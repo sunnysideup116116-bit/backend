@@ -1,0 +1,44 @@
+MULTIMEDIA:
+for photos, videos and files, all the signals and stuff should be ignored, and also saving the message into the chatlog, videos and videos and file should just be a placeholder text instead of saving the actual thing to save space
+
+ Asymmetric Dependency:
+{ 
+  "chat_id": "chat_5512_9941", 
+  "dyadic_signals": {
+    "h_lat_ema": 52.4, 
+    "h_par_ema": 0.88,
+    "consecutive_healthy_messages": 4 
+  },
+  "users": {
+    "u_5512": {
+      "current_role": "MENTOR", 
+      "s_rat_ema": 0.85,
+      "s_inv_penalties": 2,
+      "last_sinv_timestamp": "2026-04-13T09:00:00.000Z",
+      "consecutive_organic_sends": 0
+    },
+    "u_9941": {
+      "current_role": "FACILITATOR", 
+      "s_rat_ema": 0.05,
+      "s_inv_penalties": 0,
+      "last_sinv_timestamp": null,
+      "consecutive_organic_sends": 14
+    }
+  },
+  "context": {
+    "macro_summary": "...",
+    "u_5512_profiling": "...",
+    "u_9941_profiling": "..."
+  }
+}
+
+“strategy”:{
+"strategic_intent": “”// the AI’s reasoning and thinking
+"action_plan": "”
+}
+“$updatedAt”:”" //should just be native in appwrite
+
+
+Linguistic Style Matching (LSM): Character parity is a blunt instrument. In healthy CMC (Computer-Mediated Communication), participants naturally begin to mimic each other's syntax and use of function words. Agent 1 can calculate a basic LSM score during its periodic background run. A rising LSM indicates organic rapport, which can act as a counter-weight to latency spikes (e.g., if latency increases but LSM is high, the users aren't losing interest; the topic just requires deeper thought).
+
+The concept was pioneered by Dr. James W. Pennebaker (creator of the LIWC - Linguistic Inquiry and Word Count). The core discovery is that true conversational alignment is not found in content words (nouns, verbs), but in function words (pronouns, articles, conjunctions, prepositions).Function words are processed subconsciously. When two people are highly engaged, they unconsciously begin to match each other's rate of using these invisible words. High LSM in text-based chats has been empirically proven to predict relationship stability, successful negotiations, and deeper cognitive engagement.The Objective CalculationTo explain this objectively—perhaps in a system architecture document or an academic defense—you frame it strictly as mathematical frequency overlap.You do not need an AI agent for this. You just need a static dictionary array on your backend containing common function words categorized into a few buckets (e.g., Personal Pronouns, Impersonal Pronouns, Prepositions, Conjunctions).For any given text block, you calculate the percentage of total words that fall into a specific category.Let $p_{A,c}$ be the percentage of words User A used that belong to category $c$. Let $p_{B,c}$ be the percentage for User B.The LSM score for a single category is calculated using absolute differences:$$LSM_c = 1 - \frac{|p_{A,c} - p_{B,c}|}{p_{A,c} + p_{B,c} + 0.0001}$$(The $0.0001$ prevents a divide-by-zero error if neither user used words from that category).The total LSM for the conversation is simply the average of all category scores:$$LSM_{total} = \frac{\sum LSM_c}{N}$$An $LSM_{total}$ approaching $1.0$ means perfect syntactic synchronization. A score below $0.5$ indicates the users are talking past each other.

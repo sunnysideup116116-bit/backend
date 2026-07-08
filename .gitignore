@@ -1,0 +1,13 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+node_modules/
+*.log
+.superpowers/sdd/agent_env/
+*/agent_env/
+.DS_Store
+mongoDB_string.txt

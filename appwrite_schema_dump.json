@@ -1,0 +1,273 @@
+{
+  "database_id": "dating_db",
+  "collections": [
+    {
+      "name": "User Profiles",
+      "id": "user_profiles",
+      "attributes": [
+        {
+          "key": "name",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": true,
+          "array": false,
+          "$createdAt": "2026-03-20T05:38:59.021+00:00",
+          "$updatedAt": "2026-03-20T05:38:59.044+00:00",
+          "size": 50,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "gender",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": true,
+          "array": false,
+          "$createdAt": "2026-03-20T05:39:04.764+00:00",
+          "$updatedAt": "2026-03-20T05:39:04.780+00:00",
+          "elements": [
+            "male",
+            "female"
+          ],
+          "format": "enum",
+          "default": null
+        },
+        {
+          "key": "phone",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": true,
+          "array": false,
+          "$createdAt": "2026-03-20T05:39:15.733+00:00",
+          "$updatedAt": "2026-03-20T05:39:15.748+00:00",
+          "size": 20,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "age",
+          "type": "integer",
+          "status": "available",
+          "error": "",
+          "required": true,
+          "array": false,
+          "$createdAt": "2026-03-20T05:39:15.743+00:00",
+          "$updatedAt": "2026-03-20T05:39:15.761+00:00",
+          "min": -9223372036854775808,
+          "max": 9223372036854775807,
+          "default": null
+        },
+        {
+          "key": "region",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": true,
+          "array": false,
+          "$createdAt": "2026-03-20T05:39:15.753+00:00",
+          "$updatedAt": "2026-03-20T05:39:15.774+00:00",
+          "size": 30,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "photo_id",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-03-20T05:39:15.762+00:00",
+          "$updatedAt": "2026-03-20T05:39:15.788+00:00",
+          "size": 50,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "userinfo",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-03-26T02:26:32.845+00:00",
+          "$updatedAt": "2026-03-26T02:29:02.099+00:00",
+          "size": 550,
+          "default": "在這邊輸入自介，讓更多人認識你！！",
+          "encrypt": false
+        },
+        {
+          "key": "interest",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-05-28T02:28:14.626+00:00",
+          "$updatedAt": "2026-05-28T02:28:14.651+00:00",
+          "size": 100,
+          "default": null,
+          "encrypt": false
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "Chat Messages",
+      "id": "chat_messages",
+      "attributes": [
+        {
+          "key": "sender_id",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": true,
+          "array": false,
+          "$createdAt": "2026-03-26T14:24:09.001+00:00",
+          "$updatedAt": "2026-03-26T14:24:09.030+00:00",
+          "size": 50,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "receiver_id",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": true,
+          "array": false,
+          "$createdAt": "2026-03-26T14:24:22.942+00:00",
+          "$updatedAt": "2026-03-26T14:24:22.954+00:00",
+          "size": 50,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "room_id",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": true,
+          "array": false,
+          "$createdAt": "2026-03-26T14:24:35.047+00:00",
+          "$updatedAt": "2026-03-26T14:24:35.072+00:00",
+          "size": 50,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "content",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": true,
+          "array": false,
+          "$createdAt": "2026-03-26T14:24:50.613+00:00",
+          "$updatedAt": "2026-03-26T14:24:50.629+00:00",
+          "size": 1000,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "type",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-03-28T06:47:58.261+00:00",
+          "$updatedAt": "2026-03-28T06:47:58.276+00:00",
+          "size": 20,
+          "default": "text",
+          "encrypt": false
+        },
+        {
+          "key": "file_id",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-03-28T06:48:24.605+00:00",
+          "$updatedAt": "2026-03-28T06:48:24.620+00:00",
+          "size": 50,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "file_url",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-03-28T06:49:02.227+00:00",
+          "$updatedAt": "2026-03-28T06:49:02.243+00:00",
+          "size": 1000,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "reaction",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-03-28T06:49:41.025+00:00",
+          "$updatedAt": "2026-03-28T06:49:41.038+00:00",
+          "size": 100,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "reply_to",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-03-28T06:49:45.955+00:00",
+          "$updatedAt": "2026-03-28T06:49:45.968+00:00",
+          "size": 50,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "is_unsent",
+          "type": "boolean",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-03-28T07:08:07.917+00:00",
+          "$updatedAt": "2026-03-28T07:08:07.931+00:00",
+          "default": false
+        }
+      ],
+      "indexes": [
+        {
+          "$id": "1_2_idx_room_id",
+          "$createdAt": "2026-03-26T14:26:33.979+00:00",
+          "$updatedAt": "2026-03-26T14:26:33.993+00:00",
+          "key": "idx_room_id",
+          "type": "key",
+          "status": "available",
+          "error": "",
+          "attributes": [
+            "room_id"
+          ],
+          "lengths": [
+            0
+          ],
+          "orders": [
+            "ASC"
+          ]
+        }
+      ]
+    }
+  ]
+}

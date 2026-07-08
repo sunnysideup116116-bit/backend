@@ -1,0 +1,222 @@
+"""
+Knowledge Base 服務 - Appwrite 版本
+
+將原本存放於 MySQL/SQLite 的知識庫 (kb_configs / kb_features / kb_hard_blocks
+/ kb_interventions / kb_prompts / kb_rules / kb_scenario_rules) 改為從 Appwrite
+的 KB database 讀取，統一後端儲存層。對外 method 簽章與回傳結構與舊版一致。
+"""
+import json
+import os
+
+import requests
+from dotenv import load_dotenv
+from appwrite.query import Query
+
+load_dotenv()
+
+
+class KBService:
+    _endpoint = None
+    _project_id = None
+    _api_key = None
+    _kb_db_id = None
+
+    @classmethod
+    def _ensure_config(cls):
+        if cls._endpoint is not None:
+            return
+        cls._endpoint = os.getenv("APPWRITE_ENDPOINT")
+        cls._project_id = os.getenv("APPWRITE_PROJECT_ID")
+        cls._api_key = os.getenv("APPWRITE_API_KEY")
+        cls._kb_db_id = os.getenv("APPWRITE_KB_DB_ID", "kb")
+
+    @classmethod
+    def _headers(cls):
+        cls._ensure_config()
+        return {
+            "X-Appwrite-Project": cls._project_id,
+            "X-Appwrite-Key": cls._api_key,
+            "Content-Type": "application/json",
+        }
+
+    @staticmethod
+    def _list(collection_id, queries=None, limit=100):
+        """從 Appwrite KB database 列出 documents，自動分頁，回傳 list[dict]。
+
+        直接走 REST API（與 setup_appwrite.py 一致），避免 SDK 對 legacy server
+        將 attribute key 小寫化的行為差異。
+        """
+        KBService._ensure_config()
+        ep = KBService._endpoint
+        kb_db_id = KBService._kb_db_id
+        headers = KBService._headers()
+
+        results = []
+        offset = 0
+        while True:
+            params = {"limit": limit, "offset": offset}
+            if queries:
+                params["queries[]"] = [json.dumps(q) for q in queries]
+            r = requests.get(
+                f"{ep}/databases/{kb_db_id}/collections/{collection_id}/documents",
+                headers=headers,
+                params=params,
+            )
+            if r.status_code != 200:
+                print(f"[KB] list {collection_id} -> {r.status_code} {r.text[:200]}")
+                return results
+            data = r.json()
+            docs = data.get("documents", [])
+            for doc in docs:
+                clean = {k: v for k, v in doc.items() if not k.startswith("$")}
+                results.append(clean)
+            total = data.get("total", 0)
+            offset += len(docs)
+            # KB 資料量小；當本頁未滿 limit、或無資料、或已抓到 total 就停止，
+            # 避免某些 legacy server 的 offset 行為造成重複抓取。
+            if len(docs) < limit or not docs or offset >= total:
+                break
+        return results
+
+    @staticmethod
+    def _parse_json_fields(record, fields):
+        """若欄位是字串 JSON 則解析；None 則保留 None。"""
+        for f in fields:
+            v = record.get(f)
+            if isinstance(v, str) and v.strip():
+                try:
+                    record[f] = json.loads(v)
+                except (ValueError, TypeError):
+                    pass
+        return record
+
+    @staticmethod
+    def get_features():
+        """讀取所有啟用的特徵清單"""
+        try:
+            docs = KBService._list("kb_features", queries=[{"method": "equal", "attribute": "enabled", "values": [True]}])
+            for f in docs:
+                KBService._parse_json_fields(f, ["logic_config"])
+            return docs
+        except Exception as e:
+            print(f"[KB] get_features failed: {e}")
+            return []
+
+    @staticmethod
+    def get_scenario_rules():
+        """讀取啟用的二階複合規則"""
+        try:
+            docs = KBService._list("kb_scenario_rules", queries=[{"method": "equal", "attribute": "enabled", "values": [True]}])
+            for r in docs:
+                KBService._parse_json_fields(r, ["condition_logic", "bonus_actions"])
+            return docs
+        except Exception as e:
+            print(f"[KB] get_scenario_rules failed: {e}")
+            return []
+
+    @staticmethod
+    def get_rules():
+        """讀取行為規則 (用於 RuleBasedEngine)，依 priority 降冪"""
+        try:
+            docs = KBService._list(
+                "kb_rules",
+                queries=[
+                    {"method": "equal", "attribute": "enabled", "values": [True]},
+                    {"method": "orderDesc", "attribute": "priority"},
+                ],
+            )
+            for r in docs:
+                KBService._parse_json_fields(r, ["conditions", "actions"])
+            return docs
+        except Exception as e:
+            print(f"[KB] get_rules failed: {e}")
+            return []
+
+    @staticmethod
+    def get_prompt(prompt_id="risk_analysis_v2"):
+        """抓取特定的 Prompt 模板"""
+        try:
+            docs = KBService._list(
+                "kb_prompts",
+                queries=[
+                    {"method": "equal", "attribute": "prompt_id", "values": [prompt_id]},
+                    {"method": "equal", "attribute": "enabled", "values": [True]},
+                ],
+                limit=1,
+            )
+            return docs[0] if docs else None
+        except Exception as e:
+            print(f"[KB] get_prompt failed: {e}")
+            return None
+
+    @staticmethod
+    def get_prompt_by_id(prompt_id: str):
+        """抓取特定的 Prompt 模板"""
+        return KBService.get_prompt(prompt_id)
+
+    @staticmethod
+    def get_fusion_config(config_id="threshold_v1"):
+        """讀取融合/決策設定"""
+        try:
+            docs = KBService._list(
+                "kb_configs",
+                queries=[
+                    {"method": "equal", "attribute": "config_id", "values": [config_id]},
+                    {"method": "equal", "attribute": "enabled", "values": [True]},
+                ],
+                limit=1,
+            )
+            if not docs:
+                return None
+            config = docs[0]
+            KBService._parse_json_fields(config, ["thresholds", "weights"])
+            return config
+        except Exception as e:
+            print(f"[KB] get_fusion_config failed: {e}")
+            return None
+
+    @staticmethod
+    def get_interventions_by_level(risk_level: str):
+        """讀取特定等級的所有介入模板"""
+        try:
+            docs = KBService._list(
+                "kb_interventions",
+                queries=[{"method": "equal", "attribute": "risk_level", "values": [risk_level]}],
+            )
+            for t in docs:
+                KBService._parse_json_fields(t, ["message_template", "ui_behavior"])
+            return docs
+        except Exception as e:
+            print(f"[KB] get_interventions_by_level failed: {e}")
+            return []
+
+    @staticmethod
+    def get_hard_block_records():
+        """Get all hard-block records with trigger_mode."""
+        fallback = [
+            {"keyword": "炸彈", "reason_label": "violence", "trigger_mode": "flag"},
+            {"keyword": "槍枝", "reason_label": "violence", "trigger_mode": "flag"},
+            {"keyword": "自殺", "reason_label": "self_harm", "trigger_mode": "flag"},
+            {"keyword": "毒品", "reason_label": "illegal_drugs", "trigger_mode": "flag"},
+            {"keyword": "殺人", "reason_label": "violence", "trigger_mode": "flag"},
+            {"keyword": "強姦", "reason_label": "sexual_violence", "trigger_mode": "flag"},
+            {"keyword": "裸照", "reason_label": "sexual_content", "trigger_mode": "flag"},
+            {"keyword": "殺死你", "reason_label": "violence_threat", "trigger_mode": "block"},
+            {"keyword": "強姦你", "reason_label": "sexual_violence_threat", "trigger_mode": "block"},
+            {"keyword": "傳裸照給我", "reason_label": "sexual_demand", "trigger_mode": "block"},
+            {"keyword": "拍裸照給我", "reason_label": "sexual_demand", "trigger_mode": "block"},
+        ]
+
+        try:
+            docs = KBService._list("kb_hard_blocks", queries=[{"method": "equal", "attribute": "enabled", "values": [True]}])
+            records = [{"keyword": d.get("keyword"), "reason_label": d.get("reason_label"), "trigger_mode": d.get("trigger_mode")} for d in docs]
+            return records if records else fallback
+        except Exception as e:
+            print(f"[KB] get_hard_block_records failed: {e}")
+            return fallback
+
+    @staticmethod
+    def get_hard_block_keywords():
+        """Backward compat: returns just keyword strings."""
+        records = KBService.get_hard_block_records()
+        return [r["keyword"] for r in records]

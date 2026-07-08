@@ -1,0 +1,2584 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 媒人系統 - 通訊版 DEMO</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'sans-serif'], },
+                    colors: {
+                        bgDark: '#0f172a',
+                        textPrimary: '#f8fafc',
+                        textSecondary: '#94a3b8'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            background-color: #0f172a;
+            background-image: radial-gradient(circle at top right, rgba(139, 92, 246, 0.15), transparent 40%),
+                radial-gradient(circle at bottom left, rgba(56, 189, 248, 0.15), transparent 40%);
+            color: #f8fafc;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+        }
+
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .fade-in {
+            animation: fadeIn 0.4s ease-out forwards;
+        }
+
+        .slide-up {
+            animation: slideUp 0.5s ease-out forwards;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+            }
+
+            to {
+                opacity: 1;
+            }
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .chat-bubble {
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 16px;
+            margin-bottom: 12px;
+            line-height: 1.5;
+            word-wrap: break-word;
+        }
+
+        .bubble-user {
+            background: linear-gradient(135deg, #8b5cf6, #6366f1);
+            color: white;
+            align-self: flex-end;
+            border-bottom-right-radius: 4px;
+        }
+
+        .bubble-other {
+            background: rgba(255, 255, 255, 0.1);
+            color: #f8fafc;
+            align-self: flex-start;
+            border-bottom-left-radius: 4px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        /* Contact item hover */
+        .contact-item {
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .contact-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .contact-active {
+            background: rgba(139, 92, 246, 0.2);
+            border-left: 4px solid #8b5cf6;
+        }
+
+        .typing-indicator span {
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            background-color: #94a3b8;
+            border-radius: 50%;
+            margin: 0 2px;
+            animation: bounce 1.4s infinite ease-in-out both;
+        }
+
+        .typing-indicator span:nth-child(1) {
+            animation-delay: -0.32s;
+        }
+
+        .typing-indicator span:nth-child(2) {
+            animation-delay: -0.16s;
+        }
+
+        @keyframes bounce {
+
+            0%,
+            80%,
+            100% {
+                transform: scale(0);
+            }
+
+            40% {
+                transform: scale(1);
+            }
+        }
+    </style>
+</head>
+
+<body class="p-4 md:p-6">
+
+    <!-- Header & App Bar -->
+    <header class="relative z-50 flex justify-between items-center mb-6 slide-up">
+        <div>
+            <h1 class="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-violet-400 to-sky-400">
+                MatchApp Demo
+            </h1>
+            <p class="text-xs text-gray-500 mt-1">AI 性格分析與模擬聊天</p>
+        </div>
+
+        <!-- Profile & Account Switcher -->
+        <div class="relative z-50">
+            <button onclick="toggleProfileMenu()"
+                class="flex items-center gap-2 hover:bg-white/5 p-1.5 rounded-full transition cursor-pointer">
+                <div class="w-9 h-9 rounded-full bg-gradient-to-tr from-emerald-400 to-teal-500 flex items-center justify-center font-bold text-white shadow"
+                    id="header-avatar">?</div>
+                <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                </svg>
+            </button>
+
+            <div id="profile-dropdown"
+                class="absolute right-0 mt-2 w-72 max-h-[80vh] bg-[#1a1a1a] border border-white/10 rounded-2xl shadow-2xl hidden flex-col overflow-y-auto overflow-x-hidden z-50">
+                <div class="p-4 border-b border-white/10 bg-white/5">
+                    <div class="text-xs text-gray-400 mb-1">當前登入身分</div>
+                    <div class="font-bold text-lg text-emerald-400" id="dropdown-current-user">demo_user</div>
+                </div>
+
+                <div class="p-4 border-b border-white/10">
+                    <div class="text-xs text-sky-400 font-semibold mb-2">我的近期情境</div>
+                    <p id="dropdown-context" class="text-sm text-gray-300">載入中...</p>
+                </div>
+
+                <div class="p-4 border-b border-white/10">
+                    <div class="text-xs text-violet-400 font-semibold mb-2">我的檔案</div>
+                    <p id="dropdown-bf" class="text-sm text-gray-300 leading-relaxed">載入中...</p>
+                </div>
+
+
+                <div class="p-3 bg-black/50 flex flex-col gap-2 border-b border-white/10">
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs text-gray-400 whitespace-nowrap">切換帳號</span>
+                        <select id="user-select" onchange="switchUser()"
+                            class="w-full bg-[#2a2a2a] border border-white/20 text-white text-sm rounded-lg px-2 py-1 focus:outline-none focus:border-violet-500">
+                            <option value="demo_user">demo_user</option>
+                        </select>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs text-fuchsia-400 whitespace-nowrap">AI 關心頻率</span>
+                        <select id="frequency-select" onchange="updateProactiveFrequency()"
+                            class="w-full bg-[#2a2a2a] border border-white/20 text-white text-sm rounded-lg px-2 py-1 focus:outline-none focus:border-fuchsia-500">
+                            <option value="none">停用</option>
+                            <option value="60">每 1 分鐘 (測試)</option>
+                            <option value="3600">每 1 小時</option>
+                            <option value="86400">每天</option>
+                        </select>
+                    </div>
+                    <div class="flex items-center gap-2 mt-2">
+                        <button onclick="redoBigFive()" class="flex-1 text-xs font-bold text-white bg-violet-600 hover:bg-violet-500 py-2 rounded-lg shadow transition">重新基礎測驗</button>
+                        <button onclick="redoDeepProfile()" class="flex-1 text-xs font-bold text-white bg-fuchsia-600 hover:bg-fuchsia-500 py-2 rounded-lg shadow transition">重新深層測驗</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Tab Switcher -->
+    <div class="relative z-40 flex gap-4 mb-6 slide-up">
+        <button id="tab-ai-chat" onclick="switchMainTab('ai-chat')" 
+            class="flex items-center gap-2 px-5 py-3 rounded-xl glass-panel text-white font-bold transition hover:bg-white/10 border-l-4 border-violet-500 cursor-pointer">
+            <span>🔮 AI 媒人與模擬配對</span>
+        </button>
+        <button id="tab-human-chat" onclick="switchMainTab('human-chat')" 
+            class="flex items-center gap-2 px-5 py-3 rounded-xl glass-panel text-gray-400 font-semibold transition hover:bg-white/10 cursor-pointer">
+            <span>👥 雙人實時對話測試 (L2/L3 治理 & AI 建議)</span>
+        </button>
+    </div>
+
+    <div id="ai-chat-container" class="flex-1 flex flex-col min-h-0 relative">
+        <main class="flex-1 relative flex gap-6 overflow-hidden">
+
+        <!-- ================= STAGE 1: Big Five Matchmaker ================= -->
+        <section id="stage-bigfive" class="w-full flex gap-6 absolute inset-0 transition-opacity duration-500 z-10">
+            <div class="w-2/3 flex flex-col h-full glass-panel rounded-2xl overflow-hidden">
+                <div class="p-4 border-b border-white/10 bg-black/30">
+                    <h2 class="font-semibold text-lg flex items-center gap-2">🔮 專屬性格解析</h2>
+                </div>
+                <div id="bf-messages" class="flex-1 p-6 overflow-y-auto flex flex-col gap-2">
+                    <div class="chat-bubble bubble-other fade-in">你好！我是你的專屬 AI 媒人。為了幫你找到最契合的夥伴，請用幾句話描述一下你自己，平常喜歡做什麼？
+                    </div>
+                </div>
+                <div id="bf-typing" class="hidden px-6 pb-2">
+                    <div class="chat-bubble bubble-other inline-flex items-center p-3">
+                        <div class="typing-indicator flex"><span></span><span></span><span></span></div>
+                    </div>
+                </div>
+                <div class="p-4 bg-black/20 border-t border-white/10">
+                    <form id="bf-form" class="flex gap-3">
+                        <input type="text" id="bf-input" placeholder="回答 AI..." required
+                            class="flex-1 bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-violet-500 text-white">
+                        <button type="submit"
+                            class="bg-violet-600 px-6 py-3 rounded-xl font-medium shadow-lg hover:bg-violet-500 transition-colors">送出</button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="w-1/3 flex flex-col gap-4">
+                <div class="glass-panel rounded-2xl p-6 flex-1 flex flex-col">
+                    <h3 class="text-sm text-gray-400 font-semibold mb-4 uppercase tracking-wider">分析進度</h3>
+                    <pre id="bf-json"
+                        class="text-xs text-emerald-400 bg-black/40 p-4 rounded-xl border border-white/5 flex-1 overflow-y-auto w-full whitespace-pre-wrap">尚無資料...</pre>
+                </div>
+                <div
+                    class="glass-panel rounded-2xl p-4 flex justify-between items-center bg-red-900/10 border-red-500/20">
+                    <button onclick="clearSystemData()"
+                        class="text-xs text-red-400 hover:text-red-300 transition w-full py-2 bg-red-500/10 rounded">⚙️
+                        一鍵清空所有資料</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- ================= STAGE 2: Messenger Layout ================= -->
+        <section id="stage-messenger"
+            class="w-full flex gap-6 absolute inset-0 opacity-0 pointer-events-none transition-opacity duration-500 z-0">
+            <!-- Sidebar: Contacts -->
+            <div class="w-1/3 glass-panel rounded-2xl flex flex-col overflow-hidden">
+                <div class="p-4 border-b border-white/10 bg-black/30 flex justify-between items-center">
+                    <h2 class="font-semibold text-lg flex items-center gap-2">💬 聯絡人</h2>
+                    <div class="flex gap-2">
+                        <button onclick="startDeepProfileInChat()" id="btn-deep-profile"
+                            class="text-xs bg-emerald-600 hover:bg-emerald-500 px-3 py-1.5 rounded text-white shadow-lg shadow-emerald-500/20 font-bold transition">🎯 深層分析</button>
+                        <button onclick="triggerMatch()" id="btn-match"
+                            class="text-xs bg-fuchsia-600 hover:bg-fuchsia-500 px-3 py-1.5 rounded text-white shadow-lg shadow-fuchsia-500/20 font-bold transition">🌟
+                            尋找配對</button>
+                    </div>
+                </div>
+
+                <!-- Contacts List -->
+                <div id="contacts-list" class="flex-1 overflow-y-auto flex flex-col">
+                    <!-- Loaded via JS -->
+                </div>
+
+                <!-- Tools at bottom of Sidebar -->
+                <div class="p-4 bg-black/20 border-t border-white/10 flex flex-col gap-2 relative z-20">
+                    <button onclick="clearSystemData()"
+                        class="text-xs text-red-400 hover:text-red-300 transition w-full py-2 bg-red-500/10 rounded border border-red-500/20">⚙️
+                        一鍵清空所有資料</button>
+                    <button onclick="fetchSeedAndReload(event)"
+                        class="text-xs text-sky-400 hover:text-sky-300 transition w-full py-2 bg-sky-500/10 rounded border border-sky-500/20">🔄
+                        生成十筆資料</button>
+                </div>
+            </div>
+
+            <!-- Main: Chat Room -->
+            <div class="w-2/3 glass-panel rounded-2xl flex flex-col overflow-hidden relative">
+                <!-- Chat Header -->
+                <div class="p-4 border-b border-white/10 bg-black/30 flex items-center gap-3">
+                    <div id="room-avatar"
+                        class="w-10 h-10 rounded-full bg-gradient-to-tr from-violet-500 to-fuchsia-500 flex items-center justify-center font-bold text-lg text-white shadow">
+                        ?</div>
+                    <div>
+                        <h2 id="room-name" class="font-semibold text-lg">-</h2>
+                        <div class="text-xs text-textSecondary flex items-center gap-1">
+                            <span class="w-2 h-2 rounded-full bg-emerald-400 inline-block"></span>
+                            <span>已連線</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Chat History -->
+                <div id="room-messages" class="flex-1 p-6 overflow-y-auto flex flex-col gap-2">
+                    <div class="text-center text-sm text-gray-500 my-10">請從左側點選聯絡人開始對話</div>
+                </div>
+
+                <!-- Typing indicator -->
+                <div id="room-typing" class="hidden px-6 pb-2">
+                    <div class="chat-bubble bubble-other inline-flex items-center p-3">
+                        <div class="typing-indicator flex"><span></span><span></span><span></span></div>
+                    </div>
+                </div>
+
+                <!-- Copilot Suggestion UI -->
+                <div id="copilot-container" class="hidden flex-col gap-2 p-4 mx-4 mb-2 bg-indigo-900/40 border border-indigo-500/30 rounded-xl shadow-lg relative z-20">
+                    <div class="flex items-center gap-2">
+                        <span class="text-xl">🤖</span>
+                        <span class="text-sm font-bold text-indigo-300">AI Copilot 建議</span>
+                    </div>
+                    <div id="copilot-text" class="text-sm text-white bg-black/30 p-3 rounded-lg border border-indigo-500/20"></div>
+                    <details class="text-xs text-indigo-200/70 mt-1 cursor-pointer outline-none">
+                        <summary class="font-semibold select-none">[+] View AI Reasoning</summary>
+                        <div id="copilot-reasoning" class="mt-2 p-2 bg-black/40 rounded italic"></div>
+                    </details>
+                </div>
+                
+                <!-- Idle Draft UI -->
+                <div id="idle-draft-container" class="hidden flex-col gap-2 p-4 mx-4 mb-2 bg-emerald-900/40 border border-emerald-500/30 rounded-xl shadow-lg relative z-20">
+                    <div class="flex items-center gap-2">
+                        <span class="text-xl">☕</span>
+                        <span class="text-sm font-bold text-emerald-300" id="idle-draft-title">對方暫時離開</span>
+                    </div>
+                    <div id="idle-draft-text" class="text-sm text-white bg-black/30 p-3 rounded-lg border border-emerald-500/20"></div>
+                </div>
+
+                <!-- Safety Alerts Panel -->
+                <div id="safety-container" class="hidden flex-col gap-2 p-4 mx-4 mb-2 bg-red-950/40 border border-red-500/30 rounded-xl shadow-lg relative z-20">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-2">
+                            <span class="text-xl">⚠️</span>
+                            <span class="text-sm font-bold text-red-300" id="safety-title">關係安全預警與引導</span>
+                        </div>
+                        <span class="text-xs px-2 py-0.5 rounded bg-red-500/20 text-red-400 font-bold" id="safety-level">WARNING</span>
+                    </div>
+                    <div id="safety-text" class="text-sm text-white bg-black/30 p-3 rounded-lg border border-red-500/20"></div>
+                    <div class="flex items-center justify-end gap-2 mt-2 pt-2 border-t border-red-500/10 text-xs">
+                        <span class="text-gray-400">您覺得這則安全引導如何？</span>
+                        <button type="button" onclick="submitSafetyFeedback('comfortable')" class="px-2.5 py-1 rounded bg-white/5 hover:bg-emerald-500/20 border border-white/10 text-emerald-300 transition">有幫助 / 感到舒服</button>
+                        <button type="button" onclick="submitSafetyFeedback('uncomfortable')" class="px-2.5 py-1 rounded bg-white/5 hover:bg-red-500/20 border border-white/10 text-red-300 transition">沒幫助 / 感到反感</button>
+                    </div>
+                </div>
+
+                <!-- Chat Input -->
+                <div class="p-4 bg-black/20 border-t border-white/10 relative z-20">
+                    <form id="room-form" class="flex gap-3">
+                        <button type="button" id="btn-copilot" onclick="handleCopilotClick()" class="bg-indigo-600 px-4 py-3 rounded-xl font-medium shadow-lg hover:bg-indigo-500 transition disabled:opacity-50 text-white text-sm" disabled>🤖 Copilot</button>
+                        <input type="text" id="room-input" placeholder="傳送訊息..." disabled required
+                            class="flex-1 bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-violet-500 text-white disabled:opacity-50">
+                        <button type="submit" id="room-submit" disabled
+                            class="bg-violet-600 px-6 py-3 rounded-xl font-medium shadow-lg hover:bg-violet-500 transition disabled:opacity-50">送出</button>
+                    </form>
+                </div>
+            </div>
+        </section>
+
+        <!-- ================= STAGE 2.5: Deep Profile ================= -->
+        <section id="stage-deep-profile"
+            class="w-full flex gap-6 absolute inset-0 opacity-0 pointer-events-none transition-opacity duration-500 z-0">
+            <div class="w-2/3 flex flex-col h-full glass-panel rounded-2xl overflow-hidden">
+                <div class="p-4 border-b border-white/10 bg-black/30">
+                    <h2 class="font-semibold text-lg flex items-center gap-2">🎯 深層價值觀分析</h2>
+                </div>
+                <div id="dp-messages" class="flex-1 p-6 overflow-y-auto flex flex-col gap-2">
+                    <div class="chat-bubble bubble-other fade-in">讓我們來深入探索你的價值觀和人生方向吧！</div>
+                </div>
+                <div id="dp-typing" class="hidden px-6 pb-2">
+                    <div class="chat-bubble bubble-other inline-flex items-center p-3">
+                        <div class="typing-indicator flex"><span></span><span></span><span></span></div>
+                    </div>
+                </div>
+                <div class="p-4 bg-black/20 border-t border-white/10">
+                    <form id="dp-form" class="flex gap-3">
+                        <input type="text" id="dp-input" placeholder="分享你的深層想法..." required
+                            class="flex-1 bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-amber-500 text-white">
+                        <button type="submit"
+                            class="bg-amber-600 px-6 py-3 rounded-xl font-medium shadow-lg hover:bg-amber-500 transition-colors">送出</button>
+                    </form>
+                </div>
+            </div>
+            <div class="w-1/3 flex flex-col gap-4">
+                <div class="glass-panel rounded-2xl p-6 flex-1 flex flex-col">
+                    <h3 class="text-sm text-gray-400 font-semibold mb-4 uppercase tracking-wider">深層分析進度</h3>
+                    <pre id="dp-json"
+                        class="text-xs text-amber-400 bg-black/40 p-4 rounded-xl border border-white/5 flex-1 overflow-y-auto w-full whitespace-pre-wrap">尚無資料...</pre>
+                </div>
+            </div>
+        </section>
+
+    </main>
+    </div> <!-- Close ai-chat-container -->
+
+    <div id="human-chat-container" class="flex-1 flex gap-6 overflow-hidden hidden relative">
+        <!-- ================= STAGE: Dual Human Chatroom ================= -->
+        <!-- User A's Chat Box (Left Column) -->
+        <div class="w-1/2 glass-panel rounded-2xl flex flex-col overflow-hidden relative">
+            <!-- Header -->
+            <div class="p-4 border-b border-white/10 bg-black/30 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 rounded-full bg-gradient-to-tr from-violet-500 to-indigo-500 flex items-center justify-center font-bold text-lg text-white shadow">
+                        A
+                    </div>
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <span class="font-bold text-lg">使用者 A:</span>
+                            <select id="human-user-a-select" onchange="onHumanUserChange('A')"
+                                class="bg-[#1a1a1a] border border-white/10 text-emerald-400 text-sm rounded-lg px-2 py-1 font-semibold focus:outline-none focus:border-violet-500">
+                                <!-- Populated dynamically -->
+                            </select>
+                        </div>
+                        <div class="text-xs text-textSecondary flex items-center gap-1 mt-0.5">
+                            <span class="w-2 h-2 rounded-full bg-emerald-400 inline-block"></span>
+                            <span>對話中...</span>
+                        </div>
+                    </div>
+                </div>
+                <!-- Profile Summary Info Hover -->
+                <div class="text-xs text-indigo-300 bg-indigo-500/10 px-2.5 py-1.5 rounded-lg border border-indigo-500/20 max-w-[200px] truncate" id="human-a-bf-summary" title="">
+                    性格載入中...
+                </div>
+            </div>
+
+            <!-- 5-Dimension Risk Monitor Panel (A) -->
+            <div class="p-3 bg-black/40 border-b border-white/5 flex flex-col gap-2">
+                <div class="flex items-center justify-between">
+                    <span class="text-xs font-bold text-gray-400 flex items-center gap-1">
+                        📊 即時五維風險評估 (狀態: <span id="human-a-risk-level-badge" class="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/20 text-emerald-400 font-bold uppercase">SAFE</span>)
+                    </span>
+                    <span class="text-[10px] text-indigo-300 font-mono">Real-time NLP Scan</span>
+                </div>
+                <div class="grid grid-cols-5 gap-2">
+                    <div class="flex flex-col gap-1 bg-black/20 p-1.5 rounded border border-white/5">
+                        <div class="flex justify-between text-[10px]">
+                            <span class="text-gray-400 font-semibold truncate" title="性邊界侵犯">性邊界</span>
+                            <span id="human-a-score-sexual" class="text-emerald-400 font-bold">0%</span>
+                        </div>
+                        <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                            <div id="human-a-bar-sexual" class="bg-emerald-500 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div class="flex flex-col gap-1 bg-black/20 p-1.5 rounded border border-white/5">
+                        <div class="flex justify-between text-[10px]">
+                            <span class="text-gray-400 font-semibold truncate" title="強制施壓">強制施壓</span>
+                            <span id="human-a-score-coercion" class="text-emerald-400 font-bold">0%</span>
+                        </div>
+                        <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                            <div id="human-a-bar-coercion" class="bg-emerald-500 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div class="flex flex-col gap-1 bg-black/20 p-1.5 rounded border border-white/5">
+                        <div class="flex justify-between text-[10px]">
+                            <span class="text-gray-400 font-semibold truncate" title="情感操縱">情感操縱</span>
+                            <span id="human-a-score-manipulation" class="text-emerald-400 font-bold">0%</span>
+                        </div>
+                        <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                            <div id="human-a-bar-manipulation" class="bg-emerald-500 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div class="flex flex-col gap-1 bg-black/20 p-1.5 rounded border border-white/5">
+                        <div class="flex justify-between text-[10px]">
+                            <span class="text-gray-400 font-semibold truncate" title="持續騷擾">持續騷擾</span>
+                            <span id="human-a-score-harassment" class="text-emerald-400 font-bold">0%</span>
+                        </div>
+                        <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                            <div id="human-a-bar-harassment" class="bg-emerald-500 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div class="flex flex-col gap-1 bg-black/20 p-1.5 rounded border border-white/5">
+                        <div class="flex justify-between text-[10px]">
+                            <span class="text-gray-400 font-semibold truncate" title="情緒勒索">情緒勒索</span>
+                            <span id="human-a-score-emotional" class="text-emerald-400 font-bold">0%</span>
+                        </div>
+                        <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                            <div id="human-a-bar-emotional" class="bg-emerald-500 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Warning Alert Box for User A -->
+            <div id="human-a-safety-banner" class="hidden flex-col gap-2 p-3 bg-red-950/40 border-b border-red-500/30">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span class="text-lg">⚠️</span>
+                        <span id="human-a-safety-title" class="text-sm font-bold text-red-400">安全提示</span>
+                    </div>
+                    <button onclick="closeHumanSafetyBanner('A')" class="text-gray-400 hover:text-white text-xs">✕</button>
+                </div>
+                <div id="human-a-safety-body" class="text-xs text-gray-300"></div>
+                <div id="human-a-safety-feedback" class="hidden flex gap-2 mt-1">
+                    <button onclick="submitHumanFeedback('A', 'comfortable')" class="text-xs bg-emerald-600/80 hover:bg-emerald-500 px-3 py-1 rounded text-white font-medium transition cursor-pointer">感到舒服</button>
+                    <button onclick="submitHumanFeedback('A', 'uncomfortable')" class="text-xs bg-rose-600/80 hover:bg-rose-500 px-3 py-1 rounded text-white font-medium transition cursor-pointer">感到不適</button>
+                </div>
+            </div>
+
+            <!-- Messages List -->
+            <div id="human-a-messages" class="flex-1 p-4 overflow-y-auto flex flex-col gap-3">
+                <div class="text-center text-sm text-gray-500 my-10">請先在上方選擇使用者開始對話</div>
+            </div>
+
+            <!-- AI Copilot Suggestion Box -->
+            <div id="human-a-copilot" class="hidden flex-col gap-2 p-3 mx-4 mb-2 bg-indigo-900/40 border border-indigo-500/30 rounded-xl shadow-lg">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span class="text-lg">🤖</span>
+                        <span class="text-xs font-bold text-indigo-300">AI Copilot 建議</span>
+                    </div>
+                    <div class="flex gap-2">
+                        <button onclick="applyHumanCopilot('A')" class="text-xs text-indigo-300 hover:text-white font-bold bg-indigo-500/20 px-2 py-0.5 rounded cursor-pointer">帶入輸入框</button>
+                        <button onclick="closeHumanCopilot('A')" class="text-xs text-gray-400 hover:text-white cursor-pointer">✕</button>
+                    </div>
+                </div>
+                <div id="human-a-copilot-text" class="text-xs text-white bg-black/30 p-2 rounded border border-indigo-500/20"></div>
+            </div>
+
+            <!-- Input Form -->
+            <div class="p-4 bg-black/20 border-t border-white/10 flex flex-col gap-2">
+                <div class="flex gap-3">
+                    <input type="text" id="human-a-input" placeholder="以使用者 A 身份發言..."
+                        class="flex-1 bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-violet-500 text-white"
+                        onkeydown="if(event.key === 'Enter') sendHumanMessage('A')">
+                    <button onclick="sendHumanMessage('A')"
+                        class="bg-violet-600 hover:bg-violet-500 px-6 py-3 rounded-xl font-medium shadow-lg transition-colors text-white cursor-pointer">傳送</button>
+                </div>
+                <div class="flex justify-between items-center px-1">
+                    <button onclick="getHumanCopilot('A')"
+                        class="text-xs text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1 cursor-pointer">
+                        🤖 獲取 AI Copilot 對話建議
+                    </button>
+                    <span class="text-[10px] text-gray-500">輸入框有文字時將進行分析</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- User B's Chat Box (Right Column) -->
+        <div class="w-1/2 glass-panel rounded-2xl flex flex-col overflow-hidden relative">
+            <!-- Header -->
+            <div class="p-4 border-b border-white/10 bg-black/30 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 rounded-full bg-gradient-to-tr from-sky-500 to-cyan-500 flex items-center justify-center font-bold text-lg text-white shadow">
+                        B
+                    </div>
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <span class="font-bold text-lg">使用者 B:</span>
+                            <select id="human-user-b-select" onchange="onHumanUserChange('B')"
+                                class="bg-[#1a1a1a] border border-white/10 text-emerald-400 text-sm rounded-lg px-2 py-1 font-semibold focus:outline-none focus:border-violet-500">
+                                <!-- Populated dynamically -->
+                            </select>
+                        </div>
+                        <div class="text-xs text-textSecondary flex items-center gap-1 mt-0.5">
+                            <span class="w-2 h-2 rounded-full bg-emerald-400 inline-block"></span>
+                            <span>對話中...</span>
+                        </div>
+                    </div>
+                </div>
+                <!-- Profile Summary Info Hover -->
+                <div class="text-xs text-sky-300 bg-sky-500/10 px-2.5 py-1.5 rounded-lg border border-sky-500/20 max-w-[200px] truncate" id="human-b-bf-summary" title="">
+                    性格載入中...
+                </div>
+            </div>
+
+            <!-- 5-Dimension Risk Monitor Panel (B) -->
+            <div class="p-3 bg-black/40 border-b border-white/5 flex flex-col gap-2">
+                <div class="flex items-center justify-between">
+                    <span class="text-xs font-bold text-gray-400 flex items-center gap-1">
+                        📊 即時五維風險評估 (狀態: <span id="human-b-risk-level-badge" class="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/20 text-emerald-400 font-bold uppercase">SAFE</span>)
+                    </span>
+                    <span class="text-[10px] text-indigo-300 font-mono">Real-time NLP Scan</span>
+                </div>
+                <div class="grid grid-cols-5 gap-2">
+                    <div class="flex flex-col gap-1 bg-black/20 p-1.5 rounded border border-white/5">
+                        <div class="flex justify-between text-[10px]">
+                            <span class="text-gray-400 font-semibold truncate" title="性邊界侵犯">性邊界</span>
+                            <span id="human-b-score-sexual" class="text-emerald-400 font-bold">0%</span>
+                        </div>
+                        <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                            <div id="human-b-bar-sexual" class="bg-emerald-500 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div class="flex flex-col gap-1 bg-black/20 p-1.5 rounded border border-white/5">
+                        <div class="flex justify-between text-[10px]">
+                            <span class="text-gray-400 font-semibold truncate" title="強制施壓">強制施壓</span>
+                            <span id="human-b-score-coercion" class="text-emerald-400 font-bold">0%</span>
+                        </div>
+                        <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                            <div id="human-b-bar-coercion" class="bg-emerald-500 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div class="flex flex-col gap-1 bg-black/20 p-1.5 rounded border border-white/5">
+                        <div class="flex justify-between text-[10px]">
+                            <span class="text-gray-400 font-semibold truncate" title="情感操縱">情感操縱</span>
+                            <span id="human-b-score-manipulation" class="text-emerald-400 font-bold">0%</span>
+                        </div>
+                        <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                            <div id="human-b-bar-manipulation" class="bg-emerald-500 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div class="flex flex-col gap-1 bg-black/20 p-1.5 rounded border border-white/5">
+                        <div class="flex justify-between text-[10px]">
+                            <span class="text-gray-400 font-semibold truncate" title="持續騷擾">持續騷擾</span>
+                            <span id="human-b-score-harassment" class="text-emerald-400 font-bold">0%</span>
+                        </div>
+                        <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                            <div id="human-b-bar-harassment" class="bg-emerald-500 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div class="flex flex-col gap-1 bg-black/20 p-1.5 rounded border border-white/5">
+                        <div class="flex justify-between text-[10px]">
+                            <span class="text-gray-400 font-semibold truncate" title="情緒勒索">情緒勒索</span>
+                            <span id="human-b-score-emotional" class="text-emerald-400 font-bold">0%</span>
+                        </div>
+                        <div class="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                            <div id="human-b-bar-emotional" class="bg-emerald-500 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Warning Alert Box for User B -->
+            <div id="human-b-safety-banner" class="hidden flex-col gap-2 p-3 bg-red-950/40 border-b border-red-500/30">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span class="text-lg">⚠️</span>
+                        <span id="human-b-safety-title" class="text-sm font-bold text-red-400">安全提示</span>
+                    </div>
+                    <button onclick="closeHumanSafetyBanner('B')" class="text-gray-400 hover:text-white text-xs">✕</button>
+                </div>
+                <div id="human-b-safety-body" class="text-xs text-gray-300"></div>
+                <div id="human-b-safety-feedback" class="hidden flex gap-2 mt-1">
+                    <button onclick="submitHumanFeedback('B', 'comfortable')" class="text-xs bg-emerald-600/80 hover:bg-emerald-500 px-3 py-1 rounded text-white font-medium transition cursor-pointer">感到舒服</button>
+                    <button onclick="submitHumanFeedback('B', 'uncomfortable')" class="text-xs bg-rose-600/80 hover:bg-rose-500 px-3 py-1 rounded text-white font-medium transition cursor-pointer">感到不適</button>
+                </div>
+            </div>
+
+            <!-- Messages List -->
+            <div id="human-b-messages" class="flex-1 p-4 overflow-y-auto flex flex-col gap-3">
+                <div class="text-center text-sm text-gray-500 my-10">請先在上方選擇使用者開始對話</div>
+            </div>
+
+            <!-- AI Copilot Suggestion Box -->
+            <div id="human-b-copilot" class="hidden flex-col gap-2 p-3 mx-4 mb-2 bg-indigo-900/40 border border-indigo-500/30 rounded-xl shadow-lg">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span class="text-lg">🤖</span>
+                        <span class="text-xs font-bold text-indigo-300">AI Copilot 建議</span>
+                    </div>
+                    <div class="flex gap-2">
+                        <button onclick="applyHumanCopilot('B')" class="text-xs text-indigo-300 hover:text-white font-bold bg-indigo-500/20 px-2 py-0.5 rounded cursor-pointer">帶入輸入框</button>
+                        <button onclick="closeHumanCopilot('B')" class="text-xs text-gray-400 hover:text-white cursor-pointer">✕</button>
+                    </div>
+                </div>
+                <div id="human-b-copilot-text" class="text-xs text-white bg-black/30 p-2 rounded border border-indigo-500/20"></div>
+            </div>
+
+            <!-- Input Form -->
+            <div class="p-4 bg-black/20 border-t border-white/10 flex flex-col gap-2">
+                <div class="flex gap-3">
+                    <input type="text" id="human-b-input" placeholder="以使用者 B 身份發言..."
+                        class="flex-1 bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-violet-500 text-white"
+                        onkeydown="if(event.key === 'Enter') sendHumanMessage('B')">
+                    <button onclick="sendHumanMessage('B')"
+                        class="bg-violet-600 hover:bg-violet-500 px-6 py-3 rounded-xl font-medium shadow-lg transition-colors text-white cursor-pointer">傳送</button>
+                </div>
+                <div class="flex justify-between items-center px-1">
+                    <button onclick="getHumanCopilot('B')"
+                        class="text-xs text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1 cursor-pointer">
+                        🤖 獲取 AI Copilot 對話建議
+                    </button>
+                    <span class="text-[10px] text-gray-500">輸入框有文字時將進行分析</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Interest Overlay (Test) -->
+    <div id="interest-overlay" class="absolute inset-0 z-50 bg-black/80 flex items-center justify-center p-4 transition-opacity duration-300">
+        <div class="glass-panel p-8 rounded-3xl max-w-md w-full border border-violet-500/50 shadow-2xl shadow-violet-500/20 text-center">
+            <div class="text-3xl mb-4">🎯</div>
+            <h2 class="text-xl font-bold mb-2">測試：填寫註冊興趣</h2>
+            <p class="text-sm text-gray-300 mb-6">模擬 Appwrite 註冊頁面。AI 將根據這個興趣作為性格分析的開場白！</p>
+            <input type="text" id="test-interest-input" placeholder="例如：打籃球、看電影、寫程式..." class="w-full bg-black/50 border border-white/20 rounded-xl px-4 py-3 text-white mb-6 focus:outline-none focus:border-violet-500">
+            <button onclick="startWithInterest()" class="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 py-3 rounded-xl font-bold shadow-lg transition">開始測驗</button>
+        </div>
+    </div>
+
+    <!-- Notification Modal (For Receiver) -->
+    <div id="notif-modal"
+        class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center opacity-0 transition-opacity duration-300 p-4">
+        <div id="notif-content"
+            class="glass-panel p-8 rounded-3xl max-w-md w-full transform scale-95 transition-transform duration-300 border border-fuchsia-500/50 shadow-2xl shadow-fuchsia-500/20">
+            <div class="w-16 h-16 rounded-full bg-fuchsia-500/20 flex items-center justify-center mx-auto mb-4">🔔</div>
+            <h2 class="text-2xl font-bold text-center mb-2">新的配對邀請！</h2>
+            <p class="text-center text-sm text-gray-300 mb-6">有一位用戶想與你認識，你們似乎很合得來。</p>
+
+            <div class="bg-black/50 rounded-xl p-4 mb-6 border border-white/5">
+                <div class="text-xs text-gray-500 uppercase font-semibold mb-1">發起人 ID</div>
+                <div id="notif-from" class="font-mono text-lg font-bold text-sky-400 mb-4">loading...</div>
+
+                <div class="text-xs text-gray-500 uppercase font-semibold mb-1">AI 配對理由</div>
+                <p id="notif-reason" class="text-sm leading-relaxed text-gray-200">loading...</p>
+            </div>
+
+            <div class="flex gap-3">
+                <button onclick="showDeclineModal()"
+                    class="flex-1 py-3 bg-white/5 hover:bg-white/10 rounded-xl font-semibold transition">婉拒</button>
+                <button onclick="respondMatch(true)"
+                    class="flex-1 py-3 bg-gradient-to-r from-fuchsia-600 to-violet-600 hover:from-fuchsia-500 hover:to-violet-500 rounded-xl font-bold shadow-lg transition">同意聊天</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Decline Reason Modal -->
+    <div id="decline-modal"
+        class="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm hidden flex items-center justify-center opacity-0 transition-opacity duration-300 p-4">
+        <div id="decline-content"
+            class="glass-panel p-8 rounded-3xl max-w-md w-full transform scale-95 transition-transform duration-300 border border-red-500/30 shadow-2xl shadow-red-500/10">
+            <div class="w-16 h-16 rounded-full bg-red-500/20 flex items-center justify-center mx-auto mb-4">🤫</div>
+            <h2 class="text-xl font-bold text-center mb-2">能偷偷告訴我們，是哪個部分讓您猶豫了嗎？</h2>
+            <p class="text-center text-sm text-gray-400 mb-6">勾選讓您不舒服的特質（可選，不勾也能直接婉拒）</p>
+
+            <div id="decline-checkboxes" class="space-y-3 mb-6">
+                <!-- Checkboxes will be dynamically generated -->
+            </div>
+
+            <div class="flex gap-3">
+                <button onclick="cancelDecline()"
+                    class="flex-1 py-3 bg-white/5 hover:bg-white/10 rounded-xl font-semibold transition text-gray-300">取消</button>
+                <button onclick="confirmDecline()"
+                    class="flex-1 py-3 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 rounded-xl font-bold shadow-lg transition">確認婉拒</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 🥚 雙黃蛋 Initiator Match Result Modal -->
+    <div id="initiator-modal"
+        class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center opacity-0 transition-opacity duration-300 p-4">
+        <div id="initiator-content"
+            class="glass-panel p-8 rounded-3xl max-w-4xl w-full transform scale-95 transition-transform duration-300 border border-violet-500/50 shadow-2xl shadow-violet-500/20 max-h-[95vh] flex flex-col">
+            <div class="flex-none text-center">
+                <div class="w-16 h-16 rounded-full bg-violet-500/20 flex items-center justify-center mx-auto mb-4 text-2xl">✨</div>
+                <h2 class="text-2xl font-bold mb-2">🥚 雙黃蛋配對結果！</h2>
+                <p class="text-sm text-gray-300 mb-6">媒婆為您精心挑選了兩位候選人，請分別決定是否發送邀請。</p>
+            </div>
+
+            <!-- 🥚 雙卡片區域 -->
+            <div id="dual-cards-container" class="flex-1 overflow-y-auto grid grid-cols-2 gap-4 pr-2 min-h-0">
+                <!-- Card A & Card B will be rendered by JS -->
+            </div>
+
+            <!-- Debug Table + Footer -->
+            <div class="flex-none mt-4 space-y-4">
+                <details class="bg-black/30 rounded-xl border border-white/5">
+                    <summary class="px-4 py-3 text-xs text-violet-400 uppercase font-semibold cursor-pointer select-none flex items-center gap-2">
+                        <span>🛠️ 系統驗證資訊 (開發者 Debug)</span>
+                    </summary>
+                    <div class="px-4 pb-4 overflow-x-auto rounded-b-lg">
+                        <table class="w-full text-left text-sm text-gray-300">
+                            <thead class="text-xs text-gray-500 bg-black/50 border-b border-white/5">
+                                <tr>
+                                    <th class="px-4 py-3 font-medium">候選人 ID</th>
+                                    <th class="px-4 py-3 font-medium">相似度</th>
+                                    <th class="px-4 py-3 font-medium">近期情境</th>
+                                    <th class="px-4 py-3 font-medium">性格簡述</th>
+                                </tr>
+                            </thead>
+                            <tbody id="initiator-debug-table" class="divide-y divide-white/5 text-xs"></tbody>
+                        </table>
+                    </div>
+                </details>
+
+                <div id="initiator-footer" class="text-center">
+                    <p class="text-xs text-yellow-400 mb-3 animate-pulse" id="initiator-status-text">請對每位候選人做出決定</p>
+                    <button onclick="closeInitiatorModal()" id="initiator-close-btn"
+                        class="w-full py-3 bg-white/10 hover:bg-white/20 rounded-xl font-semibold transition opacity-50 pointer-events-none">確認並關閉</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script>
+        // --- State ---
+        let currentUserId = "demo_user";
+        let isStageMessenger = false;
+        let activeContactId = null;
+        let activeMatchId = null; // for notification
+        let activeMatchFromUser = null; // for auto jump to chat
+        let activeMatchBigFive = null; // 候選人 big_five，供婉拒 Checkbox 使用
+        let activeMatchContext = ""; // 候選人情境
+        let activeMatchDistinctiveTags = null; // 候選人 distinctive_tags，供婉拒 Checkbox 使用
+        let userInterest = "";
+        
+        // 🥚 雙黃蛋狀態追蹤
+        let activeDraftMatches = []; // [{match_id, matched_user_id, contrast_label, reason, big_five, context, status}]
+        let activeDeclineMatchId = null; // 目前正在婉拒的 match_id
+        let activeDeclineCardIdx = null; // 🥚 直接記住卡片索引，避免 findIndex 找不到
+        let isDeepProfiling = false; // 是否正在深層價值觀分析
+        let hasDeepProfile = false; // 是否已完成深層價值觀分析
+        let lastTriggeredMsgId = null; // 紀錄最後一次觸發風險檢測的消息 ID
+
+
+        class SmoothTypewriter {
+            constructor(element, speed = 25) {
+                this.element = element;
+                this.speed = speed;
+                this.queue = [];
+                this.timer = null;
+            }
+
+            add(text) {
+                for (let i = 0; i < text.length; i++) {
+                    this.queue.push(text.charAt(i));
+                }
+                if (!this.timer) {
+                    this.start();
+                }
+            }
+
+            start() {
+                this.timer = setInterval(() => {
+                    if (this.queue.length > 0) {
+                        const char = this.queue.shift();
+                        this.element.innerText += char;
+                        const cm = document.getElementById("room-messages");
+                        cm.scrollTop = cm.scrollHeight;
+                    } else {
+                        clearInterval(this.timer);
+                        this.timer = null;
+                    }
+                }, this.speed);
+            }
+
+            flush() {
+                if (this.timer) {
+                    clearInterval(this.timer);
+                    this.timer = null;
+                }
+                this.element.innerText += this.queue.join("");
+                this.queue = [];
+            }
+        }
+
+
+        // 🎯 深層價值觀分析
+        async function startDeepProfile() {
+            if (isDeepProfiling) return;
+            isDeepProfiling = true;
+            
+            // 切換到 Big Five 畫面但更改標題
+            switchStage(false);
+            const headerEl = document.querySelector('#stage-bigfive .p-4.border-b h2');
+            const origHeader = headerEl.innerHTML;
+            headerEl.innerHTML = '🎯 深層價值觀分析';
+            
+            const bfMessages = document.getElementById("bf-messages");
+            bfMessages.innerHTML = '';
+            const origJson = document.getElementById("bf-json").innerText;
+            document.getElementById("bf-json").innerText = "尚無深層分析資料...";
+            
+            // 重置輸入
+            const inp = document.getElementById("bf-input");
+            inp.placeholder = "分享你的深層想法...";
+            document.getElementById("bf-typing").classList.remove("hidden");
+            
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: currentUserId, message: "我想探索自己的深層價值觀", state: "deep_profile" })
+                });
+                const data = await res.json();
+                document.getElementById("bf-typing").classList.add("hidden");
+                if (res.ok) {
+                    appendBFMessage(data.reply, false);
+                    if (data.deep_profile) {
+                        document.getElementById("bf-json").innerText = JSON.stringify(data.deep_profile, null, 2);
+                    }
+                    if (data.is_complete) {
+                        appendBFMessage("🎉 深層價值觀分析完成！即將返回聊天室...", false);
+                        setTimeout(() => {
+                            isDeepProfiling = false;
+                            headerEl.innerHTML = origHeader;
+                            inp.placeholder = "回答 AI...";
+                            switchStage(true);
+                        }, 3000);
+                    }
+                }
+            } catch (e) {
+                document.getElementById("bf-typing").classList.add("hidden");
+                appendBFMessage("連線錯誤，請重試。", false);
+                isDeepProfiling = false;
+                headerEl.innerHTML = origHeader;
+                inp.placeholder = "回答 AI...";
+            }
+        }
+
+        async function startWithInterest() {
+            const inp = document.getElementById("test-interest-input");
+            userInterest = inp.value.trim();
+            if (!userInterest) userInterest = "無特別興趣";
+            
+            document.getElementById("interest-overlay").classList.add("opacity-0", "pointer-events-none");
+            
+            // Clear default message & show typing
+            document.getElementById("bf-messages").innerHTML = "";
+            document.getElementById("bf-typing").classList.remove("hidden");
+            
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        user_id: currentUserId, 
+                        message: "哈囉！這是我註冊時填寫的興趣，請根據它問我情境題。", 
+                        state: "big_five",
+                        initial_interest: userInterest 
+                    })
+                });
+                const data = await res.json();
+                document.getElementById("bf-typing").classList.add("hidden");
+                if (res.ok) {
+                    appendBFMessage(data.reply, false);
+                    document.getElementById("bf-json").innerText = JSON.stringify(data.big_five, null, 2);
+                } else {
+                    appendBFMessage("系統錯誤，無法初始化 AI。", false);
+                }
+            } catch(e) {
+                document.getElementById("bf-typing").classList.add("hidden");
+                appendBFMessage("連線錯誤，請重試。", false);
+            }
+        }
+
+        // --- DOM Elements ---
+        const stageBigFive = document.getElementById("stage-bigfive");
+        const stageMessenger = document.getElementById("stage-messenger");
+        const stageDeepProfile = document.getElementById("stage-deep-profile");
+
+        // --- Main Switcher ---
+        function switchUser() {
+            const val = document.getElementById("user-select").value;
+            if (!val) return;
+            currentUserId = val;
+            window.location.search = `?user=${currentUserId}`;
+        }
+
+        function getDeepProfileParts(data) {
+            const dp = data.my_deep_profile || {};
+            const values = dp.core_values || dp.values || data.my_dp_values;
+            const future = dp.life_philosophy || dp.ideal_future || data.my_dp_future;
+            return {
+                values: Array.isArray(values) ? values.join('、') : values,
+                future
+            };
+        }
+
+        function renderDropdownProfile(data) {
+            const contextEl = document.getElementById("dropdown-context");
+            const bfEl = document.getElementById("dropdown-bf");
+            const dpSection = document.getElementById("dropdown-dp-section");
+            const dpValuesEl = document.getElementById("dropdown-dp-values");
+            const dpFutureEl = document.getElementById("dropdown-dp-future");
+            const frequencyEl = document.getElementById("frequency-select");
+
+            const profileParts = [];
+            if (data.my_initial_interest) {
+                profileParts.push("🎯 興趣：" + data.my_initial_interest);
+            }
+            if (data.my_bf_summary && data.my_bf_summary !== "尚無性格分析資料") {
+                profileParts.push("🧠 個性：" + data.my_bf_summary);
+            }
+
+            const deepParts = getDeepProfileParts(data);
+            if (deepParts.values) profileParts.push("💎 價值觀：" + deepParts.values);
+            if (deepParts.future) profileParts.push("🌱 未來：" + deepParts.future);
+
+            if (contextEl) contextEl.innerText = data.my_context || "尚無目前情境";
+            if (bfEl) bfEl.innerText = profileParts.length > 0 ? profileParts.join('\n') : "尚無完整資料";
+            if (dpSection) dpSection.classList.toggle("hidden", !(deepParts.values || deepParts.future));
+            if (dpValuesEl) dpValuesEl.innerText = deepParts.values || "無";
+            if (dpFutureEl) dpFutureEl.innerText = deepParts.future || "無";
+            if (frequencyEl) frequencyEl.value = data.proactive_frequency || data.my_proactive_frequency || "none";
+
+            hasDeepProfile = Boolean(data.is_deep_complete || deepParts.values || deepParts.future);
+            const deepButton = document.getElementById("btn-deep-profile");
+            if (hasDeepProfile && activeContactId === "ai_assistant" && deepButton) {
+                deepButton.classList.add("hidden");
+            } else if (!hasDeepProfile && deepButton) {
+                deepButton.classList.remove("hidden");
+            }
+        }
+
+        async function toggleProfileMenu() {
+            const menu = document.getElementById("profile-dropdown");
+            menu.classList.toggle("hidden");
+            menu.classList.toggle("flex");
+
+            if (!menu.classList.contains("hidden")) {
+                try {
+                    const res = await fetch(`/api/init?user_id=${currentUserId}`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        renderDropdownProfile(data);
+                    }
+                } catch (e) { }
+            }
+        }
+
+        async function updateProactiveFrequency() {
+            const val = document.getElementById("frequency-select").value;
+            try {
+                await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: currentUserId, proactive_frequency: val })
+                });
+            } catch (e) {
+                console.error("Failed to update frequency", e);
+            }
+        }
+
+        async function redoBigFive() {
+            document.getElementById("profile-dropdown").classList.add("hidden");
+            document.getElementById("profile-dropdown").classList.remove("flex");
+
+            try {
+                await fetch('/api/chat/reset', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: currentUserId, state: "big_five" })
+                });
+
+                document.getElementById("bf-messages").innerHTML = `<div class="chat-bubble bubble-other fade-in">\u6211\u5011\u91CD\u65B0\u4F86\u4E00\u6B21\u57FA\u790E\u6027\u683C\u6E2C\u9A57\u5427\u3002\u5148\u8DDF\u6211\u804A\u804A\u6700\u8FD1\u8B93\u4F60\u6709\u611F\u89BA\u7684\u4E00\u4EF6\u4E8B\u3002</div>`;
+                document.getElementById("bf-json").innerText = "\u5C1A\u7121\u8CC7\u6599...";
+                switchStage("bigfive");
+            } catch (e) { }
+        }
+
+        async function redoDeepProfile() {
+            document.getElementById("profile-dropdown").classList.add("hidden");
+            document.getElementById("profile-dropdown").classList.remove("flex");
+
+            try {
+                await fetch('/api/chat/reset', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: currentUserId, state: "deep_profile" })
+                });
+
+                document.getElementById("dp-messages").innerHTML = "";
+                document.getElementById("dp-json").innerText = "\u5C1A\u7121\u8CC7\u6599...";
+                hasDeepProfile = false;
+                switchStage("deep_profile");
+                initDeepProfile();
+            } catch (e) { }
+        }
+
+        // Close dropdown when clicking outside
+        document.addEventListener('click', function (event) {
+            const container = document.getElementById('profile-dropdown');
+            const button = document.querySelector('button[onclick="toggleProfileMenu()"]');
+            if (container && !container.classList.contains("hidden") && !container.contains(event.target) && !button.contains(event.target)) {
+                container.classList.add("hidden");
+                container.classList.remove("flex");
+            }
+        });
+
+        async function clearSystemData() {
+            if (!confirm("確定要刪除所有資料並重新開始嗎？這會清除所有對話紀錄並自動生成 10 筆假資料。")) return;
+            
+            // 1. 清空所有資料庫
+            await fetch('/api/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: currentUserId }) });
+            
+            // 2. 自動產生 10 筆假資料
+            await fetch('/api/seed', { method: 'POST' });
+            
+            // 3. 跳回首頁 (預設 demo_user)
+            window.location.href = "/";
+        }
+
+        // --- Helper functions ---
+        function appendBFMessage(text, isUser) {
+            const c = document.getElementById("bf-messages");
+            const div = document.createElement("div");
+            div.className = `chat-bubble ${isUser ? 'bubble-user' : 'bubble-other'} fade-in`;
+            div.innerHTML = text;
+            c.appendChild(div);
+            c.scrollTop = c.scrollHeight;
+        }
+
+        function switchStage(stage) {
+            // Support both boolean (legacy) and string params
+            if (stage === true || stage === 'messenger') {
+                stage = 'messenger';
+            } else if (stage === false || stage === 'bigfive') {
+                stage = 'bigfive';
+            } else if (stage === 'deep_profile') {
+                // Keep as-is
+            }
+
+            // Hide all stages first
+            [stageBigFive, stageMessenger, stageDeepProfile].forEach(el => {
+                el.classList.add("opacity-0", "pointer-events-none");
+                el.classList.remove("z-10");
+            });
+
+            isStageMessenger = (stage === 'messenger');
+
+            if (stage === 'messenger') {
+                stageMessenger.classList.remove("opacity-0", "pointer-events-none");
+                stageMessenger.classList.add("z-10");
+                loadContacts();
+            } else if (stage === 'deep_profile') {
+                stageDeepProfile.classList.remove("opacity-0", "pointer-events-none");
+                stageDeepProfile.classList.add("z-10");
+            } else {
+                stageBigFive.classList.remove("opacity-0", "pointer-events-none");
+                stageBigFive.classList.add("z-10");
+            }
+        }
+
+        // --- Deep Profile Phase ---
+        function appendDPMessage(text, isUser) {
+            const c = document.getElementById("dp-messages");
+            const div = document.createElement("div");
+            div.className = `chat-bubble ${isUser ? 'bubble-user' : 'bubble-other'} fade-in`;
+            div.innerText = text;
+            c.appendChild(div);
+            c.scrollTop = c.scrollHeight;
+        }
+
+        document.getElementById("dp-form").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const inp = document.getElementById("dp-input");
+            const msg = inp.value.trim();
+            if (!msg) return;
+            inp.value = "";
+            appendDPMessage(msg, true);
+            document.getElementById("dp-typing").classList.remove("hidden");
+
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: currentUserId, message: msg, state: "deep_profile" })
+                });
+                const data = await res.json();
+                document.getElementById("dp-typing").classList.add("hidden");
+                if (res.ok) {
+                    document.getElementById("dp-json").innerText = JSON.stringify(data.deep_profile, null, 2);
+                    if (data.is_complete) {
+                        appendDPMessage("你的性格與價值觀分析都已經完成囉！🥳 接下來為您跳轉回聊天室！", false);
+                        setTimeout(() => switchStage('messenger'), 3000);
+                        document.getElementById("btn-deep-profile").classList.add("hidden");
+                    } else {
+                        appendDPMessage(data.reply, false);
+                    }
+                }
+            } catch (e) { }
+        });
+
+        async function startDeepProfileInChat() {
+            if (activeContactId !== "ai_assistant") return;
+            switchStage('deep_profile');
+            if (document.getElementById("dp-messages").children.length <= 1) {
+                // Initialize deep profile conversation
+                document.getElementById("dp-typing").classList.remove("hidden");
+                try {
+                    const res = await fetch('/api/chat', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: currentUserId, message: "我想探索自己的深層價值觀", state: "deep_profile" })
+                    });
+                    const data = await res.json();
+                    document.getElementById("dp-typing").classList.add("hidden");
+                    if (res.ok) {
+                        appendDPMessage(data.reply, false);
+                        if (data.deep_profile) {
+                            document.getElementById("dp-json").innerText = JSON.stringify(data.deep_profile, null, 2);
+                        }
+                    }
+                } catch (e) {
+                    document.getElementById("dp-typing").classList.add("hidden");
+                    appendDPMessage("連線錯誤，請重試。", false);
+                }
+            }
+        }
+
+        // --- Big Five Phase ---
+        document.getElementById("bf-form").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const inp = document.getElementById("bf-input");
+            const msg = inp.value.trim();
+            if (!msg) return;
+            inp.value = "";
+            appendBFMessage(msg, true);
+            document.getElementById("bf-typing").classList.remove("hidden");
+
+            const chatState = isDeepProfiling ? "deep_profile" : "big_five";
+
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: currentUserId, message: msg, state: chatState })
+                });
+                const data = await res.json();
+                document.getElementById("bf-typing").classList.add("hidden");
+                if (res.ok) {
+                    if (isDeepProfiling) {
+                        document.getElementById("bf-json").innerText = JSON.stringify(data.deep_profile, null, 2);
+                        if (data.is_complete) {
+                            appendBFMessage("🎉 深層價值觀分析完成！即將返回聊天室...", false);
+                            const headerEl = document.querySelector('#stage-bigfive .p-4.border-b h2');
+                            setTimeout(() => {
+                                isDeepProfiling = false;
+                                headerEl.innerHTML = '🔮 專屬性格解析';
+                                inp.placeholder = "回答 AI...";
+                                switchStage(true);
+                            }, 3000);
+                        } else {
+                            appendBFMessage(data.reply, false);
+                        }
+                    } else {
+                        document.getElementById("bf-json").innerText = JSON.stringify(data.big_five, null, 2);
+                        if (data.is_complete) {
+                            appendBFMessage("太棒了！我已經大概了解你的個性囉。接下來為您開通專屬聊天室，我會在那邊傳訊息給你！", false);
+                            setTimeout(() => switchStage(true), 3000);
+                        } else {
+                            appendBFMessage(data.reply, false);
+                        }
+                    }
+                }
+            } catch (e) { }
+        });
+
+        // --- Messenger Phase ---
+        async function loadContacts() {
+            try {
+                const res = await fetch(`/api/contacts?user_id=${currentUserId}`);
+                const data = await res.json();
+                const list = document.getElementById("contacts-list");
+                list.innerHTML = "";
+                data.contacts.forEach(c => {
+                    const bg = c.role === "system" ? "from-violet-500 to-fuchsia-500" : "from-sky-500 to-indigo-500";
+                    const isSystem = c.role === "system";
+                    const div = document.createElement("div");
+                    div.className = `contact-item p-4 border-b border-white/5 flex items-center gap-3 ${activeContactId === c.id ? 'contact-active' : ''}`;
+                    div.onclick = () => selectContact(c.id, c.name, bg, c.context, c.is_locked);
+                    div.innerHTML = `
+                        <div class="w-12 h-12 rounded-full bg-gradient-to-tr ${bg} flex items-center justify-center font-bold shadow-lg flex-shrink-0 text-white">
+                            ${c.name.substring(0, 2).toUpperCase()}
+                        </div>
+                        <div class="overflow-hidden">
+                            <h3 class="font-semibold text-white whitespace-nowrap overflow-hidden text-ellipsis">${c.name} ${isSystem ? '<span class="text-xs bg-violet-600 rounded px-1 ml-1">官方</span>' : ''}</h3>
+                            <p class="text-xs text-emerald-400 whitespace-nowrap overflow-hidden text-ellipsis" title="${c.context}">情境：${c.context || '交朋友'}</p>
+                        </div>
+                    `;
+                    list.appendChild(div);
+                });
+
+                // Auto select first contact if none is active
+                if (!activeContactId && data.contacts.length > 0) {
+                    const aiContact = data.contacts.find(c => c.id === "ai_assistant") || data.contacts[0];
+                    const bg = aiContact.role === "system" ? "from-violet-500 to-fuchsia-500" : "from-sky-500 to-indigo-500";
+                    selectContact(aiContact.id, aiContact.name, bg, aiContact.context);
+                }
+            } catch (e) { }
+        }
+
+        async function selectContact(id, name, bgClass, contextStr = "交朋友", is_locked = false) {
+            activeContactId = id;
+            document.getElementById("safety-container").classList.add("hidden");
+            document.getElementById("room-name").innerText = name;
+            document.getElementById("room-avatar").className = `w-10 h-10 rounded-full bg-gradient-to-tr ${bgClass} flex items-center justify-center font-bold text-lg text-white shadow`;
+
+            if (id === "ai_assistant" && !hasDeepProfile) {
+                document.getElementById("btn-deep-profile").classList.remove("hidden");
+            } else {
+                document.getElementById("btn-deep-profile").classList.add("hidden");
+            }
+
+            // UI refresh
+            loadContacts();
+
+            // Enable/disable input based on lock status
+            if (is_locked) {
+                document.getElementById("room-input").disabled = true;
+                document.getElementById("room-submit").disabled = true;
+                if(document.getElementById("btn-copilot")) document.getElementById("btn-copilot").disabled = true;
+                document.getElementById("room-input").placeholder = "AI 目前正在休息，等待下次主動聊天...";
+            } else {
+                document.getElementById("room-input").disabled = false;
+                document.getElementById("room-submit").disabled = false;
+                if(document.getElementById("btn-copilot")) document.getElementById("btn-copilot").disabled = false;
+                document.getElementById("room-input").placeholder = "傳送訊息...";
+            }
+
+            // Load messages
+            const cm = document.getElementById("room-messages");
+            cm.innerHTML = `<div class="text-center text-gray-500 my-4 text-xs">載入中...</div>`;
+
+            try {
+                const res = await fetch(`/api/messages/${id}?user_id=${currentUserId}`);
+                const data = await res.json();
+                cm.innerHTML = "";
+                if (data.messages.length === 0) {
+                    cm.innerHTML = `<div class="text-center text-gray-500 my-8 text-xs bg-black/20 rounded max-w-sm mx-auto p-4">這裡是你們專屬的聊天空間，開始打招呼吧！</div>`;
+                } else {
+                    data.messages.forEach(m => {
+                        appendRoomMessage(m.content, m.sender_id === currentUserId);
+                    });
+                }
+            } catch (e) { }
+        }
+
+        function appendRoomMessage(text, isUser) {
+            const cm = document.getElementById("room-messages");
+            const div = document.createElement("div");
+            div.className = `chat-bubble ${isUser ? 'bubble-user' : 'bubble-other'} fade-in whitespace-pre-wrap`;
+            div.innerText = text;
+            cm.appendChild(div);
+            cm.scrollTop = cm.scrollHeight;
+        }
+
+        function appendRoomMessageStream(isUser) {
+            const cm = document.getElementById("room-messages");
+            const div = document.createElement("div");
+            div.className = `chat-bubble ${isUser ? 'bubble-user' : 'bubble-other'} fade-in whitespace-pre-wrap`;
+            div.innerText = "";
+            cm.appendChild(div);
+            cm.scrollTop = cm.scrollHeight;
+            return div;
+        }
+        
+        function appendSystemMessage(text) {
+            const cm = document.getElementById("room-messages");
+            const div = document.createElement("div");
+            div.className = `chat-bubble bg-gray-800/80 text-gray-300 text-xs italic mx-auto text-center w-3/4 my-2 py-2 px-4 rounded-md fade-in`;
+            div.innerText = text;
+            cm.appendChild(div);
+            cm.scrollTop = cm.scrollHeight;
+        }
+
+        document.getElementById("room-form").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            if (!activeContactId) return;
+            const inp = document.getElementById("room-input");
+            const msg = inp.value.trim();
+            if (!msg) return;
+            inp.value = "";
+            appendRoomMessage(msg, true);
+
+            document.getElementById("room-typing").classList.remove("hidden");
+            
+            let bubble = null;
+            try {
+                const res = await fetch('/api/direct_chat_stream', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: currentUserId, contact_id: activeContactId, message: msg })
+                });
+                
+                document.getElementById("room-typing").classList.add("hidden");
+                
+                if (res.ok) {
+                    const reader = res.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = "";
+                    let typewriter = null;
+                    
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split("\n");
+                        buffer = lines.pop();
+                        
+                        for (const line of lines) {
+                            const trimmed = line.trim();
+                            if (trimmed.startsWith("data: ")) {
+                                try {
+                                    const parsed = JSON.parse(trimmed.slice(6));
+                                    if (parsed.type === "content") {
+                                        if (!bubble) {
+                                            bubble = appendRoomMessageStream(false);
+                                            typewriter = new SmoothTypewriter(bubble, 25);
+                                        }
+                                        typewriter.add(parsed.content);
+                                    } else if (parsed.type === "meta") {
+                                        if (typewriter) {
+                                            typewriter.flush();
+                                        }
+                                        if (parsed.is_locked) {
+                                            document.getElementById("room-input").disabled = true;
+                                            document.getElementById("room-submit").disabled = true;
+                                            if (document.getElementById("btn-copilot")) document.getElementById("btn-copilot").disabled = true;
+                                            document.getElementById("room-input").placeholder = "AI 目前正在休息，等待下次主動聊天...";
+                                            loadContacts();
+                                        }
+                                        if (parsed.welcome_back_draft) {
+                                            showWelcomeBackDraft(parsed.welcome_back_draft);
+                                        }
+                                        
+                                        // Render Safety Alert Panel
+                                        let safetyContainer = document.getElementById("safety-container");
+                                        let safetyText = document.getElementById("safety-text");
+                                        let safetyLevel = document.getElementById("safety-level");
+                                        
+                                        if (parsed.ui_priority === "risk" && parsed.risk_assessment && parsed.risk_assessment.intervention_command) {
+                                            let cmd = parsed.risk_assessment.intervention_command;
+                                            let senderD = cmd.sender_directive;
+                                            if (senderD && senderD.content && senderD.content.body) {
+                                                lastTriggeredMsgId = parsed.risk_assessment.triggered_by_msg_id || cmd.triggered_by_msg_id;
+                                                safetyText.innerText = senderD.content.body;
+                                                safetyLevel.innerText = (cmd.risk_level || "WARNING").toUpperCase();
+                                                
+                                                safetyContainer.classList.remove("hidden");
+                                                safetyContainer.classList.add("flex");
+                                            } else {
+                                                safetyContainer.classList.add("hidden");
+                                                safetyContainer.classList.remove("flex");
+                                            }
+                                        } else {
+                                            safetyContainer.classList.add("hidden");
+                                            safetyContainer.classList.remove("flex");
+                                        }
+
+                                    }
+                                } catch (err) {
+                                    console.error("Error parsing stream chunk:", err, trimmed);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    appendRoomMessage("⚠️ 伺服器連線發生錯誤，請稍後再試。", false);
+                }
+            } catch (e) {
+                document.getElementById("room-typing").classList.add("hidden");
+                appendRoomMessage("⚠️ 連線中斷，請稍後再試。", false);
+            }
+        });
+
+        // --- Matching & Notifications ---
+        async function triggerMatch() {
+            const btn = document.getElementById("btn-match");
+            const oldHtml = btn.innerHTML;
+            btn.innerHTML = `配對中...`; btn.disabled = true;
+            try {
+                const res = await fetch('/api/match', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: currentUserId })
+                });
+                const data = await res.json();
+                if (res.ok && data.matches && data.matches.length > 0) {
+                    showDualCardsModal(data.matches, data.debug_info);
+                } else {
+                    alert("目前沒有適合的人選，或者請先透過 AI 助理告訴我您的近況喔。");
+                }
+            } catch (e) { alert("此使用者可能尚未建檔完整"); }
+            btn.innerHTML = oldHtml; btn.disabled = false;
+        }
+
+        // 🥚 雙黃蛋：渲染雙卡片 Modal
+        function showDualCardsModal(matches, debugInfo) {
+            activeDraftMatches = matches.map(m => ({...m, status: 'draft'})); // 初始 draft
+            const container = document.getElementById("dual-cards-container");
+            container.innerHTML = "";
+            
+            matches.forEach((m, idx) => {
+                const cardLetter = String.fromCharCode(65 + idx); // A, B
+                const bfSummary = m.big_five?.summary || '無';
+                const contrastEmoji = idx === 0 ? '🔥' : '❄️';
+                
+                const card = document.createElement("div");
+                card.className = "bg-black/50 rounded-2xl p-5 border border-white/10 flex flex-col gap-3 transition-all duration-300";
+                card.id = `draft-card-${idx}`;
+                card.innerHTML = `
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-bold px-2 py-1 rounded-full bg-violet-500/20 text-violet-300">${contrastEmoji} ${m.contrast_label || '候選人 ' + cardLetter}</span>
+                        <span id="card-status-${idx}" class="text-xs px-2 py-1 rounded-full bg-yellow-500/20 text-yellow-300">草稿中</span>
+                    </div>
+                    <div class="text-xs text-gray-500 uppercase font-semibold">候選人 ID</div>
+                    <div class="font-mono text-lg font-bold text-sky-400">${m.matched_user_id}</div>
+                    <div class="text-xs text-gray-500 uppercase font-semibold mt-1">AI 推薦理由</div>
+                    <p class="text-sm leading-relaxed text-gray-200 whitespace-pre-wrap flex-1">${m.recommendation_reason || '無'}</p>
+                    ${m.distinctive_tags && m.distinctive_tags.length > 0 ? `<div class="text-xs text-gray-500 mt-1">${m.distinctive_tags.join('、')}</div>` : ''}
+                    <div id="card-actions-${idx}" class="flex gap-2 mt-auto pt-2">
+                        <button onclick="initiatorDeclineDraft(${idx})" class="flex-1 py-2.5 bg-white/5 hover:bg-red-500/20 hover:border-red-500/50 rounded-xl text-sm font-semibold transition border border-white/10">婉拒</button>
+                        <button onclick="initiatorAcceptDraft(${idx})" class="flex-1 py-2.5 bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 rounded-xl text-sm font-bold shadow-lg transition">發送邀請</button>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+
+            // Debug table
+            const tbody = document.getElementById("initiator-debug-table");
+            if (tbody) {
+                tbody.innerHTML = "";
+                if (debugInfo && debugInfo.length > 0) {
+                    const matchedIds = matches.map(m => m.matched_user_id);
+                    debugInfo.forEach(d => {
+                        const isMatched = matchedIds.includes(d.user_id);
+                        const tr = document.createElement("tr");
+                        if (isMatched) tr.className = "bg-violet-900/30";
+                        tr.innerHTML = `
+                            <td class="px-4 py-3 ${isMatched ? 'font-bold text-violet-300' : ''}">${d.user_id} ${isMatched ? '<span class="text-xs ml-1 bg-violet-600 px-1 rounded text-white">Selected</span>' : ''}</td>
+                            <td class="px-4 py-3 font-mono ${isMatched ? 'font-bold text-violet-300' : ''}">${d.score}%</td>
+                            <td class="px-4 py-3">${d.context}</td>
+                            <td class="px-4 py-3">${d.big_five_summary}</td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                }
+            }
+
+            // Reset footer
+            updateInitiatorFooter();
+
+            // Show modal
+            const modal = document.getElementById("initiator-modal");
+            const content = document.getElementById("initiator-content");
+            modal.classList.remove("hidden");
+            void modal.offsetWidth;
+            modal.classList.remove("opacity-0");
+            content.classList.remove("scale-95");
+        }
+
+        // 🥚 發起者接受草稿 → draft → pending
+        async function initiatorAcceptDraft(idx) {
+            const m = activeDraftMatches[idx];
+            if (!m || m.status !== 'draft') return;
+            
+            // Optimistic UI update
+            m.status = 'pending';
+            updateCardUI(idx, 'pending');
+            updateInitiatorFooter();
+            
+            try {
+                await fetch('/api/match/accept', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: currentUserId, match_id: m.match_id })
+                });
+                console.log(`✅ 已發送邀請給 ${m.matched_user_id}`);
+            } catch (e) {
+                console.error('發送邀請失敗:', e);
+                m.status = 'draft'; // rollback
+                updateCardUI(idx, 'draft');
+                updateInitiatorFooter();
+            }
+        }
+
+        // 🥚 發起者婉拒草稿 → draft → declined
+        function initiatorDeclineDraft(idx) {
+            const m = activeDraftMatches[idx];
+            if (!m || m.status !== 'draft') return;
+            
+            // 記住正在婉拒哪張卡（同時記錄 match_id 和卡片索引）
+            activeDeclineMatchId = m.match_id;
+            activeDeclineCardIdx = idx; // 🥚 直接記住索引
+            activeMatchBigFive = m.big_five || {};
+            activeMatchContext = m.current_context || "";
+            activeMatchDistinctiveTags = m.distinctive_tags || [];
+            
+            console.log(`🥚 initiatorDeclineDraft: idx=${idx}, match_id=${m.match_id}`);
+            showInitiatorDeclineModal(idx);
+        }
+
+        function showInitiatorDeclineModal(idx) {
+            const bf = activeMatchBigFive || {};
+            const ctx = activeMatchContext || "";
+            const tags = activeMatchDistinctiveTags || [];
+            const labels = bigFiveToCheckboxLabels(bf, ctx, tags);
+            
+            const container = document.getElementById("decline-checkboxes");
+            container.innerHTML = "";
+            labels.forEach((item, i) => {
+                const id = `decline-reason-${i}`;
+                const div = document.createElement("div");
+                div.className = "flex items-start gap-3 bg-white/5 rounded-xl p-3 hover:bg-white/10 transition cursor-pointer";
+                div.innerHTML = `
+                    <input type="checkbox" id="${id}" name="decline-reason" value="${item.value}" class="mt-1 w-4 h-4 rounded border-gray-600 bg-black/30 text-red-500 focus:ring-red-500/30 accent-red-500">
+                    <label for="${id}" class="text-sm text-gray-200 cursor-pointer select-none">${item.value}</label>
+                `;
+                div.addEventListener("click", function(e) { if (e.target.tagName !== "INPUT") div.querySelector("input").checked = !div.querySelector("input").checked; });
+                container.appendChild(div);
+            });
+            
+            const modal = document.getElementById("decline-modal");
+            const content = document.getElementById("decline-content");
+            modal.classList.remove("hidden");
+            void modal.offsetWidth;
+            modal.classList.remove("opacity-0");
+            content.classList.remove("scale-95");
+        }
+
+        // Override confirmDecline to handle both initiator and receiver contexts
+        async function confirmDecline() {
+            const checkboxes = document.querySelectorAll('input[name="decline-reason"]:checked');
+            const explicitReasons = Array.from(checkboxes).map(cb => cb.value);
+            
+            // Close decline modal
+            const modal = document.getElementById("decline-modal");
+            const content = document.getElementById("decline-content");
+            modal.classList.add("opacity-0");
+            content.classList.add("scale-95");
+            setTimeout(() => modal.classList.add("hidden"), 300);
+            
+            if (activeDeclineMatchId || activeDeclineCardIdx !== null) {
+                // 🥚 發起者婉拒草稿情境 — 用直接記住的索引，不再依賴 findIndex
+                const idx = activeDeclineCardIdx;
+                console.log(`🥚 confirmDecline (initiator): cardIdx=${idx}, match_id=${activeDeclineMatchId}, explicitReasons=`, explicitReasons);
+                
+                try {
+                    console.log("準備發送婉拒理由:", explicitReasons);
+                    await fetch('/api/match/decline', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: currentUserId, match_id: activeDeclineMatchId, explicit_reasons: explicitReasons })
+                    });
+                    
+                    if (idx !== null && idx >= 0 && idx < activeDraftMatches.length) {
+                        activeDraftMatches[idx].status = 'declined';
+                        updateCardUI(idx, 'declined');
+                        updateInitiatorFooter();
+                        console.log(`✅ 卡片 ${idx} 已更新為 declined`);
+                    } else {
+                        console.error(`❌ 無效的卡片索引: ${idx}`);
+                    }
+                } catch (e) {
+                    console.error("婉拒 API 失敗:", e);
+                    // 即使 API 失敗，仍然更新 UI（樂觀更新）
+                    if (idx !== null && idx >= 0 && idx < activeDraftMatches.length) {
+                        activeDraftMatches[idx].status = 'declined';
+                        updateCardUI(idx, 'declined');
+                        updateInitiatorFooter();
+                    }
+                }
+                activeDeclineMatchId = null;
+                activeDeclineCardIdx = null;
+                return;
+            }
+            
+            // 原本接收者婉拒情境
+            if (activeMatchId) {
+                try {
+                    console.log("準備發送婉拒理由:", explicitReasons);
+                    await fetch('/api/match/decline', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: currentUserId, match_id: activeMatchId, explicit_reasons: explicitReasons })
+                    });
+                    console.log("📝 接收者婉拒回饋已送出:", explicitReasons);
+                } catch (e) { console.error("婉拒失敗:", e); }
+            }
+        }
+
+        // 🥚 更新單張卡片的 UI
+        function updateCardUI(idx, status) {
+            const statusEl = document.getElementById(`card-status-${idx}`);
+            const actionsEl = document.getElementById(`card-actions-${idx}`);
+            const cardEl = document.getElementById(`draft-card-${idx}`);
+            if (!statusEl || !actionsEl) return;
+            
+            const statusConfig = {
+                draft:    { text: '草稿中',     cls: 'bg-yellow-500/20 text-yellow-300' },
+                pending:  { text: '邀請中 ⏳',  cls: 'bg-blue-500/20 text-blue-300' },
+                declined: { text: '已婉拒 ❌',  cls: 'bg-red-500/20 text-red-300' }
+            };
+            const cfg = statusConfig[status] || statusConfig.draft;
+            statusEl.textContent = cfg.text;
+            statusEl.className = `text-xs px-2 py-1 rounded-full ${cfg.cls}`;
+            
+            if (status !== 'draft') {
+                actionsEl.innerHTML = `<div class="text-center text-xs text-gray-500 w-full py-2">${status === 'pending' ? '等待對方回應中...' : '您已婉拒此候選人'}</div>`;
+                cardEl.classList.add('opacity-60');
+            }
+        }
+
+        // 🥚 更新 Modal Footer 狀態
+        function updateInitiatorFooter() {
+            const allDecided = activeDraftMatches.every(m => m.status !== 'draft');
+            const statusText = document.getElementById("initiator-status-text");
+            const closeBtn = document.getElementById("initiator-close-btn");
+            
+            if (allDecided) {
+                statusText.textContent = "✅ 所有決定已下達！";
+                statusText.classList.remove('text-yellow-400', 'animate-pulse');
+                statusText.classList.add('text-emerald-400');
+                closeBtn.classList.remove('opacity-50', 'pointer-events-none');
+            } else {
+                const remaining = activeDraftMatches.filter(m => m.status === 'draft').length;
+                statusText.textContent = `還有 ${remaining} 位候選人等待您的決定`;
+                statusText.classList.add('text-yellow-400', 'animate-pulse');
+                statusText.classList.remove('text-emerald-400');
+                closeBtn.classList.add('opacity-50', 'pointer-events-none');
+            }
+        }
+
+        function closeInitiatorModal() {
+            const modal = document.getElementById("initiator-modal");
+            const content = document.getElementById("initiator-content");
+            modal.classList.add("opacity-0");
+            content.classList.add("scale-95");
+            setTimeout(() => modal.classList.add("hidden"), 300);
+            // 刷新聯絡人列表（可能有新的 pending 配對）
+            if (isStageMessenger) loadContacts();
+        }
+
+        // Notification Polling
+        let isPolling = false;
+        async function checkNotifications() {
+            if (!currentUserId || isPolling) return;
+            isPolling = true;
+            try {
+                const res = await fetch(`/api/notifications?user_id=${currentUserId}`);
+                const data = await res.json();
+                if (data.notifications && data.notifications.length > 0) {
+                    const first = data.notifications[0];
+                    if (document.getElementById("notif-modal").classList.contains("hidden") && document.getElementById("decline-modal").classList.contains("hidden")) {
+                        showNotification(first.match_id, first.from_user, first.receiver_reason || first.reason, first.from_user_big_five || {}, first.from_user_context || "", first.distinctive_tags || first.from_user_distinctive_tags || null);
+                    }
+                }
+            } catch (e) { }
+
+                // Also check for proactive messages
+                try {
+                    const proactRes = await fetch(`/api/proactive_check?user_id=${currentUserId}`);
+                    const proactData = await proactRes.json();
+                    if (proactData.has_new && proactData.message) {
+                        if (isStageMessenger && activeContactId === "ai_assistant") {
+                            appendRoomMessage(proactData.message, false);
+                            document.getElementById("room-input").disabled = false;
+                            document.getElementById("room-submit").disabled = false;
+                            if(document.getElementById("btn-copilot")) document.getElementById("btn-copilot").disabled = false;
+                            document.getElementById("room-input").placeholder = "傳送訊息...";
+                        } else {
+                            console.log("New proactive message received:", proactData.message);
+                        }
+                        loadContacts();
+                    }
+                } catch (e) { }
+
+            isPolling = false;
+        }
+
+        setInterval(checkNotifications, 5000);
+
+        function showNotification(matchId, fromUser, reason, bigFive, context, distinctiveTags) {
+            activeMatchId = matchId;
+            activeMatchFromUser = fromUser;
+            activeMatchBigFive = bigFive;
+            activeMatchContext = context;
+            activeMatchDistinctiveTags = distinctiveTags || null;
+            document.getElementById("notif-from").innerText = fromUser;
+            document.getElementById("notif-reason").innerText = reason;
+
+            const modal = document.getElementById("notif-modal");
+            const content = document.getElementById("notif-content");
+            modal.classList.remove("hidden");
+            void modal.offsetWidth;
+            modal.classList.remove("opacity-0");
+            content.classList.remove("scale-95");
+        }
+
+        async function respondMatch(accept) {
+            const modal = document.getElementById("notif-modal");
+            const content = document.getElementById("notif-content");
+            modal.classList.add("opacity-0");
+            content.classList.add("scale-95");
+            setTimeout(() => modal.classList.add("hidden"), 300);
+
+            if (accept && activeMatchId) {
+                try {
+                    await fetch('/api/match/accept', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: currentUserId, match_id: activeMatchId })
+                    });
+
+                    switchStage(true);
+                    await loadContacts(); // 確保聯絡人清單已更新
+
+                    // 自動跳轉進入該聊天室
+                    const bgClass = "from-sky-500 to-indigo-500";
+                    selectContact(activeMatchFromUser, activeMatchFromUser, bgClass);
+
+                } catch (e) { }
+            } else if (!accept && activeMatchId) {
+                try {
+                    await fetch('/api/match/decline', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: currentUserId, match_id: activeMatchId })
+                    });
+                } catch (e) { }
+            }
+        }
+
+        // --- Decline Reason Modal Logic ---
+        function bigFiveToCheckboxLabels(bf, context, distinctiveTags) {
+            const labels = [];
+            const cleanTag = (tag) => String(tag || "")
+                .replace(/^(鮮明特質|近期情境|目前情境|興趣|價值觀|個性|未來規劃|未來)[:：]\s*/g, "")
+                .trim();
+            if (distinctiveTags && distinctiveTags.length > 0) {
+                distinctiveTags.forEach(tag => {
+                    const value = cleanTag(tag);
+                    if (value) labels.push({ value });
+                });
+            }
+            if (labels.length === 0 && context) {
+                labels.push({ value: cleanTag(context) });
+            }
+            return labels;
+        }
+
+        function showDeclineModal() {
+            const bf = activeMatchBigFive || {};
+            const ctx = activeMatchContext || "";
+            const tags = activeMatchDistinctiveTags || [];
+            const labels = bigFiveToCheckboxLabels(bf, ctx, tags);
+
+            const container = document.getElementById("decline-checkboxes");
+            container.innerHTML = "";
+
+            if (labels.length === 0) {
+                container.innerHTML = '<p class="text-sm text-gray-500 text-center">無法載入候選人特質資料</p>';
+            } else {
+                labels.forEach((item, idx) => {
+                    const id = `decline-reason-${idx}`;
+                    const div = document.createElement("div");
+                    div.className = "flex items-start gap-3 bg-white/5 rounded-xl p-3 hover:bg-white/10 transition cursor-pointer";
+                    div.innerHTML = `
+                        <input type="checkbox" id="${id}" name="decline-reason" value="${item.value}"
+                            class="mt-1 w-4 h-4 rounded border-gray-600 bg-black/30 text-red-500 focus:ring-red-500/30 accent-red-500">
+                        <label for="${id}" class="text-sm text-gray-200 cursor-pointer select-none">${item.value}</label>
+                    `;
+                    // Make the whole row clickable
+                    div.addEventListener("click", function(e) {
+                        if (e.target.tagName !== "INPUT") {
+                            const cb = div.querySelector("input[type=checkbox]");
+                            cb.checked = !cb.checked;
+                        }
+                    });
+                    container.appendChild(div);
+                });
+            }
+
+            // Show modal
+            const modal = document.getElementById("decline-modal");
+            const content = document.getElementById("decline-content");
+            modal.classList.remove("hidden");
+            void modal.offsetWidth;
+            modal.classList.remove("opacity-0");
+            content.classList.remove("scale-95");
+
+            // Close notification modal behind
+            const notifModal = document.getElementById("notif-modal");
+            const notifContent = document.getElementById("notif-content");
+            notifModal.classList.add("opacity-0");
+            notifContent.classList.add("scale-95");
+            setTimeout(() => notifModal.classList.add("hidden"), 300);
+        }
+
+        function cancelDecline() {
+            const modal = document.getElementById("decline-modal");
+            const content = document.getElementById("decline-content");
+            modal.classList.add("opacity-0");
+            content.classList.add("scale-95");
+            setTimeout(() => modal.classList.add("hidden"), 300);
+
+            // 🥚 發起者婉拒草稿情境：只需關閉 decline modal，不需重新顯示通知
+            if (activeDeclineMatchId || activeDeclineCardIdx !== null) {
+                activeDeclineMatchId = null;
+                activeDeclineCardIdx = null;
+                return;
+            }
+
+            // 接收者情境：重新顯示通知 modal
+            const notifModal = document.getElementById("notif-modal");
+            const notifContent = document.getElementById("notif-content");
+            notifModal.classList.remove("hidden");
+            void notifModal.offsetWidth;
+            notifModal.classList.remove("opacity-0");
+            notifContent.classList.remove("scale-95");
+        }
+
+
+        // DEV: Generate seed data
+        async function fetchSeedAndReload(e) {
+            if (!confirm("確定要產生十筆假資料嗎？這大約需要幾秒鐘的時間。")) return;
+            const btn = e.target;
+            const old = btn.innerText;
+            btn.innerText = "假資料產生中，請稍候...";
+            btn.disabled = true;
+            try {
+                await fetch('/api/seed', { method: 'POST' });
+                alert("✅ 成功產生十筆假資料！畫面將為您重整。");
+                window.location.reload();
+            } catch (err) {
+                alert("發生錯誤");
+                btn.innerText = old;
+                btn.disabled = false;
+            }
+        }
+
+        // ==========================================
+        // MAIN TAB SWITCHING LOGIC (AI Chat vs Human Chat)
+        // ==========================================
+        let currentMainTab = "ai-chat"; // "ai-chat" or "human-chat"
+
+        function switchMainTab(tab) {
+            currentMainTab = tab;
+            const btnAi = document.getElementById("tab-ai-chat");
+            const btnHuman = document.getElementById("tab-human-chat");
+            const containerAi = document.getElementById("ai-chat-container");
+            const containerHuman = document.getElementById("human-chat-container");
+
+            if (tab === "ai-chat") {
+                // Style Active Tab
+                btnAi.className = "flex items-center gap-2 px-5 py-3 rounded-xl glass-panel text-white font-bold transition hover:bg-white/10 border-l-4 border-violet-500 cursor-pointer";
+                btnHuman.className = "flex items-center gap-2 px-5 py-3 rounded-xl glass-panel text-gray-400 font-semibold transition hover:bg-white/10 cursor-pointer";
+                
+                // Show/Hide Containers
+                containerAi.classList.remove("hidden");
+                containerHuman.classList.add("hidden");
+            } else {
+                // Style Active Tab
+                btnHuman.className = "flex items-center gap-2 px-5 py-3 rounded-xl glass-panel text-white font-bold transition hover:bg-white/10 border-l-4 border-violet-500 cursor-pointer";
+                btnAi.className = "flex items-center gap-2 px-5 py-3 rounded-xl glass-panel text-gray-400 font-semibold transition hover:bg-white/10 cursor-pointer";
+                
+                // Show/Hide Containers
+                containerHuman.classList.remove("hidden");
+                containerAi.classList.add("hidden");
+
+                // Initialize history
+                loadHumanHistory();
+            }
+        }
+
+        // ==========================================
+        // DUAL HUMAN CHAT LOGIC (Split Screen)
+        // ==========================================
+        let humanUserA = "";
+        let humanUserB = "";
+        let humanLastMsgIdA = "";
+        let humanLastMsgIdB = "";
+        let allUsersList = [];
+
+        function initHumanChatDropdowns(users) {
+            allUsersList = users.filter(u => u !== "ai_assistant");
+            const selectA = document.getElementById("human-user-a-select");
+            const selectB = document.getElementById("human-user-b-select");
+            
+            selectA.innerHTML = "";
+            selectB.innerHTML = "";
+            
+            allUsersList.forEach(u => {
+                const optA = document.createElement("option");
+                optA.value = u;
+                optA.innerText = u;
+                selectA.appendChild(optA);
+                
+                const optB = document.createElement("option");
+                optB.value = u;
+                optB.innerText = u;
+                selectB.appendChild(optB);
+            });
+            
+            // Set defaults: User A is first user, User B is second user (if exists)
+            if (allUsersList.length > 0) {
+                const seed01 = allUsersList.find(u => u === "seed_user_01");
+                const seed02 = allUsersList.find(u => u === "seed_user_02");
+                
+                if (seed01) selectA.value = "seed_user_01";
+                else selectA.selectedIndex = 0;
+                
+                if (seed02) selectB.value = "seed_user_02";
+                else if (allUsersList.length > 1) selectB.selectedIndex = 1;
+                else selectB.selectedIndex = 0;
+            }
+            
+            // Fetch profiles/metadata and chat history
+            onHumanUserChange('A');
+            onHumanUserChange('B');
+            loadHumanHistory();
+        }
+
+        // Triggered when dropdown user selection changes
+        async function onHumanUserChange(side) {
+            const select = document.getElementById(`human-user-${side.toLowerCase()}-select`);
+            if (!select) return;
+            const selectedVal = select.value;
+            
+            if (side === 'A') {
+                humanUserA = selectedVal;
+            } else {
+                humanUserB = selectedVal;
+            }
+
+            // Fetch profile description to show personality context
+            try {
+                const res = await fetch(`/api/profile/${selectedVal}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    const summary = data.big_five?.summary || "尚無性格資料";
+                    const element = document.getElementById(`human-${side.toLowerCase()}-bf-summary`);
+                    if (element) {
+                        element.innerText = summary;
+                        element.title = summary; // Hover tooltip
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to load user profile", e);
+            }
+
+            // Load shared chat history
+            loadHumanHistory();
+        }
+
+        // Update the 5-Dimension Risk Monitor UI values, animation widths, and badge colors
+        function updateRiskIndicators(side, assessment) {
+            if (!assessment) return;
+            
+            const level = assessment.risk_level || "safe";
+            const scores = assessment.risk_state || assessment.new_risk_state || {};
+            
+            // 1. Update Badge
+            const badge = document.getElementById(`human-${side.toLowerCase()}-risk-level-badge`);
+            if (badge) {
+                badge.innerText = level.toUpperCase();
+                badge.className = "px-1.5 py-0.5 rounded text-[10px] font-bold uppercase transition-all duration-300";
+                
+                if (level === "safe") {
+                    badge.classList.add("bg-emerald-500/20", "text-emerald-400");
+                } else if (level === "observation") {
+                    badge.classList.add("bg-sky-500/20", "text-sky-400");
+                } else if (level === "warning") {
+                    badge.classList.add("bg-amber-500/20", "text-amber-400");
+                } else if (level === "restricted") {
+                    badge.classList.add("bg-orange-500/20", "text-orange-400");
+                } else {
+                    badge.classList.add("bg-rose-500/20", "text-rose-400");
+                }
+            }
+
+            // 2. Update Progress Bars & Scores
+            const fields = {
+                'sexual': scores.sexual_boundary || 0,
+                'coercion': scores.coercion || 0,
+                'manipulation': scores.manipulation || 0,
+                'harassment': scores.harassment || 0,
+                'emotional': scores.emotional_pressure || 0
+            };
+
+            for (const [key, val] of Object.entries(fields)) {
+                const percent = Math.round(val * 100);
+                const scoreText = document.getElementById(`human-${side.toLowerCase()}-score-${key}`);
+                const bar = document.getElementById(`human-${side.toLowerCase()}-bar-${key}`);
+                
+                if (scoreText) {
+                    scoreText.innerText = `${percent}%`;
+                    scoreText.className = "font-bold text-[10px] transition-all duration-300";
+                    if (val < 0.16) {
+                        scoreText.classList.add("text-emerald-400");
+                    } else if (val < 0.31) {
+                        scoreText.classList.add("text-sky-400");
+                    } else if (val < 0.51) {
+                        scoreText.classList.add("text-amber-400");
+                    } else if (val < 0.71) {
+                        scoreText.classList.add("text-orange-400");
+                    } else {
+                        scoreText.classList.add("text-rose-500");
+                    }
+                }
+
+                if (bar) {
+                    bar.style.width = `${percent}%`;
+                    bar.className = "h-full rounded-full transition-all duration-500";
+                    if (val < 0.16) {
+                        bar.classList.add("bg-emerald-500");
+                    } else if (val < 0.31) {
+                        bar.classList.add("bg-sky-500");
+                    } else if (val < 0.51) {
+                        bar.classList.add("bg-amber-500");
+                    } else if (val < 0.71) {
+                        bar.classList.add("bg-orange-500");
+                    } else {
+                        bar.classList.add("bg-rose-500");
+                    }
+                }
+            }
+        }
+
+        // Fetch shared room chat history and render in A and B columns
+        async function loadHumanHistory() {
+            if (!humanUserA || !humanUserB) return;
+            if (humanUserA === humanUserB) {
+                const warningMsg = `<div class="text-center text-xs text-amber-400 my-4">⚠️ 請在兩側選擇不同的使用者以進行雙人對話測試。</div>`;
+                document.getElementById("human-a-messages").innerHTML = warningMsg;
+                document.getElementById("human-b-messages").innerHTML = warningMsg;
+                return;
+            }
+
+            try {
+                const res = await fetch(`/api/messages/${humanUserB}?user_id=${humanUserA}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    const messages = data.messages || [];
+                    
+                    renderHumanMessages('A', messages);
+                    renderHumanMessages('B', messages);
+                }
+
+                // Query and render the current active 5-dimensional risk state
+                const stateRes = await fetch(`/api/human_chat/state?sender_id=${humanUserA}&receiver_id=${humanUserB}`);
+                if (stateRes.ok) {
+                    const stateData = await stateRes.json();
+                    updateRiskIndicators('A', stateData);
+                    updateRiskIndicators('B', stateData);
+                }
+            } catch (e) {
+                console.error("Failed to load human room history", e);
+            }
+        }
+
+        // Render messages array tailored for the user's perspective
+        function renderHumanMessages(side, messages) {
+            const container = document.getElementById(`human-${side.toLowerCase()}-messages`);
+            if (!container) return;
+            container.innerHTML = "";
+            
+            const currentUser = (side === 'A') ? humanUserA : humanUserB;
+
+            if (messages.length === 0) {
+                container.innerHTML = `<div class="text-center text-xs text-gray-500 my-10">尚無對話紀錄，開始輸入發言吧！</div>`;
+                return;
+            }
+
+            messages.forEach(msg => {
+                const isMe = msg.sender_id === currentUser;
+                const isSystem = msg.sender_id === "ai_assistant" || msg.sender_id === "system";
+                
+                const div = document.createElement("div");
+                
+                if (isSystem) {
+                    div.className = "text-center text-xs text-rose-400 my-2 px-4 py-2 bg-rose-500/10 border border-rose-500/20 rounded-xl max-w-[90%] mx-auto";
+                    div.innerText = msg.content;
+                } else {
+                    div.className = `chat-bubble ${isMe ? 'bubble-user ml-auto' : 'bubble-other'}`;
+                    div.innerText = msg.content;
+                }
+                
+                container.appendChild(div);
+            });
+
+            // Scroll to bottom
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // Send message from A to B or B to A
+        async function sendHumanMessage(side) {
+            const input = document.getElementById(`human-${side.toLowerCase()}-input`);
+            if (!input) return;
+            const text = input.value.trim();
+            if (!text) return;
+
+            const sender = (side === 'A') ? humanUserA : humanUserB;
+            const receiver = (side === 'A') ? humanUserB : humanUserA;
+
+            if (sender === receiver) {
+                alert("請在兩側選擇不同的使用者進行測試！");
+                return;
+            }
+
+            input.value = ""; // Clear input immediately
+
+            try {
+                const res = await fetch('/api/human_chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sender_id: sender, receiver_id: receiver, message: text })
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    
+                    // Reload history for both columns
+                    await loadHumanHistory();
+
+                    // Process Safety Risk Assessment
+                    if (data.risk_assessment) {
+                        const assessment = data.risk_assessment;
+                        
+                        // Update progress bars for both sides instantly!
+                        updateRiskIndicators('A', assessment);
+                        updateRiskIndicators('B', assessment);
+                        
+                        const command = assessment.intervention_command;
+                        
+                        // Handle Blocked
+                        if (data.is_blocked) {
+                            showHumanSafetyBanner(side, "🚫 訊息未送出", command?.sender_directive?.content?.body || "此訊息因為安全考量已被系統攔截。", false);
+                            showHumanSafetyBanner((side === 'A' ? 'B' : 'A'), "🛡️ 安全攔截", command?.receiver_directive?.content?.body || "系統安全攔截了一則可能對您造成不適的訊息。", false);
+                            return;
+                        }
+
+                        const msgId = command?.triggered_by_msg_id || "";
+                        if (side === 'A') humanLastMsgIdA = msgId;
+                        else humanLastMsgIdB = msgId;
+
+                        // Process Sender Directive
+                        if (command?.sender_directive && command.sender_directive.action !== "none") {
+                            const senderText = command.sender_directive.content?.body || "請注意對話內容，保持友善互動。";
+                            showHumanSafetyBanner(side, "⚠️ 友善交流提醒 (對話引導)", senderText, false);
+                        }
+
+                        // Process Receiver Directive
+                        if (command?.receiver_directive && command.receiver_directive.action !== "none") {
+                            const receiverText = command.receiver_directive.content?.body || "系統偵測到對方可能包含不適當的對話模式。";
+                            showHumanSafetyBanner((side === 'A' ? 'B' : 'A'), "🛡️ 安全防護提示", receiverText, true);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to send human message", e);
+            }
+        }
+
+        // Safety warning banners handling
+        function showHumanSafetyBanner(side, title, body, showFeedback) {
+            const banner = document.getElementById(`human-${side.toLowerCase()}-safety-banner`);
+            const titleElem = document.getElementById(`human-${side.toLowerCase()}-safety-title`);
+            const bodyElem = document.getElementById(`human-${side.toLowerCase()}-safety-body`);
+            const feedbackBox = document.getElementById(`human-${side.toLowerCase()}-safety-feedback`);
+
+            if (!banner) return;
+            titleElem.innerText = title;
+            bodyElem.innerText = body;
+            banner.classList.remove("hidden");
+            banner.classList.add("flex");
+
+            if (showFeedback) {
+                feedbackBox.classList.remove("hidden");
+                feedbackBox.classList.add("flex");
+            } else {
+                feedbackBox.classList.add("hidden");
+                feedbackBox.classList.remove("flex");
+            }
+        }
+
+        function closeHumanSafetyBanner(side) {
+            const banner = document.getElementById(`human-${side.toLowerCase()}-safety-banner`);
+            if (banner) {
+                banner.classList.add("hidden");
+                banner.classList.remove("flex");
+            }
+        }
+
+        // Submit feedback for human-to-human interventions
+        async function submitHumanFeedback(side, feedbackType) {
+            const msgId = (side === 'B') ? humanLastMsgIdA : humanLastMsgIdB;
+            if (!msgId) {
+                alert("找不到相應的安全警示記錄。");
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/risk/feedback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        triggered_by_msg_id: msgId,
+                        role: 'receiver',
+                        feedback: feedbackType
+                    })
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.status === "success") {
+                        alert("感謝您的意見回饋！系統已成功將此反應反饋至親密度狀態機！");
+                        closeHumanSafetyBanner(side);
+                    } else {
+                        alert("送出失敗，請稍後再試。");
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to submit human feedback", e);
+            }
+        }
+
+        // NEW_AI_GEN COPILOT SUGGESTIONS
+        async function getHumanCopilot(side) {
+            const input = document.getElementById(`human-${side.toLowerCase()}-input`);
+            if (!input) return;
+            const text = input.value.trim();
+            
+            const sender = (side === 'A') ? humanUserA : humanUserB;
+            const receiver = (side === 'A') ? humanUserB : humanUserA;
+
+            if (!sender || !receiver || sender === receiver) return;
+
+            const copilotBox = document.getElementById(`human-${side.toLowerCase()}-copilot`);
+            const copilotText = document.getElementById(`human-${side.toLowerCase()}-copilot-text`);
+            
+            if (!copilotBox) return;
+            copilotText.innerText = "🔍 AI 思考分析中，為您生成最契合大五性格的對話建議...";
+            copilotBox.classList.remove("hidden");
+            copilotBox.classList.add("flex");
+
+            try {
+                const res = await fetch('/api/guidance/suggestion', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: sender, contact_id: receiver, input_text: text })
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.ui_nudge_text) {
+                        copilotText.innerText = data.ui_nudge_text;
+                    } else {
+                        copilotText.innerText = "🤖 AI 分析對話中，您可以直接進行傳送。";
+                    }
+                } else {
+                    copilotText.innerText = "❌ 無法生成建議，請直接發言。";
+                }
+            } catch (e) {
+                console.error("Failed to get human copilot", e);
+                copilotText.innerText = "❌ 獲取建議發生錯誤。";
+            }
+        }
+
+        function applyHumanCopilot(side) {
+            const copilotText = document.getElementById(`human-${side.toLowerCase()}-copilot-text`).innerText;
+            if (copilotText.startsWith("🔍") || copilotText.startsWith("❌")) return;
+            
+            const input = document.getElementById(`human-${side.toLowerCase()}-input`);
+            if (input) {
+                input.value = copilotText;
+                closeHumanCopilot(side);
+            }
+        }
+
+        function closeHumanCopilot(side) {
+            const copilotBox = document.getElementById(`human-${side.toLowerCase()}-copilot`);
+            if (copilotBox) {
+                copilotBox.classList.add("hidden");
+                copilotBox.classList.remove("flex");
+            }
+        }
+
+        // Init Check
+        window.addEventListener("DOMContentLoaded", async () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.has('user')) {
+                currentUserId = urlParams.get('user');
+            }
+
+            try {
+                const res = await fetch(`/api/init?user_id=${currentUserId}`);
+                if (res.ok) {
+                    const data = await res.json();
+
+                    // Populate dropdown
+                    const sel = document.getElementById("user-select");
+                    sel.innerHTML = "";
+                    data.users.forEach(u => {
+                        const opt = document.createElement("option");
+                        opt.value = u;
+                        opt.innerText = u;
+                        if (u === currentUserId) opt.selected = true;
+                        sel.appendChild(opt);
+                    });
+
+                    // Initialize Dual Human Chat Dropdowns
+                    initHumanChatDropdowns(data.users);
+
+                    if (document.getElementById("dropdown-context")) {
+                        document.getElementById("dropdown-current-user").innerText = currentUserId;
+                        document.getElementById("header-avatar").innerText = currentUserId.substring(0, 2).toUpperCase();
+                        renderDropdownProfile(data);
+                    }
+
+                    // Check if complete
+                    if (data.is_complete) {
+                        document.getElementById("interest-overlay").classList.add("hidden");
+                        switchStage(true); // 直入 Messenger
+                    }
+
+                    // Run first notification check immediately
+                    checkNotifications();
+                }
+            } catch (e) { }
+        });
+
+        // --- Guidance UI Logic ---
+        let lastKeystrokeTime = 0;
+        
+        function showWelcomeBackDraft(text) {
+            const idleContainer = document.getElementById("idle-draft-container");
+            const idleText = document.getElementById("idle-draft-text");
+            const idleTitle = document.getElementById("idle-draft-title");
+            
+            idleContainer.classList.remove("hidden");
+            idleContainer.classList.add("flex");
+            idleTitle.innerText = "歡迎回來";
+            idleText.innerText = text;
+            
+            setTimeout(() => {
+                idleContainer.classList.add("hidden");
+                idleContainer.classList.remove("flex");
+            }, 15000);
+        }
+        
+        async function fetchGuidanceStatus() {
+            if (!activeContactId || activeContactId === "ai_assistant") return;
+            try {
+                const res = await fetch(`/api/guidance/status?user_id=${currentUserId}&contact_id=${activeContactId}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    const pIdle = data.partner_idle_state;
+                    const uIdle = data.current_user_idle_state;
+                    
+                    const idleContainer = document.getElementById("idle-draft-container");
+                    const idleText = document.getElementById("idle-draft-text");
+                    const idleTitle = document.getElementById("idle-draft-title");
+                    
+                    if (pIdle.is_idle) {
+                        idleContainer.classList.remove("hidden");
+                        idleContainer.classList.add("flex");
+                        idleTitle.innerText = "對方暫時離開";
+                        if (pIdle.waiting_user_draft) {
+                            idleText.innerText = "建議破冰話題：" + pIdle.waiting_user_draft;
+                        }
+                    } else {
+                        idleContainer.classList.add("hidden");
+                        idleContainer.classList.remove("flex");
+                    }
+                    
+                    // Note: If current user is idle, we don't necessarily show anything blocking them,
+                    // we just wait for their activity to trigger the welcome back draft.
+                    
+                    if (pIdle.is_new_notification) {
+                        const notifText = pIdle.system_notification_text || "[AI Copilot] 對方暫時離開。我將為您保留對話進度並提供草稿建議。";
+                        appendSystemMessage(notifText);
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to fetch guidance status", e);
+            }
+        }
+        
+        async function fetchGuidanceSuggestion(inputText) {
+            if (!activeContactId || activeContactId === "ai_assistant") return;
+            try {
+                const res = await fetch('/api/guidance/suggestion', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: currentUserId, contact_id: activeContactId, input_text: inputText })
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.ui_nudge_text) {
+                        const container = document.getElementById("copilot-container");
+                        container.classList.remove("hidden");
+                        container.classList.add("flex");
+                        document.getElementById("copilot-text").innerText = data.ui_nudge_text;
+                        document.getElementById("copilot-reasoning").innerText = data.quick_trail_string || "No reasoning provided.";
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to fetch guidance suggestion", e);
+            }
+        }
+        
+        async function handleCopilotClick() {
+            const val = document.getElementById("room-input").value;
+            const btn = document.getElementById("btn-copilot");
+            const oldText = btn.innerText;
+            btn.innerText = "思考中...";
+            btn.disabled = true;
+            await fetchGuidanceSuggestion(val);
+            btn.innerText = oldText;
+            btn.disabled = false;
+        }
+
+        document.getElementById("room-input").addEventListener("input", async (e) => {
+            const now = Date.now();
+            const val = e.target.value;
+            
+            if (now - lastKeystrokeTime > 2000) { // Throttle activity updates
+                lastKeystrokeTime = now;
+                if (activeContactId) {
+                    try {
+                        const res = await fetch('/api/guidance/activity', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ user_id: currentUserId, contact_id: activeContactId })
+                        });
+                        if (res.ok) {
+                            const data = await res.json();
+                            if (data.welcome_back_draft) {
+                                showWelcomeBackDraft(data.welcome_back_draft);
+                            }
+                        }
+                    } catch (e) {}
+                }
+            }
+        });
+        
+        async function submitSafetyFeedback(feedbackType) {
+            if (!lastTriggeredMsgId) {
+                alert("沒有找到可回饋的警示記錄。");
+                return;
+            }
+            try {
+                const res = await fetch('/api/risk/feedback', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        triggered_by_msg_id: lastTriggeredMsgId,
+                        role: 'sender',
+                        feedback: feedbackType
+                    })
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.status === "success") {
+                        alert("感謝您的回饋，系統已記錄您的感受！");
+                        document.getElementById("safety-container").classList.add("hidden");
+                    } else {
+                        alert("回饋提交失敗，請稍後再試。");
+                    }
+                } else {
+                    alert("連線失敗，請稍後再試。");
+                }
+            } catch (e) {
+                console.error("Failed to submit safety feedback", e);
+                alert("回饋提交發生錯誤。");
+            }
+        }
+        
+        // Polling loop
+
+        setInterval(() => {
+            if (isStageMessenger && activeContactId) {
+                fetchGuidanceStatus();
+            }
+        }, 5000);
+    </script>
+</body>
+
+</html>
