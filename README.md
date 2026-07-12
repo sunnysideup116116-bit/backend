@@ -101,7 +101,7 @@
 | **Appwrite cloud** | 身份 + KB | `DatingApp/lib/services/appwrite_config.dart`、`main_app/services/appwrite_service.py` | 使用者 auth、profile collection、Storage bucket、風險 KB database。 |
 | **Neo4j (Aura/本地)** | 圖譜記憶 | `matchmaker_agent/agent_api.py` | `User–[HAS_PREFERENCE]→Trait`、`Agent–[LEARNED_RULE]→GlobalRule`。 |
 
-> Flutter App 預設透過 `MATCHMAKER_API_URL` 或 `http://127.0.0.1:8000` 連到主伺服器（`matchmaking_api_service.dart:529`）。
+> Flutter App 預設透過 `MATCHMAKER_API_URL` 或 `https://service.misproject.us.ci` 連到主伺服器（`matchmaking_api_service.dart:531`）。
 
 ---
 
