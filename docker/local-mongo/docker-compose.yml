@@ -1,0 +1,28 @@
+# ============================================================
+# 本地 MongoDB（含 Vector Search）— 資料存放在桌面
+# ============================================================
+# 使用 mongodb/mongodb-atlas-local:preview 官方映像檔
+# 內含 mongod + mongot，$vectorSearch 可直接使用
+# 資料目錄掛載到 ~/桌面/MongoDB，方便用檔案總管/Compass 查看
+#
+# 啟動：  docker compose up -d
+# 停止：  docker compose down
+# 清空：  docker compose down -v  或手動刪 ~/桌面/MongoDB/data
+# ============================================================
+
+services:
+  mongodb:
+    image: mongodb/mongodb-atlas-local:preview
+    container_name: local-mongo
+    hostname: mongodb
+    restart: unless-stopped
+    environment:
+      - MONGODB_INITDB_ROOT_USERNAME=mongo_admin
+      - MONGODB_INITDB_ROOT_PASSWORD=localmongo123
+    ports:
+      - "27017:27017"
+    volumes:
+      # 掛載到桌面，資料實體可見
+      - /home/sunny/桌面/MongoDB/data:/data/db
+      - /home/sunny/桌面/MongoDB/configdb:/data/configdb
+      - /home/sunny/桌面/MongoDB/mongot:/data/mongot
