@@ -1,0 +1,34 @@
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+agent_env/
+matchmaker_agent/agent_env/
+
+# Local secrets / config
+.env
+.env.*
+!.env.example
+
+# Logs / scratch output
+*.log
+ping_out.txt
+test_out.txt
+chat_resp.txt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build / package artifacts
+build/
+dist/
+*.egg-info/
