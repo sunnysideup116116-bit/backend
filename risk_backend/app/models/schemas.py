@@ -92,6 +92,7 @@ class RiskDetectionResponse(BaseModel):
     new_risk_state: RiskState
     risk_level: str
     should_intervene: bool
+    nlp_reasoning: Optional[str] = None
     intervention_message: Optional[str] = None
     intervention_command: Optional[Any] = None
     triggered_rules: List[str] = []

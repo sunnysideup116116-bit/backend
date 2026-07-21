@@ -1,4 +1,4 @@
-﻿import json
+import json
 import time
 import os
 import re
@@ -20,6 +20,12 @@ from services.mediator_event_service import claim_next_mediator_event, queue_med
 from services import risk_client
 
 router = APIRouter(prefix="/api", tags=["Chat"])
+
+
+def analysis_room_id(user_id: str, state: str) -> str:
+    return generate_room_id(user_id, f"{state}_assistant")
+
+
 MATCH_READINESS_THRESHOLD = 75
 FEEDBACK_COOLDOWN_SECONDS = 120
 PROBE_PENDING_TTL = 72 * 3600
@@ -806,34 +812,41 @@ def queue_due_feedback(user_id: str):
 
 @router.post("/chat")
 def chat_endpoint(req: ChatRequest):
+    if req.state not in {"big_five", "deep_profile"}:
+        raise HTTPException(status_code=400, detail="Invalid state")
+
+    room_id = analysis_room_id(req.user_id, req.state)
+    save_message(room_id, req.user_id, req.message)
+
     if req.state == "big_five":
         user_doc = profiles_coll.find_one({"user_id": req.user_id})
         prev_big_five = user_doc.get("temp_big_five", {}) if user_doc else {}
         interaction_count = user_doc.get("interaction_count", 0) if user_doc else 0
-        
+
         result = analyze_big_five(req.message, prev_big_five, interaction_count, req.initial_interest)
-        
+
         update_fields = {
             "temp_big_five": result.get("big_five", {}),
             "interaction_count": interaction_count + 1
         }
-        
+
         if result.get("is_complete", False):
             update_fields["big_five"] = result.get("big_five", {})
-            room_id = generate_room_id(req.user_id, "ai_assistant")
-            count = messages_coll.count_documents({"room_id": room_id})
+            ai_room_id = generate_room_id(req.user_id, "ai_assistant")
+            count = messages_coll.count_documents({"room_id": ai_room_id})
             if count == 0:
-                save_message(room_id, "ai_assistant", "我大概更了解你的個性了。接下來可以聊聊你最近想做什麼、想去哪裡。")
+                save_message(ai_room_id, "ai_assistant", "我大概更了解你的個性了。接下來可以聊聊你最近想做什麼、想去哪裡。")
 
         profiles_coll.update_one(
-            {"user_id": req.user_id}, 
-            {"$set": update_fields}, 
+            {"user_id": req.user_id},
+            {"$set": update_fields},
             upsert=True
         )
+        save_message(room_id, f"{req.state}_assistant", result.get("reply", ""))
 
         return {
-            "status": "success", 
-            "big_five": result.get("big_five"), 
+            "status": "success",
+            "big_five": result.get("big_five"),
             "reply": result.get("reply"),
             "is_complete": result.get("is_complete", False)
         }
@@ -843,37 +856,36 @@ def chat_endpoint(req: ChatRequest):
         interaction_count = user_doc.get("interaction_count_deep", 0) if user_doc else 0
         big_five = user_doc.get("big_five", {}) if user_doc else {}
         current_context = user_doc.get("current_context", "") if user_doc else ""
-        
+
         user_context = {"big_five": big_five, "current_context": current_context}
-        
+
         result = analyze_deep_profile(req.message, prev_deep, interaction_count, user_context)
-        
+
         update_fields = {
             "temp_deep_profile": result.get("deep_profile", {}),
             "interaction_count_deep": interaction_count + 1
         }
-        
+
         if result.get("is_complete", False):
             update_fields["deep_profile"] = result.get("deep_profile", {})
-            room_id = generate_room_id(req.user_id, "ai_assistant")
-            count = messages_coll.count_documents({"room_id": room_id})
+            ai_room_id = generate_room_id(req.user_id, "ai_assistant")
+            count = messages_coll.count_documents({"room_id": ai_room_id})
             if count == 0:
-                save_message(room_id, "ai_assistant", "我也更了解你重視什麼了。之後你想找人一起做什麼，直接跟我說就好。")
+                save_message(ai_room_id, "ai_assistant", "我也更了解你重視什麼了。之後你想找人一起做什麼，直接跟我說就好。")
 
         profiles_coll.update_one(
-            {"user_id": req.user_id}, 
-            {"$set": update_fields}, 
+            {"user_id": req.user_id},
+            {"$set": update_fields},
             upsert=True
         )
+        save_message(room_id, f"{req.state}_assistant", result.get("reply", ""))
 
         return {
-            "status": "success", 
-            "deep_profile": result.get("deep_profile"), 
+            "status": "success",
+            "deep_profile": result.get("deep_profile"),
             "reply": result.get("reply"),
             "is_complete": result.get("is_complete", False)
         }
-    else:
-        raise HTTPException(status_code=400, detail="Invalid state")
 
 @router.post("/chat/reset")
 def reset_chat_state(req: ResetRequest):
@@ -888,6 +900,36 @@ def reset_chat_state(req: ResetRequest):
             {"$set": {"interaction_count_deep": 0, "temp_deep_profile": {}}}
         )
     return {"status": "success"}
+
+@router.get("/chat/messages/{state}")
+def get_analysis_messages(state: str, user_id: str):
+    if state not in {"big_five", "deep_profile"}:
+        raise HTTPException(status_code=400, detail="Invalid state")
+
+    room_id = analysis_room_id(user_id, state)
+    count = messages_coll.count_documents({"room_id": room_id})
+    if count == 0:
+        user_doc = profiles_coll.find_one({"user_id": user_id})
+        interest = user_doc.get("initial_interest") if user_doc else None
+        if state == "big_five" and interest:
+            greeting = (
+                f"我看到你註冊時提到「{interest}」。我們就從這個開始聊，"
+                "我會透過幾個情境問題整理你的性格傾向。"
+            )
+        elif state == "big_five":
+            greeting = (
+                "我們先從最近讓你印象深刻的一件事開始聊起，"
+                "我會逐步整理你的性格傾向。"
+            )
+        else:
+            greeting = "我們來聊聊你在關係和未來生活中真正重視的事情。"
+        save_message(room_id, f"{state}_assistant", greeting)
+
+    msgs = []
+    for msg in messages_coll.find({"room_id": room_id}).sort("timestamp", 1):
+        msg["id"] = str(msg.pop("_id"))
+        msgs.append(msg)
+    return {"messages": msgs}
 
 @router.get("/messages/{contact_id}")
 def get_messages(contact_id: str, user_id: str):
@@ -916,6 +958,12 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
         content=req.message,
     )
     if risk_client.is_blocked(risk_assessment):
+        save_message(
+            room_id, req.user_id, req.message,
+            risk_assessment=risk_assessment,
+            is_blocked=True,
+            delivery_status="blocked"
+        )
         return {
             "reply": None,
             "is_blocked": True,
@@ -934,7 +982,12 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
     if req.contact_id == "ai_assistant" and requested_mentions:
         prefix = " ".join("@" + other_id for other_id in requested_mentions)
         display_message = f"{prefix} {req.message}".strip()
-    save_message(room_id, req.user_id, display_message)
+    save_message(
+        room_id, req.user_id, display_message,
+        risk_assessment=risk_assessment,
+        is_blocked=False,
+        delivery_status="delivered"
+    )
     profiles_coll.update_one(
         {"user_id": req.user_id},
         {"$set": {"last_user_activity_at": time.time()}},
