@@ -81,6 +81,7 @@ sleep 2
 echo -e "\n${CYAN}🚀 Step 4: Starting Main Unified Server on Port 8000...${NC}"
 echo -e "${GREEN}----------------------------------------------------------------${NC}"
 echo -e "${GREEN}   📱 前端頁面:    http://localhost:8000/${NC}"
+echo -e "${GREEN}   🛡️  審查儀表板:  http://localhost:8000/admin/dashboard${NC}"
 echo -e "${GREEN}   🔌 主系統 API:  http://localhost:8000/api/${NC}"
 echo -e "${GREEN}   🤖 AI Gen:       http://localhost:8000/ai-gen/${NC}"
 echo -e "${GREEN}   💘 媒婆 Agent:   http://localhost:9001/${NC}"

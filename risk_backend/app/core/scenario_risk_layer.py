@@ -130,8 +130,13 @@ class ScenarioRiskLayer:
                 bonus_actions = sc.get('bonus_actions', {})
                 for category, value in bonus_actions.items():
                     if category in bonus_delta_values:
-                        bonus_delta_values[category] += value
+                        # Cap at 1.0 to prevent Pydantic validation errors
+                        bonus_delta_values[category] = min(1.0, bonus_delta_values[category] + value)
                 triggered_scenarios.append(sc['rule_name'])
                 print(f"   [ Scenario Layer Triggered ] 觸發規則: {sc['rule_name']}")
+
+        # Ensure all values are within Pydantic bounds (<= 1.0)
+        for k in bonus_delta_values:
+            bonus_delta_values[k] = min(1.0, bonus_delta_values[k])
 
         return RiskState(**bonus_delta_values), triggered_scenarios

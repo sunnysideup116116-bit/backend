@@ -23,6 +23,18 @@ class ChatLogService:
         self.db_id = config.db_id
         self.rel_service = RelationshipService()
 
+        # Initialize MongoDB Fallback Client
+        try:
+            from pymongo import MongoClient
+            mongo_uri = os.getenv("MONGO_URI", "")
+            self.mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
+            db_name = os.getenv("MONGO_DB_NAME", "profiling_db")
+            self.mongo_db = self.mongo_client[db_name]
+            self.mongo_state_coll = self.mongo_db["risk_state_history"]
+        except Exception as e:
+            print(f"[risk_backend] MongoDB init failed: {e}")
+            self.mongo_state_coll = None
+
     async def log_message(self, req, msg_id: str = None, is_blocked: bool = False, delivery_status: str = "delivered"):
         """STEP 1: Store original message (支援預設 ID 與 狀態)"""
         try:
@@ -201,11 +213,25 @@ class ChatLogService:
                 d = doc.data if hasattr(doc, 'data') else doc.to_dict()
                 state_data = json.loads(d.get('risk_state', '{}'))
                 return RiskState(**state_data), d.get('timestamp')
-            
-            return RiskState(sexual_boundary=0.0, coercion=0.0, manipulation=0.0, harassment=0.0, emotional_pressure=0.0), None
         except Exception as e:
-            print(f"Read risk state failed: {e}")
-            return RiskState(sexual_boundary=0.0, coercion=0.0, manipulation=0.0, harassment=0.0, emotional_pressure=0.0), None
+            print(f"Read risk state from Appwrite failed: {e}, falling back to MongoDB")
+            
+        # MongoDB Fallback
+        if self.mongo_state_coll is not None:
+            try:
+                doc = self.mongo_state_coll.find_one(
+                    {"conversation_id": conversation_id, "user_id": user_id},
+                    sort=[("timestamp", -1)]
+                )
+                if doc:
+                    state_data = doc.get("risk_state")
+                    if isinstance(state_data, str):
+                        state_data = json.loads(state_data)
+                    return RiskState(**(state_data or {})), doc.get("timestamp")
+            except Exception as mongo_err:
+                print(f"Read risk state from MongoDB failed: {mongo_err}")
+                
+        return RiskState(sexual_boundary=0.0, coercion=0.0, manipulation=0.0, harassment=0.0, emotional_pressure=0.0), None
 
     async def get_recent_risk_state_history(self, conversation_id: str, user_id: str, limit: int = 5):
         """Fetch recent history for trend analysis"""
@@ -226,25 +252,49 @@ class ChatLogService:
                 states.append(RiskState(**json.loads(d.get('risk_state', '{}'))))
             return states
         except Exception as e:
-            print(f"get_recent_risk_state_history failed: {e}")
-            return []
+            print(f"get_recent_risk_state_history from Appwrite failed: {e}, falling back to MongoDB")
+            
+        # MongoDB Fallback
+        if self.mongo_state_coll is not None:
+            try:
+                docs = list(self.mongo_state_coll.find(
+                    {"conversation_id": conversation_id, "user_id": user_id}
+                ).sort("timestamp", -1).limit(limit))
+                states = []
+                for doc in docs:
+                    state_data = doc.get("risk_state")
+                    if isinstance(state_data, str):
+                        state_data = json.loads(state_data)
+                    states.append(RiskState(**(state_data or {})))
+                return states
+            except Exception as mongo_err:
+                print(f"get_recent_risk_state_history from MongoDB failed: {mongo_err}")
+                
+        return []
 
     async def save_risk_state_history(self, conversation_id, user_id, msg_id, risk_state, level, delta_total, decay_applied: bool = False):
         """STEP 7, 8: Store cumulative risk state"""
+        data = {
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "triggered_by_msg_id": msg_id,
+            "risk_state": json.dumps(risk_state.model_dump()) if hasattr(risk_state, "model_dump") else json.dumps(risk_state),
+            "risk_level": level,
+            "risk_delta_total": json.dumps(delta_total.model_dump()) if hasattr(delta_total, "model_dump") else json.dumps(delta_total),
+            "decay_applied": decay_applied,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
         try:
-            data = {
-                "conversation_id": conversation_id,
-                "user_id": user_id,
-                "triggered_by_msg_id": msg_id,
-                "risk_state": json.dumps(risk_state.model_dump()),
-                "risk_level": level,
-                "risk_delta_total": json.dumps(delta_total.model_dump()),
-                "decay_applied": decay_applied,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
             self.db.create_document(self.db_id, "risk_state_history", ID.unique(), data)
         except Exception as e:
-            print(f"save_risk_state_history failed: {e}")
+            print(f"save_risk_state_history to Appwrite failed: {e}, falling back to MongoDB")
+            
+        # MongoDB Fallback
+        if self.mongo_state_coll is not None:
+            try:
+                self.mongo_state_coll.insert_one(data.copy())
+            except Exception as mongo_err:
+                print(f"save_risk_state_history to MongoDB failed: {mongo_err}")
 
     async def log_intervention(self, conversation_id, triggered_by_msg_id,
                                sender_id, receiver_id, risk_level, risk_state,

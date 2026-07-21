@@ -127,6 +127,7 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
                 conversation_id=req.conversation_id, risk_level="blocked", should_intervene=True,
                 risk_delta_rule=RiskState(), risk_delta_nlp=RiskState(), risk_delta_total=fake_state,
                 new_risk_state=fake_state, intervention_command=intervention_cmd,
+                nlp_reasoning=f"語意關鍵字阻擋: {gr_result['reason']}",
                 triggered_rules=[gr_result['reason']],
                 intervention_message=f"訊息因違反安全政策已被攔截 ({gr_result['reason']})",
                 diagnostic_signals={
@@ -286,6 +287,7 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
             new_risk_state=new_state,
             risk_level=risk_level,
             should_intervene=(risk_level != "safe"),
+            nlp_reasoning=nlp_result.get('reasoning'),
             triggered_rules=rule_result['triggered_rules'] + scenarios,
             intervention_command=intervention_cmd,
             intervention_message=intervention_cmd["sender_directive"]["content"]["body"] if intervention_cmd["sender_directive"]["content"] else None,
