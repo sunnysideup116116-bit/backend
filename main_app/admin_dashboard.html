@@ -90,6 +90,13 @@
             box-shadow: 0 0 10px rgba(225, 29, 72, 0.2);
         }
 
+        .risk-badge-restricted {
+            background: rgba(168, 85, 247, 0.2);
+            color: #d8b4fe;
+            border: 1px solid rgba(168, 85, 247, 0.5);
+            box-shadow: 0 0 10px rgba(168, 85, 247, 0.15);
+        }
+
         .risk-badge-warning {
             background: rgba(245, 158, 11, 0.2);
             color: #fde68a;
@@ -97,7 +104,14 @@
             box-shadow: 0 0 10px rgba(245, 158, 11, 0.15);
         }
 
-        .risk-badge-normal {
+        .risk-badge-observation {
+            background: rgba(59, 130, 246, 0.2);
+            color: #93c5fd;
+            border: 1px solid rgba(59, 130, 246, 0.5);
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.15);
+        }
+
+        .risk-badge-safe {
             background: rgba(16, 185, 129, 0.18);
             color: #6ee7b7;
             border: 1px solid rgba(16, 185, 129, 0.4);
@@ -253,9 +267,11 @@
                     <select id="status-filter" onchange="filterLogs()"
                         class="bg-slate-900/90 border border-slate-700/70 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500">
                         <option value="all">所有風險狀態</option>
-                        <option value="blocked">🚫 被攔截 (Blocked)</option>
-                        <option value="warning">⚠️ 風險警告 (Warning / Restricted)</option>
-                        <option value="normal">✅ 正常訊息 (Safe / Normal)</option>
+                        <option value="safe">✅ 安全 (Safe)</option>
+                        <option value="observation">🔍 觀察 (Observation)</option>
+                        <option value="warning">⚠️ 警告 (Warning)</option>
+                        <option value="restricted">🚷 限制 (Restricted)</option>
+                        <option value="blocked">🚫 攔截 (Blocked)</option>
                     </select>
 
                     <!-- Chat Type Filter -->
@@ -590,21 +606,27 @@
             }
 
             tbody.innerHTML = logs.map(log => {
-                const isBlocked = log.is_blocked || log.risk_level === 'blocked';
-                const isWarning = log.risk_level === 'warning' || log.risk_level === 'restricted';
-
-                // Clean & aligned status badge
-                let badgeClass = 'risk-badge-normal';
+                const level = (log.risk_level || '').toLowerCase();
+                let badgeClass = 'risk-badge-safe';
                 let badgeIcon = '✅';
-                let badgeLabel = '正常 Safe';
-                if (isBlocked) {
+                let badgeLabel = '安全 Safe';
+
+                if (level === 'blocked' || log.is_blocked) {
                     badgeClass = 'risk-badge-blocked';
                     badgeIcon = '🚫';
                     badgeLabel = '攔截 Blocked';
-                } else if (isWarning) {
+                } else if (level === 'restricted') {
+                    badgeClass = 'risk-badge-restricted';
+                    badgeIcon = '🚷';
+                    badgeLabel = '限制 Restricted';
+                } else if (level === 'warning') {
                     badgeClass = 'risk-badge-warning';
                     badgeIcon = '⚠️';
                     badgeLabel = '警告 Warning';
+                } else if (level === 'observation') {
+                    badgeClass = 'risk-badge-observation';
+                    badgeIcon = '🔍';
+                    badgeLabel = '觀察 Obs';
                 }
 
                 const maxScore = (log.diagnostic_signals && log.diagnostic_signals.max) ? log.diagnostic_signals.max.toFixed(2) : '0.00';
@@ -670,9 +692,18 @@
                     (log.conversation_id || '').toLowerCase().includes(query);
 
                 let matchStatus = true;
-                if (status === 'blocked') matchStatus = log.is_blocked || log.risk_level === 'blocked';
-                else if (status === 'warning') matchStatus = log.risk_level === 'warning' || log.risk_level === 'restricted';
-                else if (status === 'normal') matchStatus = !log.is_blocked && log.risk_level === 'normal';
+                const level = (log.risk_level || '').toLowerCase();
+                if (status === 'blocked') {
+                    matchStatus = level === 'blocked' || log.is_blocked;
+                } else if (status === 'restricted') {
+                    matchStatus = level === 'restricted';
+                } else if (status === 'warning') {
+                    matchStatus = level === 'warning';
+                } else if (status === 'observation') {
+                    matchStatus = level === 'observation';
+                } else if (status === 'safe') {
+                    matchStatus = (level === 'safe' || level === 'normal' || !level) && !log.is_blocked;
+                }
 
                 let matchType = true;
                 const conv = (log.conversation_id || '').toLowerCase();
