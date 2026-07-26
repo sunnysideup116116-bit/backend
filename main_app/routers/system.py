@@ -2,7 +2,13 @@ import random
 import requests
 from fastapi import APIRouter
 from pymongo.errors import PyMongoError
-from models import ClearRequest, SettingsRequest, MediatorToneRequest, ProfileMemoryActionRequest
+from models import (
+    BigFiveProfileInitRequest,
+    ClearRequest,
+    MediatorToneRequest,
+    ProfileMemoryActionRequest,
+    SettingsRequest,
+)
 from database import profiles_coll, matches_coll, messages_coll
 from services.ai_service import get_embedding
 
@@ -45,7 +51,6 @@ def init_system(user_id: str):
     proactive_frequency = "normal"
     mediator_tone = "friend"
     mediator_tone_selected = False
-    probe_mode = "balanced"
     profile_memories = []
     context_revision = 0
     match_search = {"status": "idle"}
@@ -81,7 +86,6 @@ def init_system(user_id: str):
         proactive_frequency = my_doc.get("proactive_frequency", "normal")
         mediator_tone = my_doc.get("mediator_tone", "friend")
         mediator_tone_selected = bool(my_doc.get("mediator_tone_selected", False))
-        probe_mode = my_doc.get("probe_mode", "balanced")
         profile_memories = my_doc.get("profile_memory_preview", [])
         context_revision = int(my_doc.get("current_context_revision", 0))
         match_search = my_doc.get("match_search", {"status": "idle"})
@@ -102,7 +106,6 @@ def init_system(user_id: str):
         "proactive_frequency": proactive_frequency,
         "mediator_tone": mediator_tone,
         "mediator_tone_selected": mediator_tone_selected,
-        "probe_mode": probe_mode,
         "profile_memories": profile_memories,
         "current_context_revision": context_revision,
         "match_search": match_search,
@@ -199,10 +202,8 @@ def update_mediator_tone(req: MediatorToneRequest):
     allowed = {"friend", "gentle", "enthusiastic"}
     tone = req.mediator_tone if req.mediator_tone in allowed else "friend"
     update = {"mediator_tone": tone, "mediator_tone_selected": True}
-    if req.probe_mode in {"balanced", "active", "manual"}:
-        update["probe_mode"] = req.probe_mode
     profiles_coll.update_one({"user_id": req.user_id}, {"$set": update}, upsert=True)
-    return {"status": "success", "mediator_tone": tone, "probe_mode": update.get("probe_mode")}
+    return {"status": "success", "mediator_tone": tone}
 
 @router.post("/onboarding/complete")
 def complete_onboarding(req: ClearRequest):
@@ -212,6 +213,22 @@ def complete_onboarding(req: ClearRequest):
         upsert=True
     )
     return {"status": "success", "onboarding_completed": True}
+
+@router.post("/profile/big-five/initialize")
+def initialize_big_five_profile(req: BigFiveProfileInitRequest):
+    interest = (req.initial_interest or "").strip()
+    update = {
+        "$setOnInsert": {
+            "user_id": req.user_id,
+            "temp_big_five": {},
+            "interaction_count": 0,
+            "onboarding_completed": False,
+        }
+    }
+    if interest:
+        update["$set"] = {"initial_interest": interest}
+    profiles_coll.update_one({"user_id": req.user_id}, update, upsert=True)
+    return {"status": "success", "big_five_profile_initialized": True}
 
 @router.post("/context/undo")
 def undo_recent_context(req: ClearRequest):
@@ -260,11 +277,9 @@ def debug_profile_state(user_id: str):
             "profile_memory_preview": 1,
             "profile_memory_summary": 1,
             "memory_notices": 1,
-            "pending_private_feedback": 1,
             "pending_date_coordination": 1,
             "proactive_frequency": 1,
             "mediator_tone": 1,
-            "probe_mode": 1,
             "last_user_activity_at": 1,
             "last_followup_activity_at": 1,
             "last_auto_match_revision": 1,
@@ -285,8 +300,6 @@ def debug_profile_state(user_id: str):
                 "reason": 1,
                 "receiver_reason": 1,
                 "distinctive_tags": 1,
-                "mediator_state": 1,
-                "private_feedback": 1,
                 "date_coordination": 1,
             },
         )

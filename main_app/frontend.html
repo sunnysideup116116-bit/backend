@@ -542,14 +542,6 @@
                             <option value="enthusiastic">熱心媒婆</option>
                         </select>
                     </div>
-                    <div class="flex items-center gap-2">
-                        <span class="text-xs whitespace-nowrap">助攻節奏</span>
-                        <select id="probe-mode-select" onchange="updateProbeMode(this.value)" class="w-full text-sm px-2 py-1">
-                            <option value="balanced">平衡</option>
-                            <option value="active">積極</option>
-                            <option value="manual">只在我要求時</option>
-                        </select>
-                    </div>
                     <div class="pt-2 border-t border-[#e7c9b7]">
                         <div class="text-xs font-bold mb-2">阿月記住的事</div>
                         <div id="profile-memory-list" class="flex flex-wrap gap-1 text-xs"><span class="text-gray-400">還沒有長期偏好</span></div>
@@ -713,8 +705,6 @@
                     </div>
                     <div id="mediator-private-messages" class="flex-1 overflow-y-auto p-4 flex flex-col gap-3"></div>
                     <div class="private-quick-actions">
-                        <button type="button" onclick="sendPrivateMediatorMessage('幫我探探他的口風')">探口風</button>
-                        <button type="button" onclick="sendPrivateMediatorMessage('幫我問一件他的有趣小事')">問趣事</button>
                         <button type="button" onclick="sendPrivateMediatorMessage('幫我們協調約會')">協調約會</button>
                         <button type="button" onclick="sendPrivateMediatorMessage('你看完我們最近聊天，有什麼觀察？')">看最近聊天</button>
                         <button type="button" onclick="startRelationshipQuiz()">默契小測驗</button>
@@ -883,7 +873,7 @@
             <section class="onboarding-step hidden" data-onboarding-step="2">
                 <div class="onboarding-illustration">🌙</div>
                 <h2 class="text-xl font-bold mb-3">需要時，私下找阿月助攻</h2>
-                <p class="text-sm text-[#8b7063] leading-relaxed mb-4">進入雙人聊天室後，可打開阿月悄悄話，請她探口風、問趣事、看最近聊天或協調約會。</p>
+                <p class="text-sm text-[#8b7063] leading-relaxed mb-4">進入雙人聊天室後，可打開阿月悄悄話，請她看最近聊天、提供話題建議或協調約會。</p>
                 <div class="text-xs font-bold mb-2">你喜歡阿月怎麼說話？</div>
                 <div class="grid grid-cols-3 gap-2">
                     <button data-onboarding-tone="friend" onclick="selectOnboardingTone('friend')" class="onboarding-tone p-2 text-xs">熟朋友</button>
@@ -1085,8 +1075,6 @@
             if (frequencyEl) frequencyEl.value = data.proactive_frequency || data.my_proactive_frequency || "none";
             const toneEl = document.getElementById("mediator-tone-select");
             if (toneEl) toneEl.value = data.mediator_tone || "friend";
-            const probeEl = document.getElementById("probe-mode-select");
-            if (probeEl) probeEl.value = data.probe_mode || "balanced";
             renderProfileMemories(data.profile_memories || []);
 
             hasDeepProfile = Boolean(data.is_deep_complete || deepParts.values || deepParts.future);
@@ -1162,19 +1150,11 @@
             if (res.ok) renderDropdownProfile(await res.json());
         }
 
-        async function updateProbeMode(mode) {
-            const tone = document.getElementById("mediator-tone-select")?.value || "friend";
-            await fetch('/api/settings/mediator', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: currentUserId, mediator_tone: tone, probe_mode: mode })
-            });
-        }
-
         async function updateMediatorTone(tone) {
             try {
                 await fetch('/api/settings/mediator', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: currentUserId, mediator_tone: tone, probe_mode: document.getElementById("probe-mode-select")?.value || "balanced" })
+                    body: JSON.stringify({ user_id: currentUserId, mediator_tone: tone })
                 });
                 const select = document.getElementById("mediator-tone-select");
                 if (select) select.value = tone;
@@ -1604,9 +1584,7 @@
 
                 const badge = document.createElement("div");
                 badge.className = "text-xs text-yellow-300 mb-3 font-bold";
-                badge.textContent = metadata.event_type === "feedback_request"
-                    ? "[ 阿月私下覆盤 ]"
-                    : "[ 阿月牽線提案 ]";
+                badge.textContent = "[ 阿月牽線提案 ]";
                 card.appendChild(badge);
 
                 const body = document.createElement("div");
@@ -1659,18 +1637,6 @@
                             actions.appendChild(btn);
                         });
                     }
-                } else if (metadata.event_type === "feedback_request") {
-                    (metadata.actions || []).forEach(action => {
-                        const btn = document.createElement("button");
-                        btn.type = "button";
-                        btn.className = "bg-fuchsia-800";
-                        btn.textContent = action.label;
-                        btn.onclick = () => {
-                            submitMediatorAction(action.value);
-                            actions.innerHTML = '<span class="text-xs text-cyan-300">這段只會留在你和阿月之間。</span>';
-                        };
-                        actions.appendChild(btn);
-                    });
                 }
                 if (actions.childNodes.length) card.appendChild(actions);
                 cm.appendChild(card);
@@ -1765,8 +1731,7 @@
             if (!isUser && eventType && eventType !== "text") {
                 const label = document.createElement("div");
                 label.className = "text-[10px] font-bold text-[#a96749] mb-1";
-                label.textContent = ["feedback_request", "probe_question"].includes(eventType)
-                    ? "阿月正在探口風" : eventType === "probe_result" ? "阿月帶回消息" : "阿月助攻進度";
+                label.textContent = "阿月助攻進度";
                 bubble.appendChild(label);
             }
             const body = document.createElement("div");
@@ -2557,7 +2522,7 @@
             document.getElementById("mediator-toast").classList.remove("toast-collapsed");
             if (!isStageMessenger) switchStage(true);
             await loadContacts();
-            await selectContact("ai_assistant", "媒人阿月", "from-fuchsia-500 to-violet-500", "懂你、牽線，也幫你探口風", false);
+            await selectContact("ai_assistant", "媒人阿月", "from-fuchsia-500 to-violet-500", "懂你、牽線，也陪你整理關係", false);
         }
 
         async function openMediatorNotification() {

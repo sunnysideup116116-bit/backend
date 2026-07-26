@@ -74,7 +74,7 @@ def analyze_big_five(text: str, previous_data: dict, interaction_count: int, ini
 
     【對話守則】
     1. 每次回覆與提問請保持「非常簡短（1~2句話以內）」，語氣輕鬆自然，像朋友閒聊。
-    2. 每次只丟出「一個具體的情境題」，不提供選項，不要讓使用者覺得在做問卷。
+    2. 每次只丟出「一個具體的情境題」，問題正文不列出選項。
     3. 針對使用者的前置回覆，先給予簡短共鳴後再發問。
     {interest_prompt}
     4. 第 {interaction_count + 1} 輪。只要達到 5 輪 (含) 以上，必須強制停止發問！將 "is_complete" 設為 true，並做性格總結。
@@ -83,6 +83,7 @@ def analyze_big_five(text: str, previous_data: dict, interaction_count: int, ini
     1. "reply": "你給使用者的回覆"
     2. "big_five": {{"O": 1~10, "C": 1~10, "E": 1~10, "A": 1~10, "N": 1~10, "summary": "性格簡述"}}
     3. "is_complete": true 或是 false
+    4. "answer_templates": 若尚未完成，提供兩個符合這次情境題、立場不同且可直接作答的常見回答；完成時回傳空陣列
 
     使用者說：{text}
     """
@@ -91,7 +92,12 @@ def analyze_big_five(text: str, previous_data: dict, interaction_count: int, ini
         return json.loads(content)
     except Exception as e:
         print(f"analyze_big_five error: {e}")
-        return {"reply": f"系統錯誤：{str(e)}", "big_five": previous_data, "is_complete": False}
+        return {
+            "reply": f"系統錯誤：{str(e)}",
+            "big_five": previous_data,
+            "is_complete": False,
+            "answer_templates": [],
+        }
 
 def match_candidates(user_doc, candidates):
     prompt_candidates = ""
@@ -257,3 +263,49 @@ def analyze_deep_profile(text: str, previous_data: dict, interaction_count: int,
     except Exception as e:
         print(f"analyze_deep_profile error: {e}")
         return {"reply": f"系統錯誤：{str(e)}", "deep_profile": previous_data, "is_complete": False}
+
+
+def orchestrate_date_coordination(
+    user_message: str, state: dict, context: dict
+) -> dict:
+    form = state.get("form", {})
+    prompt = f"""
+你叫阿月，是溫暖、有觀察力的 AI 媒人。目前你正在協助使用者規劃與配對對象的約會。
+
+目前約會表單：
+{json.dumps(form, ensure_ascii=False)}
+
+雙方與關係資料：
+{json.dumps(context, ensure_ascii=False)}
+
+任務：
+1. 從最新訊息更新 date、time、activity、budget。
+2. 資訊不足時自然追問一個重點，show_form=false。
+3. 日期、時間、活動大致確定時，整理表單並設 show_form=true。
+4. 不得編造雙方沒有說過的偏好、時間或預算。
+
+只輸出 JSON：
+{{
+  "reply": "給使用者的簡短回覆",
+  "show_form": true,
+  "form": {{
+    "date": "",
+    "time": "",
+    "activity": "",
+    "budget": ""
+  }}
+}}
+
+使用者說：{user_message}
+"""
+    try:
+        return json.loads(
+            generate_chat_completion(prompt, temperature=0.5, json_output=True)
+        )
+    except Exception as exc:
+        print(f"orchestrate_date_coordination error: {exc}")
+        return {
+            "reply": "我先幫你們整理，還差一點資訊時我會再問一個重點。",
+            "show_form": False,
+            "form": form,
+        }

@@ -28,7 +28,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from matchmaker import MatchmakerAgent
 
 # ????FastAPI ?蝔? (撠望????銝?鈭?)
@@ -42,6 +42,10 @@ GLOBAL_RULE_CHAR_LIMIT = max(10, min(int(os.getenv("MATCH_GLOBAL_RULE_CHAR_LIMIT
 GLOBAL_RULE_SIMILARITY_THRESHOLD = max(
     0.0, min(float(os.getenv("MATCH_GLOBAL_RULE_SIMILARITY_THRESHOLD", "0.38")), 1.0)
 )
+ALLOWED_CHAT_TRIPLE_PREDICATES = {
+    "IS_A", "HAS", "LIKES", "DISLIKES", "WANTS", "FEELS", "KNOWS",
+    "USES", "BELIEVES", "AGREES_WITH", "DISAGREES_WITH", "MENTIONED",
+}
 
 
 def compact_global_rule(text: str) -> str:
@@ -113,6 +117,26 @@ def parse_json_object_from_text(raw_text: str) -> dict:
         if start >= 0 and end > start:
             return json.loads(raw[start:end + 1])
         raise
+
+
+def sanitize_chat_triples(triples) -> list[dict]:
+    clean = []
+    for item in (triples or [])[:16]:
+        if not isinstance(item, dict):
+            continue
+        subject = str(item.get("subject") or "").strip()[:80]
+        predicate = str(item.get("predicate") or "").strip().upper()
+        obj = str(item.get("object") or "").strip()[:80]
+        if subject and obj and predicate in ALLOWED_CHAT_TRIPLE_PREDICATES:
+            clean.append(
+                {"subject": subject, "predicate": predicate, "object": obj}
+            )
+    return clean
+
+
+def graph_entity_key(session_id: str, entity: str) -> str:
+    return f"{session_id.strip()}::{entity.strip().casefold()}"
+
 
 class MatchRequest(BaseModel):
     target_user: dict
@@ -463,6 +487,14 @@ class MemoryActionRequest(BaseModel):
     value: str | None = None
 
 
+class ChatTripleRequest(BaseModel):
+    session_id: str
+    match_id: str | None = None
+    participants: list[str] = Field(default_factory=list)
+    triples: list[dict] = Field(default_factory=list)
+    evidence_messages: list[dict] = Field(default_factory=list)
+
+
 def _neo4j_config():
     return (os.getenv("NEO4J_URI"), (os.getenv("NEO4J_USERNAME"), os.getenv("NEO4J_PASSWORD")), os.getenv("NEO4J_DATABASE", "neo4j"))
 
@@ -596,6 +628,105 @@ async def memory_action(req: MemoryActionRequest):
             f"key={req.key} action={req.action} error={exc}"
         )
         return {"status":"graph_unavailable","memory":None,"message":str(exc)}
+
+
+@app.post("/api/chat_triples")
+async def receive_chat_triples(req: ChatTripleRequest):
+    clean = sanitize_chat_triples(req.triples)
+    if not clean:
+        return {"status": "skipped", "written": 0}
+
+    uri, auth, database = _neo4j_config()
+    now = time.time()
+    participants = [
+        str(user_id) for user_id in req.participants if user_id
+    ][:2]
+    evidence = [
+        {
+            "sender_id": str(message.get("sender_id") or ""),
+            "content": str(message.get("content") or "")[:240],
+            "timestamp": message.get("timestamp"),
+        }
+        for message in req.evidence_messages[-12:]
+        if isinstance(message, dict)
+    ]
+    try:
+        with GraphDatabase.driver(uri, auth=auth) as driver:
+            with driver.session(database=database) as session:
+                for user_id in participants:
+                    session.run(
+                        "MERGE (:User {id:$user_id})", user_id=user_id
+                    ).consume()
+                for triple in clean:
+                    relationship_type = triple["predicate"]
+                    session.run(
+                        f"""
+                        MERGE (subject:ChatEntity {{key:$subject_key}})
+                        SET subject.name=$subject, subject.updated_at=$now
+                        MERGE (object:ChatEntity {{key:$object_key}})
+                        SET object.name=$object, object.updated_at=$now
+                        MERGE (subject)-[relation:{relationship_type}]->(object)
+                        ON CREATE SET relation.first_seen_at=$now,
+                                      relation.evidence_count=0
+                        SET relation.session_id=$session_id,
+                            relation.match_id=$match_id,
+                            relation.participants=$participants,
+                            relation.evidence=$evidence,
+                            relation.evidence_count=
+                                coalesce(relation.evidence_count, 0) + 1,
+                            relation.last_seen_at=$now
+                        """,
+                        subject_key=graph_entity_key(
+                            req.session_id, triple["subject"]
+                        ),
+                        subject=triple["subject"],
+                        object_key=graph_entity_key(
+                            req.session_id, triple["object"]
+                        ),
+                        object=triple["object"],
+                        session_id=req.session_id,
+                        match_id=req.match_id,
+                        participants=participants,
+                        evidence=evidence,
+                        now=now,
+                    ).consume()
+        return {"status": "success", "written": len(clean)}
+    except Exception as exc:
+        print(
+            f"[CHAT_TRIPLES] graph_write_failed "
+            f"session={req.session_id} error={exc}"
+        )
+        return {"status": "graph_unavailable", "written": 0}
+
+
+@app.get("/api/chat_triples")
+async def list_chat_triples(session_id: str, limit: int = 20):
+    uri, auth, database = _neo4j_config()
+    try:
+        with GraphDatabase.driver(uri, auth=auth) as driver:
+            with driver.session(database=database) as session:
+                rows = session.run(
+                    """
+                    MATCH (subject:ChatEntity)-[relation]->(object:ChatEntity)
+                    WHERE relation.session_id = $session_id
+                    RETURN subject.name AS subject,
+                           type(relation) AS predicate,
+                           object.name AS object,
+                           coalesce(relation.evidence_count, 0) AS evidence_count,
+                           coalesce(relation.last_seen_at, 0) AS last_seen_at
+                    ORDER BY last_seen_at DESC
+                    LIMIT $limit
+                    """,
+                    session_id=session_id,
+                    limit=max(1, min(limit, 50)),
+                )
+                return {"triples": [dict(row) for row in rows]}
+    except Exception as exc:
+        print(
+            f"[CHAT_TRIPLES] graph_read_failed "
+            f"session={session_id} error={exc}"
+        )
+        return {"triples": [], "graph_unavailable": True}
 
 
 if __name__ == "__main__":
