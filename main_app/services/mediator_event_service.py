@@ -8,18 +8,15 @@ EVENT_PRIORITIES = {
     "match_proposal": 100,
     "incoming_match_interest": 100,
     "match_connected": 90,
-    "probe_result": 80,
-    "gentle_closure": 80,
-    "mutual_interest": 80,
+    "date_coordination_success": 85,
     "date_coordination_result": 75,
+    "date_coordination_form": 75,
+    "date_coordination_chat": 70,
     "date_coordination_request": 70,
     "date_coordination_cancelled": 70,
     "match_search_failed": 60,
     "match_search_empty": 60,
     "match_search_blocked": 50,
-    "feedback_consent_request": 45,
-    "feedback_request": 35,
-    "probe_question": 30,
 }
 
 

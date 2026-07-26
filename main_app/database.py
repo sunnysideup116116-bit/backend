@@ -14,4 +14,4 @@ db = mongo_client["profiling_db"]
 profiles_coll = db["profiles"]
 matches_coll = db["matches"]
 messages_coll = db["messages"]
-
+semantic_plans_coll = db["semantic_plans"]

@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 class ChatType(str, Enum):
     big_five = "big_five"
@@ -20,6 +20,10 @@ class MatchRequest(BaseModel):
 
 class ClearRequest(BaseModel):
     user_id: str
+
+class BigFiveProfileInitRequest(BaseModel):
+    user_id: str
+    initial_interest: str | None = None
 
 class AcceptRequest(BaseModel):
     user_id: str
@@ -60,13 +64,6 @@ class SettingsRequest(BaseModel):
 class MediatorToneRequest(BaseModel):
     user_id: str
     mediator_tone: str = "friend"  # "friend", "gentle", "enthusiastic"
-    probe_mode: str | None = None
-
-class MediatorProbeRequest(BaseModel):
-    user_id: str
-    other_id: str
-    force: bool = False
-    kind: str | None = None
 
 class ProfileMemoryActionRequest(BaseModel):
     user_id: str
@@ -77,6 +74,29 @@ class ProfileMemoryActionRequest(BaseModel):
 class ResetRequest(BaseModel):
     user_id: str
     state: str  # "big_five" or "deep_profile"
+
+
+class DateForm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    date: str = ""
+    time: str = ""
+    activity: str = ""
+    budget: str = ""
+
+
+class DateUpdateRequest(BaseModel):
+    user_id: str
+    other_id: str
+    form: DateForm
+    form_revision: int | None = None
+
+
+class DateConfirmRequest(BaseModel):
+    user_id: str
+    other_id: str
+    form_revision: int | None = None
+
 
 class RiskFeedbackRequest(BaseModel):
     triggered_by_msg_id: str
