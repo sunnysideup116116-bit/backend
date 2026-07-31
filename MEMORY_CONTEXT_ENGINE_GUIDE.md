@@ -4,6 +4,60 @@
 
 核心原則：這三項能力可以共用 typed contracts 與安全 projection，但不能共用一個沒有邊界的資料池。
 
+## 0. 外部設計參考：Hermes Agent
+
+實作前建議閱讀 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes-agent) 的 Memory Provider 與 Context Engine 架構。它是設計參考，不是要把 Hermes runtime 或資料模型直接搬進阿月。
+
+優先參考：
+
+- [Persistent Memory](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory)：bounded、curated memory、容量限制、重複防護、安全掃描、使用者管理與 session search 的分工。
+- [Memory Providers](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers)：外部記憶 provider 的 prefetch、turn sync、session-end extraction、工具與 base-context injection lifecycle。
+- [Memory Provider Plugin](https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin/)：可替換 memory backend 的抽象介面與 hook。
+- [Context Engine Plugin](https://hermes-agent.nousresearch.com/docs/developer-guide/context-engine-plugin)：`ContextEngine` lifecycle、單一 engine selection、per-turn selection／observation 與 contract tests。
+- [Context Compression and Caching](https://hermes-agent.nousresearch.com/docs/developer-guide/context-compression-and-caching/)：token threshold、工具結果裁切、頭尾保護、tool-call/result 邊界、structured summary、re-compression 與 gateway safety net。
+- [Sessions](https://hermes-agent.nousresearch.com/docs/user-guide/sessions/)：完整 session storage、按需搜尋與 active context 的分離；也要注意 compression 不是隱私刪除。
+
+### 值得借鑑的模式
+
+1. **Provider interface**：記憶儲存與 Agent runtime 分離，可替換 backend，但 runtime 只依賴 typed contract。
+2. **Context engine lifecycle**：session start、每回合 observation、token update、compression decision、session end 都有明確 hook。
+3. **Hot／cold separation**：少量關鍵 memory 常駐；舊 session 與大量記憶按需搜尋，不全部塞入 prompt。
+4. **Bounded context**：每個 source 有容量上限、stable ordering、dedup 與 overflow 行為。
+5. **Pre-compress hook**：壓縮或淘汰 context 前，讓 memory provider 保存真正需要跨 session 的 insight。
+6. **Write governance**：記憶寫入可以要求 approval，且提供 pending／approve／reject／edit／delete 等可見管理流程。
+7. **Contract tests**：替換 provider 或 engine 時，先通過共用 ABC／contract test，不讓 runtime 跟著改。
+
+### 不可直接照搬的部分
+
+- Hermes 內建 `MEMORY.md`／`USER.md` 適合單一使用者個人 Agent；阿月是多使用者交友 App，不能把文字記憶檔直接注入所有 prompt。
+- Hermes 的完整 session history 與 external-provider context 不能直接套用到阿月；必須先經 owner、room、accepted relation 與 consent 隔離。
+- Lossy conversation summary 只能協助對話連續性，不能成為配對狀態、行事曆、owner preference 或 proposal revision 的 source of truth。
+- Context compression 不是資料刪除。任何隱私保留／刪除政策仍需作用於 Mongo、Neo4j、session store、projection 與 trace。
+- Hermes external memory provider 是 additive；阿月若同時啟用多份 Graph／preview／provider，必須先定義唯一 source of truth、同步方向與 conflict policy。
+- 不允許 Agent 自由編輯 owner memory。阿月仍要遵守 saved owner message、typed proposal、原文 evidence、subject validation 與 message-id idempotency。
+- 不要因參考 Hermes 而新增 runtime dependency、改模型供應商或把 Public Ayue 變成 Hermes wrapper；任何第三方 provider 都必須是可選 adapter。
+
+### 阿月對應方式
+
+```text
+Hermes MemoryProvider concept
+→ Ayue DurableMemoryProvider
+   read_owner_memories()
+   apply_validated_proposals()
+   disable() / restore() / correct()
+   health()
+
+Hermes ContextEngine concept
+→ Ayue ContextEngineV1
+   collect canonical sources
+   project by privacy namespace
+   retrieve / rank / deduplicate
+   enforce per-source and total budgets
+   return ContextBundleV1
+```
+
+本專案的 typed contracts、domain state、隱私 policy 與測試是最終真相。若 Hermes 的做法與阿月規則衝突，以阿月規則為準，並在設計文件記錄差異。
+
 ## 1. 先分清楚四種狀態
 
 | 狀態 | 目前 owner | 用途 | 不可混入 |
