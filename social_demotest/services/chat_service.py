@@ -13,5 +13,6 @@ def save_message(room_id, sender_id, content, message_type="text", metadata=None
         "metadata": metadata or {},
         "timestamp": time.time()
     }
-    messages_coll.insert_one(msg)
+    result = messages_coll.insert_one(msg)
+    msg["message_id"] = str(result.inserted_id)
     return msg

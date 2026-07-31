@@ -1,61 +1,85 @@
-# AI 媒人系統 - 配對邏輯與流程說明
+# 阿月 V2 配對邏輯
 
-這份文件記錄了目前後端所實作的「動態配對機制」與整體邏輯流轉，方便與前端/介面組員合併與核對串接細節。
+這份文件只說明目前的 canonical 配對流程。公開阿月完整架構、工具與 App 遷移方式請看 [`../AYUE_V2_ARCHITECTURE.md`](../AYUE_V2_ARCHITECTURE.md)；後續 coding agent 的限制請看 [`../AGENTS.md`](../AGENTS.md)。
 
----
+## 1. 配對不是隨機挑人
 
-## 邏輯架構與流程
+使用者明確要求找人後，Public Ayue Planner 只能提出 `match.start_search` confirmation。確認成功後，Runtime 才會呼叫共用的 `match_action_service`：
 
-整個媒合系統分為三大階段：「**資料建構**」、「**配對演算法 (雙層篩選)**」與「**互動流轉**」。
+```text
+Owner request
+→ Planner confirmation
+→ Runtime confirmation guard
+→ match_action_service
+→ Mongo candidate pre-filter
+→ port 9001 matchmaker ranking
+→ directional proposal
+```
 
-### 階段一：資料建構 (Profiling & Context)
+第一層使用本人近期情境、偏好與既有關係排除不適合的人，並以 Mongo vector search 縮小候選集合。第二層 matchmaker 綜合雙方各自的近期情境、偏好、個性與已驗證記憶，選出零或一位人選。沒有通過 qualification 的候選人時，結果是沒有合適人選，不會隨機補一位。
 
-為了讓配對具有「性格互補」與「當下情境契合」兩個維度，我們在對話階段會分別搜集：
+所在地目前只供公開資訊與附近地點查詢，不進入 matchmaker 排序。
 
-1. **性格分析 (Big Five)**
-   - 使用者一登入時（`stage-bigfive`），AI 助理會根據對話（`POST /api/chat`）動態收斂使用者的「大五人格模型」（開放性 O、盡責性 C、外向性 E、親和性 A、神經質 N）。
-   - 當收集超過 3 輪並達到滿意水準時，會將 JSON 格式的性格資料寫入資料庫 `profiles_coll`。
+## 2. 角色與理由不可互換
 
-2. **近期情境 (Current Context)**
-   - 進入通訊軟體 (`stage-messenger`) 後，當使用者與「AI 小助手」聊天提到近況（例如：「我想去喝咖啡」或「最近壓力很大」），後端 `POST /api/direct_chat` 路由中，會自動擷取該訊息，並透過 **Google AI Studio 的 `models/text-embedding-004`** 將其轉換為向量 (Embedding) 儲存下來。
+新 proposal 保存 `directional_reason_v3`：
 
-### 階段二：雙層篩選配對演算法 (The Matchmaking algorithm)
+- 每個方向都明確綁定 `viewer_id` 與 `counterparty_id`。
+- Viewer 看到的理由以「你」描述 viewer，以「對方」描述 counterparty。
+- 近期情境、個性、偏好與 snapshot 都依實際 owner 綁定，不用 `target`／`candidate` 名稱猜角色。
+- 沒有 verified shared evidence 時，只能說兩項活動可能形成互補約會情境，不能假裝是共同興趣。
+- 對外 projection 不得包含 seed ID、Mongo ID、revision、raw profile 或對方私人記憶。
 
-當使用者點擊「🌟 尋找配對」觸發 `POST /api/match` 時，後端會執行極具效率的**雙重篩選**：
+舊 live proposal 可用 `scripts/repair_directional_match_reasons.py` 做 dry-run；人工 review 前不可使用 `--apply`。
 
-1. **第一層篩選：MongoDB Atlas Vector Search**
-   - 由於資料庫可能會有成千上萬筆資料，直接抓到後端記憶體計算或餵給 LLM 判斷是不切實際的。
-   - 因此系統會利用 MongoDB Atlas 內建的 `$vectorSearch` 功能，直接在資料庫層級比對 發起人 (User A) 的 `context_embedding` 與所有目標使用者的向量相似度。
-   - 資料庫會自動過濾掉已配對過的人，並直接回傳「分數最高的前 5 名候選人」。這保證了這 5 個人在「近況或想做的事情」上非常有共鳴（例如，A 想打球，系統會先把同樣想打球或想要運動的人挑出來），且大幅減少後端伺服器的運算負載。
+## 3. Canonical lifecycle
 
-2. **第二層篩選：LLM 情感智慧裁決**
-   - 系統將 User A 的性格與情境，連同這前 5 名候選人的性格與情境打包成 Prompt 送給大型語言模型（由 `OLLAMA_CHAT_MODEL` 指定，現為 `gemini-3-flash-preview:cloud`）。
-   - LLM 會扮演專業媒人，除了情境之外，還會評估「**大五人格是否互補、溝通是否合拍**」，最終從 5 人中唯一指定 **1 位最佳配對對象 (User B)**，並給出一份**感性且白話的配對理由**（"reason"）。
+```text
+draft
+├─ interested → pending
+├─ declined   → declined
+└─ timeout    → expired
 
-### 階段三：邀請通知與破冰系統
+pending
+├─ accepted   → accepted
+├─ declined   → declined
+├─ cancelled  → declined
+└─ timeout    → expired
+```
 
-1. **狀態建立**
-   - 系統將配對結果寫入 `matches_coll` (邀請狀態設為 `pending`)。發起方 (User A) 畫面會跳出等待中的彈窗。
-2. **目標用戶輪詢**
-   - 目標對象 (User B) 登入期間，前端會不斷向 `GET /api/notifications` 發送輪詢。
-   - 抓取到 `pending` 狀態的邀請後，User B 會看到彈窗通知，內容包含 AI 生成的「配對理由」。
-3. **同意與 AI 代理搭訕 (Surrogate Initialization)**
-   - 若 User B 點擊同意 (`POST /api/match/accept`)，邀請轉為 `accepted`。
-   - **關鍵亮點**：為了不讓新建立的聊天室空蕩蕩，後端會在同意的當下，**立刻請 LLM 讀取 User A 的大五人格設定與配對理由，以 User A 的性格「代理」他向 User B 發送第一句搭訕/破冰訊息**。
-   - 雙方此後可透過各自的聊天框針對此紀錄進行互動 (`POST /api/direct_chat`)。
+- `draft`、`pending` 是 live proposal。
+- `accepted`、`declined`、`expired` 是終態。
+- Accepted 代表已建立聯絡關係，不得再顯示為「配對仍在進行」。
+- Accepted 不阻擋使用者之後明確發起新的搜尋；只有 live proposal 會阻擋重複建立。
+- 歷史邀請必須保留，但不可重新變成可操作卡片。
 
----
+## 4. 所有決策共用同一條寫入路徑
 
-## 相關 API 整理
+```text
+UI /api/match/decision ─┐
+                        ├→ match_action_service
+Agent decision tool ────┘   → match_decision_service
+                              → atomic status + revision CAS
+                              → committed effects
+```
 
-| API 路徑 | Method | 負責功能 / 給前端的用途 |
-| :--- | :--- | :--- |
-| `/api/chat` | POST | 進行大五人格測驗的互動收斂。 |
-| `/api/direct_chat` | POST | 進行正式 Messenger 的 1-on-1 對話。如果是針對 `ai_assistant`，會順便更新 `context_embedding`。如果是配對用戶，讀取對方大五人格進行角色扮演。 |
-| `/api/match` | POST | 發起媒合，觸發雙層演算法，回傳配對結果與理由。 |
-| `/api/notifications` | GET | 讓前端輪詢，檢查是否有別人丟過來的 `pending` 邀請。 |
-| `/api/match/accept` | POST | 接受好友邀請，並自動讓對方拋出破冰問候。 |
-| `/api/contacts` | GET | 抓取好友名單（狀態為 `accepted` 的雙邊用戶）。 |
+Planner 不得提供 user、match、proposal ID 或 revision。Executor 根據登入者與 canonical state 注入 identifier、expected status、revision，以及由 `agent_run_id + tool_call_index` 組成的 idempotency key。
 
----
-這份文件主要說明後端的邏輯架構，任何進階的前端介面調整（如彈窗動畫、CSS 樣式）可由您的前端組員直接在此基礎上進行加工。如果有需要新增特定狀態碼或資料欄位，隨時可以再做調整！
+Stale request 只回傳最新狀態，不反向覆寫終態。通知、聊天室建立與 feedback 只在 transition 成功後執行；effect failure 不得讓已提交 transition 被重送。
+
+## 5. App 串接重點
+
+- 搜尋與自然語言接受／婉拒由 Public Ayue typed tools 處理。
+- 卡片決策呼叫 `POST /api/match/decision`，帶入畫面取得的 `expected_status` 與 `expected_revision`。
+- HTTP 409 時重新讀 canonical match state，不重送舊 decision。
+- App 不從阿月回覆文字猜狀態，也不自行建立聯絡人。
+- 「他接受了嗎／他是誰」應由阿月讀 `match.get_status` 或 `match.get_counterparty_summary`，不能從舊聊天紀錄推測。
+
+## 6. 必測案例
+
+- 雙方並發、重複 request、stale revision 都不覆寫終態。
+- 對方先婉拒後，不能自動開下一次搜尋。
+- Accepted 後狀態與對象摘要一致，且不洩漏內部 ID。
+- Viewer 兩側看到的 proposal reason 角色、近期情境與個性都正確。
+- 沒有合適候選人時回 `no_suitable_candidate`。
+- 舊歷史卡片保留，但永遠不可重新操作。
