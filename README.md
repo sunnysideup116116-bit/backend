@@ -28,6 +28,7 @@ Context Builder
 
 - [AYUE_V2_ARCHITECTURE.md](./AYUE_V2_ARCHITECTURE.md)：實際 runtime、tool、state、API 與 App V1 → V2 遷移方式
 - [AGENTS.md](./AGENTS.md)：後續 coding agent 必須遵守的邊界與擴充規則
+- [MEMORY_CONTEXT_ENGINE_GUIDE.md](./MEMORY_CONTEXT_ENGINE_GUIDE.md)：長期建議、Neo4j Graph Memory 與 Context Engine 的資料邊界和實作順序
 
 ## 專案結構
 
