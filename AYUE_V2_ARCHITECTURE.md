@@ -52,6 +52,8 @@ flowchart LR
 | `services/date_coordination_service.py` | 共同約會、改期、取消與雙方同步 |
 | `services/profile_skills.py` | 非同步 owner-only profile extraction pipeline |
 | `services/profile_contracts.py` | Typed recent-context／memory extraction contract |
+| `services/memory_service.py` | Owner-scoped durable memory domain facade、outbox 與 Mongo read projection |
+| `services/semantic_plan_service.py` | Accepted pair room 的 shared semantic plan；不是 Public owner memory |
 | `matchmaker_agent/` | Port 9001 候選排序、Neo4j 記憶與 feedback service |
 | `social_demotest/tests/` | Offline deterministic contract、trajectory、state、privacy tests |
 
@@ -265,6 +267,15 @@ Extractor 只收到該筆已保存 owner message。`ProfileExtractionDecision` �
 每個 evidence span 必須是 owner message 的連續子字串且 subject 必須是 owner。Match operation、等待回覆、assistant text、tool result、match state 與第三方特徵不得寫入近期情境。時間不是近期情境的必要條件。摘要由程式組合，不把模型自由文字直接存入 `current_context`。
 
 同一 message ID 由 unique claim 保證只處理一次；current-context write 使用 revision CAS，避免較舊的非同步工作覆蓋較新訊息。
+
+### 9.1 Durable memory、relationship graph 與 Context Engine
+
+- 本人 durable preference 的 source of truth 是 Neo4j owner-scoped `HAS_PREFERENCE`；Mongo `profile_memory_preview` 只是 bounded read projection。
+- 雙人聊天室的 `semantic_plans` 與 room-scoped KG triples 是 relationship state，不等於任一方的本人長期偏好。
+- 系統生成的長期建議是 recommendation，不是 owner fact；不得寫入 Graph preference 或增加 evidence count。
+- `context.py` 目前仍是 Public V2 唯一 Context Builder。未來若抽出 Context Engine，必須輸出 versioned typed bundle，再由 Public／Private adapter 套用各自 privacy policy；不可直接回傳 prompt 或 raw Graph。
+
+詳細資料模型、建議 contract、整合點與測試要求見 [`MEMORY_CONTEXT_ENGINE_GUIDE.md`](./MEMORY_CONTEXT_ENGINE_GUIDE.md)。
 
 ## 10. Trace 與資料安全
 
