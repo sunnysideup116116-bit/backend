@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 class ChatType(str, Enum):
     big_five = "big_five"
@@ -26,6 +26,12 @@ class AcceptRequest(BaseModel):
     match_id: str
     explicit_reasons: list[str] = []
 
+class MatchDecisionRequest(AcceptRequest):
+    """A guarded, compare-and-set decision made from a visible match card."""
+    action: str
+    expected_status: str
+    expected_revision: int | None = None
+
 class DirectChatRequest(BaseModel):
     user_id: str
     contact_id: str
@@ -48,7 +54,7 @@ class RelationshipQuizAnswerRequest(RelationshipGameRequest):
 
 class SettingsRequest(BaseModel):
     user_id: str
-    proactive_frequency: str = "normal"  # "low", "normal", "high"
+    proactive_frequency: str = "3600"  # "none", "60", "3600", "86400"
 
 class MediatorToneRequest(BaseModel):
     user_id: str
@@ -67,6 +73,68 @@ class ProfileMemoryActionRequest(BaseModel):
     action: str
     value: str | None = None
 
+class ProfileLocationRequest(BaseModel):
+    user_id: str
+    city: str = Field(default="", max_length=20)
+    district: str = Field(default="", max_length=20)
+
 class ResetRequest(BaseModel):
     user_id: str
     state: str  # "big_five" or "deep_profile"
+
+class DateUpdateRequest(BaseModel):
+    user_id: str
+    other_id: str
+    coordination_id: str
+    revision: int
+    form: dict
+
+class DateConfirmRequest(BaseModel):
+    user_id: str
+    other_id: str
+    coordination_id: str
+    revision: int
+
+class DateInviteResponseRequest(BaseModel):
+    user_id: str
+    other_id: str
+    coordination_id: str
+    accepted: bool
+
+class CalendarEventCreateRequest(BaseModel):
+    user_id: str
+    title: str = Field(min_length=1, max_length=120)
+    date: str
+    start_time: str
+    end_time: str
+    timezone: str = "Asia/Taipei"
+    location: str = ""
+    notes: str = ""
+
+class CalendarEventUpdateRequest(BaseModel):
+    user_id: str
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    date: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    timezone: str | None = None
+    location: str | None = None
+    notes: str | None = None
+
+class CalendarRescheduleRequest(BaseModel):
+    user_id: str
+    date: str
+    start_time: str
+    end_time: str
+    timezone: str = "Asia/Taipei"
+    activity: str = ""
+    location: str = ""
+    budget: str = ""
+    notes: str = ""
+
+class CalendarActionRequest(BaseModel):
+    user_id: str
+
+class CalendarSettingsRequest(BaseModel):
+    user_id: str
+    mediator_calendar_access: bool

@@ -36,20 +36,17 @@ def queue_mediator_event(user_id: str, message: str, event_type: str, **extra):
         "created_at": time.time(),
         **extra,
     }
-    profiles_coll.update_one(
-        {"user_id": user_id},
-        {
-            "$push": {
-                "mediator_inbox": {
-                    "$each": [event],
-                    "$sort": {"priority": -1, "created_at": 1},
-                }
-            }
-        },
-        upsert=True,
+    event_key = event.get("event_key")
+    query = {"user_id": user_id}
+    if event_key:
+        # A retried transition must not enqueue a second card for the same state change.
+        query["mediator_inbox.event_key"] = {"$ne": event_key}
+    result = profiles_coll.update_one(
+        query,
+        {"$push": {"mediator_inbox": {"$each": [event], "$sort": {"priority": -1, "created_at": 1}}}},
+        upsert=not bool(event_key),
     )
-    return event
-
+    return event if result.modified_count else None
 
 def claim_next_mediator_event(user_id: str):
     """Claim one event by id so concurrent browser polls cannot deliver it twice."""

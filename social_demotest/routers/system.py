@@ -1,9 +1,14 @@
-import random
+﻿import random
 import requests
 from fastapi import APIRouter
-from models import ClearRequest, SettingsRequest, MediatorToneRequest, ProfileMemoryActionRequest
-from database import profiles_coll, matches_coll, messages_coll
+from models import ClearRequest, SettingsRequest, MediatorToneRequest, ProfileMemoryActionRequest, ProfileLocationRequest
+from database import db, profiles_coll, matches_coll, messages_coll
 from services.ai_service import get_embedding
+from services.profile_projection import safe_recent_context
+from services.ayue_agent.proactive_care import normalize_proactive_frequency, schedule_proactive_care
+from services.ayue_agent.runtime import agent_mode_for_user
+from services.ayue_agent.web_tools import web_enabled
+from services.profile_location import normalize_profile_location, safe_profile_location
 
 router = APIRouter(prefix="/api", tags=["System"])
 
@@ -18,7 +23,7 @@ def init_system(user_id: str):
     
     is_deep_complete = False
     my_deep_summary = "尚無深層價值觀分析資料"
-    proactive_frequency = "normal"
+    proactive_frequency = "3600"
     mediator_tone = "friend"
     mediator_tone_selected = False
     probe_mode = "balanced"
@@ -26,6 +31,7 @@ def init_system(user_id: str):
     context_revision = 0
     match_search = {"status": "idle"}
     onboarding_completed = False
+    user_location = {}
     
     for p in profiles:
         uid = p.get("user_id")
@@ -34,7 +40,7 @@ def init_system(user_id: str):
         
         if uid == user_id:
             bf = p.get("big_five", {})
-            my_context = p.get("current_context", "交朋友")
+            my_context = safe_recent_context(p.get("current_context", ""), "交朋友")
             if bf and len(bf) >= 5:
                 is_complete = True
                 my_bf_summary = bf.get("summary", "已完成性格分析，具備基本資料。")
@@ -56,7 +62,7 @@ def init_system(user_id: str):
             my_dp_future = dp.get("life_philosophy", None) or dp.get("ideal_future", None)
             # 回傳完整 deep_profile 物件供前端組合顯示
             my_deep_profile = dp
-        proactive_frequency = my_doc.get("proactive_frequency", "normal")
+        proactive_frequency = normalize_proactive_frequency(my_doc.get("proactive_frequency", "3600"))
         mediator_tone = my_doc.get("mediator_tone", "friend")
         mediator_tone_selected = bool(my_doc.get("mediator_tone_selected", False))
         probe_mode = my_doc.get("probe_mode", "balanced")
@@ -65,6 +71,7 @@ def init_system(user_id: str):
         match_search = my_doc.get("match_search", {"status": "idle"})
         onboarding_completed = bool(my_doc.get("onboarding_completed", False))
         my_initial_interest = my_doc.get("initial_interest", None)
+        user_location = safe_profile_location(my_doc)
                 
     return {
         "users": users,
@@ -84,7 +91,8 @@ def init_system(user_id: str):
         "profile_memories": profile_memories,
         "current_context_revision": context_revision,
         "match_search": match_search,
-        "onboarding_completed": onboarding_completed
+        "onboarding_completed": onboarding_completed,
+        "user_location": user_location,
     }
 
 @router.post("/seed")
@@ -105,6 +113,23 @@ def seed_data():
         {"life_philosophy": "行動是治癒焦慮的最佳良藥", "attachment_style": "獨立型", "decision_style": "果斷型", "core_values": ["效率", "勇氣", "自主"], "summary": "果斷的行動派，相信做就對了"}
     ]
     fake_users = []
+    seed_display_names = ["小安", "小晴", "小涵", "小宇", "小葵", "小哲", "小玟", "小凱", "小樂", "小岑"]
+    seed_user_pattern = {"$regex": r"^seed_user_"}
+    stale_match_query = {
+        "$or": [
+            {"from_user": seed_user_pattern},
+            {"to_user": seed_user_pattern},
+        ]
+    }
+    stale_match_ids = [
+        item["_id"] for item in matches_coll.find(stale_match_query, {"_id": 1})
+    ]
+    if stale_match_ids:
+        matches_coll.delete_many({"_id": {"$in": stale_match_ids}})
+        profiles_coll.update_many(
+            {"active_match_proposal_id": {"$in": stale_match_ids}},
+            {"$unset": {"active_match_proposal_id": ""}},
+        )
     profiles_coll.delete_many({"user_id": {"$regex": "^seed_user"}})
     for i in range(1, 11):
         uid = f"seed_user_{i:02d}"
@@ -112,12 +137,58 @@ def seed_data():
         bf = random.choice(personalities)
         dp = random.choice(deep_profiles)
         fake_users.append({
-            "user_id": uid, "big_five": bf,
+            "user_id": uid, "display_name": seed_display_names[i - 1], "big_five": bf,
             "deep_profile": dp,
-            "current_context": ctx, "context_embedding": get_embedding(ctx)
+            "current_context": ctx, "context_embedding": get_embedding(ctx),
+            "profile_location": normalize_profile_location("高雄市", "鹽埕區") if uid == "seed_user_01" else {},
         })
     profiles_coll.insert_many(fake_users)
-    return {"status": "success", "message": "10 seed profiles created."}
+    return {
+        "status": "success",
+        "message": "10 seed profiles created.",
+        "stale_seed_matches_removed": len(stale_match_ids),
+    }
+
+
+@router.get("/demo/status")
+def get_demo_status(user_id: str):
+    """Return a privacy-safe snapshot for the local Demo tools panel."""
+    profile = profiles_coll.find_one(
+        {"user_id": user_id},
+        {
+            "_id": 0,
+            "current_context": 1,
+            "profile_location": 1,
+            "match_search.status": 1,
+            "agentic_pending_confirmation": 1,
+        },
+    )
+    profile = profile or {}
+    search = profile.get("match_search") or {}
+    search_status = str(search.get("status") or "idle")[:40]
+    return {
+        "profile_exists": bool(profile),
+        "agent_version": "v2" if agent_mode_for_user(user_id) == "on" else "legacy",
+        "web_search_ready": web_enabled(),
+        "location": safe_profile_location(profile),
+        "recent_context": safe_recent_context(profile.get("current_context", ""), "尚無近期情境"),
+        "match_search_status": search_status,
+        "has_pending_confirmation": bool(profile.get("agentic_pending_confirmation")),
+    }
+
+
+@router.get("/profile/recent-context/status")
+def get_recent_context_status(user_id: str):
+    """Small polling projection for the asynchronous owner-only profile write."""
+    profile = profiles_coll.find_one(
+        {"user_id": user_id},
+        {"_id": 0, "current_context": 1, "current_context_revision": 1, "recent_context_updated_at": 1},
+    ) or {}
+    return {
+        "current_context": safe_recent_context(profile.get("current_context"), ""),
+        "revision": max(0, int(profile.get("current_context_revision", 0) or 0)),
+        "updated_at": float(profile.get("recent_context_updated_at", 0) or 0),
+    }
 
 @router.post("/clear")
 def clear_data(req: ClearRequest):
@@ -164,12 +235,23 @@ def get_notifications(user_id: str):
 @router.post("/settings")
 def update_settings(req: SettingsRequest):
     """更新使用者設定（如主動配對頻率）"""
+    proactive_frequency = normalize_proactive_frequency(req.proactive_frequency)
+    existing = profiles_coll.find_one({"user_id": req.user_id}, {"last_user_activity_at": 1}) or {}
+    schedule_proactive_care(
+        req.user_id, proactive_frequency,
+        last_activity=float(existing.get("last_user_activity_at", 0) or 0),
+    )
+    return {"status": "success", "proactive_frequency": proactive_frequency}
+
+@router.patch("/profile/location")
+def update_profile_location(req: ProfileLocationRequest):
+    location = normalize_profile_location(req.city, req.district)
     profiles_coll.update_one(
         {"user_id": req.user_id},
-        {"$set": {"proactive_frequency": req.proactive_frequency}},
-        upsert=True
+        {"$set": {"profile_location": location}},
+        upsert=True,
     )
-    return {"status": "success", "proactive_frequency": req.proactive_frequency}
+    return {"status": "success", "location": location}
 
 @router.post("/settings/mediator")
 def update_mediator_tone(req: MediatorToneRequest):
@@ -216,6 +298,11 @@ def profile_memory_action(req: ProfileMemoryActionRequest):
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
 
+@router.get("/debug/profile_skill_runs")
+def debug_profile_skill_runs(user_id: str, limit: int = 12):
+    safe_limit = max(1, min(limit, 30))
+    runs = list(db["profile_skill_runs"].find({"user_id": user_id}, {"_id": 0}).sort("created_at", -1).limit(safe_limit))
+    return {"runs": runs}
 @router.get("/debug/profile_state")
 def debug_profile_state(user_id: str):
     """Development-only snapshot for tracing Ayue's event and memory state."""
@@ -287,3 +374,5 @@ def reset_deep_profile(req: ClearRequest):
         {"$unset": {"deep_profile": "", "dp_interaction_count": ""}}
     )
     return {"status": "success"}
+
+
