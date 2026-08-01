@@ -155,8 +155,8 @@ Runtime 規則：
 
 - 最多三個 planner/tool steps。
 - 同回合相同工具與 normalized arguments 只執行一次；標記為可重用的 bounded read（目前為兩地直線距離）即使 Planner 改寫了等價地點字串，也會沿用第一個成功 observation，不重複執行。
-- 每回合最多一次 write side effect。
-- Match status、time、relationship 與 calendar target 若缺 verified read，Guard 會先補 canonical read，而不是讓模型猜；當訊息明確同時指向本人與一位已確認聯絡人時，relationship 回答還需要本人與對方兩份公開摘要。
+- 每回合最多一次 write side effect；同一個已確認的 `calendar.cancel_my_events` 最多可取消 10 筆，仍視為一個使用者明確授權的 logical action。
+- Match status、time、relationship 與 calendar update target 若缺 verified read，Guard 會先補 canonical read，而不是讓模型猜；單筆／批次取消則由 Runtime 以 owner-scoped lookup 直接建立 confirmation，避免為同一個取消要求多跑一次 Planner/read。當訊息明確同時指向本人與一位已確認聯絡人時，relationship 回答還需要本人與對方兩份公開摘要。
 - Planner 無效、逾時、低信心、schema 不符或 tool output 不符 schema 時 fail closed。
 - Planner 的 `final.reply` 在通過語言與安全驗證後可直接回覆，避免重複呼叫模型；空白或不安全輸出才由 Final Composer 使用「原始問題 + verified observations」生成。
 - V2 error 不自動切回 legacy。
@@ -207,10 +207,13 @@ Runtime 才建立 24 小時、owner-scoped 的 assessment session。session 進�
 | `calendar.create_my_event` | 必須 | Calendar service |
 | `calendar.update_my_event` | 必須 | Calendar/date coordination service |
 | `calendar.cancel_my_event` | 必須 | Calendar/date coordination service |
+| `calendar.cancel_my_events` | 必須；指定 2–10 筆或最多 10 筆未來行程 | Calendar/date coordination service |
 | `profile.start_assessment`（`kind=basic`） | 必須 | `assessment_session_service`（完成前保留既有 Big Five） |
 | `profile.start_assessment`（`kind=deep`） | 必須 | `assessment_session_service`（完成前保留既有深層資料） |
 
 Planner 只提供自然任務參數，例如行程標題、日期、公開顯示名稱、時間或 interested/declined。`user_id`、proposal/event ID、已接受聯絡人的內部 ID、expected status 與 revision 全由 executor 根據登入者及 canonical state 取得；公開名稱只可作為 server-side accepted-contact lookup 的輸入，不能自行授權任何關係資料。
+
+取消 confirmation 使用 v3 pending payload：單筆仍保留舊欄位相容性，批次則只在 server side 保存 `targets[]`（event ID、revision、source type、共同約會關係資料與安全顯示標籤）。使用者回覆「確認」時不再呼叫 Planner；Runtime 先逐筆 preflight 所有 target 的 owner、active status 與 revision，任一筆已變動就整批不刪除。通過後每筆各有 confirmation-indexed idempotency key；意外單筆失敗會回報成功／失敗筆數，不會假稱全數完成。`calendar_action` 的 final 只可用於帶有 missing fields 的澄清，禁止用一般文字假裝已建立 confirmation。
 
 `calendar.find_my_event` 對公開名稱採精確正規化比對，而且只搜尋 canonical accepted contacts。公開名稱只對應一位已接受聯絡人時，才可用活動／日期搜尋共同約會；若有同名聯絡人，必須在讀取行事曆內容前 fail closed，回傳 typed ambiguity reason 讓 Planner 追問可區分的公開資訊。找不到名稱與找不到行程也是不同 reason code，不能一律套用「哪一天」的罐頭追問。結果最多回傳三筆安全候選。
 

@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import ANY, Mock, patch
 from types import SimpleNamespace
 
-from services.ayue_agent.contracts import AgentDecision, AgentIntent, AgentTurnContext, AgentTurnContextV2, DecisionKind, ToolResult
+from services.ayue_agent.contracts import AgentDecision, AgentIntent, AgentResult, AgentTurnContext, AgentTurnContextV2, DecisionKind, ToolResult
 from services.ayue_agent.legacy_match_routing import (
     is_explicit_match_request,
     is_match_outcome_followup,
@@ -45,6 +45,26 @@ class AyueAgentRouterTests(unittest.TestCase):
         self.assertNotIn("新增、修改，還是取消", result.reply)
         self.assertEqual(persist.call_args.args[1]["$set"]["agentic_action_draft"]["domain"], "calendar")
         self.assertFalse(result.profile_write_allowed)
+
+    def test_calendar_cancel_tool_call_is_promoted_to_one_confirmation(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="取消週三的咖啡")
+        turn = AgentTurnContextV2(user_id=ctx.user_id, room_id=ctx.room_id, message=ctx.message)
+        decision = AgentDecision(
+            kind=DecisionKind.TOOL_CALL, intent=AgentIntent.CALENDAR_ACTION,
+            tool_name="calendar.cancel_my_event", arguments={"event_hint": "週三的咖啡"},
+            confidence=.95, evidence_span=ctx.message,
+        )
+        prepared = AgentResult(handled=True, reply="要取消嗎？", conversation_intent="calendar_confirmation")
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=decision) as planner, \
+             patch("services.ayue_agent.runtime._prepare_calendar_confirmation", return_value=prepared) as prepare, \
+             patch("services.ayue_agent.runtime.execute_tool") as execute, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        self.assertEqual(result.reply, "要取消嗎？")
+        self.assertEqual(planner.call_count, 1)
+        prepare.assert_called_once()
+        execute.assert_not_called()
 
     def test_vague_recent_intent_opens_one_context_draft(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="最近想做點事情")
