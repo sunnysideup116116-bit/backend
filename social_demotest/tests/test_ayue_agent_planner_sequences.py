@@ -224,6 +224,126 @@ class AyueAgentPlannerSequenceTests(unittest.TestCase):
         self.assertEqual(trace["tool_cache_hits"], ["system.get_current_time"])
         self.assertEqual(trace["composer_outcome"]["result_code"], "llm_reply")
 
+    def test_relationship_comparison_reads_contact_then_owner_before_final(self):
+        ctx, turn = self._context("我跟小玟會擦出什麼火花？")
+        decisions = [
+            AgentDecision(
+                kind=DecisionKind.FINAL, intent=AgentIntent.RELATIONSHIP,
+                confidence=.95, reply="你們應該聊得來。",
+            ),
+            AgentDecision(kind=DecisionKind.FINAL, intent=AgentIntent.RELATIONSHIP, confidence=.95),
+            AgentDecision(
+                kind=DecisionKind.FINAL, intent=AgentIntent.RELATIONSHIP,
+                confidence=.95, reply="你們都重視真誠溝通，可以先從最近想看的電影聊起。",
+            ),
+        ]
+        contact_result = ToolResult(ok=True, data={
+            "contacts": [{
+                "display_name": "小玟", "initial_interest": "獨立電影",
+                "personality_summary": "願意主動分享想法",
+                "verified_common_ground": ["真誠溝通"],
+            }],
+            "truncated": False,
+        })
+        owner_result = ToolResult(ok=True, data={
+            "display_name": "小安", "initial_interest": "紀錄片",
+            "personality_summary": "好奇且願意主動開話題",
+            "values": ["真誠溝通"], "preferences": ["獨立電影"],
+            "missing_sections": [],
+        })
+        trace = {}
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=decisions), \
+             patch("services.ayue_agent.runtime.execute_tool", side_effect=[contact_result, owner_result]) as execute_tool, \
+             patch("services.ayue_agent.runtime._save_trace", side_effect=lambda _run, _ctx, value: trace.update(value)):
+            result = run_public_agent_turn(ctx, mode="on")
+        self.assertEqual(execute_tool.call_count, 2)
+        self.assertEqual(
+            [call.args[0].name for call in execute_tool.call_args_list],
+            ["relationship.list_accepted_contacts", "profile.get_self_summary"],
+        )
+        self.assertIn("relationship_requires_read", trace["guard_results"])
+        self.assertIn("relationship_comparison_requires_self", trace["guard_results"])
+        self.assertIn("真誠溝通", result.reply)
+
+    def test_distance_reuses_success_when_planner_paraphrases_arguments(self):
+        ctx, turn = self._context("新咖哩到弗金森市集多遠？")
+        decisions = [
+            AgentDecision(
+                kind=DecisionKind.TOOL_CALL, intent=AgentIntent.PLACES,
+                tool_name="places.measure_distance",
+                arguments={"origin": "新咖哩", "destination": "弗金森市集", "use_saved_origin": False},
+                confidence=.95,
+            ),
+            AgentDecision(
+                kind=DecisionKind.TOOL_CALL, intent=AgentIntent.PLACES,
+                tool_name="places.measure_distance",
+                arguments={"origin": "新咖哩", "destination": "弗金森市集（高雄）", "use_saved_origin": False},
+                confidence=.95,
+            ),
+        ]
+        distance_result = ToolResult(ok=True, data={
+            "origin_label": "新咖哩", "destination_label": "弗金森市集",
+            "origin_kind": "explicit", "distance_m": 780,
+            "distance_basis": "straight_line", "attribution": "© OpenStreetMap contributors",
+            "attribution_url": "https://www.openstreetmap.org/copyright",
+        })
+        trace = {}
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=decisions), \
+             patch("services.ayue_agent.runtime.execute_tool", return_value=distance_result) as execute_tool, \
+             patch("services.ayue_agent.runtime.generate_final_reply_v2", return_value="兩地直線距離約 780 公尺。"), \
+             patch("services.ayue_agent.runtime._save_trace", side_effect=lambda _run, _ctx, value: trace.update(value)):
+            result = run_public_agent_turn(ctx, mode="on")
+        execute_tool.assert_called_once()
+        self.assertEqual(execute_tool.call_args.args[0].name, "places.measure_distance")
+        self.assertEqual(result.reply, "兩地直線距離約 780 公尺。")
+        self.assertEqual(trace["tool_cache_hits"], ["places.measure_distance"])
+        self.assertIn("successful_observation_reused", trace["guard_results"])
+
+    def test_distance_does_not_reuse_a_different_endpoint_pair(self):
+        ctx, turn = self._context("新咖哩到弗金森市集，以及新咖哩到駁二，各多遠？")
+        decisions = [
+            AgentDecision(
+                kind=DecisionKind.TOOL_CALL, intent=AgentIntent.PLACES,
+                tool_name="places.measure_distance",
+                arguments={"origin": "新咖哩", "destination": "弗金森市集", "use_saved_origin": False},
+                confidence=.95,
+            ),
+            AgentDecision(
+                kind=DecisionKind.TOOL_CALL, intent=AgentIntent.PLACES,
+                tool_name="places.measure_distance",
+                arguments={"origin": "新咖哩", "destination": "駁二藝術特區", "use_saved_origin": False},
+                confidence=.95,
+            ),
+            AgentDecision(
+                kind=DecisionKind.FINAL, intent=AgentIntent.PLACES, confidence=.95,
+                reply="新咖哩到弗金森市集約 780 公尺，到駁二藝術特區約 1.2 公里，都是直線距離。",
+            ),
+        ]
+        results = [
+            ToolResult(ok=True, data={
+                "origin_label": "新咖哩", "destination_label": "弗金森市集",
+                "origin_kind": "explicit", "distance_m": 780,
+                "distance_basis": "straight_line", "attribution": "© OpenStreetMap contributors",
+                "attribution_url": "https://www.openstreetmap.org/copyright",
+            }),
+            ToolResult(ok=True, data={
+                "origin_label": "新咖哩", "destination_label": "駁二藝術特區",
+                "origin_kind": "explicit", "distance_m": 1200,
+                "distance_basis": "straight_line", "attribution": "© OpenStreetMap contributors",
+                "attribution_url": "https://www.openstreetmap.org/copyright",
+            }),
+        ]
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=decisions), \
+             patch("services.ayue_agent.runtime.execute_tool", side_effect=results) as execute_tool, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        self.assertEqual(execute_tool.call_count, 2)
+        self.assertIn("弗金森市集", result.reply)
+        self.assertIn("駁二藝術特區", result.reply)
+
     def test_decline_followup_uses_canonical_status_read(self):
         ctx, turn = self._context("為什麼？")
         turn.recent_messages = [

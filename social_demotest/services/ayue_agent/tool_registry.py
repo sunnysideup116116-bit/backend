@@ -340,6 +340,10 @@ class ToolSpec:
     executor_arguments_model: type[BaseModel] = _NoArguments
     output_model: type[BaseModel] = _NoArguments
     argument_source: ToolArgumentSource = ToolArgumentSource.NONE
+    # Some reads answer one bounded fact for the whole turn.  If the planner
+    # asks for that fact again with paraphrased arguments, Runtime reuses the
+    # verified observation instead of spending a second read.
+    reuse_success_within_turn: bool = False
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
@@ -451,6 +455,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         executor_arguments_model=_PlacesDistanceArguments,
         output_model=_PlacesDistanceOutput,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
+        reuse_success_within_turn=True,
     ),
     "places.resolve_place": ToolSpec(
         "places.resolve_place", ToolRisk.READ, "places_resolve",

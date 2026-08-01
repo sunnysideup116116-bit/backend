@@ -421,6 +421,84 @@ def _clarification_topic(
     return "request"
 
 
+_RELATIONSHIP_OBSERVATION_TOOLS = frozenset({
+    "match.get_counterparty_summary",
+    "relationship.get_verified_evidence",
+    "relationship.get_mentioned_contact_summary",
+    "relationship.list_accepted_contacts",
+})
+
+
+def _relationship_comparison_needs_self_summary(turn: Any, observations: list[dict]) -> bool:
+    """Detect a grounded "me + this known contact" comparison.
+
+    This is an evidence gate, not an intent router: it only runs after the
+    Planner selected relationship intent and only trusts public contact labels
+    from Context or a verified relationship observation.
+    """
+    names = {
+        str(item.get("display_name") or "").strip()
+        for item in (getattr(turn, "mentioned_contacts", None) or [])
+        if str(item.get("display_name") or "").strip() not in {"", "對方"}
+    }
+    for observation in observations:
+        result = observation.get("result") or {}
+        label = str(result.get("display_name") or "").strip()
+        if label and label != "對方":
+            names.add(label)
+        for contact in (result.get("contacts") or []):
+            label = str((contact or {}).get("display_name") or "").strip()
+            if label and label != "對方":
+                names.add(label)
+    if not names or "我" not in str(getattr(turn, "message", "") or ""):
+        return False
+    owner_text = str(getattr(turn, "message", "") or "")
+    for item in (getattr(turn, "recent_messages", None) or []):
+        if str((item or {}).get("role") or "") == "user":
+            owner_text += str((item or {}).get("content") or "")
+    return any(name in owner_text for name in names)
+
+
+def _same_public_place_reference(requested: Any, resolved: Any) -> bool:
+    """Match a planner place phrase to a resolved public label.
+
+    Qualifiers such as ``（高雄）`` may be added on a retry, so containment is
+    accepted after whitespace/punctuation normalization. Different resolved
+    endpoints still remain distinct and may be measured in the same turn.
+    """
+    def compact(value: Any) -> str:
+        return re.sub(r"[\s\W_]+", "", str(value or "").lower(), flags=re.UNICODE)
+
+    requested_key = compact(requested)
+    resolved_key = compact(resolved)
+    return bool(
+        len(requested_key) >= 2
+        and len(resolved_key) >= 2
+        and (requested_key in resolved_key or resolved_key in requested_key)
+    )
+
+
+def _has_reusable_success(spec: Any, arguments: dict[str, Any], observations: list[dict]) -> bool:
+    if not getattr(spec, "reuse_success_within_turn", False):
+        return False
+    for observation in observations:
+        if observation.get("tool") != spec.name:
+            continue
+        result = observation.get("result") or {}
+        if spec.name == "places.measure_distance":
+            if str(result.get("origin_kind") or "") == "saved_profile":
+                origin_matches = bool(arguments.get("use_saved_origin"))
+            else:
+                origin_matches = not bool(arguments.get("use_saved_origin")) and _same_public_place_reference(
+                    arguments.get("origin"), result.get("origin_label"),
+                )
+            if origin_matches and _same_public_place_reference(
+                arguments.get("destination"), result.get("destination_label"),
+            ):
+                return True
+    return False
+
+
 def _compose_clarification(
     turn: Any,
     observations: list[dict],
@@ -1540,6 +1618,12 @@ def run_public_agent_turn(
                 has_profile_observation = any(
                     item.get("tool") == "profile.get_self_summary" for item in observations
                 )
+                has_relationship_observation = any(
+                    item.get("tool") in _RELATIONSHIP_OBSERVATION_TOOLS for item in observations
+                )
+                relationship_comparison_needs_self_summary = _relationship_comparison_needs_self_summary(
+                    turn, observations,
+                )
                 has_places_observation = any(
                     item.get("tool") in {"places.search_nearby", "places.resolve_place", "places.measure_distance"}
                     for item in observations
@@ -1551,16 +1635,28 @@ def run_public_agent_turn(
                     has_time_observation=has_time_observation,
                     has_calendar_observation=has_calendar_observation,
                     has_profile_observation=has_profile_observation,
+                    has_relationship_observation=has_relationship_observation,
+                    relationship_comparison_needs_self_summary=relationship_comparison_needs_self_summary,
                     place_search_ready=place_search_ready,
                     has_places_observation=has_places_observation,
                 )
                 trace["guard_results"].append(reason)
                 if not ok:
-                    if reason in {"match_status_requires_read", "time_requires_read", "profile_requires_read", "calendar_target_requires_read", "places_search_requires_read"}:
+                    if reason in {
+                        "match_status_requires_read", "time_requires_read", "profile_requires_read",
+                        "relationship_requires_read", "relationship_comparison_requires_self",
+                        "calendar_target_requires_read", "places_search_requires_read",
+                    }:
                         required_tool = {
                             "match_status_requires_read": "match.get_status",
                             "time_requires_read": "system.get_current_time",
                             "profile_requires_read": "profile.get_self_summary",
+                            "relationship_requires_read": (
+                                "relationship.get_mentioned_contact_summary"
+                                if turn.mentioned_contacts and "relationship.get_mentioned_contact_summary" in visible
+                                else "relationship.list_accepted_contacts"
+                            ),
+                            "relationship_comparison_requires_self": "profile.get_self_summary",
                             "calendar_target_requires_read": "calendar.list_my_events",
                             "places_search_requires_read": "places.search_nearby",
                         }[reason]
@@ -1705,6 +1801,20 @@ def run_public_agent_turn(
                     )
                     break
                 key = tool_call_key(spec, safe_arguments)
+                if _has_reusable_success(spec, safe_arguments, observations):
+                    # Some bounded reads (currently distance) have already
+                    # answered their fact for this user turn.  Do not let a
+                    # paraphrased second tool call consume a step.
+                    trace["guard_results"].append("successful_observation_reused")
+                    trace["tool_cache_hits"].append(spec.name)
+                    result = AgentResult(
+                        handled=True,
+                        reply=_compose_final_reply(turn, observations, trace, "successful_observation_reused"),
+                        agent_run_id=run_id,
+                        agent_mode="v2",
+                        fallback_reason="successful_observation_reused",
+                    )
+                    break
                 if key in seen:
                     # A repeated read has no new information. Reuse the first
                     # observation and finish the turn without leaking a guard
