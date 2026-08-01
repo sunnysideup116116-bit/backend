@@ -20,7 +20,39 @@ INTERNAL_ID_RE = re.compile(r"(?:@?seed_user_[\w-]+|@?demo_user|@?user[_-]?\d+)"
 MAX_HISTORY_MESSAGES = 12
 MAX_HISTORY_CHARS = 6000
 ACTION_DRAFT_TTL_SECONDS = 15 * 60
+PLACE_SEARCH_DRAFT_TTL_SECONDS = 15 * 60
 RECENT_CONTEXT_DRAFT_TTL_SECONDS = 30 * 60
+
+
+def _safe_place_search_draft(value: Any) -> dict[str, Any] | None:
+    """Project only bounded public place-search state into the planner context."""
+    if not isinstance(value, dict):
+        return None
+    categories = [
+        str(item) for item in (value.get("categories") or [])
+        if str(item) in {"restaurant", "cafe", "bar", "attraction", "park"}
+    ][:3]
+    try:
+        created_at = float(value.get("created_at", 0) or 0)
+    except (TypeError, ValueError):
+        created_at = 0.0
+    try:
+        radius_m = int(value.get("radius_m", 1500) or 1500)
+    except (TypeError, ValueError):
+        radius_m = 1500
+    try:
+        limit = int(value.get("limit", 3) or 3)
+    except (TypeError, ValueError):
+        limit = 3
+    return {
+        "version": "v1",
+        "anchor": _clean_text(value.get("anchor"), 160),
+        "categories": categories,
+        "radius_m": max(300, min(radius_m, 5000)),
+        "limit": max(1, min(limit, 3)),
+        "use_saved_location": bool(value.get("use_saved_location")),
+        "created_at": created_at,
+    }
 
 
 def _clean_text(value: Any, limit: int = 900) -> str:
@@ -151,11 +183,15 @@ def build_agent_turn_context_v2(ctx: AgentTurnContext, *, clock: TurnClockV1 | N
     outcome = None
     pending = profile.get("agentic_pending_confirmation") or None
     action_draft = profile.get("agentic_action_draft") or None
+    place_search_draft = _safe_place_search_draft(profile.get("agentic_place_search_draft"))
     recent_context_draft = profile.get("recent_context_draft") or None
     now = time.time()
     if action_draft and now - float(action_draft.get("created_at", 0) or 0) > ACTION_DRAFT_TTL_SECONDS:
         profiles_coll.update_one({"user_id": ctx.user_id}, {"$unset": {"agentic_action_draft": ""}})
         action_draft = None
+    if place_search_draft and now - float(place_search_draft.get("created_at", 0) or 0) > PLACE_SEARCH_DRAFT_TTL_SECONDS:
+        profiles_coll.update_one({"user_id": ctx.user_id}, {"$unset": {"agentic_place_search_draft": ""}})
+        place_search_draft = None
     if recent_context_draft and now - float(recent_context_draft.get("created_at", 0) or 0) > RECENT_CONTEXT_DRAFT_TTL_SECONDS:
         profiles_coll.update_one({"user_id": ctx.user_id}, {"$unset": {"recent_context_draft": ""}})
         recent_context_draft = None
@@ -183,7 +219,8 @@ def build_agent_turn_context_v2(ctx: AgentTurnContext, *, clock: TurnClockV1 | N
         user_location=safe_profile_location(profile).get("display_name", ""),
         relevant_memories=memories, active_proposal=active_prompt,
         latest_match_outcome=outcome, pending_confirmation=pending, clock=turn_clock,
-        action_draft=action_draft, recent_context_draft=recent_context_draft,
+        action_draft=action_draft, place_search_draft=place_search_draft,
+        recent_context_draft=recent_context_draft,
         mentioned_contacts=mentioned_contact_refs(ctx.user_id, mentioned_ids),
         mentioned_contact_overflow=bool(ctx.mention_overflow or validation_overflow),
         capability_manifest_version=CAPABILITY_MANIFEST_VERSION,

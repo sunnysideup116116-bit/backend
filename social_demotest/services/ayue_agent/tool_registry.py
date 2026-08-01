@@ -43,6 +43,11 @@ class _ProposalDecisionArguments(BaseModel):
     decision: Literal["interested", "declined"]
 
 
+class _AssessmentStartArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["basic", "deep"]
+
+
 class _CalendarCreateArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str = Field(min_length=1, max_length=120)
@@ -69,6 +74,13 @@ class _CalendarUpdateArguments(BaseModel):
 class _CalendarCancelArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     event_hint: str = Field(min_length=1, max_length=120)
+
+
+class _CalendarFindArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_hint: str = Field(min_length=1, max_length=120)
+    date_hint: str | None = Field(default=None, max_length=32)
+    companion_hint: str | None = Field(default=None, max_length=30)
 
 
 class _WebSearchArguments(BaseModel):
@@ -102,6 +114,11 @@ class _PlacesDistanceArguments(BaseModel):
     use_saved_origin: bool = False
 
 
+class _PlacesResolveArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(min_length=2, max_length=160)
+
+
 class _CalendarEventOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     date: str
@@ -115,6 +132,31 @@ class _CalendarOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     events: list[_CalendarEventOutput]
     range: str
+
+
+class _CalendarEventCandidateOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    activity: str
+    date: str
+    start_time: str
+    end_time: str
+
+
+class _CalendarFindOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["found", "not_found", "ambiguous"]
+    reason_code: Literal[
+        "", "event_not_found", "event_ambiguous", "companion_not_found", "companion_ambiguous",
+    ] = ""
+    activity: str = ""
+    date: str = ""
+    start_time: str = ""
+    end_time: str = ""
+    event_kind: Literal["personal", "shared_date", ""] = ""
+    companion_known: bool = False
+    companion_display_name: str = "對方"
+    companion_safe_summary: str = ""
+    candidates: list[_CalendarEventCandidateOutput] = Field(default_factory=list, max_length=3)
 
 
 class _MatchStatusOutput(BaseModel):
@@ -151,6 +193,30 @@ class _RecentContextOutput(BaseModel):
     exists: bool
 
 
+class _SelfProfileOutput(BaseModel):
+    """Owner-only, typed profile projection for an on-demand self summary."""
+
+    model_config = ConfigDict(extra="forbid")
+    display_name: str = ""
+    initial_interest: str = ""
+    personality_summary: str = ""
+    openness: float | None = None
+    conscientiousness: float | None = None
+    extraversion: float | None = None
+    agreeableness: float | None = None
+    neuroticism: float | None = None
+    values: list[str] = Field(default_factory=list)
+    life_goals: list[str] = Field(default_factory=list)
+    relationship_needs: list[str] = Field(default_factory=list)
+    stress_coping: str = ""
+    ideal_future: str = ""
+    deep_profile_summary: str = ""
+    recent_context: str = ""
+    location: str = ""
+    preferences: list[str] = Field(default_factory=list, max_length=8)
+    missing_sections: list[str] = Field(default_factory=list)
+
+
 class _RelationshipOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     relationships: list[dict[str, Any]]
@@ -170,6 +236,12 @@ class _MentionedContactOutput(BaseModel):
 class _MentionedContactSummaryOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     contacts: list[_MentionedContactOutput] = Field(default_factory=list)
+
+
+class _AcceptedContactListOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    contacts: list[_MentionedContactOutput] = Field(default_factory=list, max_length=8)
+    truncated: bool = False
 
 
 class _MemoryOutput(BaseModel):
@@ -223,6 +295,8 @@ class _PlaceOutput(BaseModel):
     distance_m: int = Field(ge=0)
     address_summary: str = ""
     map_url: str
+    provider: Literal["openstreetmap", "google"] = "openstreetmap"
+    place_id: str = ""
 
 
 class _PlacesNearbyOutput(BaseModel):
@@ -233,6 +307,14 @@ class _PlacesNearbyOutput(BaseModel):
     attribution: str
     attribution_url: str
     places: list[_PlaceOutput] = Field(default_factory=list)
+
+
+class _PlacesResolveOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    found: bool
+    place: _PlaceOutput | None = None
+    attribution: str = "Google Maps"
+    attribution_url: str = "https://www.google.com/maps"
 
 
 class _PlacesDistanceOutput(BaseModel):
@@ -273,6 +355,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         "我看一下你的行事曆…",
         output_model=_CalendarOutput,
     ),
+    "calendar.find_my_event": ToolSpec(
+        "calendar.find_my_event", ToolRisk.READ, "calendar_event_find",
+        "查詢本人一筆指定行程及其是否為已確認共同約會；適用於問某個行程的日期、內容或跟誰去。可用已接受聯絡人的公開名稱縮小共同約會，但只會從該筆行程回答，不能用目前配對對象猜測。",
+        "我確認一下這筆行程…",
+        planner_arguments_model=_CalendarFindArguments,
+        executor_arguments_model=_CalendarFindArguments,
+        output_model=_CalendarFindOutput,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
+    ),
     "match.get_status": ToolSpec(
         "match.get_status", ToolRisk.READ, "match_status",
         "讀取本人唯一正式配對狀態；適用於配對成功、接受、回覆與目前進度。",
@@ -291,6 +382,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         "我確認一下你最近提過的計畫…",
         output_model=_RecentContextOutput,
     ),
+    "profile.get_self_summary": ToolSpec(
+        "profile.get_self_summary", ToolRisk.READ, "self_profile",
+        "讀取本人的已完成基礎資料、深度資料、偏好、近期情境與粗略地區；適用於問『我是誰』、『你了解我多少』或自己的個性與興趣。只讀取本人資料，不會寫入。",
+        "我整理一下我目前認識的你…",
+        output_model=_SelfProfileOutput,
+    ),
     "relationship.get_verified_evidence": ToolSpec(
         "relationship.get_verified_evidence", ToolRisk.READ, "relationship_evidence",
         "讀取已接受配對的可驗證互動摘要。",
@@ -306,6 +403,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         executor_arguments_model=_MentionedContactSummaryArguments,
         output_model=_MentionedContactSummaryOutput,
         argument_source=ToolArgumentSource.MENTIONED_CONTACTS,
+    ),
+    "relationship.list_accepted_contacts": ToolSpec(
+        "relationship.list_accepted_contacts", ToolRisk.READ, "accepted_contact_list",
+        "讀取本人已接受聯絡人的最小公開摘要；適用於詢問目前認識的人中誰適合某個活動或地點，不能用來推測對方行程。",
+        "我整理一下目前已建立聯絡的對象…",
+        output_model=_AcceptedContactListOutput,
     ),
     "memory.search_my_profile": ToolSpec(
         "memory.search_my_profile", ToolRisk.READ, "memory_profile",
@@ -349,6 +452,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         output_model=_PlacesDistanceOutput,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
+    "places.resolve_place": ToolSpec(
+        "places.resolve_place", ToolRisk.READ, "places_resolve",
+        "將使用者明確提到、或本回合已確認名稱的店家或景點解析成公開地點卡；不能自行捏造店名。",
+        "我確認一下這家店的公開地點資訊…",
+        planner_arguments_model=_PlacesResolveArguments,
+        executor_arguments_model=_PlacesResolveArguments,
+        output_model=_PlacesResolveOutput,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
+    ),
     "match.start_search": ToolSpec(
         "match.start_search", ToolRisk.WRITE, "start_search",
         "開始找新對象；只能先建立 confirmation，確認後由 Runtime 執行。",
@@ -361,6 +473,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         "我正在更新這張牽線提案…",
         planner_arguments_model=_ProposalDecisionArguments,
         executor_arguments_model=_ProposalDecisionArguments,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
+    ),
+    "profile.start_assessment": ToolSpec(
+        "profile.start_assessment", ToolRisk.WRITE, "assessment_start",
+        "開始或重新開始本人的基本／深層探索；kind=basic 或 deep，必須先取得確認，完成後仍需再次確認才會覆寫對應正式資料。",
+        "我準備開始這段探索…",
+        requires_confirmation=True,
+        planner_arguments_model=_AssessmentStartArguments,
+        executor_arguments_model=_AssessmentStartArguments,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
     "calendar.create_my_event": ToolSpec(
@@ -398,10 +519,11 @@ READ_ONLY_TOOLS = frozenset(
     name for name, spec in TOOL_REGISTRY.items()
     if spec.risk is ToolRisk.READ
     and spec.argument_source is not ToolArgumentSource.MENTIONED_CONTACTS
-    and spec.executor_key not in {"web_search", "web_extract", "places_nearby", "places_distance"}
+    and spec.executor_key not in {"web_search", "web_extract", "places_nearby", "places_distance", "places_resolve"}
 )
 WEB_TOOLS = frozenset({"web.search", "web.extract"})
-PLACES_TOOLS = frozenset({"places.search_nearby", "places.measure_distance"})
+PLACES_TOOLS = frozenset({"places.search_nearby", "places.measure_distance", "places.resolve_place"})
+ASSESSMENT_TOOLS = frozenset({"profile.start_assessment"})
 SIDE_EFFECT_TOOLS = frozenset(
     name for name, spec in TOOL_REGISTRY.items() if spec.risk is ToolRisk.WRITE
 )
@@ -453,6 +575,7 @@ def tool_call_key(spec: ToolSpec, arguments: dict[str, Any]) -> tuple[str, str]:
 def planner_tool_names(
     *, can_start_search: bool, can_decide_active_proposal: bool, can_edit_calendar: bool = True,
     can_read_mentioned_contacts: bool = False, can_use_web: bool = False, can_use_places: bool = False,
+    can_start_assessments: bool = True,
 ) -> frozenset[str]:
     """Return V2's complete safe read surface plus guarded write intents."""
     names = set(READ_ONLY_TOOLS)
@@ -470,4 +593,6 @@ def planner_tool_names(
         names.add("match.decide_active_proposal")
     if can_edit_calendar:
         names.update({"calendar.create_my_event", "calendar.update_my_event", "calendar.cancel_my_event"})
+    if can_start_assessments:
+        names.update(ASSESSMENT_TOOLS)
     return frozenset(names)

@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 RecentContextAction = Literal["update", "clear", "none"]
+RecentContextEpisodeRelation = Literal["continue", "new", "unrelated"]
 FieldOperation = Literal["set", "clear"]
 
 
@@ -36,6 +37,11 @@ class RecentContextDecision(BaseModel):
         "real_world_update", "match_operation", "durable_preference", "other",
     ]
     fields: dict[str, EvidenceField] = Field(default_factory=dict)
+    # The provider may relate the current owner message to a bounded typed
+    # episode.  It never receives raw conversation history or prior evidence.
+    # ``new`` is the backwards-compatible, fail-safe default for older
+    # providers and fixtures.
+    episode_relation: RecentContextEpisodeRelation = "new"
     reason_code: str = ""
 
 

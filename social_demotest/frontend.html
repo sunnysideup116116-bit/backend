@@ -426,14 +426,84 @@
             background: #fde3d3; border: 1px solid #d9a98d; font-size: 28px;
         }
         .onboarding-tone.selected { background: #e9966c !important; color: white !important; }
-        #match-progress-card {
-            margin: 10px 14px 0; padding: 10px 12px; background: #fff3e9;
-            border: 1px solid #e5b99f; box-shadow: 2px 2px 0 var(--warm-shadow);
+        .match-search-process-bubble {
+            position: relative; align-self: flex-start; flex: 0 0 auto;
+            width: min(440px, 88%); box-sizing: border-box;
+            margin: 6px 0 10px; padding: 18px 18px 16px; overflow: hidden;
+            border: 1px solid #dda27f;
+            border-left: 6px solid var(--warm-apricot); border-radius: 22px;
+            background:
+                radial-gradient(circle at 92% 15%, rgba(255,255,255,.92) 0 7%, transparent 8%),
+                linear-gradient(145deg, #fffdf8 0%, #ffe6d3 100%);
+            box-shadow: 0 14px 34px rgba(121, 77, 57, .22); color: #5f4034;
         }
-        #match-progress-card.has-proposal { cursor: pointer; }
-        #match-progress-card.has-proposal:hover { background: #ffeadc; }
-        #match-progress-track { height: 5px; background: #f4d7c5; overflow: hidden; }
-        #match-progress-bar { height: 100%; width: 0; background: var(--warm-apricot); transition: width .25s ease; }
+        .match-search-process-bubble::after {
+            content: "✦"; position: absolute; right: 18px; bottom: 8px;
+            color: rgba(207,116,73,.2); font-size: 42px; line-height: 1;
+        }
+        .match-search-process-header { display: flex; align-items: center; gap: 10px; }
+        .match-search-process-icon {
+            width: 48px; height: 48px; flex: 0 0 48px; display: grid; place-items: center;
+            border-radius: 50%; background: #fff; border: 1px solid #e8bda5;
+            color: white; font-size: 16px; font-weight: 900;
+            background: linear-gradient(145deg, #f5a77f, #d86f4c);
+            box-shadow: 0 5px 14px rgba(167,87,55,.25);
+            animation: match-search-pulse 1.6s ease-in-out infinite;
+        }
+        .match-search-process-heading { min-width: 0; flex: 1; }
+        .match-search-process-kicker {
+            font-size: 11px; font-weight: 800; letter-spacing: .08em; color: #a45e40;
+        }
+        .match-search-process-title { margin-top: 3px; font-size: 16px; font-weight: 900; color: #5f4034; }
+        .match-search-live {
+            display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
+            padding: 4px 7px; border-radius: 999px; background: rgba(255,255,255,.72);
+            border: 1px solid #e8bda5; color: #9f5b3d; font-size: 10px; font-weight: 700;
+        }
+        .match-search-collapse {
+            position: relative; z-index: 2; flex: 0 0 auto; padding: 5px 7px !important;
+            border: 0 !important; background: transparent !important; box-shadow: none !important;
+            color: #a06b55 !important; font-size: 10px !important;
+        }
+        .match-search-live-dot {
+            width: 6px; height: 6px; border-radius: 50%; background: #e5794b;
+            box-shadow: 0 0 0 3px rgba(229,121,75,.16);
+        }
+        .match-search-process-track {
+            height: 6px; margin-top: 12px; overflow: hidden; border-radius: 999px;
+            background: rgba(211, 154, 120, .24);
+        }
+        .match-search-process-bar {
+            height: 100%; border-radius: inherit;
+            background: linear-gradient(90deg, #e9966c, #cf7449); transition: width .35s ease;
+        }
+        .match-search-process-meta {
+            display: flex; justify-content: space-between; margin-top: 6px;
+            color: #9a715e; font-size: 10px; font-weight: 700;
+        }
+        .match-search-process-detail { position: relative; z-index: 1; margin-top: 10px; max-width: 88%; font-size: 12px; line-height: 1.6; color: #78584b; }
+        .match-search-process-bubble.is-collapsed { padding: 10px 12px; border-radius: 16px; }
+        .match-search-process-bubble.is-collapsed .match-search-process-icon { width: 34px; height: 34px; flex-basis: 34px; }
+        .match-search-process-bubble.is-collapsed .match-search-process-track,
+        .match-search-process-bubble.is-collapsed .match-search-process-meta,
+        .match-search-process-bubble.is-collapsed .match-search-process-detail,
+        .match-search-process-bubble.is-collapsed .match-search-live { display: none; }
+        .gif-message-card {
+            align-self: flex-start; width: min(360px, 82%); padding: 10px;
+            background: #fffaf5; border: 1px solid #e2b69d; border-radius: 18px;
+            box-shadow: 3px 5px 16px rgba(121,77,57,.14); color: #6f4d3f;
+        }
+        .gif-message-card img { display: block; width: 100%; max-height: 280px; object-fit: contain; border-radius: 13px; background: #fff; }
+        .gif-message-caption { display: flex; justify-content: space-between; gap: 10px; margin-top: 7px; font-size: 10px; }
+        .gif-message-provider { color: #a07764; white-space: nowrap; }
+        @keyframes match-search-pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.08); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .match-search-process-icon { animation: none; }
+            .match-search-process-bar { transition: none; }
+        }
         .proposal-contexts, .proposal-reasons {
             margin-top: 10px; padding: 9px 10px; background: #fffaf4;
             border: 1px solid #e7c9b7; font-size: 12px; line-height: 1.55;
@@ -448,6 +518,36 @@
         }
         .mention-option { width: 100%; padding: 8px 10px; text-align: left; box-shadow: none !important; border: 0 !important; }
         .mention-chip { background: #fde3d3; border: 1px solid #d9a98d; padding: 4px 8px; font-size: 12px; }
+        #room-input[contenteditable="true"] { min-height: 46px; white-space: pre-wrap; overflow-wrap: anywhere; }
+        #room-input[contenteditable="true"]:empty::before { content: attr(data-placeholder); color: rgba(255,255,255,.45); pointer-events: none; }
+        #room-input[aria-disabled="true"] { opacity: .5; pointer-events: none; }
+        .inline-mention { display: inline-block; background: #6d63aa; color: #f6f4ff; border-radius: 4px; padding: 0 3px; margin: 0 1px; line-height: 1.45; }
+        .place-card-list { display: grid; gap: 9px; margin-top: 10px; width: min(440px, 100%); }
+        .place-card { overflow: hidden; border-radius: 12px; border: 1px solid #dfc2ae; background: #fffaf5; color: #523a2f; box-shadow: 0 5px 14px rgba(66, 37, 25, .12); }
+        .place-card-custom { display: grid; grid-template-columns: 185px minmax(0, 1fr); min-height: 145px; }
+        .place-card-preview { position: relative; min-height: 145px; overflow: hidden; background: linear-gradient(135deg, #d9ead7, #f2dfc8); }
+        .place-card-preview iframe {
+            width: 150%; height: 150%; min-height: 218px; border: 0; display: block;
+            pointer-events: none; transform: scale(.667); transform-origin: top left;
+        }
+        .place-card-preview-fallback { display: grid; place-items: center; height: 100%; min-height: 145px; font-size: 38px; }
+        .place-card-preview-fallback[data-category="restaurant"] { background: linear-gradient(135deg, #ffc7a8, #ffe8d6); }
+        .place-card-preview-fallback[data-category="cafe"] { background: linear-gradient(135deg, #d4b49b, #f5e7dc); }
+        .place-card-preview-fallback[data-category="bar"] { background: linear-gradient(135deg, #b7acd8, #ebe5fa); }
+        .place-card-preview-fallback[data-category="park"] { background: linear-gradient(135deg, #a9d8b4, #e5f3df); }
+        .place-card-pin { position: absolute; left: 8px; bottom: 8px; padding: 3px 7px; border-radius: 999px; background: rgba(255, 250, 245, .92); color: #8a543c; font-size: 10px; font-weight: 700; box-shadow: 0 2px 7px rgba(0,0,0,.15); }
+        .place-card-body { min-width: 0; padding: 12px 13px 10px; display: flex; flex-direction: column; }
+        .place-card-name { color: #51352a; font-size: 14px; font-weight: 800; line-height: 1.35; }
+        .place-card-meta { margin-top: 4px; color: #a0674c; font-size: 11px; }
+        .place-card-address { margin-top: 7px; color: #745648; font-size: 11px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .place-card-footer { display: flex; align-items: end; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 8px; }
+        .place-card-open { color: #8d4d32; font-size: 11px; font-weight: 800; text-decoration: underline; }
+        .place-card-attribution { color: #99796a; font-size: 9px; text-decoration: none; text-align: right; }
+        @media (max-width: 640px) {
+            .place-card-custom { grid-template-columns: 1fr; }
+            .place-card-preview, .place-card-preview-fallback { min-height: 150px; height: 150px; }
+            .place-card-preview iframe { min-height: 225px; height: 225px; }
+        }
         .private-quick-actions { display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto; border-bottom: 1px solid var(--warm-line); }
         .private-quick-actions button { white-space: nowrap; padding: 6px 8px; font-size: 11px; }
         .memory-notice {
@@ -602,6 +702,10 @@
             #stage-messenger > div:nth-child(2) { width: 100%; flex: 1; min-height: 0; }
             #stage-messenger > div:nth-child(2) > div:first-child { padding: 8px 10px; }
             #room-messages { padding: 12px; }
+            .match-search-process-bubble { width: min(390px, 94%); padding: 14px; border-radius: 18px; }
+            .match-search-process-title { font-size: 14px; }
+            .match-search-process-detail { max-width: 100%; }
+            .gif-message-card { width: min(330px, 92%); }
             #mediator-private-panel { left: 6px; right: 6px; bottom: 68px; width: auto; height: min(70%, 560px); }
             #mediator-private-trigger { right: 8px; bottom: 72px; }
             .date-form-grid { grid-template-columns: 1fr; }
@@ -727,7 +831,10 @@
         <section id="stage-bigfive" class="w-full flex gap-6 absolute inset-0 transition-opacity duration-500 z-10">
             <div class="w-2/3 flex flex-col h-full glass-panel rounded-2xl overflow-hidden">
                 <div class="p-4 border-b border-white/10 bg-black/30">
-                    <h2 class="font-semibold text-lg flex items-center gap-2">🔮 專屬性格解析</h2>
+                    <div class="flex items-center justify-between gap-3">
+                        <h2 class="font-semibold text-lg flex items-center gap-2">🔮 專屬性格解析</h2>
+                        <button type="button" onclick="exitAssessmentFromUi('big_five')" class="text-xs text-gray-300 hover:text-white">先離開</button>
+                    </div>
                 </div>
                 <div id="bf-messages" class="flex-1 p-6 overflow-y-auto flex flex-col gap-2">
                     <div class="chat-bubble bubble-other fade-in">你好！我是你的專屬 AI 媒人。為了幫你找到最契合的夥伴，請用幾句話描述一下你自己，平常喜歡做什麼？
@@ -853,21 +960,6 @@
                     </div>
                 </div>
 
-                <div id="match-progress-card" class="hidden" onclick="openActiveProposalCard()">
-                      <div class="flex items-center gap-2">
-                          <div class="w-8 h-8 rounded bg-white/10 flex items-center justify-center">?</div>
-                          <div>
-                              <div id="match-progress-title" class="text-xs font-bold">配對準備中</div>
-                              <div id="match-progress-detail" class="text-[11px] text-[#8b7063] mt-1">尚未尋找對象</div>
-                          </div>
-                      </div>
-                      <div class="flex items-center gap-2">
-                          <span id="match-progress-state" class="text-[10px] text-[#a96749]"></span>
-                      </div>
-                  </div>
-                  
-
-
                 <div id="room-messages" class="flex-1 p-6 overflow-y-auto flex flex-col gap-2"></div>
                 <div id="room-typing" class="hidden px-6 pb-2">
                     <div class="chat-bubble bubble-other inline-flex items-center p-3">
@@ -880,8 +972,8 @@
                     <div id="mention-chip-row" class="hidden mb-2 flex-wrap items-center gap-2"></div>
                     <form id="room-form" class="flex gap-3 relative">
                         <div id="mention-menu" class="hidden"></div>
-                        <input type="text" id="room-input" placeholder="傳送訊息..." disabled required
-                            class="flex-1 bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-violet-500 text-white disabled:opacity-50">
+                        <div id="room-input" contenteditable="false" role="textbox" aria-multiline="true" aria-disabled="true" data-placeholder="傳送訊息..."
+                            class="flex-1 bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-violet-500 text-white"></div>
                         <button type="submit" id="room-submit" disabled
                             class="bg-violet-600 px-6 py-3 rounded-xl font-medium shadow-lg hover:bg-violet-500 transition disabled:opacity-50">送出</button>
                     </form>
@@ -905,12 +997,10 @@
                     <div id="mediator-private-messages" class="flex-1 overflow-y-auto p-4 flex flex-col gap-3"></div>
                     <div class="private-quick-actions">
                         <!-- 探口風 button removed -->
-                        <button type="button" onclick="sendPrivateMediatorMessage('幫我問一件他的有趣小事')">問趣事</button>
                         <button type="button" onclick="sendPrivateMediatorMessage('幫我們協調約會')">協調約會</button>
                         <button type="button" id="date-coordination-card" class="hidden font-bold !text-fuchsia-700 !bg-fuchsia-100 !border-fuchsia-400" onclick="document.getElementById('date-modal').classList.remove('hidden')">📅 約會進度表</button>
                         <button type="button" id="established-events-card" class="hidden font-bold !text-emerald-700 !bg-emerald-100 !border-emerald-400" onclick="document.getElementById('established-modal').classList.remove('hidden')">✅ 已確認約會</button>
                         <button type="button" onclick="sendPrivateMediatorMessage('你看完我們最近聊天，有什麼觀察？')">看最近聊天</button>
-                        <button type="button" onclick="startRelationshipQuiz()">默契小測驗</button>
                     </div>
                     <form id="mediator-private-form" class="p-3 border-t border-[#e7c9b7] flex gap-2">
                         <input id="mediator-private-input" required placeholder="問阿月關於這個人…" class="flex-1 px-3 py-2 text-sm">
@@ -925,7 +1015,10 @@
             class="w-full flex gap-6 absolute inset-0 opacity-0 pointer-events-none transition-opacity duration-500 z-0">
             <div class="w-2/3 flex flex-col h-full glass-panel rounded-2xl overflow-hidden">
                 <div class="p-4 border-b border-white/10 bg-black/30">
-                    <h2 class="font-semibold text-lg flex items-center gap-2">🎯 深層價值觀分析</h2>
+                    <div class="flex items-center justify-between gap-3">
+                        <h2 class="font-semibold text-lg flex items-center gap-2">🎯 深層價值觀分析</h2>
+                        <button type="button" onclick="exitAssessmentFromUi('deep_profile')" class="text-xs text-gray-300 hover:text-white">先離開</button>
+                    </div>
                 </div>
                 <div id="dp-messages" class="flex-1 p-6 overflow-y-auto flex flex-col gap-2">
                     <div class="chat-bubble bubble-other fade-in">讓我們來深入探索你的價值觀和人生方向吧！</div>
@@ -1040,7 +1133,7 @@
                         <table class="w-full text-left text-sm text-gray-300">
                             <thead class="text-xs text-gray-500 bg-black/50 border-b border-white/5">
                                 <tr>
-                                    <th class="px-4 py-3 font-medium">候選人 ID</th>
+                                    <th class="px-4 py-3 font-medium">人選</th>
                                     <th class="px-4 py-3 font-medium">相似度</th>
                                     <th class="px-4 py-3 font-medium">近期情境</th>
                                     <th class="px-4 py-3 font-medium">性格簡述</th>
@@ -1076,7 +1169,7 @@
             <section class="onboarding-step hidden" data-onboarding-step="2">
                 <div class="onboarding-illustration">🌙</div>
                 <h2 class="text-xl font-bold mb-3">需要時，私下找阿月助攻</h2>
-                <p class="text-sm text-[#8b7063] leading-relaxed mb-4">進入雙人聊天室後，可打開阿月悄悄話，請她探口風、問趣事、看最近聊天或協調約會。</p>
+                <p class="text-sm text-[#8b7063] leading-relaxed mb-4">進入雙人聊天室後，可打開阿月悄悄話，請她看最近聊天、整理想法或協調約會。</p>
                 <div class="text-xs font-bold mb-2">你喜歡阿月怎麼說話？</div>
                 <div class="grid grid-cols-3 gap-2">
                     <button data-onboarding-tone="friend" onclick="selectOnboardingTone('friend')" class="onboarding-tone p-2 text-xs">熟朋友</button>
@@ -1123,6 +1216,8 @@
         let acceptedContacts = [];
         let mentionedOtherIds = [];
         let matchStatusTimer = null;
+        let matchStatusRequestVersion = 0;
+        let matchStatusFailureCount = 0;
         let dateCoordinationSignature = "";
         let activeDateCoordinationId = null;
         let dateCoordinationDraftDirty = false;
@@ -1134,13 +1229,188 @@
         let privateMediatorSending = false;
         let mediatorToastTimer = null;
         let whisperCollapseTimer = null;
-        let currentRelationshipFunState = null;
-        let currentActiveProposalCard = null;
-        let relationshipQuizExpanded = false;
-        let previousRelationshipQuizStatus = null;
         let ayueProgressBubble = null;
         let ayueProgressTimer = null;
+        let matchSearchCollapsed = false;
         let publicAyueSending = false;
+        let googlePlaceCardsConfig = null;
+        let googleMapsLibraryPromise = null;
+
+        function installRoomInputAdapter() {
+            const input = document.getElementById("room-input");
+            Object.defineProperties(input, {
+                value: {
+                    get: () => input.innerText || "",
+                    set: value => { input.textContent = String(value || ""); syncMentionIds(); },
+                },
+                disabled: {
+                    get: () => input.getAttribute("aria-disabled") === "true",
+                    set: value => {
+                        input.contentEditable = value ? "false" : "true";
+                        input.setAttribute("aria-disabled", value ? "true" : "false");
+                    },
+                },
+                placeholder: {
+                    get: () => input.dataset.placeholder || "",
+                    set: value => { input.dataset.placeholder = String(value || ""); },
+                },
+            });
+        }
+
+        installRoomInputAdapter();
+
+        async function loadGooglePlacesUi() {
+            if (googleMapsLibraryPromise) return googleMapsLibraryPromise;
+            googleMapsLibraryPromise = (async () => {
+                const response = await fetch("/api/client-config");
+                const config = await response.json();
+                googlePlaceCardsConfig = config || {};
+                if (!config?.google_place_cards_enabled || !config?.google_maps_browser_api_key) {
+                    throw new Error("place_cards_disabled");
+                }
+                if (!window.google?.maps) {
+                    await new Promise((resolve, reject) => {
+                        const script = document.createElement("script");
+                        script.async = true;
+                        script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(config.google_maps_browser_api_key)}&v=weekly&libraries=places`;
+                        script.onload = resolve;
+                        script.onerror = reject;
+                        document.head.appendChild(script);
+                    });
+                }
+                await window.google.maps.importLibrary("places");
+            })();
+            return googleMapsLibraryPromise;
+        }
+
+        const PLACE_CARD_LABELS = {
+            restaurant: ["餐廳", "🍽️"], cafe: ["咖啡廳", "☕"], bar: ["酒吧", "🍸"],
+            attraction: ["景點", "📍"], park: ["公園", "🌿"],
+        };
+
+        function safePlaceUrl(value, provider, embed = false) {
+            try {
+                const url = new URL(String(value || ""));
+                if (url.protocol !== "https:") return null;
+                const host = url.hostname.toLowerCase();
+                if (provider === "openstreetmap") {
+                    if (host !== "www.openstreetmap.org") return null;
+                    if (embed && url.pathname !== "/export/embed.html") return null;
+                } else if (provider === "google") {
+                    if (!(host === "google.com" || host === "www.google.com" || host.endsWith(".google.com"))) return null;
+                } else {
+                    return null;
+                }
+                return url.href;
+            } catch (_) {
+                return null;
+            }
+        }
+
+        function renderCustomPlaceCard(wrapper, card) {
+            const provider = card.provider === "google" ? "google" : "openstreetmap";
+            const category = Object.hasOwn(PLACE_CARD_LABELS, card.category) ? card.category : "attraction";
+            const [categoryLabel, categoryIcon] = PLACE_CARD_LABELS[category];
+            const preview = document.createElement("div");
+            preview.className = "place-card-preview";
+            const embedUrl = safePlaceUrl(card.embed_url, provider, true);
+            if (embedUrl && provider === "openstreetmap") {
+                const frame = document.createElement("iframe");
+                frame.src = embedUrl;
+                frame.loading = "lazy";
+                frame.referrerPolicy = "no-referrer";
+                frame.title = `${String(card.name || "地點").slice(0, 80)}地圖預覽`;
+                frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-popups");
+                preview.appendChild(frame);
+            } else {
+                const fallback = document.createElement("div");
+                fallback.className = "place-card-preview-fallback";
+                fallback.dataset.category = category;
+                fallback.textContent = categoryIcon;
+                preview.appendChild(fallback);
+            }
+            const pin = document.createElement("span");
+            pin.className = "place-card-pin";
+            pin.textContent = provider === "google" ? "Google Maps" : "OSM 地圖";
+            preview.appendChild(pin);
+
+            const body = document.createElement("div");
+            body.className = "place-card-body";
+            const name = document.createElement("div");
+            name.className = "place-card-name";
+            name.textContent = String(card.name || "地點").slice(0, 80);
+            const meta = document.createElement("div");
+            meta.className = "place-card-meta";
+            meta.textContent = [categoryLabel, String(card.distance_label || "").slice(0, 30)].filter(Boolean).join(" · ");
+            body.append(name, meta);
+            if (card.address_summary) {
+                const address = document.createElement("div");
+                address.className = "place-card-address";
+                address.textContent = String(card.address_summary).slice(0, 180);
+                body.appendChild(address);
+            }
+            const footer = document.createElement("div");
+            footer.className = "place-card-footer";
+            const mapUrl = safePlaceUrl(card.map_url, provider);
+            if (mapUrl) {
+                const open = document.createElement("a");
+                open.className = "place-card-open";
+                open.href = mapUrl;
+                open.target = "_blank";
+                open.rel = "noopener noreferrer";
+                open.textContent = "開啟地圖 ↗";
+                footer.appendChild(open);
+            }
+            const attributionUrl = safePlaceUrl(card.attribution_url, provider);
+            if (attributionUrl) {
+                const attribution = document.createElement("a");
+                attribution.className = "place-card-attribution";
+                attribution.href = attributionUrl;
+                attribution.target = "_blank";
+                attribution.rel = "noopener noreferrer";
+                attribution.textContent = String(card.attribution || "地圖資料").slice(0, 80);
+                footer.appendChild(attribution);
+            }
+            body.appendChild(footer);
+            wrapper.replaceChildren(preview, body);
+        }
+
+        function upgradeGooglePlaceCard(wrapper, card) {
+            if (card.provider !== "google" || !/^[A-Za-z0-9_-]{3,180}$/.test(String(card.place_id || ""))) return;
+            loadGooglePlacesUi().then(() => {
+                const details = document.createElement("gmp-place-details-compact");
+                details.setAttribute("orientation", "horizontal");
+                details.setAttribute("truncation-preferred", "");
+                const request = document.createElement("gmp-place-details-place-request");
+                request.setAttribute("place", card.place_id);
+                const content = document.createElement("gmp-place-content-config");
+                ["gmp-place-media", "gmp-place-rating", "gmp-place-type", "gmp-place-price", "gmp-place-open-now-status", "gmp-place-attribution"].forEach(tag => {
+                    const element = document.createElement(tag);
+                    if (tag === "gmp-place-media") element.setAttribute("lightbox-preferred", "");
+                    content.appendChild(element);
+                });
+                details.append(request, content);
+                wrapper.replaceChildren(details);
+                wrapper.classList.remove("place-card-custom");
+            }).catch(() => {});
+        }
+
+        function appendPlaceCards(container, cards) {
+            const safeCards = Array.isArray(cards) ? cards.filter(card =>
+                card && ["openstreetmap", "google"].includes(card.provider)
+            ).slice(0, 3) : [];
+            if (!safeCards.length) return;
+            const list = document.createElement("div");
+            list.className = "place-card-list";
+            safeCards.forEach(card => {
+                const wrapper = document.createElement("div");
+                wrapper.className = "place-card place-card-custom";
+                renderCustomPlaceCard(wrapper, card);
+                list.appendChild(wrapper);
+                upgradeGooglePlaceCard(wrapper, card);
+            });
+            container.appendChild(list);
+        }
         
         // 🥚 雙黃蛋狀態追蹤
         let activeDraftMatches = []; // [{match_id, matched_user_id, contrast_label, reason, big_five, context, status}]
@@ -1173,7 +1443,7 @@
             try {
                 const res = await fetch('/api/chat', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: currentUserId, message: "我想探索自己的深層價值觀", state: "deep_profile" })
+                    body: JSON.stringify({ user_id: currentUserId, message: "我想探索自己的深層價值觀", state: "deep_profile", initialize: true })
                 });
                 const data = await res.json();
                 document.getElementById("bf-typing").classList.add("hidden");
@@ -1219,7 +1489,8 @@
                         user_id: currentUserId, 
                         message: "哈囉！這是我註冊時填寫的興趣，請根據它問我情境題。", 
                         state: "big_five",
-                        initial_interest: userInterest 
+                        initial_interest: userInterest,
+                        initialize: true
                     })
                 });
                 const data = await res.json();
@@ -1572,10 +1843,24 @@
                     body: JSON.stringify({ user_id: currentUserId, state: "big_five" })
                 });
 
-                document.getElementById("bf-messages").innerHTML = `<div class="chat-bubble bubble-other fade-in">\u6211\u5011\u91CD\u65B0\u4F86\u4E00\u6B21\u57FA\u790E\u6027\u683C\u6E2C\u9A57\u5427\u3002\u5148\u8DDF\u6211\u804A\u804A\u6700\u8FD1\u8B93\u4F60\u6709\u611F\u89BA\u7684\u4E00\u4EF6\u4E8B\u3002</div>`;
+                document.getElementById("bf-messages").innerHTML = "";
                 document.getElementById("bf-json").innerText = "\u5C1A\u7121\u8CC7\u6599...";
                 switchStage("bigfive");
-            } catch (e) { }
+                document.getElementById("bf-typing").classList.remove("hidden");
+                const startRes = await fetch('/api/chat', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        user_id: currentUserId, message: "重新開始基本性格探索",
+                        state: "big_five", initialize: true
+                    })
+                });
+                const startData = await startRes.json();
+                document.getElementById("bf-typing").classList.add("hidden");
+                if (startRes.ok) appendBFMessage(startData.reply, false);
+            } catch (e) {
+                document.getElementById("bf-typing").classList.add("hidden");
+                appendBFMessage("連線錯誤，請重試。", false);
+            }
         }
 
         async function redoDeepProfile() {
@@ -1593,7 +1878,7 @@
                 document.getElementById("dp-json").innerText = "\u5C1A\u7121\u8CC7\u6599...";
                 hasDeepProfile = false;
                 switchStage("deep_profile");
-                initDeepProfile();
+                await startDeepProfileInChat(true);
             } catch (e) { }
         }
 
@@ -1625,7 +1910,7 @@
             const c = document.getElementById("bf-messages");
             const div = document.createElement("div");
             div.className = `chat-bubble ${isUser ? 'bubble-user' : 'bubble-other'} fade-in`;
-            div.innerHTML = text;
+            div.innerText = text;
             c.appendChild(div);
             c.scrollTop = c.scrollHeight;
         }
@@ -1700,8 +1985,8 @@
             } catch (e) { }
         });
 
-        async function startDeepProfileInChat() {
-            if (activeContactId !== "ai_assistant") return;
+        async function startDeepProfileInChat(force = false) {
+            if (!force && activeContactId !== "ai_assistant") return;
             switchStage('deep_profile');
             if (document.getElementById("dp-messages").children.length <= 1) {
                 // Initialize deep profile conversation
@@ -1709,7 +1994,7 @@
                 try {
                     const res = await fetch('/api/chat', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ user_id: currentUserId, message: "我想探索自己的深層價值觀", state: "deep_profile" })
+                        body: JSON.stringify({ user_id: currentUserId, message: "我想探索自己的深層價值觀", state: "deep_profile", initialize: true })
                     });
                     const data = await res.json();
                     document.getElementById("dp-typing").classList.add("hidden");
@@ -1810,14 +2095,15 @@
 
         async function selectContact(id, name, bgClass, contextStr = "交朋友", is_locked = false) {
             clearAyueProgressBubble();
+            clearMatchSearchProcessBubble();
+            matchStatusRequestVersion += 1;
+            matchStatusFailureCount = 0;
             activeContactId = id;
             dateCoordinationSignature = "";
             activeDateCoordinationId = null;
             dateCoordinationDraftDirty = false;
             clearMention();
             closeMediatorPrivatePanel();
-            const progressCard = document.getElementById("match-progress-card");
-            progressCard.classList.toggle("hidden", id !== "ai_assistant");
             document.getElementById("match-readiness-status").classList.toggle(
                 "hidden", id !== "ai_assistant"
             );
@@ -1941,6 +2227,16 @@
                 state.append(title, detail, retry);
                 cm.appendChild(state);
             }
+        }
+
+        async function exitAssessmentFromUi(state) {
+            try {
+                await fetch('/api/chat/reset', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({user_id: currentUserId, state})
+                });
+            } catch (e) { }
+            switchStage('messenger');
         }
 
         async function updateProfileLocation() {
@@ -2471,8 +2767,76 @@
             card.appendChild(actions);
         }
 
+        function appendGiphyMessage(container, text, messageData = {}) {
+            if (!container || messageData.message_type !== "gif") return false;
+            const media = messageData.metadata?.media || {};
+            const candidateUrl = String(media.preview_url || media.url || "");
+            let safeUrl = "";
+            try {
+                const parsed = new URL(candidateUrl);
+                const host = parsed.hostname.toLowerCase();
+                if (parsed.protocol === "https:" && (host === "giphy.com" || host.endsWith(".giphy.com"))) {
+                    safeUrl = parsed.href;
+                }
+            } catch (_) { }
+            if (!safeUrl) return false;
+            const card = document.createElement("div");
+            card.className = "gif-message-card fade-in";
+            const speaker = document.createElement("div");
+            speaker.className = "text-[10px] font-bold text-[#a96749] mb-1";
+            speaker.textContent = "阿月";
+            const image = document.createElement("img");
+            image.src = safeUrl;
+            image.alt = String(media.alt_text || "阿月送上的 GIF");
+            image.loading = "lazy";
+            image.decoding = "async";
+            const caption = document.createElement("div");
+            caption.className = "gif-message-caption";
+            const copy = document.createElement("span");
+            copy.textContent = text || "太好了～快去和對方聊聊吧！";
+            const provider = document.createElement("span");
+            provider.className = "gif-message-provider";
+            provider.textContent = "via GIPHY";
+            caption.append(copy, provider);
+            image.addEventListener("error", () => {
+                image.remove();
+                provider.textContent = "GIF 暫時載入不了";
+            }, {once: true});
+            card.append(speaker, image, caption);
+            container.appendChild(card);
+            container.scrollTop = container.scrollHeight;
+            return true;
+        }
+
+        function appendMessageText(container, text, mentionLabels = []) {
+            const labels = Array.isArray(mentionLabels)
+                ? [...new Set(mentionLabels.map(label => String(label || "").trim()).filter(Boolean))]
+                : [];
+            if (!labels.length) {
+                container.textContent = text;
+                return;
+            }
+            const escaped = labels.sort((a, b) => b.length - a.length)
+                .map(label => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+            const parts = String(text || "").split(new RegExp(`(@(?:${escaped.join("|")}))`, "g"));
+            parts.forEach(part => {
+                const label = part.startsWith("@") ? part.slice(1) : "";
+                if (labels.includes(label)) {
+                    const mention = document.createElement("span");
+                    mention.className = "inline-mention";
+                    mention.textContent = part;
+                    container.appendChild(mention);
+                } else if (part) {
+                    container.appendChild(document.createTextNode(part));
+                }
+            });
+        }
+
         function appendRoomMessage(text, isUser, messageData = {}) {
             const cm = document.getElementById("room-messages");
+            if (!isUser && messageData.message_type === "gif") {
+                if (appendGiphyMessage(cm, text, messageData)) return;
+            }
             if (!isUser && messageData.message_type === "mediator_card") {
                 const metadata = messageData.metadata || {};
                 if (["date_coordination_invite", "date_coordination_form", "date_coordination_success", "date_coordination_cancelled"].includes(metadata.event_type)) {
@@ -2509,11 +2873,12 @@
                 const body = document.createElement("div");
                 body.className = "text-sm leading-relaxed whitespace-pre-wrap";
                 if (isProposal && proposal) {
+                    body.classList.add("match-proposal-copy");
                     const isReceiver = metadata.proposal_role === "receiver";
                     const reason = proposal.viewer_reason || (isReceiver ? proposal.receiver_reason : proposal.recommendation_reason);
                     const fallback = isReceiver
-                        ? `欸，@${candidateId} 想認識你，我先來問你本人。`
-                        : `欸，我一看到 @${candidateId} 就想到你。`;
+                        ? "欸，有位人選想認識你，我先來問你本人。"
+                        : "欸，我找到一位可能適合你的人，想先問問你的感覺。";
                     body.textContent = reason || fallback;
                 } else {
                     body.textContent = text;
@@ -2621,8 +2986,12 @@ if (metadata.event_type === "date_coordination_form") {
 
             const div = document.createElement("div");
             div.className = `chat-bubble ${isUser ? 'bubble-user' : 'bubble-other'} fade-in whitespace-pre-wrap`;
-            div.innerText = text;
-            const sources = !isUser ? (messageData.metadata || {}).sources : [];
+            appendMessageText(div, text, isUser ? (messageData.metadata || {}).mention_labels : []);
+            const placeCards = !isUser ? ((messageData.metadata || {}).place_cards || []) : [];
+            const placeUrls = new Set(Array.isArray(placeCards) ? placeCards.map(card => String(card?.map_url || "")) : []);
+            const sources = !isUser && Array.isArray((messageData.metadata || {}).sources)
+                ? (messageData.metadata || {}).sources.filter(source => !placeUrls.has(String(source?.url || "")))
+                : [];
             if (Array.isArray(sources) && sources.length) {
                 const sourceList = document.createElement("div");
                 sourceList.className = "mt-3 pt-2 border-t border-white/20 flex flex-col gap-1 text-xs";
@@ -2644,27 +3013,23 @@ if (metadata.event_type === "date_coordination_form") {
                 });
                 if (sourceList.childElementCount > 1) div.appendChild(sourceList);
             }
+            if (!isUser) appendPlaceCards(div, placeCards);
             cm.appendChild(div);
             cm.scrollTop = cm.scrollHeight;
         }
 
-        function appendContextNotice(kind) {
+        function appendContextConfirmationNotice() {
             const cm = document.getElementById("room-messages");
             const notice = document.createElement("div");
             notice.className = "self-center text-xs bg-[#fff3e9] border border-[#e7c9b7] px-3 py-2 flex gap-2 items-center";
-            notice.append(document.createTextNode(kind === "changed" ? "近期情境已更新" : "這段要記成近期情境嗎？"));
+            notice.append(document.createTextNode("這段要記成近期情境嗎？"));
             const btn = document.createElement("button");
             btn.type = "button";
-            btn.textContent = kind === "changed" ? "復原" : "幫我更新";
+            btn.textContent = "幫我更新";
             btn.onclick = async () => {
-                if (kind === "changed") {
-                    await fetch('/api/context/undo', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({user_id:currentUserId})});
-                    notice.textContent = "已復原近期情境";
-                } else {
-                    document.getElementById("room-input").value = "幫我更新近況，沿用剛剛說的內容";
-                    document.getElementById("room-form").requestSubmit();
-                    notice.remove();
-                }
+                document.getElementById("room-input").value = "幫我更新近況，沿用剛剛說的內容";
+                document.getElementById("room-form").requestSubmit();
+                notice.remove();
             };
             notice.appendChild(btn);
             cm.appendChild(notice);
@@ -2684,10 +3049,6 @@ if (metadata.event_type === "date_coordination_form") {
             if (whisperCollapseTimer) clearTimeout(whisperCollapseTimer);
             whisperCollapseTimer = null;
             document.getElementById("mediator-private-trigger").classList.remove("whisper-collapsed");
-            if (panel.classList.contains("hidden")) {
-                previousRelationshipQuizStatus = null;
-                relationshipQuizExpanded = false;
-            }
             document.getElementById("mediator-private-context").textContent = "關於 " + activeContactId + "，只有你看得到";
             panel.classList.remove("hidden");
             panel.classList.add("flex");
@@ -2704,7 +3065,6 @@ if (metadata.event_type === "date_coordination_form") {
                 const data = await res.json();
                 container.innerHTML = "";
                 (data.messages || []).forEach(message => appendPrivateMessage(message.content, message.sender_id === currentUserId, message));
-                await loadRelationshipFun();
             } catch (e) {
                 container.innerHTML = '<div class="text-xs text-red-500">暫時找不到阿月。</div>';
             }
@@ -2719,17 +3079,16 @@ if (metadata.event_type === "date_coordination_form") {
 
         function appendPrivateMessage(text, isUser, messageData = {}) {
             const container = document.getElementById("mediator-private-messages");
+            if (!isUser && appendGiphyMessage(container, text, messageData)) return;
             const bubble = document.createElement("div");
             bubble.className = "chat-bubble " + (isUser ? 'bubble-user' : 'bubble-other') + " text-sm";
             if (messageData.timestamp) {
                 bubble.dataset.timestamp = messageData.timestamp;
             }
-            const eventType = messageData.event_type || (messageData.metadata && messageData.metadata.event_type);
-            if (!isUser && eventType && eventType !== "text") {
+            if (!isUser) {
                 const label = document.createElement("div");
                 label.className = "text-[10px] font-bold text-[#a96749] mb-1";
-                label.textContent = ["feedback_request", "probe_question"].includes(eventType)
-                    ? "阿月正在探口風" : eventType === "probe_result" ? "阿月帶回消息" : "阿月助攻進度";
+                label.textContent = "阿月";
                 bubble.appendChild(label);
             }
             const body = document.createElement("div");
@@ -2995,9 +3354,17 @@ if (metadata.event_type === "date_coordination_form") {
             await sendPrivateMediatorMessage(message);
         });
 
+        function syncMentionIds() {
+            const input = document.getElementById("room-input");
+            mentionedOtherIds = [...input.querySelectorAll("[data-mention-id]")]
+                .map(node => node.dataset.mentionId)
+                .filter((id, index, all) => id && all.indexOf(id) === index)
+                .slice(0, 3);
+        }
+
         function clearMention() {
             mentionedOtherIds = [];
-            renderMentionChips();
+            document.getElementById("mention-menu").classList.add("hidden");
         }
 
         function mentionLabel(otherId) {
@@ -3005,39 +3372,50 @@ if (metadata.event_type === "date_coordination_form") {
             return (contact && contact.name) ? contact.name : "對方";
         }
 
+        let activeMentionRange = null;
+
+        function mentionQueryAtCaret(input) {
+            const selection = window.getSelection();
+            if (!selection || !selection.rangeCount || !input.contains(selection.anchorNode)) return null;
+            const range = selection.getRangeAt(0).cloneRange();
+            range.collapse(true);
+            // A caret can sit on the editable container after clicking beside a
+            // mention token. Only build a replacement range inside real text.
+            if (range.endContainer.nodeType !== Node.TEXT_NODE) return null;
+            const prefix = range.cloneRange();
+            prefix.selectNodeContents(input);
+            prefix.setEnd(range.endContainer, range.endOffset);
+            const text = prefix.toString();
+            const match = text.match(/(^|\s)@([^\s@]*)$/);
+            if (!match) return null;
+            const token = document.createRange();
+            token.setStart(range.endContainer, Math.max(0, range.endOffset - match[0].length + match[1].length));
+            token.setEnd(range.endContainer, range.endOffset);
+            return {query: match[2].toLowerCase(), range: token};
+        }
+
         function chooseMention(contact) {
-            if (!mentionedOtherIds.includes(contact.id)) mentionedOtherIds.push(contact.id);
-            renderMentionChips();
-            document.getElementById("mention-menu").classList.add("hidden");
+            if (!activeMentionRange || mentionedOtherIds.includes(contact.id) || mentionedOtherIds.length >= 3) return;
             const input = document.getElementById("room-input");
-            input.value = input.value.replace(/(^|\s)@[^\s]*$/, "$1");
+            const token = document.createElement("span");
+            token.className = "inline-mention";
+            token.contentEditable = "false";
+            token.dataset.mentionId = contact.id;
+            token.textContent = "@" + (contact.name || "對方");
+            activeMentionRange.deleteContents();
+            activeMentionRange.insertNode(token);
+            const spacer = document.createTextNode(" ");
+            token.after(spacer);
+            const selection = window.getSelection();
+            const tail = document.createRange();
+            tail.setStartAfter(spacer);
+            tail.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(tail);
+            syncMentionIds();
+            activeMentionRange = null;
+            document.getElementById("mention-menu").classList.add("hidden");
             input.focus();
-        }
-
-        function removeMention(otherId) {
-            mentionedOtherIds = mentionedOtherIds.filter(id => id !== otherId);
-            renderMentionChips();
-        }
-
-        function renderMentionChips() {
-            const row = document.getElementById("mention-chip-row");
-            row.innerHTML = "";
-            row.classList.toggle("hidden", mentionedOtherIds.length === 0);
-            row.classList.toggle("flex", mentionedOtherIds.length > 0);
-            mentionedOtherIds.forEach(otherId => {
-                const chip = document.createElement("span");
-                chip.className = "mention-chip inline-flex items-center gap-1";
-                const label = mentionLabel(otherId);
-                chip.append(document.createTextNode("@" + label));
-                const remove = document.createElement("button");
-                remove.type = "button";
-                remove.className = "px-1 py-0 text-xs";
-                remove.textContent = "×";
-                remove.setAttribute("aria-label", "移除 @" + label);
-                remove.onclick = () => removeMention(otherId);
-                chip.appendChild(remove);
-                row.appendChild(chip);
-            });
         }
 
         function refreshMentionMenu() {
@@ -3047,12 +3425,13 @@ if (metadata.event_type === "date_coordination_form") {
                 menu.classList.add("hidden");
                 return;
             }
-            const match = input.value.match(/(^|\s)@([^\s]*)$/);
-            if (!match) {
+            const mention = mentionQueryAtCaret(input);
+            if (!mention) {
                 menu.classList.add("hidden");
                 return;
             }
-            const query = match[2].toLowerCase();
+            activeMentionRange = mention.range;
+            const query = mention.query;
             const options = acceptedContacts.filter(c =>
                 ((c.name || "").toLowerCase().includes(query) || c.id.toLowerCase().includes(query))
                 && !mentionedOtherIds.includes(c.id)
@@ -3069,7 +3448,27 @@ if (metadata.event_type === "date_coordination_form") {
             menu.classList.toggle("hidden", options.length === 0);
         }
 
-        document.getElementById("room-input").addEventListener("input", refreshMentionMenu);
+        document.getElementById("room-input").addEventListener("input", () => {
+            syncMentionIds();
+            refreshMentionMenu();
+        });
+
+        document.getElementById("room-input").addEventListener("keydown", event => {
+            const menu = document.getElementById("mention-menu");
+            if (event.key === "Escape") {
+                activeMentionRange = null;
+                menu.classList.add("hidden");
+                return;
+            }
+            if (event.key !== "Enter" || event.shiftKey) return;
+            event.preventDefault();
+            const firstOption = !menu.classList.contains("hidden") ? menu.querySelector("button") : null;
+            if (firstOption) {
+                firstOption.click();
+                return;
+            }
+            document.getElementById("room-form").requestSubmit();
+        });
 
         function clearAyueProgressBubble() {
             if (ayueProgressTimer) window.clearTimeout(ayueProgressTimer);
@@ -3139,21 +3538,34 @@ if (metadata.event_type === "date_coordination_form") {
             return finalResponse;
         }
 
-        async function pollRecentContextUpdate() {
+        async function pollRecentContextUpdate(runKey, contactId) {
             const baselineRevision = currentContextRevision;
-            for (const delay of [1000, 2000, 4000, 8000]) {
+            for (const delay of [500, 1000, 2000, 4000, 8000]) {
                 await new Promise(resolve => setTimeout(resolve, delay));
+                if (activeContactId !== contactId) return;
                 try {
-                    const res = await fetch(`/api/profile/recent-context/status?user_id=${encodeURIComponent(currentUserId)}`);
+                    const res = await fetch(
+                        `/api/profile/recent-context/status?user_id=${encodeURIComponent(currentUserId)}&run_key=${encodeURIComponent(runKey)}`
+                    );
                     const data = await res.json().catch(() => ({}));
-                    if (!res.ok || Number(data.revision || 0) <= baselineRevision) continue;
-                    currentContextRevision = Number(data.revision || 0);
-                    currentUserContext = data.current_context || "";
-                    const contextEl = document.getElementById("dropdown-context");
-                    if (contextEl) contextEl.textContent = currentUserContext || "尚無目前情境";
-                    if (typeof refreshDemoToolStatus === "function") refreshDemoToolStatus();
-                    appendContextNotice("changed");
-                    return;
+                    if (!res.ok) continue;
+                    const processState = data.process || {};
+                    if (processState.state === "completed") {
+                        if (
+                            processState.outcome === "updated"
+                            && Number(data.revision || 0) > baselineRevision
+                        ) {
+                            currentContextRevision = Number(data.revision || 0);
+                            currentUserContext = data.current_context || "";
+                            const contextEl = document.getElementById("dropdown-context");
+                            if (contextEl) contextEl.textContent = currentUserContext || "尚無目前情境";
+                            if (typeof refreshDemoToolStatus === "function") refreshDemoToolStatus();
+                        }
+                        return;
+                    }
+                    if (["timeout", "superseded", "unavailable"].includes(processState.state)) {
+                        return;
+                    }
                 } catch (error) {
                     // The background profile write remains independent from UI polling.
                 }
@@ -3169,17 +3581,21 @@ if (metadata.event_type === "date_coordination_form") {
             const inp = document.getElementById("room-input");
             const msg = inp.value.trim();
             if (!msg) return;
+            syncMentionIds();
             const outgoingMentions = [...mentionedOtherIds];
-            const displayMsg = `${outgoingMentions.map(id => "@" + mentionLabel(id)).join(" ")} ${msg}`.trim();
+            const displayMsg = msg;
             inp.value = "";
-            appendRoomMessage(displayMsg, true);
+            appendRoomMessage(displayMsg, true, {metadata: {
+                mention_labels: outgoingMentions.map(mentionLabel),
+            }});
 
             if (isPublicAyue) publicAyueSending = true;
             if (!isPublicAyue) document.getElementById("room-typing").classList.remove("hidden");
             try {
                 const payload = {
                     user_id: currentUserId, contact_id: requestContactId, message: msg,
-                    mentioned_other_ids: isPublicAyue ? outgoingMentions : []
+                    mentioned_other_ids: isPublicAyue ? outgoingMentions : [],
+                    mentions_inline: isPublicAyue && outgoingMentions.length > 0,
                 };
                 let res = null;
                 let data = null;
@@ -3196,7 +3612,10 @@ if (metadata.event_type === "date_coordination_form") {
                 clearMention();
                 document.getElementById("room-typing").classList.add("hidden");
                 if (res.ok) {
-                    appendRoomMessage(data.reply, false, {metadata: {sources: data.sources || []}});
+                    appendRoomMessage(data.reply, false, {metadata: {
+                        sources: data.sources || [], place_cards: data.place_cards || [],
+                    }});
+                    if (isPublicAyue) refreshMatchStatus();
                     if (data.mediator_card) {
                         const meta = data.mediator_card.metadata || {};
                         if (meta.match_id) window.activeMatchProposalId = meta.match_id;
@@ -3215,9 +3634,16 @@ if (metadata.event_type === "date_coordination_form") {
                             }
                         });
                     }
-                    if (activeContactId === "ai_assistant" && data.context_changed) appendContextNotice("changed");
-                    else if (activeContactId === "ai_assistant" && data.context_confirmation_needed) appendContextNotice("confirm");
-                    if (activeContactId === "ai_assistant" && data.profile_update_pending) pollRecentContextUpdate();
+                    if (activeContactId === "ai_assistant" && data.context_confirmation_needed) {
+                        appendContextConfirmationNotice();
+                    }
+                    if (
+                        activeContactId === "ai_assistant"
+                        && data.profile_update_pending
+                        && data.profile_process_run_key
+                    ) {
+                        pollRecentContextUpdate(data.profile_process_run_key, requestContactId);
+                    }
                     if (activeContactId === "ai_assistant" && (
                         Number.isFinite(data.match_readiness_score) || data.match_readiness_state
                     )) {
@@ -3321,6 +3747,8 @@ if (metadata.event_type === "date_coordination_form") {
                 const res = await fetch(`/api/match/state?user_id=${encodeURIComponent(currentUserId)}&match_id=${encodeURIComponent(matchId)}&_t=${Date.now()}`);
                 const state = await res.json().catch(() => ({}));
                 if (!res.ok) throw new Error(state.detail || "狀態讀取失敗");
+                const currentCopy = actions.closest(".mediator-card")?.querySelector(".match-proposal-copy");
+                if (currentCopy && state.viewer_reason) currentCopy.textContent = state.viewer_reason;
                 renderProposalActions(matchId, actions, state, proposal, candidateId);
             } catch (err) {
                 actions.innerHTML = '<span class="text-xs text-gray-500">暫時無法確認狀態，操作按鈕已停用。</span>';
@@ -3390,139 +3818,186 @@ if (metadata.event_type === "date_coordination_form") {
                 if (err.code !== "MATCH_STATE_SYNCED" && actions) actions.insertAdjacentHTML("beforeend", `<span class="text-xs text-red-300">${err.message}</span>`);
             }
         }
-        // --- Matching & Notifications ---
-        const matchStageView = {
-            idle: ["還沒開始找", "跟阿月說說近況，或直接請她找下一位", 0],
-            awaiting_confirmation: ["等你點頭", "阿月還沒開始找；確認後才會翻名單", 5],
-            queued: ["先鎖定方向", "阿月正在抓你這次想要的氛圍", 10],
-            searching: ["開始翻名單", "先排除已配過、剛婉拒和不適合的人", 20],
-            loading_profile: ["整理近期需求", "把你的活動、時間和偏好串起來", 30],
-            vector_search: ["找可能合拍的人", "先從近期狀態接近的人開始看", 50],
-            graph_check: ["查圖譜地雷", "避開你明確不喜歡的特質", 70],
-            writing_reason: ["寫牽線理由", "阿月正在把推薦講得像人話", 88],
-            waiting_user: ["找到一位了", "等你決定要不要請阿月牽線", 100],
-            found: ["找到一位了", "推薦即將送到聊天室", 100],
-            waiting_other: ["已替你問對方", "現在等對方本人回覆", 100],
-            incoming_decision: ["有人想認識你", "阿月沒有替你答應，點這裡看看", 100],
-            completed: ["雙方都點頭了", "聊天室已經開好", 100],
-            no_candidates: ["這輪沒有新人選", "阿月沒有硬湊，之後可再試", 100],
-            failed: ["媒合暫時失敗", "錯誤已留下，可再試一次", 100],
-            cancelled: ["這條線已收起", "想找下一位時可以直接說", 100]
+        // Durable match-search jobs use one ephemeral bubble in the message flow.
+        // It is never persisted, pinned, or moved after newer messages arrive.
+        const matchSearchProcessText = {
+            loading_profile: "先把你的近況整理好",
+            vector_search: "阿月正在翻翻名單",
+            graph_check: "看看你們是不是真的合拍",
+            writing_reason: "把這次介紹整理得可愛一點"
         };
+        const matchSearchProcessDescription = {
+            loading_profile: "我先想想你最近在意什麼、想和誰一起做什麼～",
+            vector_search: "努力看看誰可能跟你聊得來，不能只是隨便抓一個人 👀",
+            graph_check: "再確認重要偏好和互動節奏，阿月牽線也要負責任。",
+            writing_reason: "人選好像出現了！再等我一下下，我正在好好介紹你們 ✦"
+        };
+        const matchSearchProcessOrder = [
+            "loading_profile", "vector_search", "graph_check", "writing_reason"
+        ];
+
+        function clearMatchSearchProcessBubble() {
+            document.getElementById("match-search-process-bubble")?.remove();
+            matchSearchCollapsed = false;
+        }
+
+        function renderMatchSearchProcess(search) {
+            const active = activeContactId === "ai_assistant"
+                && ["queued", "running"].includes(search?.status);
+            if (!active) {
+                clearMatchSearchProcessBubble();
+                return;
+            }
+            const step = matchSearchProcessText[search?.step] || "阿月正在努力幫你找～";
+            const stepIndex = Math.max(0, matchSearchProcessOrder.indexOf(search?.step));
+            const rawPercent = Number(search?.progress_percent || 0);
+            const progressPercent = Math.max(0, Math.min(100, Number.isFinite(rawPercent) ? rawPercent : 0));
+            const messages = document.getElementById("room-messages");
+            if (!messages) return;
+            let bubble = document.getElementById("match-search-process-bubble");
+            const isNewBubble = !bubble;
+            if (!bubble) {
+                bubble = document.createElement("div");
+                bubble.id = "match-search-process-bubble";
+                bubble.className = "chat-bubble bubble-other match-search-process-bubble fade-in";
+                bubble.setAttribute("role", "status");
+                bubble.setAttribute("aria-live", "polite");
+            }
+            bubble.innerHTML = "";
+            bubble.classList.toggle("is-collapsed", matchSearchCollapsed);
+            const header = document.createElement("div");
+            header.className = "match-search-process-header";
+            const icon = document.createElement("div");
+            icon.className = "match-search-process-icon";
+            icon.setAttribute("aria-hidden", "true");
+            icon.textContent = "月";
+            const heading = document.createElement("div");
+            heading.className = "match-search-process-heading";
+            const kicker = document.createElement("div");
+            kicker.className = "match-search-process-kicker";
+            kicker.textContent = "阿月努力牽線中 ✦";
+            const title = document.createElement("div");
+            title.className = "match-search-process-title";
+            title.textContent = step;
+            heading.append(kicker, title);
+            const live = document.createElement("div");
+            live.className = "match-search-live";
+            const liveDot = document.createElement("span");
+            liveDot.className = "match-search-live-dot";
+            liveDot.setAttribute("aria-hidden", "true");
+            live.append(liveDot, document.createTextNode("努力中"));
+            const collapse = document.createElement("button");
+            collapse.type = "button";
+            collapse.className = "match-search-collapse";
+            collapse.textContent = matchSearchCollapsed ? "展開" : "縮小";
+            collapse.setAttribute("aria-expanded", String(!matchSearchCollapsed));
+            collapse.onclick = () => {
+                matchSearchCollapsed = !matchSearchCollapsed;
+                bubble.classList.toggle("is-collapsed", matchSearchCollapsed);
+                collapse.textContent = matchSearchCollapsed ? "展開" : "縮小";
+                collapse.setAttribute("aria-expanded", String(!matchSearchCollapsed));
+            };
+            header.append(icon, heading, live, collapse);
+            const track = document.createElement("div");
+            track.className = "match-search-process-track";
+            track.setAttribute("role", "progressbar");
+            track.setAttribute("aria-label", "牽線搜尋進度");
+            track.setAttribute("aria-valuemin", "0");
+            track.setAttribute("aria-valuemax", "100");
+            track.setAttribute("aria-valuenow", String(progressPercent));
+            const bar = document.createElement("div");
+            bar.className = "match-search-process-bar";
+            bar.style.width = `${progressPercent}%`;
+            track.appendChild(bar);
+            const meta = document.createElement("div");
+            meta.className = "match-search-process-meta";
+            const stepLabel = document.createElement("span");
+            stepLabel.textContent = `步驟 ${stepIndex + 1} / ${matchSearchProcessOrder.length}`;
+            const percentLabel = document.createElement("span");
+            percentLabel.textContent = `${progressPercent}%`;
+            meta.append(stepLabel, percentLabel);
+            const description = document.createElement("div");
+            description.className = "match-search-process-detail";
+            description.textContent = matchSearchProcessDescription[search?.step]
+                || "通常約需要 1–3 分鐘。你可以繼續跟我聊天，我會在背景努力找。";
+            bubble.append(header, track, meta, description);
+            if (isNewBubble) {
+                messages.appendChild(bubble);
+                bubble.scrollIntoView({block: "nearest"});
+            }
+        }
+
+        function ensureMatchSearchPolling(immediate = false) {
+            if (immediate) matchStatusFailureCount = 0;
+            if (!matchStatusTimer) {
+                matchStatusTimer = setInterval(refreshMatchStatus, 1000);
+            }
+            if (immediate) setTimeout(refreshMatchStatus, 100);
+        }
 
         async function refreshMatchStatus() {
             if (!currentUserId) return;
+            const requestedUserId = currentUserId;
+            const requestVersion = ++matchStatusRequestVersion;
             try {
-                const response = await fetch(`/api/match/status?user_id=${encodeURIComponent(currentUserId)}&_t=${Date.now()}`);
+                const response = await fetch(`/api/match/status?user_id=${encodeURIComponent(requestedUserId)}&_t=${Date.now()}`);
+                if (!response.ok) throw new Error("match_status_unavailable");
                 const data = await response.json();
-                const search = data.match_search || {status: "idle"};
-                const stage = search.status || "idle";
-                const view = matchStageView[stage] || [stage, "阿月正在處理", 35];
-                const card = document.getElementById("match-progress-card");
-                const shouldShow = activeContactId === "ai_assistant";
-                card.classList.toggle("hidden", !shouldShow);
-                currentActiveProposalCard = data.active_proposal_card || null;
-                syncExistingProposalCard(currentActiveProposalCard, data.live_match || data.active_proposal || null);
-                card.classList.toggle("has-proposal", Boolean(currentActiveProposalCard));
-                card.setAttribute(
-                    "aria-label",
-                    currentActiveProposalCard ? "開啟阿月牽線提案" : "媒合進度"
-                );
-                document.getElementById("match-progress-title").textContent = view[0];
-                document.getElementById("match-progress-detail").textContent =
-                    search.error ? `${view[1]}：${search.error}` : view[1];
-                document.getElementById("match-progress-state").textContent =
-                    ["waiting_user", "waiting_other", "incoming_decision", "found"].includes(stage) && search.other_id
-                        ? `@${search.other_id}` : "";
-                document.getElementById("match-progress-bar").style.width = view[2] + "%";
-                document.getElementById("match-confirm-actions").classList.toggle(
-                    "hidden", stage !== "awaiting_confirmation"
-                );
-                const activeStages = ["queued", "searching", "loading_profile", "vector_search", "graph_check", "writing_reason"];
-                if (activeStages.includes(stage)) {
-                    if (!matchStatusTimer) {
-                        matchStatusTimer = setInterval(refreshMatchStatus, 1000);
-                        setTimeout(refreshMatchStatus, 500);
-                    }
+                if (requestVersion !== matchStatusRequestVersion || requestedUserId !== currentUserId) return;
+                matchStatusFailureCount = 0;
+                const search = data.search || data.match_search || {status: "idle"};
+                renderMatchSearchProcess(search);
+                if (["queued", "running"].includes(search.status)) {
+                    ensureMatchSearchPolling(false);
                 } else if (matchStatusTimer) {
                     clearInterval(matchStatusTimer);
                     matchStatusTimer = null;
                 }
-            } catch (e) {}
-        }
-
-        function openActiveProposalCard() {
-            const proposal = currentActiveProposalCard;
-            if (!proposal || activeContactId !== "ai_assistant") return;
-            const existing = document.querySelector(
-                `.mediator-card[data-match-id="${proposal.match_id}"]`
-            );
-            if (existing) {
-                existing.scrollIntoView({behavior: "smooth", block: "center"});
-                return;
-            }
-            appendRoomMessage(proposal.opening, false, {
-                message_type: "mediator_card",
-                metadata: {
-                    event_type: proposal.event_type,
-                    match_id: proposal.match_id,
-                    other_id: proposal.other_id,
-                    proposal_role: proposal.proposal_role,
-                    matches: [{
-                        match_id: proposal.match_id,
-                        matched_user_id: proposal.other_id,
-                        display_name: proposal.other_label || "對方",
-                        target_context: proposal.your_context,
-                        current_context: proposal.other_context,
-                        top_reasons: proposal.reasons || [],
-                        score_breakdown: {total: proposal.score || 0},
-                        stage: proposal.stage,
-                        recommendation_reason: proposal.recommendation_reason || "",
-                        receiver_reason: proposal.receiver_reason || "",
-                        viewer_reason: proposal.viewer_reason || ""
-                    }]
+            } catch (e) {
+                if (requestVersion !== matchStatusRequestVersion) return;
+                matchStatusFailureCount += 1;
+                if (matchStatusFailureCount >= 3) {
+                    clearMatchSearchProcessBubble();
+                    if (matchStatusTimer) clearInterval(matchStatusTimer);
+                    matchStatusTimer = null;
                 }
-            });
+            }
         }
 
         async function triggerMatch() {
             const btn = document.getElementById("btn-match");
             const oldHtml = btn.innerHTML;
-            btn.innerHTML = "阿月正在找…"; btn.disabled = true;
+            btn.innerHTML = "阿月正在確認…"; btn.disabled = true;
             try {
                 const res = await fetch('/api/match/request', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ user_id: currentUserId, source: 'explicit_next', force_new: true, confirmed: false })
                 });
-                let data = await res.json();
-                refreshMatchStatus();
+                const data = await res.json();
                 if (data.status === "awaiting_confirmation") {
-                    appendRoomMessage(data.message || "要我現在幫你翻翻名單嗎？", false);
+                    appendRoomMessage(data.message || "要我現在幫你找找看嗎？", false);
+                } else if (["queued", "already_queued", "already_searching"].includes(data.status)) {
+                    ensureMatchSearchPolling(true);
+                } else if (data.status === "already_active") {
+                    appendRoomMessage("你目前有一段配對正在進行，我先不重複開新搜尋。", false);
                 }
-                else if (data.status === "queued") appendRoomMessage("好，這次真的排進去了；有沒有找到我都會回來說。", false);
-                else if (data.status === "already_active") appendRoomMessage("手上這條線還沒確認完，先處理它，我再幫你找下一位。", false);
-                else appendRoomMessage("我已經在找了，先別連按門鈴啦。", false);
-            } catch (e) { appendRoomMessage("剛剛沒有成功排入，我晚點再試。", false); }
+                refreshMatchStatus();
+            } catch (e) {
+                appendRoomMessage("剛剛沒有成功排入搜尋；你晚點再叫我試一次。", false);
+            }
             btn.innerHTML = oldHtml; btn.disabled = false;
         }
 
         async function confirmMatchSearch() {
             const res = await fetch('/api/match/request', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    user_id: currentUserId, source: 'explicit_next',
-                    force_new: true, confirmed: true
-                })
+                body: JSON.stringify({user_id: currentUserId, source: 'explicit_next', force_new: true, confirmed: true})
             });
             const data = await res.json();
-            if (data.status === "queued") {
-                appendRoomMessage("好，我現在真的開始翻名單；有沒有找到都會回來說。", false);
-                if (!matchStatusTimer) {
-                    matchStatusTimer = setInterval(refreshMatchStatus, 1000);
-                    setTimeout(refreshMatchStatus, 500);
-                }
+            if (["queued", "already_queued", "already_searching"].includes(data.status)) {
+                ensureMatchSearchPolling(true);
             } else if (data.status === "already_active") {
-                appendRoomMessage("手上已經有一條線，我們先處理那位。", false);
+                appendRoomMessage("你目前有一段配對正在進行，我先不重複開新搜尋。", false);
             }
             refreshMatchStatus();
         }
@@ -3532,7 +4007,6 @@ if (metadata.event_type === "date_coordination_form") {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({user_id: currentUserId, source: 'explicit_next'})
             });
-            appendRoomMessage("好，那這次先不找。", false);
             refreshMatchStatus();
         }
 
@@ -3555,8 +4029,8 @@ if (metadata.event_type === "date_coordination_form") {
                         <span class="text-xs font-bold px-2 py-1 rounded-full bg-violet-500/20 text-violet-300">${contrastEmoji} ${m.contrast_label || '候選人 ' + cardLetter}</span>
                         <span id="card-status-${idx}" class="text-xs px-2 py-1 rounded-full bg-yellow-500/20 text-yellow-300">草稿中</span>
                     </div>
-                    <div class="text-xs text-gray-500 uppercase font-semibold">候選人 ID</div>
-                    <div class="font-mono text-lg font-bold text-sky-400">${m.matched_user_id}</div>
+                    <div class="text-xs text-gray-500 uppercase font-semibold">牽線人選</div>
+                    <div class="text-lg font-bold text-sky-400">對方</div>
                     <div class="text-xs text-gray-500 uppercase font-semibold mt-1">AI 推薦理由</div>
                     <p class="text-sm leading-relaxed text-gray-200 whitespace-pre-wrap flex-1">${m.recommendation_reason || '無'}</p>
                     ${m.distinctive_tags && m.distinctive_tags.length > 0 ? `<div class="text-xs text-gray-500 mt-1">${m.distinctive_tags.join('、')}</div>` : ''}
@@ -3579,7 +4053,7 @@ if (metadata.event_type === "date_coordination_form") {
                         const tr = document.createElement("tr");
                         if (isMatched) tr.className = "bg-violet-900/30";
                         tr.innerHTML = `
-                            <td class="px-4 py-3 ${isMatched ? 'font-bold text-violet-300' : ''}">${d.user_id} ${isMatched ? '<span class="text-xs ml-1 bg-violet-600 px-1 rounded text-white">Selected</span>' : ''}</td>
+                            <td class="px-4 py-3 ${isMatched ? 'font-bold text-violet-300' : ''}">人選 ${isMatched ? '<span class="text-xs ml-1 bg-violet-600 px-1 rounded text-white">Selected</span>' : ''}</td>
                             <td class="px-4 py-3 font-mono ${isMatched ? 'font-bold text-violet-300' : ''}">${d.score}%</td>
                             <td class="px-4 py-3">${d.context}</td>
                             <td class="px-4 py-3">${d.big_five_summary}</td>
@@ -3817,7 +4291,14 @@ if (metadata.event_type === "date_coordination_form") {
             if (!payload || payload.surface !== "relationship_private") return openMediatorChat();
             if (!isStageMessenger) switchStage(true);
             await loadContacts();
-            await selectContact(payload.other_id, payload.other_id, "from-orange-300 to-rose-300", "你們的配對聊天室", false);
+            const contact = acceptedContacts.find(item => item.id === payload.other_id);
+            await selectContact(
+                payload.other_id,
+                contact?.name || "對方",
+                "from-orange-300 to-rose-300",
+                contact?.context || "你們的配對聊天室",
+                false
+            );
             await openMediatorPrivatePanel();
         }
 
@@ -3835,7 +4316,8 @@ if (metadata.event_type === "date_coordination_form") {
                 const panel = document.getElementById("mediator-private-panel");
                 if (!panel.classList.contains("hidden")) openMediatorPrivatePanel();
             } else {
-                showMediatorToast("我在你和 " + payload.other_id + " 的聊天室留了話。", payload);
+                const contact = acceptedContacts.find(item => item.id === payload.other_id);
+                showMediatorToast(`我在你和${contact?.name || "對方"}的聊天室留了話。`, payload);
             }
         }
 
@@ -3860,7 +4342,7 @@ if (metadata.event_type === "date_coordination_form") {
                 if (data.notifications && data.notifications.length > 0) {
                     const first = data.notifications[0];
                     if (document.getElementById("notif-modal").classList.contains("hidden") && document.getElementById("decline-modal").classList.contains("hidden")) {
-                        showNotification(first.match_id, first.from_user, first.receiver_reason || first.reason, first.from_user_big_five || {}, first.from_user_context || "", first.distinctive_tags || first.from_user_distinctive_tags || null);
+                        showNotification(first.match_id, first.from_user || "對方", first.viewer_reason || first.receiver_reason || first.reason, first.from_user_big_five || {}, first.from_user_context || "", first.distinctive_tags || first.from_user_distinctive_tags || null);
                     }
                 }
             } catch (e) { }
@@ -3933,7 +4415,7 @@ if (metadata.event_type === "date_coordination_form") {
             activeMatchBigFive = bigFive;
             activeMatchContext = context;
             activeMatchDistinctiveTags = distinctiveTags || null;
-            document.getElementById("notif-from").innerText = fromUser;
+            document.getElementById("notif-from").innerText = "對方";
             document.getElementById("notif-reason").innerText = reason;
 
             const modal = document.getElementById("notif-modal");
@@ -3956,7 +4438,11 @@ if (metadata.event_type === "date_coordination_form") {
                 if (result.new_status === "accepted") {
                     switchStage(true);
                     await loadContacts();
-                    selectContact(activeMatchFromUser, activeMatchFromUser, "from-sky-500 to-indigo-500");
+                    if (activeMatchFromUser && activeMatchFromUser !== "對方") {
+                        selectContact(activeMatchFromUser, activeMatchFromUser, "from-sky-500 to-indigo-500");
+                    } else {
+                        selectContact("ai_assistant", "媒人阿月", "from-fuchsia-500 to-violet-500", "懂你、牽線，也幫你探口風", false);
+                    }
                 }
                 const modal = document.getElementById("notif-modal");
                 modal.classList.add("hidden");

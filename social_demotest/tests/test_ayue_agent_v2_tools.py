@@ -5,10 +5,12 @@ from services.ayue_agent.contracts import AgentTurnContext, ToolCall, TurnClockV
 from services.ayue_agent.router import generate_clarification_reply_v2, generate_final_reply_v2
 from services.ayue_agent.contracts import AgentTurnContextV2
 from services.ayue_agent.tools import (
+    _calendar_find_event,
     _counterparty_summary,
     _match_latest_outcome,
     _recent_context,
     _relationship_evidence,
+    _self_profile,
     execute_tool,
 )
 from services.ayue_agent.runtime import _reply_from_observation
@@ -102,6 +104,42 @@ class AyueAgentV2ToolTests(unittest.TestCase):
             "current_context": "近期規劃前往合掌村旅行", "revision": 7, "exists": True,
         })
 
+    def test_self_profile_summary_projects_completed_owner_fields_without_internal_ids(self):
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="room", message="我是誰",
+            user_profile={
+                "display_name": "小安", "initial_interest": "想認識願意一起看展的人",
+                "big_five": {"O": 7, "E": 6, "summary": "好奇又願意主動開話題"},
+                "deep_profile": {"values": ["真誠溝通"], "ideal_future": "有穩定自在的生活"},
+                "current_context": "最近想去駁二看展", "profile_location": {"city": "高雄市", "district": "鹽埕區"},
+                "profile_memory_preview": [
+                    {"label": "獨立電影", "stance": "like", "owner_user_id": "owner"},
+                    {"label": "抽菸", "stance": "avoid"},
+                    {"label": "seed_user_08", "stance": "like"},
+                ],
+            },
+        )
+        result = _self_profile(ctx)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["initial_interest"], "想認識願意一起看展的人")
+        self.assertEqual(result.data["personality_summary"], "好奇又願意主動開話題")
+        self.assertEqual(result.data["values"], ["真誠溝通"])
+        self.assertEqual(result.data["location"], "高雄市鹽埕區")
+        self.assertEqual(result.data["preferences"], ["喜歡獨立電影", "避免抽菸"])
+        self.assertNotIn("seed_user_08", str(result.data))
+
+    def test_self_profile_summary_returns_at_most_eight_safe_durable_preferences(self):
+        preferences = [
+            {"label": f"偏好{i}", "stance": "like", "evidence": "不得輸出"}
+            for i in range(10)
+        ]
+        result = _self_profile(AgentTurnContext(
+            user_id="owner", room_id="room", message="你記得我哪些偏好",
+            user_profile={"profile_memory_preview": preferences},
+        ))
+        self.assertEqual(len(result.data["preferences"]), 8)
+        self.assertNotIn("evidence", str(result.data))
+
     def test_counterparty_summary_is_available_through_registry_executor(self):
         match = {
             "from_user": "owner", "to_user": "other", "status": "accepted",
@@ -140,6 +178,129 @@ class AyueAgentV2ToolTests(unittest.TestCase):
         self.assertEqual(result.data["verified_common_ground"], ["你們近期都提到京都賞櫻"])
         self.assertNotIn("seed_user_08", str(result.data))
         self.assertNotIn("不應公開", str(result.data))
+
+    def test_pending_counterparty_keeps_identity_anonymous(self):
+        match = {
+            "from_user": "owner", "to_user": "other", "status": "pending",
+            "reason_items": [{"kind": "shared_value", "text": "小樂也重視坦誠溝通"}],
+        }
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="他是誰")
+        with patch("services.ayue_agent.tools.get_counterparty_match_source", return_value={
+            "ambiguous": False, "match": match,
+        }), patch("services.ayue_agent.public_relationship_projection.profiles_coll.find_one", return_value={
+            "display_name": "小樂", "initial_interest": "小樂想找人旅行",
+        }):
+            result = _counterparty_summary(ctx)
+        self.assertEqual(result.data["display_name"], "對方")
+        self.assertEqual(result.data["initial_interest"], "對方想找人旅行")
+        self.assertNotIn("小樂", str(result.data))
+
+    def test_named_shared_calendar_event_resolves_its_verified_companion_not_latest_match(self):
+        event = {
+            "source_type": "date", "participants": ["owner", "small-wen"],
+            "title": "與對方的約會", "activity": "看電影", "timezone": "Asia/Taipei",
+            "start_at": __import__("datetime").datetime(2026, 8, 5, 11, 0),
+            "end_at": __import__("datetime").datetime(2026, 8, 5, 13, 0),
+        }
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="看電影是跟誰去")
+        with patch("services.ayue_agent.tools.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.find_owned_events", return_value=[event]), \
+             patch("services.ayue_agent.tools.matches_coll.find_one", return_value={
+                 "from_user": "owner", "to_user": "small-wen", "status": "accepted",
+             }), patch("services.ayue_agent.public_relationship_projection.profiles_coll.find_one", return_value={
+                 "display_name": "小玟",
+             }):
+            result = _calendar_find_event(ctx, {"event_hint": "看電影", "date_hint": ""})
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["companion_display_name"], "小玟")
+        self.assertNotIn("small-wen", str(result.data))
+
+    def test_personal_calendar_event_does_not_guess_a_companion(self):
+        event = {
+            "source_type": "personal", "participants": ["owner"], "title": "看電影",
+            "timezone": "Asia/Taipei", "start_at": __import__("datetime").datetime(2026, 8, 5, 11, 0),
+            "end_at": __import__("datetime").datetime(2026, 8, 5, 13, 0),
+        }
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="看電影是跟誰去")
+        with patch("services.ayue_agent.tools.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.find_owned_events", return_value=[event]):
+            result = _calendar_find_event(ctx, {"event_hint": "看電影", "date_hint": ""})
+        self.assertFalse(result.data["companion_known"])
+        self.assertEqual(result.data["event_kind"], "personal")
+
+    def test_calendar_find_resolves_a_named_accepted_contact_without_a_date(self):
+        event = {
+            "source_type": "date", "participants": ["owner", "small-kui"], "title": "與對方的約會",
+            "activity": "看電影", "timezone": "Asia/Taipei",
+            "start_at": __import__("datetime").datetime(2026, 8, 11, 11, 0),
+            "end_at": __import__("datetime").datetime(2026, 8, 11, 13, 0),
+        }
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="我跟小葵的約會是什麼時候")
+        with patch("services.ayue_agent.tools.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.accepted_contact_ids_by_display_name", return_value=["small-kui"]), \
+             patch("services.ayue_agent.tools.find_owned_events", return_value=[event]) as find_events, \
+             patch("services.ayue_agent.tools.matches_coll.find_one", return_value={
+                 "from_user": "owner", "to_user": "small-kui",
+             }), patch("services.ayue_agent.tools._display_name", return_value="小葵"):
+            result = _calendar_find_event(ctx, {
+                "event_hint": "約會", "date_hint": "", "companion_hint": "小葵",
+            })
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["date"], "2026-08-11")
+        self.assertEqual(result.data["companion_display_name"], "小葵")
+        self.assertEqual(find_events.call_args.kwargs["companion_user_id"], "small-kui")
+        fallback = _reply_from_observation("calendar.find_my_event", result.data)
+        self.assertIn("2026-08-11", fallback)
+        self.assertIn(f"{result.data['start_time']}–{result.data['end_time']}", fallback)
+        self.assertIn("看電影", fallback)
+        self.assertIn("小葵", fallback)
+
+    def test_same_display_name_fails_closed_without_reading_calendar_contents(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="我跟小葵看電影是什麼時候")
+        with patch("services.ayue_agent.tools.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.accepted_contact_ids_by_display_name", return_value=["contact-a", "contact-b"]), \
+             patch("services.ayue_agent.tools.find_owned_events") as find_events:
+            result = _calendar_find_event(ctx, {
+                "event_hint": "看電影", "date_hint": "", "companion_hint": "小葵",
+            })
+        self.assertEqual(result.data["status"], "ambiguous")
+        self.assertEqual(result.data["reason_code"], "companion_ambiguous")
+        find_events.assert_not_called()
+
+    def test_ambiguous_calendar_result_returns_at_most_three_safe_candidates(self):
+        events = [{
+            "source_type": "personal", "participants": ["owner"], "title": f"看電影 {index}",
+            "timezone": "Asia/Taipei",
+            "start_at": __import__("datetime").datetime(2026, 8, 5 + index, 11, 0),
+            "end_at": __import__("datetime").datetime(2026, 8, 5 + index, 13, 0),
+        } for index in range(5)]
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="我的電影行程")
+        with patch("services.ayue_agent.tools.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.find_owned_events", return_value=events):
+            result = _calendar_find_event(ctx, {"event_hint": "看電影", "date_hint": ""})
+        self.assertEqual(result.data["status"], "ambiguous")
+        self.assertEqual(len(result.data["candidates"]), 3)
+        self.assertNotIn("participants", str(result.data))
+
+    def test_unresolved_or_ambiguous_companion_returns_a_specific_clarification_reason(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="我跟小葵的約會呢")
+        with patch("services.ayue_agent.tools.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.accepted_contact_ids_by_display_name", return_value=[]):
+            missing = _calendar_find_event(ctx, {
+                "event_hint": "約會", "date_hint": "", "companion_hint": "小葵",
+            })
+        self.assertEqual(missing.data["reason_code"], "companion_not_found")
+        self.assertIn("稱呼", _reply_from_observation("calendar.find_my_event", missing.data))
+
+        with patch("services.ayue_agent.tools.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.accepted_contact_ids_by_display_name", return_value=["a", "b"]), \
+             patch("services.ayue_agent.tools.find_owned_events") as find_events:
+            ambiguous = _calendar_find_event(ctx, {
+                "event_hint": "約會", "date_hint": "", "companion_hint": "小葵",
+            })
+        self.assertEqual(ambiguous.data["reason_code"], "companion_ambiguous")
+        self.assertIn("同名", _reply_from_observation("calendar.find_my_event", ambiguous.data))
+        find_events.assert_not_called()
 
     def test_recent_context_is_available_through_registry_executor(self):
         ctx = AgentTurnContext(

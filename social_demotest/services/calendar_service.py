@@ -326,6 +326,44 @@ def resolve_owned_event(user_id: str, event_hint: str) -> tuple[dict | None, str
     return _resolve_event(user_id, event_hint)
 
 
+def find_owned_events(
+    user_id: str, event_hint: str, *, date_hint: str = "", companion_user_id: str | None = None, limit: int = 3,
+) -> list[dict]:
+    """Return owner-visible event candidates without making the caller use IDs.
+
+    This is intentionally a domain lookup, rather than a planner-side filter.
+    ``date_hint`` is optional because a user can naturally say just "看電影";
+    callers must ask a clarification when multiple events remain.
+    """
+    hint = str(event_hint or "").strip()
+    if not hint:
+        return []
+    query: dict = {
+        "participants": user_id,
+        "status": {"$in": list(ACTIVE_EVENT_STATUSES)},
+    }
+    if companion_user_id:
+        # This ID is executor-owned and comes only from a verified accepted
+        # relationship, never from the planner or a client request.
+        query.update({"source_type": "date", "participants": {"$all": [user_id, companion_user_id]}})
+    candidates = []
+    for event in calendar_events_coll.find(query).sort("start_at", 1):
+        if not _event_matches_hint(event, hint):
+            continue
+        if date_hint:
+            try:
+                zone = get_timezone(event.get("timezone") or "Asia/Taipei")
+                event_date = as_utc(event["start_at"]).astimezone(zone).date().isoformat()
+            except Exception:
+                continue
+            if event_date != date_hint:
+                continue
+        candidates.append(event)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
 def resolve_personal_event(user_id: str, event_hint: str) -> tuple[dict | None, str | None]:
     """Compatibility wrapper for callers that explicitly require a private event."""
     return _resolve_event(user_id, event_hint, source_type="personal")

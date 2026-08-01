@@ -8,36 +8,31 @@ separate write rule.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Callable
 
 import requests
 
 from database import profiles_coll
-from services.ai_service import generate_peer_first_message
-from services.chat_service import generate_room_id, save_message
+from services.giphy_service import schedule_match_celebration_gifs
 from services.match_decision_service import apply_match_decision
+from services.match_reason_service import accepted_opening_for_viewer
 from services.match_state_service import derive_match_stage, reconcile_live_match
 from services.mediator_event_service import queue_mediator_event
 
 
-SearchExecutor = Callable[[str, str, bool], dict[str, Any]]
 TaskScheduler = Callable[..., Any]
 
-_search_executor: SearchExecutor | None = None
 
-
-def register_match_search_executor(executor: SearchExecutor) -> None:
-    """Register the application-owned candidate-search implementation."""
-    global _search_executor
-    _search_executor = executor
-
-
-def start_match_search(user_id: str, *, source: str, force_new: bool = False) -> dict[str, Any]:
-    """Start a search through the registered domain executor, or fail closed."""
-    executor = _search_executor
-    if executor is None:
-        return {"status": "failed", "detail": "match_search_executor_unavailable"}
-    return executor(user_id, source, force_new)
+def start_match_search(
+    user_id: str, *, source: str, force_new: bool = False, idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Queue a canonical persistent search job; never rank candidates inline."""
+    from services.match_search_job_service import enqueue_match_search
+    return enqueue_match_search(
+        user_id, source=source, force_new=force_new,
+        idempotency_key=idempotency_key or f"legacy-match-search:{uuid.uuid4().hex}",
+    )
 
 
 def _schedule_or_run(scheduler: TaskScheduler | None, task: Callable[[], None]) -> None:
@@ -45,6 +40,29 @@ def _schedule_or_run(scheduler: TaskScheduler | None, task: Callable[[], None]) 
         task()
     else:
         scheduler(task)
+
+
+def _safe_profile_label(profile: dict, user_id: str) -> str:
+    value = str(
+        profile.get("display_name") or profile.get("nickname") or profile.get("name") or ""
+    ).strip()
+    if not value or value == user_id or value.startswith(("seed_user_", "demo_user", "user_")):
+        return "對方"
+    return value[:30]
+
+
+def _receiver_intro(profile: dict, user_id: str) -> str:
+    label = _safe_profile_label(profile, user_id)
+    greeting = f"{label}{label}～" if label != "對方" else "欸欸～"
+    tone = str(profile.get("mediator_tone") or "friend")
+    templates = {
+        "gentle": f"{label if label != '對方' else '你'}，我留意到一位可能和你聊得來的人。先看看我整理的提案，不急著答應。",
+        "enthusiastic": f"{greeting}我好像發現一條很有趣的線了 ✦ 先來看看這位人選，不急著決定～",
+    }
+    return templates.get(
+        tone,
+        f"{greeting}我幫你留意到一位可能適合認識的人 👀 先看看我整理的提案，不急著答應～",
+    )
 
 
 def apply_transition_effects(
@@ -56,54 +74,47 @@ def apply_transition_effects(
     match_id = str(match_doc["_id"])
     status = match_doc["status"]
     if status == "pending":
-        receiver_reason = match_doc.get("receiver_reason") or match_doc.get("reason", "")
-        from_doc = profiles_coll.find_one(
-            {"user_id": from_id}, {"_id": 0, "current_context": 1},
-        ) or {}
-        to_doc = profiles_coll.find_one(
-            {"user_id": to_id}, {"_id": 0, "current_context": 1},
-        ) or {}
+        receiver_doc = profiles_coll.find_one({"user_id": to_id}) or {}
+        try:
+            queue_mediator_event(
+                to_id, _receiver_intro(receiver_doc, to_id), "incoming_match_intro",
+                event_key=f"match:{match_id}:pending-intro:{to_id}", match_id=match_id,
+            )
+        except Exception as exc:
+            # The friendly preface is optional; the actionable proposal is not.
+            print(f"[match] receiver intro delivery failed: {type(exc).__name__}")
         queue_mediator_event(
-            to_id, f"欸，@{from_id} 想認識你，我先來問你本人。", "incoming_match_interest",
-            event_key=f"match:{match_id}:pending:{to_id}", match_id=match_id, other_id=from_id,
-            proposal_role="receiver", matches=[{
-                "match_id": match_id, "matched_user_id": from_id,
-                "contrast_label": match_doc.get("contrast_label", ""),
-                "distinctive_tags": match_doc.get("distinctive_tags", []),
-                "recommendation_reason": receiver_reason, "receiver_reason": receiver_reason,
-                "score_breakdown": match_doc.get("receiver_score_breakdown", {}),
-                "reason_items": match_doc.get("receiver_reason_items", []),
-                "top_reasons": [
-                    item.get("text") for item in match_doc.get("receiver_reason_items", [])
-                    if item.get("kind") != "context_pair" and item.get("text")
-                ][:2],
-                "current_context": from_doc.get("current_context", ""),
-                "target_context": to_doc.get("current_context", ""),
-            }],
+            to_id, "欸，有位人選想認識你，我先來問你本人。", "incoming_match_interest",
+            event_key=f"match:{match_id}:pending-proposal:{to_id}", match_id=match_id,
+            proposal_role="receiver",
         )
         return
     if status == "accepted":
         initiator_doc = profiles_coll.find_one({"user_id": from_id}) or {}
         target_doc = profiles_coll.find_one({"user_id": to_id}) or {}
-        reason = match_doc.get("reason", "")
-
-        def send_first_message() -> None:
+        for user_id, other_id in ((from_id, to_id), (to_id, from_id)):
+            other_doc = target_doc if other_id == to_id else initiator_doc
+            other_label = _safe_profile_label(other_doc, other_id)
+            opening = accepted_opening_for_viewer(match_doc, user_id, other_id, other_label)
             try:
-                save_message(
-                    generate_room_id(from_id, to_id), from_id,
-                    generate_peer_first_message(initiator_doc, target_doc, reason),
+                queue_mediator_event(
+                    user_id,
+                    opening,
+                    "match_connected", event_key=f"match:{match_id}:accepted:{user_id}",
+                    match_id=match_id, other_id=other_id,
                 )
             except Exception as exc:
-                print(f"[match] first-message generation failed: {type(exc).__name__}")
-
-        for user_id, other_id in ((from_id, to_id), (to_id, from_id)):
-            queue_mediator_event(
-                user_id,
-                f"好，{other_id} 也點頭了！聊天室已經替你們開好。先自然打聲招呼，別一上來就像面試官，我會在旁邊幫你顧氣氛。",
-                "match_connected", event_key=f"match:{match_id}:accepted:{user_id}",
-                match_id=match_id, other_id=other_id,
+                print(f"[match] connected notification failed: {type(exc).__name__}")
+        try:
+            participants = (
+                (from_id, to_id),
+                (to_id, from_id),
             )
-        _schedule_or_run(schedule_task, send_first_message)
+            schedule_match_celebration_gifs(
+                participants, match_id, schedule_task=schedule_task,
+            )
+        except Exception as exc:
+            print(f"[match] celebration GIF scheduling failed: {type(exc).__name__}")
         return
     if status != "declined":
         return
@@ -128,8 +139,8 @@ def apply_transition_effects(
     if previous_status == "pending":
         event_type = "match_cancelled" if action == "cancel" else "match_declined"
         message = (
-            f"@{actor} 取消了這次邀請，這張提案已經收起來。"
-            if action == "cancel" else f"@{actor} 這次先婉拒了邀請，這張提案已經收起來。"
+            "對方取消了這次邀請，這張提案已經收起來。"
+            if action == "cancel" else "對方這次先婉拒了邀請，這張提案已經收起來。"
         )
         queue_mediator_event(
             other_id, message, event_type,

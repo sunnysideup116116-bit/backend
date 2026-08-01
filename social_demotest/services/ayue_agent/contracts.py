@@ -21,6 +21,8 @@ class AgentIntent(str, Enum):
     CALENDAR = "calendar"
     CALENDAR_ACTION = "calendar_action"
     RELATIONSHIP = "relationship"
+    PROFILE = "profile"
+    ASSESSMENT = "assessment"
     MEMORY = "memory"
     TIME = "time"
     WEB = "web"
@@ -45,6 +47,7 @@ class AgentTurnContext(BaseModel):
     user_id: str
     room_id: str
     message: str
+    message_id: str | None = None
     mentioned_ids: list[str] = Field(default_factory=list)
     mention_overflow: bool = False
     user_profile: dict[str, Any] = Field(default_factory=dict)
@@ -77,6 +80,7 @@ class AgentTurnContextV2(BaseModel):
     latest_match_outcome: dict[str, Any] | None = None
     pending_confirmation: dict[str, Any] | None = None
     action_draft: dict[str, Any] | None = None
+    place_search_draft: dict[str, Any] | None = None
     recent_context_draft: dict[str, Any] | None = None
     # Public references only. Their executor-side IDs remain on AgentTurnContext.
     mentioned_contacts: list[dict[str, str]] = Field(default_factory=list)
@@ -108,6 +112,7 @@ class AgentDecision(BaseModel):
     clarification_goal: str | None = None
     missing_fields: list[str] = Field(default_factory=list)
     recent_context_followup: Literal["none", "ask_activity"] = "none"
+    place_search_followup: Literal["none", "recommend"] = "none"
 
 
 class AgentResult(BaseModel):
@@ -125,6 +130,10 @@ class AgentResult(BaseModel):
     # Legacy/private compatibility metadata. Public V2 always lets the isolated
     # profile extractor inspect the saved owner message and ignores this gate.
     profile_write_allowed: bool = True
+    assessment_state: str | None = None
+    assessment_kind: str | None = None
+    assessment_revision: int | None = None
     profile_write_reason: str = "casual"
     sources: list[dict[str, str]] = Field(default_factory=list)
+    place_cards: list[dict[str, str]] = Field(default_factory=list)
 

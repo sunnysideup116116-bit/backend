@@ -14,8 +14,9 @@ from services.ayue_agent.tools import execute_tool
 class AyueAgentRegistryTests(unittest.TestCase):
     def test_each_registered_read_tool_has_a_runtime_executor_key(self):
         executor_keys = {
-            "calendar_events", "current_time", "match_status",
-            "counterparty_summary", "recent_context", "relationship_evidence", "mentioned_contact_summary", "memory_profile",
+            "calendar_events", "calendar_event_find", "current_time", "match_status",
+            "counterparty_summary", "recent_context", "relationship_evidence", "mentioned_contact_summary", "accepted_contact_list", "memory_profile",
+            "self_profile",
         }
         for tool_name in READ_ONLY_TOOLS:
             spec = TOOL_REGISTRY[tool_name]
@@ -44,6 +45,17 @@ class AyueAgentRegistryTests(unittest.TestCase):
         self.assertEqual(arguments, {"decision": "interested"})
         with self.assertRaises(Exception):
             executor_arguments_for_turn(spec, [], {"decision": "interested", "proposal_id": "nope"})
+
+    def test_calendar_find_accepts_an_omitted_or_null_date_hint(self):
+        spec = TOOL_REGISTRY["calendar.find_my_event"]
+        self.assertEqual(
+            executor_arguments_for_turn(spec, [], {"event_hint": "看電影"}),
+            {"event_hint": "看電影", "date_hint": None, "companion_hint": None},
+        )
+        self.assertEqual(
+            executor_arguments_for_turn(spec, [], {"event_hint": "看電影", "date_hint": None}),
+            {"event_hint": "看電影", "date_hint": None, "companion_hint": None},
+        )
 
 
 if __name__ == "__main__":

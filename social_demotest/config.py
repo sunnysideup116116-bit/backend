@@ -15,6 +15,8 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 GOOGLE_EMBEDDING_MODEL = os.getenv("GOOGLE_EMBEDDING_MODEL", "models/gemini-embedding-2")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 TAVILY_PROJECT = os.getenv("TAVILY_PROJECT")
+GIPHY_API_KEY = os.getenv("GIPHY_API_KEY")
+GIPHY_GIF_ENABLED = os.getenv("GIPHY_GIF_ENABLED", "on").strip().lower() == "on"
 AYUE_MAPS_ENABLED = os.getenv("AYUE_MAPS_ENABLED", "on").strip().lower() == "on"
 OSM_NOMINATIM_URL = os.getenv("OSM_NOMINATIM_URL", "https://nominatim.openstreetmap.org/search")
 OSM_OVERPASS_URL = os.getenv("OSM_OVERPASS_URL", "https://overpass-api.de/api/interpreter")
@@ -24,3 +26,6 @@ OSM_USER_AGENT = os.getenv("OSM_USER_AGENT", "AyueDatingDemo/1.0 (educational de
 # with the process-local TTL cache; enable this only when persistent cache
 # writes are wanted and Atlas is healthy.
 AYUE_MAPS_MONGO_CACHE = os.getenv("AYUE_MAPS_MONGO_CACHE", "off").strip().lower() == "on"
+GOOGLE_PLACES_SERVER_API_KEY = os.getenv("GOOGLE_PLACES_SERVER_API_KEY", "").strip()
+GOOGLE_MAPS_BROWSER_API_KEY = os.getenv("GOOGLE_MAPS_BROWSER_API_KEY", "").strip()
+AYUE_GOOGLE_PLACE_CARDS_ENABLED = os.getenv("AYUE_GOOGLE_PLACE_CARDS_ENABLED", "off").strip().lower() == "on"

@@ -18,18 +18,18 @@ class AyuePhase4CleanupTests(unittest.TestCase):
         self.assertFalse((ROOT / "services" / "ayue_agent" / "skills.py").exists())
 
     def test_legacy_helpers_are_isolated_to_the_rollback_adapter(self):
-        chat_source = (ROOT / "routers" / "chat.py").read_text(encoding="utf-8")
+        public_chat_source = (ROOT / "routers" / "public_chat.py").read_text(encoding="utf-8")
         legacy_source = (ROOT / "services" / "ayue_agent" / "legacy_match_routing.py").read_text(encoding="utf-8")
         v2_router_source = (ROOT / "services" / "ayue_agent" / "router.py").read_text(encoding="utf-8")
         runtime_source = (ROOT / "services" / "ayue_agent" / "runtime.py").read_text(encoding="utf-8")
-        chat_tree = ast.parse(chat_source)
+        public_chat_tree = ast.parse(public_chat_source)
         top_level_imports = {
             node.module
-            for node in chat_tree.body
+            for node in public_chat_tree.body
             if isinstance(node, ast.ImportFrom)
         }
         self.assertNotIn("services.ayue_agent.legacy_match_routing", top_level_imports)
-        self.assertIn("from services.ayue_agent import legacy_match_routing", chat_source)
+        self.assertIn("from services.ayue_agent import legacy_match_routing", public_chat_source)
         self.assertIn("def is_explicit_match_request", legacy_source)
         self.assertIn("def should_answer_match_outcome_followup", legacy_source)
         self.assertNotIn("legacy_match_routing", v2_router_source)

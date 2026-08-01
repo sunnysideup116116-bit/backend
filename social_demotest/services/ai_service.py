@@ -13,7 +13,7 @@ from config import (
     OLLAMA_CHAT_MODEL,
 
 )
-from services.language_service import normalize_zh_tw
+from services.language_service import normalize_model_text, normalize_zh_tw
 
 
 
@@ -182,7 +182,7 @@ def analyze_big_five(text: str, previous_data: dict, interaction_count: int, ini
 
         content = generate_chat_completion(prompt, temperature=0.5, json_output=True)
 
-        return json.loads(content)
+        return normalize_model_text(json.loads(content))
 
     except Exception as e:
 
@@ -452,7 +452,7 @@ def analyze_deep_profile(text: str, previous_data: dict, interaction_count: int,
 
     可以偶爾善意吐槽或鼓勵，但不能刻薄，也不能讓使用者感到被審問。
 
-    使用者已經完成了基本性格分析。現在你的任務是進一步在自然對話中推測出使用者的「深層價值觀」— 包含核心信念、人生目標、對關係的期待等。
+    現在的任務是在這段獨立探索中，從使用者本次的回答與目前 typed 草稿整理出「深層價值觀」— 包含核心信念、人生目標、對關係的期待等。不要假設使用者已完成其他測驗，也不要補入未提供的資料。
 
 {context_prompt}
 
@@ -512,7 +512,7 @@ def analyze_deep_profile(text: str, previous_data: dict, interaction_count: int,
 
         content = generate_chat_completion(prompt, temperature=0.6, json_output=True)
 
-        return json.loads(content)
+        return normalize_model_text(json.loads(content))
 
     except Exception as e:
 

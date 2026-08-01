@@ -257,6 +257,255 @@ class AyueAgentPlannerSequenceTests(unittest.TestCase):
         self.assertEqual(execute_tool.call_count, 1)
         self.assertEqual(execute_tool.call_args.args[0].name, "match.get_status")
 
+    def test_random_restaurant_followup_forces_search_instead_of_repeating_cuisine_question(self):
+        ctx, turn = self._context("你隨意推薦")
+        turn.user_location = "高雄市鹽埕區"
+        turn.place_search_draft = {
+            "version": "v1", "anchor": "", "categories": ["restaurant"],
+            "radius_m": 1500, "limit": 3, "use_saved_location": True,
+            "created_at": 1,
+        }
+        decisions = [
+            AgentDecision(
+                kind=DecisionKind.FINAL, intent=AgentIntent.PLACES, confidence=.95,
+                place_search_followup="recommend", reply="那你想找哪一類的料理呢？",
+            ),
+            AgentDecision(
+                kind=DecisionKind.FINAL, intent=AgentIntent.PLACES, confidence=.95,
+                reply="我先幫你挑三間鹽埕區附近的餐廳。",
+            ),
+        ]
+        place_result = ToolResult(ok=True, data={
+            "anchor_label": "高雄市鹽埕區",
+            "places": [{
+                "name": "六姐傳統飯糰特製蛋餅專賣店", "category": "restaurant",
+                "distance_m": 420, "address_summary": "高雄市鹽埕區",
+                "map_url": "https://www.openstreetmap.org/?mlat=22.62&mlon=120.28",
+                "provider": "openstreetmap",
+            }],
+            "attribution": "© OpenStreetMap contributors",
+            "attribution_url": "https://www.openstreetmap.org/copyright",
+        })
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=decisions), \
+             patch("services.ayue_agent.runtime.execute_tool", return_value=place_result) as execute_tool, \
+             patch("services.ayue_agent.runtime.profiles_coll.update_one") as update, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        execute_tool.assert_called_once()
+        call = execute_tool.call_args.args[0]
+        self.assertEqual(call.name, "places.search_nearby")
+        self.assertEqual(call.arguments["categories"], ["restaurant"])
+        self.assertTrue(call.arguments["use_saved_location"])
+        self.assertNotIn("哪一類", result.reply)
+        self.assertEqual(result.place_cards[0]["name"], "六姐傳統飯糰特製蛋餅專賣店")
+        self.assertIn("agentic_place_search_draft", update.call_args.args[1]["$unset"])
+
+    def test_first_place_clarification_persists_bounded_search_state(self):
+        ctx, turn = self._context("還有什麼吃的")
+        turn.user_location = "高雄市鹽埕區"
+        decision = AgentDecision(
+            kind=DecisionKind.FINAL, intent=AgentIntent.PLACES, confidence=.95,
+            place_search_followup="recommend", reply="你是在問鹽埕區附近的餐廳嗎？",
+        )
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=decision), \
+             patch("services.ayue_agent.runtime.profiles_coll.update_one") as update, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        draft = update.call_args.args[1]["$set"]["agentic_place_search_draft"]
+        self.assertEqual(draft["categories"], ["restaurant"])
+        self.assertTrue(draft["use_saved_location"])
+        self.assertEqual(draft["limit"], 3)
+        self.assertIn("鹽埕區", result.reply)
+
+    def test_self_profile_final_is_forced_through_the_owner_summary_read(self):
+        ctx, turn = self._context("你了解我多少？")
+        decisions = [
+            AgentDecision(
+                kind=DecisionKind.FINAL, intent=AgentIntent.PROFILE,
+                confidence=.95, reply="你是正在跟我聊天的使用者。",
+            ),
+            AgentDecision(
+                kind=DecisionKind.FINAL, intent=AgentIntent.PROFILE,
+                confidence=.95, reply="你喜歡獨立電影，也很重視真誠溝通。",
+            ),
+        ]
+        profile_result = ToolResult(ok=True, data={
+            "display_name": "小安", "initial_interest": "喜歡獨立電影",
+            "personality_summary": "好奇且願意主動開話題",
+            "values": ["真誠溝通"], "preferences": ["喜歡獨立電影"],
+            "missing_sections": ["深層資料"],
+        })
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=decisions), \
+             patch("services.ayue_agent.runtime.execute_tool", return_value=profile_result) as execute_tool, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        self.assertEqual(execute_tool.call_count, 1)
+        self.assertEqual(execute_tool.call_args.args[0].name, "profile.get_self_summary")
+        self.assertIn("獨立電影", result.reply)
+        self.assertNotIn("正在跟我聊天的使用者", result.reply)
+
+    def test_assessment_confirmation_starts_a_session_without_replanning(self):
+        ctx, turn = self._context("確認")
+        turn.pending_confirmation = {
+            "action": "profile.start_assessment", "arguments": {"kind": "basic"}, "confirmation_id": "confirm-1",
+            "created_at": 1.0, "status": "pending",
+        }
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.profiles_coll.update_one", return_value=SimpleNamespace(modified_count=1)), \
+             patch("services.ayue_agent.runtime.start_assessment_session", return_value={
+                 "status": "started", "reply": "你臨時有空時，通常怎麼安排？",
+             }) as start, \
+             patch("services.ayue_agent.runtime.plan_turn_v2") as planner, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        start.assert_called_once_with("fixture_owner", "big_five", idempotency_key="assessment-confirmation:confirm-1")
+        planner.assert_not_called()
+        self.assertEqual(result.conversation_intent, "assessment")
+        self.assertIn("通常怎麼安排", result.reply)
+
+    def test_active_assessment_bypasses_general_planner_and_can_exit(self):
+        ctx, turn = self._context("我會先找朋友一起討論")
+        ctx.user_profile = {
+            "agentic_assessment_session": {
+                "session_id": "session-1", "kind": "big_five", "status": "active",
+                "expires_at": 9_999_999_999,
+            }
+        }
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.advance_assessment_session", return_value={
+                 "status": "continued", "reply": "聽起來你很重視一起想辦法。那遇到臨時變動時呢？",
+             }) as advance, \
+             patch("services.ayue_agent.runtime.plan_turn_v2") as planner, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        advance.assert_called_once()
+        planner.assert_not_called()
+        self.assertEqual(result.conversation_intent, "assessment")
+
+        ctx.message = "結束測驗"
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.cancel_assessment_session", return_value={"status": "cancelled"}) as cancel, \
+             patch("services.ayue_agent.runtime.plan_turn_v2") as planner, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            exited = run_public_agent_turn(ctx, mode="on")
+        cancel.assert_called_once_with("fixture_owner", "session-1", "big_five")
+        planner.assert_not_called()
+        self.assertIn("原本已完成的資料", exited.reply)
+
+    def test_expired_assessment_answer_does_not_fall_through_to_planner_or_profile_extraction(self):
+        ctx, turn = self._context("這是上一輪測驗的回答")
+        ctx.user_profile = {
+            "agentic_assessment_session": {
+                "session_id": "expired-session", "kind": "big_five", "status": "active",
+                "revision": 3, "expires_at": 1,
+            }
+        }
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.expire_assessment_session", return_value={
+                 "status": "expired", "session_state": "expired", "kind": "big_five", "revision": 4,
+             }) as expire, \
+             patch("services.ayue_agent.runtime.plan_turn_v2") as planner, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        expire.assert_called_once_with("fixture_owner", "expired-session", "big_five")
+        planner.assert_not_called()
+        self.assertEqual(result.assessment_state, "expired")
+        self.assertEqual(result.profile_write_reason, "assessment")
+
+    def test_commit_cancel_race_reports_the_winning_completed_state(self):
+        ctx, turn = self._context("取消")
+        ctx.user_profile = {
+            "agentic_assessment_session": {
+                "session_id": "session-race", "kind": "big_five", "status": "awaiting_commit",
+                "revision": 4, "expires_at": 9_999_999_999, "draft": {},
+            }
+        }
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.cancel_assessment_session", return_value={
+                 "status": "stale", "session_state": "completed", "kind": "big_five",
+                 "revision": 5, "reply": "這份結果已由另一個分頁套用。",
+             }), \
+             patch("services.ayue_agent.runtime.plan_turn_v2") as planner, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        planner.assert_not_called()
+        self.assertEqual(result.assessment_state, "completed")
+        self.assertIn("另一個分頁", result.reply)
+
+    def test_commit_confirmation_reports_a_concurrent_cancellation(self):
+        ctx, turn = self._context("確認")
+        ctx.user_profile = {
+            "agentic_assessment_session": {
+                "session_id": "session-race", "kind": "big_five", "status": "awaiting_commit",
+                "revision": 4, "expires_at": 9_999_999_999, "draft": {},
+            }
+        }
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.commit_assessment_session", return_value={
+                 "status": "stale", "session_state": "cancelled", "kind": "big_five",
+                 "revision": 5, "reply": "這份草稿已由另一個分頁取消。",
+             }), \
+             patch("services.ayue_agent.runtime.plan_turn_v2") as planner, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        planner.assert_not_called()
+        self.assertEqual(result.assessment_state, "cancelled")
+        self.assertIn("另一個分頁", result.reply)
+
+    def test_completed_assessment_requires_a_second_commit_confirmation(self):
+        ctx, turn = self._context("確認")
+        ctx.user_profile = {
+            "agentic_assessment_session": {
+                "session_id": "session-commit", "kind": "big_five", "status": "awaiting_commit",
+                "revision": 4, "expires_at": 9_999_999_999,
+                "draft": {"O": 7, "C": 6, "E": 6, "A": 7, "N": 4, "summary": "喜歡探索"},
+            }
+        }
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.commit_assessment_session", return_value={
+                 "status": "committed", "reply": "新的結果已套用。", "kind": "big_five",
+             }) as commit, \
+             patch("services.ayue_agent.runtime.plan_turn_v2") as planner, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        commit.assert_called_once_with(
+            "fixture_owner", "session-commit", expected_revision=4,
+            idempotency_key="assessment-commit:session-commit:4",
+        )
+        planner.assert_not_called()
+        self.assertEqual(result.assessment_state, "completed")
+        self.assertIn("套用", result.reply)
+
+    def test_assessment_start_failure_clears_executing_confirmation(self):
+        ctx, turn = self._context("確認")
+        turn.pending_confirmation = {
+            "action": "profile.start_assessment", "arguments": {"kind": "deep"}, "confirmation_id": "confirm-2",
+            "created_at": 2.0, "status": "pending",
+        }
+        updates = []
+
+        def update_one(query, mutation, **kwargs):
+            updates.append((query, mutation))
+            return SimpleNamespace(modified_count=1)
+
+        events = []
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.profiles_coll.update_one", side_effect=update_one), \
+             patch("services.ayue_agent.runtime.start_assessment_session", side_effect=RuntimeError("db secret")), \
+             patch("services.ayue_agent.runtime.plan_turn_v2") as planner, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on", on_progress=events.append)
+        planner.assert_not_called()
+        self.assertIn("沒有改動原本的資料", result.reply)
+        self.assertNotIn("secret", result.reply)
+        self.assertEqual(updates[-1][0]["agentic_pending_confirmation.confirmation_id"], "confirm-2")
+        self.assertIn("agentic_pending_confirmation", updates[-1][1]["$unset"])
+        finished = [event for event in events if event.get("type") == "tool_finished"]
+        self.assertEqual(finished[-1]["outcome"], "error")
+
 
 if __name__ == "__main__":
     unittest.main()

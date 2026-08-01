@@ -7,6 +7,7 @@ import re
 import time
 import uuid
 from typing import Any, Callable
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from database import db, profiles_coll
 from services.match_action_service import decide_active_proposal, start_match_search
@@ -34,6 +35,19 @@ from .tool_registry import ToolRisk, executor_arguments_for_turn, get_tool_spec,
 from .tools import execute_tool
 from .public_relationship_projection import validated_mentioned_contact_ids
 from .web_tools import is_safe_public_url
+from services.assessment_session_service import (
+    active_assessment_session,
+    advance_assessment_session,
+    assessment_cancel_choice,
+    assessment_commit_choice,
+    assessment_label,
+    assessment_public_state,
+    cancel_assessment_session,
+    commit_assessment_session,
+    expire_assessment_session,
+    start_assessment_session,
+    awaiting_assessment_commit,
+)
 
 
 RUNS = db["agent_runs"]
@@ -157,7 +171,7 @@ def _persist_trace(run_id: str, ctx: AgentTurnContext, payload: dict[str, Any]) 
             str(payload.get("profile_input") or "casual")
             if str(payload.get("profile_input") or "casual") in {
                 "casual", "calendar_action", "relationship", "match_action", "match_status",
-                "time", "recent_context_prompt", "unknown",
+                "time", "assessment", "recent_context_prompt", "unknown",
             }
             else "unknown"
         ),
@@ -260,6 +274,9 @@ def _public_sources(observations: list[dict]) -> list[dict[str, str]]:
                 {"title": str(item.get("name") or "地圖"), "url": str(item.get("map_url") or "")}
                 for item in (data.get("places") or [])
             ]
+        elif tool_name == "places.resolve_place":
+            place = data.get("place") or {}
+            candidates = [{"title": str(place.get("name") or "地圖"), "url": str(place.get("map_url") or "")}]
         elif tool_name == "places.measure_distance":
             candidates = [{
                 "title": str(data.get("attribution") or "OpenStreetMap"),
@@ -277,6 +294,96 @@ def _public_sources(observations: list[dict]) -> list[dict[str, str]]:
             if len(sources) == 5:
                 return sources
     return sources
+
+
+def _osm_embed_url(map_url: str) -> str:
+    """Build a bounded OSM embed URL only from our typed public map link."""
+    try:
+        parsed = urlsplit(map_url)
+        if parsed.scheme != "https" or parsed.hostname != "www.openstreetmap.org":
+            return ""
+        query = parse_qs(parsed.query)
+        lat = float((query.get("mlat") or [""])[0])
+        lon = float((query.get("mlon") or [""])[0])
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    params = urlencode({
+        "bbox": f"{lon - .004:.6f},{lat - .003:.6f},{lon + .004:.6f},{lat + .003:.6f}",
+        "layer": "mapnik",
+        "marker": f"{lat:.6f},{lon:.6f}",
+    })
+    return f"https://www.openstreetmap.org/export/embed.html?{params}"
+
+
+def _distance_label(value: Any) -> str:
+    try:
+        distance = max(0, int(value))
+    except (TypeError, ValueError):
+        return ""
+    if distance <= 0:
+        return ""
+    if distance < 1_000:
+        return f"約 {distance} 公尺"
+    return f"約 {distance / 1_000:.1f} 公里"
+
+
+def _public_place_cards(observations: list[dict]) -> list[dict[str, str]]:
+    """Project verified place observations into bounded provider-neutral cards."""
+    cards: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for observation in observations:
+        tool_name = observation.get("tool")
+        if tool_name == "places.search_nearby":
+            places = (observation.get("result") or {}).get("places") or []
+        elif tool_name == "places.resolve_place":
+            place = (observation.get("result") or {}).get("place") or {}
+            places = [place] if place else []
+        else:
+            continue
+        attribution = re.sub(r"\s+", " ", str((observation.get("result") or {}).get("attribution") or "")).strip()[:80]
+        attribution_url = str((observation.get("result") or {}).get("attribution_url") or "")
+        if not is_safe_public_url(attribution_url):
+            attribution_url = ""
+        for item in places:
+            provider = str(item.get("provider") or "openstreetmap")
+            if provider not in {"openstreetmap", "google"}:
+                continue
+            place_id = str(item.get("place_id") or "").strip()
+            map_url = str(item.get("map_url") or "").strip()
+            if map_url and not is_safe_public_url(map_url):
+                map_url = ""
+            if provider == "google":
+                if not re.fullmatch(r"[A-Za-z0-9_-]{3,180}", place_id):
+                    continue
+                unique_key = f"google:{place_id}"
+            else:
+                if not map_url:
+                    continue
+                unique_key = f"openstreetmap:{map_url}"
+            if unique_key in seen:
+                continue
+            seen.add(unique_key)
+            category = str(item.get("category") or "attraction")
+            if category not in {"restaurant", "cafe", "bar", "attraction", "park"}:
+                category = "attraction"
+            card = {
+                "provider": provider,
+                "place_id": place_id if provider == "google" else "",
+                "name": re.sub(r"\s+", " ", str(item.get("name") or "地點")).strip()[:80],
+                "category": category,
+                "address_summary": re.sub(r"\s+", " ", str(item.get("address_summary") or "")).strip()[:180],
+                "distance_label": _distance_label(item.get("distance_m")),
+                "map_url": map_url,
+                "embed_url": _osm_embed_url(map_url) if provider == "openstreetmap" else "",
+                "attribution": attribution or ("Google Maps" if provider == "google" else "© OpenStreetMap contributors"),
+                "attribution_url": attribution_url,
+            }
+            cards.append(card)
+            if len(cards) == 3:
+                return cards
+    return cards
 
 
 def _web_extract_urls_allowed(ctx: AgentTurnContext, observations: list[dict], urls: list[str]) -> bool:
@@ -305,7 +412,7 @@ def _clarification_topic(
         return "match_target"
     if error_code == "calendar_access_denied":
         return "calendar_access"
-    if name in {"calendar.list_my_events", "calendar.create_my_event", "calendar.update_my_event", "calendar.cancel_my_event", "system.get_current_time"} or intent in {"calendar", "calendar_action", "time"}:
+    if name in {"calendar.list_my_events", "calendar.find_my_event", "calendar.create_my_event", "calendar.update_my_event", "calendar.cancel_my_event", "system.get_current_time"} or intent in {"calendar", "calendar_action", "time"}:
         return "schedule"
     if name in {"match.get_counterparty_summary", "relationship.get_verified_evidence", "relationship.get_mentioned_contact_summary"} or intent == "relationship":
         return "relationship"
@@ -496,6 +603,43 @@ def _reply_from_observation(tool_name: str, data: dict[str, Any]) -> str:
             return "接下來 90 天我沒有讀到你的行程。"
         lines = [f"{event['date'][5:].replace('-', '/')} {event['start_time']}–{event['end_time']} {event['activity']}" for event in events[:5]]
         return "我讀到你的行程：\n" + "\n".join(lines)
+    if tool_name == "calendar.find_my_event":
+        status = str(data.get("status") or "not_found")
+        reason_code = str(data.get("reason_code") or "")
+        if status == "not_found":
+            if reason_code == "companion_not_found":
+                return "我目前不能把這個稱呼對應到一位已確認的聯絡人；你可以確認稱呼，或補充約會活動。"
+            return "我沒有找到這筆行程。你記得大約是哪一天嗎？"
+        if status == "ambiguous":
+            if reason_code == "companion_ambiguous":
+                return "我找到不只一位同名的已確認聯絡人，目前無法安全確認你指的是哪一位。"
+            dates = [str(item.get("date") or "") for item in (data.get("candidates") or []) if item.get("date")]
+            return f"我找到不只一筆相同行程，分別在{'、'.join(dates)}。你想問哪一天？" if dates else "我找到不只一筆相同行程，你想問哪一天？"
+        activity = str(data.get("activity") or "這筆行程")
+        date = str(data.get("date") or "")
+        start_time = str(data.get("start_time") or "")
+        end_time = str(data.get("end_time") or "")
+        schedule = " ".join(part for part in (
+            date, f"{start_time}–{end_time}" if start_time and end_time else start_time,
+        ) if part)
+        event_text = f"{schedule} 的{activity}" if schedule else activity
+        if data.get("event_kind") != "shared_date":
+            return f"{event_text}是你的私人行程，行事曆沒有記錄同行者。"
+        if not data.get("companion_known"):
+            return f"{event_text}是共同約會，但我目前只能確認是和對方，不能確認姓名。"
+        return f"{event_text}這筆共同約會是和{str(data.get('companion_display_name') or '對方')}。"
+    if tool_name == "profile.get_self_summary":
+        details = [
+            str(data.get("initial_interest") or "").strip(),
+            str(data.get("personality_summary") or "").strip(),
+            str(data.get("deep_profile_summary") or "").strip(),
+        ]
+        details.extend(str(item).strip() for item in (data.get("values") or [])[:2] if str(item).strip())
+        summary = "；".join(dict.fromkeys(item for item in details if item))
+        if summary:
+            return f"我目前認識的你是：{summary}。"
+        missing = [str(item).strip() for item in (data.get("missing_sections") or []) if str(item).strip()]
+        return "我還在慢慢認識你。" + (f"目前可以再聊聊{missing[0]}。" if missing else "")
     return "我查到一些和你這題相關的資訊。"
 
 
@@ -512,16 +656,19 @@ def _start_search(
     if prior:
         return True, str((prior.get("result") or {}).get("reply") or "我已經處理過這次搜尋。"), None
     try:
-        result = start_match_search(ctx.user_id, source="agent_v2", force_new=True)
+        result = start_match_search(
+            ctx.user_id, source="agent_v2", force_new=True, idempotency_key=idempotency_key,
+        )
         status = result.get("status", "failed")
         reply = {
-            "queued": "我已經開始幫你找人，找到結果會回來告訴你。",
+            "queued": "好，我開始幫你找，通常約需要 1–3 分鐘。你可以先繼續跟我聊，找到後我會回來。",
+            "already_queued": "這次搜尋已經排進去了，通常約需要 1–3 分鐘；你可以先繼續跟我聊。",
             "already_active": "你目前還有一張進行中的提案，我先不重複開新搜尋。",
             "already_searching": "我正在幫你找，先不用重複送出。",
             "no_candidates": "這輪暫時沒有合適的新對象。",
         }.get(status, "這次搜尋沒有成功啟動，我沒有把它當作已完成。")
         TOOL_CALLS.update_one({"idempotency_key": idempotency_key}, {"$set": {"state": "done", "result": {"status": status, "reply": reply}}})
-        return status in {"queued", "already_active", "already_searching", "no_candidates"}, reply, None
+        return status in {"queued", "already_queued", "already_active", "already_searching", "no_candidates"}, reply, None
     except Exception as exc:
         return False, "我現在不能安全地開始搜尋，請稍後再試。", type(exc).__name__
 
@@ -539,6 +686,15 @@ def _new_pending_search(*, source: str = "explicit_request", guidance_fingerprin
 _CALENDAR_WRITE_ACTIONS = {
     "calendar.create_my_event", "calendar.update_my_event", "calendar.cancel_my_event",
 }
+_ASSESSMENT_START_ACTIONS = {
+    "profile.start_assessment",
+}
+
+
+def _assessment_kind_for_action(action: str, arguments: dict[str, Any] | None = None) -> str | None:
+    if action != "profile.start_assessment":
+        return None
+    return {"basic": "big_five", "deep": "deep_profile"}.get(str((arguments or {}).get("kind") or ""))
 
 
 def _calendar_event_label(event: dict) -> str:
@@ -591,6 +747,69 @@ def _save_action_draft(ctx: AgentTurnContext, turn: Any, decision: Any) -> None:
 
 def _clear_action_draft(user_id: str) -> None:
     profiles_coll.update_one({"user_id": user_id}, {"$unset": {"agentic_action_draft": ""}})
+
+
+_PLACE_CATEGORIES = {"restaurant", "cafe", "bar", "attraction", "park"}
+
+
+def _bounded_place_int(value: Any, default: int, lower: int, upper: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(lower, min(parsed, upper))
+
+
+def _place_search_arguments(turn: Any, decision: Any | None = None) -> dict[str, Any] | None:
+    """Merge a bounded place draft with planner-grounded search arguments."""
+    draft = dict(getattr(turn, "place_search_draft", None) or {})
+    proposed = dict(getattr(decision, "arguments", None) or {})
+    for key in ("anchor", "categories", "radius_m", "limit", "use_saved_location"):
+        if key in proposed:
+            draft[key] = proposed[key]
+    categories = [str(item) for item in (draft.get("categories") or []) if str(item) in _PLACE_CATEGORIES][:3]
+    if not categories:
+        categories = ["restaurant"]
+    anchor = re.sub(r"\s+", " ", str(draft.get("anchor") or "")).strip()[:160]
+    use_saved_location = bool(draft.get("use_saved_location")) and bool(getattr(turn, "user_location", ""))
+    if not anchor and not use_saved_location:
+        return None
+    return {
+        "anchor": anchor,
+        "categories": categories,
+        "radius_m": _bounded_place_int(draft.get("radius_m", 1500), 1500, 300, 5000),
+        "limit": _bounded_place_int(draft.get("limit", 3), 3, 1, 3),
+        "use_saved_location": use_saved_location,
+    }
+
+
+def _save_place_search_draft(ctx: AgentTurnContext, turn: Any, decision: Any) -> None:
+    """Persist only public search constraints so the next reply cannot restart clarification."""
+    proposed = dict(getattr(decision, "arguments", None) or {})
+    existing = dict(getattr(turn, "place_search_draft", None) or {})
+    categories = [
+        str(item) for item in (proposed.get("categories") or existing.get("categories") or ["restaurant"])
+        if str(item) in _PLACE_CATEGORIES
+    ][:3] or ["restaurant"]
+    anchor = re.sub(r"\s+", " ", str(proposed.get("anchor") or existing.get("anchor") or "")).strip()[:160]
+    use_saved_location = bool(
+        proposed.get("use_saved_location")
+        or existing.get("use_saved_location")
+        or (not anchor and getattr(turn, "user_location", ""))
+    )
+    profiles_coll.update_one(
+        {"user_id": ctx.user_id},
+        {"$set": {"agentic_place_search_draft": {
+            "version": "v1", "anchor": anchor, "categories": categories,
+            "radius_m": 1500, "limit": 3,
+            "use_saved_location": use_saved_location, "created_at": time.time(),
+        }}},
+        upsert=True,
+    )
+
+
+def _clear_place_search_draft(user_id: str) -> None:
+    profiles_coll.update_one({"user_id": user_id}, {"$unset": {"agentic_place_search_draft": ""}})
 
 
 def _open_recent_context_draft(ctx: AgentTurnContext) -> None:
@@ -843,6 +1062,266 @@ def _handle_calendar_pending_confirmation(
     return AgentResult(handled=True, reply=reply, conversation_intent="calendar_action", agent_run_id=run_id, agent_mode="v2", profile_write_allowed=False, profile_write_reason="calendar_action")
 
 
+def _prepare_assessment_confirmation(
+    ctx: AgentTurnContext, decision: Any, trace: dict[str, Any], run_id: str,
+) -> AgentResult:
+    action = str(decision.tool_name or "")
+    kind = _assessment_kind_for_action(action, decision.arguments)
+    if kind is None:
+        return AgentResult(
+            handled=True, reply="我還不確定你想重新做哪一種探索。",
+            agent_run_id=run_id, agent_mode="v2", fallback_reason="assessment_unknown_action",
+        )
+    now = time.time()
+    pending = {
+        "version": "v2", "confirmation_id": uuid.uuid4().hex,
+        "action": action, "arguments": dict(decision.arguments or {}), "status": "pending",
+        "created_at": now, "expires_at": now + 15 * 60,
+    }
+    claimed = profiles_coll.update_one(
+        {"user_id": ctx.user_id, "$or": [
+            {"agentic_pending_confirmation": {"$exists": False}},
+            {"agentic_pending_confirmation": None},
+        ]},
+        {"$set": {"agentic_pending_confirmation": pending}},
+    )
+    if not getattr(claimed, "modified_count", 0):
+        return AgentResult(
+            handled=True, reply="上一個確認還在等你決定；你可以回覆「確認」或「取消」。",
+            conversation_intent="assessment_confirmation", agent_run_id=run_id, agent_mode="v2",
+            profile_write_allowed=False, profile_write_reason="assessment",
+        )
+    trace["confirmation"] = "created"
+    return AgentResult(
+        handled=True,
+        reply=(
+            f"要重新開始{assessment_label(kind)}嗎？新的結果完成前，原本的資料會保留。"
+            "回覆「確認」就開始，也可以回覆「取消」。"
+        ),
+        conversation_intent="assessment_confirmation", agent_run_id=run_id, agent_mode="v2",
+        profile_write_allowed=False, profile_write_reason="assessment",
+    )
+
+
+def _handle_assessment_pending_confirmation(
+    ctx: AgentTurnContext, pending: dict[str, Any], run_id: str, trace: dict[str, Any],
+    on_progress: ProgressCallback | None,
+) -> AgentResult | None:
+    choice = confirmation_choice(ctx.message)
+    if choice == "none":
+        return None
+    action = str(pending.get("action") or "")
+    kind = _assessment_kind_for_action(action, pending.get("arguments") or {})
+    created_at = float(pending.get("created_at", 0) or 0)
+    confirmation_id = str(pending.get("confirmation_id") or f"legacy-{int(created_at * 1000)}")
+    base_query = {
+        "user_id": ctx.user_id,
+        "agentic_pending_confirmation.created_at": created_at,
+        "agentic_pending_confirmation.action": action,
+    }
+    if pending.get("confirmation_id"):
+        base_query["agentic_pending_confirmation.confirmation_id"] = confirmation_id
+    if choice == "cancel":
+        profiles_coll.update_one(base_query, {"$unset": {"agentic_pending_confirmation": ""}})
+        trace["confirmation"] = "cancelled"
+        return AgentResult(
+            handled=True, reply="好，這次先不重新開始探索。",
+            conversation_intent="assessment_confirmation", agent_run_id=run_id, agent_mode="v2",
+            profile_write_allowed=False, profile_write_reason="assessment",
+        )
+    claimed = profiles_coll.update_one(
+        {**base_query, "$or": [
+            {"agentic_pending_confirmation.status": "pending"},
+            {"agentic_pending_confirmation.status": {"$exists": False}},
+        ]},
+        {"$set": {"agentic_pending_confirmation.status": "executing"}},
+    )
+    if not getattr(claimed, "modified_count", 0):
+        return AgentResult(
+            handled=True, reply="這個探索確認正在處理，我不會重複開始。",
+            conversation_intent="assessment_confirmation", agent_run_id=run_id, agent_mode="v2",
+            profile_write_allowed=False, profile_write_reason="assessment",
+        )
+    spec = get_tool_spec(action)
+    if kind is None or spec is None:
+        profiles_coll.update_one(
+            {**base_query, "agentic_pending_confirmation.status": "executing"},
+            {"$unset": {"agentic_pending_confirmation": ""}},
+        )
+        trace["confirmation"] = "invalidated"
+        return AgentResult(
+            handled=True, reply="我沒有找到要開始的探索類型，你可以告訴我想做基本性格還是深層探索。",
+            conversation_intent="assessment_confirmation", agent_run_id=run_id, agent_mode="v2",
+            profile_write_allowed=False, profile_write_reason="assessment",
+        )
+    _emit_progress(
+        on_progress, "tool_started", trace=trace, agent_run_id=run_id,
+        step_id="confirmation:0", text=spec.progress_text,
+    )
+    try:
+        outcome = start_assessment_session(
+            ctx.user_id, kind, idempotency_key=f"assessment-confirmation:{confirmation_id}",
+        )
+    except Exception:
+        _emit_progress(
+            on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
+            step_id="confirmation:0", outcome="error",
+        )
+        profiles_coll.update_one(
+            {**base_query, "agentic_pending_confirmation.status": "executing"},
+            {"$unset": {"agentic_pending_confirmation": ""}},
+        )
+        trace["confirmation"] = "failed"
+        trace["tool_results"].append({"tool": action, "ok": False, "code": "assessment_start_failed"})
+        return AgentResult(
+            handled=True, reply="剛剛沒有成功開始，我沒有改動原本的資料。你想再試一次時跟我說。",
+            conversation_intent="assessment_confirmation", agent_run_id=run_id, agent_mode="v2",
+            profile_write_allowed=False, profile_write_reason="assessment",
+        )
+    ok = outcome.get("status") in {"started", "already_started"}
+    _emit_progress(
+        on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
+        step_id="confirmation:0", outcome="ok" if ok else "error",
+    )
+    profiles_coll.update_one(
+        {**base_query, "agentic_pending_confirmation.status": "executing"},
+        {"$unset": {"agentic_pending_confirmation": ""}},
+    )
+    trace["confirmation"] = "executed" if ok else "invalidated"
+    trace["tool_results"].append({"tool": action, "ok": ok, "code": None if ok else str(outcome.get("status") or "assessment_start_failed")})
+    session_state = assessment_public_state({"agentic_assessment_session": outcome.get("session") or {}})
+    return AgentResult(
+        handled=True, reply=str(outcome.get("reply") or "我們可以從一個輕鬆的問題開始。"),
+        conversation_intent="assessment", agent_run_id=run_id, agent_mode="v2",
+        profile_write_allowed=False, profile_write_reason="assessment",
+        **session_state,
+    )
+
+
+def _handle_active_assessment(
+    ctx: AgentTurnContext, run_id: str, trace: dict[str, Any],
+) -> AgentResult | None:
+    session = active_assessment_session(ctx.user_profile)
+    if not session:
+        return None
+    session_id = str(session.get("session_id") or "")
+    expires_at = float(session.get("expires_at", 0) or 0)
+    if expires_at and expires_at <= time.time():
+        outcome = expire_assessment_session(ctx.user_id, session_id, str(session.get("kind") or ""))
+        trace["assessment"] = str(outcome.get("status") or "expired")
+        state = str(outcome.get("session_state") or "expired")
+        return AgentResult(
+            handled=True,
+            reply=(
+                "剛剛那段探索已經過期，原本的資料沒有變動。想重新開始時再跟我說就好。"
+                if state == "expired" else str(outcome.get("reply") or "這段探索剛剛已有新的變動。")
+            ),
+            conversation_intent="assessment", agent_run_id=run_id, agent_mode="v2",
+            profile_write_allowed=False, profile_write_reason="assessment",
+            assessment_state=state, assessment_kind=str(outcome.get("kind") or session.get("kind") or "") or None,
+            assessment_revision=outcome.get("revision", int(session.get("revision", 0) or 0)),
+        )
+    if assessment_cancel_choice(ctx.message):
+        outcome = cancel_assessment_session(
+            ctx.user_id, session_id, str(session.get("kind") or ""),
+        )
+        trace["assessment"] = str(outcome.get("status") or "cancelled")
+        state = str(outcome.get("session_state") or "cancelled")
+        return AgentResult(
+            handled=True,
+            reply=(
+                "好，這段探索先停在這裡；原本已完成的資料我會保留。"
+                if state == "cancelled" else str(outcome.get("reply") or "這段探索剛剛已有新的變動。")
+            ),
+            conversation_intent="assessment", agent_run_id=run_id, agent_mode="v2",
+            profile_write_allowed=False, profile_write_reason="assessment",
+            assessment_state=state, assessment_kind=str(outcome.get("kind") or session.get("kind") or "") or None,
+            assessment_revision=outcome.get("revision", int(session.get("revision", 0) or 0)),
+        )
+    outcome = advance_assessment_session(
+        ctx.user_id, session_id, ctx.message, message_id=ctx.message_id,
+    )
+    trace["assessment"] = str(outcome.get("status") or "unknown")
+    state = str(outcome.get("status") or "")
+    session_state = str(outcome.get("session_state") or "")
+    if not session_state:
+        session_state = "awaiting_commit" if state == "awaiting_commit" else "active"
+    return AgentResult(
+        handled=True, reply=str(outcome.get("reply") or "你可以換個方式說說看？"),
+        conversation_intent="assessment", agent_run_id=run_id, agent_mode="v2",
+        profile_write_allowed=False, profile_write_reason="assessment",
+        assessment_state=session_state,
+        assessment_kind=str(outcome.get("kind") or session.get("kind") or "") or None,
+        assessment_revision=outcome.get("revision", int(session.get("revision", 0) or 0)),
+    )
+
+
+def _handle_assessment_commit(
+    ctx: AgentTurnContext, run_id: str, trace: dict[str, Any],
+) -> AgentResult | None:
+    """Resolve the closed commit/cancel protocol before the general planner."""
+    session = awaiting_assessment_commit(ctx.user_profile)
+    if not session:
+        return None
+    session_id = str(session.get("session_id") or "")
+    kind = str(session.get("kind") or "")
+    revision = int(session.get("revision", 0) or 0)
+    expires_at = float(session.get("expires_at", 0) or 0)
+    if expires_at and expires_at <= time.time():
+        outcome = expire_assessment_session(ctx.user_id, session_id, kind)
+        trace["assessment"] = str(outcome.get("status") or "expired")
+        state = str(outcome.get("session_state") or "expired")
+        return AgentResult(
+            handled=True, reply=(
+                "這份探索草稿已經過期，原本的資料沒有變動。你想重新開始時再跟我說就好。"
+                if state == "expired" else str(outcome.get("reply") or "這份探索草稿剛剛已有新的變動。")
+            ),
+            conversation_intent="assessment", agent_run_id=run_id, agent_mode="v2",
+            profile_write_allowed=False, profile_write_reason="assessment",
+            assessment_state=state, assessment_kind=str(outcome.get("kind") or kind) or None,
+            assessment_revision=outcome.get("revision", revision),
+        )
+    choice = assessment_commit_choice(ctx.message)
+    if choice == "none":
+        return AgentResult(
+            handled=True,
+            reply="這份探索結果已整理好。回覆「確認」才會套用；想保留原本資料可以回覆「取消」。",
+            conversation_intent="assessment", agent_run_id=run_id, agent_mode="v2",
+            profile_write_allowed=False, profile_write_reason="assessment",
+            assessment_state="awaiting_commit", assessment_kind=kind, assessment_revision=revision,
+        )
+    if choice == "cancel":
+        outcome = cancel_assessment_session(ctx.user_id, session_id, kind)
+        trace["assessment"] = str(outcome.get("status") or "cancelled")
+        state = str(outcome.get("session_state") or "cancelled")
+        return AgentResult(
+            handled=True, reply=(
+                "好，這份草稿先不套用，原本已完成的資料會保留。"
+                if state == "cancelled" else str(outcome.get("reply") or "這份探索草稿剛剛已有新的變動。")
+            ),
+            conversation_intent="assessment", agent_run_id=run_id, agent_mode="v2",
+            profile_write_allowed=False, profile_write_reason="assessment",
+            assessment_state=state, assessment_kind=str(outcome.get("kind") or kind) or None,
+            assessment_revision=outcome.get("revision", revision),
+        )
+    outcome = commit_assessment_session(
+        ctx.user_id, session_id, expected_revision=revision,
+        idempotency_key=f"assessment-commit:{session_id}:{revision}",
+    )
+    trace["assessment"] = str(outcome.get("status") or "commit_failed")
+    state = str(outcome.get("session_state") or "")
+    if not state:
+        state = "completed" if outcome.get("status") in {"committed", "already_committed"} else "awaiting_commit"
+    return AgentResult(
+        handled=True, reply=str(outcome.get("reply") or "這份結果目前無法套用。"),
+        conversation_intent="assessment", agent_run_id=run_id, agent_mode="v2",
+        profile_write_allowed=False, profile_write_reason="assessment",
+        assessment_state=state,
+        assessment_kind=str(outcome.get("kind") or kind) or None,
+        assessment_revision=outcome.get("revision", revision),
+    )
+
+
 def _handle_pending_confirmation(
     ctx: AgentTurnContext, turn: Any, run_id: str, trace: dict[str, Any],
     on_progress: ProgressCallback | None = None,
@@ -852,6 +1331,8 @@ def _handle_pending_confirmation(
     action = pending.get("action", pending.get("tool"))
     if action in _CALENDAR_WRITE_ACTIONS:
         return _handle_calendar_pending_confirmation(ctx, pending, run_id, trace, on_progress)
+    if action in _ASSESSMENT_START_ACTIONS:
+        return _handle_assessment_pending_confirmation(ctx, pending, run_id, trace, on_progress)
     if action != "match.start_search":
         return None
     choice = confirmation_choice(turn.message)
@@ -1007,11 +1488,16 @@ def run_public_agent_turn(
         if pending_result:
             result = pending_result
         else:
-            visible = tool_policy_for_turn(turn)
+            assessment_result = _handle_assessment_commit(ctx, run_id, trace)
+            if assessment_result is None:
+                assessment_result = _handle_active_assessment(ctx, run_id, trace)
+            if assessment_result:
+                result = assessment_result
+            visible = tool_policy_for_turn(turn) if assessment_result is None else frozenset()
             trace["visible_tools"] = sorted(visible)
             side_effects = 0
             seen: set[tuple[str, str]] = set()
-            for index in range(MAX_STEPS):
+            for index in range(MAX_STEPS if assessment_result is None else 0):
                 model_started = time.perf_counter()
                 decision = plan_turn_v2(turn, visible, observations)
                 trace["model_ms"].append(round((time.perf_counter() - model_started) * 1000))
@@ -1047,19 +1533,36 @@ def run_public_agent_turn(
                         break
                 has_match_observation = any(item.get("tool") == "match.get_status" for item in observations)
                 has_time_observation = any(item.get("tool") == "system.get_current_time" for item in observations)
-                has_calendar_observation = any(item.get("tool") == "calendar.list_my_events" for item in observations)
+                has_calendar_observation = any(
+                    item.get("tool") in {"calendar.list_my_events", "calendar.find_my_event"}
+                    for item in observations
+                )
+                has_profile_observation = any(
+                    item.get("tool") == "profile.get_self_summary" for item in observations
+                )
+                has_places_observation = any(
+                    item.get("tool") in {"places.search_nearby", "places.resolve_place", "places.measure_distance"}
+                    for item in observations
+                )
+                place_search_arguments = _place_search_arguments(turn, decision)
+                place_search_ready = bool(turn.place_search_draft and place_search_arguments)
                 ok, reason = guard_v2_decision(
                     turn, visible, decision, has_match_observation=has_match_observation,
                     has_time_observation=has_time_observation,
                     has_calendar_observation=has_calendar_observation,
+                    has_profile_observation=has_profile_observation,
+                    place_search_ready=place_search_ready,
+                    has_places_observation=has_places_observation,
                 )
                 trace["guard_results"].append(reason)
                 if not ok:
-                    if reason in {"match_status_requires_read", "time_requires_read", "calendar_target_requires_read"}:
+                    if reason in {"match_status_requires_read", "time_requires_read", "profile_requires_read", "calendar_target_requires_read", "places_search_requires_read"}:
                         required_tool = {
                             "match_status_requires_read": "match.get_status",
                             "time_requires_read": "system.get_current_time",
+                            "profile_requires_read": "profile.get_self_summary",
                             "calendar_target_requires_read": "calendar.list_my_events",
+                            "places_search_requires_read": "places.search_nearby",
                         }[reason]
                         required_spec = get_tool_spec(required_tool)
                         if required_spec is None:
@@ -1073,7 +1576,11 @@ def run_public_agent_turn(
                                 fallback_reason="guard:tool_not_registered",
                             )
                             break
-                        required_arguments = executor_arguments_for_turn(required_spec, ctx.mentioned_ids)
+                        required_arguments = executor_arguments_for_turn(
+                            required_spec,
+                            ctx.mentioned_ids,
+                            place_search_arguments if reason == "places_search_requires_read" else None,
+                        )
                         step_id = f"{index}:required"
                         _emit_progress(on_progress, "tool_started", trace=trace, agent_run_id=run_id, step_id=step_id, text=required_spec.progress_text)
                         try:
@@ -1088,6 +1595,8 @@ def run_public_agent_turn(
                         if tool_result.ok:
                             seen.add(tool_call_key(required_spec, required_arguments))
                             observations.append({"tool": required_tool, "result": tool_result.data})
+                            if required_tool == "places.search_nearby":
+                                _clear_place_search_draft(ctx.user_id)
                             continue
                         result = AgentResult(
                             handled=True,
@@ -1128,6 +1637,8 @@ def run_public_agent_turn(
                 if decision.kind == DecisionKind.CONFIRMATION:
                     if decision.tool_name in _CALENDAR_WRITE_ACTIONS:
                         result = _prepare_calendar_confirmation(ctx, turn, decision, trace, run_id)
+                    elif decision.tool_name in _ASSESSMENT_START_ACTIONS:
+                        result = _prepare_assessment_confirmation(ctx, decision, trace, run_id)
                     else:
                         result = _handle_match_opportunity(ctx, turn, decision, trace, run_id)
                     if result is None:
@@ -1157,10 +1668,16 @@ def run_public_agent_turn(
                             profile_write_allowed=False, profile_write_reason="calendar_action",
                         )
                         break
+                    if (
+                        intent_name == "places"
+                        and decision.place_search_followup == "recommend"
+                        and not has_places_observation
+                    ):
+                        _save_place_search_draft(ctx, turn, decision)
                     result = AgentResult(
                         handled=True, reply=_final_reply_for_decision(turn, decision, observations, trace, "planner_final"),
                         agent_run_id=run_id, agent_mode="v2",
-                        profile_write_allowed=intent_name not in {"calendar", "match_action", "match_status", "relationship", "time"},
+                        profile_write_allowed=intent_name not in {"calendar", "match_action", "match_status", "relationship", "time", "assessment"},
                         profile_write_reason=("casual" if intent_name in {"", "chat", "memory", "unclear"} else intent_name),
                     )
                     break
@@ -1245,6 +1762,8 @@ def run_public_agent_turn(
                     )
                     break
                 observations.append({"tool": decision.tool_name, "result": tool_result.data})
+                if decision.tool_name == "places.search_nearby":
+                    _clear_place_search_draft(ctx.user_id)
                 # Read quota exhaustion still composes from every verified
                 # observation; it must not downgrade to a last-tool template.
                 if index == MAX_STEPS - 1:
@@ -1259,6 +1778,7 @@ def run_public_agent_turn(
         trace["exception"] = type(exc).__name__
         result = AgentResult(handled=True, reply="我現在沒辦法安全地處理這件事，請稍後再試。", agent_run_id=run_id, agent_mode="v2", fallback_reason=type(exc).__name__)
     result.sources = _public_sources(observations)
+    result.place_cards = _public_place_cards(observations)
     trace["latency_ms"] = round((time.perf_counter() - started) * 1000)
     trace["result"] = {
         "handled": result.handled,

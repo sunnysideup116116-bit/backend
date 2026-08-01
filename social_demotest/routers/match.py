@@ -4,6 +4,7 @@ import json
 import re
 import os
 import uuid
+from typing import Callable
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from models import MatchRequest, AcceptRequest, MatchDecisionRequest
 from database import profiles_coll, matches_coll
@@ -11,16 +12,38 @@ from services.ai_service import get_embedding, generate_chat_completion
 from services.memory_service import get_user_graph_memories
 from services.mediator_event_service import queue_mediator_event
 from services.match_state_service import get_match_status_snapshot, has_verified_acceptance
+from services.match_reason_service import (
+    FRIEND_COPY_VERSION,
+    MATCH_PROPOSAL_FEW_SHOTS,
+    PRIVATE_OPENING_FEW_SHOTS,
+    V4_REASON_VERSION,
+    build_v4_snapshot_fallback,
+    friend_intro_fallback,
+    public_personality_phrase,
+    reason_for_viewer,
+    short_public_text as reason_public_text,
+    valid_accepted_opening_text,
+    valid_friend_intro_text,
+)
 from services.match_action_service import (
     decide_active_proposal as decide_active_proposal_action,
     decide_match as decide_match_action,
-    register_match_search_executor,
     start_match_search,
 )
+from services.match_search_job_service import (
+    cancel_match_search,
+    public_match_search_status,
+    register_match_search_pipeline,
+)
 from services.profile_projection import safe_recent_context
-from services.ayue_agent.public_relationship_projection import display_name as public_display_name
+from services.language_service import normalize_zh_tw
+from services.ayue_agent.public_relationship_projection import (
+    anonymize_counterparty_text,
+    display_name as public_display_name,
+)
 from bson.objectid import ObjectId
 from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 router = APIRouter(prefix="/api/match", tags=["Match"])
 DRAFT_TTL_SECONDS = 24 * 3600
@@ -110,51 +133,91 @@ def build_active_proposal_card(match_doc: dict, user_id: str):
         return None
     is_initiator = match_doc.get("from_user") == user_id
     other_id = match_doc.get("to_user") if is_initiator else match_doc.get("from_user")
+    other_name = public_display_name(other_id)
     initiator_id = match_doc.get("from_user")
     receiver_id = match_doc.get("to_user")
     viewer_reason = reason_for_viewer(match_doc, user_id)
     snapshot = match_doc.get("match_context_snapshot", {}) or {}
     own_snapshot = snapshot.get("target" if is_initiator else "candidate", {}) or {}
     other_snapshot = snapshot.get("candidate" if is_initiator else "target", {}) or {}
-    reason_items = (
+    is_v4 = match_doc.get("reason_version") == V4_REASON_VERSION
+    reason_items = [] if is_v4 else (
         match_doc.get("reason_items", [])
         if is_initiator else match_doc.get("receiver_reason_items", [])
     )
     reasons = [
-        item.get("text")
+        anonymize_counterparty_text(item.get("text"), other_id, 120, counterparty_name=other_name)
         for item in reason_items
         if item.get("kind") in {"shared_graph", "shared_context", "shared_value"} and item.get("text")
     ][:2]
     if not reasons:
-        reasons = [reason_for_viewer(match_doc, user_id) or "目前沒有明確共同點，適合先從公開近況聊起。"]
+        reasons = [anonymize_counterparty_text(
+            reason_for_viewer(match_doc, user_id) or "目前沒有明確共同點，適合先從公開近況聊起。",
+            other_id, 180, counterparty_name=other_name,
+        )]
     score = (
         match_doc.get("score_breakdown", {})
         if is_initiator else match_doc.get("receiver_score_breakdown", {})
     )
-    return {
+    card = {
         "match_id": str(match_doc["_id"]),
-        "proposal_revision": int(match_doc.get("proposal_revision", 0)),
-        "other_id": other_id,
-        "other_label": public_display_name(other_id),
+        # A proposal may describe the anonymous person, but not identify them
+        # until both parties have accepted the relationship.
+        "other_label": "對方",
         "stage": stage,
         "event_type": "match_proposal" if is_initiator else "incoming_match_interest",
         "proposal_role": "initiator" if is_initiator else "receiver",
         "opening": (
-            f"欸，我一看到 {public_display_name(other_id)} 就想到你。"
-            if is_initiator else f"欸，{public_display_name(other_id)} 想認識你，我先來問你本人。"
+            "欸，我找到一位可能適合你的人，想先問問你的感覺。"
+            if is_initiator else "欸，有位人選想認識你，我先來問你本人。"
         ),
-        "your_context": own_snapshot.get("current_context") or "尚無近期情境",
-        "other_context": other_snapshot.get("current_context") or "尚無近期情境",
+        "your_context": reason_public_text(
+            safe_recent_context(own_snapshot.get("current_context"), "尚無近期情境"), 80,
+        ),
+        "other_context": anonymize_counterparty_text(
+            reason_public_text(
+                safe_recent_context(other_snapshot.get("current_context"), "尚無近期情境"), 80,
+            ), other_id, 80,
+            counterparty_name=other_name,
+        ),
         "reasons": reasons,
         "score": round(float(score.get("total", 0) or 0)),
-        # Keep these two fields permanently tied to the match roles.  UI
-        # callers must render viewer_reason instead of reinterpreting roles.
-        "recommendation_reason": reason_for_viewer(match_doc, initiator_id),
-        "receiver_reason": reason_for_viewer(match_doc, receiver_id),
-        "viewer_reason": viewer_reason,
+        "viewer_reason": anonymize_counterparty_text(
+            viewer_reason, other_id, 180, counterparty_name=other_name,
+        ),
+        "reason_version": str(match_doc.get("reason_version") or "legacy"),
+    }
+    # V4 exposes exactly one reason: the projection bound to this viewer.
+    # Keep legacy aliases only for old records whose API shape cannot change.
+    if not is_v4:
+        card.update({
+            "proposal_revision": int(match_doc.get("proposal_revision", 0)),
+            "other_id": other_id,
+            "recommendation_reason": anonymize_counterparty_text(
+                reason_for_viewer(match_doc, initiator_id), other_id, 180, counterparty_name=other_name,
+            ),
+            "receiver_reason": anonymize_counterparty_text(
+                reason_for_viewer(match_doc, receiver_id), other_id, 180, counterparty_name=other_name,
+            ),
+        })
+    return card
+
+
+def build_status_proposal_card(match_doc: dict, user_id: str):
+    """Safe card for polling only; decision identifiers arrive via mediator events."""
+    card = build_active_proposal_card(match_doc, user_id)
+    if not card:
+        return None
+    return {
+        key: card[key]
+        for key in (
+            "other_label", "stage", "event_type", "opening", "your_context",
+            "other_context", "reasons", "score", "viewer_reason",
+        )
+        if key in card
     }
 def _short_text(value, limit: int) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = re.sub(r"\s+", " ", normalize_zh_tw(str(value or ""))).strip()
     return text[:limit].rstrip()
 
 
@@ -449,69 +512,66 @@ def build_validated_match_explanation(target: dict, candidate: dict, vector_scor
 
 
 def _public_personality_phrase(profile: dict) -> str:
-    """A compact, non-clinical descriptor grounded only in public Big Five values."""
-    traits = profile.get("big_five") or {}
-    options = []
-    value = traits.get("E")
-    if isinstance(value, (int, float)):
-        options.append("比較外向、容易帶起話題" if value >= 6 else "偏安靜、重視舒服節奏" if value <= 4 else "互動節奏自然")
-    value = traits.get("O")
-    if isinstance(value, (int, float)) and value >= 7:
-        options.append("願意嘗試新點子")
-    value = traits.get("A")
-    if isinstance(value, (int, float)) and value >= 7:
-        options.append("願意傾聽")
-    summary = _short_text(traits.get("summary"), 32)
-    return options[0] if options else summary
+    return public_personality_phrase(profile)
 
 
 def _directional_reason_fallback(viewer: dict, other: dict, tier: str) -> dict:
-    """Viewer-specific, privacy-safe explanation when LLM wording is unavailable."""
-    other_context = _short_text(other.get("current_context"), 56)
-    viewer_context = _short_text(viewer.get("current_context"), 56)
-    viewer_trait = _public_personality_phrase(viewer)
-    other_trait = _public_personality_phrase(other)
-    lines = []
-    if other_context:
-        lines.append(f"對方最近提到「{other_context}」。")
-    if viewer_trait and other_trait:
-        lines.append(f"你{viewer_trait}，對方{other_trait}；如果聊起這件事，或許能形成舒服的互補。")
-    elif viewer_trait and other_context:
-        lines.append(f"你{viewer_trait}，或許能讓這個話題更容易延伸。")
-    elif viewer_context and other_context:
-        lines.append("你們最近在意的事情不同，可以先交換各自想做的事，看看節奏合不合。")
-    elif tier == "grounded":
-        lines.append("你們有已確認的共同點，可以先從那裡自然聊起。")
-    else:
-        lines.append("這次是依整體情境與個性推薦，還沒有已確認的共同興趣。")
-    text = "".join(lines[:2])[:110]
-    starter = f"可以先問他最近那件「{other_context}」最吸引他的地方。" if other_context else "可以先從最近想做的事聊起。"
-    return {
-        "tier": tier,
-        "viewer_text": text,
-        "scenario_bridge": other_context,
-        "personality_dynamic": "互補" if viewer_trait and other_trait else "",
-        "conversation_starter": starter,
-        "used_evidence_keys": [key for key, value in (
-            ("other.current_context", other_context),
-            ("viewer.big_five", viewer_trait),
-            ("other.big_five", other_trait),
-        ) if value],
-    }
+    return friend_intro_fallback(viewer, other, tier)
 
 
-def _valid_directional_reason(value: object, fallback: dict) -> dict:
+def _valid_directional_reason(
+    value: object, fallback: dict, *, required_context: str = "",
+    required_introduced_personality: str = "", required_viewer_personality: str = "",
+) -> dict:
     """Allow only short, person-first hypotheses; fall back on any provider drift."""
     if not isinstance(value, dict):
         return fallback
-    text = _short_text(value.get("viewer_text"), 110)
+    text = valid_friend_intro_text(
+        value.get("viewer_text"), required_context=required_context,
+        introduced_personality=required_introduced_personality,
+        viewer_personality=required_viewer_personality,
+    )
     starter = _short_text(value.get("conversation_starter"), 72)
-    banned = ("seed_user", "user_id", "mongo", "資料庫", "物件", "已答應", "已同意")
-    if not text or any(token.lower() in text.lower() for token in banned):
+    accepted_opening = valid_accepted_opening_text(
+        value.get("accepted_opening"), required_context=required_context,
+        introduced_personality=required_introduced_personality,
+        viewer_personality=required_viewer_personality,
+    )
+    if not text:
         return fallback
-    if text.count("。") > 2:
+    result = {**fallback, "viewer_text": text, "conversation_starter": starter or fallback["conversation_starter"]}
+    if accepted_opening:
+        result["accepted_opening"] = accepted_opening
+    return result
+
+
+def _refine_directional_reason(viewer: dict, other: dict, tier: str, fallback: dict) -> dict:
+    """Phrase one bound direction at a time so a provider cannot swap roles."""
+    other_context = reason_public_text(other.get("current_context"), 56)
+    if not other_context:
         return fallback
-    return {**fallback, "viewer_text": text, "conversation_starter": starter or fallback["conversation_starter"]}
+    payload = {
+        "recommendation_tier": tier,
+        "person_being_introduced_recent_context": other_context,
+        "person_being_introduced_personality": _public_personality_phrase(other),
+        "message_receiver_personality": _public_personality_phrase(viewer),
+    }
+    prompt = f"""你是交友軟體裡像朋友一樣牽線的阿月。只寫給一位收件人，不要產生雙向欄位。
+用自然、有變化的繁體中文寫 2 到 3 句：先介紹另一位人選最近想做的事與個性，再用假設語氣說明兩人的個性在那個情境裡可能有什麼舒服、有趣的互動，最後真誠問收件人是否想認識對方或一起參加。
+必須原樣保留「person_being_introduced_recent_context」文字，避免角色顛倒。不同活動不可說成共同興趣；不可說對方已答應、已同意或一定合適；不可補名字、地點、活動、個性或其他事實；禁止「物件」、ID、資料庫與技術詞。不要使用固定標題或條列。
+以下是語氣與結構的參考，必須依資料重新組織，不得逐字複製：{json.dumps(MATCH_PROPOSAL_FEW_SHOTS, ensure_ascii=False)}
+同時寫一則只會在配對成功後才使用的 accepted_opening：1 到 3 句、像朋友幫忙遞第一句話、須保留 {{{{counterparty}}}} 這個 placeholder 一次，且須包含對方近期情境與雙方公開性格；不可使用真實姓名或補充其他事實。其語氣參考：{json.dumps(PRIVATE_OPENING_FEW_SHOTS, ensure_ascii=False)}
+只輸出 JSON：{{"viewer_text":"","conversation_starter":"","accepted_opening":""}}
+資料：{json.dumps(payload, ensure_ascii=False)}"""
+    try:
+        raw = json.loads(generate_chat_completion(prompt, temperature=0.55, json_output=True))
+        return _valid_directional_reason(
+            raw, fallback, required_context=other_context,
+            required_introduced_personality=_public_personality_phrase(other),
+            required_viewer_personality=_public_personality_phrase(viewer),
+        )
+    except Exception:
+        return fallback
 
 
 def build_directional_match_explanations(target: dict, candidate: dict, vector_score: float, *, refine: bool = False) -> tuple[dict, dict]:
@@ -547,7 +607,7 @@ def build_directional_match_explanations(target: dict, candidate: dict, vector_s
         return target_fallback, candidate_fallback
 
 
-def _role_bound_reason_entries(target: dict, candidate: dict, tier: str) -> list[dict]:
+def _role_bound_reason_entries(target: dict, candidate: dict, tier: str, *, refine: bool = False) -> list[dict]:
     """Build two role-bound reasons without ever asking a model to map roles.
 
     The older v2 prompt returned both directions in one JSON object. A model
@@ -561,7 +621,8 @@ def _role_bound_reason_entries(target: dict, candidate: dict, tier: str) -> list
         if not viewer_id or not other_id or viewer_id == other_id:
             continue
         fallback = _directional_reason_fallback(viewer, other, tier)
-        text = str(fallback.get("viewer_text") or "")
+        reason = _refine_directional_reason(viewer, other, tier, fallback) if refine else fallback
+        text = str(reason.get("viewer_text") or "")
         if not text or "seed_user" in text.lower() or "物件" in text:
             continue
         entries.append({
@@ -570,17 +631,19 @@ def _role_bound_reason_entries(target: dict, candidate: dict, tier: str) -> list
             "counterparty_context_snapshot": _short_text(other.get("current_context"), 56),
             "viewer_text": text,
             "interaction_hypothesis": _short_text(text.split("。", 1)[-1], 76),
-            "conversation_starter": _short_text(fallback.get("conversation_starter"), 72),
-            "used_evidence_keys": list(fallback.get("used_evidence_keys") or []),
+            "conversation_starter": _short_text(reason.get("conversation_starter"), 72),
+            "used_evidence_keys": list(reason.get("used_evidence_keys") or []),
             "tier": tier,
         })
     return entries
 
 
-def build_directional_reason_v3(target: dict, candidate: dict, vector_score: float) -> list[dict]:
+def build_directional_reason_v3(
+    target: dict, candidate: dict, vector_score: float, *, refine: bool = False,
+) -> list[dict]:
     _, items, _, _ = build_validated_match_explanation(target, candidate, vector_score)
     tier = next((item.get("text") for item in items if item.get("kind") == "recommendation_tier"), "exploratory")
-    return _role_bound_reason_entries(target, candidate, tier)
+    return _role_bound_reason_entries(target, candidate, tier, refine=refine)
 
 
 def build_directional_reason_v3_from_snapshot(match_doc: dict) -> list[dict]:
@@ -599,32 +662,96 @@ def build_directional_reason_v3_from_snapshot(match_doc: dict) -> list[dict]:
     )
 
 
-def reason_for_viewer(match_doc: dict, user_id: str) -> str:
-    """One canonical viewer projection for cards, status and mediator replies."""
-    from_user, to_user = str(match_doc.get("from_user") or ""), str(match_doc.get("to_user") or "")
-    expected_other = to_user if user_id == from_user else from_user if user_id == to_user else ""
-    v3 = match_doc.get("directional_reason_v3") or (
-        build_directional_reason_v3_from_snapshot(match_doc)
-        if match_doc.get("status") in {"draft", "pending"} else []
-    )
-    if isinstance(v3, list) and expected_other:
-        matching = [
-            item for item in v3 if isinstance(item, dict)
-            and item.get("viewer_id") == user_id
-            and item.get("counterparty_id") == expected_other
-        ]
-        if len(matching) == 1:
-            text = _short_text(matching[0].get("viewer_text"), 110)
-            if text and not any(token in text.lower() for token in ("seed_user", "user_id", "mongo", "資料庫", "物件")):
-                return text
-    directional = match_doc.get("directional_reason_v2") or {}
-    key = "target" if match_doc.get("from_user") == user_id else "candidate"
-    candidate = directional.get(key) if isinstance(directional, dict) else None
-    if isinstance(candidate, dict) and candidate.get("viewer_text"):
-        return str(candidate["viewer_text"])
-    return str(match_doc.get("reason") if key == "target" else match_doc.get("receiver_reason") or match_doc.get("reason") or "")
+def _friend_intro_entry(viewer: dict, other: dict, tier: str, *, refine: bool) -> dict:
+    """Create one V4 projection from one recipient's point of view.
 
-def generate_matches_for_user(user_id: str, source: str = "manual"):
+    The identifiers are stored only with the proposal so the runtime can prove
+    which direction a projection belongs to.  They are never returned by any
+    public card/event projection.
+    """
+    viewer_id = str(viewer.get("user_id") or "")
+    other_id = str(other.get("user_id") or "")
+    if not viewer_id or not other_id or viewer_id == other_id:
+        return {}
+    fallback = _directional_reason_fallback(viewer, other, tier)
+    reason = _refine_directional_reason(viewer, other, tier, fallback) if refine else fallback
+    text = _short_text(reason.get("viewer_text"), 220)
+    if not text or any(token in text.lower() for token in ("seed_user", "user_id", "mongo", "資料庫", "物件")):
+        reason = fallback
+        text = _short_text(reason.get("viewer_text"), 110)
+    return {
+        "copy_version": FRIEND_COPY_VERSION,
+        "viewer_id": viewer_id,
+        "counterparty_id": other_id,
+        "counterparty_context_snapshot": reason_public_text(other.get("current_context"), 56),
+        "counterparty_public_personality": _public_personality_phrase(other),
+        "viewer_public_personality": _public_personality_phrase(viewer),
+        "viewer_text": text,
+        "conversation_starter": _short_text(reason.get("conversation_starter"), 72),
+        "accepted_opening": _short_text(reason.get("accepted_opening"), 220),
+        "tier": tier,
+    }
+
+
+def build_friend_intro_v4(
+    initiator: dict, receiver: dict, vector_score: float, *, refine: bool = False,
+) -> dict:
+    """Create the two immutable V4 friend-introduction projections.
+
+    Calls are intentionally sequential and role-local: a model writes one
+    invitation to the initiator and a separate one to the receiver.  It never
+    gets a bidirectional JSON shape that it could accidentally swap.
+    """
+    _, items, _, _ = build_validated_match_explanation(initiator, receiver, vector_score)
+    tier = next((item.get("text") for item in items if item.get("kind") == "recommendation_tier"), "exploratory")
+    if tier not in {"grounded", "exploratory"}:
+        tier = "exploratory"
+    return {
+        "initiator_preview": _friend_intro_entry(initiator, receiver, tier, refine=refine),
+        "receiver_invitation": _friend_intro_entry(receiver, initiator, tier, refine=refine),
+    }
+
+
+def build_friend_intro_v4_from_snapshot(match_doc: dict) -> dict:
+    """Recover a malformed V4 live projection from immutable creation data."""
+    return build_v4_snapshot_fallback(match_doc)
+
+
+def _existing_job_match_result(match_doc: dict, user_id: str, user_doc: dict) -> dict:
+    """Rebuild the bounded pipeline result after a worker lease handoff."""
+    matched_id = (
+        match_doc.get("to_user")
+        if match_doc.get("from_user") == user_id else match_doc.get("from_user")
+    )
+    candidate = profiles_coll.find_one(
+        {"user_id": matched_id}, {"_id": 0, "big_five": 1, "current_context": 1},
+    ) or {}
+    return {
+        "status": "success",
+        "matches": [{
+            "match_id": str(match_doc.get("_id")),
+            "matched_user_id": matched_id,
+            "contrast_label": match_doc.get("contrast_label", ""),
+            "distinctive_tags": match_doc.get("distinctive_tags", []),
+            "score_breakdown": match_doc.get("score_breakdown", {}),
+            "top_reasons": match_doc.get("top_reasons", []),
+            "reason_items": match_doc.get("reason_items", []),
+            "recommendation_reason": reason_for_viewer(match_doc, user_id),
+            "viewer_reason": reason_for_viewer(match_doc, user_id),
+            "reason_version": match_doc.get("reason_version", "v3"),
+            "big_five": candidate.get("big_five", {}),
+            "current_context": candidate.get("current_context", ""),
+            "target_context": user_doc.get("current_context", ""),
+        }],
+        "debug_info": [],
+    }
+
+def generate_matches_for_user(
+    user_id: str, source: str = "manual", *,
+    report_progress: Callable[[str], bool] | None = None,
+    can_commit: Callable[[], bool] | None = None,
+    search_job_id: str = "",
+):
     """Run the existing matching pipeline for either a manual or proactive request."""
     req = MatchRequest(user_id=user_id)
     candidate_limit = agent_candidate_limit()
@@ -632,22 +759,41 @@ def generate_matches_for_user(user_id: str, source: str = "manual"):
     print(f"[TIMING][V1 /api/match] start user={req.user_id} candidate_limit={candidate_limit}")
 
     step_start = time.perf_counter()
-    _set_match_search(user_id, "loading_profile", source)
+    def report(step: str, **extra) -> bool:
+        if report_progress is not None:
+            return bool(report_progress(step))
+        _set_match_search(user_id, step, source, **extra)
+        return True
+
+    if not report("loading_profile"):
+        return {"status": "stale", "matches": [], "debug_info": []}
     user_doc = profiles_coll.find_one({"user_id": req.user_id}, {"_id": 0})
     print(f"[TIMING][V1 /api/match] load user profile: {time.perf_counter() - step_start:.3f}s")
     if not user_doc:
          raise HTTPException(status_code=400, detail="User context not found.")
+
+    if search_job_id:
+        existing_job_match = matches_coll.find_one({
+            "search_job_id": search_job_id,
+            "from_user": req.user_id,
+            "status": {"$in": list(LIVE_MATCH_STATUSES)},
+        })
+        if existing_job_match:
+            return _existing_job_match_result(existing_job_match, req.user_id, user_doc)
          
-    stored_context = str(user_doc.get("current_context") or "")
+    stored_context_value = user_doc.get("current_context")
+    stored_context = str(stored_context_value or "")
     normalized_context = safe_recent_context(stored_context, "交朋友")
     user_doc["current_context"] = normalized_context
     user_embedding = user_doc.get("context_embedding", [])
     if not user_embedding or normalized_context != stored_context:
         step_start = time.perf_counter()
         user_embedding = get_embedding(normalized_context)
+        # Embedding refresh is derived from the profile version loaded above.
+        # Never let a slow search overwrite a newer profile/context update.
         profiles_coll.update_one(
-            {"user_id": req.user_id},
-            {"$set": {"context_embedding": user_embedding, "current_context": normalized_context}},
+            {"user_id": req.user_id, "current_context": stored_context_value},
+            {"$set": {"context_embedding": user_embedding}},
         )
         print(f"[TIMING][V1 /api/match] create missing embedding: {time.perf_counter() - step_start:.3f}s")
     
@@ -699,7 +845,8 @@ def generate_matches_for_user(user_id: str, source: str = "manual"):
     ]
     
     try:
-        _set_match_search(user_id, "vector_search", source)
+        if not report("vector_search"):
+            return {"status": "stale", "matches": [], "debug_info": []}
         step_start = time.perf_counter()
         raw_candidates = list(profiles_coll.aggregate(pipeline))
         print(f"[TIMING][V1 /api/match] Mongo vector search: {time.perf_counter() - step_start:.3f}s raw_candidates={len(raw_candidates)}")
@@ -714,7 +861,7 @@ def generate_matches_for_user(user_id: str, source: str = "manual"):
         top_5_candidates.append((score, c))
     
     if not top_5_candidates:
-        raise HTTPException(status_code=404, detail="Not enough candidates.")
+        return {"status": "no_suitable_candidate", "matches": [], "debug_info": []}
 
     # Only candidates with a reciprocal safety check and a strong owner-grounded
     # link are eligible for the LLM ranking step.  The model never receives weak
@@ -789,7 +936,8 @@ def generate_matches_for_user(user_id: str, source: str = "manual"):
         print(f"[TIMING][V1 /api/match] Agent payload size logging failed: {e}")
     
     try:
-        _set_match_search(user_id, "graph_check", source, candidate_count=len(qualified_candidates))
+        if not report("graph_check", candidate_count=len(qualified_candidates)):
+            return {"status": "stale", "matches": [], "debug_info": []}
         print("📞 正在打電話給 9001 港口的媒婆 Agent...")
         step_start = time.perf_counter()
         agent_resp = requests.post("http://127.0.0.1:9001/api/match", json=payload, timeout=120)
@@ -811,10 +959,13 @@ def generate_matches_for_user(user_id: str, source: str = "manual"):
         raise HTTPException(status_code=503, detail=f"配對 Agent (port 9001) 無法連線: {e}")
     
     # 阿月一次只牽一條線，避免同時丟出候選人清單。
-    _set_match_search(user_id, "writing_reason", source)
+    if not report("writing_reason"):
+        return {"status": "stale", "matches": [], "debug_info": []}
     step_start = time.perf_counter()
     result_matches = []
     for m in agent_matches[:1]:
+        if can_commit is not None and not can_commit():
+            return {"status": "stale", "matches": [], "debug_info": []}
         matched_id = m.get("matched_user_id")
         
         if not matched_id or not qualification_by_id.get(matched_id, {}).get("eligible"):
@@ -834,22 +985,18 @@ def generate_matches_for_user(user_id: str, source: str = "manual"):
         receiver_breakdown, receiver_items, _, receiver_reason = build_validated_match_explanation(
             candidate_doc, user_doc, vector_scores.get(matched_id, 0)
         )
-        # V3 binds each explanation to the actual viewer/counterparty IDs.
-        # Keep V2 fields as a compatibility projection, but do not ask an LLM
-        # to generate two role-labelled paragraphs in one response.
-        directional_target, directional_candidate = build_directional_match_explanations(
-            user_doc, candidate_doc, vector_scores.get(matched_id, 0), refine=False,
+        # V4 persists two role-bound friend introductions.  They are created
+        # with two separate model calls and never exposed as a two-way public
+        # payload, so a role swap cannot leak into the recipient's card.
+        friend_intro_v4 = build_friend_intro_v4(
+            user_doc, candidate_doc, vector_scores.get(matched_id, 0), refine=True,
         )
-        directional_v3 = build_directional_reason_v3(
-            user_doc, candidate_doc, vector_scores.get(matched_id, 0),
+        ai_recommendation_reason = str(
+            (friend_intro_v4.get("initiator_preview") or {}).get("viewer_text") or reason
         )
-        
-        # Persist only explanations assembled from owner-bound evidence.  The
-        # ranking model may select an eligible candidate, but its free-form
-        # prose is never a trusted source of facts shown to either person.
-        by_viewer = {item.get("viewer_id"): item for item in directional_v3 if isinstance(item, dict)}
-        ai_recommendation_reason = str((by_viewer.get(req.user_id) or {}).get("viewer_text") or directional_target["viewer_text"] or reason)
-        ai_receiver_reason = str((by_viewer.get(matched_id) or {}).get("viewer_text") or directional_candidate["viewer_text"] or receiver_reason)
+        ai_receiver_reason = str(
+            (friend_intro_v4.get("receiver_invitation") or {}).get("viewer_text") or receiver_reason
+        )
         recommendation_tier = next(
             (item.get("text") for item in reason_items if item.get("kind") == "recommendation_tier"),
             "exploratory",
@@ -861,12 +1008,9 @@ def generate_matches_for_user(user_id: str, source: str = "manual"):
             "live_participants": [req.user_id, matched_id],
             "reason": ai_recommendation_reason,
             "receiver_reason": ai_receiver_reason,
-            "reason_version": "v3",
-            "directional_reason_v2": {
-                "target": directional_target,
-                "candidate": directional_candidate,
-            },
-            "directional_reason_v3": directional_v3,
+            "reason_version": V4_REASON_VERSION,
+            "reason_copy_version": FRIEND_COPY_VERSION,
+            "friend_intro_v4": friend_intro_v4,
             "contrast_label": contrast_label,
             "distinctive_tags": distinctive_tags,
             "score_breakdown": score_breakdown,
@@ -879,12 +1023,14 @@ def generate_matches_for_user(user_id: str, source: str = "manual"):
                 "target": {
                     "user_id": req.user_id,
                     "current_context": user_doc.get("current_context"),
+                    "public_personality": _public_personality_phrase(user_doc),
                     "context_revision": int(user_doc.get("current_context_revision", 0)),
                     "context_signals": user_doc.get("context_signals", {}),
                 },
                 "candidate": {
                     "user_id": matched_id,
                     "current_context": candidate_doc.get("current_context"),
+                    "public_personality": _public_personality_phrase(candidate_doc),
                     "context_revision": int(candidate_doc.get("current_context_revision", 0)),
                     "context_signals": candidate_doc.get("context_signals", {}),
                 },
@@ -896,7 +1042,16 @@ def generate_matches_for_user(user_id: str, source: str = "manual"):
             "created_at": time.time(),
             "state_history": [{"from": None, "to": "draft", "actor": req.user_id, "action": "created", "at": time.time()}]
         }
-        insert_result = matches_coll.insert_one(match_doc)
+        if search_job_id:
+            match_doc["search_job_id"] = search_job_id
+        if can_commit is not None and not can_commit():
+            return {"status": "stale", "matches": [], "debug_info": []}
+        try:
+            insert_result = matches_coll.insert_one(match_doc)
+        except DuplicateKeyError:
+            # Another worker/user established a live proposal after our final
+            # read. The unique participant index is the authoritative guard.
+            return {"status": "stale", "matches": [], "debug_info": []}
         
         # 查詢候選人的 profile 供前端渲染
         to_doc = profiles_coll.find_one({"user_id": matched_id}, {"_id": 0})
@@ -910,8 +1065,8 @@ def generate_matches_for_user(user_id: str, source: str = "manual"):
             "top_reasons": top_reasons,
             "reason_items": reason_items,
             "recommendation_reason": ai_recommendation_reason,
-            "receiver_reason": ai_receiver_reason,
-            "reason_version": "v3",
+            "viewer_reason": ai_recommendation_reason,
+            "reason_version": V4_REASON_VERSION,
             "big_five": to_doc.get("big_five", {}) if to_doc else {},
             "current_context": to_doc.get("current_context", "") if to_doc else "",
             "target_context": user_doc.get("current_context", ""),
@@ -941,94 +1096,16 @@ def _queue_match_event(user_id: str, event_type: str, message: str, **extra):
 
 
 def create_proactive_match_proposal(user_id: str, source: str = "automatic", force_new: bool = False):
-    """Create one proposal and always surface success or failure to Ayue's chat."""
-    now = time.time()
-    request_id = uuid.uuid4().hex
-    active = reconcile_match_state(user_id)
-    if active:
-        stage = derive_match_stage(active, user_id)
-        _set_match_search(
-            user_id, stage,
-            source, match_id=str(active["_id"]),
-            other_id=active["to_user"] if active["from_user"] == user_id else active["from_user"],
-        )
-        _queue_match_event(user_id, "match_search_blocked", "手上這條線還沒確認完，先把它處理好，我再幫你看下一位。")
-        return {"status": "already_active"}
-    claimed = profiles_coll.find_one_and_update(
-        {"user_id": user_id,
-         "$or": [{"matchmaking_in_progress": {"$ne": True}}, {"matchmaking_started_at": {"$lt": now - 300}}],
-         "user_id": user_id},
-        {"$set": {"matchmaking_in_progress": True, "matchmaking_started_at": now,
-                  "matchmaking_request_id": request_id,
-                  "match_search": {"status": "searching", "source": source, "started_at": now,
-                                   "request_id": request_id}}},
-        return_document=True
+    """Legacy callable kept as a queueing compatibility facade."""
+    return start_match_search(
+        user_id, source=source, force_new=force_new,
+        idempotency_key=f"legacy-proactive:{uuid.uuid4().hex}",
     )
-    if not claimed:
-        return {"status": "already_searching"}
-    request_context_revision = int((claimed or {}).get("current_context_revision", 0))
-    profiles_coll.update_one(
-        {"user_id": user_id, "match_search.request_id": request_id},
-        {"$set": {"match_search.context_revision": request_context_revision}},
-    )
-    try:
-        result = generate_matches_for_user(user_id, source)
-        suggestions = result.get("matches", [])[:1]
-        if not suggestions:
-            raise HTTPException(status_code=404, detail="目前沒有新的候選人")
-        first = suggestions[0]
-        candidate_id = first.get("matched_user_id", "這個人")
-        first_match_id = first.get("match_id")
-        tone = (profiles_coll.find_one({"user_id": user_id}, {"mediator_tone": 1}) or {}).get("mediator_tone", "friend")
-        proposal_message = {
-            "friend": "我翻到一位可以介紹給你的人，先看這張阿月牽線提案。",
-            "gentle": "我幫你留意到一位可能合拍的人，先看看這個提案。",
-            "enthusiastic": "我找到一位有機會聊起來的人，快看看這張牽線提案！",
-        }.get(tone, "我翻到一位可以介紹給你的人，先看這張阿月牽線提案。")
-        current = profiles_coll.find_one(
-            {"user_id": user_id}, {"current_context_revision": 1, "matchmaking_request_id": 1},
-        ) or {}
-        current_revision = int(current.get("current_context_revision", 0))
-        is_stale = (
-            current.get("matchmaking_request_id") != request_id
-            or current_revision != request_context_revision
-        )
-        if is_stale:
-            profiles_coll.update_one(
-                {"user_id": user_id, "matchmaking_request_id": request_id},
-                {"$set": {"match_search.status": "stale", "match_search.completed_at": time.time()}},
-            )
-            return {"status": "stale"}
-        profiles_coll.update_one({"user_id": user_id}, {"$set": {
-            "last_auto_match_revision": current_revision,
-            "match_search": {"status": "idle", "source": source, "completed_at": time.time()}}})
-        queue_mediator_event(
-            user_id, proposal_message, "match_proposal",
-            matches=suggestions, match_id=first_match_id, other_id=candidate_id,
-            proposal_role="initiator", debug_info=result.get("debug_info", []),
-        )
-        return {"status": "queued", "other_id": candidate_id}
-    except Exception as exc:
-        detail = getattr(exc, "detail", None) or str(exc)
-        no_candidates = "candidate" in detail.lower() or "候選" in detail or getattr(exc, "status_code", 0) == 404
-        message = "這輪我暫時沒看到適合的新對象，等資料多一點我再幫你看。" if no_candidates else "我剛剛找人的路上卡了一下，沒有假裝成功；晚點可以再叫我試一次。"
-        _queue_match_event(user_id, "match_search_empty" if no_candidates else "match_search_failed", message, error=detail[:200])
-        profiles_coll.update_one({"user_id": user_id}, {"$set": {"match_search": {
-            "status": "no_candidates" if no_candidates else "failed", "source": source,
-            "error": detail[:200], "completed_at": time.time()}}})
-        print(f"Proactive matchmaking failed for {user_id}: {exc}")
-        return {"status": "no_candidates" if no_candidates else "failed", "detail": detail}
-    finally:
-        profiles_coll.update_one(
-            {"user_id": user_id},
-            {"$set": {"matchmaking_in_progress": False},
-             "$unset": {"matchmaking_started_at": "", "matchmaking_request_id": ""}},
-        )
 
 
-# Candidate ranking lives in this router for now, but every public caller
-# reaches it through the shared match-action boundary.
-register_match_search_executor(create_proactive_match_proposal)
+# Candidate ranking is still this module's legacy implementation. The durable
+# job service owns when it runs, leases, cancellation and public status.
+register_match_search_pipeline(generate_matches_for_user)
 
 @router.post("/request")
 def request_next_match(req: MatchRequest, background_tasks: BackgroundTasks):
@@ -1039,65 +1116,35 @@ def request_next_match(req: MatchRequest, background_tasks: BackgroundTasks):
         _set_match_search(
             req.user_id, stage, req.source, match_id=str(active["_id"]), other_id=other_id
         )
-        return {"status": "already_active", "stage": stage, "match_id": str(active["_id"])}
-    profile = profiles_coll.find_one({"user_id": req.user_id}) or {}
-    if profile.get("matchmaking_in_progress") and profile.get("matchmaking_started_at", 0) > time.time() - 300:
-        return {"status": "already_searching"}
+        return {"status": "already_active", "stage": stage}
     if not req.confirmed:
         _set_match_search(req.user_id, "awaiting_confirmation", req.source)
         return {
             "status": "awaiting_confirmation",
             "message": "要我現在幫你翻翻名單嗎？你點開始，我才會真的去找。",
         }
-    profiles_coll.update_one({"user_id": req.user_id}, {"$set": {"match_search": {
-        "status": "queued", "source": req.source, "requested_at": time.time()}}}, upsert=True)
-    background_tasks.add_task(start_match_search, req.user_id, source=req.source, force_new=req.force_new)
-    return {"status": "queued"}
+    return start_match_search(
+        req.user_id, source=req.source, force_new=req.force_new,
+        idempotency_key=f"match-request:{req.user_id}:{uuid.uuid4().hex}",
+    )
 
 
 @router.post("/cancel")
 def cancel_match_request(req: MatchRequest):
-    active = reconcile_match_state(req.user_id)
-    if active:
-        return {"status": "already_active", "match_id": str(active["_id"])}
-    _set_match_search(req.user_id, "cancelled", req.source)
-    return {"status": "cancelled"}
+    return cancel_match_search(req.user_id, source=req.source)
 
 @router.get("/status")
 def get_match_status(user_id: str):
     active = reconcile_match_state(user_id)
-    profile = profiles_coll.find_one({"user_id": user_id}, {"match_search": 1, "matchmaking_in_progress": 1}) or {}
-    search = profile.get("match_search", {"status": "idle"})
-    if active and search.get("status") in {"idle", "completed", "cancelled"}:
-        search = {
-            "status": derive_match_stage(active, user_id),
-            "source": "reconciled", "match_id": str(active["_id"]),
-            "other_id": active["to_user"] if active["from_user"] == user_id else active["from_user"],
-            "updated_at": time.time(),
-        }
-    elif active:
-        search = {
-            **search,
-            "status": derive_match_stage(active, user_id),
-            "match_id": str(active["_id"]),
-            "other_id": active["to_user"] if active["from_user"] == user_id else active["from_user"],
-        }
-    if not active and search.get("status") in {"waiting_user", "waiting_other", "incoming_decision", "found", "completed"}:
-        search = {"status": "idle", "source": "reconciled", "updated_at": time.time()}
-        profiles_coll.update_one(
-            {"user_id": user_id, "match_search.status": {"$in": ["waiting_user", "waiting_other", "incoming_decision", "found", "completed"]}},
-            {"$set": {"match_search": search}},
-        )
-    live_match = ({"match_id": str(active["_id"]), "status": active.get("status"), "other_id": active["to_user"] if active["from_user"] == user_id else active["from_user"]} if active else None)
-    return {"search": search, "live_match": live_match, "match_search": search,
-            "matchmaking_in_progress": bool(profile.get("matchmaking_in_progress")),
-            "active_proposal_card": build_active_proposal_card(active, user_id) if active else None,
-            "active_proposal": ({
-                "match_id": str(active["_id"]),
-                "status": active.get("status"),
-                "other_id": active["to_user"] if active["from_user"] == user_id else active["from_user"],
-            } if active else None),
-            "status_snapshot": get_match_status_snapshot(user_id)}
+    search = public_match_search_status(user_id)
+    snapshot = get_match_status_snapshot(user_id)
+    public_snapshot = {
+        key: snapshot.get(key)
+        for key in ("state", "scope", "is_terminal", "chat_opened", "counterparty", "reason_code")
+    }
+    return {"search": search, "match_search": search,
+            "active_proposal_card": build_status_proposal_card(active, user_id) if active else None,
+            "status_snapshot": public_snapshot}
 
 @router.get("/state")
 def get_single_match_state(user_id: str, match_id: str):
@@ -1109,13 +1156,25 @@ def get_single_match_state(user_id: str, match_id: str):
         raise HTTPException(status_code=404, detail="Match not found")
     if user_id not in {match_doc.get("from_user"), match_doc.get("to_user")}:
         raise HTTPException(status_code=403, detail="Only a match participant may read this state")
-    other_id = match_doc.get("to_user") if match_doc.get("from_user") == user_id else match_doc.get("from_user")
-    return {"match_id": match_id, "status": match_doc.get("status"),
-            "stage": derive_match_stage(match_doc, user_id), "other_id": other_id}
+    response = {
+        "match_id": match_id,
+        "status": match_doc.get("status"),
+        "stage": derive_match_stage(match_doc, user_id),
+    }
+    # While a proposal is still actionable, hydrate its saved chat card from
+    # the canonical viewer-bound projection.  This lets old cards receive copy
+    # compatibility fixes without editing message history.
+    active_card = build_active_proposal_card(match_doc, user_id)
+    if active_card:
+        response["viewer_reason"] = active_card.get("viewer_reason", "")
+    return response
 
 @router.post("")
 def match_endpoint(req: MatchRequest):
-    return generate_matches_for_user(req.user_id)
+    return start_match_search(
+        req.user_id, source=req.source, force_new=req.force_new,
+        idempotency_key=f"match-endpoint:{req.user_id}:{uuid.uuid4().hex}",
+    )
 
 def _apply_match_decision(req: MatchDecisionRequest, background_tasks: BackgroundTasks):
     result = decide_match_action(

@@ -9,7 +9,7 @@ from database import matches_coll, profiles_coll
 
 
 LIVE_MATCH_STATUSES = {"draft", "pending"}
-SEARCHING_STATUSES = {"queued", "searching", "loading_profile", "vector_search", "graph_check", "writing_reason"}
+SEARCHING_STATUSES = {"queued", "running", "searching", "loading_profile", "vector_search", "graph_check", "writing_reason"}
 SEARCH_RESULT_STATUSES = {"no_candidates", "failed", "cancelled"}
 TERMINAL_MATCH_STATUSES = {"accepted", "declined", "expired"}
 DRAFT_TTL_SECONDS = 24 * 3600
@@ -200,7 +200,9 @@ def get_match_status_snapshot(user_id: str) -> dict[str, Any]:
         return {
             "state": derive_match_stage(live, user_id), "scope": "live_match", "is_terminal": False,
             "chat_opened": False,
-            "counterparty": _display_name(_other_id(live, user_id)),
+            # A live proposal is intentionally anonymous.  The identifier is
+            # still available to the decision service, never this public view.
+            "counterparty": "對方",
             "revision": int(live.get("proposal_revision", 0)),
             "updated_at": live.get("updated_at") or live.get("created_at"), "reason_code": None,
         }
@@ -246,7 +248,7 @@ def get_match_status_snapshot(user_id: str) -> dict[str, Any]:
         return {
             "state": state, "scope": "latest_match", "is_terminal": True,
             "chat_opened": state == "accepted",
-            "counterparty": _display_name(_other_id(latest, user_id)),
+            "counterparty": _display_name(_other_id(latest, user_id)) if state == "accepted" else "對方",
             "revision": int(latest.get("proposal_revision", 0)),
             "updated_at": latest.get("updated_at") or latest.get("created_at"), "reason_code": None,
         }

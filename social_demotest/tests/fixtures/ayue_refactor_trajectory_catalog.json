@@ -13,5 +13,6 @@
   {"id":"counterparty_summary","message":"他是誰","semantic_owner":"planner","profile_write":"none","tool_category":"counterparty_summary_read","coverage_status":"unit_characterized","target_phase":2},
   {"id":"ordinary_why","message":"為什麼","semantic_owner":"planner","profile_write":"none","tool_category":"none","coverage_status":"unit_characterized","target_phase":2},
   {"id":"decline_why","message":"為什麼","semantic_owner":"planner","profile_write":"none","tool_category":"match_status_read","precondition":"previous_decline","coverage_status":"unit_characterized","target_phase":2},
-  {"id":"confirmation_topic_switch","message":"你有記得我的旅遊計畫嗎？","semantic_owner":"planner","profile_write":"none","tool_category":"recent_context_read","precondition":"pending_search_confirmation","coverage_status":"unit_characterized","target_phase":2}
+  {"id":"confirmation_topic_switch","message":"你有記得我的旅遊計畫嗎？","semantic_owner":"planner","profile_write":"none","tool_category":"recent_context_read","precondition":"pending_search_confirmation","coverage_status":"unit_characterized","target_phase":2},
+  {"id":"random_restaurant_followup","message":"你隨意推薦","semantic_owner":"planner","profile_write":"none","tool_category":"places_nearby_read","precondition":"ready_place_search_draft","coverage_status":"unit_characterized","target_phase":2}
 ]

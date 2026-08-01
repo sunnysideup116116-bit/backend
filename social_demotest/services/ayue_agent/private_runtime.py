@@ -305,7 +305,7 @@ def _fun_fact_reply(ctx: PrivateAgentTurnContext, *, dry_run: bool) -> tuple[boo
     """Delegate the actual queue mutation to the existing idempotent workflow."""
     if dry_run:
         return False, ""
-    from routers.chat import participant_probe_state, queue_manual_fun_fact_probe
+    from services.relationship_engagement_service import participant_probe_state, queue_manual_fun_fact_probe
 
     state = participant_probe_state(ctx.match_doc, ctx.other_id)
     if state.get("kind") == "fun_fact" and state.get("status") in {"queued", "awaiting_answer", "awaiting_sentiment", "awaiting_consent"}:
@@ -335,10 +335,14 @@ def run_private_agent_turn(ctx: PrivateAgentTurnContext, *, mode: str) -> AgentR
             reply = "我只能看出那段時間已有安排，不能看到或透露內容。" if _asks_event_detail(ctx.message) else _calendar_reply(access_enabled, busy, truncated=truncated)
             result = AgentResult(handled=True, reply=reply, conversation_intent="private_partner_availability", agent_run_id=run_id, agent_mode=mode)
         elif is_private_fun_fact_request(ctx.message):
-            trace["route"] = "request_fun_fact"
-            trace["tools"].append("private_relationship.request_fun_fact")
-            handled, reply = _fun_fact_reply(ctx, dry_run=mode == "shadow")
-            result = AgentResult(handled=handled, reply=reply or None, conversation_intent="private_probe_request", agent_run_id=run_id, agent_mode=mode, fallback_reason=None if handled else "shadow_action")
+            trace["route"] = "fun_fact_disabled"
+            result = AgentResult(
+                handled=True,
+                reply="這個功能目前先收起來了，不過我可以幫你想一個自然的開場方式。",
+                conversation_intent="private_advice",
+                agent_run_id=run_id,
+                agent_mode=mode,
+            )
         else:
             advisory = _partner_advisory_profile(ctx.other_id)
             facts = _shared_and_consented_facts(ctx)

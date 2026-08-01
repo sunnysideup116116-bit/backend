@@ -19,6 +19,7 @@ class AyueRefactorTrajectoryCatalogTests(unittest.TestCase):
             "mixed_activity_companion", "explicit_no_store", "natural_match_search",
             "unsupported_direct_date", "match_status", "counterparty_summary",
             "ordinary_why", "decline_why", "confirmation_topic_switch",
+            "random_restaurant_followup",
         }
         self.assertEqual({item["id"] for item in catalog}, expected_ids)
         for item in catalog:

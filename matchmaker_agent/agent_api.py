@@ -24,6 +24,12 @@ from matchmaker import MatchmakerAgent
 # ????FastAPI ?蝔? (撠望????銝?鈭?)
 app = FastAPI()
 
+
+@app.get("/health")
+def health_check():
+    """Process-level readiness endpoint; does not read profiles or Neo4j."""
+    return {"status": "ok", "service": "matchmaker"}
+
 # ??????慦?憭扯
 agent = MatchmakerAgent()
 
