@@ -11,6 +11,7 @@ class ChatRequest(BaseModel):
     message: str
     state: str # "big_five" or "deep_profile"
     initial_interest: str = None
+    initialize: bool = False
 
 class MatchRequest(BaseModel):
     user_id: str
@@ -39,6 +40,7 @@ class DirectChatRequest(BaseModel):
     chat_type: str = "direct"  # "direct", "deep_profile"
     mentioned_other_id: str | None = None
     mentioned_other_ids: list[str] | None = None
+    mentions_inline: bool = False
 
 class MediatorPrivateRequest(BaseModel):
     user_id: str

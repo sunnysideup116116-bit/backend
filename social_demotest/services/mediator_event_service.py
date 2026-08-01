@@ -5,9 +5,11 @@ from database import profiles_coll
 
 
 EVENT_PRIORITIES = {
+    "incoming_match_intro": 105,
     "match_proposal": 100,
     "incoming_match_interest": 100,
     "match_connected": 90,
+    "match_connected_gif": 85,
     "probe_result": 80,
     "gentle_closure": 80,
     "mutual_interest": 80,

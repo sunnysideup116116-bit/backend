@@ -33,3 +33,19 @@ def normalize_zh_tw(value: str | None, *, max_length: int | None = None) -> str:
     text = _OPENCC.convert(text) if _OPENCC else text.translate(_FALLBACK_S2T)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:max_length].rstrip() if max_length else text
+
+
+def normalize_model_text(value):
+    """Normalize human-facing values from a typed model payload.
+
+    JSON keys and non-text values are deliberately retained exactly as supplied.
+    This helper belongs only at model-output boundaries; identifiers and evidence
+    spans must never be passed to it.
+    """
+    if isinstance(value, str):
+        return normalize_zh_tw(value)
+    if isinstance(value, list):
+        return [normalize_model_text(item) for item in value]
+    if isinstance(value, dict):
+        return {key: normalize_model_text(item) for key, item in value.items()}
+    return value

@@ -23,7 +23,7 @@ flowchart LR
     API -.-> UI
 ```
 
-它不是關鍵字 chatbot，也不是讓模型直接操作資料庫。LLM 負責語意規劃與自然回答；Runtime、Guard、typed tools 與 domain services 負責權限、狀態和副作用安全。
+它不是關鍵字 chatbot，也不是讓模型直接操作資料庫。公開阿月是本交友 App 內協助使用者認識人、牽線的 AI 媒人，不是另一位使用者，也不把目前 App 當成外部服務。LLM 負責語意規劃與自然回答；Runtime、Guard、typed tools 與 domain services 負責權限、狀態和副作用安全。
 
 公開阿月與阿月悄悄話都是 sibling runtimes，不是 parent/subagent 關係。悄悄話 V2 使用獨立的 context、registry、trace 與隱私 namespace；公開阿月不能任意把 history 或 prompt 交給它。
 
@@ -33,7 +33,15 @@ flowchart LR
 | --- | --- |
 | `social_demotest/main.py` | FastAPI app、routers 與 index 初始化 |
 | `social_demotest/frontend.html` | 現行 Web UI、NDJSON progress、match/calendar cards |
-| `social_demotest/routers/chat.py` | API adapter、訊息保存、stream worker、V2/rollback 入口 |
+| `social_demotest/routers/chat.py` | Chat aggregate router；統一 `/api` prefix 與 `Chat` OpenAPI tag |
+| `social_demotest/routers/chat_onboarding.py` | Big Five／deep profile onboarding HTTP adapters |
+| `social_demotest/routers/chat_messages.py` | 聊天紀錄與聯絡人清單 HTTP adapters |
+| `social_demotest/routers/relationship_dates.py` | 共同約會 domain service 的 thin HTTP adapters |
+| `social_demotest/routers/demo.py` | Demo-only reset endpoint |
+| `social_demotest/routers/proactive.py` | 主動關心／mediator polling 的 thin HTTP adapter |
+| `social_demotest/routers/private_mediator.py` | 悄悄話 JSON／NDJSON HTTP adapters 與既有 private orchestration |
+| `social_demotest/routers/relationship_quiz.py` | 已接受配對的默契小測驗 HTTP adapters |
+| `social_demotest/routers/public_chat.py` | Public `/api/direct_chat*` adapters；V2 loop 與 explicit legacy rollback orchestration |
 | `social_demotest/services/ayue_agent/runtime.py` | 公開 V2 唯一 orchestrator |
 | `services/ayue_agent/context.py` | 每回合 privacy-safe context |
 | `services/ayue_agent/contracts.py` | Provider-neutral Planner/Tool/Result contracts |
@@ -44,6 +52,12 @@ flowchart LR
 | `services/ayue_agent/maps_client.py` | OpenStreetMap／Overpass 附近地點與距離 adapter、TTL cache |
 | `services/ayue_agent/capabilities.py` | 對使用者一致的產品能力與用詞真相 |
 | `services/ayue_agent/proactive_scheduler.py` | Server-side 主動關心排程、claim 與重試 |
+| `services/relationship_engagement_service.py` | Probe、feedback、關係摘要與 post-chat engagement state |
+| `services/proactive_delivery_service.py` | Polling 時 mediator event／care delivery 的 claim 與投遞流程 |
+| `services/profile_task_service.py` | 已保存 owner 訊息的 profile extraction 排程 facade |
+| `services/assessment_session_service.py` | 公開阿月聊天室內基本性格／深層探索的 owner-scoped、短期 session lifecycle |
+| `services/mediator_context_service.py` | Legacy public／private mediator 共用的 bounded context projection |
+| `services/relationship_quiz_service.py` | 默契小測驗 lifecycle、答案驗證與完成結果 projection |
 | `services/ayue_agent/private_v2.py` | 悄悄話 V2 的獨立 context、registry 與 composer |
 | `services/match_state_service.py` | Canonical match read model |
 | `services/match_action_service.py` | Agent/API 共用的 match action facade 與 transition effects |
@@ -114,7 +128,7 @@ Streaming worker 擁有本次 run 的 background tasks。瀏覽器斷線只停�
 - 本人手動保存的粗略所在地（城市／行政區）；不含地址或座標。
 - 最多 8 筆本人相關記憶。
 - 唯一可操作 proposal 的安全狀態與 server-side revision。
-- 有效的 pending confirmation、calendar action draft 或 recent-context draft。
+- 有效的 pending confirmation、calendar action draft、place-search draft 或 recent-context draft。
 - 每回合建立一次的 Asia/Taipei authoritative clock 與相對日期解析。
 - Public capability manifest。
 - 本回合經 server 驗證的 @ 已接受聯絡人公開名稱；其內部 ID 僅保留 executor-side。超過三位時只告知 Planner 需要縮小範圍。
@@ -130,7 +144,7 @@ Streaming worker 擁有本次 run 的 background tasks。瀏覽器斷線只停�
 ```text
 kind: final | tool_call | confirmation
 intent: chat | match_status | match_action | calendar | calendar_action |
-        relationship | memory | time | web | unclear
+        relationship | profile | assessment | memory | time | web | places | unclear
 tool_name: registered tool or null
 arguments: schema-valid, never IDs/revisions
 confidence: 0..1
@@ -149,6 +163,16 @@ Runtime 規則：
 
 Pending confirmation 在 Planner 前處理。Match/calendar confirmation 預設 15 分鐘到期；calendar action draft 15 分鐘、recent-context draft 30 分鐘。狀態或 proposal revision 改變時，相關 confirmation 立即失效。
 
+餐廳／景點推薦另使用 15 分鐘、owner-scoped 的 `agentic_place_search_draft`，只保存公開地點名稱、受限類別、半徑、結果上限與是否使用本人手動保存的粗略所在地。Planner 對一般「吃什麼」預設使用 `restaurant`；當使用者把選擇交給阿月或確認上一輪地點時，必須承接 draft 並讀取 `places.search_nearby`，不可再問已知地點或料理種類。Guard 在 draft 已足以搜尋時會強制先取得 typed places observation，成功後立即清除 draft；draft 逾時則由 Context Builder 清除。
+
+聊天室內的基本性格與深層探索也遵循這個原則：Planner 只能提出
+`profile.start_assessment`（以 `kind: basic|deep` 區分）的 confirmation；確認後，
+Runtime 才建立 24 小時、owner-scoped 的 assessment session。session 進行中，後續答案
+不再送入 Planner，而是只以本次 owner 訊息與 bounded typed draft 交給 analyzer；使用者可回覆「先不做了」、「退出測驗」或「結束測驗」離開。舊的
+`big_five`／`deep_profile` 會保留到新一輪對應探索真正完成才原子替換；取消、逾時、provider
+失敗或重送同一個 message ID 都不得覆寫它。session ID、暫存答案與 analyzer 原始輸出不能
+出現在 Planner context、public event 或 trace。
+
 ## 6. Tool Registry
 
 ### 唯讀工具
@@ -157,16 +181,20 @@ Pending confirmation 在 Planner 前處理。Match/calendar confirmation 預設 
 | --- | --- |
 | `system.get_current_time` | 本回合固定時間、日期、星期與相對日期 |
 | `calendar.list_my_events` | 本人已授權行程；預設未來 90 天或問題指定日期 |
+| `calendar.find_my_event` | 本人一筆指定行程；可用已接受聯絡人的公開名稱縮小共同約會，且只能依該筆行程回答同行者 |
 | `match.get_status` | Canonical search/proposal/terminal state 與聊天室狀態 |
 | `match.get_counterparty_summary` | 唯一有效／已接受對象的公開名稱、近況、個性摘要、共同點與 chat state |
 | `profile.get_recent_context` | 本人已保存的 current context 與 revision |
+| `profile.get_self_summary` | 本人的已完成興趣、基礎／深層性格資料、偏好、近期情境與粗略地區；只在使用者主動詢問本人資料時讀取 |
 | `memory.search_my_profile` | 本人記憶摘要、近期情境及最多 8 筆偏好 |
 | `relationship.get_verified_evidence` | 已接受關係中可驗證的共同互動摘要 |
 | `relationship.get_mentioned_contact_summary` | 本回合 @ 的已接受聯絡人公開近況、初始想認識的事、個性摘要與可驗證共同點；只有有有效 @ 時可見 |
+| `relationship.list_accepted_contacts` | 最多 8 位已接受聯絡人的公開摘要；只用於判斷活動／地點適合度，不代表可得知對方行程或已答應邀約 |
 | `web.search` | Tavily 最新公開搜尋結果；只有設定 `TAVILY_API_KEY` 時可見 |
 | `web.extract` | 本回合搜尋結果或 owner 明確提供公開網址的有限內容；拒絕內網與非 HTTP(S) URL |
 | `places.search_nearby` | 以本人手動保存的粗略所在地或使用者指定地點，查詢附近餐廳／景點等公開地點 |
 | `places.measure_distance` | 計算兩個公開地點的直線距離；不保存精確住址或即時定位 |
+| `places.resolve_place` | 將原句或本回合已確認的店家名稱解析為公開地點；預設使用 OSM，Google Places 啟用時優先使用 Google，失敗則回退 OSM |
 
 ### 寫入工具
 
@@ -177,10 +205,18 @@ Pending confirmation 在 Planner 前處理。Match/calendar confirmation 預設 
 | `calendar.create_my_event` | 必須 | Calendar service |
 | `calendar.update_my_event` | 必須 | Calendar/date coordination service |
 | `calendar.cancel_my_event` | 必須 | Calendar/date coordination service |
+| `profile.start_assessment`（`kind=basic`） | 必須 | `assessment_session_service`（完成前保留既有 Big Five） |
+| `profile.start_assessment`（`kind=deep`） | 必須 | `assessment_session_service`（完成前保留既有深層資料） |
 
-Planner 只提供自然任務參數，例如行程標題、日期、時間或 interested/declined。`user_id`、proposal/event ID、expected status 與 revision 全由 executor 根據登入者及 canonical state 取得。
+Planner 只提供自然任務參數，例如行程標題、日期、公開顯示名稱、時間或 interested/declined。`user_id`、proposal/event ID、已接受聯絡人的內部 ID、expected status 與 revision 全由 executor 根據登入者及 canonical state 取得；公開名稱只可作為 server-side accepted-contact lookup 的輸入，不能自行授權任何關係資料。
 
-`@` 是 entity binding 而不是自動查資料的開關：使用者真正詢問對方近況、特質或比較時，Planner 才會讀取公開摘要；普通提及與打招呼不讀。伺服器重新驗證所有 client IDs 是否為已接受聯絡人，且最多允許三位。
+`calendar.find_my_event` 對公開名稱採精確正規化比對，而且只搜尋 canonical accepted contacts。公開名稱只對應一位已接受聯絡人時，才可用活動／日期搜尋共同約會；若有同名聯絡人，必須在讀取行事曆內容前 fail closed，回傳 typed ambiguity reason 讓 Planner 追問可區分的公開資訊。找不到名稱與找不到行程也是不同 reason code，不能一律套用「哪一天」的罐頭追問。結果最多回傳三筆安全候選。
+
+`profile.get_self_summary` 只投影 owner 已完成的 profile 欄位。Graph memory 最多輸出 8 筆正規化後的偏好 label 與 stance，不回傳 key、owner ID、evidence、confidence 或儲存 metadata；缺少的測驗區段以 `missing_sections` 表示，Planner 不得把未完成資料說成既定結論。
+
+`@` 是 entity binding 而不是自動查資料的開關：使用者真正詢問對方近況、特質或比較時，Planner 才會讀取公開摘要；普通提及與打招呼不讀。前端以文字內、不可拆分的 mention token 顯示，Enter 選取候選或送出、Shift+Enter 換行；訊息紀錄只保存已驗證的公開顯示名稱以重建 token。送出可保留 `@名稱` 文字與 optional `mentions_inline=true`，但伺服器仍重新驗證所有 client IDs 是否為已接受聯絡人，且最多允許三位。
+
+地點卡是 places observation 的 provider-neutral presentation layer：Runtime 只能從 typed place tools 產生最多三張卡，不能從 LLM 回覆或一般 web snippet 猜店家。OSM 卡片保存經過長度與 URL 驗證的店名、分類、地址摘要、距離文字、地圖與 attribution，前端以 lazy OSM embed 或分類封面呈現。Google Places 是可選升級；只有經驗證的 Place ID 才能 lazy-load UI Kit Compact，載入失敗時仍保留自製卡。兩種 provider 都不保存照片、評分或評論。
 
 ## 6.1 Proactive Care
 
@@ -219,7 +255,7 @@ stateDiagram-v2
 
 `draft/pending` 是 live proposal；`accepted/declined/expired` 是歷史／終態。Accepted contact 不應被當成仍在等待的 proposal，也不應讓歷史卡片重新可操作。
 
-每筆新 proposal 另保存 `directional_reason_v3`：每個理由綁定 `viewer_id` 與 `counterparty_id`，並以建立當下的 counterpart context snapshot 組成。所有卡片與通知依目前 viewer 取唯一綁定理由；不得用 `target/candidate` 欄位名稱重新猜測角色。舊 live proposal 可由 `scripts/repair_directional_match_reasons.py` 預設 dry-run 檢查，只有人工 review 後才可使用 `--apply`。
+每筆新 proposal 使用 `reason_version: "v4_friend_intro"`，並在 `friend_intro_v4` 保存兩個內部角色綁定投影：`initiator_preview` 與 `receiver_invitation`。每個投影只可由綁定的 viewer 讀取，並固定保存建立當下對方的公開近期情境與公開性格；其中的 `viewer_id`／`counterparty_id` 只作 server-side 驗證，絕不放進卡片、通知或 agent context。建立新提案時，兩個方向各自使用一次單向、角色已綁定的 LLM 文案器；不得用一個雙向 JSON 讓模型自行對應角色。接收方邀請必須介紹發起人的近期情境、帶入雙方公開性格，以「可能／或許／可以」等假設語氣描述互動，最後詢問是否想認識或參與。驗證失敗、逾時、補造事實或壞 JSON 時，改用同樣完整且不截斷詢問句的 deterministic friend-introduction fallback。`services/match_reason_service.py` 是唯一 viewer projection owner；提案卡、mediator delivery、agent 公開關係摘要與 `/api/notifications` 均只讀它的 `reason_for_viewer`。Queue 只保存控制資訊，delivery 會從 canonical match 重建唯一 viewer payload；接收方送達資料不可攜帶 participant ID、理由項目、分數、對方 profile 片段或發起方預覽。舊 V3 live proposal 只可從 immutable create-time snapshot 讀取安全 fallback，不能被遷移、重算或覆寫。
 
 所有卡片與自然語言決策共用同一條寫入路徑：
 
@@ -233,6 +269,12 @@ Agent write tool ───────┘                                      �
 CAS query 同時綁定 participant、expected status 與 expected revision。成功後 revision 加一並追加 `state_history`。Idempotency key 重送回同一結果；stale request 回最新 status/revision，不覆寫已提交終態。
 
 Matchmaker flow 與公開阿月 loop 分離：Mongo vector search 先縮小候選集合，port 9001 matchmaker 再利用 profile、Neo4j 記憶及規則排序。這不是隨機配對；沒有符合 qualification 的人選時可回報沒有結果。
+
+### Durable match-search jobs
+
+使用者確認找人後，runtime 只建立一筆 owner-scoped `match_search_jobs` 工作，不會在聊天 request thread 內跑候選搜尋。Job 以 `queued → running → completed | no_candidates | failed | cancelled | stale` 表示生命週期；worker 以 atomic claim、lease 與 `active_user_id` unique index 確保同一使用者同時最多一筆 active job。每次工作保留建立時的近期情境 revision，並在載入 profile、vector search、graph check 與 proposal 寫入前重新確認 ownership、revision 與 live match；失效工作不可建立第二張 proposal。Proposal 另以內部 `search_job_id` 綁定來源 job，worker lease 接手或服務重啟時恢復同一 proposal，不重新插入。
+
+`GET /api/match/status` 僅回傳安全的 status、step、progress percent、1–3 分鐘估計和不含識別碼的 proposal 摘要。聊天室在搜尋期間顯示置中、與一般訊息外觀分離的暫時流程卡，包含「阿月牽線流程／配對中」、目前階段、四步驟進度條與背景執行提示；它不建立 message。完成、取消、失敗、連續 status 錯誤或離開公開阿月時立即移除。proposal 操作所需的 identifier 仍只由既有 mediator card 事件提供。
 
 ## 8. Calendar 與共同約會
 
@@ -258,15 +300,26 @@ flowchart LR
     V --> N["Durable memory service"]
 ```
 
-Extractor 只收到該筆已保存 owner message。`ProfileExtractionDecision` 可提出：
+Extractor 的新 facts／evidence 只來自該筆已保存 owner message。為了支援使用者分句描述同一件事，它可以另外收到一個 30 分鐘內有效、只含已驗證 typed values 的 active episode；不含舊原句、assistant reply、evidence ID、工具或配對資料。`ProfileExtractionDecision` 可提出：
 
 - `recent_context.action: update | clear | none`
+- `recent_context.episode_relation: continue | new | unrelated`
 - Typed fields：`activity`、`destination`、`timing`、`companion_intent`
 - Durable memory：typed key、繁中 label、stance、category、confidence、evidence span
 
-每個 evidence span 必須是 owner message 的連續子字串且 subject 必須是 owner。Match operation、等待回覆、assistant text、tool result、match state 與第三方特徵不得寫入近期情境。時間不是近期情境的必要條件。摘要由程式組合，不把模型自由文字直接存入 `current_context`。
+每個新欄位的 evidence span 必須是本次 owner message 的連續子字串且 subject 必須是 owner。只有 `episode_relation=continue` 且 episode ID 仍相同、未逾時時 reducer 才合併欄位；`new` 會建立新 episode，`unrelated` 不寫入。Match operation、等待回覆、assistant text、tool result、match state 與第三方特徵不得寫入近期情境。時間不是近期情境的必要條件。摘要由程式組合，不把模型自由文字直接存入 `current_context`。
 
 同一 message ID 由 unique claim 保證只處理一次；current-context write 使用 revision CAS，避免較舊的非同步工作覆蓋較新訊息。
+
+Public V2 回覆可另外帶 `profile_update_pending` 與 opaque `profile_process_run_key`。前端收到後顯示獨立的暫時泡泡「我整理一下你剛提到的近況…」，並以 run key 輪詢 privacy-safe process projection；它與 agent tool progress 使用不同狀態，不會互相覆蓋。`updated`、`no_update`、`error`、`timeout`、較新工作取代或切換聯絡人時都移除泡泡。process 狀態與泡泡不保存 owner 原句、extractor result、內部 ID，也不寫入 `messages` 或新增 assistant reply。永久的「近期情境已更新」通知已移除；需要使用者操作的 context confirmation 仍保留。
+
+### 9.2 Assessment sessions
+
+基本性格與深層探索由 `services/assessment_session_service.py` 唯一管理；Public V2 的 `profile.start_assessment`（`kind=basic|deep`）及既有 `/api/chat` onboarding UI 都只呼叫這個 domain service，不直接寫 `big_five`、`deep_profile` 或另一套 temporary state。兩份 versioned skill 分別位於 `skills/basic-profile-assessment/` 與 `skills/deep-profile-assessment/`。
+
+每位使用者同時最多一個未結束 session。session 為 owner-scoped，保存 session ID、owner ID、kind、`active | awaiting_commit | completed | cancelled | expired`、revision、turn count、bounded typed draft 與 24 小時 expiry；不保存 raw prompt、assistant history、tool result 或其他人的資料。所有回答、取消、到期與 commit 都以 session revision CAS 保護，message ID 用於重送去重。
+
+開始測驗與套用完成草稿都是兩次不同確認：開始 confirmation 只建立 draft session；模型宣告完成時，正式 profile 仍不變、session 轉為 `awaiting_commit`。使用者明確確認後，service 才在同一個原子更新中替換該 kind 的正式 profile 並標示 `completed`；取消或過期清除 draft、保留先前完成資料。Runtime 在一般 Planner 前接管 active／awaiting-commit session，assessment owner messages 不進近期情境或 durable memory extractor。公開 JSON 與 stream final 可附帶安全 metadata：`assessment_state`、`assessment_kind`、`assessment_revision`，不含 session ID 或 draft。
 
 ### 9.1 Durable memory、relationship graph 與 Context Engine
 
@@ -307,6 +360,9 @@ Public V2 在程式中的預設值仍是 `off`，部署／App 測試必須明確
 | `AYUE_PRIVATE_AGENTIC_USER_ALLOWLIST` | Private V2 rollout allowlist |
 | `AYUE_MAPS_ENABLED` | 是否提供 OpenStreetMap／Overpass 地點工具 |
 | `AYUE_MAPS_MONGO_CACHE` | 是否將地點工具 cache 寫入 Mongo；預設 `off` |
+| `AYUE_GOOGLE_PLACE_CARDS_ENABLED` | 啟用 Google Places UI Kit 卡片；需同時設定下列兩把 key |
+| `GOOGLE_PLACES_SERVER_API_KEY` | 後端 Places API New key；僅限 Places API |
+| `GOOGLE_MAPS_BROWSER_API_KEY` | 前端 Maps JavaScript / Places UI Kit key；必須限制 HTTP referrer |
 
 基礎服務另需 `MONGO_URI`、LLM/Ollama、Google embedding；設定 `TAVILY_API_KEY` 後才開啟 Web Search／Extract，選填 `TAVILY_PROJECT`。地點工具使用 Nominatim 與 Overpass 的公開 HTTP API，可用 `OSM_*` 變數替換 endpoint 與 user agent。port 9001 matchmaker 需要 `LLM_*` 與 Neo4j 設定。可提交的欄位範例見 `social_demotest/.env.example` 與 `matchmaker_agent/.env.example`；包含真實密鑰的 `.env` 不得提交或交付。
 
@@ -365,6 +421,7 @@ Public V2 在程式中的預設值仍是 `off`，部署／App 測試必須明確
 
 - 一般聊天自然回答，不因沒有工具而拒答。
 - 配對結果、目前日期、本人行事曆與近期情境都經正確 read tool。
+- 地點推薦在搜尋條件已足夠時先讀取 places tool；「隨意推薦」不得重複追問料理類型。
 - 明確找人先 confirmation，確認後只搜尋一次。
 - Planner duplicate、壞 JSON、timeout、低信心不造成重複工具或 legacy fallback。
 - Proposal stale revision、重複 request、雙方並發不覆寫終態。

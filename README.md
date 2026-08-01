@@ -20,7 +20,7 @@ Context Builder
 - 本人近期情境與長期記憶 extraction
 - 主動關心 scheduler
 - `@` 已接受聯絡人的公開資訊查詢
-- Tavily 網路搜尋，以及 OpenStreetMap／Overpass 附近地點與距離查詢
+- Tavily 網路搜尋，以及 OpenStreetMap／Overpass 附近地點、距離與可預覽的地點卡
 - 與公開阿月隔離的阿月悄悄話 V2
 - 離線 deterministic tests 與 trajectory fixtures
 
@@ -36,7 +36,7 @@ Context Builder
 | --- | --- |
 | `social_demotest/` | FastAPI 主服務、Web Demo、Public/Private Ayue 與測試 |
 | `matchmaker_agent/` | 候選排序、Neo4j 記憶與 feedback service |
-| `skills/` | 近期情境與長期記憶的 versioned extraction policy |
+| `skills/` | 近期情境、長期記憶與性格探索的 versioned policy |
 | `start_ayue.ps1` | Windows 啟動與 health check |
 | `start_ayue.cmd` | PowerShell 啟動腳本的 cmd wrapper |
 
@@ -50,6 +50,8 @@ Context Builder
 - Google AI Studio API key（embedding）
 - Neo4j 僅在需要完整 matchmaker 記憶功能時設定
 - Tavily 僅在需要即時網路搜尋時設定
+
+附近地點預設使用 OpenStreetMap／Overpass，不需要 Google API key。若要選擇性升級成 Google Places UI Kit 卡片，再設定 `AYUE_GOOGLE_PLACE_CARDS_ENABLED=on`、後端 Places key 與受 HTTP referrer 限制的瀏覽器 Maps key；未設定或載入失敗時仍會保留 OSM 自製卡片。
 
 建立專案虛擬環境並安裝兩個服務的依賴：
 
@@ -124,3 +126,4 @@ Set-Location .\social_demotest
 - 所有寫入預設需要 confirmation、ownership、CAS 與 idempotency。
 - V2 失敗必須 fail closed，不得自動掉回 legacy。
 - 修真實失敗案例時先新增匿名 trajectory，再修 contract、projection 或 prompt；不要堆疊中文 keyword regex。
+- 多輪地點推薦會保存 15 分鐘的 bounded search draft；條件已足夠或使用者把選擇交給阿月時，必須直接查詢，不能重複追問料理類型。

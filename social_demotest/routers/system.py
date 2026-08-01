@@ -1,16 +1,35 @@
 ﻿import random
 import requests
+import time
+import config
 from fastapi import APIRouter
 from models import ClearRequest, SettingsRequest, MediatorToneRequest, ProfileMemoryActionRequest, ProfileLocationRequest
 from database import db, profiles_coll, matches_coll, messages_coll
 from services.ai_service import get_embedding
 from services.profile_projection import safe_recent_context
+from services.language_service import normalize_model_text, normalize_zh_tw
 from services.ayue_agent.proactive_care import normalize_proactive_frequency, schedule_proactive_care
 from services.ayue_agent.runtime import agent_mode_for_user
 from services.ayue_agent.web_tools import web_enabled
 from services.profile_location import normalize_profile_location, safe_profile_location
+from services.ayue_agent.public_relationship_projection import anonymize_counterparty_payload
+from services.match_reason_service import V4_REASON_VERSION, reason_for_viewer
 
 router = APIRouter(prefix="/api", tags=["System"])
+
+
+@router.get("/client-config")
+def client_config():
+    """Return browser-safe configuration; Maps browser keys must be referrer-restricted."""
+    enabled = bool(
+        getattr(config, "AYUE_GOOGLE_PLACE_CARDS_ENABLED", False)
+        and getattr(config, "GOOGLE_PLACES_SERVER_API_KEY", "")
+        and getattr(config, "GOOGLE_MAPS_BROWSER_API_KEY", "")
+    )
+    return {
+        "google_place_cards_enabled": enabled,
+        "google_maps_browser_api_key": str(getattr(config, "GOOGLE_MAPS_BROWSER_API_KEY", "")) if enabled else "",
+    }
 
 @router.get("/init")
 def init_system(user_id: str):
@@ -43,7 +62,7 @@ def init_system(user_id: str):
             my_context = safe_recent_context(p.get("current_context", ""), "交朋友")
             if bf and len(bf) >= 5:
                 is_complete = True
-                my_bf_summary = bf.get("summary", "已完成性格分析，具備基本資料。")
+                my_bf_summary = normalize_zh_tw(bf.get("summary", "已完成性格分析，具備基本資料。"))
                 
     # 取得深層價值觀分析狀態
     my_dp_values = None
@@ -54,23 +73,24 @@ def init_system(user_id: str):
     if my_doc:
         dp = my_doc.get("deep_profile", {})
         if dp and dp.get("summary"):
+            dp_display = normalize_model_text(dp)
             is_deep_complete = True
-            my_deep_summary = dp.get("summary", "已完成深層價值觀分析。")
+            my_deep_summary = normalize_zh_tw(dp_display.get("summary", "已完成深層價值觀分析。"))
             # 提供深層價值觀欄位供前端 dropdown 顯示
-            core_vals = dp.get("core_values") or dp.get("values")
+            core_vals = dp_display.get("core_values") or dp_display.get("values")
             my_dp_values = "、".join(core_vals) if isinstance(core_vals, list) else (core_vals or None)
-            my_dp_future = dp.get("life_philosophy", None) or dp.get("ideal_future", None)
+            my_dp_future = dp_display.get("life_philosophy", None) or dp_display.get("ideal_future", None)
             # 回傳完整 deep_profile 物件供前端組合顯示
-            my_deep_profile = dp
+            my_deep_profile = dp_display
         proactive_frequency = normalize_proactive_frequency(my_doc.get("proactive_frequency", "3600"))
         mediator_tone = my_doc.get("mediator_tone", "friend")
         mediator_tone_selected = bool(my_doc.get("mediator_tone_selected", False))
         probe_mode = my_doc.get("probe_mode", "balanced")
-        profile_memories = my_doc.get("profile_memory_preview", [])
+        profile_memories = normalize_model_text(my_doc.get("profile_memory_preview", []))
         context_revision = int(my_doc.get("current_context_revision", 0))
         match_search = my_doc.get("match_search", {"status": "idle"})
         onboarding_completed = bool(my_doc.get("onboarding_completed", False))
-        my_initial_interest = my_doc.get("initial_interest", None)
+        my_initial_interest = normalize_zh_tw(my_doc.get("initial_interest"), max_length=120) or None
         user_location = safe_profile_location(my_doc)
                 
     return {
@@ -178,17 +198,53 @@ def get_demo_status(user_id: str):
 
 
 @router.get("/profile/recent-context/status")
-def get_recent_context_status(user_id: str):
-    """Small polling projection for the asynchronous owner-only profile write."""
+def get_recent_context_status(user_id: str, run_key: str | None = None):
+    """Privacy-safe polling projection for the asynchronous profile process."""
     profile = profiles_coll.find_one(
         {"user_id": user_id},
-        {"_id": 0, "current_context": 1, "current_context_revision": 1, "recent_context_updated_at": 1},
+        {
+            "_id": 0, "current_context": 1, "current_context_revision": 1,
+            "recent_context_updated_at": 1, "agentic_profile_process": 1,
+        },
     ) or {}
-    return {
+    try:
+        revision = max(0, int(profile.get("current_context_revision", 0) or 0))
+    except (TypeError, ValueError):
+        revision = 0
+    try:
+        updated_at = max(0.0, float(profile.get("recent_context_updated_at", 0) or 0))
+    except (TypeError, ValueError):
+        updated_at = 0.0
+    response = {
         "current_context": safe_recent_context(profile.get("current_context"), ""),
-        "revision": max(0, int(profile.get("current_context_revision", 0) or 0)),
-        "updated_at": float(profile.get("recent_context_updated_at", 0) or 0),
+        "revision": revision,
+        "updated_at": updated_at,
     }
+    token = str(run_key or "").strip().lower()
+    if not token:
+        return response
+    if len(token) != 32 or any(character not in "0123456789abcdef" for character in token):
+        response["process"] = {"state": "unavailable", "outcome": None}
+        return response
+    process = profile.get("agentic_profile_process") or {}
+    if not isinstance(process, dict) or process.get("run_key") != token:
+        response["process"] = {"state": "superseded", "outcome": None}
+        return response
+    state = str(process.get("state") or "queued")
+    try:
+        expires_at = float(process.get("expires_at", 0) or 0)
+    except (TypeError, ValueError):
+        expires_at = 0.0
+    if state not in {"queued", "processing", "completed"}:
+        state = "unavailable"
+    elif state != "completed" and expires_at and expires_at <= time.time():
+        state = "timeout"
+    outcome = str(process.get("outcome") or "") if state == "completed" else ""
+    response["process"] = {
+        "state": state,
+        "outcome": outcome if outcome in {"updated", "no_update", "error"} else None,
+    }
+    return response
 
 @router.post("/clear")
 def clear_data(req: ClearRequest):
@@ -209,6 +265,9 @@ def clear_data(req: ClearRequest):
 @router.get("/notifications")
 def get_notifications(user_id: str):
     """查詢指定 user 的待回應配對邀請（pending）。"""
+    # Keep notification text on the same role-bound projection as proposal
+    # cards and mediator delivery.  A V4 invitation never reconstructs an
+    # explanation from the other party's profile or old reason fields.
     pending = list(matches_coll.find({
         "to_user": user_id,
         "status": "pending",
@@ -216,16 +275,40 @@ def get_notifications(user_id: str):
     }))
     results = []
     for p in pending:
+        viewer_reason = reason_for_viewer(p, user_id)
+        if p.get("reason_version") == V4_REASON_VERSION:
+            results.append({
+                "match_id": str(p["_id"]),
+                "viewer_reason": viewer_reason,
+                # Compatibility aliases contain the same receiver projection;
+                # they do not expose the initiator preview.
+                "reason": viewer_reason,
+                "receiver_reason": viewer_reason,
+                "reason_version": V4_REASON_VERSION,
+            })
+            continue
         # 查詢發起人的完整 profile，取得 big_five 與 context 供前端渲染 Checkbox
         from_doc = profiles_coll.find_one({"user_id": p["from_user"]}, {"_id": 0})
-        from_big_five = from_doc.get("big_five", {}) if from_doc else {}
-        from_context = from_doc.get("current_context", "") if from_doc else ""
-        from_distinctive_tags = from_doc.get("distinctive_tags", []) if from_doc else []
+        from_name = str((from_doc or {}).get("display_name") or (from_doc or {}).get("nickname") or (from_doc or {}).get("name") or "").strip()
+        from_big_five = anonymize_counterparty_payload(
+            from_doc.get("big_five", {}), p["from_user"], counterparty_name=from_name,
+        ) if from_doc else {}
+        from_context = anonymize_counterparty_payload(
+            from_doc.get("current_context", ""), p["from_user"], counterparty_name=from_name,
+        ) if from_doc else ""
+        from_distinctive_tags = anonymize_counterparty_payload(
+            from_doc.get("distinctive_tags", []), p["from_user"], counterparty_name=from_name,
+        ) if from_doc else []
         results.append({
             "match_id": str(p["_id"]),
             "from_user": p["from_user"],
-            "reason": p["reason"],
-            "receiver_reason": p.get("receiver_reason", p.get("reason", "")),
+            "reason": anonymize_counterparty_payload(
+                p["reason"], p["from_user"], counterparty_name=from_name,
+            ),
+            "receiver_reason": anonymize_counterparty_payload(
+                p.get("receiver_reason", p.get("reason", "")), p["from_user"],
+                counterparty_name=from_name,
+            ),
             "from_user_big_five": from_big_five,
             "from_user_context": from_context,
             "from_user_distinctive_tags": from_distinctive_tags

@@ -173,6 +173,91 @@ def nominatim_search(query: str) -> dict[str, Any]:
     return point
 
 
+def _nominatim_category(item: dict[str, Any], query: str) -> str:
+    osm_class = _clean(item.get("class") or item.get("category"), 30).lower()
+    osm_type = _clean(item.get("type"), 30).lower()
+    if osm_class == "amenity" and osm_type in {"restaurant", "fast_food", "food_court"}:
+        return "restaurant"
+    if osm_class == "amenity" and osm_type in {"cafe", "ice_cream"}:
+        return "cafe"
+    if osm_class == "amenity" and osm_type in {"bar", "pub", "biergarten"}:
+        return "bar"
+    if osm_class == "leisure" and osm_type in {"park", "garden", "nature_reserve"}:
+        return "park"
+    lowered = query.lower()
+    if any(token in lowered for token in ("咖啡", "coffee", "cafe")):
+        return "cafe"
+    if any(token in lowered for token in ("酒吧", "酒館", "bar", "pub")):
+        return "bar"
+    if any(token in lowered for token in ("公園", "park")):
+        return "park"
+    if any(token in lowered for token in ("餐廳", "飯店", "小吃", "restaurant")):
+        return "restaurant"
+    return "attraction"
+
+
+def resolve_place(query: str) -> dict[str, Any] | None:
+    """Resolve one explicit public place into the same typed card shape as nearby search."""
+    if not maps_enabled():
+        raise MapClientError("maps_disabled")
+    query = _clean(query, 160)
+    if not query:
+        raise MapClientError("location_required")
+    key = _cache_key("place", {"query": query.lower()})
+    cached = _cache_get(key)
+    if cached:
+        return cached
+    _nominatim_wait()
+    try:
+        response = requests.get(
+            str(getattr(config, "OSM_NOMINATIM_URL", "")),
+            params={
+                "q": query, "format": "jsonv2", "limit": 1,
+                "addressdetails": 1, "namedetails": 1,
+            },
+            headers={
+                "User-Agent": str(getattr(config, "OSM_USER_AGENT", "AyueDatingDemo/1.0")),
+                "Accept-Language": "zh-TW",
+            },
+            timeout=(3, 12),
+        )
+    except requests.Timeout as exc:
+        raise MapClientError("map_timeout") from exc
+    except requests.RequestException as exc:
+        raise MapClientError("map_unavailable") from exc
+    if not response.ok:
+        raise MapClientError(_request_error_code(response))
+    try:
+        rows = response.json()
+    except ValueError as exc:
+        raise MapClientError("map_invalid_response") from exc
+    if not isinstance(rows, list) or not rows:
+        return None
+    item = rows[0] or {}
+    try:
+        lat, lon = float(item["lat"]), float(item["lon"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MapClientError("location_not_found") from exc
+    names = item.get("namedetails") if isinstance(item.get("namedetails"), dict) else {}
+    display_name = _clean(item.get("display_name"), 180)
+    name = _clean(
+        names.get("name:zh-TW") or names.get("name:zh") or names.get("name")
+        or display_name.split(",", 1)[0] or query,
+        80,
+    )
+    place = {
+        "name": name,
+        "category": _nominatim_category(item, query),
+        "distance_m": 0,
+        "address_summary": display_name,
+        "map_url": f"https://www.openstreetmap.org/?mlat={lat:.6f}&mlon={lon:.6f}#map=18/{lat:.6f}/{lon:.6f}",
+        "provider": "openstreetmap",
+        "place_id": "",
+    }
+    _cache_put(key, place, NOMINATIM_TTL_SECONDS)
+    return place
+
+
 def build_overpass_nearby(categories: list[str], lat: float, lon: float, radius_m: int) -> str:
     """Build fixed, injection-free Overpass QL from allowlisted category tags."""
     radius = max(300, min(int(radius_m), MAX_RADIUS_METERS))

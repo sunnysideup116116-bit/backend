@@ -1,6 +1,7 @@
 import json
 import os
 import inspect
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,6 +10,7 @@ from bson.objectid import ObjectId
 from services.language_service import normalize_zh_tw
 from services.memory_service import memory_summary
 from services.profile_skills import (
+    _active_recent_episode,
     _compose_recent_context_summary,
     apply_recent_context,
     analyze_profile_message,
@@ -34,13 +36,14 @@ def router_payload(activity=None, memories=None, *, recent=True, confidence=0.95
                        "fields": fields, "reason_code": "test"}, "memories": memories})
 
 
-def patch_payload(fields, *, recent=True, confidence=0.95, kind="real_world_update"):
+def patch_payload(fields, *, recent=True, confidence=0.95, kind="real_world_update", episode_relation="new"):
     for value in fields.values():
         if isinstance(value, dict):
             value.setdefault("confidence", confidence)
             value.setdefault("subject", "owner")
     return json.dumps({"recent_context": {"message_kind": kind, "action": "update" if recent else "none",
-                       "confidence": confidence, "fields": fields, "reason_code": "test"}, "memories": []})
+                       "confidence": confidence, "fields": fields, "episode_relation": episode_relation,
+                       "reason_code": "test"}, "memories": []})
 
 
 class ProfileSkillsTests(unittest.TestCase):
@@ -317,6 +320,75 @@ class ProfileSkillsTests(unittest.TestCase):
         fields = update.call_args.args[1]["$set"]["recent_context_state"]["fields"]
         self.assertEqual(set(fields), {"activity"})
 
+    def test_short_followup_merges_into_the_same_typed_episode(self):
+        now = time.time()
+        profile = {
+            "current_context": "近期想去旅行",
+            "current_context_revision": 1,
+            "recent_context_updated_at": now - 5,
+            "recent_context_state": {"version": 4, "revision": 1, "episode_id": "episode:first", "updated_at": now - 5, "fields": {
+                "activity": {"value": "旅行", "plan_id": "episode:first", "source_timestamp": 1},
+                "temporal_status": {"value": "planned", "plan_id": "episode:first", "source_timestamp": 1},
+            }},
+        }
+        proposal = {
+            "should_update": True, "message_kind": "real_world_update", "context_action": "update",
+            "episode_relation": "continue", "active_episode_id": "episode:first",
+            "fields": {"destination": {"operation": "set", "value": "合掌村", "evidence_span": "合掌村"}},
+        }
+        with patch("services.profile_skills.profiles_coll.find_one", return_value=profile), \
+             patch("services.profile_skills.profiles_coll.update_one", return_value=SimpleNamespace(modified_count=1)) as update, \
+             patch("services.profile_skills.generate_chat_completion", side_effect=RuntimeError), \
+             patch("services.profile_skills.get_embedding", return_value=[]):
+            self.assertTrue(apply_recent_context("owner", proposal, message_id="second", source_timestamp=2))
+        state = update.call_args.args[1]["$set"]["recent_context_state"]
+        self.assertEqual(state["episode_id"], "episode:first")
+        self.assertEqual(state["fields"]["activity"]["value"], "旅行")
+        self.assertEqual(state["fields"]["destination"]["value"], "合掌村")
+        self.assertEqual(state["fields"]["destination"]["evidence_message_id"], "second")
+
+    def test_extractor_uses_only_bounded_typed_episode_for_continuity(self):
+        payload = patch_payload({
+            "destination": {"operation": "set", "value": "合掌村", "evidence_span": "合掌村"},
+        }, episode_relation="continue")
+        active = {"episode_id": "episode:first", "fields": {"activity": "旅行", "temporal_status": "planned"}}
+        with patch("services.profile_skills.generate_chat_completion", return_value=payload) as model:
+            decision = analyze_profile_message("合掌村", active_episode=active)
+        prompt = model.call_args.args[0]
+        self.assertIn('"activity": "旅行"', prompt)
+        self.assertNotIn("evidence_message_id", prompt)
+        self.assertNotIn("episode:first", prompt)
+        self.assertEqual(decision["recent_context"]["episode_relation"], "continue")
+        self.assertEqual(decision["recent_context"]["active_episode_id"], "episode:first")
+
+    def test_recent_context_followup_draft_can_start_a_typed_episode(self):
+        episode = _active_recent_episode({
+            "recent_context_draft": {
+                "goal": "activity_or_destination", "created_at": 100.0,
+            },
+        }, now=110.0)
+        self.assertEqual(episode["episode_id"], "draft:100000")
+        self.assertEqual(episode["fields"], {})
+        self.assertEqual(episode["goal"], "activity_or_destination")
+
+    def test_continuation_fails_closed_after_episode_expires(self):
+        profile = {
+            "current_context": "近期想去旅行", "current_context_revision": 1,
+            "recent_context_updated_at": 1,
+            "recent_context_state": {"version": 4, "revision": 1, "episode_id": "episode:first", "updated_at": 1, "fields": {
+                "activity": {"value": "旅行", "plan_id": "episode:first", "source_timestamp": 1},
+            }},
+        }
+        proposal = {
+            "should_update": True, "message_kind": "real_world_update", "context_action": "update",
+            "episode_relation": "continue", "active_episode_id": "episode:first",
+            "fields": {"timing": {"operation": "set", "value": "下週", "evidence_span": "下週"}},
+        }
+        with patch("services.profile_skills.profiles_coll.find_one", return_value=profile), \
+             patch("services.profile_skills.profiles_coll.update_one") as update:
+            self.assertFalse(apply_recent_context("owner", proposal, message_id="late", source_timestamp=2))
+        update.assert_not_called()
+
     def test_clear_action_clears_the_whole_recent_context(self):
         profile = {
             "current_context": "近期規劃爬山", "current_context_revision": 2,
@@ -368,6 +440,7 @@ class ProfileSkillsTests(unittest.TestCase):
             "memories": [], "memory_codes": ["no_memory_candidate"], "policy_versions": {},
         }
         with patch("services.profile_skills.messages_coll.find_one", return_value={"content": "我最近想去非洲"}) as find_message, \
+             patch("services.profile_skills.profiles_coll.find_one", return_value={}), \
              patch("services.profile_skills._claim_profile_message", return_value=True), \
              patch("services.profile_skills.analyze_profile_message", return_value=decision), \
              patch("services.profile_skills._trace"):
@@ -389,6 +462,7 @@ class ProfileSkillsTests(unittest.TestCase):
         }
         source = {"content": "@seed_user_01 我想去爬山", "metadata": {"owner_raw_content": "我想去爬山"}}
         with patch("services.profile_skills.messages_coll.find_one", return_value=source), \
+             patch("services.profile_skills.profiles_coll.find_one", return_value={}), \
              patch("services.profile_skills._claim_profile_message", return_value=True), \
              patch("services.profile_skills.analyze_profile_message", return_value=decision) as analyze, \
              patch("services.profile_skills._trace"):

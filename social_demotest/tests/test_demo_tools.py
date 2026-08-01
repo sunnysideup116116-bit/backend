@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from routers.system import get_demo_status
+from routers.system import get_demo_status, get_recent_context_status
 
 
 class DemoToolsTests(unittest.TestCase):
@@ -46,6 +46,69 @@ class DemoToolsTests(unittest.TestCase):
         self.assertEqual(result["recent_context"], "尚無近期情境")
         self.assertEqual(result["match_search_status"], "idle")
         self.assertFalse(result["has_pending_confirmation"])
+
+    @patch("routers.system.profiles_coll")
+    def test_recent_context_process_status_is_privacy_safe(self, profiles):
+        profiles.find_one.return_value = {
+            "current_context": "最近想去駁二看展",
+            "current_context_revision": 4,
+            "recent_context_updated_at": 123.0,
+            "agentic_profile_process": {
+                "run_key": "a" * 32,
+                "state": "completed",
+                "outcome": "updated",
+                "raw_result": "seed_user_08 private",
+            },
+        }
+
+        result = get_recent_context_status("owner", "a" * 32)
+
+        self.assertEqual(result["process"], {"state": "completed", "outcome": "updated"})
+        self.assertEqual(result["revision"], 4)
+        self.assertNotIn("run_key", result)
+        self.assertNotIn("seed_user_08", str(result))
+
+    @patch("routers.system.profiles_coll")
+    def test_recent_context_process_status_distinguishes_superseded_and_timeout(self, profiles):
+        profiles.find_one.return_value = {
+            "agentic_profile_process": {
+                "run_key": "b" * 32, "state": "processing", "expires_at": 50.0,
+            },
+        }
+        self.assertEqual(
+            get_recent_context_status("owner", "a" * 32)["process"]["state"],
+            "superseded",
+        )
+        with patch("routers.system.time.time", return_value=51.0):
+            self.assertEqual(
+                get_recent_context_status("owner", "b" * 32)["process"]["state"],
+                "timeout",
+            )
+
+    @patch("routers.system.profiles_coll")
+    def test_recent_context_legacy_poll_shape_stays_compatible(self, profiles):
+        profiles.find_one.return_value = {
+            "current_context": "最近去游泳",
+            "current_context_revision": 2,
+            "recent_context_updated_at": 10.0,
+            "agentic_profile_process": {"run_key": "a" * 32, "state": "queued"},
+        }
+        result = get_recent_context_status("owner")
+        self.assertEqual(set(result), {"current_context", "revision", "updated_at"})
+
+    @patch("routers.system.profiles_coll")
+    def test_recent_context_poll_tolerates_malformed_legacy_numbers(self, profiles):
+        profiles.find_one.return_value = {
+            "current_context_revision": "unknown",
+            "recent_context_updated_at": {},
+            "agentic_profile_process": {
+                "run_key": "a" * 32, "state": "queued", "expires_at": "unknown",
+            },
+        }
+        result = get_recent_context_status("owner", "a" * 32)
+        self.assertEqual(result["revision"], 0)
+        self.assertEqual(result["updated_at"], 0.0)
+        self.assertEqual(result["process"]["state"], "queued")
 
 
 if __name__ == "__main__":

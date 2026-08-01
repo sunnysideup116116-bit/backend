@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from routers.chat import get_contacts
+from routers.chat_messages import get_contacts
 from routers.system import seed_data
 from services.match_state_service import (
     has_verified_acceptance,
@@ -27,8 +27,8 @@ class AcceptedMatchIntegrityTests(unittest.TestCase):
             ],
         }))
 
-    @patch("routers.chat.profiles_coll")
-    @patch("routers.chat.matches_coll")
+    @patch("routers.chat_messages.profiles_coll")
+    @patch("routers.chat_messages.matches_coll")
     def test_contacts_require_canonical_acceptance_evidence(self, matches, profiles):
         matches.find.return_value = []
         profiles.find_one.return_value = {"ai_chat_locked": False}

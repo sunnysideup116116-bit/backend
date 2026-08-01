@@ -7,6 +7,7 @@ from services.ayue_agent.runtime import ensure_indexes as ensure_ayue_agent_inde
 from services.ayue_agent.maps_client import ensure_map_cache_indexes
 from services.profile_skills import ensure_profile_skill_indexes
 from services.ayue_agent.proactive_scheduler import start_proactive_care_scheduler, stop_proactive_care_scheduler
+from services.match_search_job_service import start_match_search_worker, stop_match_search_worker
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -28,12 +29,14 @@ def setup_calendar_indexes():
     ensure_map_cache_indexes()
     ensure_profile_skill_indexes()
     ensure_match_indexes()
+    start_match_search_worker()
     start_proactive_care_scheduler()
 
 
 @app.on_event("shutdown")
 def stop_background_services():
     stop_proactive_care_scheduler()
+    stop_match_search_worker()
 
 if __name__ == "__main__":
     import uvicorn

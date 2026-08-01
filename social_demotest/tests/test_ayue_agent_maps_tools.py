@@ -22,9 +22,9 @@ class AyueMapsToolsTests(unittest.TestCase):
     def test_places_tools_are_visible_only_when_enabled(self):
         ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="附近有什麼餐廳")
         with patch("services.ayue_agent.router.maps_enabled", return_value=True):
-            self.assertTrue({"places.search_nearby", "places.measure_distance"} <= tool_policy_for_turn(ctx))
+            self.assertTrue({"places.search_nearby", "places.measure_distance", "places.resolve_place"} <= tool_policy_for_turn(ctx))
         with patch("services.ayue_agent.router.maps_enabled", return_value=False):
-            self.assertFalse({"places.search_nearby", "places.measure_distance"} & tool_policy_for_turn(ctx))
+            self.assertFalse({"places.search_nearby", "places.measure_distance", "places.resolve_place"} & tool_policy_for_turn(ctx))
 
     def test_nearby_uses_saved_coarse_location_only_when_requested(self):
         ctx = AgentTurnContext(
@@ -50,6 +50,36 @@ class AyueMapsToolsTests(unittest.TestCase):
         }), AgentTurnContext(user_id="owner", room_id="room", message="多遠"))
         self.assertFalse(result.ok)
         self.assertEqual(result.error_code, "location_required")
+
+    def test_explicit_place_resolution_uses_google_when_enabled(self):
+        payload = {
+            "name": "示範餐廳", "category": "restaurant", "distance_m": 0,
+            "address_summary": "鹽埕區", "map_url": "https://www.google.com/maps/place/example",
+            "provider": "google", "place_id": "ChIJexample",
+        }
+        with patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.resolve_google_place", return_value=payload):
+            result = execute_tool(ToolCall(name="places.resolve_place", arguments={"query": "示範餐廳"}), AgentTurnContext(
+                user_id="owner", room_id="room", message="示範餐廳在哪？",
+            ))
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["place"]["place_id"], "ChIJexample")
+        self.assertNotIn("raw", str(result.data))
+
+    def test_explicit_place_resolution_falls_back_to_osm_without_google(self):
+        payload = {
+            "name": "示範餐廳", "category": "restaurant", "distance_m": 0,
+            "address_summary": "高雄市鹽埕區", "map_url": "https://www.openstreetmap.org/?mlat=22.6&mlon=120.2",
+            "provider": "openstreetmap", "place_id": "",
+        }
+        with patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=False), \
+             patch("services.ayue_agent.tools.resolve_osm_place", return_value=payload):
+            result = execute_tool(ToolCall(name="places.resolve_place", arguments={"query": "示範餐廳"}), AgentTurnContext(
+                user_id="owner", room_id="room", message="示範餐廳在哪？",
+            ))
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["place"]["provider"], "openstreetmap")
+        self.assertEqual(result.data["attribution"], "© OpenStreetMap contributors")
 
 
 if __name__ == "__main__":

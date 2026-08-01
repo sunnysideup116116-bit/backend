@@ -48,7 +48,6 @@ PRIVATE_TOOL_REGISTRY = {
     "private.relationship.get_pair_summary": PrivateToolSpec(name="private.relationship.get_pair_summary", risk="read", description="讀取這段已接受關係中可公開、共同或已同意分享的摘要。", progress_text="我整理一下你們已確認的共同資訊…"),
     "private.relationship.get_shared_history": PrivateToolSpec(name="private.relationship.get_shared_history", risk="read", description="讀取這一對在共同聊天室的近期對話脈絡。", progress_text="我回看一下你們最近聊到哪裡…"),
     "private.calendar.get_counterparty_availability": PrivateToolSpec(name="private.calendar.get_counterparty_availability", risk="read", description="確認對方在指定期間的 busy/free 時段；不可讀取行程內容。", progress_text="我確認一下對方那段時間是否已有安排…"),
-    "private.relationship.request_fun_fact": PrivateToolSpec(name="private.relationship.request_fun_fact", risk="write", description="向對方發出一題低敏感度趣事提問；會聯絡對方，必須先確認。", progress_text="我準備問問對方一個輕鬆的小問題…", requires_confirmation=True),
     "private.date.start_coordination": PrivateToolSpec(name="private.date.start_coordination", risk="write", description="發起雙方同意的約會協調；會通知對方，必須先確認。", progress_text="我準備先問對方是否願意一起協調約會…", requires_confirmation=True),
 }
 
@@ -56,7 +55,7 @@ PRIVATE_TOOL_REGISTRY = {
 class PrivateAgentDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: Literal["final", "tool_call", "confirmation"]
-    intent: Literal["advice", "pair_summary", "shared_history", "availability", "fun_fact", "date_coordination", "unclear"] = "advice"
+    intent: Literal["advice", "pair_summary", "shared_history", "availability", "date_coordination", "unclear"] = "advice"
     tool_name: str | None = None
     arguments: dict[str, str] = Field(default_factory=dict)
     confidence: float = Field(default=0, ge=0, le=1)
@@ -149,9 +148,9 @@ def _planner_prompt(ctx: PrivateAgentTurnContextV2, observations: list[dict[str,
     }
     return f"""你是阿月悄悄話的單一回合規劃與回覆器。先判斷是否需要工具；若輸出 final，reply 必須是可直接給使用者的完整自然回答。
 你正在協助一位已接受配對中的使用者。本人與對方資料已分開標示；對方 advisory 僅能影響 strategy（warm/playful/calm/direct），不可出現在事實、工具參數或回答裡。
-只能使用 visible_tools。對方行事曆只能查 busy/free。問趣事和開始約會協調會打擾對方，必須輸出 confirmation，不能直接 tool_call。一般建議、看共同聊天、問對方是誰或近況可用 read tools；沒有需要讀取時輸出 final。不可輸出 ID、revision、資料庫欄位、私人資料或工具內部資訊。
+只能使用 visible_tools。對方行事曆只能查 busy/free。開始約會協調會打擾對方，必須輸出 confirmation，不能直接 tool_call。問趣事功能目前暫停，不可提議或執行；被問到時自然說功能先收起來，並改為協助想開場。一般建議、看共同聊天、問對方是誰或近況可用 read tools；沒有需要讀取時輸出 final。不可輸出 ID、revision、資料庫欄位、私人資料或工具內部資訊。
 reply 只能依 safe context 與 observations 作答，以繁體中文、1 到 3 句；不可提及工具、模型、系統、權限、私人資料、ID、revision 或資料庫。對方行事曆只能說 busy/free。
-只輸出 JSON：{{"kind":"final|tool_call|confirmation","intent":"advice|pair_summary|shared_history|availability|fun_fact|date_coordination|unclear","tool_name":null,"arguments":{{"scope":""}},"confidence":0.0,"evidence_span":"使用者原句子字串","strategy":"warm|playful|calm|direct","reply":""}}。
+只輸出 JSON：{{"kind":"final|tool_call|confirmation","intent":"advice|pair_summary|shared_history|availability|date_coordination|unclear","tool_name":null,"arguments":{{"scope":""}},"confidence":0.0,"evidence_span":"使用者原句子字串","strategy":"warm|playful|calm|direct","reply":""}}。
 安全 context：{json.dumps(safe, ensure_ascii=False)}"""
 
 
@@ -190,9 +189,6 @@ def _execute_read(name: str, ctx: PrivateAgentTurnContextV2, arguments: dict[str
 
 
 def _execute_write(name: str, user_id: str, other_id: str, match_doc: dict[str, Any]) -> tuple[bool, str]:
-    if name == "private.relationship.request_fun_fact":
-        from routers.chat import queue_manual_fun_fact_probe
-        return queue_manual_fun_fact_probe(match_doc, user_id, other_id), "fun_fact_queued"
     if name == "private.date.start_coordination":
         from services.date_coordination_service import create_invite
         return bool(create_invite(match_doc, user_id, other_id)), "date_invite_created"
@@ -220,11 +216,11 @@ def _consume_confirmation(ctx: PrivateAgentTurnContextV2, match_doc: dict[str, A
         return True, "剛才那個邀請已經過期了；如果你還想進行，我可以再幫你整理一次。"
     if choice == "cancel":
         return True, "好，我先不會通知對方。"
+    if str(pending.get("action") or "") == "private.relationship.request_fun_fact":
+        return True, "這個功能目前先收起來了，我先不會聯絡對方。"
     if match_doc.get("status") != "accepted" or int(match_doc.get("proposal_revision", 0) or 0) != int(pending.get("pair_revision", -1)):
         return True, "你們的關係狀態剛有變動，我先不送出舊的邀請。"
     ok, code = _execute_write(str(pending.get("action") or ""), ctx.user_id, ctx.other_id, match_doc)
-    if code == "fun_fact_queued":
-        return True, "好，我已經向對方問一個輕鬆的小問題；有適合分享的回覆我會再告訴你。" if ok else "這題目前已經在進行中，我先不重複打擾對方。"
     if code == "date_invite_created":
         return True, "好，我已經先問對方是否願意一起協調約會；對方同意後會到共同聊天室確認。" if ok else "目前已經有一個約會協調在進行中，我先不重複通知對方。"
     return True, "這個邀請目前無法送出。"

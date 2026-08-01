@@ -32,6 +32,7 @@ TRAVEL_ACTIVITY_ALIASES = {"travel", "travelling", "traveling", "trip", "旅遊"
 RECENT_FIELD_NAMES = ("activity", "destination", "timing", "companion_intent", "temporal_status")
 RECENT_TIMINGS = {"昨天", "前天", "今天", "明天", "後天", "最近", "近期", "本週", "下週", "本月", "下個月"}
 RECENT_TEMPORAL_STATUSES = {"past", "current", "planned"}
+RECENT_EPISODE_TTL_SECONDS = 30 * 60
 
 
 def _activity_from_owner_message(activity: str, message: str) -> str:
@@ -114,6 +115,56 @@ def _source_is_newer(candidate: dict[str, Any], existing: dict[str, Any] | None)
     candidate_key = (float(candidate.get("source_timestamp", 0) or 0), str(candidate.get("evidence_message_id") or ""))
     existing_key = (float(existing.get("source_timestamp", 0) or 0), str(existing.get("evidence_message_id") or ""))
     return candidate_key > existing_key
+
+
+def _timestamp(value: Any) -> float:
+    if hasattr(value, "timestamp"):
+        try:
+            return float(value.timestamp())
+        except (TypeError, ValueError, OSError):
+            return 0.0
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _active_recent_episode(profile: dict[str, Any], *, now: float | None = None) -> dict[str, Any] | None:
+    """Return a bounded typed episode; never expose evidence or raw history."""
+    reference = time.time() if now is None else float(now)
+    state = profile.get("recent_context_state") or {}
+    fields = state.get("fields") or {}
+    if isinstance(fields, dict) and fields:
+        updated_at = _timestamp(state.get("updated_at") or profile.get("recent_context_updated_at"))
+        if updated_at and reference - updated_at <= RECENT_EPISODE_TTL_SECONDS:
+            episode_id = str(state.get("episode_id") or "")
+            if not episode_id:
+                plan_ids = {
+                    str((fields.get(name) or {}).get("plan_id") or "")
+                    for name in RECENT_FIELD_NAMES if isinstance(fields.get(name), dict)
+                }
+                plan_ids.discard("")
+                if len(plan_ids) == 1:
+                    episode_id = plan_ids.pop()
+            projection = {
+                name: _clean((fields.get(name) or {}).get("value"), 40)
+                for name in RECENT_FIELD_NAMES
+                if isinstance(fields.get(name), dict) and _clean((fields.get(name) or {}).get("value"), 40)
+            }
+            if episode_id and projection:
+                return {"episode_id": episode_id[:128], "fields": projection}
+    draft = profile.get("recent_context_draft") or {}
+    created_at = _timestamp(draft.get("created_at")) if isinstance(draft, dict) else 0.0
+    if (
+        created_at and reference - created_at <= RECENT_EPISODE_TTL_SECONDS
+        and draft.get("goal") == "activity_or_destination"
+    ):
+        return {
+            "episode_id": f"draft:{int(created_at * 1000)}"[:128],
+            "fields": {},
+            "goal": "activity_or_destination",
+        }
+    return None
 
 
 def profile_skills_mode_for_user(user_id: str) -> str:
@@ -254,6 +305,7 @@ def _validated_recent_proposal(raw_recent: Any, message: str, plan_id: str | Non
     should_update = (
         raw_recent.action in {"update", "clear"}
         and raw_recent.message_kind == "real_world_update"
+        and raw_recent.episode_relation != "unrelated"
         and recent_confidence >= 0.90 and bool(patches) and not unsafe_value
     )
     if unsafe_value:
@@ -280,6 +332,7 @@ def _validated_recent_proposal(raw_recent: Any, message: str, plan_id: str | Non
         "should_update": should_update, "confidence": recent_confidence, **compatibility,
         "fields": patches, "message_kind": raw_recent.message_kind,
         "context_action": raw_recent.action,
+        "episode_relation": raw_recent.episode_relation,
         "evidence_span": next((item.get("evidence_span") for item in patches.values() if item.get("evidence_span")), ""),
         "summary_zh_tw": render_recent_context(preview_fields), "plan_id": plan_id or "",
         "reason_code": reason_code,
@@ -293,12 +346,15 @@ def _validated_recent_proposal(raw_recent: Any, message: str, plan_id: str | Non
     return recent, retry_needed
 
 
-def _retry_recent_context_contract(message: str, recent_skill: dict[str, Any]) -> Any | None:
+def _retry_recent_context_contract(
+    message: str, recent_skill: dict[str, Any], active_episode: dict[str, Any] | None,
+) -> Any | None:
     """One bounded retry for a real activity whose first extraction omitted fields."""
     prompt = f"""你是阿月的近期情境欄位抽取器。只能讀取一則已儲存的本人原始訊息，不能讀取歷史、助理回覆、工具、配對或行事曆。
 【recent-context skill v{recent_skill['version']}】
 {recent_skill['instructions']}
-這句已被初步判定為本人真實活動。請只輸出 ProfileExtractionDecision JSON，memories 必須是 []；recent_context 必須保留 action=update、message_kind=real_world_update，並從 activity、destination、timing、companion_intent、temporal_status 中輸出所有有明確原文依據的欄位。每個 evidence_span 必須是原句連續子字串，subject 必須是 owner，confidence 至少 0.90；沒有原文依據的欄位不要輸出。
+這句已被初步判定為本人真實活動。請只輸出 ProfileExtractionDecision JSON，memories 必須是 []；recent_context 必須保留 action=update、message_kind=real_world_update，並從 activity、destination、timing、companion_intent、temporal_status 中輸出所有有明確原文依據的欄位。episode_relation 必須依語意輸出 continue、new 或 unrelated。每個 evidence_span 必須是原句連續子字串，subject 必須是 owner，confidence 至少 0.90；沒有原文依據的欄位不要輸出。
+目前有效的 typed episode（只能判斷是否延續，不是新 evidence）：{json.dumps(active_episode or {}, ensure_ascii=False)}
 本人原始訊息：{message}"""
     try:
         data = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True))
@@ -307,17 +363,21 @@ def _retry_recent_context_contract(message: str, recent_skill: dict[str, Any]) -
         return None
 
 
-def analyze_profile_message(message: str, previous_context: str = "", *, plan_id: str | None = None) -> dict[str, Any]:
+def analyze_profile_message(
+    message: str, previous_context: str = "", *, plan_id: str | None = None,
+    active_episode: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Extract from one saved owner message, then validate deterministically.
 
-    ``previous_context`` is intentionally retained only for call compatibility;
-    it must never reach the extractor prompt or influence a V2 decision.
+    ``previous_context`` is intentionally retained only for call compatibility.
+    Continuity may use a bounded typed episode, never raw conversation text.
     """
     del previous_context
     message = _clean(message, 800)
     blank = {"should_update": False, "confidence": 0.0, "activity": None, "destination": None,
              "timing": None, "companion_intent": None, "temporal_status": None, "fields": {}, "message_kind": "other",
-             "summary_zh_tw": "", "reason_code": "skipped", "plan_id": plan_id or ""}
+             "summary_zh_tw": "", "reason_code": "skipped", "plan_id": plan_id or "",
+             "episode_relation": "unrelated", "active_episode_id": ""}
     if not message or NO_STORE_RE.search(message) or contains_internal_identifier(message):
         return {"recent_context": {**blank, "reason_code": "blocked_input"}, "memories": [], "memory_codes": ["blocked_input"], "policy_versions": {}, "contract": {}}
     if contains_protected_content(message):
@@ -327,18 +387,33 @@ def analyze_profile_message(message: str, previous_context: str = "", *, plan_id
         memory_skill = load_profile_skill("memory")
     except Exception as exc:
         return {"recent_context": {**blank, "reason_code": "skill_load_failed"}, "memories": [], "memory_codes": [type(exc).__name__], "policy_versions": {}, "contract": {}}
+    safe_episode = active_episode if isinstance(active_episode, dict) else None
+    safe_episode = {
+        "episode_id": str((safe_episode or {}).get("episode_id") or "")[:128],
+        "goal": "activity_or_destination" if (safe_episode or {}).get("goal") == "activity_or_destination" else "",
+        "fields": {
+            name: _clean(value, 40)
+            for name, value in ((safe_episode or {}).get("fields") or {}).items()
+            if name in RECENT_FIELD_NAMES and _clean(value, 40)
+        },
+    } if safe_episode else None
+    prompt_episode = {
+        "goal": (safe_episode or {}).get("goal") or "continue_current_activity",
+        "fields": dict((safe_episode or {}).get("fields") or {}),
+    } if safe_episode else None
     prompt = f"""
-你是阿月的 Profile Extractor。你只能讀取下方一則「已儲存的本人原始訊息」，不可使用對話歷史、助理回覆、工具結果、配對或行事曆資料。
+你是阿月的 Profile Extractor。新欄位與 evidence 只能來自下方一則「已儲存的本人原始訊息」，不可使用對話歷史、助理回覆、工具結果、配對或行事曆資料。你可能收到一個已驗證的 typed active episode；它只用來判斷本句是延續還是新情境，不能當作本句新欄位的 evidence。
 
 【recent-context skill v{recent_skill['version']}】
 {recent_skill['instructions']}
 【memory skill v{memory_skill['version']}】
 {memory_skill['instructions']}
 
-請輸出 ProfileExtractionDecision JSON。recent_context.action 必須為 update、clear 或 none。每個欄位都要有 value、evidence_span、confidence、subject；subject 只能是 owner。只有確實描述本人現實活動時才 update；訊息可同時包含找人要求，但只擷取本人活動，絕不把找人、配對、提案或等待回覆寫入欄位。時間詞（例如今天、下週）是活動的時間欄位，不是拒絕理由。若提到他人，但同時清楚表達「我喜歡／不喜歡這種類型」，只能提出本人偏好記憶，不能儲存他人的特徵。
+請輸出 ProfileExtractionDecision JSON。recent_context.action 必須為 update、clear 或 none。episode_relation 必須為 continue、new 或 unrelated：本句是在補充／修正 active episode 時用 continue，開始不同活動時用 new，無關時用 unrelated。短句沒有時間詞也能延續；不確定時用 unrelated，禁止硬合併。每個欄位都要有 value、evidence_span、confidence、subject；subject 只能是 owner。只有確實描述本人現實活動時才 update；訊息可同時包含找人要求，但只擷取本人活動，絕不把找人、配對、提案或等待回覆寫入欄位。時間詞（例如今天、下週）是活動的時間欄位，不是拒絕理由。若提到他人，但同時清楚表達「我喜歡／不喜歡這種類型」，只能提出本人偏好記憶，不能儲存他人的特徵。
 不得自行杜撰摘要。欄位與記憶標籤使用繁體中文；每個 evidence_span 必須是原訊息的連續子字串。
 
-JSON schema：{{"recent_context":{{"action":"update|clear|none","confidence":0.0,"message_kind":"real_world_update|match_operation|durable_preference|other","fields":{{"activity":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"destination":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"timing":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"companion_intent":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"temporal_status":{{"operation":"set|clear","value":"past|current|planned","evidence_span":"","confidence":0.0,"subject":"owner"}}}},"reason_code":""}},"memories":[{{"key":"snake_case","label_zh_tw":"繁體中文標籤","stance":"like|dislike|require|avoid","category":"lifestyle|habit|personality|relationship|activity","confidence":0.0,"evidence_span":"","subject":"owner","reason_code":""}}]}}
+JSON schema：{{"recent_context":{{"action":"update|clear|none","confidence":0.0,"message_kind":"real_world_update|match_operation|durable_preference|other","episode_relation":"continue|new|unrelated","fields":{{"activity":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"destination":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"timing":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"companion_intent":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"temporal_status":{{"operation":"set|clear","value":"past|current|planned","evidence_span":"","confidence":0.0,"subject":"owner"}}}},"reason_code":""}},"memories":[{{"key":"snake_case","label_zh_tw":"繁體中文標籤","stance":"like|dislike|require|avoid","category":"lifestyle|habit|personality|relationship|activity","confidence":0.0,"evidence_span":"","subject":"owner","reason_code":""}}]}}
+目前有效的 typed episode：{json.dumps(prompt_episode or {}, ensure_ascii=False)}
 本人原始訊息：{message}
 """
     try:
@@ -348,12 +423,14 @@ JSON schema：{{"recent_context":{{"action":"update|clear|none","confidence":0.0
         return {"recent_context": {**blank, "reason_code": f"model_{type(exc).__name__}"}, "memories": [], "memory_codes": [f"model_{type(exc).__name__}"], "policy_versions": {"recent-context": recent_skill["version"], "memory": memory_skill["version"]}, "contract": {}}
 
     recent, retry_needed = _validated_recent_proposal(contract.recent_context, message, plan_id)
+    recent["active_episode_id"] = str((safe_episode or {}).get("episode_id") or "")
     if retry_needed:
-        retried_recent = _retry_recent_context_contract(message, recent_skill)
+        retried_recent = _retry_recent_context_contract(message, recent_skill, prompt_episode)
         if retried_recent is not None:
             retry_result, _ = _validated_recent_proposal(retried_recent, message, plan_id)
             if retry_result["should_update"]:
                 retry_result["reason_code"] = "retry_accepted"
+                retry_result["active_episode_id"] = str((safe_episode or {}).get("episode_id") or "")
                 recent = retry_result
     memories, codes = [], []
     for item in contract.memories[:3]:
@@ -376,30 +453,48 @@ def apply_recent_context(
     if not isinstance(patches, dict) or not patches:
         return False
     context_action = str(proposal.get("context_action") or "update")
-    source_timestamp = float(source_timestamp or 0)
-    plan_id = str(proposal.get("plan_id") or f"message:{message_id}")[:128]
+    source_timestamp = _timestamp(source_timestamp)
+    episode_relation = str(proposal.get("episode_relation") or "new")
+    if context_action != "clear" and episode_relation not in {"continue", "new"}:
+        return False
+    proposed_episode_id = str(proposal.get("active_episode_id") or "")[:128]
     for _ in range(3):
         profile = profiles_coll.find_one(
             {"user_id": user_id},
-            {"current_context": 1, "current_context_revision": 1, "recent_context_state": 1},
+            {"current_context": 1, "current_context_revision": 1, "recent_context_state": 1,
+             "recent_context_updated_at": 1, "recent_context_draft": 1},
         ) or {}
         previous = _safe_context_text(profile.get("current_context"))
-        state = profile.get("recent_context_state") or {"version": 3, "revision": 0, "fields": {}}
+        state = profile.get("recent_context_state") or {"version": 4, "revision": 0, "fields": {}}
         state_fields = dict(state.get("fields") or {})
         changed = False
-        core_patch_names = {
-            name for name in ("activity", "destination")
-            if isinstance(patches.get(name), dict) and patches[name].get("operation") == "set"
-        }
-        existing_plan_ids = {
-            str((state_fields.get(name) or {}).get("plan_id") or "")
-            for name in RECENT_FIELD_NAMES if state_fields.get(name)
-        }
-        # A newly evidenced activity/destination is a new coherent snapshot.
-        # Never combine it with destination/activity inherited from another turn.
-        if core_patch_names and existing_plan_ids and existing_plan_ids != {plan_id}:
+        active_episode = _active_recent_episode(profile)
+        if context_action == "clear":
+            episode_id = str(state.get("episode_id") or f"episode:{message_id}")[:128]
+        elif episode_relation == "continue":
+            # The analyzer saw one exact typed episode. If it expired or was
+            # replaced before this CAS attempt, fail closed instead of joining
+            # two unrelated plans.
+            if not active_episode or active_episode.get("episode_id") != proposed_episode_id:
+                return False
+            episode_id = proposed_episode_id
+        else:
+            existing_sources = [
+                item for item in state_fields.values() if isinstance(item, dict)
+            ]
+            newest_existing = max(
+                existing_sources,
+                key=lambda item: (_timestamp(item.get("source_timestamp")), str(item.get("evidence_message_id") or "")),
+                default=None,
+            )
+            if newest_existing and not _source_is_newer(
+                {"source_timestamp": source_timestamp, "evidence_message_id": message_id},
+                newest_existing,
+            ):
+                return False
+            episode_id = f"episode:{message_id}"[:128]
             state_fields = {}
-            changed = True
+            changed = bool(state.get("fields"))
         if context_action == "clear":
             changed = changed or bool(state_fields)
             state_fields = {}
@@ -413,7 +508,7 @@ def apply_recent_context(
                 "evidence_message_id": message_id,
                 "evidence_span": patch.get("evidence_span"),
                 "source_timestamp": source_timestamp,
-                "plan_id": plan_id,
+                "plan_id": episode_id,
             }
             existing = state_fields.get(name)
             if not _source_is_newer(candidate, existing):
@@ -429,8 +524,10 @@ def apply_recent_context(
         if not changed:
             return False
         state = {
-            "version": 3,
+            "version": 4,
             "revision": int(state.get("revision", 0)) + 1,
+            "episode_id": episode_id,
+            "updated_at": time.time(),
             "fields": state_fields,
         }
         summary = _compose_recent_context_summary(state_fields)
@@ -460,7 +557,9 @@ def apply_recent_context(
             {"current_context_revision": old_revision},
             {"current_context_revision": {"$exists": False}, "$expr": {"$eq": [old_revision, 0]}},
         ]}
-        updated = profiles_coll.update_one(query, {"$set": set_fields}, upsert=False)
+        updated = profiles_coll.update_one(
+            query, {"$set": set_fields, "$unset": {"recent_context_draft": ""}}, upsert=False,
+        )
         if updated.modified_count:
             return True
     return False
@@ -487,14 +586,22 @@ def process_profile_message(user_id: str, message: str, message_id: str | None, 
         return {"status": "skipped", "reason": "owner_message_not_saved"}
     if not _claim_profile_message(user_id, message_id, mode):
         return {"status": "skipped", "reason": "already_processed"}
+    try:
+        profile = profiles_coll.find_one(
+            {"user_id": user_id},
+            {"recent_context_state": 1, "recent_context_updated_at": 1, "recent_context_draft": 1},
+        ) or {}
+    except Exception:
+        profile = {}
+    active_episode = _active_recent_episode(profile)
     decision = analyze_profile_message(
-        message, plan_id=f"message:{message_id}",
+        message, plan_id=f"message:{message_id}", active_episode=active_episode,
     )
     recent_changed, saved_memories, memory_error = False, [], None
     if mode == "on":
         recent_changed = apply_recent_context(
             user_id, decision["recent_context"], message_id=message_id,
-            source_timestamp=float(source.get("timestamp", 0) or 0),
+            source_timestamp=_timestamp(source.get("timestamp")),
         )
         try:
             from services.memory_service import MemoryWriteError, apply_profile_memory_proposals

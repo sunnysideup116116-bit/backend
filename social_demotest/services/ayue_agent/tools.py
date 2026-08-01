@@ -11,19 +11,28 @@ from datetime import datetime, time as time_value, timedelta, timezone
 from typing import Any
 
 from database import matches_coll, profiles_coll
-from services.calendar_service import calendar_access_enabled, get_calendar_context, get_timezone
+from services.calendar_service import (
+    as_utc,
+    calendar_access_enabled,
+    find_owned_events,
+    get_calendar_context,
+    get_timezone,
+)
 from services.match_state_service import (
     get_counterparty_match_source,
     get_match_status_snapshot,
     verified_accepted_match_query,
 )
-from services.profile_projection import safe_recent_context
+from services.profile_projection import clean_profile_text, contains_internal_identifier, safe_recent_context
 from services.profile_location import safe_profile_location
 
 from .contracts import AgentTurnContext, ToolCall, ToolResult, TurnClockV1
 from .time_context import clock_utc
 from .tool_registry import ToolRisk, get_tool_spec, validate_executor_arguments
 from .public_relationship_projection import (
+    anonymize_counterparty_payload,
+    accepted_contact_ids_by_display_name,
+    accepted_contact_summaries,
     display_name as _display_name,
     mentioned_contact_summary,
     other_id as _other_id,
@@ -33,7 +42,14 @@ from .public_relationship_projection import (
     verified_common_ground as _verified_common_ground,
 )
 from .web_tools import extract_web, search_web
-from .maps_client import MapClientError, measure_distance, nearby_places
+from .maps_client import (
+    MapClientError, measure_distance, nearby_places, nominatim_search,
+    resolve_place as resolve_osm_place,
+)
+from .google_places_client import (
+    GooglePlacesError, google_place_cards_enabled, resolve_place as resolve_google_place,
+    search_nearby_places,
+)
 
 
 def _calendar_events(user_id: str, clock: TurnClockV1 | None = None) -> ToolResult:
@@ -64,6 +80,106 @@ def _calendar_events(user_id: str, clock: TurnClockV1 | None = None) -> ToolResu
             "status": event.get("status", "confirmed"),
         })
     return ToolResult(ok=True, data={"events": safe_events, "range": range_label})
+
+
+def _calendar_event_fields(event: dict) -> dict[str, str]:
+    zone = get_timezone(event.get("timezone") or "Asia/Taipei")
+    start = as_utc(event["start_at"]).astimezone(zone)
+    end = as_utc(event["end_at"]).astimezone(zone)
+    return {
+        "activity": str(event.get("activity") or event.get("title") or "行程")[:120],
+        "date": start.date().isoformat(),
+        "start_time": start.strftime("%H:%M"),
+        "end_time": end.strftime("%H:%M"),
+    }
+
+
+def _calendar_event_companion(event: dict, user_id: str) -> dict[str, object]:
+    """Resolve a shared-event companion only through canonical acceptance.
+
+    Calendar storage contains participant IDs for synchronization.  They are
+    intentionally kept executor-side and are never included in the tool result.
+    """
+    if event.get("source_type") != "date":
+        return {
+            "event_kind": "personal", "companion_known": False,
+            "companion_display_name": "對方", "companion_safe_summary": "",
+        }
+    other_id = next((item for item in (event.get("participants") or []) if item != user_id), None)
+    if not isinstance(other_id, str) or not other_id:
+        return {
+            "event_kind": "shared_date", "companion_known": False,
+            "companion_display_name": "對方", "companion_safe_summary": "",
+        }
+    match = matches_coll.find_one(
+        verified_accepted_match_query(user_id, other_id),
+        {
+            "_id": 0, "from_user": 1, "to_user": 1, "reason_items": 1,
+            "receiver_reason_items": 1, "directional_reason_v2": 1,
+            "reason_version": 1, "friend_intro_v4": 1,
+        },
+    )
+    if not match:
+        return {
+            "event_kind": "shared_date", "companion_known": False,
+            "companion_display_name": "對方", "companion_safe_summary": "",
+        }
+    label = _display_name(other_id)
+    return {
+        "event_kind": "shared_date", "companion_known": label != "對方",
+        "companion_display_name": label,
+        "companion_safe_summary": _safe_proposal_summary(match, user_id),
+    }
+
+
+def _calendar_find_event(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResult:
+    if not calendar_access_enabled(ctx.user_id):
+        return ToolResult(ok=False, error_code="calendar_access_denied", user_message="你目前沒有授權我讀取行事曆。")
+    event_hint = str(arguments.get("event_hint") or "").strip()
+    date_hint = str(arguments.get("date_hint") or "").strip()
+    companion_hint = str(arguments.get("companion_hint") or "").strip()
+    companion_ids = accepted_contact_ids_by_display_name(ctx.user_id, companion_hint) if companion_hint else []
+    if companion_hint and not companion_ids:
+        return _empty_calendar_find("not_found", "companion_not_found")
+    if len(companion_ids) > 1:
+        # A public display name is not a unique authority boundary. Do not use
+        # calendar contents to infer which same-named accepted contact the
+        # owner meant; ask for a different identifying description instead.
+        return _empty_calendar_find("ambiguous", "companion_ambiguous")
+    events: list[dict] = []
+    lookup_ids: list[str | None] = companion_ids if companion_ids else [None]
+    for companion_user_id in lookup_ids:
+        for event in find_owned_events(
+            ctx.user_id, event_hint, date_hint=date_hint,
+            companion_user_id=companion_user_id,
+        ):
+            if event not in events:
+                events.append(event)
+    if not events:
+        reason = "companion_ambiguous" if len(companion_ids) > 1 else "event_not_found"
+        return _empty_calendar_find("ambiguous" if len(companion_ids) > 1 else "not_found", reason)
+    if len(events) > 1:
+        return ToolResult(ok=True, data={
+            "status": "ambiguous", "reason_code": "event_ambiguous",
+            "activity": "", "date": "", "start_time": "", "end_time": "",
+            "event_kind": "", "companion_known": False, "companion_display_name": "對方",
+            "companion_safe_summary": "",
+            "candidates": [_calendar_event_fields(event) for event in events[:3]],
+        })
+    event = events[0]
+    return ToolResult(ok=True, data={
+        "status": "found", "reason_code": "", **_calendar_event_fields(event),
+        **_calendar_event_companion(event, ctx.user_id), "candidates": [],
+    })
+
+
+def _empty_calendar_find(status: str, reason_code: str) -> ToolResult:
+    return ToolResult(ok=True, data={
+        "status": status, "reason_code": reason_code,
+        "activity": "", "date": "", "start_time": "", "end_time": "",
+        "event_kind": "", "companion_known": False, "companion_display_name": "對方",
+        "companion_safe_summary": "", "candidates": [],
+    })
 
 
 def _match_state(user_id: str) -> ToolResult:
@@ -154,11 +270,30 @@ def _counterparty_summary(ctx: AgentTurnContext) -> ToolResult:
     tier = str(match.get("recommendation_tier") or "")
     if tier not in {"grounded", "exploratory"}:
         tier = "grounded" if common_ground else "exploratory"
+    resolved_name = _display_name(other_id)
+    display_label = resolved_name if status == "accepted" else "對方"
+    if status != "accepted":
+        public_profile = anonymize_counterparty_payload(
+            public_profile, other_id, counterparty_name=resolved_name,
+        )
+        common_ground = anonymize_counterparty_payload(
+            common_ground, other_id, counterparty_name=resolved_name,
+        )
+        tags = anonymize_counterparty_payload(tags, other_id, counterparty_name=resolved_name)
     return ToolResult(ok=True, data={
         "found": True,
         "match_state": status,
-        "display_name": _display_name(other_id),
-        "safe_summary": _safe_proposal_summary(match, ctx.user_id),
+        # Profiles can be evaluated anonymously while a proposal is pending;
+        # identity becomes public only after canonical acceptance.
+        "display_name": display_label,
+        "safe_summary": (
+            _safe_proposal_summary(match, ctx.user_id)
+            if status == "accepted"
+            else anonymize_counterparty_payload(
+                _safe_proposal_summary(match, ctx.user_id), other_id,
+                counterparty_name=resolved_name,
+            )
+        ),
         **public_profile,
         "distinctive_tags": tags,
         "verified_common_ground": common_ground,
@@ -212,6 +347,11 @@ def _mentioned_contact_summary(ctx: AgentTurnContext, other_ids: list[str]) -> T
     return ToolResult(ok=True, data={"contacts": mentioned_contact_summary(ctx.user_id, other_ids)})
 
 
+def _accepted_contact_list(ctx: AgentTurnContext) -> ToolResult:
+    contacts, truncated = accepted_contact_summaries(ctx.user_id)
+    return ToolResult(ok=True, data={"contacts": contacts, "truncated": truncated})
+
+
 def _memory_profile(ctx: AgentTurnContext) -> ToolResult:
     profile = ctx.user_profile or profiles_coll.find_one({"user_id": ctx.user_id}, {"_id": 0}) or {}
     return ToolResult(ok=True, data={
@@ -219,6 +359,87 @@ def _memory_profile(ctx: AgentTurnContext) -> ToolResult:
         "current_context": safe_recent_context(profile.get("current_context"), ""),
         "preferences": profile.get("profile_memory_preview", [])[:8],
     })
+
+
+def _owner_profile_text(value: Any, limit: int) -> str:
+    text = clean_profile_text(value, limit)
+    return "" if contains_internal_identifier(text) else text
+
+
+def _owner_profile_list(value: Any, *, limit: int = 3, item_limit: int = 32) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = _owner_profile_text(item, item_limit)
+        if text and text not in items:
+            items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _owner_memory_preferences(value: Any, *, limit: int = 8) -> list[str]:
+    """Render typed memory items without exposing graph/storage metadata."""
+    if not isinstance(value, list):
+        return []
+    stance_prefix = {"like": "喜歡", "dislike": "不喜歡", "require": "需要", "avoid": "避免"}
+    preferences: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            label = _owner_profile_text(item.get("label") or item.get("label_zh_tw"), 40)
+            prefix = stance_prefix.get(str(item.get("stance") or "").strip(), "")
+            text = f"{prefix}{label}" if label and prefix and not label.startswith(prefix) else label
+        else:
+            text = _owner_profile_text(item, 48)
+        if text and text not in preferences:
+            preferences.append(text)
+        if len(preferences) >= limit:
+            break
+    return preferences
+
+
+def _self_profile(ctx: AgentTurnContext) -> ToolResult:
+    """Project only completed owner profile fields into a bounded tool result."""
+    profile = ctx.user_profile or profiles_coll.find_one({"user_id": ctx.user_id}, {"_id": 0}) or {}
+    big_five = profile.get("big_five") if isinstance(profile.get("big_five"), dict) else {}
+    deep = profile.get("deep_profile") if isinstance(profile.get("deep_profile"), dict) else {}
+    scores = {
+        "openness": big_five.get("O"),
+        "conscientiousness": big_five.get("C"),
+        "extraversion": big_five.get("E"),
+        "agreeableness": big_five.get("A"),
+        "neuroticism": big_five.get("N"),
+    }
+    normalized_scores = {
+        name: float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+        for name, value in scores.items()
+    }
+    data = {
+        "display_name": _owner_profile_text(profile.get("display_name") or profile.get("nickname") or profile.get("name"), 30),
+        "initial_interest": _owner_profile_text(profile.get("initial_interest"), 120),
+        "personality_summary": _owner_profile_text(big_five.get("summary"), 140),
+        **normalized_scores,
+        "values": _owner_profile_list(deep.get("values")),
+        "life_goals": _owner_profile_list(deep.get("life_goals")),
+        "relationship_needs": _owner_profile_list(deep.get("relationship_needs")),
+        "stress_coping": _owner_profile_text(deep.get("stress_coping"), 100),
+        "ideal_future": _owner_profile_text(deep.get("ideal_future"), 120),
+        "deep_profile_summary": _owner_profile_text(deep.get("summary"), 140),
+        "recent_context": safe_recent_context(profile.get("current_context"), ""),
+        "location": safe_profile_location(profile).get("display_name", ""),
+        "preferences": _owner_memory_preferences(profile.get("profile_memory_preview"), limit=8),
+        "missing_sections": [],
+    }
+    if not data["initial_interest"]:
+        data["missing_sections"].append("興趣與認識方向")
+    if not data["personality_summary"] and not any(value is not None for value in normalized_scores.values()):
+        data["missing_sections"].append("基礎性格")
+    if not any((data["values"], data["life_goals"], data["relationship_needs"], data["stress_coping"], data["ideal_future"], data["deep_profile_summary"])):
+        data["missing_sections"].append("深層資料")
+    if not data["recent_context"]:
+        data["missing_sections"].append("近期情境")
+    return ToolResult(ok=True, data=data)
 
 
 def _web_search(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResult:
@@ -257,15 +478,35 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
         origin_kind = "saved_profile"
     if not anchor:
         return ToolResult(ok=False, error_code="location_required", user_message="你想從哪個地點開始找？")
-    try:
-        data = nearby_places(
-            anchor,
-            [str(item) for item in (arguments.get("categories") or [])],
-            radius_m=int(arguments.get("radius_m") or 1500),
-            limit=int(arguments.get("limit") or 8),
-        )
-    except MapClientError as exc:
-        return ToolResult(ok=False, error_code=exc.code, user_message="")
+    categories = [str(item) for item in (arguments.get("categories") or [])]
+    safe_limit = int(arguments.get("limit") or 8)
+    data = None
+    # Google is an optional presentation enhancement. Its failure must never
+    # take away the existing OpenStreetMap place discovery capability.
+    if google_place_cards_enabled():
+        try:
+            point = nominatim_search(anchor)
+            google_places = search_nearby_places(
+                str(point.get("label") or anchor), float(point["lat"]), float(point["lon"]), categories,
+                limit=safe_limit,
+            )
+            data = {
+                "anchor_label": str(point.get("label") or anchor),
+                "distance_basis": "straight_line",
+                "attribution": "Google Maps",
+                "attribution_url": "https://www.google.com/maps",
+                "places": google_places,
+            }
+        except (MapClientError, GooglePlacesError, KeyError, TypeError, ValueError):
+            data = None
+    if data is None:
+        try:
+            data = nearby_places(
+                anchor, categories,
+                radius_m=int(arguments.get("radius_m") or 1500), limit=safe_limit,
+            )
+        except MapClientError as exc:
+            return ToolResult(ok=False, error_code=exc.code, user_message="")
     return ToolResult(ok=True, data={**data, "origin_kind": origin_kind})
 
 
@@ -284,6 +525,27 @@ def _places_distance(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolRe
     return ToolResult(ok=True, data={**data, "origin_kind": origin_kind})
 
 
+def _places_resolve(arguments: dict[str, Any]) -> ToolResult:
+    query = str(arguments.get("query") or "")
+    place = None
+    if google_place_cards_enabled():
+        try:
+            place = resolve_google_place(query)
+        except GooglePlacesError:
+            place = None
+    if place is None:
+        try:
+            place = resolve_osm_place(query)
+        except MapClientError as exc:
+            return ToolResult(ok=False, error_code=exc.code, user_message="")
+    provider = str((place or {}).get("provider") or "openstreetmap")
+    return ToolResult(ok=True, data={
+        "found": bool(place), "place": place,
+        "attribution": "Google Maps" if provider == "google" else "© OpenStreetMap contributors",
+        "attribution_url": "https://www.google.com/maps" if provider == "google" else "https://www.openstreetmap.org/copyright",
+    })
+
+
 def execute_tool(
     call: ToolCall, ctx: AgentTurnContext, *, clock: TurnClockV1 | None = None, dry_run: bool = False,
 ) -> ToolResult:
@@ -296,17 +558,21 @@ def execute_tool(
         return ToolResult(ok=False, error_code="invalid_tool_arguments", user_message="這個請求的資訊格式不正確，我沒有執行它。")
     executors = {
         "calendar_events": lambda: _calendar_events(ctx.user_id, clock),
+        "calendar_event_find": lambda: _calendar_find_event(ctx, arguments),
         "current_time": lambda: _current_time(clock),
         "match_status": lambda: _match_status(ctx.user_id),
         "counterparty_summary": lambda: _counterparty_summary(ctx),
         "recent_context": lambda: _recent_context(ctx),
         "relationship_evidence": lambda: _relationship_evidence(ctx, arguments.get("other_id")),
         "mentioned_contact_summary": lambda: _mentioned_contact_summary(ctx, arguments.get("other_ids") or []),
+        "accepted_contact_list": lambda: _accepted_contact_list(ctx),
         "memory_profile": lambda: _memory_profile(ctx),
+        "self_profile": lambda: _self_profile(ctx),
         "web_search": lambda: _web_search(ctx, arguments),
         "web_extract": lambda: _web_extract(arguments),
         "places_nearby": lambda: _places_nearby(ctx, arguments),
         "places_distance": lambda: _places_distance(ctx, arguments),
+        "places_resolve": lambda: _places_resolve(arguments),
     }
     executor = executors.get(spec.executor_key)
     if executor is not None:

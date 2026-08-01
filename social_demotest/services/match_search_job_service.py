@@ -1,0 +1,354 @@
+"""Durable, owner-scoped background jobs for Public Ayue match searches."""
+
+from __future__ import annotations
+
+import threading
+import time
+import uuid
+from typing import Any, Callable
+
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
+
+from database import db, profiles_coll
+from services.mediator_event_service import queue_mediator_event
+
+
+MATCH_SEARCH_JOBS = db["match_search_jobs"]
+JOB_ACTIVE_STATUSES = frozenset({"queued", "running"})
+JOB_TERMINAL_STATUSES = frozenset({"completed", "no_candidates", "failed", "cancelled", "stale"})
+JOB_STEPS = {
+    "loading_profile": 15,
+    "vector_search": 40,
+    "graph_check": 65,
+    "writing_reason": 85,
+}
+LEASE_SECONDS = 180
+POLL_SECONDS = 0.5
+
+MatchPipeline = Callable[..., dict[str, Any]]
+_pipeline: MatchPipeline | None = None
+_worker_thread: threading.Thread | None = None
+_stop_event = threading.Event()
+
+
+def register_match_search_pipeline(pipeline: MatchPipeline) -> None:
+    """Register the existing candidate pipeline; the job service owns scheduling."""
+    global _pipeline
+    _pipeline = pipeline
+
+
+def ensure_match_search_job_indexes() -> None:
+    try:
+        MATCH_SEARCH_JOBS.create_index(
+            [("active_user_id", 1)], unique=True, sparse=True,
+            name="one_active_match_search_per_user",
+        )
+        MATCH_SEARCH_JOBS.create_index([("status", 1), ("lease_until", 1), ("updated_at", 1)])
+        MATCH_SEARCH_JOBS.create_index([("user_id", 1), ("created_at", -1)])
+        MATCH_SEARCH_JOBS.create_index([("user_id", 1), ("idempotency_key", 1)], unique=True)
+    except Exception as exc:
+        print(f"[match-search-job] index setup skipped: {type(exc).__name__}")
+
+
+def _safe_revision(profile: dict[str, Any]) -> int:
+    try:
+        return max(0, int(profile.get("current_context_revision", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _profile_search_projection(status: str, source: str, *, step: str = "", progress_percent: int = 0, **extra: Any) -> dict[str, Any]:
+    return {
+        "status": status,
+        "source": str(source or "automatic")[:40],
+        "step": step if step in JOB_STEPS else "",
+        "progress_percent": max(0, min(100, int(progress_percent or 0))),
+        "updated_at": time.time(),
+        **extra,
+    }
+
+
+def _live_match(user_id: str) -> dict[str, Any] | None:
+    # Avoid an import cycle with match_state_service at module import time.
+    from services.match_state_service import reconcile_live_match
+    return reconcile_live_match(user_id)
+
+
+def _has_live_match(user_id: str) -> bool:
+    return bool(_live_match(user_id))
+
+
+def enqueue_match_search(user_id: str, *, source: str, idempotency_key: str, force_new: bool = False) -> dict[str, Any]:
+    """Create one queued job. This call never runs candidate ranking inline."""
+    if _has_live_match(user_id):
+        return {"status": "already_active"}
+    now = time.time()
+    profile = profiles_coll.find_one(
+        {"user_id": user_id}, {"_id": 0, "current_context_revision": 1},
+    ) or {}
+    job = {
+        "job_id": uuid.uuid4().hex,
+        "user_id": user_id,
+        "active_user_id": user_id,
+        "status": "queued",
+        "step": "loading_profile",
+        "progress_percent": 0,
+        "context_revision": _safe_revision(profile),
+        "source": str(source or "automatic")[:40],
+        "idempotency_key": str(idempotency_key)[:120],
+        "lease_id": "",
+        "lease_until": 0.0,
+        "attempt": 0,
+        "created_at": now,
+        "updated_at": now,
+    }
+    try:
+        MATCH_SEARCH_JOBS.insert_one(job)
+    except DuplicateKeyError:
+        replay = MATCH_SEARCH_JOBS.find_one(
+            {"user_id": user_id, "idempotency_key": job["idempotency_key"]},
+            {"_id": 0, "status": 1},
+        ) or {}
+        replay_status = str(replay.get("status") or "")
+        if replay_status == "queued":
+            return {"status": "already_queued"}
+        if replay_status == "running":
+            return {"status": "already_searching"}
+        if replay_status in JOB_TERMINAL_STATUSES:
+            return {"status": replay_status}
+        existing = MATCH_SEARCH_JOBS.find_one(
+            {"user_id": user_id, "active_user_id": user_id},
+            {"_id": 0, "status": 1, "idempotency_key": 1},
+        ) or {}
+        return {"status": "already_searching" if existing else "failed"}
+    profiles_coll.update_one(
+        {"user_id": user_id},
+        {"$set": {
+            "matchmaking_in_progress": True,
+            "active_match_search_job_id": job["job_id"],
+            "match_search": _profile_search_projection("queued", job["source"], step="loading_profile", progress_percent=0),
+        }},
+        upsert=True,
+    )
+    return {"status": "queued"}
+
+
+def cancel_match_search(user_id: str, *, source: str = "manual") -> dict[str, Any]:
+    """Cancel a queued/running job; a worker checks this before proposal writes."""
+    now = time.time()
+    job = MATCH_SEARCH_JOBS.find_one_and_update(
+        {"user_id": user_id, "active_user_id": user_id, "status": {"$in": list(JOB_ACTIVE_STATUSES)}},
+        {"$set": {"status": "cancelled", "updated_at": now, "completed_at": now}, "$unset": {"active_user_id": ""}},
+        return_document=ReturnDocument.BEFORE,
+    )
+    if not job:
+        return {"status": "already_active" if _has_live_match(user_id) else "idle"}
+    profiles_coll.update_one(
+        {"user_id": user_id, "active_match_search_job_id": job.get("job_id")},
+        {"$set": {
+            "matchmaking_in_progress": False,
+            "match_search": _profile_search_projection("cancelled", source, progress_percent=0, completed_at=now),
+        }, "$unset": {"active_match_search_job_id": ""}},
+    )
+    return {"status": "cancelled"}
+
+
+def _claim_next_job(now: float) -> dict[str, Any] | None:
+    lease_id = uuid.uuid4().hex
+    return MATCH_SEARCH_JOBS.find_one_and_update(
+        {
+            "active_user_id": {"$exists": True},
+            "$or": [
+                {"status": "queued"},
+                {"status": "running", "lease_until": {"$lte": now}},
+            ],
+        },
+        {"$set": {
+            "status": "running", "lease_id": lease_id, "lease_until": now + LEASE_SECONDS,
+            "updated_at": now,
+        }, "$inc": {"attempt": 1}},
+        sort=[("created_at", 1)],
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+def _job_has_lease(job: dict[str, Any]) -> bool:
+    current = MATCH_SEARCH_JOBS.find_one(
+        {
+            "_id": job.get("_id"), "status": "running",
+            "active_user_id": job.get("user_id"), "lease_id": job.get("lease_id"),
+        },
+        {"_id": 1},
+    )
+    return bool(current)
+
+
+def _job_context_matches(job: dict[str, Any]) -> bool:
+    profile = profiles_coll.find_one(
+        {"user_id": job.get("user_id")}, {"_id": 0, "current_context_revision": 1},
+    ) or {}
+    return _safe_revision(profile) == int(job.get("context_revision", 0) or 0)
+
+
+def _job_has_ownership(job: dict[str, Any]) -> bool:
+    return _job_has_lease(job) and _job_context_matches(job)
+
+
+def _job_is_current(job: dict[str, Any]) -> bool:
+    if not _job_has_lease(job):
+        return False
+    live_match = _live_match(str(job.get("user_id") or ""))
+    if live_match:
+        # A proposal already committed by this same durable job is recoverable
+        # after a lease handoff; any other live proposal makes the job stale.
+        return str(live_match.get("search_job_id") or "") == str(job.get("job_id") or "")
+    return _job_context_matches(job)
+
+
+def _report_progress(job: dict[str, Any], step: str) -> bool:
+    if step not in JOB_STEPS:
+        return False
+    now = time.time()
+    result = MATCH_SEARCH_JOBS.update_one(
+        {
+            "_id": job.get("_id"), "status": "running", "active_user_id": job.get("user_id"),
+            "lease_id": job.get("lease_id"),
+        },
+        {"$set": {"step": step, "progress_percent": JOB_STEPS[step], "updated_at": now, "lease_until": now + LEASE_SECONDS}},
+    )
+    if not getattr(result, "modified_count", 0):
+        return False
+    profiles_coll.update_one(
+        {"user_id": job.get("user_id"), "active_match_search_job_id": job.get("job_id")},
+        {"$set": {"match_search": _profile_search_projection("running", str(job.get("source") or "automatic"), step=step, progress_percent=JOB_STEPS[step])}},
+    )
+    return _job_is_current(job)
+
+
+def _finish_job(job: dict[str, Any], status: str, *, error_code: str = "") -> bool:
+    if status not in JOB_TERMINAL_STATUSES:
+        status = "failed"
+    now = time.time()
+    result = MATCH_SEARCH_JOBS.update_one(
+        {"_id": job.get("_id"), "status": "running", "active_user_id": job.get("user_id"), "lease_id": job.get("lease_id")},
+        {"$set": {"status": status, "updated_at": now, "completed_at": now, "error_code": error_code[:80]}, "$unset": {"active_user_id": "", "lease_id": "", "lease_until": ""}},
+    )
+    if not getattr(result, "modified_count", 0):
+        return False
+    profiles_coll.update_one(
+        {"user_id": job.get("user_id"), "active_match_search_job_id": job.get("job_id")},
+        {"$set": {
+            "matchmaking_in_progress": False,
+            "match_search": _profile_search_projection(status, str(job.get("source") or "automatic"), progress_percent=100 if status == "completed" else 0, completed_at=now),
+        }, "$unset": {"active_match_search_job_id": ""}},
+    )
+    return True
+
+
+def run_one_match_search_job() -> bool:
+    """Claim and execute at most one job. Safe to invoke from many workers."""
+    job = _claim_next_job(time.time())
+    if not job:
+        return False
+    if _pipeline is None:
+        _finish_job(job, "failed", error_code="pipeline_unavailable")
+        return True
+    if not _report_progress(job, "loading_profile"):
+        _finish_job(job, "stale", error_code="ownership_or_context_changed")
+        return True
+    try:
+        result = _pipeline(
+            str(job.get("user_id") or ""), str(job.get("source") or "automatic"),
+            report_progress=lambda step: _report_progress(job, step),
+            can_commit=lambda: _job_is_current(job),
+            search_job_id=str(job.get("job_id") or ""),
+        )
+    except Exception as exc:
+        if _finish_job(job, "failed", error_code=type(exc).__name__):
+            queue_mediator_event(
+                str(job.get("user_id") or ""), "我剛剛找人的路上卡了一下，沒有假裝成功；晚點可以再叫我試一次。",
+                "match_search_failed", event_key=f"match-search-job:{job.get('job_id')}:failed",
+            )
+        return True
+    if str((result or {}).get("status") or "") == "stale":
+        _finish_job(job, "stale", error_code="ownership_or_context_changed")
+        return True
+    matches = list((result or {}).get("matches") or [])[:1]
+    if not matches:
+        if not _job_has_ownership(job):
+            _finish_job(job, "stale", error_code="ownership_or_context_changed")
+            return True
+        if _finish_job(job, "no_candidates"):
+            queue_mediator_event(
+                str(job.get("user_id") or ""), "這輪我暫時沒看到合適的新對象，等資料多一點我再幫你看。",
+                "match_search_empty", event_key=f"match-search-job:{job.get('job_id')}:empty",
+            )
+        return True
+    # The pipeline checked ownership immediately before proposal insertion. Once
+    # the sole draft exists, it is the canonical result of this job.
+    if not _job_has_lease(job):
+        # A new lease owner will recover the proposal by search_job_id and
+        # publish the single terminal event.
+        return True
+    if _finish_job(job, "completed"):
+        first = matches[0]
+        tone_doc = profiles_coll.find_one({"user_id": job.get("user_id")}, {"_id": 0, "mediator_tone": 1}) or {}
+        proposal_message = {
+            "friend": "我翻到一位可以介紹給你的人，先看這張阿月牽線提案。",
+            "gentle": "我幫你留意到一位可能合拍的人，先看看這個提案。",
+            "enthusiastic": "我找到一位有機會聊起來的人，快看看這張牽線提案！",
+        }.get(str(tone_doc.get("mediator_tone") or "friend"), "我翻到一位可以介紹給你的人，先看這張阿月牽線提案。")
+        queue_mediator_event(
+            str(job.get("user_id") or ""), proposal_message, "match_proposal",
+            event_key=f"match-search-job:{job.get('job_id')}:proposal",
+            match_id=first.get("match_id"), proposal_role="initiator",
+        )
+    return True
+
+
+def public_match_search_status(user_id: str) -> dict[str, Any]:
+    """Public status projection: no job ID, lease, context revision, or errors."""
+    job = MATCH_SEARCH_JOBS.find_one(
+        {"user_id": user_id},
+        {"_id": 0, "status": 1, "step": 1, "progress_percent": 1, "updated_at": 1, "completed_at": 1},
+        sort=[("created_at", -1)],
+    ) or {}
+    status = str(job.get("status") or "idle")
+    if status not in {"idle", *JOB_ACTIVE_STATUSES, *JOB_TERMINAL_STATUSES}:
+        status = "failed"
+    step = str(job.get("step") or "") if status in JOB_ACTIVE_STATUSES else ""
+    if step not in JOB_STEPS:
+        step = ""
+    try:
+        percent = max(0, min(100, int(job.get("progress_percent", 0) or 0)))
+    except (TypeError, ValueError):
+        percent = 0
+    return {
+        "status": status, "step": step, "progress_percent": percent,
+        "estimated_seconds_min": 60 if status in JOB_ACTIVE_STATUSES else None,
+        "estimated_seconds_max": 180 if status in JOB_ACTIVE_STATUSES else None,
+    }
+
+
+def _worker_loop() -> None:
+    while not _stop_event.wait(POLL_SECONDS):
+        try:
+            while run_one_match_search_job():
+                pass
+        except Exception as exc:
+            print(f"[match-search-job] worker loop failed: {type(exc).__name__}")
+
+
+def start_match_search_worker() -> None:
+    global _worker_thread
+    ensure_match_search_job_indexes()
+    if _worker_thread and _worker_thread.is_alive():
+        return
+    _stop_event.clear()
+    _worker_thread = threading.Thread(target=_worker_loop, name="match-search-worker", daemon=True)
+    _worker_thread.start()
+
+
+def stop_match_search_worker() -> None:
+    _stop_event.set()

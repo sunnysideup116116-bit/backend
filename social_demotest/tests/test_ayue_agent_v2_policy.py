@@ -11,14 +11,17 @@ from services.ayue_agent.router import (
     guard_v2_decision,
     tool_policy_for_turn,
 )
-from services.ayue_agent.tool_registry import PLACES_TOOLS, READ_ONLY_TOOLS
+from services.ayue_agent.tool_registry import ASSESSMENT_TOOLS, PLACES_TOOLS, READ_ONLY_TOOLS, WEB_TOOLS
 from services.ayue_agent.maps_client import maps_enabled
+from services.ayue_agent.web_tools import web_enabled
 
 
 class AyueAgentV2PolicyTests(unittest.TestCase):
     @staticmethod
     def _base_policy():
-        return READ_ONLY_TOOLS | (PLACES_TOOLS if maps_enabled() else set()) | {
+        return READ_ONLY_TOOLS | ASSESSMENT_TOOLS \
+            | (PLACES_TOOLS if maps_enabled() else set()) \
+            | (WEB_TOOLS if web_enabled() else set()) | {
             "calendar.create_my_event", "calendar.update_my_event", "calendar.cancel_my_event",
         }
 
@@ -30,6 +33,29 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
     def test_plain_why_has_no_special_match_route(self):
         ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="為什麼")
         self.assertEqual(tool_policy_for_turn(ctx) - {"match.start_search"}, self._base_policy())
+
+    def test_planner_prompt_keeps_the_in_app_matchmaker_identity(self):
+        prompt = _planner_prompt(
+            AgentTurnContextV2(user_id="owner", room_id="room", message="你根本不認識我"),
+            tool_policy_for_turn(AgentTurnContextV2(user_id="owner", room_id="room", message="你根本不認識我")), [],
+        )
+        self.assertIn("交友 App 內", prompt)
+        self.assertIn("AI 媒人", prompt)
+        self.assertIn("不是另一位使用者", prompt)
+
+    def test_planner_prompt_carries_place_search_state_and_forbids_cuisine_reprompt(self):
+        ctx = AgentTurnContextV2(
+            user_id="owner", room_id="room", message="你隨意推薦",
+            user_location="高雄市鹽埕區",
+            place_search_draft={
+                "version": "v1", "categories": ["restaurant"],
+                "use_saved_location": True, "created_at": 1,
+            },
+        )
+        prompt = _planner_prompt(ctx, tool_policy_for_turn(ctx), [])
+        self.assertIn('"place_search_draft"', prompt)
+        self.assertIn("不可再追問料理種類", prompt)
+        self.assertIn('"place_search_followup":"none|recommend"', prompt)
 
     def test_guard_does_not_reclassify_a_planner_confirmation_from_text(self):
         ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="我不喜歡抽菸的人")
@@ -50,6 +76,24 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
             guard_v2_decision(ctx, tool_policy_for_turn(ctx), direct_call),
             (False, "search_must_use_confirmation_executor"),
         )
+
+    def test_assessment_starts_are_visible_but_require_a_grounded_confirmation(self):
+        ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="我想重新做基本性格測驗")
+        self.assertIn("profile.start_assessment", tool_policy_for_turn(ctx))
+        direct = AgentDecision(
+            kind=DecisionKind.TOOL_CALL, intent=AgentIntent.ASSESSMENT,
+            tool_name="profile.start_assessment", arguments={"kind": "basic"}, confidence=.95,
+        )
+        self.assertEqual(
+            guard_v2_decision(ctx, tool_policy_for_turn(ctx), direct),
+            (False, "confirmation_required"),
+        )
+        confirmation = AgentDecision(
+            kind=DecisionKind.CONFIRMATION, intent=AgentIntent.ASSESSMENT,
+            tool_name="profile.start_assessment", arguments={"kind": "basic"}, confidence=.95,
+            evidence_span="重新做基本性格測驗",
+        )
+        self.assertEqual(guard_v2_decision(ctx, tool_policy_for_turn(ctx), confirmation), (True, "allowed"))
 
     def test_confirmation_guard_uses_typed_evidence_not_keyword_routing(self):
         for message, evidence in (
@@ -166,6 +210,7 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
         self.assertIn("calendar.list_my_events", tool_policy_for_turn(ctx))
         self.assertIn("match.get_counterparty_summary", tool_policy_for_turn(ctx))
         self.assertIn("profile.get_recent_context", tool_policy_for_turn(ctx))
+        self.assertIn("profile.get_self_summary", tool_policy_for_turn(ctx))
         self.assertIn("memory.search_my_profile", tool_policy_for_turn(ctx))
 
     def test_pending_confirmation_is_runtime_only_not_planner_context(self):
@@ -194,6 +239,61 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
             guard_v2_decision(ctx, tool_policy_for_turn(ctx), decision),
             (False, "match_status_requires_read"),
         )
+
+    def test_ready_place_recommendation_requires_a_nearby_read_before_final(self):
+        ctx = AgentTurnContextV2(
+            user_id="owner", room_id="room", message="你隨意推薦",
+            user_location="高雄市鹽埕區",
+            place_search_draft={
+                "version": "v1", "categories": ["restaurant"],
+                "use_saved_location": True, "created_at": 1,
+            },
+        )
+        final = AgentDecision(
+            kind=DecisionKind.FINAL, intent=AgentIntent.PLACES, confidence=.95,
+            place_search_followup="recommend", reply="那你想找哪一類的料理呢？",
+        )
+        self.assertEqual(
+            guard_v2_decision(
+                ctx, tool_policy_for_turn(ctx), final,
+                place_search_ready=True, has_places_observation=False,
+            ),
+            (False, "places_search_requires_read"),
+        )
+        self.assertEqual(
+            guard_v2_decision(
+                ctx, tool_policy_for_turn(ctx), final,
+                place_search_ready=True, has_places_observation=True,
+            ),
+            (True, "allowed"),
+        )
+
+    def test_self_profile_question_requires_owner_summary_before_final(self):
+        ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="你了解我多少")
+        final = AgentDecision(kind=DecisionKind.FINAL, intent=AgentIntent.PROFILE, confidence=.9)
+        self.assertEqual(
+            guard_v2_decision(ctx, tool_policy_for_turn(ctx), final),
+            (False, "profile_requires_read"),
+        )
+        read = AgentDecision(
+            kind=DecisionKind.TOOL_CALL, intent=AgentIntent.PROFILE,
+            tool_name="profile.get_self_summary", confidence=.9,
+        )
+        self.assertEqual(guard_v2_decision(ctx, tool_policy_for_turn(ctx), read), (True, "allowed"))
+
+    def test_named_calendar_question_requires_a_calendar_read_not_match_state(self):
+        ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="看電影是跟誰去")
+        final = AgentDecision(kind=DecisionKind.FINAL, intent=AgentIntent.CALENDAR, confidence=.9)
+        self.assertEqual(
+            guard_v2_decision(ctx, tool_policy_for_turn(ctx), final),
+            (False, "calendar_read_requires_read"),
+        )
+        find = AgentDecision(
+            kind=DecisionKind.TOOL_CALL, intent=AgentIntent.CALENDAR,
+            tool_name="calendar.find_my_event", arguments={"event_hint": "看電影", "date_hint": ""},
+            confidence=.9,
+        )
+        self.assertEqual(guard_v2_decision(ctx, tool_policy_for_turn(ctx), find), (True, "allowed"))
 
     def test_low_confidence_final_is_safe_but_low_confidence_action_is_blocked(self):
         ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="最近還好嗎")
