@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ToolRisk(str, Enum):
@@ -74,6 +74,24 @@ class _CalendarUpdateArguments(BaseModel):
 class _CalendarCancelArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     event_hint: str = Field(min_length=1, max_length=120)
+
+
+class _CalendarBatchCancelArguments(BaseModel):
+    """A bounded, public description of one or more calendar cancellations."""
+
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["selected", "all_upcoming"]
+    event_hints: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(
+        default_factory=list, max_length=10,
+    )
+
+    @model_validator(mode="after")
+    def validate_mode_payload(self) -> "_CalendarBatchCancelArguments":
+        if self.mode == "selected" and not 2 <= len(self.event_hints) <= 10:
+            raise ValueError("selected mode requires 2-10 event hints")
+        if self.mode == "all_upcoming" and self.event_hints:
+            raise ValueError("all_upcoming mode does not accept event hints")
+        return self
 
 
 class _CalendarFindArguments(BaseModel):
@@ -516,6 +534,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         executor_arguments_model=_CalendarCancelArguments,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
+    "calendar.cancel_my_events": ToolSpec(
+        "calendar.cancel_my_events", ToolRisk.WRITE, "calendar_cancel",
+        "取消多筆自己的行程；mode=selected 時提供 2–10 個行程描述，mode=all_upcoming 時取消最多 10 筆未來有效行程。必須先向使用者確認。",
+        "我確認一下要取消的行程…",
+        requires_confirmation=True,
+        planner_arguments_model=_CalendarBatchCancelArguments,
+        executor_arguments_model=_CalendarBatchCancelArguments,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
+    ),
 }
 
 READ_ONLY_TOOLS = frozenset(
@@ -597,7 +624,10 @@ def planner_tool_names(
     if can_decide_active_proposal:
         names.add("match.decide_active_proposal")
     if can_edit_calendar:
-        names.update({"calendar.create_my_event", "calendar.update_my_event", "calendar.cancel_my_event"})
+        names.update({
+            "calendar.create_my_event", "calendar.update_my_event",
+            "calendar.cancel_my_event", "calendar.cancel_my_events",
+        })
     if can_start_assessments:
         names.update(ASSESSMENT_TOOLS)
     return frozenset(names)

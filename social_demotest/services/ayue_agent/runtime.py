@@ -762,7 +762,8 @@ def _new_pending_search(*, source: str = "explicit_request", guidance_fingerprin
 
 
 _CALENDAR_WRITE_ACTIONS = {
-    "calendar.create_my_event", "calendar.update_my_event", "calendar.cancel_my_event",
+    "calendar.create_my_event", "calendar.update_my_event",
+    "calendar.cancel_my_event", "calendar.cancel_my_events",
 }
 _ASSESSMENT_START_ACTIONS = {
     "profile.start_assessment",
@@ -793,6 +794,21 @@ def _calendar_event_label(event: dict) -> str:
         title = str(event.get("title") or event.get("activity") or "這筆行程").strip()
     # %-m / %-d are not portable to the Windows runtime used by this app.
     return f"{start.month}/{start.day} {start:%H:%M}–{end:%H:%M} {title}"
+
+
+def _calendar_pending_target(event: dict, user_id: str) -> dict[str, Any]:
+    """Store executor-only cancellation data; planner inputs never contain it."""
+    return {
+        "event_id": str(event.get("event_id") or ""),
+        "event_revision": int(event.get("revision", 1)),
+        "event_source_type": str(event.get("source_type") or "personal"),
+        "event_other_id": (
+            next((person for person in (event.get("participants") or []) if person != user_id), None)
+            if event.get("source_type") == "date" else None
+        ),
+        "coordination_id": event.get("coordination_id"),
+        "safe_label": _calendar_event_label(event),
+    }
 
 
 def _calendar_action_error(message: str, run_id: str) -> AgentResult:
@@ -918,6 +934,8 @@ def _calendar_details_question(action: str | None, arguments: dict[str, Any] | N
             return "你想把這筆行程改成什麼呢？"
     if action == "calendar.cancel_my_event":
         return "你想取消哪一筆自己的行程？可以告訴我名稱或日期。"
+    if action == "calendar.cancel_my_events":
+        return "你想取消哪些行程？可以說出兩筆以上的名稱或日期，或直接說要刪除接下來所有行程。"
     return "你想新增、修改，還是取消哪一筆自己的行程？"
 
 
@@ -928,7 +946,7 @@ def _prepare_calendar_confirmation(
     from fastapi import HTTPException
     from services.calendar_service import (
         _parse_local_interval, as_utc, calendar_access_enabled, conflicts_for_viewer,
-        get_timezone, normalize_form, resolve_owned_event,
+        get_timezone, normalize_form, resolve_owned_event, resolve_owned_events_for_cancel,
     )
 
     action = str(decision.tool_name or "")
@@ -939,6 +957,7 @@ def _prepare_calendar_confirmation(
         return _calendar_action_error("我目前不能存取你的行事曆；你可以先到日曆設定確認是否已授權。", run_id)
     arguments = executor_arguments_for_turn(spec, ctx.mentioned_ids, decision.arguments)
     event: dict | None = None
+    targets: list[dict[str, Any]] = []
     conflicts: list[dict] = []
     try:
         if action == "calendar.create_my_event":
@@ -947,6 +966,25 @@ def _prepare_calendar_confirmation(
             arguments = {**arguments, **form}
             conflicts = conflicts_for_viewer(ctx.user_id, [ctx.user_id], start_at, end_at)
             preview = f"要新增 {form['date'][5:].replace('-', '/')} {form['start_time']}–{form['end_time']}「{form['title']}」嗎？"
+        elif action == "calendar.cancel_my_events":
+            events, resolution = resolve_owned_events_for_cancel(
+                ctx.user_id,
+                mode=str(arguments.get("mode") or ""),
+                event_hints=list(arguments.get("event_hints") or []),
+            )
+            if resolution == "ambiguous":
+                return _calendar_action_error("有一筆行程對應到不只一個結果。你可以補上日期或完整名稱嗎？", run_id)
+            if resolution == "not_found":
+                return _calendar_action_error("我找不到其中一筆自己的行程。你可以補上日期或名稱嗎？", run_id)
+            if resolution == "too_many":
+                return _calendar_action_error("接下來的行程超過 10 筆；請先指定想取消哪些日期。", run_id)
+            if resolution or not events:
+                return _calendar_action_error("我還需要更明確的行程名稱或日期，才能一次取消多筆。", run_id)
+            targets = [_calendar_pending_target(item, ctx.user_id) for item in events]
+            labels = "、".join(f"「{target['safe_label']}」" for target in targets)
+            preview = f"要取消這 {len(targets)} 筆行程嗎：{labels}？"
+            if any(target["event_source_type"] == "date" for target in targets):
+                preview += " 其中共同約會會同步雙方行事曆並通知對方。"
         else:
             event, resolution = resolve_owned_event(ctx.user_id, arguments.get("event_hint", ""))
             if resolution == "ambiguous":
@@ -955,6 +993,7 @@ def _prepare_calendar_confirmation(
                 return _calendar_action_error("我找不到這筆自己的行程。你可以補上日期或名稱嗎？", run_id)
             is_shared = event.get("source_type") == "date"
             if action == "calendar.cancel_my_event":
+                targets = [_calendar_pending_target(event, ctx.user_id)]
                 preview = f"要取消「{_calendar_event_label(event)}」嗎？"
                 if is_shared:
                     preview += " 這是共同約會，取消後會同步雙方行事曆並通知對方。"
@@ -1005,7 +1044,10 @@ def _prepare_calendar_confirmation(
         preview += f" 這會和你現有的 {len(conflicts)} 筆行程重疊；仍要這樣安排嗎？"
     now = time.time()
     pending = {
-        "version": "v2", "confirmation_id": uuid.uuid4().hex,
+        "version": (
+            "v3" if action in {"calendar.cancel_my_event", "calendar.cancel_my_events"} else "v2"
+        ),
+        "confirmation_id": uuid.uuid4().hex,
         "action": action, "arguments": arguments, "status": "pending",
         "created_at": now, "expires_at": now + 15 * 60,
         "event_id": event.get("event_id") if event else None,
@@ -1016,6 +1058,7 @@ def _prepare_calendar_confirmation(
             if event and event.get("source_type") == "date" else None
         ),
         "coordination_id": event.get("coordination_id") if event else None,
+        "targets": targets,
         "proposed_form": proposed if event and action == "calendar.update_my_event" and event.get("source_type") == "date" else None,
         "conflict_count": len(conflicts),
     }
@@ -1040,7 +1083,10 @@ def _execute_calendar_pending(
     ctx: AgentTurnContext, pending: dict[str, Any], confirmation_id: str,
 ) -> tuple[bool, str, str | None]:
     from fastapi import HTTPException
-    from services.calendar_service import cancel_event, create_personal_event, update_personal_event
+    from services.calendar_service import (
+        cancel_event, cancel_targets_are_current, create_personal_event,
+        update_personal_event,
+    )
     from services.date_coordination_service import cancel_coordination_or_event, request_reschedule
 
     action = str(pending.get("action") or "")
@@ -1095,6 +1141,40 @@ def _execute_calendar_pending(
                 ctx.user_id, event_id, personal_only=True, expected_revision=revision, agent_action_key=key,
             )
             return True, f"已取消行程：{_calendar_event_label(event)}。", None
+        if action == "calendar.cancel_my_events":
+            targets = list(pending.get("targets") or [])
+            if not cancel_targets_are_current(ctx.user_id, targets):
+                return False, "其中一筆行程剛剛有變動，我沒有刪除任何行程。請重新確認。", "stale_revision"
+            completed: list[str] = []
+            failed = 0
+            for index, target in enumerate(targets):
+                target_key = f"{key}:{index}"
+                try:
+                    if target.get("event_source_type") == "date":
+                        cancel_coordination_or_event(
+                            ctx.user_id,
+                            str(target.get("event_other_id") or ""),
+                            str(target.get("coordination_id") or ""),
+                            expected_revision=int(target.get("event_revision", 0) or 0),
+                            idempotency_key=target_key,
+                        )
+                    else:
+                        cancel_event(
+                            ctx.user_id,
+                            str(target.get("event_id") or ""),
+                            personal_only=True,
+                            expected_revision=int(target.get("event_revision", 0) or 0),
+                            agent_action_key=target_key,
+                        )
+                    completed.append(str(target.get("safe_label") or "這筆行程"))
+                except Exception:
+                    failed += 1
+            if not completed:
+                return False, "這些行程現在無法變更；我沒有確認到任何刪除結果。", "calendar_write_failed"
+            reply = f"已取消 {len(completed)} 筆行程：" + "、".join(f"「{label}」" for label in completed) + "。"
+            if failed:
+                reply += f"另有 {failed} 筆沒有刪除，請再查看後重試。"
+            return True, reply, "partial" if failed else None
         return False, "這個行程確認已失效，請重新告訴我你想怎麼安排。", "unknown_calendar_action"
     except HTTPException as exc:
         if exc.status_code == 409:
@@ -1590,6 +1670,18 @@ def run_public_agent_turn(
                     break
                 trace["planner_decisions"].append({"kind": decision.kind.value, "tool_name": decision.tool_name, "confidence": decision.confidence})
                 intent_name = str(getattr(getattr(decision, "intent", None), "value", "") or "")
+                # A calendar write is never executed from a TOOL_CALL.  Some
+                # providers nevertheless choose that JSON kind despite the
+                # prompt; promote a valid cancellation into the same safe
+                # confirmation path instead of spending another model turn
+                # and then asking a text-only question with no pending state.
+                if (
+                    decision.kind == DecisionKind.TOOL_CALL
+                    and intent_name == "calendar_action"
+                    and decision.tool_name in {"calendar.cancel_my_event", "calendar.cancel_my_events"}
+                ):
+                    decision = decision.model_copy(update={"kind": DecisionKind.CONFIRMATION})
+                    trace["guard_results"].append("calendar_cancel_promoted_to_confirmation")
                 # A social opening is non-mutating apart from storing its own
                 # pending confirmation.  Explicit search confirmations must
                 # pass the deterministic guard below before any state write.

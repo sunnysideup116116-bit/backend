@@ -22,7 +22,8 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
         return READ_ONLY_TOOLS | ASSESSMENT_TOOLS \
             | (PLACES_TOOLS if maps_enabled() else set()) \
             | (WEB_TOOLS if web_enabled() else set()) | {
-            "calendar.create_my_event", "calendar.update_my_event", "calendar.cancel_my_event",
+            "calendar.create_my_event", "calendar.update_my_event",
+            "calendar.cancel_my_event", "calendar.cancel_my_events",
         }
 
     def test_decline_followup_keeps_only_safe_status_read_visible(self):

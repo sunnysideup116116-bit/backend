@@ -326,6 +326,73 @@ def resolve_owned_event(user_id: str, event_hint: str) -> tuple[dict | None, str
     return _resolve_event(user_id, event_hint)
 
 
+def resolve_owned_events_for_cancel(
+    user_id: str, *, mode: str, event_hints: list[str] | None = None, limit: int = 10,
+) -> tuple[list[dict], str | None]:
+    """Resolve a bounded cancellation set without exposing IDs to the planner.
+
+    ``selected`` requires each human description to resolve uniquely.  ``all_upcoming``
+    deliberately includes only active events that have not started yet, so a broad
+    natural-language request cannot erase calendar history.
+    """
+    hints = [str(value or "").strip() for value in (event_hints or []) if str(value or "").strip()]
+    if mode == "selected":
+        if not 2 <= len(hints) <= limit or len(set(hints)) != len(hints):
+            return [], "invalid_selection"
+        events: list[dict] = []
+        seen_ids: set[str] = set()
+        for hint in hints:
+            event, resolution = resolve_owned_event(user_id, hint)
+            if resolution:
+                return [], resolution
+            if not event or str(event.get("event_id") or "") in seen_ids:
+                return [], "ambiguous"
+            seen_ids.add(str(event.get("event_id") or ""))
+            events.append(event)
+        return events, None
+    if mode == "all_upcoming":
+        if hints:
+            return [], "invalid_selection"
+        now = datetime.now(timezone.utc)
+        query = {
+            "participants": user_id,
+            "status": {"$in": list(ACTIVE_EVENT_STATUSES)},
+            "start_at": {"$gte": now},
+        }
+        events = list(calendar_events_coll.find(query).sort("start_at", 1).limit(limit + 1))
+        if len(events) > limit:
+            return [], "too_many"
+        return events, None
+    return [], "invalid_selection"
+
+
+def cancel_targets_are_current(user_id: str, targets: list[dict]) -> bool:
+    """Preflight a batch confirmation before changing any event.
+
+    This protects a confirmed batch from partially applying after another actor
+    has edited or cancelled one of its targets.  Actual writes still include
+    the same revision check for the race between this read and the write.
+    """
+    if not targets:
+        return False
+    for target in targets:
+        event_id = str(target.get("event_id") or "")
+        revision = int(target.get("event_revision", 0) or 0)
+        source_type = str(target.get("event_source_type") or "")
+        if not event_id or not revision or source_type not in {"personal", "date"}:
+            return False
+        event = calendar_events_coll.find_one({
+            "event_id": event_id,
+            "participants": user_id,
+            "source_type": source_type,
+            "status": {"$in": list(ACTIVE_EVENT_STATUSES)},
+            "revision": revision,
+        })
+        if not event:
+            return False
+    return True
+
+
 def find_owned_events(
     user_id: str, event_hint: str, *, date_hint: str = "", companion_user_id: str | None = None, limit: int = 3,
 ) -> list[dict]:
