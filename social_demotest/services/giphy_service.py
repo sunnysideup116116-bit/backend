@@ -6,6 +6,8 @@ event allowlist and users cannot supply a search query or invoke an endpoint.
 
 from __future__ import annotations
 
+from collections import deque
+import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -19,11 +21,20 @@ from services.mediator_event_service import queue_mediator_event
 
 
 GIPHY_SEARCH_URL = "https://api.giphy.com/v1/gifs/search"
-MATCH_CELEBRATION_QUERY = "kawaii cute celebration happy dance animated"
+MATCH_CELEBRATION_QUERIES = (
+    "happy celebration dance",
+    "congratulations celebration",
+    "yay confetti celebration",
+    "happy congrats dance",
+    "cute party celebration",
+)
 _REQUEST_TIMEOUT = (3, 8)
 _CACHE_TTL_SECONDS = 15 * 60
+_RECENT_REACTION_LIMIT = 80
 _cache_lock = threading.Lock()
-_reaction_cache: tuple[float, list[dict[str, Any]]] | None = None
+_reaction_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_recent_reaction_urls: deque[str] = deque(maxlen=_RECENT_REACTION_LIMIT)
+_query_cursor = 0
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ayue-giphy")
 
 
@@ -43,7 +54,7 @@ def _safe_giphy_url(value: Any) -> str:
 def _parse_reactions(payload: Any) -> list[dict[str, Any]]:
     reactions: list[dict[str, Any]] = []
     rows = payload.get("data", []) if isinstance(payload, dict) else []
-    for item in rows[:5]:
+    for item in rows[:25]:
         images = item.get("images", {}) if isinstance(item, dict) else {}
         original = images.get("original", {}) if isinstance(images, dict) else {}
         preview = images.get("fixed_height_small", {}) if isinstance(images, dict) else {}
@@ -62,12 +73,20 @@ def _parse_reactions(payload: Any) -> list[dict[str, Any]]:
     return reactions
 
 
-def _match_celebration_reactions() -> list[dict[str, Any]]:
-    global _reaction_cache
+def _next_celebration_query() -> str:
+    global _query_cursor
+    with _cache_lock:
+        query = MATCH_CELEBRATION_QUERIES[_query_cursor % len(MATCH_CELEBRATION_QUERIES)]
+        _query_cursor += 1
+    return query
+
+
+def _match_celebration_reactions(query: str) -> list[dict[str, Any]]:
     now = time.time()
     with _cache_lock:
-        if _reaction_cache and _reaction_cache[0] > now:
-            return list(_reaction_cache[1])
+        cached = _reaction_cache.get(query)
+        if cached and cached[0] > now:
+            return list(cached[1])
     if not giphy_enabled():
         return []
     try:
@@ -75,8 +94,8 @@ def _match_celebration_reactions() -> list[dict[str, Any]]:
             GIPHY_SEARCH_URL,
             params={
                 "api_key": config.GIPHY_API_KEY,
-                "q": MATCH_CELEBRATION_QUERY,
-                "limit": 5,
+                "q": query,
+                "limit": 25,
                 "rating": "g",
                 "lang": "en",
                 "bundle": "messaging_non_clips",
@@ -89,28 +108,33 @@ def _match_celebration_reactions() -> list[dict[str, Any]]:
         return []
     if reactions:
         with _cache_lock:
-            _reaction_cache = (now + _CACHE_TTL_SECONDS, list(reactions))
+            _reaction_cache[query] = (now + _CACHE_TTL_SECONDS, list(reactions))
     return reactions
 
 
-def _pick_reaction(match_id: str) -> dict[str, Any] | None:
-    reactions = _match_celebration_reactions()
+def _pick_reaction() -> dict[str, Any] | None:
+    reactions = _match_celebration_reactions(_next_celebration_query())
     if not reactions:
         return None
-    # Giphy ranks search results by relevance. Keep the most relevant result
-    # instead of pseudo-randomly selecting a weaker/odd result from the page.
-    return reactions[0]
+    with _cache_lock:
+        recent_urls = set(_recent_reaction_urls)
+        unused = [reaction for reaction in reactions if reaction["url"] not in recent_urls]
+        reaction = random.choice(unused or reactions)
+        # Reserve it immediately so two concurrent acceptance effects cannot
+        # choose the same GIF. It is bounded and never persisted as user data.
+        _recent_reaction_urls.append(reaction["url"])
+    return reaction
 
 
 def write_match_celebration_gifs(
     participants: tuple[tuple[str, str], ...], match_id: str,
 ) -> bool:
     """Best-effort private-mediator reactions. A GIF failure never affects a match."""
-    reaction = _pick_reaction(match_id)
-    if not reaction:
-        return False
     delivered = False
     for user_id, other_id in dict.fromkeys(participants):
+        reaction = _pick_reaction()
+        if not reaction:
+            continue
         try:
             queued = queue_mediator_event(
                 user_id,

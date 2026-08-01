@@ -6,7 +6,9 @@ from services import giphy_service
 
 class GiphyServiceTests(unittest.TestCase):
     def setUp(self):
-        giphy_service._reaction_cache = None
+        giphy_service._reaction_cache = {}
+        giphy_service._recent_reaction_urls.clear()
+        giphy_service._query_cursor = 0
 
     @patch.object(giphy_service.config, "GIPHY_API_KEY", "")
     def test_missing_key_fails_soft_without_network_call(self):
@@ -18,11 +20,17 @@ class GiphyServiceTests(unittest.TestCase):
     @patch.object(giphy_service.config, "GIPHY_API_KEY", "test-key")
     def test_valid_giphy_reaction_is_saved_as_typed_message(self):
         response = MagicMock()
-        response.json.return_value = {"data": [{"images": {
-            "original": {"url": "https://media.giphy.com/media/ok/giphy.gif", "width": "480", "height": "270"},
-            "fixed_height_small": {"url": "https://media.giphy.com/media/ok/100.gif"},
-        }}]}
-        with patch.object(giphy_service.requests, "get", return_value=response), \
+        response.json.return_value = {"data": [
+            {"images": {
+                "original": {"url": "https://media.giphy.com/media/one/giphy.gif", "width": "480", "height": "270"},
+                "fixed_height_small": {"url": "https://media.giphy.com/media/one/100.gif"},
+            }},
+            {"images": {
+                "original": {"url": "https://media.giphy.com/media/two/giphy.gif", "width": "480", "height": "270"},
+                "fixed_height_small": {"url": "https://media.giphy.com/media/two/100.gif"},
+            }},
+        ]}
+        with patch.object(giphy_service.requests, "get", return_value=response) as get, \
              patch.object(giphy_service, "queue_mediator_event", side_effect=[{"event_id": "a"}, {"event_id": "b"}]) as queue:
             self.assertTrue(giphy_service.write_match_celebration_gifs((("a", "b"), ("b", "a")), "match-1"))
         self.assertEqual(queue.call_count, 2)
@@ -33,6 +41,32 @@ class GiphyServiceTests(unittest.TestCase):
         media = queue.call_args_list[0].kwargs["media"]
         self.assertEqual(media["provider"], "giphy")
         self.assertTrue(media["url"].startswith("https://media.giphy.com/"))
+        delivered_urls = [call.kwargs["media"]["url"] for call in queue.call_args_list]
+        self.assertEqual(len(set(delivered_urls)), 2)
+        searched_queries = [call.kwargs["params"]["q"] for call in get.call_args_list]
+        self.assertEqual(len(searched_queries), 2)
+        self.assertNotEqual(searched_queries[0], searched_queries[1])
+
+    @patch.object(giphy_service.config, "GIPHY_GIF_ENABLED", True)
+    @patch.object(giphy_service.config, "GIPHY_API_KEY", "test-key")
+    def test_consecutive_celebrations_avoid_recent_gif_urls(self):
+        response = MagicMock()
+        response.json.return_value = {"data": [
+            {"images": {
+                "original": {"url": "https://media.giphy.com/media/one/giphy.gif"},
+                "fixed_height_small": {"url": "https://media.giphy.com/media/one/100.gif"},
+            }},
+            {"images": {
+                "original": {"url": "https://media.giphy.com/media/two/giphy.gif"},
+                "fixed_height_small": {"url": "https://media.giphy.com/media/two/100.gif"},
+            }},
+        ]}
+        with patch.object(giphy_service.requests, "get", return_value=response), \
+             patch.object(giphy_service, "queue_mediator_event", return_value={"event_id": "ok"}) as queue:
+            self.assertTrue(giphy_service.write_match_celebration_gifs((("a", "b"),), "match-1"))
+            self.assertTrue(giphy_service.write_match_celebration_gifs((("c", "d"),), "match-2"))
+        delivered_urls = [call.kwargs["media"]["url"] for call in queue.call_args_list]
+        self.assertEqual(len(set(delivered_urls)), 2)
 
     @patch.object(giphy_service.config, "GIPHY_GIF_ENABLED", True)
     @patch.object(giphy_service.config, "GIPHY_API_KEY", "test-key")

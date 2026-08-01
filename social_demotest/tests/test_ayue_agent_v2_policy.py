@@ -240,6 +240,29 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
             (False, "match_status_requires_read"),
         )
 
+    def test_relationship_intent_requires_a_public_contact_read_before_final(self):
+        ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="我跟小玟會擦出什麼火花？")
+        final = AgentDecision(
+            kind=DecisionKind.FINAL, intent=AgentIntent.RELATIONSHIP,
+            confidence=.9, reply="你們看起來很適合。",
+        )
+        self.assertEqual(
+            guard_v2_decision(ctx, tool_policy_for_turn(ctx), final),
+            (False, "relationship_requires_read"),
+        )
+
+    def test_grounded_relationship_comparison_requires_self_summary(self):
+        ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="我跟小玟會擦出什麼火花？")
+        final = AgentDecision(kind=DecisionKind.FINAL, intent=AgentIntent.RELATIONSHIP, confidence=.9)
+        self.assertEqual(
+            guard_v2_decision(
+                ctx, tool_policy_for_turn(ctx), final,
+                has_relationship_observation=True,
+                relationship_comparison_needs_self_summary=True,
+            ),
+            (False, "relationship_comparison_requires_self"),
+        )
+
     def test_ready_place_recommendation_requires_a_nearby_read_before_final(self):
         ctx = AgentTurnContextV2(
             user_id="owner", room_id="room", message="你隨意推薦",
