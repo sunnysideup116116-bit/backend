@@ -22,6 +22,7 @@ from .match_opportunity import (
     record_guidance_shown,
 )
 from .router import (
+    calendar_confirmation_choice,
     confirmation_choice,
     generate_clarification_reply_v2,
     generate_final_reply_v2,
@@ -31,7 +32,13 @@ from .router import (
     tool_policy_for_turn,
 )
 from .time_context import build_turn_clock
-from .tool_registry import ToolRisk, executor_arguments_for_turn, get_tool_spec, tool_call_key
+from .tool_registry import (
+    ToolRisk,
+    executor_arguments_for_turn,
+    get_tool_spec,
+    planner_arguments_allowed,
+    tool_call_key,
+)
 from .tools import execute_tool
 from .public_relationship_projection import validated_mentioned_contact_ids
 from .web_tools import is_safe_public_url
@@ -247,7 +254,7 @@ def _final_reply_for_decision(
     turn: Any, decision: Any, observations: list[dict], trace: dict[str, Any], reason: str,
 ) -> str:
     """Prefer the terminal planner reply; retain Composer as a safe fallback."""
-    reply = planner_final_reply_v2(turn, decision)
+    reply = planner_final_reply_v2(turn, decision, observations)
     if reply:
         trace["composer_outcome"] = {
             "reason": reason,
@@ -329,9 +336,24 @@ def _distance_label(value: Any) -> str:
     return f"約 {distance / 1_000:.1f} 公里"
 
 
-def _public_place_cards(observations: list[dict]) -> list[dict[str, str]]:
-    """Project verified place observations into bounded provider-neutral cards."""
-    cards: list[dict[str, str]] = []
+def _normalized_place_name(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "")).casefold()
+
+
+def _public_place_cards(observations: list[dict], *, reply: str | None = None) -> list[dict[str, str]]:
+    """Project reply-named places, with one-result searches as the sole safe fallback."""
+    mentioned_text = _normalized_place_name(reply)
+    candidate_count = sum(
+        len((observation.get("result") or {}).get("places") or [])
+        if observation.get("tool") == "places.search_nearby"
+        else int(bool((observation.get("result") or {}).get("place")))
+        if observation.get("tool") == "places.resolve_place"
+        else 0
+        for observation in observations
+    )
+    if reply is not None and not mentioned_text and candidate_count != 1:
+        return []
+    cards_with_positions: list[tuple[int, dict[str, str]]] = []
     seen: set[str] = set()
     for observation in observations:
         tool_name = observation.get("tool")
@@ -364,6 +386,13 @@ def _public_place_cards(observations: list[dict]) -> list[dict[str, str]]:
                 unique_key = f"openstreetmap:{map_url}"
             if unique_key in seen:
                 continue
+            name = re.sub(r"\s+", " ", str(item.get("name") or "")).strip()[:80]
+            name_token = _normalized_place_name(name)
+            if reply is not None and not name_token:
+                continue
+            mention_position = mentioned_text.find(name_token) if name_token else -1
+            if reply is not None and mention_position < 0 and candidate_count != 1:
+                continue
             seen.add(unique_key)
             category = str(item.get("category") or "attraction")
             if category not in {"restaurant", "cafe", "bar", "attraction", "park"}:
@@ -371,7 +400,7 @@ def _public_place_cards(observations: list[dict]) -> list[dict[str, str]]:
             card = {
                 "provider": provider,
                 "place_id": place_id if provider == "google" else "",
-                "name": re.sub(r"\s+", " ", str(item.get("name") or "地點")).strip()[:80],
+                "name": name,
                 "category": category,
                 "address_summary": re.sub(r"\s+", " ", str(item.get("address_summary") or "")).strip()[:180],
                 "distance_label": _distance_label(item.get("distance_m")),
@@ -380,10 +409,9 @@ def _public_place_cards(observations: list[dict]) -> list[dict[str, str]]:
                 "attribution": attribution or ("Google Maps" if provider == "google" else "© OpenStreetMap contributors"),
                 "attribution_url": attribution_url,
             }
-            cards.append(card)
-            if len(cards) == 3:
-                return cards
-    return cards
+            cards_with_positions.append((mention_position if reply is not None else len(cards_with_positions), card))
+    cards_with_positions.sort(key=lambda item: item[0])
+    return [card for _, card in cards_with_positions[:3]]
 
 
 def _web_extract_urls_allowed(ctx: AgentTurnContext, observations: list[dict], urls: list[str]) -> bool:
@@ -765,6 +793,18 @@ _CALENDAR_WRITE_ACTIONS = {
     "calendar.create_my_event", "calendar.update_my_event",
     "calendar.cancel_my_event", "calendar.cancel_my_events",
 }
+_CALENDAR_DRAFT_FIELDS = {
+    "calendar.create_my_event": {"title", "date", "start_time", "end_time", "timezone", "location", "notes"},
+    "calendar.update_my_event": {"event_hint", "title", "date", "start_time", "end_time", "timezone", "location", "notes"},
+    "calendar.cancel_my_event": {"event_hint"},
+    "calendar.cancel_my_events": {"mode", "event_hints"},
+    "calendar": {"event_hint", "title", "date", "start_time", "end_time", "timezone", "location", "notes", "mode", "event_hints"},
+}
+_CALENDAR_DRAFT_LIMITS = {
+    "event_hint": 120, "title": 120, "date": 10, "start_time": 5, "end_time": 5,
+    "timezone": 64, "location": 160, "notes": 500, "mode": 20,
+}
+_SINGLE_CALENDAR_TARGET_ACTIONS = {"calendar.update_my_event", "calendar.cancel_my_event"}
 _ASSESSMENT_START_ACTIONS = {
     "profile.start_assessment",
 }
@@ -819,21 +859,85 @@ def _calendar_action_error(message: str, run_id: str) -> AgentResult:
     )
 
 
-def _save_action_draft(ctx: AgentTurnContext, turn: Any, decision: Any) -> None:
-    """Keep only public, model-safe clarification state; never persist event IDs."""
-    existing = turn.action_draft or {}
-    action = str(getattr(decision, "tool_name", "") or existing.get("action") or "calendar")
-    if action not in _CALENDAR_WRITE_ACTIONS:
+def _safe_calendar_draft_arguments(action: str, values: Any) -> dict[str, Any]:
+    """Persist only bounded public calendar details, never executor identity state."""
+    raw = values if isinstance(values, dict) else {}
+    cleaned: dict[str, Any] = {}
+    for key in _CALENDAR_DRAFT_FIELDS.get(action, _CALENDAR_DRAFT_FIELDS["calendar"]):
+        value = raw.get(key)
+        if value is None:
+            continue
+        if key == "event_hints":
+            if not isinstance(value, list):
+                continue
+            hints = [str(item).strip()[:120] for item in value if str(item).strip()]
+            if hints:
+                cleaned[key] = list(dict.fromkeys(hints))[:10]
+            continue
+        if key == "mode":
+            mode = str(value).strip()
+            if mode in {"selected", "all_upcoming"}:
+                cleaned[key] = mode
+            continue
+        text = str(value).strip()[:_CALENDAR_DRAFT_LIMITS.get(key, 120)]
+        if text or (
+            action == "calendar.update_my_event"
+            and key in {"location", "notes"}
+            and value is not None
+        ):
+            cleaned[key] = text
+    return cleaned
+
+
+def _calendar_draft_state(turn: Any, decision: Any) -> tuple[str, dict[str, Any]]:
+    existing = getattr(turn, "action_draft", None) or {}
+    existing_action = str(existing.get("action") or "calendar")
+    if existing_action not in _CALENDAR_DRAFT_FIELDS:
+        existing_action = "calendar"
+    proposed_action = str(getattr(decision, "tool_name", "") or "")
+    action = proposed_action if proposed_action in _CALENDAR_WRITE_ACTIONS else existing_action
+    if action not in _CALENDAR_DRAFT_FIELDS:
         action = "calendar"
+    previous = _safe_calendar_draft_arguments(existing_action, existing.get("arguments"))
+    proposed = _safe_calendar_draft_arguments(action, getattr(decision, "arguments", None))
+    if existing_action == action or existing_action == "calendar":
+        merged = {**previous, **proposed}
+    elif action in _SINGLE_CALENDAR_TARGET_ACTIONS and existing_action in _SINGLE_CALENDAR_TARGET_ACTIONS:
+        merged = {**({"event_hint": previous["event_hint"]} if previous.get("event_hint") else {}), **proposed}
+    else:
+        merged = proposed
+    return action, _safe_calendar_draft_arguments(action, merged)
+
+
+def _merge_calendar_draft_into_decision(turn: Any, decision: Any) -> Any:
+    """Carry validated public details across Calendar clarification turns."""
+    if str(getattr(getattr(decision, "intent", None), "value", "")) != "calendar_action":
+        return decision
+    action = str(getattr(decision, "tool_name", "") or "")
+    if action not in _CALENDAR_WRITE_ACTIONS:
+        return decision
+    _, arguments = _calendar_draft_state(turn, decision)
+    return decision.model_copy(update={"arguments": arguments})
+
+
+def _save_action_draft(ctx: AgentTurnContext, turn: Any, decision: Any) -> None:
+    """Keep bounded Calendar clarification state across turns; never persist IDs or revisions."""
+    existing = getattr(turn, "action_draft", None) or {}
+    action, arguments = _calendar_draft_state(turn, decision)
     missing = [
         str(field) for field in (getattr(decision, "missing_fields", None) or [])
-        if str(field) in {"event_hint", "title", "date", "start_time", "end_time", "changes"}
+        if str(field) in {"event_hint", "event_hints", "title", "date", "start_time", "end_time", "changes"}
     ][:4]
+    if not missing:
+        missing = [
+            str(field) for field in (existing.get("missing_fields") or [])
+            if str(field) in {"event_hint", "event_hints", "title", "date", "start_time", "end_time", "changes"}
+        ][:4]
     profiles_coll.update_one(
         {"user_id": ctx.user_id},
         {"$set": {"agentic_action_draft": {
-            "version": "v1", "domain": "calendar", "action": action,
-            "missing_fields": missing, "created_at": time.time(),
+            "version": "v2", "domain": "calendar", "action": action,
+            "arguments": arguments, "missing_fields": missing, "created_at": time.time(),
         }}},
         upsert=True,
     )
@@ -956,6 +1060,16 @@ def _prepare_calendar_confirmation(
     if not calendar_access_enabled(ctx.user_id):
         return _calendar_action_error("我目前不能存取你的行事曆；你可以先到日曆設定確認是否已授權。", run_id)
     arguments = executor_arguments_for_turn(spec, ctx.mentioned_ids, decision.arguments)
+
+    def draft_error(message: str, missing_fields: list[str] | None = None) -> AgentResult:
+        draft_decision = decision.model_copy(update={
+            "tool_name": action,
+            "arguments": arguments,
+            "missing_fields": missing_fields or [],
+        })
+        _save_action_draft(ctx, turn, draft_decision)
+        return _calendar_action_error(message, run_id)
+
     event: dict | None = None
     targets: list[dict[str, Any]] = []
     conflicts: list[dict] = []
@@ -973,13 +1087,13 @@ def _prepare_calendar_confirmation(
                 event_hints=list(arguments.get("event_hints") or []),
             )
             if resolution == "ambiguous":
-                return _calendar_action_error("有一筆行程對應到不只一個結果。你可以補上日期或完整名稱嗎？", run_id)
+                return draft_error("有一筆行程對應到不只一個結果。你可以補上日期或完整名稱嗎？", ["event_hints"])
             if resolution == "not_found":
-                return _calendar_action_error("我找不到其中一筆自己的行程。你可以補上日期或名稱嗎？", run_id)
+                return draft_error("我找不到其中一筆自己的行程。你可以補上日期或名稱嗎？", ["event_hints"])
             if resolution == "too_many":
-                return _calendar_action_error("接下來的行程超過 10 筆；請先指定想取消哪些日期。", run_id)
+                return draft_error("接下來的行程超過 10 筆；請先指定想取消哪些日期。", ["event_hints"])
             if resolution or not events:
-                return _calendar_action_error("我還需要更明確的行程名稱或日期，才能一次取消多筆。", run_id)
+                return draft_error("我還需要更明確的行程名稱或日期，才能一次取消多筆。", ["event_hints"])
             targets = [_calendar_pending_target(item, ctx.user_id) for item in events]
             labels = "、".join(f"「{target['safe_label']}」" for target in targets)
             preview = f"要取消這 {len(targets)} 筆行程嗎：{labels}？"
@@ -988,9 +1102,9 @@ def _prepare_calendar_confirmation(
         else:
             event, resolution = resolve_owned_event(ctx.user_id, arguments.get("event_hint", ""))
             if resolution == "ambiguous":
-                return _calendar_action_error("我找到不只一筆符合的行程。你可以補上日期或完整名稱嗎？", run_id)
+                return draft_error("我找到不只一筆符合的行程。你可以補上日期或完整名稱嗎？", ["event_hint"])
             if not event:
-                return _calendar_action_error("我找不到這筆自己的行程。你可以補上日期或名稱嗎？", run_id)
+                return draft_error("我找不到這筆自己的行程。你可以補上日期或名稱嗎？", ["event_hint"])
             is_shared = event.get("source_type") == "date"
             if action == "calendar.cancel_my_event":
                 targets = [_calendar_pending_target(event, ctx.user_id)]
@@ -1014,7 +1128,7 @@ def _prepare_calendar_confirmation(
                 }
                 changes = {key: value for key, value in arguments.items() if key != "event_hint" and value is not None}
                 if not changes:
-                    return _calendar_action_error("你想把「%s」改成什麼呢？" % _calendar_event_label(event), run_id)
+                    return draft_error("你想把「%s」改成什麼呢？" % _calendar_event_label(event), ["changes"])
                 if is_shared:
                     shared_changes = dict(changes)
                     if "title" in shared_changes:
@@ -1039,7 +1153,7 @@ def _prepare_calendar_confirmation(
                 if is_shared:
                     preview += " 對方會收到改期通知，重新確認後才會正式變更。"
     except HTTPException as exc:
-        return _calendar_action_error(f"我還需要補齊行程資訊：{exc.detail}。", run_id)
+        return draft_error(f"我還需要補齊行程資訊：{exc.detail}。")
     if conflicts:
         preview += f" 這會和你現有的 {len(conflicts)} 筆行程重疊；仍要這樣安排嗎？"
     now = time.time()
@@ -1188,7 +1302,7 @@ def _handle_calendar_pending_confirmation(
     ctx: AgentTurnContext, pending: dict[str, Any], run_id: str, trace: dict[str, Any],
     on_progress: ProgressCallback | None,
 ) -> AgentResult | None:
-    choice = confirmation_choice(ctx.message)
+    choice = calendar_confirmation_choice(ctx.message)
     if choice == "none":
         return None
     created_at = float(pending.get("created_at", 0) or 0)
@@ -1668,20 +1782,30 @@ def run_public_agent_turn(
                         fallback_reason="planner_invalid",
                     )
                     break
+                decision = _merge_calendar_draft_into_decision(turn, decision)
                 trace["planner_decisions"].append({"kind": decision.kind.value, "tool_name": decision.tool_name, "confidence": decision.confidence})
                 intent_name = str(getattr(getattr(decision, "intent", None), "value", "") or "")
-                # A calendar write is never executed from a TOOL_CALL.  Some
+                # A calendar write is never executed from a TOOL_CALL. Some
                 # providers nevertheless choose that JSON kind despite the
-                # prompt; promote a valid cancellation into the same safe
-                # confirmation path instead of spending another model turn
-                # and then asking a text-only question with no pending state.
+                # prompt, so promote a schema-valid Calendar write into the
+                # same safe confirmation path. Updates still require a
+                # verified read before promotion.
                 if (
                     decision.kind == DecisionKind.TOOL_CALL
                     and intent_name == "calendar_action"
-                    and decision.tool_name in {"calendar.cancel_my_event", "calendar.cancel_my_events"}
+                    and decision.tool_name in _CALENDAR_WRITE_ACTIONS
+                    and (spec := get_tool_spec(decision.tool_name)) is not None
+                    and planner_arguments_allowed(spec, decision.arguments)
+                    and (
+                        decision.tool_name != "calendar.update_my_event"
+                        or any(
+                            item.get("tool") in {"calendar.list_my_events", "calendar.find_my_event"}
+                            for item in observations
+                        )
+                    )
                 ):
                     decision = decision.model_copy(update={"kind": DecisionKind.CONFIRMATION})
-                    trace["guard_results"].append("calendar_cancel_promoted_to_confirmation")
+                    trace["guard_results"].append("calendar_write_promoted_to_confirmation")
                 # A social opening is non-mutating apart from storing its own
                 # pending confirmation.  Explicit search confirmations must
                 # pass the deterministic guard below before any state write.
@@ -1980,7 +2104,7 @@ def run_public_agent_turn(
         trace["exception"] = type(exc).__name__
         result = AgentResult(handled=True, reply="我現在沒辦法安全地處理這件事，請稍後再試。", agent_run_id=run_id, agent_mode="v2", fallback_reason=type(exc).__name__)
     result.sources = _public_sources(observations)
-    result.place_cards = _public_place_cards(observations)
+    result.place_cards = _public_place_cards(observations, reply=str(result.reply or ""))
     trace["latency_ms"] = round((time.perf_counter() - started) * 1000)
     trace["result"] = {
         "handled": result.handled,

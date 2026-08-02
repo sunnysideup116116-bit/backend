@@ -198,6 +198,7 @@ class _CounterpartySummaryOutput(BaseModel):
     recent_context: str = ""
     initial_interest: str = ""
     personality_summary: str = ""
+    location: str = ""
     distinctive_tags: list[str] = Field(default_factory=list)
     verified_common_ground: list[str] = Field(default_factory=list)
     recommendation_tier: Literal["grounded", "exploratory", ""] = ""
@@ -246,6 +247,7 @@ class _MentionedContactOutput(BaseModel):
     recent_context: str = ""
     initial_interest: str = ""
     personality_summary: str = ""
+    location: str = ""
     safe_match_reason: str = ""
     verified_common_ground: list[str] = Field(default_factory=list)
     distinctive_tags: list[str] = Field(default_factory=list)

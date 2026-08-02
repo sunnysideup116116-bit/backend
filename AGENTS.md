@@ -1,6 +1,6 @@
 # Dating-App Agent Rules
 
-本文件適用於 `Dating-App/` 下所有程式。任何接手本專案的 coding agent，在修改前必須先閱讀本文件與 [`AYUE_V2_ARCHITECTURE.md`](./AYUE_V2_ARCHITECTURE.md)。修改長期建議、Graph Memory 或 Context Engine 時，另須閱讀 [`MEMORY_CONTEXT_ENGINE_GUIDE.md`](./MEMORY_CONTEXT_ENGINE_GUIDE.md)。
+本文件適用於 `Dating-App/` 下所有程式。任何接手本專案的 coding agent，在修改前必須先閱讀本文件與 [`AYUE_V2_ARCHITECTURE.md`](./AYUE_V2_ARCHITECTURE.md)。修改公開阿月／阿月悄悄話、Profile、Memory、Skill 或共用 projection 時，另須閱讀 [`AYUE_PUBLIC_PRIVATE_COLLABORATION_RULES.md`](./AYUE_PUBLIC_PRIVATE_COLLABORATION_RULES.md)；修改長期建議、Graph Memory 或 Context Engine 時，另須閱讀 [`MEMORY_CONTEXT_ENGINE_GUIDE.md`](./MEMORY_CONTEXT_ENGINE_GUIDE.md)。
 
 ## 目標與範圍
 

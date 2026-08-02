@@ -9,7 +9,7 @@ class ProactiveDeliveryServiceTests(unittest.TestCase):
     def test_match_gif_is_saved_as_typed_message_in_private_mediator_room(self):
         event = {
             "event_id": "gif-1", "type": "match_connected_gif", "match_id": "match-1",
-            "other_id": "other", "message": "太好了～快去和對方聊聊吧！",
+            "other_id": "other", "message": "這張有夠好笑，丟給你 😂",
             "media": {"provider": "giphy", "url": "https://media.giphy.com/demo.gif"},
         }
         match = {

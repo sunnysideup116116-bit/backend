@@ -8,7 +8,15 @@ class GiphyServiceTests(unittest.TestCase):
     def setUp(self):
         giphy_service._reaction_cache = {}
         giphy_service._recent_reaction_urls.clear()
-        giphy_service._query_cursor = 0
+        giphy_service._last_query = ""
+
+    def test_reaction_queries_are_funny_and_randomized_without_immediate_repeat(self):
+        self.assertTrue(all("funny" in query for query in giphy_service.MATCH_CELEBRATION_QUERIES))
+        with patch.object(giphy_service.random, "choice", side_effect=lambda choices: choices[-1]) as choice:
+            first = giphy_service._next_celebration_query()
+            second = giphy_service._next_celebration_query()
+        self.assertNotEqual(first, second)
+        self.assertEqual(choice.call_count, 2)
 
     @patch.object(giphy_service.config, "GIPHY_API_KEY", "")
     def test_missing_key_fails_soft_without_network_call(self):
@@ -38,8 +46,10 @@ class GiphyServiceTests(unittest.TestCase):
         self.assertTrue(all(call.args[2] == "match_connected_gif" for call in queue.call_args_list))
         self.assertEqual(queue.call_args_list[0].kwargs["other_id"], "b")
         self.assertEqual(queue.call_args_list[1].kwargs["other_id"], "a")
+        self.assertTrue(all(call.args[1] == "這張有夠好笑，丟給你 😂" for call in queue.call_args_list))
         media = queue.call_args_list[0].kwargs["media"]
         self.assertEqual(media["provider"], "giphy")
+        self.assertEqual(media["alt_text"], "阿月送上的搞笑 GIF")
         self.assertTrue(media["url"].startswith("https://media.giphy.com/"))
         delivered_urls = [call.kwargs["media"]["url"] for call in queue.call_args_list]
         self.assertEqual(len(set(delivered_urls)), 2)

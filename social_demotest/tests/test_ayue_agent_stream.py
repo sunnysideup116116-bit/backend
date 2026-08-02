@@ -212,6 +212,8 @@ class AyueAgentStreamTests(unittest.TestCase):
         self.assertIn('parsed.protocol === "https:"', source)
         self.assertIn('host === "giphy.com" || host.endsWith(".giphy.com")', source)
         self.assertIn('provider.textContent = "via GIPHY"', source)
+        self.assertIn('proactData.type === "match_connected_gif"', source)
+        self.assertIn('copy.textContent = text || "這張有夠好笑，丟給你 😂"', source)
         self.assertIn('image.loading = "lazy"', source)
         self.assertIn('appendGiphyMessage(container, text, messageData)', source)
 
@@ -221,6 +223,7 @@ class AyueAgentStreamTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('contenteditable="false"', source)
         self.assertIn('className = "inline-mention"', source)
+        self.assertIn('.inline-mention { display: inline; background: transparent; color: #8b5cf6;', source)
         self.assertIn("mentions_inline: isPublicAyue", source)
         self.assertIn('event.key !== "Enter" || event.shiftKey', source)
         self.assertIn('mention_labels: outgoingMentions.map(mentionLabel)', source)

@@ -97,20 +97,28 @@ def _other_participant(match: dict, user_id: str) -> str:
 
 def _notify_date_change(match: dict, actor_id: str, coordination: dict, event_type: str, message: str) -> None:
     """Queue one private, relationship-scoped notification for the other person."""
-    other_id = _other_participant(match, actor_id)
-    queue_mediator_event(
-        other_id,
-        message,
-        event_type,
-        event_key=(
-            f"date:{coordination.get('coordination_id')}:{coordination.get('revision', 1)}:"
-            f"{event_type}:{coordination.get('status')}"
-        ),
-        match_id=str(match["_id"]),
-        other_id=actor_id,
-        coordination_id=coordination.get("coordination_id"),
-        revision=coordination.get("revision", 1),
-    )
+    # The calendar/match transition has already committed before this effect is
+    # attempted.  A delivery outage must never make that committed transition
+    # look retryable or failed to the caller.
+    try:
+        other_id = _other_participant(match, actor_id)
+        queue_mediator_event(
+            other_id,
+            message,
+            event_type,
+            event_key=(
+                f"date:{coordination.get('coordination_id')}:{coordination.get('revision', 1)}:"
+                f"{event_type}:{coordination.get('status')}"
+            ),
+            match_id=str(match["_id"]),
+            other_id=actor_id,
+            coordination_id=coordination.get("coordination_id"),
+            revision=coordination.get("revision", 1),
+        )
+    except Exception as exc:
+        # Keep this diagnostic intentionally metadata-only; notification
+        # payloads and relationship identifiers must not leak into logs.
+        print(f"Date notification skipped: {type(exc).__name__}")
 
 
 def create_invite(match: dict, initiator_id: str, invitee_id: str) -> dict | None:

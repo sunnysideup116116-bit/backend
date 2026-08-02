@@ -290,18 +290,46 @@ def cancel_event(
     return serialize_event(calendar_events_coll.find_one({"_id": event["_id"]}), user_id)
 
 
-def _event_matches_hint(event: dict, event_hint: str) -> bool:
-    hint = re.sub(r"\s+", "", str(event_hint or "").lower())
-    if not hint:
-        return False
-    haystack = " ".join(str(event.get(key) or "") for key in ("title", "activity", "location"))
+def _event_hint_aliases(event: dict) -> list[str]:
+    """Return public, human-facing aliases without exposing event identifiers."""
+    aliases = [
+        re.sub(r"\s+", "", str(event.get(key) or "").lower())
+        for key in ("title", "activity", "location")
+    ]
     try:
         zone = get_timezone(event.get("timezone") or "Asia/Taipei")
         local_start = as_utc(event["start_at"]).astimezone(zone)
-        haystack += f" {local_start:%Y-%m-%d} {local_start.month}/{local_start.day}"
+        aliases.extend((
+            local_start.strftime("%Y-%m-%d"),
+            f"{local_start.month}/{local_start.day}",
+            f"{local_start.month}月{local_start.day}日",
+        ))
     except Exception:
         pass
-    return hint in re.sub(r"\s+", "", haystack.lower())
+    return list(dict.fromkeys(alias for alias in aliases if len(alias) >= 2))
+
+
+def _event_matches_hint(event: dict, event_hint: str) -> bool:
+    hint = re.sub(r"\s+", "", str(event_hint or "").lower())
+    if len(hint) < 2:
+        return False
+    # Users often wrap the known activity in words such as "那個" or "行程".
+    # Bidirectional public-alias matching keeps those phrases useful while the
+    # resolver still fails closed whenever more than one event matches.
+    aliases = _event_hint_aliases(event)
+    date_alias_pattern = re.compile(r"(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}|\d{1,2}月\d{1,2}日)")
+    date_aliases = [alias for alias in aliases if date_alias_pattern.fullmatch(alias)]
+    text_aliases = [alias for alias in aliases if alias not in date_aliases]
+    text_matches = any(alias in hint or hint in alias for alias in text_aliases)
+    date_matches = any(alias in hint for alias in date_aliases)
+    if date_alias_pattern.search(hint):
+        remainder = date_alias_pattern.sub("", hint).strip("的，。！？!?、")
+        date_only_wrappers = {"", "行程", "活動", "那個", "那筆", "那個行程", "那筆行程"}
+        # When a hint contains both a date and meaningful event text, both must
+        # match. A date-only hint can still intentionally resolve by date.
+        if remainder not in date_only_wrappers:
+            return text_matches and date_matches
+    return text_matches or date_matches
 
 
 def _resolve_event(user_id: str, event_hint: str, *, source_type: str | None = None) -> tuple[dict | None, str | None]:
