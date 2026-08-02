@@ -66,6 +66,78 @@ class AyueAgentRouterTests(unittest.TestCase):
         prepare.assert_called_once()
         execute.assert_not_called()
 
+    def test_calendar_create_tool_call_is_promoted_to_confirmation(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="明天兩點到三點新增看展")
+        turn = AgentTurnContextV2(user_id=ctx.user_id, room_id=ctx.room_id, message=ctx.message)
+        decision = AgentDecision(
+            kind=DecisionKind.TOOL_CALL, intent=AgentIntent.CALENDAR_ACTION,
+            tool_name="calendar.create_my_event",
+            arguments={"title": "看展", "date": "2026-08-03", "start_time": "14:00", "end_time": "15:00"},
+            confidence=.95, evidence_span=ctx.message,
+        )
+        prepared = AgentResult(handled=True, reply="要新增嗎？", conversation_intent="calendar_confirmation")
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=decision), \
+             patch("services.ayue_agent.runtime._prepare_calendar_confirmation", return_value=prepared) as prepare, \
+             patch("services.ayue_agent.runtime.execute_tool") as execute, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        self.assertEqual(result.reply, "要新增嗎？")
+        self.assertEqual(prepare.call_args.args[2].kind, DecisionKind.CONFIRMATION)
+        execute.assert_not_called()
+
+    def test_calendar_update_tool_call_is_promoted_after_required_read(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="把 8/4 的電影改到 8/5，時間不變")
+        turn = AgentTurnContextV2(user_id=ctx.user_id, room_id=ctx.room_id, message=ctx.message)
+        decision = AgentDecision(
+            kind=DecisionKind.TOOL_CALL, intent=AgentIntent.CALENDAR_ACTION,
+            tool_name="calendar.update_my_event",
+            arguments={"event_hint": "8/4 的電影", "date": "2026-08-05"},
+            confidence=.95, evidence_span=ctx.message,
+        )
+        prepared = AgentResult(handled=True, reply="要改到 8/5 嗎？", conversation_intent="calendar_confirmation")
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=[decision, decision]) as planner, \
+             patch("services.ayue_agent.runtime.execute_tool", return_value=ToolResult(
+                 ok=True, data={"events": [], "range": "next_90_days"},
+             )) as execute, \
+             patch("services.ayue_agent.runtime._prepare_calendar_confirmation", return_value=prepared) as prepare, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        self.assertEqual(result.reply, "要改到 8/5 嗎？")
+        self.assertEqual(planner.call_count, 2)
+        self.assertEqual(execute.call_count, 1)
+        prepare.assert_called_once()
+        self.assertEqual(prepare.call_args.args[2].kind, DecisionKind.CONFIRMATION)
+
+    def test_calendar_update_merges_target_from_draft_before_confirmation(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="改到 8/5")
+        turn = AgentTurnContextV2(
+            user_id=ctx.user_id, room_id=ctx.room_id, message=ctx.message,
+            action_draft={
+                "version": "v2", "domain": "calendar", "action": "calendar.update_my_event",
+                "arguments": {"event_hint": "8/4 的看電影"}, "missing_fields": ["date"],
+            },
+        )
+        decision = AgentDecision(
+            kind=DecisionKind.TOOL_CALL, intent=AgentIntent.CALENDAR_ACTION,
+            tool_name="calendar.update_my_event", arguments={"date": "2026-08-05"},
+            confidence=.95, evidence_span=ctx.message,
+        )
+        prepared = AgentResult(handled=True, reply="要改到 8/5 嗎？", conversation_intent="calendar_confirmation")
+        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
+             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=[decision, decision]), \
+             patch("services.ayue_agent.runtime.execute_tool", return_value=ToolResult(
+                 ok=True, data={"events": [], "range": "next_90_days"},
+             )), \
+             patch("services.ayue_agent.runtime._prepare_calendar_confirmation", return_value=prepared) as prepare, \
+             patch("services.ayue_agent.runtime._save_trace"):
+            result = run_public_agent_turn(ctx, mode="on")
+        self.assertEqual(result.reply, "要改到 8/5 嗎？")
+        self.assertEqual(prepare.call_args.args[2].arguments, {
+            "event_hint": "8/4 的看電影", "date": "2026-08-05",
+        })
+
     def test_vague_recent_intent_opens_one_context_draft(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="最近想做點事情")
         turn = AgentTurnContextV2(user_id="owner", room_id="room", message=ctx.message)

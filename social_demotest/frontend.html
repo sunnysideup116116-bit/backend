@@ -521,7 +521,7 @@
         #room-input[contenteditable="true"] { min-height: 46px; white-space: pre-wrap; overflow-wrap: anywhere; }
         #room-input[contenteditable="true"]:empty::before { content: attr(data-placeholder); color: rgba(255,255,255,.45); pointer-events: none; }
         #room-input[aria-disabled="true"] { opacity: .5; pointer-events: none; }
-        .inline-mention { display: inline-block; background: #6d63aa; color: #f6f4ff; border-radius: 4px; padding: 0 3px; margin: 0 1px; line-height: 1.45; }
+        .inline-mention { display: inline; background: transparent; color: #8b5cf6; padding: 0; margin: 0; line-height: inherit; font-weight: 700; }
         .place-card-list { display: grid; gap: 9px; margin-top: 10px; width: min(440px, 100%); }
         .place-card { overflow: hidden; border-radius: 12px; border: 1px solid #dfc2ae; background: #fffaf5; color: #523a2f; box-shadow: 0 5px 14px rgba(66, 37, 25, .12); }
         .place-card-custom { display: grid; grid-template-columns: 185px minmax(0, 1fr); min-height: 145px; }
@@ -2793,7 +2793,7 @@
             const caption = document.createElement("div");
             caption.className = "gif-message-caption";
             const copy = document.createElement("span");
-            copy.textContent = text || "太好了～快去和對方聊聊吧！";
+            copy.textContent = text || "這張有夠好笑，丟給你 😂";
             const provider = document.createElement("span");
             provider.className = "gif-message-provider";
             provider.textContent = "via GIPHY";
@@ -4389,7 +4389,9 @@ if (metadata.event_type === "date_coordination_form") {
                                 window.activeMatchProposalId = proactData.metadata.match_id;
                             }
                             appendRoomMessage(proactData.message, false, {
-                                message_type: ["match_proposal", "incoming_match_interest"].includes(proactData.type) ? "mediator_card" : "text",
+                                message_type: proactData.type === "match_connected_gif"
+                                    ? "gif"
+                                    : (["match_proposal", "incoming_match_interest"].includes(proactData.type) ? "mediator_card" : "text"),
                                 metadata: proactData.metadata || {}
                             });
                             document.getElementById("room-input").disabled = false;

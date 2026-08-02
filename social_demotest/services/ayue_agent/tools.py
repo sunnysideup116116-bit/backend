@@ -247,7 +247,7 @@ def _counterparty_summary(ctx: AgentTurnContext) -> ToolResult:
         return ToolResult(ok=True, data={
             "found": False, "match_state": "failed", "display_name": "對方",
             "safe_summary": "", "recent_context": "", "initial_interest": "",
-            "personality_summary": "", "distinctive_tags": [],
+            "personality_summary": "", "location": "", "distinctive_tags": [],
             "verified_common_ground": [], "recommendation_tier": "", "chat_opened": False,
         })
     match = source.get("match")
@@ -255,12 +255,13 @@ def _counterparty_summary(ctx: AgentTurnContext) -> ToolResult:
         return ToolResult(ok=True, data={
             "found": False, "match_state": None, "display_name": "對方",
             "safe_summary": "", "recent_context": "", "initial_interest": "",
-            "personality_summary": "", "distinctive_tags": [],
+            "personality_summary": "", "location": "", "distinctive_tags": [],
             "verified_common_ground": [], "recommendation_tier": "", "chat_opened": False,
         })
     other_id = _other_id(match, ctx.user_id)
     status = _public_match_state(match, ctx.user_id)
-    public_profile = _public_counterparty_profile(other_id)
+    public_profile = _public_counterparty_profile(other_id, include_location=status == "accepted")
+    public_profile.setdefault("location", "")
     common_ground = _verified_common_ground(match, ctx.user_id)
     tags = [
         _public_text(value, 30)

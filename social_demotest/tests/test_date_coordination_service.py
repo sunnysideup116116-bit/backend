@@ -125,6 +125,47 @@ class DateCoordinationDomainTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 409)
         event_write.assert_not_called()
 
+    def test_post_commit_notification_failure_does_not_change_cancel_success(self):
+        match = self._match()
+        updated_match = self._match(status="cancelled")
+        with patch("services.date_coordination_service.find_accepted_match", return_value=match), \
+             patch("services.date_coordination_service.calendar_events_coll.find_one", return_value=self._event()), \
+             patch("services.date_coordination_service.calendar_events_coll.update_one", return_value=Mock(modified_count=1)), \
+             patch("services.date_coordination_service.matches_coll.find_one_and_update", return_value=updated_match), \
+             patch("services.date_coordination_service._sync_card"), \
+             patch("services.date_coordination_service.queue_mediator_event", side_effect=RuntimeError("offline")):
+            result = cancel_coordination_or_event(
+                "owner", "other", "coord", expected_revision=3, idempotency_key="run:delivery-failure",
+            )
+        self.assertEqual(result["status"], "cancelled")
+
+    def test_post_commit_notification_failure_does_not_change_reschedule_success(self):
+        match = self._match()
+        updated_match = self._match(status="active", revision=4)
+        updated_match["date_coordination"]["form"] = {
+            "date": "2026-08-04", "start_time": "16:00", "end_time": "17:00",
+            "timezone": "Asia/Taipei", "title": "", "activity": "rescheduled",
+            "location": "", "budget": "", "notes": "",
+        }
+        pending_event = self._event(status="pending_reconfirmation", revision=4)
+        with patch("services.date_coordination_service.find_accepted_match", return_value=match), \
+             patch(
+                 "services.date_coordination_service.calendar_events_coll.find_one",
+                 side_effect=[self._event(), pending_event],
+             ), \
+             patch("services.date_coordination_service.calendar_events_coll.update_one", return_value=Mock(modified_count=1)), \
+             patch("services.date_coordination_service.matches_coll.find_one_and_update", return_value=updated_match), \
+             patch("services.date_coordination_service._sync_card"), \
+             patch("services.date_coordination_service.queue_mediator_event", side_effect=RuntimeError("offline")):
+            coordination, event = request_reschedule(
+                "owner", "other", "event",
+                {"date": "2026-08-04", "start_time": "16:00", "end_time": "17:00", "activity": "rescheduled"},
+                expected_revision=3,
+                idempotency_key="run:reschedule-delivery-failure",
+            )
+        self.assertEqual(coordination["status"], "active")
+        self.assertEqual(event["status"], "pending_reconfirmation")
+
     def test_cancel_rolls_back_coordination_if_calendar_projection_cannot_follow(self):
         match = self._match()
         cancelled_match = self._match(status="cancelled")

@@ -95,6 +95,7 @@ class ChatLeafRouterTests(unittest.TestCase):
 
     def test_demo_reset_keeps_its_existing_scoped_cleanup(self):
         with patch("routers.demo.messages_coll.delete_many") as delete_messages, \
+             patch("routers.demo.calendar_events_coll.delete_many") as delete_calendar_events, \
              patch("routers.demo.matches_coll.update_many") as update_matches, \
              patch("routers.demo.profiles_coll.update_many") as update_profiles, \
              patch("builtins.print"):
@@ -102,6 +103,7 @@ class ChatLeafRouterTests(unittest.TestCase):
 
         self.assertEqual(response, {"status": "success", "message": "DB state reset"})
         delete_messages.assert_called_once_with({"room_id": {"$regex": "mediator_private"}})
+        delete_calendar_events.assert_called_once_with({})
         update_matches.assert_called_once_with({}, {"$unset": {"date_coordination": ""}})
         update_profiles.assert_called_once_with({}, {"$set": {"mediator_inbox": []}})
 

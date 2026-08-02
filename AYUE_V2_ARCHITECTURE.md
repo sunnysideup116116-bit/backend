@@ -156,12 +156,12 @@ Runtime 規則：
 - 最多三個 planner/tool steps。
 - 同回合相同工具與 normalized arguments 只執行一次；標記為可重用的 bounded read（目前為兩地直線距離）即使 Planner 改寫了等價地點字串，也會沿用第一個成功 observation，不重複執行。
 - 每回合最多一次 write side effect；同一個已確認的 `calendar.cancel_my_events` 最多可取消 10 筆，仍視為一個使用者明確授權的 logical action。
-- Match status、time、relationship 與 calendar update target 若缺 verified read，Guard 會先補 canonical read，而不是讓模型猜；單筆／批次取消則由 Runtime 以 owner-scoped lookup 直接建立 confirmation，避免為同一個取消要求多跑一次 Planner/read。當訊息明確同時指向本人與一位已確認聯絡人時，relationship 回答還需要本人與對方兩份公開摘要。
+- Match status、time、relationship 與 calendar update target 若缺 verified read，Guard 會先補 canonical read，而不是讓模型猜；Calendar write 的 schema-valid `tool_call` 會在 prerequisite read 完成後由 Runtime 升格為 confirmation，避免模型在「已讀取→確認」間跳針。單筆／批次取消則由 Runtime 以 owner-scoped lookup 直接建立 confirmation，避免為同一個取消要求多跑一次 Planner/read。當訊息明確同時指向本人與一位已確認聯絡人時，relationship 回答還需要本人與對方兩份公開摘要。
 - Planner 無效、逾時、低信心、schema 不符或 tool output 不符 schema 時 fail closed。
 - Planner 的 `final.reply` 在通過語言與安全驗證後可直接回覆，避免重複呼叫模型；空白或不安全輸出才由 Final Composer 使用「原始問題 + verified observations」生成。
 - V2 error 不自動切回 legacy。
 
-Pending confirmation 在 Planner 前處理。Match/calendar confirmation 預設 15 分鐘到期；calendar action draft 15 分鐘、recent-context draft 30 分鐘。狀態或 proposal revision 改變時，相關 confirmation 立即失效。
+Pending confirmation 在 Planner 前處理。Match/calendar confirmation 預設 15 分鐘到期；calendar action draft 15 分鐘、recent-context draft 30 分鐘。Calendar draft 僅保存 bounded 的公開 action、arguments 與 missing fields，不能保存 event ID、revision 或原始資料；Runtime 在下一回合合併它，讓補日期、時間或行程描述不遺失既有目標。僅在存在 Calendar pending confirmation 時，精確的「對／是」也可視為確認；其他 pending surface 仍採既有封閉確認協議。狀態或 proposal revision 改變時，相關 confirmation 立即失效。
 
 餐廳／景點推薦另使用 15 分鐘、owner-scoped 的 `agentic_place_search_draft`，只保存公開地點名稱、受限類別、半徑、結果上限與是否使用本人手動保存的粗略所在地。Planner 對一般「吃什麼」預設使用 `restaurant`；當使用者把選擇交給阿月或確認上一輪地點時，必須承接 draft 並讀取 `places.search_nearby`，不可再問已知地點或料理種類。Guard 在 draft 已足以搜尋時會強制先取得 typed places observation，成功後立即清除 draft；draft 逾時則由 Context Builder 清除。
 
@@ -185,13 +185,13 @@ Runtime 才建立 24 小時、owner-scoped 的 assessment session。session 進�
 | `calendar.list_my_events` | 本人已授權行程；預設未來 90 天或問題指定日期 |
 | `calendar.find_my_event` | 本人一筆指定行程；可用已接受聯絡人的公開名稱縮小共同約會，且只能依該筆行程回答同行者 |
 | `match.get_status` | Canonical search/proposal/terminal state 與聊天室狀態 |
-| `match.get_counterparty_summary` | 唯一有效／已接受對象的公開名稱、近況、個性摘要、共同點與 chat state |
+| `match.get_counterparty_summary` | 唯一有效／已接受對象的公開名稱、近況、個性摘要、共同點與 chat state；只有 accepted 狀態可附本人手動保存的縣市／行政區粗略所在地 |
 | `profile.get_recent_context` | 本人已保存的 current context 與 revision |
 | `profile.get_self_summary` | 本人的已完成興趣、基礎／深層性格資料、偏好、近期情境與粗略地區；只在使用者主動詢問本人資料時讀取 |
 | `memory.search_my_profile` | 本人記憶摘要、近期情境及最多 8 筆偏好 |
 | `relationship.get_verified_evidence` | 已接受關係中可驗證的共同互動摘要 |
-| `relationship.get_mentioned_contact_summary` | 本回合 @ 的已接受聯絡人公開近況、初始想認識的事、個性摘要與可驗證共同點；只有有有效 @ 時可見 |
-| `relationship.list_accepted_contacts` | 最多 8 位已接受聯絡人的公開摘要；可安全確認文字提及的已接受對象，並用於判斷活動／地點或雙方特質適合度，不代表可得知對方行程或已答應邀約 |
+| `relationship.get_mentioned_contact_summary` | 本回合 @ 的已接受聯絡人公開近況、初始想認識的事、個性摘要、粗略所在地與可驗證共同點；只有有有效 @ 時可見，未填地區時不得猜測 |
+| `relationship.list_accepted_contacts` | 最多 8 位已接受聯絡人的公開摘要與粗略所在地；可安全確認文字提及的已接受對象，並用於判斷活動／地點或雙方特質適合度，不代表可得知對方行程或已答應邀約 |
 | `web.search` | Tavily 最新公開搜尋結果；只有設定 `TAVILY_API_KEY` 時可見 |
 | `web.extract` | 本回合搜尋結果或 owner 明確提供公開網址的有限內容；拒絕內網與非 HTTP(S) URL |
 | `places.search_nearby` | 以本人手動保存的粗略所在地或使用者指定地點，查詢附近餐廳／景點等公開地點 |
@@ -221,7 +221,7 @@ Planner 只提供自然任務參數，例如行程標題、日期、公開顯示
 
 `@` 是 entity binding 而不是自動查資料的開關：使用者真正詢問對方近況、特質或比較時，Planner 才會讀取公開摘要；普通提及與打招呼不讀。前端以文字內、不可拆分的 mention token 顯示，Enter 選取候選或送出、Shift+Enter 換行；訊息紀錄只保存已驗證的公開顯示名稱以重建 token。送出可保留 `@名稱` 文字與 optional `mentions_inline=true`，但伺服器仍重新驗證所有 client IDs 是否為已接受聯絡人，且最多允許三位。
 
-地點卡是 places observation 的 provider-neutral presentation layer：Runtime 只能從 typed place tools 產生最多三張卡，不能從 LLM 回覆或一般 web snippet 猜店家。OSM 卡片保存經過長度與 URL 驗證的店名、分類、地址摘要、距離文字、地圖與 attribution，前端以 lazy OSM embed 或分類封面呈現。Google Places 是可選升級；只有經驗證的 Place ID 才能 lazy-load UI Kit Compact，載入失敗時仍保留自製卡。兩種 provider 都不保存照片、評分或評論。
+地點卡是 places observation 的 provider-neutral presentation layer：Runtime 只能從 typed place tools 產生最多三張卡，不能從一般 web snippet 猜店家；多候選時只投影 final reply 明確點名的安全地點，整回合只有一個 verified place 時可作唯一結果 fallback。Web／Places verified observation 可使用較完整的 5 句／約 240 字呈現額度，一般聊天仍維持 2 句／約 80 字。OSM 卡片保存經過長度與 URL 驗證的店名、分類、地址摘要、距離文字、地圖與 attribution，前端以 lazy OSM embed 或分類封面呈現。Google Places 是可選升級；只有經驗證的 Place ID 才能 lazy-load UI Kit Compact，載入失敗時仍保留自製卡。兩種 provider 都不保存照片、評分或評論。
 
 ## 6.1 Proactive Care
 
@@ -240,7 +240,7 @@ Planner 只提供自然任務參數，例如行程標題、日期、公開顯示
 - 對方與阿月的私人悄悄話永不進 context；對方 advisory 只能產生 `warm/playful/calm/direct` 的抽象策略，Final Composer 看不到原始 advisory。
 - 目前 typed tools 為 pair summary、shared history、busy/free availability、request fun fact、start date coordination。後兩者都需要 pair-scoped 15 分鐘 confirmation。
 - Private trace 不保存雙方 ID、profile、history、arguments 或 observations；V2 失敗不得落回 legacy private router。
-- 配對成立後的慶祝 GIF 是 server-owned durable event，不是 private agent tool。Giphy 啟用時，系統會輪替 `happy`、`congratulations`、`yay`、`celebration` 類安全搜尋詞，並在有限的 process-local recent URL window 內避開重複；同一次配對對兩人的私訊也各自挑選不同 GIF。沒有 API key、外部失敗或可用媒體不足時 fail-soft，不影響配對成立。
+- 配對成立後的 GIF 是 server-owned durable event，不是 private agent tool。Giphy 啟用時，系統會隨機挑選 `funny` 類安全搜尋詞，並在有限的 process-local recent URL window 內避開重複；同一次配對對兩人的私訊也各自挑選不同 GIF。沒有 API key、外部失敗或可用媒體不足時 fail-soft，不影響配對成立。
 
 ## 7. Match lifecycle 與一致性
 
@@ -286,9 +286,9 @@ Matchmaker flow 與公開阿月 loop 分離：Mongo vector search 先縮小候�
 
 - Public Ayue 可以讀取、建立、修改、取消本人的行程。
 - Calendar read 只在使用者已授權時成功。
-- 所有 Calendar writes 都需要確認。
+- 所有 Calendar writes 都需要確認；自然語言事件提示會以標題、活動、地點與日期別名雙向比對，若仍有多筆候選則 fail closed 請使用者縮小範圍。
 - 私人行程直接修改本人資料。
-- 共同約會取消時同步雙方並通知對方；改期會建立需對方重新確認的協調狀態。
+- 共同約會取消時同步雙方並通知對方；改期會建立需對方重新確認的協調狀態。通知與卡片同步屬於 post-commit effect，失敗不得把已提交的取消／改期回報成可重試的寫入失敗。
 - 「直接替我向對方約會／代替雙方答應」目前不是 Public Ayue 的能力，不能誤轉成私人日曆新增。
 - 對方行事曆細節不能進 prompt 或回覆；跨使用者 availability 僅可使用產品允許的安全 projection。
 
