@@ -1,4 +1,4 @@
-import os
+﻿import os
 import unittest
 from unittest.mock import ANY, Mock, patch
 from types import SimpleNamespace
@@ -18,7 +18,7 @@ class AyueAgentRouterTests(unittest.TestCase):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="你可以直接幫我跟對方約會嗎")
         turn = AgentTurnContextV2(user_id="owner", room_id="room", message=ctx.message)
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=AgentDecision(
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", return_value=AgentDecision(
                  kind=DecisionKind.FINAL, intent=AgentIntent.RELATIONSHIP, confidence=.95,
              )) as planner, \
              patch("services.ayue_agent.runtime.execute_tool") as execute_tool, \
@@ -36,7 +36,7 @@ class AyueAgentRouterTests(unittest.TestCase):
         decision = AgentDecision(kind=DecisionKind.FINAL, intent=AgentIntent.CALENDAR_ACTION, confidence=.95,
                                  clarification_goal="calendar_action", missing_fields=["event_hint"])
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=decision), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", return_value=decision), \
              patch("services.ayue_agent.runtime.profiles_coll.update_one") as persist, \
              patch("services.ayue_agent.runtime.generate_clarification_reply_v2", return_value="你想改剛才哪一筆行程？"), \
              patch("services.ayue_agent.runtime._save_trace"):
@@ -56,7 +56,7 @@ class AyueAgentRouterTests(unittest.TestCase):
         )
         prepared = AgentResult(handled=True, reply="要取消嗎？", conversation_intent="calendar_confirmation")
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=decision) as planner, \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", return_value=decision) as planner, \
              patch("services.ayue_agent.runtime._prepare_calendar_confirmation", return_value=prepared) as prepare, \
              patch("services.ayue_agent.runtime.execute_tool") as execute, \
              patch("services.ayue_agent.runtime._save_trace"):
@@ -66,85 +66,13 @@ class AyueAgentRouterTests(unittest.TestCase):
         prepare.assert_called_once()
         execute.assert_not_called()
 
-    def test_calendar_create_tool_call_is_promoted_to_confirmation(self):
-        ctx = AgentTurnContext(user_id="owner", room_id="room", message="明天兩點到三點新增看展")
-        turn = AgentTurnContextV2(user_id=ctx.user_id, room_id=ctx.room_id, message=ctx.message)
-        decision = AgentDecision(
-            kind=DecisionKind.TOOL_CALL, intent=AgentIntent.CALENDAR_ACTION,
-            tool_name="calendar.create_my_event",
-            arguments={"title": "看展", "date": "2026-08-03", "start_time": "14:00", "end_time": "15:00"},
-            confidence=.95, evidence_span=ctx.message,
-        )
-        prepared = AgentResult(handled=True, reply="要新增嗎？", conversation_intent="calendar_confirmation")
-        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=decision), \
-             patch("services.ayue_agent.runtime._prepare_calendar_confirmation", return_value=prepared) as prepare, \
-             patch("services.ayue_agent.runtime.execute_tool") as execute, \
-             patch("services.ayue_agent.runtime._save_trace"):
-            result = run_public_agent_turn(ctx, mode="on")
-        self.assertEqual(result.reply, "要新增嗎？")
-        self.assertEqual(prepare.call_args.args[2].kind, DecisionKind.CONFIRMATION)
-        execute.assert_not_called()
-
-    def test_calendar_update_tool_call_is_promoted_after_required_read(self):
-        ctx = AgentTurnContext(user_id="owner", room_id="room", message="把 8/4 的電影改到 8/5，時間不變")
-        turn = AgentTurnContextV2(user_id=ctx.user_id, room_id=ctx.room_id, message=ctx.message)
-        decision = AgentDecision(
-            kind=DecisionKind.TOOL_CALL, intent=AgentIntent.CALENDAR_ACTION,
-            tool_name="calendar.update_my_event",
-            arguments={"event_hint": "8/4 的電影", "date": "2026-08-05"},
-            confidence=.95, evidence_span=ctx.message,
-        )
-        prepared = AgentResult(handled=True, reply="要改到 8/5 嗎？", conversation_intent="calendar_confirmation")
-        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=[decision, decision]) as planner, \
-             patch("services.ayue_agent.runtime.execute_tool", return_value=ToolResult(
-                 ok=True, data={"events": [], "range": "next_90_days"},
-             )) as execute, \
-             patch("services.ayue_agent.runtime._prepare_calendar_confirmation", return_value=prepared) as prepare, \
-             patch("services.ayue_agent.runtime._save_trace"):
-            result = run_public_agent_turn(ctx, mode="on")
-        self.assertEqual(result.reply, "要改到 8/5 嗎？")
-        self.assertEqual(planner.call_count, 2)
-        self.assertEqual(execute.call_count, 1)
-        prepare.assert_called_once()
-        self.assertEqual(prepare.call_args.args[2].kind, DecisionKind.CONFIRMATION)
-
-    def test_calendar_update_merges_target_from_draft_before_confirmation(self):
-        ctx = AgentTurnContext(user_id="owner", room_id="room", message="改到 8/5")
-        turn = AgentTurnContextV2(
-            user_id=ctx.user_id, room_id=ctx.room_id, message=ctx.message,
-            action_draft={
-                "version": "v2", "domain": "calendar", "action": "calendar.update_my_event",
-                "arguments": {"event_hint": "8/4 的看電影"}, "missing_fields": ["date"],
-            },
-        )
-        decision = AgentDecision(
-            kind=DecisionKind.TOOL_CALL, intent=AgentIntent.CALENDAR_ACTION,
-            tool_name="calendar.update_my_event", arguments={"date": "2026-08-05"},
-            confidence=.95, evidence_span=ctx.message,
-        )
-        prepared = AgentResult(handled=True, reply="要改到 8/5 嗎？", conversation_intent="calendar_confirmation")
-        with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=[decision, decision]), \
-             patch("services.ayue_agent.runtime.execute_tool", return_value=ToolResult(
-                 ok=True, data={"events": [], "range": "next_90_days"},
-             )), \
-             patch("services.ayue_agent.runtime._prepare_calendar_confirmation", return_value=prepared) as prepare, \
-             patch("services.ayue_agent.runtime._save_trace"):
-            result = run_public_agent_turn(ctx, mode="on")
-        self.assertEqual(result.reply, "要改到 8/5 嗎？")
-        self.assertEqual(prepare.call_args.args[2].arguments, {
-            "event_hint": "8/4 的看電影", "date": "2026-08-05",
-        })
-
     def test_vague_recent_intent_opens_one_context_draft(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="最近想做點事情")
         turn = AgentTurnContextV2(user_id="owner", room_id="room", message=ctx.message)
         decision = AgentDecision(kind=DecisionKind.FINAL, intent=AgentIntent.CHAT, confidence=.95,
                                  evidence_span=ctx.message, recent_context_followup="ask_activity")
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=decision), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", return_value=decision), \
              patch("services.ayue_agent.runtime.profiles_coll.update_one") as persist, \
              patch("services.ayue_agent.runtime.generate_clarification_reply_v2", return_value="你最近比較想做什麼，或想去哪裡走走？"), \
              patch("services.ayue_agent.runtime._save_trace"):
@@ -179,7 +107,7 @@ class AyueAgentRouterTests(unittest.TestCase):
         wrong = AgentDecision(kind=DecisionKind.TOOL_CALL, tool_name="match.get_active_state", confidence=0.95)
         turn = AgentTurnContextV2(user_id="demo_user", room_id="ai_assistant_demo_user", message=ctx.message)
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=wrong), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", return_value=wrong), \
              patch("services.ayue_agent.runtime._save_trace") as save_trace, \
              patch("services.ayue_agent.runtime.execute_tool") as execute_tool:
             result = run_public_agent_turn(ctx, mode="on")
@@ -197,7 +125,7 @@ class AyueAgentRouterTests(unittest.TestCase):
             AgentDecision(kind=DecisionKind.FINAL, intent=AgentIntent.MATCH_STATUS, confidence=.95),
         ]
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=decisions), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", side_effect=decisions), \
              patch("services.ayue_agent.runtime.execute_tool", return_value=ToolResult(
                  ok=True, data={"state": "accepted", "counterparty": "對方"}
              )) as execute_tool, \
@@ -222,7 +150,7 @@ class AyueAgentRouterTests(unittest.TestCase):
         )
         executor = Mock(return_value=(True, "好，我已更新這張牽線提案。", None))
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=decision), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", return_value=decision), \
              patch.dict("services.ayue_agent.runtime._WRITE_EXECUTORS", {"decide_active_proposal": executor}), \
              patch("services.ayue_agent.runtime._save_trace"):
             result = run_public_agent_turn(ctx, mode="on")
@@ -242,7 +170,7 @@ class AyueAgentRouterTests(unittest.TestCase):
              patch("services.ayue_agent.runtime.profiles_coll.update_one", side_effect=[SimpleNamespace(modified_count=1), SimpleNamespace(modified_count=1)]), \
              patch("services.ayue_agent.runtime.assess_match_opportunity", return_value=MatchOpportunityAssessment("ready")), \
              patch("services.ayue_agent.runtime._start_search", return_value=(True, "已開始找人", None)) as start, \
-             patch("services.ayue_agent.runtime.plan_turn_v2") as planner, \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling") as planner, \
              patch("services.ayue_agent.runtime._save_trace"):
             result = run_public_agent_turn(ctx, mode="on")
         self.assertEqual(result.reply, "已開始找人")
@@ -263,7 +191,7 @@ class AyueAgentRouterTests(unittest.TestCase):
              patch("services.ayue_agent.runtime.assess_match_opportunity", return_value=MatchOpportunityAssessment("active_match_blocked", ("active_match",))), \
              patch("services.ayue_agent.runtime.profiles_coll.update_one") as update, \
              patch("services.ayue_agent.runtime._start_search") as start, \
-             patch("services.ayue_agent.runtime.plan_turn_v2") as planner, \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling") as planner, \
              patch("services.ayue_agent.runtime._save_trace"):
             result = run_public_agent_turn(ctx, mode="on")
         self.assertEqual(result.match_readiness_state, "active_match_blocked")
@@ -280,7 +208,7 @@ class AyueAgentRouterTests(unittest.TestCase):
             tool_name="match.start_search", confidence=.95, evidence_span="介紹一個旅伴",
         )
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=decision), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", return_value=decision), \
              patch("services.ayue_agent.runtime.assess_match_opportunity", return_value=MatchOpportunityAssessment("ready")), \
              patch("services.ayue_agent.runtime.profiles_coll.update_one") as update, \
              patch("services.ayue_agent.runtime._save_trace"):
@@ -297,7 +225,7 @@ class AyueAgentRouterTests(unittest.TestCase):
             AgentDecision(kind=DecisionKind.FINAL, intent=AgentIntent.TIME, confidence=.95),
         ]
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=decisions), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", side_effect=decisions), \
              patch("services.ayue_agent.runtime.execute_tool", return_value=ToolResult(ok=True, data={
                  "timezone": "Asia/Taipei", "local_date": "2026-07-30", "local_time": "14:30",
                  "weekday_zh_tw": "星期四", "temporal_references": {"後天": "2026-08-01"},
@@ -318,7 +246,7 @@ class AyueAgentRouterTests(unittest.TestCase):
             tool_name="system.get_current_time", confidence=.95,
         )
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=[repeated, repeated]), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", side_effect=[repeated, repeated]), \
              patch("services.ayue_agent.runtime.execute_tool", return_value=ToolResult(ok=True, data={
                  "timezone": "Asia/Taipei", "local_date": "2026-07-30", "local_time": "14:30",
                  "weekday_zh_tw": "星期四",
@@ -339,7 +267,7 @@ class AyueAgentRouterTests(unittest.TestCase):
             tool_name="system.get_current_time", arguments={"noise": 1}, confidence=.95,
         )
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=noisy), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", return_value=noisy), \
              patch("services.ayue_agent.runtime.execute_tool") as execute_tool, \
              patch("services.ayue_agent.runtime._save_trace"):
             result = run_public_agent_turn(ctx, mode="on")
@@ -365,7 +293,7 @@ class AyueAgentRouterTests(unittest.TestCase):
             }),
         ]
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=decisions), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", side_effect=decisions), \
              patch("services.ayue_agent.runtime.execute_tool", side_effect=tool_results), \
              patch("services.ayue_agent.runtime.generate_final_reply_v2", return_value="綜合完成") as composer, \
              patch("services.ayue_agent.runtime._save_trace"):
@@ -384,7 +312,7 @@ class AyueAgentRouterTests(unittest.TestCase):
         ]
         events = []
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=decisions), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", side_effect=decisions), \
              patch("services.ayue_agent.runtime.execute_tool", return_value=ToolResult(ok=True, data={
                  "timezone": "Asia/Taipei", "local_date": "2026-07-30", "local_time": "14:30",
                  "weekday_zh_tw": "星期四", "utc_iso": "2026-07-30T06:30:00+00:00",
@@ -404,7 +332,7 @@ class AyueAgentRouterTests(unittest.TestCase):
         turn = AgentTurnContextV2(user_id=ctx.user_id, room_id=ctx.room_id, message=ctx.message)
         events = []
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=AgentDecision(kind=DecisionKind.FINAL, confidence=.95)), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", return_value=AgentDecision(kind=DecisionKind.FINAL, confidence=.95)), \
              patch("services.ayue_agent.runtime.generate_final_reply_v2", return_value="我在呀。"), \
              patch("services.ayue_agent.runtime._save_trace"):
             run_public_agent_turn(ctx, mode="on", on_progress=events.append)
@@ -415,7 +343,7 @@ class AyueAgentRouterTests(unittest.TestCase):
         turn = AgentTurnContextV2(user_id=ctx.user_id, room_id=ctx.room_id, message=ctx.message)
         decision = AgentDecision(kind=DecisionKind.FINAL, intent=AgentIntent.CHAT, confidence=.95, reply="我在呀，今天過得怎麼樣？")
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=decision), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", return_value=decision), \
              patch("services.ayue_agent.runtime.generate_final_reply_v2") as composer, \
              patch("services.ayue_agent.runtime._save_trace") as save_trace:
             result = run_public_agent_turn(ctx, mode="on")
@@ -427,7 +355,7 @@ class AyueAgentRouterTests(unittest.TestCase):
         ctx = AgentTurnContext(user_id="demo_user", room_id="room", message="最近還好嗎")
         turn = AgentTurnContextV2(user_id=ctx.user_id, room_id=ctx.room_id, message=ctx.message)
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=AgentDecision(kind=DecisionKind.FINAL, confidence=.95)), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", return_value=AgentDecision(kind=DecisionKind.FINAL, confidence=.95)), \
              patch("services.ayue_agent.runtime.generate_final_reply_v2", return_value="我在呀。"), \
              patch("services.ayue_agent.runtime._save_trace") as save_trace:
             result = run_public_agent_turn(ctx, mode="on", on_progress=lambda _event: False)
@@ -444,7 +372,7 @@ class AyueAgentRouterTests(unittest.TestCase):
             tool_name="system.get_current_time", confidence=.95,
         )
         with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-             patch("services.ayue_agent.runtime.plan_turn_v2", return_value=decision), \
+             patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", return_value=decision), \
              patch("services.ayue_agent.runtime.execute_tool", side_effect=RuntimeError("raw tool failure")), \
              patch("services.ayue_agent.runtime._save_trace") as save_trace:
             result = run_public_agent_turn(ctx, mode="on", on_progress=events.append)

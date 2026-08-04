@@ -94,7 +94,7 @@ def _observe_direct(user_id: str, text: str, surface: str, message_id: str | Non
     prompt = f'''只從使用者本人的第一人稱句子抽取穩定交友偏好。忽略轉述、玩笑、假設、近期行程、配對狀態、其他使用者、帳號和敏感資訊。
 只回 JSON：{{"memories":[{{"key":"英文snake_case","label":"繁中短標籤","stance":"like|dislike|require|avoid","category":"habit|lifestyle|personality|relationship|activity","confidence":0.0}}]}}。
 只有信心 >=0.90 才輸出。句子：{text}'''
-    data = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True))
+    data = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True).content)
     items, clean, now = data.get("memories", [])[:3], [], time.time()
     uri, auth, database = _agent_graph_config()
     with GraphDatabase.driver(uri, auth=auth) as driver:

@@ -44,7 +44,9 @@ def create_event(req: CalendarEventCreateRequest):
 
 @router.patch("/events/{event_id}")
 def patch_event(event_id: str, req: CalendarEventUpdateRequest):
-    return {"event": update_personal_event(req.user_id, event_id, req.model_dump(exclude_unset=True))}
+    data = req.model_dump(exclude_unset=True)
+    expected_revision = data.pop("expected_revision", None)
+    return {"event": update_personal_event(req.user_id, event_id, data, expected_revision=expected_revision)}
 
 
 @router.post("/events/{event_id}/cancel")
@@ -53,10 +55,12 @@ def cancel_calendar_event(event_id: str, req: CalendarActionRequest):
     if shared:
         other_id = next(person for person in shared["participants"] if person != req.user_id)
         from services.date_coordination_service import cancel_coordination_or_event
-        coordination = cancel_coordination_or_event(req.user_id, other_id, shared["coordination_id"])
+        coordination = cancel_coordination_or_event(
+            req.user_id, other_id, shared["coordination_id"], expected_revision=req.expected_revision,
+        )
         event = calendar_events_coll.find_one({"event_id": event_id})
         return {"event": serialize_event(event, req.user_id), "coordination": coordination}
-    return {"event": cancel_event(req.user_id, event_id)}
+    return {"event": cancel_event(req.user_id, event_id, expected_revision=req.expected_revision)}
 
 
 @router.post("/events/{event_id}/reschedule")
@@ -99,9 +103,12 @@ def cancel_reschedule(event_id: str, req: CalendarActionRequest):
             },
             "confirmations": {person: True for person in event["participants"]},
         })
+        # 撤回改期後清掉「改期中」標記，避免後續 update_form 誤把 pending_change 寫回已確認行程
+        coordination.pop("rescheduling_event_id", None)
+        coordination.pop("last_action_key", None)
         from database import matches_coll
         from services.date_coordination_service import _sync_card
-        matches_coll.update_one({"_id": match["_id"]}, {"$set": {"date_coordination": coordination}})
+        matches_coll.update_one({"_id": match["_id"]}, {"$set": {"date_coordination": coordination}, "$unset": {"date_coordination.rescheduling_event_id": "", "date_coordination.last_action_key": ""}})
         _sync_card(match, coordination)
     return {"event": serialize_event(calendar_events_coll.find_one({"_id": event["_id"]}), req.user_id)}
 

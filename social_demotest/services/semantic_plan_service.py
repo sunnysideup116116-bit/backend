@@ -392,7 +392,7 @@ Output strictly valid JSON:
 """
     try:
         updated = _parse_json_object(
-            generate_chat_completion(prompt, temperature=0.2, json_output=True)
+            generate_chat_completion(prompt, temperature=0.2, json_output=True).content
         )
     except Exception as exc:
         print(f"[SEMANTIC_PLAN] generation failed session={session_id} error={exc}")

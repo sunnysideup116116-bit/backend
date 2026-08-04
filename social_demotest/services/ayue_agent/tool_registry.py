@@ -115,11 +115,17 @@ class _WebExtractArguments(BaseModel):
 
 
 class _PlacesNearbyArguments(BaseModel):
-    """Human place names only; coordinates and arbitrary map queries are never planner input."""
+    """Human place names only; coordinates and arbitrary map queries are never planner input.
+
+    cuisine is a bounded free-text food-type hint (e.g. 火鍋、日式、素食). It is
+    only ever folded into the Google Places textQuery JSON body; it never
+    reaches the Overpass QL builder, which stays on the allowlisted categories.
+    """
 
     model_config = ConfigDict(extra="forbid")
     anchor: str = Field(default="", max_length=160)
     categories: list[Literal["restaurant", "cafe", "bar", "attraction", "park"]] = Field(min_length=1, max_length=3)
+    cuisine: str = Field(default="", max_length=30)
     radius_m: int = Field(default=1500, ge=300, le=5000)
     limit: int = Field(default=8, ge=1, le=10)
     use_saved_location: bool = False
@@ -198,7 +204,6 @@ class _CounterpartySummaryOutput(BaseModel):
     recent_context: str = ""
     initial_interest: str = ""
     personality_summary: str = ""
-    location: str = ""
     distinctive_tags: list[str] = Field(default_factory=list)
     verified_common_ground: list[str] = Field(default_factory=list)
     recommendation_tier: Literal["grounded", "exploratory", ""] = ""
@@ -247,7 +252,6 @@ class _MentionedContactOutput(BaseModel):
     recent_context: str = ""
     initial_interest: str = ""
     personality_summary: str = ""
-    location: str = ""
     safe_match_reason: str = ""
     verified_common_ground: list[str] = Field(default_factory=list)
     distinctive_tags: list[str] = Field(default_factory=list)
@@ -317,6 +321,9 @@ class _PlaceOutput(BaseModel):
     map_url: str
     provider: Literal["openstreetmap", "google"] = "openstreetmap"
     place_id: str = ""
+    # Optional photo from the Text Search response (places.photos is a Pro-tier
+    # field; the media bytes bill under Place Details Photos).
+    photo_url: str = ""
 
 
 class _PlacesNearbyOutput(BaseModel):
@@ -343,7 +350,8 @@ class _PlacesDistanceOutput(BaseModel):
     destination_label: str
     origin_kind: Literal["explicit", "saved_profile"]
     distance_m: int = Field(ge=0)
-    distance_basis: Literal["straight_line"]
+    distance_basis: Literal["straight_line", "driving"]
+    duration_text: str = ""
     attribution: str
     attribution_url: str
 

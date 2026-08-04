@@ -3,7 +3,7 @@ import requests
 import time
 import config
 from fastapi import APIRouter
-from models import ClearRequest, SettingsRequest, MediatorToneRequest, ProfileMemoryActionRequest, ProfileLocationRequest
+from models import ClearRequest, SettingsRequest, MediatorToneRequest, ProfileMemoryActionRequest, ProfileLocationRequest, ModelSettingsRequest
 from database import db, profiles_coll, matches_coll, messages_coll
 from services.ai_service import get_embedding
 from services.profile_projection import safe_recent_context
@@ -345,6 +345,19 @@ def update_mediator_tone(req: MediatorToneRequest):
         update["probe_mode"] = req.probe_mode
     profiles_coll.update_one({"user_id": req.user_id}, {"$set": update}, upsert=True)
     return {"status": "success", "mediator_tone": tone, "probe_mode": update.get("probe_mode")}
+
+@router.post("/settings/model")
+def update_model_settings(req: ModelSettingsRequest):
+    """Set a process-wide LLM model override (in-memory only, does not touch .env)."""
+    from services.ai_service import set_runtime_model_override, get_runtime_model_override
+    set_runtime_model_override(req.model, req.thinking_level)
+    return {"status": "success", **get_runtime_model_override()}
+
+@router.get("/settings/model")
+def get_model_settings():
+    """Return current runtime model override state."""
+    from services.ai_service import get_runtime_model_override
+    return get_runtime_model_override()
 
 @router.post("/onboarding/complete")
 def complete_onboarding(req: ClearRequest):

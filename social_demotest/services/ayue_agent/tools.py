@@ -47,7 +47,8 @@ from .maps_client import (
     resolve_place as resolve_osm_place,
 )
 from .google_places_client import (
-    GooglePlacesError, google_place_cards_enabled, resolve_place as resolve_google_place,
+    GooglePlacesError, google_place_cards_enabled,
+    measure_distance_matrix, resolve_place as resolve_google_place,
     search_nearby_places,
 )
 
@@ -55,15 +56,19 @@ from .google_places_client import (
 def _calendar_events(user_id: str, clock: TurnClockV1 | None = None) -> ToolResult:
     if not calendar_access_enabled(user_id):
         return ToolResult(ok=False, error_code="calendar_access_denied", user_message="你目前沒有授權我讀取行事曆。")
-    now = clock_utc(clock) if clock else datetime.now(timezone.utc)
-    end = now + timedelta(days=90)
-    range_label = "next_90_days"
+    zone = get_timezone(clock.timezone) if clock else timezone(timedelta(hours=8), name="Asia/Taipei")
     if clock and clock.temporal_references:
         target_date = next(iter(clock.temporal_references.values()))
-        zone = get_timezone(clock.timezone)
         local_start = datetime.combine(datetime.fromisoformat(target_date).date(), time_value.min, zone)
         now, end = local_start.astimezone(timezone.utc), (local_start + timedelta(days=1)).astimezone(timezone.utc)
         range_label = target_date
+    else:
+        # "最近的行程"：從今天 00:00 當地時間起算，含今天已結束的行程
+        local_now = (clock_utc(clock) if clock else datetime.now(timezone.utc)).astimezone(zone)
+        local_start = datetime.combine(local_now.date(), time_value.min, zone)
+        now = local_start.astimezone(timezone.utc)
+        end = now + timedelta(days=90)
+        range_label = "next_90_days"
     events = get_calendar_context(user_id, None, now, end).get("viewer_events", [])
     safe_events = []
     for event in events:
@@ -247,7 +252,7 @@ def _counterparty_summary(ctx: AgentTurnContext) -> ToolResult:
         return ToolResult(ok=True, data={
             "found": False, "match_state": "failed", "display_name": "對方",
             "safe_summary": "", "recent_context": "", "initial_interest": "",
-            "personality_summary": "", "location": "", "distinctive_tags": [],
+            "personality_summary": "", "distinctive_tags": [],
             "verified_common_ground": [], "recommendation_tier": "", "chat_opened": False,
         })
     match = source.get("match")
@@ -255,13 +260,12 @@ def _counterparty_summary(ctx: AgentTurnContext) -> ToolResult:
         return ToolResult(ok=True, data={
             "found": False, "match_state": None, "display_name": "對方",
             "safe_summary": "", "recent_context": "", "initial_interest": "",
-            "personality_summary": "", "location": "", "distinctive_tags": [],
+            "personality_summary": "", "distinctive_tags": [],
             "verified_common_ground": [], "recommendation_tier": "", "chat_opened": False,
         })
     other_id = _other_id(match, ctx.user_id)
     status = _public_match_state(match, ctx.user_id)
-    public_profile = _public_counterparty_profile(other_id, include_location=status == "accepted")
-    public_profile.setdefault("location", "")
+    public_profile = _public_counterparty_profile(other_id)
     common_ground = _verified_common_ground(match, ctx.user_id)
     tags = [
         _public_text(value, 30)
@@ -480,6 +484,7 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
     if not anchor:
         return ToolResult(ok=False, error_code="location_required", user_message="你想從哪個地點開始找？")
     categories = [str(item) for item in (arguments.get("categories") or [])]
+    cuisine = str(arguments.get("cuisine") or "").strip()
     safe_limit = int(arguments.get("limit") or 8)
     data = None
     # Google is an optional presentation enhancement. Its failure must never
@@ -489,7 +494,7 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
             point = nominatim_search(anchor)
             google_places = search_nearby_places(
                 str(point.get("label") or anchor), float(point["lat"]), float(point["lon"]), categories,
-                limit=safe_limit,
+                limit=safe_limit, cuisine=cuisine,
             )
             data = {
                 "anchor_label": str(point.get("label") or anchor),
@@ -519,10 +524,20 @@ def _places_distance(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolRe
         origin_kind = "saved_profile"
     if not origin:
         return ToolResult(ok=False, error_code="location_required", user_message="你想從哪裡出發？")
-    try:
-        data = measure_distance(origin, str(arguments.get("destination") or ""))
-    except MapClientError as exc:
-        return ToolResult(ok=False, error_code=exc.code, user_message="")
+    destination = str(arguments.get("destination") or "")
+    # Try Google Routes API for real driving distance; fall back to OSM haversine.
+    # The fallback keeps the tool working without Google quota.
+    data = None
+    if google_place_cards_enabled():
+        try:
+            data = measure_distance_matrix(origin, destination)
+        except Exception:
+            data = None
+    if data is None:
+        try:
+            data = measure_distance(origin, destination)
+        except MapClientError as exc:
+            return ToolResult(ok=False, error_code=exc.code, user_message="")
     return ToolResult(ok=True, data={**data, "origin_kind": origin_kind})
 
 
@@ -539,6 +554,9 @@ def _places_resolve(arguments: dict[str, Any]) -> ToolResult:
             place = resolve_osm_place(query)
         except MapClientError as exc:
             return ToolResult(ok=False, error_code=exc.code, user_message="")
+    # Google resolve already carries photo_url from the Text Search response
+    # (places.photos is a Pro-tier field). No extra Place Details request is
+    # made: rating / opening hours are Enterprise-tier and intentionally absent.
     provider = str((place or {}).get("provider") or "openstreetmap")
     return ToolResult(ok=True, data={
         "found": bool(place), "place": place,

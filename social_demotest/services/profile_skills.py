@@ -85,7 +85,7 @@ def _compose_recent_context_summary(fields: dict[str, Any]) -> str:
 最多 32 個中文字，不加引號、不加解釋，只輸出句子。
 欄位：{json.dumps(typed_fields, ensure_ascii=False)}"""
     try:
-        summary = _clean(generate_chat_completion(prompt, temperature=0.2), 48)
+        summary = _clean(generate_chat_completion(prompt, temperature=0.2).content, 48)
     except Exception:
         return fallback
     if (
@@ -357,7 +357,7 @@ def _retry_recent_context_contract(
 目前有效的 typed episode（只能判斷是否延續，不是新 evidence）：{json.dumps(active_episode or {}, ensure_ascii=False)}
 本人原始訊息：{message}"""
     try:
-        data = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True))
+        data = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True).content)
         return ProfileExtractionDecision.model_validate(data).recent_context
     except Exception:
         return None
@@ -417,7 +417,7 @@ JSON schema：{{"recent_context":{{"action":"update|clear|none","confidence":0.0
 本人原始訊息：{message}
 """
     try:
-        data = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True))
+        data = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True).content)
         contract = ProfileExtractionDecision.model_validate(data)
     except Exception as exc:
         return {"recent_context": {**blank, "reason_code": f"model_{type(exc).__name__}"}, "memories": [], "memory_codes": [f"model_{type(exc).__name__}"], "policy_versions": {"recent-context": recent_skill["version"], "memory": memory_skill["version"]}, "contract": {}}

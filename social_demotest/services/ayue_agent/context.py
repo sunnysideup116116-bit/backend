@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import re
 import time
 from typing import Any
@@ -24,64 +23,6 @@ ACTION_DRAFT_TTL_SECONDS = 15 * 60
 PLACE_SEARCH_DRAFT_TTL_SECONDS = 15 * 60
 RECENT_CONTEXT_DRAFT_TTL_SECONDS = 30 * 60
 
-_CALENDAR_DRAFT_FIELDS = {
-    "calendar.create_my_event": {"title", "date", "start_time", "end_time", "timezone", "location", "notes"},
-    "calendar.update_my_event": {"event_hint", "title", "date", "start_time", "end_time", "timezone", "location", "notes"},
-    "calendar.cancel_my_event": {"event_hint"},
-    "calendar.cancel_my_events": {"mode", "event_hints"},
-    "calendar": {"event_hint", "event_hints", "title", "date", "start_time", "end_time", "timezone", "location", "notes", "mode"},
-}
-_CALENDAR_DRAFT_ACTIONS = set(_CALENDAR_DRAFT_FIELDS)
-_CALENDAR_DRAFT_MISSING_FIELDS = set().union(*_CALENDAR_DRAFT_FIELDS.values(), {"changes"})
-
-
-def _safe_calendar_action_draft(value: Any) -> dict[str, Any] | None:
-    """Expose only bounded public Calendar clarification state to the planner."""
-    if not isinstance(value, dict) or value.get("domain") not in {None, "calendar"}:
-        return None
-    action = str(value.get("action") or "calendar")
-    if action not in _CALENDAR_DRAFT_ACTIONS:
-        action = "calendar"
-    raw_arguments = value.get("arguments") if isinstance(value.get("arguments"), dict) else {}
-    arguments: dict[str, Any] = {}
-    for field in _CALENDAR_DRAFT_FIELDS[action]:
-        if field == "event_hints":
-            hints = [_clean_text(item, 120) for item in (raw_arguments.get(field) or [])]
-            hints = [item for item in hints if item][:10]
-            if hints:
-                arguments[field] = hints
-        elif field == "mode":
-            mode = str(raw_arguments.get(field) or "")
-            if mode in {"all_upcoming", "selected"}:
-                arguments[field] = mode
-        else:
-            text = _clean_text(raw_arguments.get(field), 400)
-            if text or (
-                action == "calendar.update_my_event"
-                and field in {"location", "notes"}
-                and field in raw_arguments
-                and raw_arguments.get(field) is not None
-            ):
-                arguments[field] = text
-    missing = [
-        field for field in (value.get("missing_fields") or [])
-        if isinstance(field, str) and field in _CALENDAR_DRAFT_MISSING_FIELDS
-    ][:4]
-    try:
-        created_at = float(value.get("created_at", 0) or 0)
-    except (TypeError, ValueError):
-        created_at = 0.0
-    if not math.isfinite(created_at) or created_at < 0:
-        created_at = 0.0
-    return {
-        "version": "v2",
-        "domain": "calendar",
-        "action": action,
-        "arguments": arguments,
-        "missing_fields": missing,
-        "created_at": created_at,
-    }
-
 
 def _safe_place_search_draft(value: Any) -> dict[str, Any] | None:
     """Project only bounded public place-search state into the planner context."""
@@ -100,15 +41,17 @@ def _safe_place_search_draft(value: Any) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         radius_m = 1500
     try:
-        limit = int(value.get("limit", 3) or 3)
+        limit = int(value.get("limit", 5) or 5)
     except (TypeError, ValueError):
-        limit = 3
+        limit = 5
+    cuisine = value.get("cuisine")
     return {
         "version": "v1",
         "anchor": _clean_text(value.get("anchor"), 160),
         "categories": categories,
+        "cuisine": _clean_text(cuisine, 30) if isinstance(cuisine, str) else "",
         "radius_m": max(300, min(radius_m, 5000)),
-        "limit": max(1, min(limit, 3)),
+        "limit": max(1, min(limit, 5)),
         "use_saved_location": bool(value.get("use_saved_location")),
         "created_at": created_at,
     }
@@ -241,7 +184,7 @@ def build_agent_turn_context_v2(ctx: AgentTurnContext, *, clock: TurnClockV1 | N
     # when it semantically recognises a match-status question instead.
     outcome = None
     pending = profile.get("agentic_pending_confirmation") or None
-    action_draft = _safe_calendar_action_draft(profile.get("agentic_action_draft"))
+    action_draft = profile.get("agentic_action_draft") or None
     place_search_draft = _safe_place_search_draft(profile.get("agentic_place_search_draft"))
     recent_context_draft = profile.get("recent_context_draft") or None
     now = time.time()

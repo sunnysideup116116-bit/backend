@@ -97,28 +97,20 @@ def _other_participant(match: dict, user_id: str) -> str:
 
 def _notify_date_change(match: dict, actor_id: str, coordination: dict, event_type: str, message: str) -> None:
     """Queue one private, relationship-scoped notification for the other person."""
-    # The calendar/match transition has already committed before this effect is
-    # attempted.  A delivery outage must never make that committed transition
-    # look retryable or failed to the caller.
-    try:
-        other_id = _other_participant(match, actor_id)
-        queue_mediator_event(
-            other_id,
-            message,
-            event_type,
-            event_key=(
-                f"date:{coordination.get('coordination_id')}:{coordination.get('revision', 1)}:"
-                f"{event_type}:{coordination.get('status')}"
-            ),
-            match_id=str(match["_id"]),
-            other_id=actor_id,
-            coordination_id=coordination.get("coordination_id"),
-            revision=coordination.get("revision", 1),
-        )
-    except Exception as exc:
-        # Keep this diagnostic intentionally metadata-only; notification
-        # payloads and relationship identifiers must not leak into logs.
-        print(f"Date notification skipped: {type(exc).__name__}")
+    other_id = _other_participant(match, actor_id)
+    queue_mediator_event(
+        other_id,
+        message,
+        event_type,
+        event_key=(
+            f"date:{coordination.get('coordination_id')}:{coordination.get('revision', 1)}:"
+            f"{event_type}:{coordination.get('status')}"
+        ),
+        match_id=str(match["_id"]),
+        other_id=actor_id,
+        coordination_id=coordination.get("coordination_id"),
+        revision=coordination.get("revision", 1),
+    )
 
 
 def create_invite(match: dict, initiator_id: str, invitee_id: str) -> dict | None:
@@ -189,7 +181,7 @@ def update_form(user_id: str, other_id: str, coordination_id: str, revision: int
     if not updated.modified_count:
         raise HTTPException(status_code=409, detail="表單已被其他人更新")
     if coordination.get("rescheduling_event_id"):
-        calendar_events_coll.update_one(
+        pending_result = calendar_events_coll.update_one(
             {
                 "event_id": coordination["rescheduling_event_id"],
                 "status": "pending_reconfirmation",
@@ -201,6 +193,14 @@ def update_form(user_id: str, other_id: str, coordination_id: str, revision: int
                 }
             },
         )
+        if not pending_result.modified_count:
+            # event 已不在「等重新確認」（例如被撤回改期還原成 confirmed）；
+            # 清掉 rescheduling_event_id，避免後續 update_form 再誤把 pending_change 寫回已確認行程
+            matches_coll.update_one(
+                {"_id": match["_id"], "date_coordination.coordination_id": coordination_id},
+                {"$unset": {"date_coordination.rescheduling_event_id": ""}},
+            )
+            coordination.pop("rescheduling_event_id", None)
     _sync_card(match, coordination)
     return public_coordination(coordination)
 
@@ -300,9 +300,9 @@ def request_reschedule(
         return public_coordination(coordination), serialize_event(event, user_id)
     current_revision = int(coordination.get("revision", 1) or 1)
     event_revision = int(event.get("revision", 1) or 1)
-    if expected_revision is not None and (
-        event_revision != expected_revision or current_revision != expected_revision
-    ):
+    # 呼叫端（agent 確認或 REST）都是以「行程版本」當錨點；協調單有自己的 CAS（下方 update）保護。
+    # 不再強制協調單版本 == 行程版本，避免表單編輯導致兩者分歧時誤判 409。
+    if expected_revision is not None and event_revision != expected_revision:
         raise HTTPException(status_code=409, detail="約會剛剛已變更，請重新確認")
     if event.get("status") != "confirmed":
         raise HTTPException(status_code=409, detail="這筆約會目前正在等待重新確認")
@@ -395,9 +395,8 @@ def cancel_coordination_or_event(
         if not idempotency_key or coordination.get("last_action_key") == idempotency_key:
             return public_coordination(coordination)
         raise HTTPException(status_code=409, detail="這筆共同約會已經取消")
-    revision = int(coordination.get("revision", 1) or 1)
-    if expected_revision is not None and revision != expected_revision:
-        raise HTTPException(status_code=409, detail="約會剛剛已變更，請重新確認")
+    # 不在此處用「協調單版本」當 CAS；呼叫端鎖的是行程版本。下方 event_query 有 event revision CAS，
+    # match_query 有 status CAS，足以保護。避免表單編輯導致協調單與行程版本分歧時誤判 409。
 
     event = None
     if coordination.get("calendar_event_id"):
@@ -425,8 +424,8 @@ def cancel_coordination_or_event(
         "date_coordination.coordination_id": coordination_id,
         "date_coordination.status": {"$ne": "cancelled"},
     }
-    if expected_revision is not None:
-        match_query["date_coordination.revision"] = expected_revision
+    # 不在此處用「協調單版本」當 CAS（呼叫端鎖的是行程版本，二者可能因表單編輯而分歧）；
+    # 行程版本已由上方 event revision 檢查保護。
     updated_match = matches_coll.find_one_and_update(
         match_query,
         {"$set": coordination_set},

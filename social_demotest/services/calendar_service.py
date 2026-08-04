@@ -290,46 +290,48 @@ def cancel_event(
     return serialize_event(calendar_events_coll.find_one({"_id": event["_id"]}), user_id)
 
 
-def _event_hint_aliases(event: dict) -> list[str]:
-    """Return public, human-facing aliases without exposing event identifiers."""
-    aliases = [
-        re.sub(r"\s+", "", str(event.get(key) or "").lower())
-        for key in ("title", "activity", "location")
-    ]
-    try:
-        zone = get_timezone(event.get("timezone") or "Asia/Taipei")
-        local_start = as_utc(event["start_at"]).astimezone(zone)
-        aliases.extend((
-            local_start.strftime("%Y-%m-%d"),
-            f"{local_start.month}/{local_start.day}",
-            f"{local_start.month}月{local_start.day}日",
-        ))
-    except Exception:
-        pass
-    return list(dict.fromkeys(alias for alias in aliases if len(alias) >= 2))
+_TEMPORAL_WORDS = ("今天", "明天", "後天", "這週", "本週", "下週", "本月", "下個月", "的行程", "的", "幫我", "取消", "修改", "刪除", "更改", "在", "去", "到")
+
+# 模型回覆常見的全形/特殊標點 → 半形對照，比對前統一正規化避免「09:00–10:00」vs「09:00-10:00」漏抓
+_HINT_NORMALIZE_TABLE = str.maketrans({
+    "\u2013": "-", "\u2014": "-",   # en dash / em dash
+    "\uff5e": "-",                  # 全形波浪號（當作連字號）
+    "\u3000": " ",                  # 全形空白
+    "\uff0c": " ",                  # 全形逗號
+    "：": ":",                       # 全形冒號
+    "０": "0", "１": "1", "２": "2", "３": "3", "４": "4",
+    "５": "5", "６": "6", "７": "7", "８": "8", "９": "9",
+})
+
+
+def _normalize_hint_text(s: str) -> str:
+    return re.sub(r"\s+", " ", s.translate(_HINT_NORMALIZE_TABLE)).strip()
 
 
 def _event_matches_hint(event: dict, event_hint: str) -> bool:
-    hint = re.sub(r"\s+", "", str(event_hint or "").lower())
-    if len(hint) < 2:
+    raw = _normalize_hint_text(str(event_hint or ""))
+    if not raw:
         return False
-    # Users often wrap the known activity in words such as "那個" or "行程".
-    # Bidirectional public-alias matching keeps those phrases useful while the
-    # resolver still fails closed whenever more than one event matches.
-    aliases = _event_hint_aliases(event)
-    date_alias_pattern = re.compile(r"(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}|\d{1,2}月\d{1,2}日)")
-    date_aliases = [alias for alias in aliases if date_alias_pattern.fullmatch(alias)]
-    text_aliases = [alias for alias in aliases if alias not in date_aliases]
-    text_matches = any(alias in hint or hint in alias for alias in text_aliases)
-    date_matches = any(alias in hint for alias in date_aliases)
-    if date_alias_pattern.search(hint):
-        remainder = date_alias_pattern.sub("", hint).strip("的，。！？!?、")
-        date_only_wrappers = {"", "行程", "活動", "那個", "那筆", "那個行程", "那筆行程"}
-        # When a hint contains both a date and meaningful event text, both must
-        # match. A date-only hint can still intentionally resolve by date.
-        if remainder not in date_only_wrappers:
-            return text_matches and date_matches
-    return text_matches or date_matches
+    # 剔除時間詞與動詞（不在行程資料裡），避免整段子字串比對失敗
+    for term in _TEMPORAL_WORDS:
+        raw = raw.replace(term, " ")
+    segments = [s for s in re.split(r"[\s,，、]+", raw) if s.strip()]
+    if not segments:
+        return False
+    haystack = " ".join(str(event.get(key) or "") for key in ("title", "activity", "location"))
+    try:
+        zone = get_timezone(event.get("timezone") or "Asia/Taipei")
+        local_start = as_utc(event["start_at"]).astimezone(zone)
+        local_end = as_utc(event["end_at"]).astimezone(zone)
+        haystack += (
+            f" {local_start:%Y-%m-%d} {local_start.month}/{local_start.day}"
+            f" {local_start:%H:%M}-{local_end:%H:%M}"
+        )
+    except Exception:
+        pass
+    haystack_compact = _normalize_hint_text(haystack).lower().replace(" ", "")
+    # 每個段落都要出現在 haystack（順序不拘），避免 hint 與 event 欄位順序相反時漏抓
+    return all(re.sub(r"\s+", "", seg.lower()) in haystack_compact for seg in segments)
 
 
 def _resolve_event(user_id: str, event_hint: str, *, source_type: str | None = None) -> tuple[dict | None, str | None]:
@@ -477,7 +479,11 @@ def get_calendar_context(viewer_id: str, partner_id: str | None, start: datetime
             if viewer_id in event.get("participants", []) and event.get("source_type") == "date":
                 partner_busy.append(serialize_event(event, viewer_id))
             else:
-                partner_busy.append(serialize_event(event, viewer_id, include_private=False))
+                # 對方私人行程只回 busy 投影；serialize_event 的 non-private 分支仍會帶 event_id，
+                # 在此剝掉，避免對方行程內部編號外洩給 viewer。
+                projection = serialize_event(event, viewer_id, include_private=False)
+                projection.pop("event_id", None)
+                partner_busy.append(projection)
     return {"viewer_events": viewer_events, "partner_busy": partner_busy}
 
 

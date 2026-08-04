@@ -14,7 +14,6 @@ from database import matches_coll, profiles_coll
 from services.language_service import normalize_zh_tw
 from services.match_state_service import verified_accepted_match_query
 from services.match_reason_service import reason_for_viewer
-from services.profile_location import safe_profile_location
 
 
 MAX_MENTIONED_CONTACTS = 3
@@ -78,31 +77,19 @@ def other_id(match: dict[str, Any], user_id: str) -> str | None:
     return match.get("to_user") if match.get("from_user") == user_id else match.get("from_user")
 
 
-def safe_public_profile(other_user_id: str | None, *, include_location: bool = False) -> dict[str, str]:
-    """Return the bounded public profile fields allowed for this caller.
-
-    Coarse location is opt-in because this helper is also used by the private
-    runtime.  Public relationship callers enable it only after canonical
-    accepted-relation validation.
-    """
-    projection = {
-        "_id": 0, "current_context": 1, "initial_interest": 1,
-        "big_five.summary": 1,
-    }
-    if include_location:
-        projection["profile_location"] = 1
+def safe_public_profile(other_user_id: str | None) -> dict[str, str]:
     profile = profiles_coll.find_one(
         {"user_id": other_user_id},
-        projection,
+        {
+            "_id": 0, "current_context": 1, "initial_interest": 1,
+            "big_five.summary": 1,
+        },
     ) or {}
-    result = {
+    return {
         "recent_context": public_text(profile.get("current_context"), 100),
         "initial_interest": public_text(profile.get("initial_interest"), 80),
         "personality_summary": public_text((profile.get("big_five") or {}).get("summary"), 100),
     }
-    if include_location:
-        result["location"] = safe_profile_location(profile).get("display_name", "")
-    return result
 
 
 def safe_match_reason(match: dict[str, Any], user_id: str) -> str:
@@ -208,7 +195,7 @@ def mentioned_contact_summary(user_id: str, other_user_ids: list[str]) -> list[d
         match = matches_coll.find_one(verified_accepted_match_query(user_id, other_user_id), projection)
         if not match:
             continue
-        public_profile = safe_public_profile(other_user_id, include_location=True)
+        public_profile = safe_public_profile(other_user_id)
         tags = [public_text(value, 30) for value in (match.get("distinctive_tags") or [])]
         contacts.append({
             "display_name": display_name(other_user_id),
@@ -244,7 +231,7 @@ def accepted_contact_summaries(
         other_user_id = other_id(match, user_id)
         if not other_user_id:
             continue
-        public_profile = safe_public_profile(other_user_id, include_location=True)
+        public_profile = safe_public_profile(other_user_id)
         tags = [public_text(value, 30) for value in (match.get("distinctive_tags") or [])]
         contacts.append({
             "display_name": display_name(other_user_id),

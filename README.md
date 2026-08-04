@@ -1,5 +1,7 @@
 # 阿月交友 Demo
 
+> **說明**：這是 function calling 第一版本，修改與更改的地方可以詳看 `docs/` 資料夾裡面的 MD 檔。
+
 這個 repository 是目前 Demo 使用的阿月 V2。公開阿月採用單一、事件化的 agent loop，由 LLM 理解語意與選擇 typed tool；程式端負責權限、確認、狀態轉移、隱私與冪等性。
 
 ```text
@@ -29,6 +31,7 @@ Context Builder
 - [AYUE_V2_ARCHITECTURE.md](./AYUE_V2_ARCHITECTURE.md)：實際 runtime、tool、state、API 與 App V1 → V2 遷移方式
 - [AGENTS.md](./AGENTS.md)：後續 coding agent 必須遵守的邊界與擴充規則
 - [MEMORY_CONTEXT_ENGINE_GUIDE.md](./MEMORY_CONTEXT_ENGINE_GUIDE.md)：長期建議、Neo4j Graph Memory 與 Context Engine 的資料邊界、Hermes Agent 參考方式和實作順序
+- [docs/](./docs/)：詳細設計與變更說明文件（包含 Google Maps 遷移計畫、行事曆已知問題與地點菜系支援等 `.md` 檔案）
 
 ## 專案結構
 
@@ -36,6 +39,7 @@ Context Builder
 | --- | --- |
 | `social_demotest/` | FastAPI 主服務、Web Demo、Public/Private Ayue 與測試 |
 | `matchmaker_agent/` | 候選排序、Neo4j 記憶與 feedback service |
+| `docs/` | 詳細設計與技術規格說明文件 (MD) |
 | `skills/` | 近期情境、長期記憶與性格探索的 versioned policy |
 | `start_ayue.ps1` | Windows 啟動與 health check |
 | `start_ayue.cmd` | PowerShell 啟動腳本的 cmd wrapper |
