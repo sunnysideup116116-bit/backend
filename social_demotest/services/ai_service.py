@@ -1,4 +1,6 @@
 import json
+import time
+from dataclasses import dataclass
 
 import google.generativeai as genai
 
@@ -14,6 +16,37 @@ from config import (
 
 )
 from services.language_service import normalize_model_text, normalize_zh_tw
+
+
+_RUNTIME_MODEL_OVERRIDE: str | None = None
+_RUNTIME_THINKING_LEVEL: str | None = None
+
+
+def set_runtime_model_override(
+    model: str | None, thinking_level: str | None = None, planner_mode: str | None = None,
+) -> None:
+    """Set a process-wide model override (in-memory only, never touches .env)."""
+    global _RUNTIME_MODEL_OVERRIDE, _RUNTIME_THINKING_LEVEL
+    _RUNTIME_MODEL_OVERRIDE = model.strip() if model else None
+    _RUNTIME_THINKING_LEVEL = thinking_level if thinking_level in {"off", "low", "medium", "high", "max"} else None
+
+
+def get_runtime_model_override() -> dict:
+    return {
+        "model": _RUNTIME_MODEL_OVERRIDE,
+        "thinking_level": _RUNTIME_THINKING_LEVEL,
+        "default_model": OLLAMA_CHAT_MODEL,
+    }
+
+
+@dataclass
+class ChatResult:
+    """Wraps LLM output with token and timing metrics."""
+    content: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    duration_ms: int = 0
+    prompt: str = ""
 
 
 
@@ -62,7 +95,6 @@ def get_embedding(text: str) -> list:
         raise HTTPException(status_code=500, detail=f"Google Embedding 錯誤: {e}")
 
 
-
 def generate_chat_completion(
 
     prompt: str,
@@ -73,29 +105,44 @@ def generate_chat_completion(
 
     model: str | None = None,
 
-) -> str:
+    max_tokens: int = 8192,
+
+) -> ChatResult:
 
     if not OLLAMA_API_KEY:
 
         raise RuntimeError("缺少 OLLAMA_API_KEY，無法呼叫 Ollama Cloud 聊天模型")
 
+    effective_model = model or _RUNTIME_MODEL_OVERRIDE or OLLAMA_CHAT_MODEL
+
     payload = {
 
-        "model": model or OLLAMA_CHAT_MODEL,
+        "model": effective_model,
 
         "messages": [{"role": "user", "content": prompt}],
 
-        "options": {"temperature": temperature},
+        "options": {"temperature": temperature, "num_predict": max_tokens},
 
     }
+
+    if _RUNTIME_THINKING_LEVEL and _RUNTIME_THINKING_LEVEL != "off":
+        payload["options"]["think"] = _RUNTIME_THINKING_LEVEL
 
     if json_output:
 
         payload["format"] = "json"
 
+    started = time.perf_counter()
+
     response = ollama_client.chat(**payload)
 
+    duration_ms = round((time.perf_counter() - started) * 1000)
+
     content = response["message"]["content"].strip()
+
+    input_tokens = int(response.get("prompt_eval_count") or 0)
+
+    output_tokens = int(response.get("eval_count") or 0)
 
     
 
@@ -114,7 +161,68 @@ def generate_chat_completion(
         
 
     # JSON is a machine contract: normalize only human-facing model prose.
-    return content if json_output else normalize_zh_tw(content)
+
+    if not json_output:
+
+        content = normalize_zh_tw(content)
+
+    return ChatResult(content=content, input_tokens=input_tokens, output_tokens=output_tokens, duration_ms=duration_ms, prompt=prompt)
+
+
+@dataclass
+class ToolCallResult:
+    """Wraps native function-calling output."""
+    content: str
+    tool_calls: list[dict]  # [{"name": str, "arguments": dict}]
+    input_tokens: int = 0
+    output_tokens: int = 0
+    duration_ms: int = 0
+    prompt: str = ""
+
+
+def generate_chat_completion_with_tools(
+    prompt: str,
+    tools: list[dict],
+    temperature: float = 0,
+    model: str | None = None,
+    max_tokens: int = 8192,
+) -> ToolCallResult:
+    """Native function-calling path using Ollama's tools parameter."""
+    if not OLLAMA_API_KEY:
+        raise RuntimeError("缺少 OLLAMA_API_KEY，無法呼叫 Ollama Cloud 聊天模型")
+
+    effective_model = model or _RUNTIME_MODEL_OVERRIDE or OLLAMA_CHAT_MODEL
+    options: dict = {"temperature": temperature, "num_predict": max_tokens}
+    if _RUNTIME_THINKING_LEVEL and _RUNTIME_THINKING_LEVEL != "off":
+        options["think"] = _RUNTIME_THINKING_LEVEL
+
+    started = time.perf_counter()
+    response = ollama_client.chat(
+        model=effective_model,
+        messages=[{"role": "user", "content": prompt}],
+        tools=tools,
+        options=options,
+    )
+    duration_ms = round((time.perf_counter() - started) * 1000)
+
+    msg = response.get("message", {})
+    content = (msg.get("content") or "").strip()
+    tool_calls_raw = msg.get("tool_calls") or []
+    tool_calls = []
+    for tc in tool_calls_raw:
+        fn = tc.get("function", {})
+        tool_calls.append({
+            "name": fn.get("name", ""),
+            "arguments": fn.get("arguments", {}) or {},
+        })
+
+    input_tokens = int(response.get("prompt_eval_count") or 0)
+    output_tokens = int(response.get("eval_count") or 0)
+    return ToolCallResult(
+        content=content, tool_calls=tool_calls,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        duration_ms=duration_ms, prompt=prompt,
+    )
 
 
 
@@ -180,9 +288,9 @@ def analyze_big_five(text: str, previous_data: dict, interaction_count: int, ini
 
     try:
 
-        content = generate_chat_completion(prompt, temperature=0.5, json_output=True)
+        chat_result = generate_chat_completion(prompt, temperature=0.5, json_output=True)
 
-        return normalize_model_text(json.loads(content))
+        return normalize_model_text(json.loads(chat_result.content))
 
     except Exception as e:
 
@@ -276,9 +384,9 @@ def match_candidates(user_doc, candidates):
 
     try:
 
-        content = generate_chat_completion(prompt, temperature=0.5, json_output=True)
+        chat_result = generate_chat_completion(prompt, temperature=0.5, json_output=True)
 
-        result = json.loads(content)
+        result = json.loads(chat_result.content)
 
         
 
@@ -332,7 +440,7 @@ def generate_peer_first_message(initiator_doc, target_doc, reason: str) -> str:
 
     try:
 
-        return generate_chat_completion(prompt, temperature=0.5, json_output=False)
+        return generate_chat_completion(prompt, temperature=0.5, json_output=False).content
 
     except Exception as e:
 
@@ -416,7 +524,7 @@ def summarize_context(message: str, previous_context: str = None) -> str:
 
         result = generate_chat_completion(prompt, temperature=0.3, json_output=False)
 
-        return result.strip()[:20]
+        return result.content.strip()[:20]
 
     except Exception as e:
 
@@ -510,9 +618,9 @@ def analyze_deep_profile(text: str, previous_data: dict, interaction_count: int,
 
     try:
 
-        content = generate_chat_completion(prompt, temperature=0.6, json_output=True)
+        chat_result = generate_chat_completion(prompt, temperature=0.6, json_output=True)
 
-        return normalize_model_text(json.loads(content))
+        return normalize_model_text(json.loads(chat_result.content))
 
     except Exception as e:
 
@@ -567,8 +675,8 @@ def orchestrate_date_coordination(user_message: str, state: dict, context: dict)
     使用者說：{user_message}
     """
     try:
-        content = generate_chat_completion(prompt, temperature=0.5, json_output=True)
-        return __import__('json').loads(content)
+        chat_result = generate_chat_completion(prompt, temperature=0.5, json_output=True)
+        return __import__('json').loads(chat_result.content)
     except Exception as e:
         print(f"orchestrate_date_coordination error: {e}")
         return {"reply": f"系統錯誤：{str(e)}", "show_form": False, "form": form}
@@ -585,7 +693,7 @@ def detect_date_activation(message: str) -> bool:
 使用者訊息：{message}
 """
     try:
-        result = __import__('json').loads(generate_chat_completion(prompt, temperature=0, json_output=True))
+        result = __import__('json').loads(generate_chat_completion(prompt, temperature=0, json_output=True).content)
         is_scheduling = bool(result.get('is_scheduling'))
         if is_scheduling:
             print(f"\n[DATE_ACTIVATION] 🎉 偵測到約會啟動意圖: '{message}'")
@@ -623,7 +731,7 @@ def generate_date_prodding_messages(match_doc: dict, current_form: dict) -> dict
 }}
 """
     try:
-        return __import__('json').loads(generate_chat_completion(prompt, temperature=0.5, json_output=True))
+        return __import__('json').loads(generate_chat_completion(prompt, temperature=0.5, json_output=True).content)
     except Exception as e:
         print(f"generate_date_prodding_messages error: {e}")
         return {
@@ -659,8 +767,8 @@ def extract_date_form_updates(message: str, current_form: dict) -> dict:
 """
     try:
         raw_output = generate_chat_completion(prompt, temperature=0, json_output=True)
-        print(f"\n[DEBUG] LLM Date Form Extraction raw output:\n{raw_output}\n")
-        updated = __import__('json').loads(raw_output)
+        print(f"\n[DEBUG] LLM Date Form Extraction raw output:\n{raw_output.content}\n")
+        updated = __import__('json').loads(raw_output.content)
         
         final_form = {
             "date": updated.get("date") or current_form.get("date", ""),

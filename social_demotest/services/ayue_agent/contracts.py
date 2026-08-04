@@ -136,4 +136,5 @@ class AgentResult(BaseModel):
     profile_write_reason: str = "casual"
     sources: list[dict[str, str]] = Field(default_factory=list)
     place_cards: list[dict[str, str]] = Field(default_factory=list)
+    llm_call_metrics: list[dict[str, Any]] = Field(default_factory=list)
 

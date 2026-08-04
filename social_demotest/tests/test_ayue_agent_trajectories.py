@@ -1,4 +1,4 @@
-import json
+﻿import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -39,7 +39,7 @@ class AyueAgentTrajectoryTests(unittest.TestCase):
                     captured_trace.update(trace)
 
                 with patch("services.ayue_agent.runtime.build_agent_turn_context_v2", return_value=turn), \
-                     patch("services.ayue_agent.runtime.plan_turn_v2", side_effect=decisions), \
+                     patch("services.ayue_agent.runtime.plan_turn_v2_function_calling", side_effect=decisions), \
                      patch("services.ayue_agent.runtime.execute_tool", side_effect=tool_results) as execute_tool, \
                      patch("services.ayue_agent.runtime.generate_final_reply_v2", return_value=fixture["reply"]), \
                      patch("services.ayue_agent.runtime._save_trace", side_effect=capture_trace):

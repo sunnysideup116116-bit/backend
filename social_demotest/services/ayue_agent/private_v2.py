@@ -156,7 +156,7 @@ reply 只能依 safe context 與 observations 作答，以繁體中文、1 到 3
 
 def _plan(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]]) -> PrivateAgentDecision | None:
     try:
-        decision = PrivateAgentDecision.model_validate(json.loads(generate_chat_completion(_planner_prompt(ctx, observations), temperature=0, json_output=True)))
+        decision = PrivateAgentDecision.model_validate(json.loads(generate_chat_completion(_planner_prompt(ctx, observations), temperature=0, json_output=True).content))
         if decision.kind != "final" and (decision.confidence < .65 or decision.tool_name not in PRIVATE_TOOL_REGISTRY):
             return None
         if decision.kind == "confirmation" and not PRIVATE_TOOL_REGISTRY[decision.tool_name].requires_confirmation:
@@ -236,7 +236,7 @@ def _compose(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]],
 只能依 safe context 回答；不能提及、猜測或暗示對方未公開的私人資料、私人悄悄話或行事曆內容。calendar observation 只能說是否有既有安排與時段，不能說活動內容。不要提及工具、模型、系統或權限。
 安全 context：{json.dumps(safe, ensure_ascii=False)}"""
     try:
-        reply = str(generate_chat_completion(prompt, temperature=.45) or "").strip()
+        reply = str(generate_chat_completion(prompt, temperature=.45).content or "").strip()
         if reply and not re.search(r"(?:私人資料|工具|prompt|seed_user|資料庫)", reply, re.I):
             return reply[:360]
     except Exception:

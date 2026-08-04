@@ -22,11 +22,11 @@ from services.mediator_event_service import queue_mediator_event
 
 GIPHY_SEARCH_URL = "https://api.giphy.com/v1/gifs/search"
 MATCH_CELEBRATION_QUERIES = (
-    "funny reaction laugh",
-    "funny excited dance",
-    "funny happy fail",
-    "funny animal celebration",
-    "funny meme reaction",
+    "happy celebration dance",
+    "congratulations celebration",
+    "yay confetti celebration",
+    "happy congrats dance",
+    "cute party celebration",
 )
 _REQUEST_TIMEOUT = (3, 8)
 _CACHE_TTL_SECONDS = 15 * 60
@@ -34,7 +34,7 @@ _RECENT_REACTION_LIMIT = 80
 _cache_lock = threading.Lock()
 _reaction_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _recent_reaction_urls: deque[str] = deque(maxlen=_RECENT_REACTION_LIMIT)
-_last_query = ""
+_query_cursor = 0
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ayue-giphy")
 
 
@@ -68,17 +68,16 @@ def _parse_reactions(payload: Any) -> list[dict[str, Any]]:
             "preview_url": preview_url,
             "width": str(original.get("width") or "")[:8] if isinstance(original, dict) else "",
             "height": str(original.get("height") or "")[:8] if isinstance(original, dict) else "",
-            "alt_text": "阿月送上的搞笑 GIF",
+            "alt_text": "阿月替配對成功送上的慶祝 GIF",
         })
     return reactions
 
 
 def _next_celebration_query() -> str:
-    global _last_query
+    global _query_cursor
     with _cache_lock:
-        choices = [query for query in MATCH_CELEBRATION_QUERIES if query != _last_query]
-        query = random.choice(choices or MATCH_CELEBRATION_QUERIES)
-        _last_query = query
+        query = MATCH_CELEBRATION_QUERIES[_query_cursor % len(MATCH_CELEBRATION_QUERIES)]
+        _query_cursor += 1
     return query
 
 
@@ -139,7 +138,7 @@ def write_match_celebration_gifs(
         try:
             queued = queue_mediator_event(
                 user_id,
-                "這張有夠好笑，丟給你 😂",
+                "太好了～快去和對方聊聊吧！",
                 "match_connected_gif",
                 event_key=f"match:{match_id}:celebration:gif:{user_id}",
                 match_id=match_id,

@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 import inspect
 from pathlib import Path
 from unittest.mock import patch
@@ -6,7 +6,7 @@ from unittest.mock import patch
 from services.ayue_agent.contracts import AgentDecision, AgentIntent, AgentTurnContext, AgentTurnContextV2, DecisionKind
 from services.ayue_agent.router import (
     _concise_public_reply,
-    _planner_prompt,
+    _fc_planner_prompt,
     generate_final_reply_v2,
     guard_v2_decision,
     tool_policy_for_turn,
@@ -35,8 +35,8 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
         ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="為什麼")
         self.assertEqual(tool_policy_for_turn(ctx) - {"match.start_search"}, self._base_policy())
 
-    def test_planner_prompt_keeps_the_in_app_matchmaker_identity(self):
-        prompt = _planner_prompt(
+    def test_fc_planner_prompt_keeps_the_in_app_matchmaker_identity(self):
+        prompt = _fc_planner_prompt(
             AgentTurnContextV2(user_id="owner", room_id="room", message="你根本不認識我"),
             tool_policy_for_turn(AgentTurnContextV2(user_id="owner", room_id="room", message="你根本不認識我")), [],
         )
@@ -44,7 +44,7 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
         self.assertIn("AI 媒人", prompt)
         self.assertIn("不是另一位使用者", prompt)
 
-    def test_planner_prompt_carries_place_search_state_and_forbids_cuisine_reprompt(self):
+    def test_fc_planner_prompt_carries_place_search_state_and_forbids_cuisine_reprompt(self):
         ctx = AgentTurnContextV2(
             user_id="owner", room_id="room", message="你隨意推薦",
             user_location="高雄市鹽埕區",
@@ -53,10 +53,9 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
                 "use_saved_location": True, "created_at": 1,
             },
         )
-        prompt = _planner_prompt(ctx, tool_policy_for_turn(ctx), [])
+        prompt = _fc_planner_prompt(ctx, tool_policy_for_turn(ctx), [])
         self.assertIn('"place_search_draft"', prompt)
         self.assertIn("不可再追問料理種類", prompt)
-        self.assertIn('"place_search_followup":"none|recommend"', prompt)
 
     def test_guard_does_not_reclassify_a_planner_confirmation_from_text(self):
         ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="我不喜歡抽菸的人")
@@ -176,7 +175,7 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
             "_is_memory_query", "validate_tool_intent", "route_turn",
             "explicit_search_request", "is_unsupported_direct_date_request",
         )
-        for function in (tool_policy_for_turn, _planner_prompt, guard_v2_decision):
+        for function in (tool_policy_for_turn, _fc_planner_prompt, guard_v2_decision):
             source = inspect.getsource(function)
             for legacy_name in legacy_names:
                 self.assertNotIn(legacy_name, source)
@@ -219,18 +218,18 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
             user_id="owner", room_id="room", message="你有記得我的旅遊計畫嗎？",
             pending_confirmation={"action": "match.start_search", "status": "pending"},
         )
-        prompt = _planner_prompt(ctx, tool_policy_for_turn(ctx), [])
+        prompt = _fc_planner_prompt(ctx, tool_policy_for_turn(ctx), [])
         self.assertNotIn('"pending_confirmation"', prompt)
 
-    def test_planner_prompt_exposes_typed_proposal_decision_contract(self):
+    def test_fc_planner_prompt_exposes_typed_proposal_decision_contract(self):
         ctx = AgentTurnContextV2(
             user_id="owner", room_id="room", message="有興趣，幫我問問",
             active_proposal={"user_can_decide": True, "proposal_revision": 3},
         )
-        prompt = _planner_prompt(ctx, tool_policy_for_turn(ctx), [])
-        self.assertIn('"decision"', prompt)
-        self.assertIn('"interested"', prompt)
-        self.assertIn('"declined"', prompt)
+        prompt = _fc_planner_prompt(ctx, tool_policy_for_turn(ctx), [])
+        # Function-calling mode exposes the proposal decision as a native tool
+        # (match.decide_active_proposal), not as inline JSON schema text.
+        self.assertIn("match.decide_active_proposal", tool_policy_for_turn(ctx))
         self.assertNotIn("proposal_revision", prompt)
 
     def test_match_status_intent_requires_canonical_read_before_final(self):
@@ -364,7 +363,7 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
         self.assertLessEqual(len(concise), 110)
         self.assertNotIn("接著還能", concise)
 
-    def test_planner_prompt_allows_one_offer_after_sustained_activity_engagement(self):
+    def test_fc_planner_prompt_allows_one_offer_after_sustained_activity_engagement(self):
         ctx = AgentTurnContextV2(
             user_id="owner", room_id="room", message="我心情超好",
             recent_messages=[
@@ -373,9 +372,11 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
                 {"role": "user", "content": "當地市集我要去"},
             ],
         )
-        prompt = _planner_prompt(ctx, tool_policy_for_turn(ctx), [])
-        self.assertIn("已連續談出具體活動", prompt)
-        self.assertIn("自然問一次", prompt)
+        prompt = _fc_planner_prompt(ctx, tool_policy_for_turn(ctx), [])
+        # Function-calling mode uses the meta-line protocol for opportunity
+        # signalling instead of inline JSON-schema instructions.
+        self.assertIn("opportunity_signal", prompt)
+        self.assertIn("social_opening", prompt)
 
 
 if __name__ == "__main__":

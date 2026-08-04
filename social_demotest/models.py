@@ -80,6 +80,10 @@ class ProfileLocationRequest(BaseModel):
     city: str = Field(default="", max_length=20)
     district: str = Field(default="", max_length=20)
 
+class ModelSettingsRequest(BaseModel):
+    model: str | None = None
+    thinking_level: str | None = None  # "off", "low", "medium", "high", "max"
+
 class ResetRequest(BaseModel):
     user_id: str
     state: str  # "big_five" or "deep_profile"
@@ -122,6 +126,7 @@ class CalendarEventUpdateRequest(BaseModel):
     timezone: str | None = None
     location: str | None = None
     notes: str | None = None
+    expected_revision: int | None = None
 
 class CalendarRescheduleRequest(BaseModel):
     user_id: str
@@ -136,6 +141,7 @@ class CalendarRescheduleRequest(BaseModel):
 
 class CalendarActionRequest(BaseModel):
     user_id: str
+    expected_revision: int | None = None
 
 class CalendarSettingsRequest(BaseModel):
     user_id: str

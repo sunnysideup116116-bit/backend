@@ -553,7 +553,7 @@ def classify_proposal_intent(message: str, situation: str = "match_search_confir
 
     try:
 
-        result = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True))
+        result = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True).content)
 
         intent = str(result.get("intent", "unclear")).lower()
 
@@ -699,6 +699,7 @@ def _complete_public_v2_turn(
         "assessment_revision": agent_result.assessment_revision,
         "sources": sources,
         "place_cards": place_cards,
+        "llm_call_metrics": agent_result.llm_call_metrics or [],
     }
 
 
@@ -739,12 +740,38 @@ def _sanitize_public_stream_event(event: dict) -> dict | None:
     run_id = str(event.get("agent_run_id") or "")[:128]
     if event_type == "run_started" and run_id:
         return {"type": "run_started", "agent_run_id": run_id}
+    if event_type == "planner_decision" and run_id:
+        decision = event.get("decision") or {}
+        llm_metrics = decision.get("llm_metrics") or {}
+        return {
+            "type": "planner_decision",
+            "agent_run_id": run_id,
+            "step_id": str(event.get("step_id") or "")[:64],
+            "decision": {
+                "kind": str(decision.get("kind") or "")[:20],
+                "intent": str(decision.get("intent") or "")[:30],
+                "tool_name": str(decision.get("tool_name") or "")[:80] or None,
+                "confidence": round(float(decision.get("confidence") or 0), 3),
+                "arguments": decision.get("arguments") or {},
+                "reply": str(decision.get("reply") or "")[:500] or None,
+                "duration_ms": max(0, int(decision.get("duration_ms") or 0)),
+                "llm_metrics": {
+                    "input_tokens": max(0, int(llm_metrics.get("input_tokens") or 0)),
+                    "output_tokens": max(0, int(llm_metrics.get("output_tokens") or 0)),
+                    "duration_ms": max(0, int(llm_metrics.get("duration_ms") or 0)),
+                    "prompt": str(llm_metrics.get("prompt") or "")[:20000],
+                    "response": str(llm_metrics.get("response") or json.dumps(llm_metrics.get("tool_calls") or {}, ensure_ascii=False))[:20000],
+                } if llm_metrics else None,
+            },
+        }
     if event_type == "tool_started" and run_id:
         return {
             "type": "tool_started",
             "agent_run_id": run_id,
             "step_id": str(event.get("step_id") or "")[:64],
             "text": str(event.get("text") or "我確認一下…")[:200],
+            "tool_name": str(event.get("tool_name") or "")[:80] or None,
+            "arguments": event.get("arguments") or {},
         }
     if event_type == "tool_finished" and run_id:
         outcome = "ok" if event.get("outcome") == "ok" else "error"
@@ -753,6 +780,9 @@ def _sanitize_public_stream_event(event: dict) -> dict | None:
             "agent_run_id": run_id,
             "step_id": str(event.get("step_id") or "")[:64],
             "outcome": outcome,
+            "tool_name": str(event.get("tool_name") or "")[:80] or None,
+            "duration_ms": max(0, int(event.get("duration_ms") or 0)),
+            "result_summary": event.get("result_summary"),
         }
     if event_type == "final" and isinstance(event.get("response"), dict):
         return {"type": "final", "response": event["response"]}
@@ -1413,7 +1443,7 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
 
             )
 
-            ai_res = json.loads(ai_res_str)
+            ai_res = json.loads(ai_res_str.content)
 
             ai_reply = ai_res.get("reply", "收到。")
 

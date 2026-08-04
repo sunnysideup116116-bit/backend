@@ -280,7 +280,7 @@ pace: slow|normal|direct
         "next_action": {"ask_open_question", "share_self", "suggest_topic", "wait", "clarify"},
     }
     try:
-        raw = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True))
+        raw = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True).content)
         return {key: raw.get(key) if raw.get(key) in values else fallback[key] for key, values in allowed.items()}
     except Exception:
         return fallback
@@ -296,7 +296,7 @@ def _render_advice(ctx: PrivateAgentTurnContext, strategy: dict[str, str], facts
 可直接引用資料：{json.dumps(facts, ensure_ascii=False)}
 """
     try:
-        return generate_chat_completion(prompt, temperature=0.35, json_output=False).strip()
+        return generate_chat_completion(prompt, temperature=0.35, json_output=False).content.strip()
     except Exception:
         return "我會建議先從輕一點的話題接，讓對方比較好回；你也可以先分享一小段自己的經驗。"
 

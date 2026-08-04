@@ -9,9 +9,10 @@ import uuid
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from database import db, profiles_coll
+from database import calendar_events_coll, db, profiles_coll
 from services.match_action_service import decide_active_proposal, start_match_search
 
+import config
 from .context import build_agent_turn_context_v2
 from .contracts import AgentResult, AgentTurnContext, DecisionKind, ToolCall
 from .capabilities import CAPABILITY_MANIFEST_VERSION, matching_truth_reply
@@ -22,23 +23,16 @@ from .match_opportunity import (
     record_guidance_shown,
 )
 from .router import (
-    calendar_confirmation_choice,
     confirmation_choice,
     generate_clarification_reply_v2,
     generate_final_reply_v2,
     guard_v2_decision,
     planner_final_reply_v2,
-    plan_turn_v2,
+    plan_turn_v2_function_calling,
     tool_policy_for_turn,
 )
 from .time_context import build_turn_clock
-from .tool_registry import (
-    ToolRisk,
-    executor_arguments_for_turn,
-    get_tool_spec,
-    planner_arguments_allowed,
-    tool_call_key,
-)
+from .tool_registry import ToolRisk, executor_arguments_for_turn, get_tool_spec, tool_call_key
 from .tools import execute_tool
 from .public_relationship_projection import validated_mentioned_contact_ids
 from .web_tools import is_safe_public_url
@@ -59,7 +53,7 @@ from services.assessment_session_service import (
 
 RUNS = db["agent_runs"]
 TOOL_CALLS = db["agent_tool_calls"]
-MAX_STEPS = max(1, min(int(os.getenv("AYUE_AGENT_MAX_STEPS", "3")), 3))
+MAX_STEPS = max(1, min(int(os.getenv("AYUE_AGENT_MAX_STEPS", "5")), 5))
 ProgressCallback = Callable[[dict[str, Any]], Any]
 
 
@@ -148,7 +142,7 @@ def _persist_trace(run_id: str, ctx: AgentTurnContext, payload: dict[str, Any]) 
         "tool_results": tool_results,
         "event_sequence": [
             str(event) for event in (payload.get("event_sequence") or [])
-            if event in {"run_started", "tool_started", "tool_finished", "final", "error"}
+            if event in {"run_started", "tool_started", "tool_finished", "planner_decision", "final", "error"}
         ],
         "tool_cache_hits": [
             str(tool) for tool in (payload.get("tool_cache_hits") or [])
@@ -231,7 +225,7 @@ def _emit_progress(
         trace["public_progress_result_codes"].append(f"{event_type}:{delivery_code}")
 
 
-def _compose_final_reply(turn: Any, observations: list[dict], trace: dict[str, Any], reason: str) -> str:
+def _compose_final_reply(turn: Any, observations: list[dict], trace: dict[str, Any], reason: str, metrics_collector: list | None = None) -> str:
     """Record composer metadata without recording user text or observations."""
     result_code = "unknown"
 
@@ -240,7 +234,7 @@ def _compose_final_reply(turn: Any, observations: list[dict], trace: dict[str, A
         result_code = value
 
     started = time.perf_counter()
-    reply = generate_final_reply_v2(turn, observations, outcome_sink=record_outcome)
+    reply = generate_final_reply_v2(turn, observations, outcome_sink=record_outcome, metrics_collector=metrics_collector or trace.get("_llm_metrics"))
     trace.setdefault("model_ms", []).append(round((time.perf_counter() - started) * 1000))
     trace["composer_outcome"] = {
         "reason": reason,
@@ -252,9 +246,10 @@ def _compose_final_reply(turn: Any, observations: list[dict], trace: dict[str, A
 
 def _final_reply_for_decision(
     turn: Any, decision: Any, observations: list[dict], trace: dict[str, Any], reason: str,
+    metrics_collector: list | None = None,
 ) -> str:
     """Prefer the terminal planner reply; retain Composer as a safe fallback."""
-    reply = planner_final_reply_v2(turn, decision, observations)
+    reply = planner_final_reply_v2(turn, decision)
     if reply:
         trace["composer_outcome"] = {
             "reason": reason,
@@ -262,7 +257,7 @@ def _final_reply_for_decision(
             "result_code": "planner_reply",
         }
         return reply
-    return _compose_final_reply(turn, observations, trace, reason)
+    return _compose_final_reply(turn, observations, trace, reason, metrics_collector=metrics_collector)
 
 
 def _public_sources(observations: list[dict]) -> list[dict[str, str]]:
@@ -324,6 +319,24 @@ def _osm_embed_url(map_url: str) -> str:
     return f"https://www.openstreetmap.org/export/embed.html?{params}"
 
 
+def _google_embed_url(place_id: str) -> str:
+    """Build a Google Maps Embed URL for one validated Google Place ID.
+
+    Uses the browser key (referrer-restricted) so the embed is unlimited free
+    (Maps Embed SKU 9C10-8313-F21F). The place_id is validated by the caller via
+    the runtime card projection, but we re-check the regex defensively.
+    See docs/google-maps-migration-plan.md §3.3 E.
+    """
+    place_id = str(place_id or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{3,180}", place_id):
+        return ""
+    browser_key = str(getattr(config, "GOOGLE_MAPS_BROWSER_API_KEY", "") or "")
+    if not browser_key:
+        return ""
+    params = urlencode({"key": browser_key, "q": f"place_id:{place_id}"})
+    return f"https://www.google.com/maps/embed/v1/place?{params}"
+
+
 def _distance_label(value: Any) -> str:
     try:
         distance = max(0, int(value))
@@ -336,24 +349,9 @@ def _distance_label(value: Any) -> str:
     return f"約 {distance / 1_000:.1f} 公里"
 
 
-def _normalized_place_name(value: Any) -> str:
-    return re.sub(r"\s+", "", str(value or "")).casefold()
-
-
-def _public_place_cards(observations: list[dict], *, reply: str | None = None) -> list[dict[str, str]]:
-    """Project reply-named places, with one-result searches as the sole safe fallback."""
-    mentioned_text = _normalized_place_name(reply)
-    candidate_count = sum(
-        len((observation.get("result") or {}).get("places") or [])
-        if observation.get("tool") == "places.search_nearby"
-        else int(bool((observation.get("result") or {}).get("place")))
-        if observation.get("tool") == "places.resolve_place"
-        else 0
-        for observation in observations
-    )
-    if reply is not None and not mentioned_text and candidate_count != 1:
-        return []
-    cards_with_positions: list[tuple[int, dict[str, str]]] = []
+def _public_place_cards(observations: list[dict]) -> list[dict[str, str]]:
+    """Project verified place observations into bounded provider-neutral cards."""
+    cards: list[dict[str, str]] = []
     seen: set[str] = set()
     for observation in observations:
         tool_name = observation.get("tool")
@@ -386,13 +384,6 @@ def _public_place_cards(observations: list[dict], *, reply: str | None = None) -
                 unique_key = f"openstreetmap:{map_url}"
             if unique_key in seen:
                 continue
-            name = re.sub(r"\s+", " ", str(item.get("name") or "")).strip()[:80]
-            name_token = _normalized_place_name(name)
-            if reply is not None and not name_token:
-                continue
-            mention_position = mentioned_text.find(name_token) if name_token else -1
-            if reply is not None and mention_position < 0 and candidate_count != 1:
-                continue
             seen.add(unique_key)
             category = str(item.get("category") or "attraction")
             if category not in {"restaurant", "cafe", "bar", "attraction", "park"}:
@@ -400,18 +391,39 @@ def _public_place_cards(observations: list[dict], *, reply: str | None = None) -
             card = {
                 "provider": provider,
                 "place_id": place_id if provider == "google" else "",
-                "name": name,
+                "name": re.sub(r"\s+", " ", str(item.get("name") or "地點")).strip()[:80],
                 "category": category,
                 "address_summary": re.sub(r"\s+", " ", str(item.get("address_summary") or "")).strip()[:180],
                 "distance_label": _distance_label(item.get("distance_m")),
                 "map_url": map_url,
-                "embed_url": _osm_embed_url(map_url) if provider == "openstreetmap" else "",
+                "embed_url": (_google_embed_url(place_id) if provider == "google" else _osm_embed_url(map_url)),
                 "attribution": attribution or ("Google Maps" if provider == "google" else "© OpenStreetMap contributors"),
                 "attribution_url": attribution_url,
             }
-            cards_with_positions.append((mention_position if reply is not None else len(cards_with_positions), card))
-    cards_with_positions.sort(key=lambda item: item[0])
-    return [card for _, card in cards_with_positions[:3]]
+            # Optional photo projection (Google only). photo_url must pass the
+            # strict Google media-endpoint check; rating / opening hours are
+            # Enterprise-tier and intentionally never projected.
+            if provider == "google":
+                photo_url = str(item.get("photo_url") or "")
+                if photo_url:
+                    # Photo URLs must come from Google Places media endpoint and
+                    # carry the server key. is_safe_public_url is too permissive
+                    # (any non-local host passes), so apply a strict host check.
+                    try:
+                        parsed_photo = urlsplit(photo_url)
+                        if (
+                            parsed_photo.scheme == "https"
+                            and parsed_photo.hostname.lower() == "places.googleapis.com"
+                            and parsed_photo.path.startswith("/v1/places/")
+                            and parsed_photo.path.endswith("/media")
+                        ):
+                            card["photo_url"] = photo_url
+                    except (TypeError, ValueError):
+                        pass
+            cards.append(card)
+            if len(cards) == 5:
+                return cards
+    return cards
 
 
 def _web_extract_urls_allowed(ctx: AgentTurnContext, observations: list[dict], urls: list[str]) -> bool:
@@ -533,6 +545,7 @@ def _compose_clarification(
     trace: dict[str, Any],
     *,
     topic: str,
+    metrics_collector: list | None = None,
 ) -> str:
     result_code = "unknown"
 
@@ -542,6 +555,7 @@ def _compose_clarification(
 
     reply = generate_clarification_reply_v2(
         turn, topic=topic, observations=observations, outcome_sink=record_outcome,
+        metrics_collector=metrics_collector or trace.get("_llm_metrics"),
     )
     trace["composer_outcome"] = {
         "reason": "clarification",
@@ -793,18 +807,6 @@ _CALENDAR_WRITE_ACTIONS = {
     "calendar.create_my_event", "calendar.update_my_event",
     "calendar.cancel_my_event", "calendar.cancel_my_events",
 }
-_CALENDAR_DRAFT_FIELDS = {
-    "calendar.create_my_event": {"title", "date", "start_time", "end_time", "timezone", "location", "notes"},
-    "calendar.update_my_event": {"event_hint", "title", "date", "start_time", "end_time", "timezone", "location", "notes"},
-    "calendar.cancel_my_event": {"event_hint"},
-    "calendar.cancel_my_events": {"mode", "event_hints"},
-    "calendar": {"event_hint", "title", "date", "start_time", "end_time", "timezone", "location", "notes", "mode", "event_hints"},
-}
-_CALENDAR_DRAFT_LIMITS = {
-    "event_hint": 120, "title": 120, "date": 10, "start_time": 5, "end_time": 5,
-    "timezone": 64, "location": 160, "notes": 500, "mode": 20,
-}
-_SINGLE_CALENDAR_TARGET_ACTIONS = {"calendar.update_my_event", "calendar.cancel_my_event"}
 _ASSESSMENT_START_ACTIONS = {
     "profile.start_assessment",
 }
@@ -859,85 +861,21 @@ def _calendar_action_error(message: str, run_id: str) -> AgentResult:
     )
 
 
-def _safe_calendar_draft_arguments(action: str, values: Any) -> dict[str, Any]:
-    """Persist only bounded public calendar details, never executor identity state."""
-    raw = values if isinstance(values, dict) else {}
-    cleaned: dict[str, Any] = {}
-    for key in _CALENDAR_DRAFT_FIELDS.get(action, _CALENDAR_DRAFT_FIELDS["calendar"]):
-        value = raw.get(key)
-        if value is None:
-            continue
-        if key == "event_hints":
-            if not isinstance(value, list):
-                continue
-            hints = [str(item).strip()[:120] for item in value if str(item).strip()]
-            if hints:
-                cleaned[key] = list(dict.fromkeys(hints))[:10]
-            continue
-        if key == "mode":
-            mode = str(value).strip()
-            if mode in {"selected", "all_upcoming"}:
-                cleaned[key] = mode
-            continue
-        text = str(value).strip()[:_CALENDAR_DRAFT_LIMITS.get(key, 120)]
-        if text or (
-            action == "calendar.update_my_event"
-            and key in {"location", "notes"}
-            and value is not None
-        ):
-            cleaned[key] = text
-    return cleaned
-
-
-def _calendar_draft_state(turn: Any, decision: Any) -> tuple[str, dict[str, Any]]:
-    existing = getattr(turn, "action_draft", None) or {}
-    existing_action = str(existing.get("action") or "calendar")
-    if existing_action not in _CALENDAR_DRAFT_FIELDS:
-        existing_action = "calendar"
-    proposed_action = str(getattr(decision, "tool_name", "") or "")
-    action = proposed_action if proposed_action in _CALENDAR_WRITE_ACTIONS else existing_action
-    if action not in _CALENDAR_DRAFT_FIELDS:
-        action = "calendar"
-    previous = _safe_calendar_draft_arguments(existing_action, existing.get("arguments"))
-    proposed = _safe_calendar_draft_arguments(action, getattr(decision, "arguments", None))
-    if existing_action == action or existing_action == "calendar":
-        merged = {**previous, **proposed}
-    elif action in _SINGLE_CALENDAR_TARGET_ACTIONS and existing_action in _SINGLE_CALENDAR_TARGET_ACTIONS:
-        merged = {**({"event_hint": previous["event_hint"]} if previous.get("event_hint") else {}), **proposed}
-    else:
-        merged = proposed
-    return action, _safe_calendar_draft_arguments(action, merged)
-
-
-def _merge_calendar_draft_into_decision(turn: Any, decision: Any) -> Any:
-    """Carry validated public details across Calendar clarification turns."""
-    if str(getattr(getattr(decision, "intent", None), "value", "")) != "calendar_action":
-        return decision
-    action = str(getattr(decision, "tool_name", "") or "")
-    if action not in _CALENDAR_WRITE_ACTIONS:
-        return decision
-    _, arguments = _calendar_draft_state(turn, decision)
-    return decision.model_copy(update={"arguments": arguments})
-
-
 def _save_action_draft(ctx: AgentTurnContext, turn: Any, decision: Any) -> None:
-    """Keep bounded Calendar clarification state across turns; never persist IDs or revisions."""
-    existing = getattr(turn, "action_draft", None) or {}
-    action, arguments = _calendar_draft_state(turn, decision)
+    """Keep only public, model-safe clarification state; never persist event IDs."""
+    existing = turn.action_draft or {}
+    action = str(getattr(decision, "tool_name", "") or existing.get("action") or "calendar")
+    if action not in _CALENDAR_WRITE_ACTIONS:
+        action = "calendar"
     missing = [
         str(field) for field in (getattr(decision, "missing_fields", None) or [])
-        if str(field) in {"event_hint", "event_hints", "title", "date", "start_time", "end_time", "changes"}
+        if str(field) in {"event_hint", "title", "date", "start_time", "end_time", "changes"}
     ][:4]
-    if not missing:
-        missing = [
-            str(field) for field in (existing.get("missing_fields") or [])
-            if str(field) in {"event_hint", "event_hints", "title", "date", "start_time", "end_time", "changes"}
-        ][:4]
     profiles_coll.update_one(
         {"user_id": ctx.user_id},
         {"$set": {"agentic_action_draft": {
-            "version": "v2", "domain": "calendar", "action": action,
-            "arguments": arguments, "missing_fields": missing, "created_at": time.time(),
+            "version": "v1", "domain": "calendar", "action": action,
+            "missing_fields": missing, "created_at": time.time(),
         }}},
         upsert=True,
     )
@@ -958,11 +896,15 @@ def _bounded_place_int(value: Any, default: int, lower: int, upper: int) -> int:
     return max(lower, min(parsed, upper))
 
 
+def _bounded_place_cuisine(value: Any) -> str:
+    return " ".join(str(value or "").split())[:30]
+
+
 def _place_search_arguments(turn: Any, decision: Any | None = None) -> dict[str, Any] | None:
     """Merge a bounded place draft with planner-grounded search arguments."""
     draft = dict(getattr(turn, "place_search_draft", None) or {})
     proposed = dict(getattr(decision, "arguments", None) or {})
-    for key in ("anchor", "categories", "radius_m", "limit", "use_saved_location"):
+    for key in ("anchor", "categories", "radius_m", "limit", "use_saved_location", "cuisine"):
         if key in proposed:
             draft[key] = proposed[key]
     categories = [str(item) for item in (draft.get("categories") or []) if str(item) in _PLACE_CATEGORIES][:3]
@@ -975,8 +917,9 @@ def _place_search_arguments(turn: Any, decision: Any | None = None) -> dict[str,
     return {
         "anchor": anchor,
         "categories": categories,
+        "cuisine": _bounded_place_cuisine(draft.get("cuisine")),
         "radius_m": _bounded_place_int(draft.get("radius_m", 1500), 1500, 300, 5000),
-        "limit": _bounded_place_int(draft.get("limit", 3), 3, 1, 3),
+        "limit": _bounded_place_int(draft.get("limit", 5), 5, 1, 5),
         "use_saved_location": use_saved_location,
     }
 
@@ -999,7 +942,8 @@ def _save_place_search_draft(ctx: AgentTurnContext, turn: Any, decision: Any) ->
         {"user_id": ctx.user_id},
         {"$set": {"agentic_place_search_draft": {
             "version": "v1", "anchor": anchor, "categories": categories,
-            "radius_m": 1500, "limit": 3,
+            "cuisine": _bounded_place_cuisine(proposed.get("cuisine") or existing.get("cuisine")),
+            "radius_m": 1500, "limit": 5,
             "use_saved_location": use_saved_location, "created_at": time.time(),
         }}},
         upsert=True,
@@ -1060,16 +1004,6 @@ def _prepare_calendar_confirmation(
     if not calendar_access_enabled(ctx.user_id):
         return _calendar_action_error("我目前不能存取你的行事曆；你可以先到日曆設定確認是否已授權。", run_id)
     arguments = executor_arguments_for_turn(spec, ctx.mentioned_ids, decision.arguments)
-
-    def draft_error(message: str, missing_fields: list[str] | None = None) -> AgentResult:
-        draft_decision = decision.model_copy(update={
-            "tool_name": action,
-            "arguments": arguments,
-            "missing_fields": missing_fields or [],
-        })
-        _save_action_draft(ctx, turn, draft_decision)
-        return _calendar_action_error(message, run_id)
-
     event: dict | None = None
     targets: list[dict[str, Any]] = []
     conflicts: list[dict] = []
@@ -1087,13 +1021,13 @@ def _prepare_calendar_confirmation(
                 event_hints=list(arguments.get("event_hints") or []),
             )
             if resolution == "ambiguous":
-                return draft_error("有一筆行程對應到不只一個結果。你可以補上日期或完整名稱嗎？", ["event_hints"])
+                return _calendar_action_error("有一筆行程對應到不只一個結果。你可以補上日期或完整名稱嗎？", run_id)
             if resolution == "not_found":
-                return draft_error("我找不到其中一筆自己的行程。你可以補上日期或名稱嗎？", ["event_hints"])
+                return _calendar_action_error("我找不到其中一筆自己的行程。你可以補上日期或名稱嗎？", run_id)
             if resolution == "too_many":
-                return draft_error("接下來的行程超過 10 筆；請先指定想取消哪些日期。", ["event_hints"])
+                return _calendar_action_error("接下來的行程超過 10 筆；請先指定想取消哪些日期。", run_id)
             if resolution or not events:
-                return draft_error("我還需要更明確的行程名稱或日期，才能一次取消多筆。", ["event_hints"])
+                return _calendar_action_error("我還需要更明確的行程名稱或日期，才能一次取消多筆。", run_id)
             targets = [_calendar_pending_target(item, ctx.user_id) for item in events]
             labels = "、".join(f"「{target['safe_label']}」" for target in targets)
             preview = f"要取消這 {len(targets)} 筆行程嗎：{labels}？"
@@ -1102,9 +1036,9 @@ def _prepare_calendar_confirmation(
         else:
             event, resolution = resolve_owned_event(ctx.user_id, arguments.get("event_hint", ""))
             if resolution == "ambiguous":
-                return draft_error("我找到不只一筆符合的行程。你可以補上日期或完整名稱嗎？", ["event_hint"])
+                return _calendar_action_error("我找到不只一筆符合的行程。你可以補上日期或完整名稱嗎？", run_id)
             if not event:
-                return draft_error("我找不到這筆自己的行程。你可以補上日期或名稱嗎？", ["event_hint"])
+                return _calendar_action_error("我找不到這筆自己的行程。你可以補上日期或名稱嗎？", run_id)
             is_shared = event.get("source_type") == "date"
             if action == "calendar.cancel_my_event":
                 targets = [_calendar_pending_target(event, ctx.user_id)]
@@ -1128,7 +1062,7 @@ def _prepare_calendar_confirmation(
                 }
                 changes = {key: value for key, value in arguments.items() if key != "event_hint" and value is not None}
                 if not changes:
-                    return draft_error("你想把「%s」改成什麼呢？" % _calendar_event_label(event), ["changes"])
+                    return _calendar_action_error("你想把「%s」改成什麼呢？" % _calendar_event_label(event), run_id)
                 if is_shared:
                     shared_changes = dict(changes)
                     if "title" in shared_changes:
@@ -1153,7 +1087,7 @@ def _prepare_calendar_confirmation(
                 if is_shared:
                     preview += " 對方會收到改期通知，重新確認後才會正式變更。"
     except HTTPException as exc:
-        return draft_error(f"我還需要補齊行程資訊：{exc.detail}。")
+        return _calendar_action_error(f"我還需要補齊行程資訊：{exc.detail}。", run_id)
     if conflicts:
         preview += f" 這會和你現有的 {len(conflicts)} 筆行程重疊；仍要這樣安排嗎？"
     now = time.time()
@@ -1191,6 +1125,25 @@ def _prepare_calendar_confirmation(
         conversation_intent="calendar_confirmation", agent_run_id=run_id, agent_mode="v2",
         profile_write_allowed=False, profile_write_reason="calendar_action",
     )
+
+
+def _remaining_cancel_targets(ctx: AgentTurnContext, pending: dict[str, Any]) -> list[dict]:
+    """批次取消部分失敗後，回傳「仍未取消」的目標清單（已成功取消者排除）。
+
+    以 DB 現況判斷：目標行程已變成 cancelled 視為成功取消，排除；其餘保留供再次確認。
+    """
+    from services.calendar_service import ACTIVE_EVENT_STATUSES
+    remaining: list[dict] = []
+    for target in (pending.get("targets") or []):
+        event_id = str(target.get("event_id") or "")
+        if not event_id:
+            remaining.append(target)
+            continue
+        ev = calendar_events_coll.find_one({"event_id": event_id, "participants": ctx.user_id}, {"status": 1})
+        if ev and ev.get("status") == "cancelled":
+            continue  # 已成功取消，排除
+        remaining.append(target)
+    return remaining
 
 
 def _execute_calendar_pending(
@@ -1302,7 +1255,7 @@ def _handle_calendar_pending_confirmation(
     ctx: AgentTurnContext, pending: dict[str, Any], run_id: str, trace: dict[str, Any],
     on_progress: ProgressCallback | None,
 ) -> AgentResult | None:
-    choice = calendar_confirmation_choice(ctx.message)
+    choice = confirmation_choice(ctx.message)
     if choice == "none":
         return None
     created_at = float(pending.get("created_at", 0) or 0)
@@ -1327,6 +1280,15 @@ def _handle_calendar_pending_confirmation(
     ok, reply, code = _execute_calendar_pending(ctx, pending, confirmation_id)
     if spec:
         _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id, step_id="confirmation:0", outcome="ok" if ok else "error")
+    if ok and code == "partial" and str(pending.get("action") or "") == "calendar.cancel_my_events":
+        # 批次取消部分失敗：保留「尚未取消」的目標在 pending 裡，使用者只需再確認就能補取消，
+        # 不必重新描述全部行程。已成功取消的目標要從 targets 移除。
+        remaining = _remaining_cancel_targets(ctx, pending)
+        if remaining:
+            profiles_coll.update_one(base_query, {"$set": {"agentic_pending_confirmation.targets": remaining}})
+            trace["confirmation"] = "partial"
+            trace["tool_results"].append({"tool": pending.get("action"), "ok": ok, "code": code})
+            return AgentResult(handled=True, reply=reply + " 回覆「確認」會再取消剩下的行程。", conversation_intent="calendar_action", agent_run_id=run_id, agent_mode="v2", profile_write_allowed=False, profile_write_reason="calendar_action")
     profiles_coll.update_one(base_query, {"$unset": {"agentic_pending_confirmation": ""}})
     trace["confirmation"] = "executed" if ok else "invalidated"
     trace["tool_results"].append({"tool": pending.get("action"), "ok": ok, "code": code})
@@ -1747,6 +1709,7 @@ def run_public_agent_turn(
         "tool_ms": [],
     }
     observations: list[dict] = []
+    llm_metrics: list[dict[str, Any]] = []
     try:
         _emit_progress(on_progress, "run_started", trace=trace, agent_run_id=run_id)
         context_started = time.perf_counter()
@@ -1755,6 +1718,7 @@ def run_public_agent_turn(
         turn = build_agent_turn_context_v2(ctx, clock=clock)
         trace["context_ms"] = round((time.perf_counter() - context_started) * 1000)
         trace["mentioned_contact_count"] = len(turn.mentioned_contacts)
+        trace["_llm_metrics"] = llm_metrics
         result: AgentResult | None = None
         pending_result = _handle_pending_confirmation(ctx, turn, run_id, trace, on_progress)
         if pending_result:
@@ -1771,8 +1735,18 @@ def run_public_agent_turn(
             seen: set[tuple[str, str]] = set()
             for index in range(MAX_STEPS if assessment_result is None else 0):
                 model_started = time.perf_counter()
-                decision = plan_turn_v2(turn, visible, observations)
+                decision = plan_turn_v2_function_calling(turn, visible, observations, metrics_collector=llm_metrics)
                 trace["model_ms"].append(round((time.perf_counter() - model_started) * 1000))
+                _emit_progress(on_progress, "planner_decision", trace=trace, agent_run_id=run_id, step_id=f"{index}:planner", decision={
+                    "kind": decision.kind.value if decision else "invalid",
+                    "intent": str(getattr(getattr(decision, "intent", None), "value", "")) if decision else "",
+                    "tool_name": decision.tool_name if decision else None,
+                    "confidence": round(decision.confidence, 3) if decision else 0,
+                    "arguments": decision.arguments if decision else {},
+                    "reply": decision.reply if decision else None,
+                    "duration_ms": trace["model_ms"][-1],
+                    "llm_metrics": llm_metrics[-1] if llm_metrics else None,
+                })
                 if not decision:
                     result = AgentResult(
                         handled=True,
@@ -1782,30 +1756,20 @@ def run_public_agent_turn(
                         fallback_reason="planner_invalid",
                     )
                     break
-                decision = _merge_calendar_draft_into_decision(turn, decision)
                 trace["planner_decisions"].append({"kind": decision.kind.value, "tool_name": decision.tool_name, "confidence": decision.confidence})
                 intent_name = str(getattr(getattr(decision, "intent", None), "value", "") or "")
-                # A calendar write is never executed from a TOOL_CALL. Some
+                # A calendar write is never executed from a TOOL_CALL.  Some
                 # providers nevertheless choose that JSON kind despite the
-                # prompt, so promote a schema-valid Calendar write into the
-                # same safe confirmation path. Updates still require a
-                # verified read before promotion.
+                # prompt; promote a valid cancellation into the same safe
+                # confirmation path instead of spending another model turn
+                # and then asking a text-only question with no pending state.
                 if (
                     decision.kind == DecisionKind.TOOL_CALL
                     and intent_name == "calendar_action"
-                    and decision.tool_name in _CALENDAR_WRITE_ACTIONS
-                    and (spec := get_tool_spec(decision.tool_name)) is not None
-                    and planner_arguments_allowed(spec, decision.arguments)
-                    and (
-                        decision.tool_name != "calendar.update_my_event"
-                        or any(
-                            item.get("tool") in {"calendar.list_my_events", "calendar.find_my_event"}
-                            for item in observations
-                        )
-                    )
+                    and decision.tool_name in {"calendar.cancel_my_event", "calendar.cancel_my_events"}
                 ):
                     decision = decision.model_copy(update={"kind": DecisionKind.CONFIRMATION})
-                    trace["guard_results"].append("calendar_write_promoted_to_confirmation")
+                    trace["guard_results"].append("calendar_cancel_promoted_to_confirmation")
                 # A social opening is non-mutating apart from storing its own
                 # pending confirmation.  Explicit search confirmations must
                 # pass the deterministic guard below before any state write.
@@ -1894,15 +1858,16 @@ def run_public_agent_turn(
                             place_search_arguments if reason == "places_search_requires_read" else None,
                         )
                         step_id = f"{index}:required"
-                        _emit_progress(on_progress, "tool_started", trace=trace, agent_run_id=run_id, step_id=step_id, text=required_spec.progress_text)
+                        _emit_progress(on_progress, "tool_started", trace=trace, agent_run_id=run_id, step_id=step_id, text=required_spec.progress_text, tool_name=required_tool, arguments=required_arguments)
                         try:
                             tool_started = time.perf_counter()
                             tool_result = execute_tool(ToolCall(name=required_tool, arguments=required_arguments), ctx, clock=turn.clock)
-                            trace["tool_ms"].append(round((time.perf_counter() - tool_started) * 1000))
+                            tool_duration_ms = round((time.perf_counter() - tool_started) * 1000)
+                            trace["tool_ms"].append(tool_duration_ms)
                         except Exception:
-                            _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id, step_id=step_id, outcome="error")
+                            _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id, step_id=step_id, outcome="error", tool_name=required_tool, duration_ms=0, result_summary=None)
                             raise
-                        _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id, step_id=step_id, outcome="ok" if tool_result.ok else "error")
+                        _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id, step_id=step_id, outcome="ok" if tool_result.ok else "error", tool_name=required_tool, duration_ms=tool_duration_ms, result_summary=tool_result.data if tool_result.ok else {"error_code": tool_result.error_code})
                         trace["tool_results"].append({"tool": required_tool, "ok": tool_result.ok, "code": tool_result.error_code})
                         if tool_result.ok:
                             seen.add(tool_call_key(required_spec, required_arguments))
@@ -1987,7 +1952,7 @@ def run_public_agent_turn(
                     ):
                         _save_place_search_draft(ctx, turn, decision)
                     result = AgentResult(
-                        handled=True, reply=_final_reply_for_decision(turn, decision, observations, trace, "planner_final"),
+                        handled=True, reply=_final_reply_for_decision(turn, decision, observations, trace, "planner_final", metrics_collector=llm_metrics),
                         agent_run_id=run_id, agent_mode="v2",
                         profile_write_allowed=intent_name not in {"calendar", "match_action", "match_status", "relationship", "time", "assessment"},
                         profile_write_reason=("casual" if intent_name in {"", "chat", "memory", "unclear"} else intent_name),
@@ -2052,26 +2017,29 @@ def run_public_agent_turn(
                         break
                     side_effects += 1
                     step_id = f"{index}:write"
-                    _emit_progress(on_progress, "tool_started", trace=trace, agent_run_id=run_id, step_id=step_id, text=spec.progress_text)
+                    _emit_progress(on_progress, "tool_started", trace=trace, agent_run_id=run_id, step_id=step_id, text=spec.progress_text, tool_name=decision.tool_name, arguments=safe_arguments)
                     try:
+                        write_started = time.perf_counter()
                         ok, reply, code = _execute_write_tool(spec, ctx, turn, run_id, index, safe_arguments)
+                        write_duration_ms = round((time.perf_counter() - write_started) * 1000)
                     except Exception:
-                        _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id, step_id=step_id, outcome="error")
+                        _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id, step_id=step_id, outcome="error", tool_name=decision.tool_name, duration_ms=0, result_summary=None)
                         raise
-                    _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id, step_id=step_id, outcome="ok" if ok else "error")
+                    _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id, step_id=step_id, outcome="ok" if ok else "error", tool_name=decision.tool_name, duration_ms=write_duration_ms, result_summary={"reply": reply, "code": code})
                     trace["tool_results"].append({"tool": decision.tool_name, "ok": ok, "code": code})
                     result = AgentResult(handled=True, reply=reply, conversation_intent="agentic_match", agent_run_id=run_id, agent_mode="v2")
                     break
                 step_id = f"{index}:read"
-                _emit_progress(on_progress, "tool_started", trace=trace, agent_run_id=run_id, step_id=step_id, text=spec.progress_text)
+                _emit_progress(on_progress, "tool_started", trace=trace, agent_run_id=run_id, step_id=step_id, text=spec.progress_text, tool_name=decision.tool_name, arguments=safe_arguments)
                 try:
                     tool_started = time.perf_counter()
                     tool_result = execute_tool(ToolCall(name=decision.tool_name or "", arguments=safe_arguments), ctx, clock=turn.clock)
-                    trace["tool_ms"].append(round((time.perf_counter() - tool_started) * 1000))
+                    tool_duration_ms = round((time.perf_counter() - tool_started) * 1000)
+                    trace["tool_ms"].append(tool_duration_ms)
                 except Exception:
-                    _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id, step_id=step_id, outcome="error")
+                    _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id, step_id=step_id, outcome="error", tool_name=decision.tool_name, duration_ms=0, result_summary=None)
                     raise
-                _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id, step_id=step_id, outcome="ok" if tool_result.ok else "error")
+                _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id, step_id=step_id, outcome="ok" if tool_result.ok else "error", tool_name=decision.tool_name, duration_ms=tool_duration_ms, result_summary=tool_result.data if tool_result.ok else {"error_code": tool_result.error_code})
                 trace["tool_results"].append({"tool": decision.tool_name, "ok": tool_result.ok, "code": tool_result.error_code})
                 if not tool_result.ok:
                     result = AgentResult(
@@ -2104,7 +2072,8 @@ def run_public_agent_turn(
         trace["exception"] = type(exc).__name__
         result = AgentResult(handled=True, reply="我現在沒辦法安全地處理這件事，請稍後再試。", agent_run_id=run_id, agent_mode="v2", fallback_reason=type(exc).__name__)
     result.sources = _public_sources(observations)
-    result.place_cards = _public_place_cards(observations, reply=str(result.reply or ""))
+    result.place_cards = _public_place_cards(observations)
+    result.llm_call_metrics = llm_metrics
     trace["latency_ms"] = round((time.perf_counter() - started) * 1000)
     trace["result"] = {
         "handled": result.handled,

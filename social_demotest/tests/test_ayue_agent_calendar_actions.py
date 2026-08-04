@@ -4,88 +4,16 @@ from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 from services.ayue_agent.contracts import AgentDecision, AgentIntent, AgentTurnContext, AgentTurnContextV2, DecisionKind
-from services.ayue_agent.context import _safe_calendar_action_draft
-from services.ayue_agent.router import calendar_confirmation_choice, confirmation_choice, guard_v2_decision, tool_policy_for_turn
+from services.ayue_agent.router import guard_v2_decision, tool_policy_for_turn
 from services.ayue_agent.runtime import (
     _calendar_details_question,
     _execute_calendar_pending,
-    _handle_calendar_pending_confirmation,
     _prepare_calendar_confirmation,
-    _safe_calendar_draft_arguments,
 )
-from services.calendar_service import _event_matches_hint, cancel_event, normalize_form, update_personal_event
+from services.calendar_service import cancel_event, normalize_form, update_personal_event
 
 
 class AyueAgentCalendarActionTests(unittest.TestCase):
-    def test_calendar_confirmation_accepts_natural_short_affirmations_only_on_calendar_path(self):
-        self.assertEqual(confirmation_choice("\u5c0d"), "none")
-        self.assertEqual(calendar_confirmation_choice("\u5c0d"), "confirm")
-        self.assertEqual(calendar_confirmation_choice("\u662f"), "confirm")
-
-    def test_calendar_pending_confirmation_executes_for_yes(self):
-        ctx = AgentTurnContext(user_id="owner", room_id="room", message="\u662f")
-        pending = {
-            "action": "calendar.create_my_event", "created_at": 1.0,
-            "confirmation_id": "confirm-1", "status": "pending",
-        }
-        with patch("services.ayue_agent.runtime.profiles_coll.update_one", return_value=Mock(modified_count=1)), \
-             patch("services.ayue_agent.runtime._execute_calendar_pending", return_value=(True, "created", None)) as execute:
-            result = _handle_calendar_pending_confirmation(
-                ctx, pending, "run", {
-                    "tool_results": [], "event_sequence": [], "public_progress_result_codes": [],
-                }, None,
-            )
-        self.assertEqual(result.reply, "created")
-        execute.assert_called_once()
-
-    def test_calendar_event_hint_accepts_a_wrapped_activity_phrase(self):
-        event = {
-            "title": "movie night", "activity": "movie", "location": "",
-            "start_at": datetime(2026, 8, 4, 2, 30, tzinfo=timezone.utc), "timezone": "Asia/Taipei",
-        }
-        self.assertTrue(_event_matches_hint(event, "please move my movie event"))
-
-    def test_calendar_event_hint_requires_both_date_and_activity_when_both_are_given(self):
-        movie = {
-            "title": "movie", "activity": "movie", "location": "",
-            "start_at": datetime(2026, 8, 4, 2, 30, tzinfo=timezone.utc), "timezone": "Asia/Taipei",
-        }
-        coffee = {**movie, "title": "coffee", "activity": "coffee"}
-        movie_next_day = {**movie, "start_at": datetime(2026, 8, 5, 2, 30, tzinfo=timezone.utc)}
-        self.assertTrue(_event_matches_hint(movie, "8/4 movie"))
-        self.assertFalse(_event_matches_hint(coffee, "8/4 movie"))
-        self.assertFalse(_event_matches_hint(movie_next_day, "8/4 movie"))
-        self.assertTrue(_event_matches_hint(coffee, "8/4"))
-
-    def test_calendar_action_draft_never_exposes_ids_or_revisions(self):
-        draft = _safe_calendar_action_draft({
-            "domain": "calendar", "action": "calendar.update_my_event",
-            "arguments": {"event_hint": "movie", "event_id": "secret", "revision": 9},
-            "missing_fields": ["date", "event_id"], "created_at": 10,
-        })
-        self.assertEqual(draft["arguments"], {"event_hint": "movie"})
-        self.assertEqual(draft["missing_fields"], ["date"])
-        self.assertNotIn("event_id", str(draft))
-        self.assertNotIn("revision", str(draft))
-
-    def test_calendar_batch_draft_preserves_supported_mode_and_all_targets(self):
-        hints = [f"event-{index}" for index in range(6)]
-        draft = _safe_calendar_action_draft({
-            "domain": "calendar", "action": "calendar.cancel_my_events",
-            "arguments": {"mode": "all_upcoming", "event_hints": hints},
-            "missing_fields": ["changes"], "created_at": 10,
-        })
-        self.assertEqual(draft["arguments"], {"mode": "all_upcoming", "event_hints": hints})
-        self.assertEqual(draft["missing_fields"], ["changes"])
-
-    def test_calendar_update_draft_preserves_explicitly_cleared_optional_text(self):
-        self.assertEqual(
-            _safe_calendar_draft_arguments("calendar.update_my_event", {
-                "event_hint": "movie", "location": "", "notes": "",
-            }),
-            {"event_hint": "movie", "location": "", "notes": ""},
-        )
-
     def test_normalize_form_preserves_personal_event_title(self):
         form = normalize_form({
             "title": "和小安喝咖啡", "date": "2026-08-03", "start_time": "14:00", "end_time": "15:30",

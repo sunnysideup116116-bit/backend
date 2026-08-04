@@ -521,7 +521,7 @@
         #room-input[contenteditable="true"] { min-height: 46px; white-space: pre-wrap; overflow-wrap: anywhere; }
         #room-input[contenteditable="true"]:empty::before { content: attr(data-placeholder); color: rgba(255,255,255,.45); pointer-events: none; }
         #room-input[aria-disabled="true"] { opacity: .5; pointer-events: none; }
-        .inline-mention { display: inline; background: transparent; color: #8b5cf6; padding: 0; margin: 0; line-height: inherit; font-weight: 700; }
+        .inline-mention { display: inline-block; background: #6d63aa; color: #f6f4ff; border-radius: 4px; padding: 0 3px; margin: 0 1px; line-height: 1.45; }
         .place-card-list { display: grid; gap: 9px; margin-top: 10px; width: min(440px, 100%); }
         .place-card { overflow: hidden; border-radius: 12px; border: 1px solid #dfc2ae; background: #fffaf5; color: #523a2f; box-shadow: 0 5px 14px rgba(66, 37, 25, .12); }
         .place-card-custom { display: grid; grid-template-columns: 185px minmax(0, 1fr); min-height: 145px; }
@@ -539,6 +539,8 @@
         .place-card-body { min-width: 0; padding: 12px 13px 10px; display: flex; flex-direction: column; }
         .place-card-name { color: #51352a; font-size: 14px; font-weight: 800; line-height: 1.35; }
         .place-card-meta { margin-top: 4px; color: #a0674c; font-size: 11px; }
+        .place-card-details { margin-top: 5px; color: #6b4a3a; font-size: 11px; line-height: 1.4; }
+        .place-card-photo { width: 100%; max-height: 140px; margin-top: 8px; border-radius: 8px; object-fit: cover; }
         .place-card-address { margin-top: 7px; color: #745648; font-size: 11px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
         .place-card-footer { display: flex; align-items: end; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 8px; }
         .place-card-open { color: #8d4d32; font-size: 11px; font-weight: 800; text-decoration: underline; }
@@ -958,6 +960,42 @@
                             <span>已連線</span>
                         </div>
                     </div>
+                    <button id="llm-metrics-btn" type="button" onclick="toggleLlmMetricsPanel()"
+                        class="ml-auto px-3 py-1.5 text-xs border border-white/20 rounded-lg hover:bg-white/10 transition"
+                        title="查看上次對話的後端執行流程">執行流程</button>
+                    <div class="flex items-center gap-1.5">
+                        <label class="text-[10px] text-textSecondary uppercase tracking-wider">Model</label>
+                        <select id="model-selector"
+                            class="bg-black/40 border border-white/15 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-violet-500 cursor-pointer"
+                            onchange="onModelChange()">
+                            <option value="deepseek-v4-flash:cloud">deepseek-v4-flash</option>
+                            <option value="deepseek-v4-flash:0731-cloud">deepseek-v4-flash:0731</option>
+                            <option value="deepseek-v4-pro:cloud">deepseek-v4-pro</option>
+                            <option value="glm-5.2:cloud">glm-5.2</option>
+                            <option value="minimax-m3:cloud">minimax-m3</option>
+                            <option value="gpt-oss:120b-cloud">gpt-oss:120b</option>
+                            <option value="gpt-oss:20b-cloud">gpt-oss:20b</option>
+                            <option value="gemma4:cloud">gemma4</option>
+                            <option value="nemotron-3-super:cloud">nemotron-3-super</option>
+                            <option value="nemotron-3-ultra:cloud">nemotron-3-ultra</option>
+                        </select>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <label class="text-[10px] text-textSecondary uppercase tracking-wider">思考</label>
+                        <select id="thinking-level-selector"
+                            class="bg-black/40 border border-white/15 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-violet-500 cursor-pointer"
+                            onchange="onThinkingLevelChange()">
+                            <option value="off">關閉</option>
+                            <option value="low">低</option>
+                            <option value="medium">中</option>
+                            <option value="high">高</option>
+                            <option value="max">最高</option>
+                        </select>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <label class="text-[10px] text-textSecondary uppercase tracking-wider">Planner</label>
+                        <span class="text-xs text-textSecondary px-2 py-1.5">Function Calling</span>
+                    </div>
                 </div>
 
                 <div id="room-messages" class="flex-1 p-6 overflow-y-auto flex flex-col gap-2"></div>
@@ -1212,6 +1250,8 @@
         let activeMatchContext = ""; // 候選人情境
         let activeMatchDistinctiveTags = null; // 候選人 distinctive_tags，供婉拒 Checkbox 使用
         let userInterest = "";
+        let lastLlmCallMetrics = null;
+        let lastDebugTrace = [];
         let pendingMediatorNotification = null;
         let acceptedContacts = [];
         let mentionedOtherIds = [];
@@ -1297,10 +1337,33 @@
                     if (host !== "www.openstreetmap.org") return null;
                     if (embed && url.pathname !== "/export/embed.html") return null;
                 } else if (provider === "google") {
-                    if (!(host === "google.com" || host === "www.google.com" || host.endsWith(".google.com"))) return null;
+                    if (embed) {
+                        // Maps Embed API: https://www.google.com/maps/embed/v1/place
+                        if (host !== "www.google.com" && host !== "google.com") return null;
+                        if (url.pathname !== "/maps/embed/v1/place") return null;
+                    } else {
+                        if (!(host === "google.com" || host === "www.google.com" || host.endsWith(".google.com"))) return null;
+                    }
                 } else {
                     return null;
                 }
+                return url.href;
+            } catch (_) {
+                return null;
+            }
+        }
+
+        function safeGooglePhotoUrl(value) {
+            // Place Details photo URLs come from places.googleapis.com and carry
+            // the SERVER api key in the query string. They are produced by the
+            // backend only, so the browser never sees the key as a variable.
+            try {
+                const url = new URL(String(value || ""));
+                if (url.protocol !== "https:") return null;
+                const host = url.hostname.toLowerCase();
+                if (host !== "places.googleapis.com") return null;
+                if (!url.pathname.startsWith("/v1/places/")) return null;
+                if (!url.pathname.endsWith("/media")) return null;
                 return url.href;
             } catch (_) {
                 return null;
@@ -1314,7 +1377,7 @@
             const preview = document.createElement("div");
             preview.className = "place-card-preview";
             const embedUrl = safePlaceUrl(card.embed_url, provider, true);
-            if (embedUrl && provider === "openstreetmap") {
+            if (embedUrl) {
                 const frame = document.createElement("iframe");
                 frame.src = embedUrl;
                 frame.loading = "lazy";
@@ -1343,6 +1406,20 @@
             meta.className = "place-card-meta";
             meta.textContent = [categoryLabel, String(card.distance_label || "").slice(0, 30)].filter(Boolean).join(" · ");
             body.append(name, meta);
+            // Optional Google photo (from the Text Search response; rating /
+            // opening hours are Enterprise-tier and intentionally absent).
+            if (provider === "google") {
+                const photoUrl = safeGooglePhotoUrl(card.photo_url);
+                if (photoUrl) {
+                    const img = document.createElement("img");
+                    img.className = "place-card-photo";
+                    img.src = photoUrl;
+                    img.loading = "lazy";
+                    img.referrerPolicy = "no-referrer";
+                    img.alt = String(card.name || "地點").slice(0, 80);
+                    body.appendChild(img);
+                }
+            }
             if (card.address_summary) {
                 const address = document.createElement("div");
                 address.className = "place-card-address";
@@ -1377,22 +1454,56 @@
 
         function upgradeGooglePlaceCard(wrapper, card) {
             if (card.provider !== "google" || !/^[A-Za-z0-9_-]{3,180}$/.test(String(card.place_id || ""))) return;
-            loadGooglePlacesUi().then(() => {
-                const details = document.createElement("gmp-place-details-compact");
-                details.setAttribute("orientation", "horizontal");
-                details.setAttribute("truncation-preferred", "");
-                const request = document.createElement("gmp-place-details-place-request");
-                request.setAttribute("place", card.place_id);
-                const content = document.createElement("gmp-place-content-config");
-                ["gmp-place-media", "gmp-place-rating", "gmp-place-type", "gmp-place-price", "gmp-place-open-now-status", "gmp-place-attribution"].forEach(tag => {
-                    const element = document.createElement(tag);
-                    if (tag === "gmp-place-media") element.setAttribute("lightbox-preferred", "");
-                    content.appendChild(element);
-                });
-                details.append(request, content);
-                wrapper.replaceChildren(details);
-                wrapper.classList.remove("place-card-custom");
-            }).catch(() => {});
+            // The custom card already shows embed iframe + Place Details
+            // fields (rating / opening hours) from the backend. Per migration
+            // plan §3.4 the Web Component is an optional upgrade that should
+            // only trigger on user interaction, not automatically, so it
+            // never replaces a working card with "Place info couldn't load".
+            // The card is clickable to opt into the richer Web Component.
+            wrapper.style.cursor = "pointer";
+            wrapper.addEventListener("click", function onceClick() {
+                wrapper.removeEventListener("click", onceClick);
+                loadGooglePlacesUi().then(() => {
+                    const details = document.createElement("gmp-place-details-compact");
+                    details.setAttribute("orientation", "horizontal");
+                    details.setAttribute("truncation-preferred", "");
+                    const request = document.createElement("gmp-place-details-place-request");
+                    request.setAttribute("place", card.place_id);
+                    const content = document.createElement("gmp-place-content-config");
+                    ["gmp-place-media", "gmp-place-rating", "gmp-place-type", "gmp-place-price", "gmp-place-open-now-status", "gmp-place-attribution"].forEach(tag => {
+                        const element = document.createElement(tag);
+                        if (tag === "gmp-place-media") element.setAttribute("lightbox-preferred", "");
+                        content.appendChild(element);
+                    });
+                    details.append(request, content);
+                    // Stage off-DOM; only swap in on confirmed successful
+                    // render so the working custom card is never destroyed.
+                    const stage = document.createElement("div");
+                    stage.style.position = "absolute";
+                    stage.style.left = "-9999px";
+                    stage.style.width = "100%";
+                    stage.appendChild(details);
+                    document.body.appendChild(stage);
+                    let settled = false;
+                    const finish = () => {
+                        if (settled) return;
+                        settled = true;
+                        const text = (details.shadowRoot && details.shadowRoot.textContent) || "";
+                        if (text.trim() && !text.includes("couldn't load")) {
+                            wrapper.replaceChildren(details);
+                            wrapper.classList.remove("place-card-custom");
+                        }
+                        stage.remove();
+                    };
+                    if (details.shadowRoot) {
+                        new MutationObserver(() => {
+                            const text = (details.shadowRoot && details.shadowRoot.textContent) || "";
+                            if (text.trim()) finish();
+                        }).observe(details.shadowRoot, { childList: true, subtree: true, characterData: true });
+                    }
+                    setTimeout(finish, 4000);
+                }).catch(() => {});
+            }, { once: true });
         }
 
         function appendPlaceCards(container, cards) {
@@ -2793,7 +2904,7 @@
             const caption = document.createElement("div");
             caption.className = "gif-message-caption";
             const copy = document.createElement("span");
-            copy.textContent = text || "這張有夠好笑，丟給你 😂";
+            copy.textContent = text || "太好了～快去和對方聊聊吧！";
             const provider = document.createElement("span");
             provider.className = "gif-message-provider";
             provider.textContent = "via GIPHY";
@@ -3509,6 +3620,8 @@ if (metadata.event_type === "date_coordination_form") {
             const decoder = new TextDecoder();
             let buffer = "";
             let finalResponse = null;
+            const debugEvents = [];
+            lastDebugTrace = [];
             try {
                 while (true) {
                     const {done, value} = await reader.read();
@@ -3519,17 +3632,26 @@ if (metadata.event_type === "date_coordination_form") {
                     for (const line of lines) {
                         if (!line.trim()) continue;
                         const event = JSON.parse(line);
+                        debugEvents.push(event);
+                        lastDebugTrace.push(event);
                         if (event.type === "run_started") showAyueProgress("阿月正在想一下…");
+                        if (event.type === "planner_decision") showAyueProgress("阿月正在想一下…");
                         if (event.type === "tool_started") showAyueProgress(event.text || "我確認一下…");
                         if (event.type === "final") finalResponse = event.response || {};
                         if (event.type === "error") throw new Error(event.reply || "伺服器暫時無法回覆");
+                        const panel = document.getElementById("llm-metrics-panel");
+                        if (panel && !panel.classList.contains("hidden")) renderLlmMetricsContent();
                     }
                 }
                 buffer += decoder.decode();
                 if (buffer.trim()) {
                     const event = JSON.parse(buffer);
+                    debugEvents.push(event);
+                    lastDebugTrace.push(event);
                     if (event.type === "final") finalResponse = event.response || {};
                     if (event.type === "error") throw new Error(event.reply || "伺服器暫時無法回覆");
+                    const panel = document.getElementById("llm-metrics-panel");
+                    if (panel && !panel.classList.contains("hidden")) renderLlmMetricsContent();
                 }
             } finally {
                 clearAyueProgressBubble();
@@ -3581,6 +3703,12 @@ if (metadata.event_type === "date_coordination_form") {
             const inp = document.getElementById("room-input");
             const msg = inp.value.trim();
             if (!msg) return;
+            if (isPublicAyue) {
+                lastLlmCallMetrics = null;
+                lastDebugTrace = [];
+                const panel = document.getElementById("llm-metrics-panel");
+                if (panel && !panel.classList.contains("hidden")) renderLlmMetricsContent();
+            }
             syncMentionIds();
             const outgoingMentions = [...mentionedOtherIds];
             const displayMsg = msg;
@@ -3602,6 +3730,9 @@ if (metadata.event_type === "date_coordination_form") {
                 if (isPublicAyue) {
                     data = await streamPublicAyueChat(payload);
                     res = {ok: true};
+                    lastLlmCallMetrics = data.llm_call_metrics || null;
+                    const panel = document.getElementById("llm-metrics-panel");
+                    if (panel && !panel.classList.contains("hidden")) renderLlmMetricsContent();
                 } else {
                     res = await fetch('/api/direct_chat', {
                         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
@@ -4389,9 +4520,7 @@ if (metadata.event_type === "date_coordination_form") {
                                 window.activeMatchProposalId = proactData.metadata.match_id;
                             }
                             appendRoomMessage(proactData.message, false, {
-                                message_type: proactData.type === "match_connected_gif"
-                                    ? "gif"
-                                    : (["match_proposal", "incoming_match_interest"].includes(proactData.type) ? "mediator_card" : "text"),
+                                message_type: ["match_proposal", "incoming_match_interest"].includes(proactData.type) ? "mediator_card" : "text",
                                 metadata: proactData.metadata || {}
                             });
                             document.getElementById("room-input").disabled = false;
@@ -4780,13 +4909,17 @@ if (metadata.event_type === "date_coordination_form") {
                     const edit = document.createElement('button'); edit.className = 'text-xs text-sky-300'; edit.textContent = '修改';
                     edit.onclick = async () => {
                         const titleValue = prompt('行程名稱', event.title); if (titleValue === null || !titleValue.trim()) return;
-                        const local = new Date(event.start_at); const dateValue = local.toISOString().slice(0, 10);
-                        const startValue = local.toTimeString().slice(0, 5);
-                        const endValue = new Date(event.end_at).toTimeString().slice(0, 5);
+                        // 日期與時間都用「行程本身的時區」解析，避免瀏覽器時區不同或 UTC/本地混用導致偏移
+                        const tz = event.timezone || 'Asia/Taipei';
+                        const fmt = (iso, opts) => new Date(iso).toLocaleString('en-CA', {timeZone: tz, ...opts});
+                        const dateValue = fmt(event.start_at, {year: 'numeric', month: '2-digit', day: '2-digit'}).replace(/\//g, '-');
+                        const startValue = fmt(event.start_at, {hour: '2-digit', minute: '2-digit', hour12: false});
+                        const endValue = fmt(event.end_at, {hour: '2-digit', minute: '2-digit', hour12: false});
                         const dateInput = prompt('日期 YYYY-MM-DD', dateValue); if (dateInput === null) return;
                         const startInput = prompt('開始時間 HH:MM', startValue); if (startInput === null) return;
                         const endInput = prompt('結束時間 HH:MM', endValue); if (endInput === null) return;
-                        const res = await fetch(`/api/calendar/events/${encodeURIComponent(event.event_id)}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({user_id: currentUserId, title: titleValue.trim(), date: dateInput, start_time: startInput, end_time: endInput})});
+                        const res = await fetch(`/api/calendar/events/${encodeURIComponent(event.event_id)}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({user_id: currentUserId, title: titleValue.trim(), date: dateInput, start_time: startInput, end_time: endInput, timezone: tz, expected_revision: event.revision})});
+                        if (res.status === 409) { const data = await res.json(); alert((data.detail || '行程剛剛已變更，請重新整理') + ' 請重新整理後再修改。'); loadCalendarEvents(); return; }
                         if (!res.ok) { const data = await res.json(); alert(data.detail || '無法修改行程'); return; }
                         loadCalendarEvents();
                     };
@@ -4818,7 +4951,9 @@ if (metadata.event_type === "date_coordination_form") {
                 const cancel = document.createElement('button'); cancel.className = 'text-xs text-red-300'; cancel.textContent = '取消';
                 cancel.onclick = async () => {
                     if (!confirm('確定要取消這個行程嗎？')) return;
-                    await fetch(`/api/calendar/events/${encodeURIComponent(event.event_id)}/cancel`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({user_id: currentUserId})});
+                    const res = await fetch(`/api/calendar/events/${encodeURIComponent(event.event_id)}/cancel`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({user_id: currentUserId, expected_revision: event.revision})});
+                    if (res.status === 409) { const data = await res.json(); alert((data.detail || '行程剛剛已變更') + ' 請重新整理後再取消。'); loadCalendarEvents(); return; }
+                    if (!res.ok) { const data = await res.json(); alert(data.detail || '無法取消行程'); return; }
                     loadCalendarEvents();
                 };
                 actions.appendChild(cancel);
@@ -5216,6 +5351,145 @@ if (metadata.event_type === "date_coordination_form") {
                 setCalendarEditorFeedback(error.message);
             }
         }
+
+        function renderLlmMetricsContent() {
+            const content = document.getElementById("llm-metrics-content");
+            if (!content) return;
+            if (!lastDebugTrace || !lastDebugTrace.length) {
+                content.innerHTML = '<p class="text-sm text-gray-400">尚無執行數據。傳送訊息後再點擊查看。</p>';
+                return;
+            }
+            let html = "";
+            let loopNum = 0;
+            for (const evt of lastDebugTrace) {
+                if (evt.type === "run_started") {
+                    html += '<div class="border-2 border-[#8a72b8] p-2 bg-[#110a22]">' +
+                        '<div class="text-[#ffd166] font-bold text-xs">▶ Agent Run 開始</div></div>';
+                } else if (evt.type === "planner_decision") {
+                    loopNum++;
+                    const d = evt.decision || {};
+                    const m = d.llm_metrics || {};
+                    const argsStr = d.arguments && Object.keys(d.arguments).length ? JSON.stringify(d.arguments, null, 2) : "(無)";
+                    const replyStr = d.reply ? d.reply.substring(0, 200) : "(無)";
+                    html += '<div class="border-2 border-[#ffd166] p-2 bg-[#110a22]">' +
+                        '<div class="flex items-center gap-1 mb-1 flex-wrap">' +
+                        '<span class="text-[#ffd166] font-bold text-xs">Loop ' + loopNum + ' — Planner</span>' +
+                        '<span class="text-[#55e6d9] text-[10px] border-2 border-[#55e6d9] px-1">' + (d.kind || "") + '</span>' +
+                        '<span class="text-[#ff6fae] text-[10px]">' + (d.intent || "") + '</span>' +
+                        '</div>' +
+                        '<div class="text-[11px] space-y-0.5">' +
+                        '<div><span class="text-gray-400">Tool:</span> <span class="text-[#fff1b8]">' + (d.tool_name || "無") + '</span></div>' +
+                        '<div><span class="text-gray-400">Confidence:</span> <span class="text-[#fff1b8]">' + (d.confidence || 0) + '</span></div>' +
+                        '<div><span class="text-gray-400">Arguments:</span> <pre class="text-[#fff1b8] mt-1 p-1 border border-[#8a72b8] text-[10px] overflow-x-auto whitespace-pre-wrap">' + argsStr + '</pre></div>' +
+                        '<div><span class="text-gray-400">LLM Reply:</span> <div class="text-[#fff1b8] mt-1">' + replyStr + '</div></div>' +
+                        '<div class="grid grid-cols-4 gap-1 mt-1">' +
+                        '<div><span class="text-gray-400 text-[10px]">Input</span><br><button onclick="toggleDetail(this)" data-detail="' + encodeURIComponent(m.prompt || "(無)") + '" class="text-[#55e6d9] font-bold text-[11px] underline cursor-pointer">' + (m.input_tokens || 0) + '</button></div>' +
+                        '<div><span class="text-gray-400 text-[10px]">Output</span><br><button onclick="toggleDetail(this)" data-detail="' + encodeURIComponent(m.response || "(無)") + '" class="text-[#55e6d9] font-bold text-[11px] underline cursor-pointer">' + (m.output_tokens || 0) + '</button></div>' +
+                        '<div><span class="text-gray-400 text-[10px]">LLM耗時</span><br><span class="text-[#55e6d9] font-bold text-[11px]">' + (m.duration_ms || 0) + 'ms</span></div>' +
+                        '<div><span class="text-gray-400 text-[10px]">總耗時</span><br><span class="text-[#55e6d9] font-bold text-[11px]">' + (d.duration_ms || 0) + 'ms</span></div>' +
+                        '</div></div></div>';
+                } else if (evt.type === "tool_started") {
+                    const argsStr = evt.arguments && Object.keys(evt.arguments).length ? JSON.stringify(evt.arguments, null, 2) : "(無)";
+                    html += '<div class="border-2 border-[#55e6d9] p-2 bg-[#110a22]">' +
+                        '<div class="flex items-center gap-1 mb-1">' +
+                        '<span class="text-[#55e6d9] font-bold text-xs">🔧 Tool 開始</span>' +
+                        '<span class="text-[#fff1b8] text-[10px]">' + (evt.tool_name || "") + '</span>' +
+                        '</div>' +
+                        '<div class="text-[11px]"><span class="text-gray-400">Arguments:</span> <pre class="text-[#fff1b8] mt-1 p-1 border border-[#8a72b8] text-[10px] overflow-x-auto whitespace-pre-wrap">' + argsStr + '</pre></div></div>';
+                } else if (evt.type === "tool_finished") {
+                    const resultStr = evt.result_summary ? JSON.stringify(evt.result_summary, null, 2).substring(0, 600) : "(無)";
+                    html += '<div class="border-2 border-' + (evt.outcome === "ok" ? '[#55e6d9]' : '[#ff6fae]') + ' p-2 bg-[#110a22]">' +
+                        '<div class="flex items-center gap-1 mb-1">' +
+                        '<span class="text-' + (evt.outcome === "ok" ? '[#55e6d9]' : '[#ff6fae]') + ' font-bold text-xs">🔧 Tool 結束 — ' + (evt.outcome === "ok" ? "成功" : "失敗") + '</span>' +
+                        '<span class="text-[#fff1b8] text-[10px]">' + (evt.tool_name || "") + '</span>' +
+                        '</div>' +
+                        '<div class="text-[11px] space-y-0.5">' +
+                        '<div><span class="text-gray-400">執行時間:</span> <span class="text-[#55e6d9] font-bold">' + (evt.duration_ms || 0) + 'ms</span></div>' +
+                        '<div><span class="text-gray-400">結果:</span> <pre class="text-[#fff1b8] mt-1 p-1 border border-[#8a72b8] text-[10px] overflow-x-auto whitespace-pre-wrap max-h-32">' + resultStr + '</pre></div>' +
+                        '</div></div>';
+                } else if (evt.type === "final") {
+                    const r = evt.response || {};
+                    html += '<div class="border-2 border-[#ffd166] p-2 bg-[#110a22]">' +
+                        '<div class="text-[#ffd166] font-bold text-xs">🏁 Agent Run 完成</div>' +
+                        '<div class="text-[11px] text-[#fff1b8] mt-1">' + (r.reply || "").substring(0, 200) + '</div></div>';
+                } else if (evt.type === "error") {
+                    html += '<div class="border-2 border-[#ff6fae] p-2 bg-[#110a22]">' +
+                        '<div class="text-[#ff6fae] font-bold text-xs">❌ Agent Run 錯誤</div>' +
+                        '<div class="text-[11px] text-[#fff1b8] mt-1">' + (evt.reply || "") + '</div></div>';
+                }
+            }
+            content.innerHTML = html;
+            content.scrollTop = content.scrollHeight;
+        }
+
+        function toggleLlmMetricsPanel() {
+            const panel = document.getElementById("llm-metrics-panel");
+            if (panel.classList.contains("hidden")) {
+                renderLlmMetricsContent();
+                panel.classList.remove("hidden");
+            } else {
+                panel.classList.add("hidden");
+            }
+        }
+
+        function hideLlmMetricsPanel() {
+            document.getElementById("llm-metrics-panel").classList.add("hidden");
+        }
+
+        function toggleDetail(btn) {
+            const existing = btn.closest(".border-2").querySelector(".detail-expanded");
+            if (existing) {
+                existing.remove();
+                return;
+            }
+            const text = decodeURIComponent(btn.dataset.detail || "");
+            const div = document.createElement("div");
+            div.className = "detail-expanded mt-1 p-1 border border-[#8a72b8] bg-[#0a0618] text-[10px] text-[#fff1b8] overflow-x-auto whitespace-pre-wrap max-h-60 overflow-y-auto";
+            div.textContent = text;
+            btn.closest(".border-2").appendChild(div);
+        }
+
+        async function loadModelSettings() {
+            try {
+                const res = await fetch('/api/settings/model');
+                const data = await res.json();
+                const modelSelector = document.getElementById('model-selector');
+                const thinkingSelector = document.getElementById('thinking-level-selector');
+                const currentModel = data.model || data.default_model || 'deepseek-v4-flash:cloud';
+                for (const opt of modelSelector.options) {
+                    opt.selected = opt.value === currentModel;
+                }
+                const currentThinking = data.thinking_level || 'off';
+                for (const opt of thinkingSelector.options) {
+                    opt.selected = opt.value === currentThinking;
+                }
+            } catch (e) {
+                // Backend may not be ready yet; defaults remain.
+            }
+        }
+
+        async function _postModelSettings() {
+            const model = document.getElementById('model-selector').value;
+            const thinkingLevel = document.getElementById('thinking-level-selector').value;
+            try {
+                await fetch('/api/settings/model', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({model: model, thinking_level: thinkingLevel})
+                });
+            } catch (e) {
+                // Non-fatal.
+            }
+        }
+
+        async function onModelChange() { await _postModelSettings(); }
+        async function onThinkingLevelChange() { await _postModelSettings(); }
+
+        if (document.readyState !== 'loading') {
+            loadModelSettings();
+        } else {
+            document.addEventListener('DOMContentLoaded', loadModelSettings);
+        }
 </script>
 
 <!-- Modals for Date Coordination -->
@@ -5313,6 +5587,15 @@ if (metadata.event_type === "date_coordination_form") {
         </div>
     </div>
 </div>
+
+<!-- LLM Debug Side Panel -->
+<aside id="llm-metrics-panel" class="hidden fixed top-0 left-0 z-[100] h-full w-[420px] bg-[#1a1033] border-r-2 border-[#d8c7ff] shadow-[8px_0_0_#090612] flex flex-col">
+    <div class="p-3 border-b-2 border-[#d8c7ff] flex items-center justify-between flex-shrink-0">
+        <h3 class="font-bold text-sm text-[#ffd166]">後端執行流程</h3>
+        <button type="button" onclick="hideLlmMetricsPanel()" class="text-xs px-2 py-1 border-2 border-[#d8c7ff]">收起</button>
+    </div>
+    <div id="llm-metrics-content" class="flex-1 p-3 space-y-2 overflow-y-auto"></div>
+</aside>
 
 </body>
 

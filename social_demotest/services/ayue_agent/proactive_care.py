@@ -267,7 +267,7 @@ def generate_proactive_care_outcome(context: ProactiveCareContext) -> tuple[Proa
             prompt += "\n前一次輸出未通過格式或安全驗證。請重新產生一次，嚴格使用原文 grounding_span，不要輸出解釋。"
         try:
             decision = _valid_decision(
-                generate_chat_completion(prompt, temperature=0.5 if attempt == 0 else 0, json_output=True),
+                generate_chat_completion(prompt, temperature=0.5 if attempt == 0 else 0, json_output=True).content,
                 effective_context,
             )
         except Exception:
