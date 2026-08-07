@@ -2,8 +2,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from services.ayue_agent.contracts import AgentTurnContext, AgentTurnContextV2, ToolCall
-from services.ayue_agent.router import tool_policy_for_turn
-from services.ayue_agent.runtime import _public_sources, _web_extract_urls_allowed
+from services.ayue_agent.v3.scheduler import _public_sources, _web_extract_urls_allowed
 from services.ayue_agent.tools import execute_tool
 from services.ayue_agent.web_tools import is_safe_public_url, search_web
 from services.profile_location import normalize_profile_location, safe_profile_location
@@ -28,13 +27,6 @@ class AyueWebToolsTests(unittest.TestCase):
         self.assertEqual(len(data["results"]), 1)
         self.assertEqual(post.call_args.kwargs["json"]["query"], "駁二最近有什麼 高雄市鹽埕區")
         self.assertNotIn("test-key", str(data))
-
-    def test_registry_exposes_web_tools_only_when_provider_is_available(self):
-        ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="駁二最近有什麼")
-        with patch("services.ayue_agent.router.web_enabled", return_value=True):
-            self.assertTrue({"web.search", "web.extract"} <= tool_policy_for_turn(ctx))
-        with patch("services.ayue_agent.router.web_enabled", return_value=False):
-            self.assertFalse({"web.search", "web.extract"} & tool_policy_for_turn(ctx))
 
     def test_web_search_executor_uses_saved_location_only_when_requested(self):
         ctx = AgentTurnContext(

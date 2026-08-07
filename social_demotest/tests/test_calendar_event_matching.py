@@ -73,6 +73,68 @@ class EventMatchesHintTests(unittest.TestCase):
         ev = _make_event(title="看電影", day=8, start="15:00", end="18:00", location="信義威秀")
         self.assertTrue(_event_matches_hint(ev, "8/8 15:00-18:00 信義威秀 看電影"))
 
+    def test_chinese_date_only(self):
+        # 模型把使用者原句的「8月25日」直接放進 hint
+        ev = _make_event(title="與簡的雞排約會", day=25, start="17:00", end="20:00")
+        self.assertTrue(_event_matches_hint(ev, "8月25日 與簡的雞排約會"))
+
+    def test_chinese_date_with_full_year(self):
+        ev = _make_event(title="與簡的雞排約會", day=25, start="17:00", end="20:00")
+        self.assertTrue(_event_matches_hint(ev, "2026年8月25日 下午5點到8點 與簡的雞排約會"))
+
+    def test_chinese_time_range_with_period_prefix(self):
+        # 「下午5點到8點」→ 17:00-20:00；前後半都要命中 haystack 的 17:00-20:00
+        ev = _make_event(title="與簡的雞排約會", day=25, start="17:00", end="20:00")
+        self.assertTrue(_event_matches_hint(ev, "8月25日下午5點到8點與簡的雞排約會"))
+
+    def test_chinese_time_half_hour(self):
+        ev = _make_event(title="喝咖啡", day=3, start="09:30", end="10:00")
+        self.assertTrue(_event_matches_hint(ev, "8月3日 早上9點半 喝咖啡"))
+
+    def test_chinese_date_wrong_day_does_not_match(self):
+        ev = _make_event(title="與簡的雞排約會", day=25, start="17:00", end="20:00")
+        self.assertFalse(_event_matches_hint(ev, "8月15日 下午5點到8點 與簡的雞排約會"))
+
+    def test_chinese_time_mismatch_does_not_match(self):
+        # 日期對、名稱對，但「晚上7點到9點」≠ 17:00-20:00
+        ev = _make_event(title="與簡的雞排約會", day=25, start="17:00", end="20:00")
+        self.assertFalse(_event_matches_hint(ev, "8月25日 晚上7點到9點 與簡的雞排約會"))
+
+    def test_remove_verb_stripped(self):
+        # 「移除」不在行程資料裡，必須先被剝掉；修改/移除場景常見
+        ev = _make_event(title="吃牛排", day=12, start="18:00", end="20:00")
+        self.assertTrue(_event_matches_hint(ev, "移除吃牛排"))
+        self.assertTrue(_event_matches_hint(ev, "幫我移除吃牛排的行程"))
+        self.assertTrue(_event_matches_hint(ev, "把吃牛排移除"))
+
+    def test_relative_weekday_matches_chinese_weekday(self):
+        # 2026-08-12 是星期三；「下禮拜三/下週三/下星期三」→ 星期三
+        ev = _make_event(title="吃牛排", day=12, start="18:00", end="20:00")
+        self.assertTrue(_event_matches_hint(ev, "下禮拜三 吃牛排"))
+        self.assertTrue(_event_matches_hint(ev, "下週三 18:00-20:00 吃牛排"))
+        self.assertTrue(_event_matches_hint(ev, "下星期三 晚上6點到8點 吃牛排"))
+
+    def test_relative_weekday_wrong_day_does_not_match(self):
+        ev = _make_event(title="吃牛排", day=12, start="18:00", end="20:00")
+        self.assertFalse(_event_matches_hint(ev, "下星期五 吃牛排"))
+
+    def test_halfwidth_time_range_with_chinese_to(self):
+        # 模型把「14:02到14:05」原樣放進 hint；haystack 是 14:02-14:05
+        ev = _make_event(title="接小孩上學", day=12, start="14:02", end="14:05")
+        self.assertTrue(_event_matches_hint(ev, "8月12日14:02到14:05的接小孩上學"))
+
+    def test_de_particle_splits_segments_but_keeps_name(self):
+        # 「的」作為拆分符號：時間與名稱黏在一起時仍可比對；
+        # 名稱內的「的」（與簡的雞排約會）不受影響。
+        ev = _make_event(title="接小孩上學", day=12, start="14:02", end="14:05")
+        self.assertTrue(_event_matches_hint(ev, "8/12 14:02到14:05的接小孩上學"))
+        ev2 = _make_event(title="與簡的雞排約會", day=25, start="17:00", end="20:00")
+        self.assertTrue(_event_matches_hint(ev2, "8月25日下午5點到8點與簡的雞排約會"))
+
+    def test_halfwidth_time_range_wrong_time_does_not_match(self):
+        ev = _make_event(title="接小孩上學", day=12, start="14:02", end="14:05")
+        self.assertFalse(_event_matches_hint(ev, "8月12日15:00到16:00的接小孩上學"))
+
     # --- 不命中樣本 ---
     def test_wrong_date(self):
         self.assertFalse(_event_matches_hint(self.event, "8/11 牛肉麵"))

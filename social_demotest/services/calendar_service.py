@@ -290,7 +290,7 @@ def cancel_event(
     return serialize_event(calendar_events_coll.find_one({"_id": event["_id"]}), user_id)
 
 
-_TEMPORAL_WORDS = ("今天", "明天", "後天", "這週", "本週", "下週", "本月", "下個月", "的行程", "的", "幫我", "取消", "修改", "刪除", "更改", "在", "去", "到")
+_TEMPORAL_WORDS = ("今天", "明天", "後天", "這週", "本週", "下週", "本月", "下個月", "的行程", "幫我", "取消", "修改", "刪除", "移除", "更改", "在", "去", "到", "原本", "改成", "改到", "移到", "把", "將")
 
 # 模型回覆常見的全形/特殊標點 → 半形對照，比對前統一正規化避免「09:00–10:00」vs「09:00-10:00」漏抓
 _HINT_NORMALIZE_TABLE = str.maketrans({
@@ -304,8 +304,89 @@ _HINT_NORMALIZE_TABLE = str.maketrans({
 })
 
 
+def _normalize_chinese_temporal(text: str) -> str:
+    """Convert common Chinese date/time phrases into haystack-compatible forms.
+
+    The model often echoes the owner's original wording back into an
+    ``event_hint`` (e.g. ``8月25日下午5點到8點與簡的雞排約會``), so before
+    matching we translate:
+    - ``2026年8月25日`` → ``2026-08-25`` and ``8月25日`` → ``8/25``
+    - ``下午5點到8點`` → ``17:00-20:00`` (the 上午/下午/晚上 prefix carries to
+      the end of the range), ``5點半`` → ``05:30``, ``8點5分`` → ``08:05``
+    - relative weekdays (``下禮拜三`` / ``下週三`` / ``下星期三``) are kept as
+      a bare weekday token (``星期三``) because the haystack carries the event's
+      Chinese weekday; the week offset itself cannot be resolved without a
+      reference date, so it is dropped rather than compared literally.
+    ISO dates and half-width times are left untouched.
+    """
+    if not text:
+        return text
+
+    def _hour_with_prefix(prefix: str, hour: int) -> int:
+        if prefix in {"下午", "傍晚", "晚上", "中午"}:
+            return hour if hour >= 12 else hour + 12
+        if prefix == "凌晨":
+            return hour if hour < 12 else hour - 12
+        return hour  # 早上／上午／無前綴：依原數字
+
+    # 相對星期：上/本/下（禮拜|週|星期|周）X → 星期三
+    text = re.sub(
+        r"(?:上|這|本|下)\s*(?:禮拜|週|星期|周)\s*([一二三四五六日天])",
+        r"\1", text,
+    )
+    text = re.sub(
+        r"(?:禮拜|星期|周)\s*([一二三四五六日天])",
+        r"\1", text,
+    )
+
+    # 日期：2026年8月25日 → 2026-08-25；8月25日 → 8/25（對齊 haystack 的 m/d 格式）
+    text = re.sub(
+        r"(?P<year>(?:19|20)\d{2})年(?P<month>\d{1,2})月(?P<day>\d{1,2})(?:日|號)",
+        lambda m: f" {int(m.group('year')):04d}-{int(m.group('month')):02d}-{int(m.group('day')):02d} ",
+        text,
+    )
+    text = re.sub(
+        r"(?<![\d/])(?P<month>\d{1,2})月(?P<day>\d{1,2})(?:日|號)",
+        lambda m: f" {int(m.group('month'))}/{int(m.group('day'))} ",
+        text,
+    )
+
+    # 時間（含範圍）：下午5點到8點 → 17:00-20:00；5點半 → 05:30
+    time_pattern = re.compile(
+        r"(?P<p1>凌晨|早上|上午|中午|下午|傍晚|晚上)?(?P<h1>\d{1,2})\s*點"
+        r"(?:(?:(?P<m1>\d{1,2})\s*分)|(?P<hm1>半))?"
+        r"(?:\s*(?:到|至|[~～\-–—])\s*"
+        r"(?P<p2>凌晨|早上|上午|中午|下午|傍晚|晚上)?(?P<h2>\d{1,2})\s*點"
+        r"(?:(?:(?P<m2>\d{1,2})\s*分)|(?P<hm2>半))?)?"
+    )
+
+    # 半形時間範圍：14:02到14:05 → 14:02-14:05（對齊 haystack 的 HH:MM-HH:MM）
+    text = re.sub(
+        r"(?P<t1>\d{1,2}:\d{2})\s*(?:到|至|[~～\-–—])\s*(?P<t2>\d{1,2}:\d{2})",
+        lambda m: f" {m.group('t1')}-{m.group('t2')} ",
+        text,
+    )
+
+    def _fraction(m: re.Match, tag: str) -> int:
+        minutes = m.group(f"m{tag}")
+        if minutes is not None:
+            return int(minutes)
+        return 30 if m.group(f"hm{tag}") else 0
+
+    def _time_repl(m: re.Match) -> str:
+        h1 = _hour_with_prefix(m.group("p1") or "", int(m.group("h1")))
+        first = f"{h1:02d}:{_fraction(m, '1'):02d}"
+        if m.group("h2") is None:
+            return f" {first} "
+        h2 = _hour_with_prefix(m.group("p2") or m.group("p1") or "", int(m.group("h2")))
+        return f" {first}-{h2:02d}:{_fraction(m, '2'):02d} "
+
+    return time_pattern.sub(_time_repl, text)
+
+
 def _normalize_hint_text(s: str) -> str:
-    return re.sub(r"\s+", " ", s.translate(_HINT_NORMALIZE_TABLE)).strip()
+    text = _normalize_chinese_temporal(str(s or ""))
+    return re.sub(r"\s+", " ", text.translate(_HINT_NORMALIZE_TABLE)).strip()
 
 
 def _event_matches_hint(event: dict, event_hint: str) -> bool:
@@ -315,7 +396,9 @@ def _event_matches_hint(event: dict, event_hint: str) -> bool:
     # 剔除時間詞與動詞（不在行程資料裡），避免整段子字串比對失敗
     for term in _TEMPORAL_WORDS:
         raw = raw.replace(term, " ")
-    segments = [s for s in re.split(r"[\s,，、]+", raw) if s.strip()]
+    # 「的」不整顆剝離（名稱如「與簡的雞排約會」需要它），但作為 segment 拆分符號，
+    # 避免「14:05的接小孩上學」黏成一段而比對失敗。
+    segments = [s for s in re.split(r"[\s,，、]+|的", raw) if s.strip()]
     if not segments:
         return False
     haystack = " ".join(str(event.get(key) or "") for key in ("title", "activity", "location"))
@@ -326,7 +409,11 @@ def _event_matches_hint(event: dict, event_hint: str) -> bool:
         haystack += (
             f" {local_start:%Y-%m-%d} {local_start.month}/{local_start.day}"
             f" {local_start:%H:%M}-{local_end:%H:%M}"
+            f" {local_start.strftime('%A')}"
         )
+        # 中文星期（一二三四五六日）讓「下禮拜三」類 hint 可比對
+        weekday_zh = "一二三四五六日"[local_start.weekday()]
+        haystack += f" {weekday_zh} {local_start:%A}"
     except Exception:
         pass
     haystack_compact = _normalize_hint_text(haystack).lower().replace(" ", "")
@@ -424,7 +511,7 @@ def cancel_targets_are_current(user_id: str, targets: list[dict]) -> bool:
 
 
 def find_owned_events(
-    user_id: str, event_hint: str, *, date_hint: str = "", companion_user_id: str | None = None, limit: int = 3,
+    user_id: str, event_hint: str, *, date_hint: str = "", companion_user_id: str | None = None, limit: int = 10,
 ) -> list[dict]:
     """Return owner-visible event candidates without making the caller use IDs.
 

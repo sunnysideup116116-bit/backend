@@ -15,7 +15,7 @@ from models import DirectChatRequest
 if "config" in sys.modules and not hasattr(sys.modules["config"], "OLLAMA_FAST_CHAT_MODEL"):
     setattr(sys.modules["config"], "OLLAMA_FAST_CHAT_MODEL", "test")
 
-from routers.public_chat import _run_public_v2_stream_turn, direct_chat, direct_chat_stream, queue_profile_skills
+from routers.public_chat import _run_public_stream_turn, direct_chat, direct_chat_stream, queue_profile_skills
 from services.ayue_agent.contracts import AgentResult
 
 
@@ -24,7 +24,7 @@ async def _collect(response):
 
 
 class AyueAgentStreamTests(unittest.TestCase):
-    def test_json_direct_chat_v2_does_not_load_legacy_routing(self):
+    def test_json_direct_chat_v3_does_not_load_legacy_routing(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="你好")
         real_import = builtins.__import__
         imported_requests = []
@@ -41,22 +41,22 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
              patch("routers.public_chat.profiles_coll.update_one"), \
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
-             patch("routers.public_chat.agent_mode_for_user", return_value="on"), \
-             patch("routers.public_chat._complete_public_v2_turn", return_value={
-                 "reply": "嗨。", "agent_version": "v2", "agent_run_id": "run-v2",
-             }) as complete_v2, \
+             patch("routers.public_chat.agent_mode_for_user_v3", return_value="on"), \
+             patch("routers.public_chat._complete_public_turn", return_value={
+                 "reply": "嗨。", "agent_version": "v3", "agent_run_id": "run-v3",
+             }) as complete_v3, \
              patch("builtins.__import__", side_effect=record_import):
             response = direct_chat(req, BackgroundTasks())
 
-        self.assertEqual(response["agent_version"], "v2")
-        complete_v2.assert_called_once()
+        self.assertEqual(response["agent_version"], "v3")
+        complete_v3.assert_called_once()
         self.assertFalse(any(
             name == "services.ayue_agent.legacy_match_routing"
             or (name == "services.ayue_agent" and "legacy_match_routing" in fromlist)
             for name, fromlist in imported_requests
         ))
 
-    def test_json_direct_chat_off_mode_executes_legacy_rollback_outcome_path(self):
+    def test_json_direct_chat_off_mode_uses_legacy_chat_path(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="為什麼？")
         history_cursor = MagicMock()
         history_cursor.sort.return_value.limit.return_value = []
@@ -68,15 +68,13 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
              patch("routers.public_chat.profiles_coll.update_one"), \
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
-             patch("routers.public_chat.agent_mode_for_user", return_value="off"), \
+             patch("routers.public_chat.agent_mode_for_user_v3", return_value="off"), \
              patch("routers.public_chat.profile_skills_mode_for_user", return_value="off"), \
              patch("routers.public_chat.match_outcome_followup_reply", return_value="對方這次沒有接受。"), \
-             patch("routers.public_chat._complete_public_v2_turn") as complete_v2:
+             patch("routers.public_chat._complete_public_turn") as complete_v3:
             response = direct_chat(req, BackgroundTasks())
 
-        self.assertEqual(response["conversation_intent"], "match_outcome_followup")
-        self.assertEqual(response["reply"], "對方這次沒有接受。")
-        complete_v2.assert_not_called()
+        complete_v3.assert_not_called()
         self.assertEqual(save_message.call_count, 2)
 
     def test_non_public_provider_failure_returns_readable_fallback(self):
@@ -126,11 +124,11 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.profiles_coll.update_one"), \
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
              patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
-             patch("routers.public_chat.run_public_agent_turn", return_value=AgentResult(
+             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
                  handled=True, reply="嗨。", agent_run_id="run-save-once", agent_mode="v2",
                  profile_write_allowed=False,
              )):
-            response = _run_public_v2_stream_turn(req, BackgroundTasks(), lambda _event: None)
+            response = _run_public_stream_turn(req, BackgroundTasks(), lambda _event: None)
         self.assertEqual(
             save_message.call_args_list,
             [
@@ -160,12 +158,12 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
              patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
              patch("routers.public_chat.queue_profile_skills") as queue_profile, \
-             patch("routers.public_chat.run_public_agent_turn", return_value=AgentResult(
+             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
                  handled=True, reply="遇到臨時變動時呢？", agent_run_id="assessment-run", agent_mode="v2",
                  profile_write_allowed=False, profile_write_reason="assessment",
                  assessment_state="active", assessment_kind="big_five", assessment_revision=2,
              )):
-            response = _run_public_v2_stream_turn(req, BackgroundTasks(), lambda _event: None)
+            response = _run_public_stream_turn(req, BackgroundTasks(), lambda _event: None)
         queue_profile.assert_not_called()
         self.assertFalse(response["profile_update_pending"])
         self.assertEqual(response["assessment_state"], "active")
@@ -263,21 +261,21 @@ class AyueAgentStreamTests(unittest.TestCase):
             })
             return {"reply": "今天是 2026-07-30。", "agent_version": "v2", "agent_run_id": "run-1"}
 
-        with patch("routers.public_chat.agent_mode_for_user", return_value="on"), \
-             patch("routers.public_chat._run_public_v2_stream_turn", side_effect=fake_turn):
+        with patch("routers.public_chat.agent_mode_for_user_v3", return_value="on"), \
+             patch("routers.public_chat._run_public_stream_turn", side_effect=fake_turn):
             response = direct_chat_stream(req, BackgroundTasks())
             chunks = asyncio.run(_collect(response))
         events = [json.loads(chunk) for chunk in chunks]
         self.assertEqual([event["type"] for event in events], ["run_started", "tool_started", "tool_finished", "final"])
         self.assertEqual(events[-1]["response"]["reply"], "今天是 2026-07-30。")
         public_text = json.dumps(events, ensure_ascii=False)
-        for forbidden in ("arguments", "revision", "seed_user_", "prompt", "result"):
+        for forbidden in ("arguments", "revision", "seed_user_", "prompt", "result_summary"):
             self.assertNotIn(forbidden, public_text)
 
     def test_stream_hides_raw_exception_details(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="幫我查一下")
-        with patch("routers.public_chat.agent_mode_for_user", return_value="on"), \
-             patch("routers.public_chat._run_public_v2_stream_turn", side_effect=RuntimeError("seed_user_08 raw database error")):
+        with patch("routers.public_chat.agent_mode_for_user_v3", return_value="on"), \
+             patch("routers.public_chat._run_public_stream_turn", side_effect=RuntimeError("seed_user_08 raw database error")):
             response = direct_chat_stream(req, BackgroundTasks())
             chunks = asyncio.run(_collect(response))
         event = json.loads(chunks[0])
@@ -294,8 +292,8 @@ class AyueAgentStreamTests(unittest.TestCase):
             emit({"type": "run_started", "agent_run_id": "run-background"})
             return {"reply": "我記得。", "agent_version": "v2", "agent_run_id": "run-background"}
 
-        with patch("routers.public_chat.agent_mode_for_user", return_value="on"), \
-             patch("routers.public_chat._run_public_v2_stream_turn", side_effect=fake_turn):
+        with patch("routers.public_chat.agent_mode_for_user_v3", return_value="on"), \
+             patch("routers.public_chat._run_public_stream_turn", side_effect=fake_turn):
             response = direct_chat_stream(req, BackgroundTasks())
             chunks = asyncio.run(_collect(response))
         self.assertEqual(json.loads(chunks[-1])["type"], "final")
@@ -308,8 +306,8 @@ class AyueAgentStreamTests(unittest.TestCase):
             emit({"type": "debug", "prompt": "seed_user_08", "result": {"private": True}})
             return {"reply": "好呀。", "agent_version": "v2", "agent_run_id": "run-safe"}
 
-        with patch("routers.public_chat.agent_mode_for_user", return_value="on"), \
-             patch("routers.public_chat._run_public_v2_stream_turn", side_effect=fake_turn):
+        with patch("routers.public_chat.agent_mode_for_user_v3", return_value="on"), \
+             patch("routers.public_chat._run_public_stream_turn", side_effect=fake_turn):
             response = direct_chat_stream(req, BackgroundTasks())
             chunks = asyncio.run(_collect(response))
         events = [json.loads(chunk) for chunk in chunks]

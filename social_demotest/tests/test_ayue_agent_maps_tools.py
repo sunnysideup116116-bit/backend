@@ -3,7 +3,6 @@ from unittest.mock import patch
 
 from services.ayue_agent.contracts import AgentTurnContext, AgentTurnContextV2, ToolCall
 from services.ayue_agent.maps_client import MapClientError, build_overpass_nearby, haversine_m
-from services.ayue_agent.router import tool_policy_for_turn
 from services.ayue_agent.tools import execute_tool
 
 
@@ -18,28 +17,6 @@ class AyueMapsToolsTests(unittest.TestCase):
     def test_haversine_is_straight_line_estimate(self):
         self.assertEqual(haversine_m(22.626, 120.286, 22.626, 120.286), 0)
         self.assertGreater(haversine_m(22.626, 120.286, 22.616, 120.296), 1_000)
-
-    def test_places_tools_are_visible_only_when_enabled(self):
-        ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="附近有什麼餐廳")
-        with patch("services.ayue_agent.router.maps_enabled", return_value=True), \
-             patch("services.ayue_agent.router.google_place_cards_enabled", return_value=False):
-            self.assertTrue({"places.search_nearby", "places.measure_distance", "places.resolve_place"} <= tool_policy_for_turn(ctx))
-        with patch("services.ayue_agent.router.maps_enabled", return_value=False), \
-             patch("services.ayue_agent.router.google_place_cards_enabled", return_value=False):
-            self.assertFalse({"places.search_nearby", "places.measure_distance", "places.resolve_place"} & tool_policy_for_turn(ctx))
-
-    def test_places_tools_remain_visible_when_google_on_and_osm_off(self):
-        """Google on + OSM off must not hide the place tools (visibility bug fix)."""
-        ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="附近有什麼餐廳")
-        with patch("services.ayue_agent.router.maps_enabled", return_value=False), \
-             patch("services.ayue_agent.router.google_place_cards_enabled", return_value=True):
-            self.assertTrue({"places.search_nearby", "places.measure_distance", "places.resolve_place"} <= tool_policy_for_turn(ctx))
-
-    def test_places_tools_hidden_when_both_providers_off(self):
-        ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="附近有什麼餐廳")
-        with patch("services.ayue_agent.router.maps_enabled", return_value=False), \
-             patch("services.ayue_agent.router.google_place_cards_enabled", return_value=False):
-            self.assertFalse({"places.search_nearby", "places.measure_distance", "places.resolve_place"} & tool_policy_for_turn(ctx))
 
     def test_nearby_uses_saved_coarse_location_only_when_requested(self):
         ctx = AgentTurnContext(

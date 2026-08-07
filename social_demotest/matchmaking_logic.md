@@ -1,15 +1,15 @@
-# 阿月 V2 配對邏輯
+# 阿月 V3 配對邏輯
 
-這份文件只說明目前的 canonical 配對流程。公開阿月完整架構、工具與 App 遷移方式請看 [`../AYUE_V2_ARCHITECTURE.md`](../AYUE_V2_ARCHITECTURE.md)；後續 coding agent 的限制請看 [`../AGENTS.md`](../AGENTS.md)。
+這份文件只說明目前的 canonical 配對流程。公開阿月完整架構、工具與 App 遷移方式請看 [`../AYUE_V3_ARCHITECTURE.md`](../AYUE_V3_ARCHITECTURE.md)（V3 架構文件）；後續 coding agent 的限制請看 [`../AGENTS.md`](../AGENTS.md)。
 
 ## 1. 配對不是隨機挑人
 
-使用者明確要求找人後，Public Ayue Planner 只能提出 `match.start_search` confirmation。確認成功後，Runtime 才會呼叫共用的 `match_action_service`：
+使用者明確要求找人後，Public Ayue Planner 只能提出 `match.start_search` confirmation。確認成功後，Scheduler 才會呼叫共用的 `match_action_service`：
 
 ```text
 Owner request
 → Planner confirmation
-→ Runtime confirmation guard
+→ Scheduler confirmation guard
 → match_action_service
 → Mongo candidate pre-filter
 → port 9001 matchmaker ranking
