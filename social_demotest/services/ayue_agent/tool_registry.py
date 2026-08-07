@@ -99,6 +99,27 @@ class _CalendarFindArguments(BaseModel):
     event_hint: str = Field(min_length=1, max_length=120)
     date_hint: str | None = Field(default=None, max_length=32)
     companion_hint: str | None = Field(default=None, max_length=30)
+    limit: int | None = Field(default=None, ge=1, le=30)
+
+
+class _CalendarListArguments(BaseModel):
+    """Date range filter for listing the owner's calendar.
+
+    Primary path: `start_date` / `end_date` (ISO YYYY-MM-DD, both optional).
+    The sub-agent resolves relative terms (這個月/本週/上週…) against the
+    turn clock and fills explicit dates. When both are omitted the range
+    defaults to the next 90 days.
+
+    Legacy fallback: `date` (single day) and `range_label`
+    (今天/明天/後天/本週/下週/本月/下個月) are still accepted and resolved
+    server-side through the turn clock.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    start_date: str | None = Field(default=None, min_length=10, max_length=10)
+    end_date: str | None = Field(default=None, min_length=10, max_length=10)
+    date: str | None = Field(default=None, min_length=10, max_length=10)
+    range_label: str | None = Field(default=None, max_length=32)
 
 
 class _WebSearchArguments(BaseModel):
@@ -164,6 +185,9 @@ class _CalendarEventCandidateOutput(BaseModel):
     date: str
     start_time: str
     end_time: str
+    location: str = ""
+    notes: str = ""
+    event_kind: Literal["personal", "shared_date", ""] = ""
 
 
 class _CalendarFindOutput(BaseModel):
@@ -176,11 +200,14 @@ class _CalendarFindOutput(BaseModel):
     date: str = ""
     start_time: str = ""
     end_time: str = ""
+    location: str = ""
+    notes: str = ""
     event_kind: Literal["personal", "shared_date", ""] = ""
     companion_known: bool = False
     companion_display_name: str = "對方"
     companion_safe_summary: str = ""
-    candidates: list[_CalendarEventCandidateOutput] = Field(default_factory=list, max_length=3)
+    query: str = ""
+    candidates: list[_CalendarEventCandidateOutput] = Field(default_factory=list, max_length=10)
 
 
 class _MatchStatusOutput(BaseModel):
@@ -383,9 +410,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "calendar.list_my_events": ToolSpec(
         "calendar.list_my_events", ToolRisk.READ, "calendar_events",
-        "讀取本人的行事曆與忙碌時段，不讀取對方行事曆。",
+        "讀取本人的行事曆與忙碌時段，不讀取對方行事曆。建議用 start_date 與 end_date（YYYY-MM-DD）指定查詢區間，可包含今天之前與之後；不指定時預設未來 90 天。",
         "我看一下你的行事曆…",
+        planner_arguments_model=_CalendarListArguments,
+        executor_arguments_model=_CalendarListArguments,
         output_model=_CalendarOutput,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
     "calendar.find_my_event": ToolSpec(
         "calendar.find_my_event", ToolRisk.READ, "calendar_event_find",

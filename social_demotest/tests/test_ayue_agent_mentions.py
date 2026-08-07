@@ -2,7 +2,6 @@ import unittest
 from unittest.mock import patch
 
 from services.ayue_agent.contracts import AgentTurnContext, AgentTurnContextV2, ToolCall
-from services.ayue_agent.router import tool_policy_for_turn
 from services.ayue_agent.tools import execute_tool
 from services.ayue_agent.public_relationship_projection import (
     accepted_contact_ids_by_display_name,
@@ -12,30 +11,6 @@ from services.ayue_agent.public_relationship_projection import (
 
 
 class AyueAgentMentionTests(unittest.TestCase):
-    def test_mentioned_contact_tool_requires_a_validated_entity_reference(self):
-        no_mention = AgentTurnContextV2(user_id="owner", room_id="room", message="她最近如何")
-        with_mention = AgentTurnContextV2(
-            user_id="owner", room_id="room", message="她最近如何",
-            mentioned_contacts=[{"display_name": "小安"}],
-        )
-        self.assertNotIn("relationship.get_mentioned_contact_summary", tool_policy_for_turn(no_mention))
-        self.assertIn("relationship.get_mentioned_contact_summary", tool_policy_for_turn(with_mention))
-
-    def test_more_than_three_mentions_do_not_silently_inspect_a_subset(self):
-        with patch(
-            "services.ayue_agent.public_relationship_projection.matches_coll.find_one",
-            return_value={"_id": "accepted"},
-        ):
-            ids, overflow = validated_mentioned_contact_ids("owner", ["a", "b", "c", "d"])
-        self.assertEqual(ids, ["a", "b", "c"])
-        self.assertTrue(overflow)
-        turn = AgentTurnContextV2(
-            user_id="owner", room_id="room", message="幫我比較他們",
-            mentioned_contacts=[{"display_name": "甲"}, {"display_name": "乙"}, {"display_name": "丙"}],
-            mentioned_contact_overflow=True,
-        )
-        self.assertNotIn("relationship.get_mentioned_contact_summary", tool_policy_for_turn(turn))
-
     def test_display_name_resolver_keeps_duplicate_accepted_contacts_for_executor_disambiguation(self):
         matches = [
             {"from_user": "owner", "to_user": "contact-a"},

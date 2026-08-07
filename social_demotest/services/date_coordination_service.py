@@ -11,8 +11,8 @@ from pymongo import ReturnDocument
 
 from database import calendar_events_coll, matches_coll, messages_coll
 from services.calendar_service import (
-    calendar_access_enabled, conflicts_for_viewer, normalize_form, _parse_local_interval,
-    serialize_event,
+    as_utc, calendar_access_enabled, conflicts_for_viewer, get_timezone,
+    normalize_form, _parse_local_interval, serialize_event,
 )
 from services.chat_service import generate_room_id, save_message
 from services.match_state_service import verified_accepted_match_query
@@ -170,7 +170,11 @@ def update_form(user_id: str, other_id: str, coordination_id: str, revision: int
         raise HTTPException(status_code=409, detail="目前沒有可修改的約會協調")
     if int(coordination.get("revision", 1)) != revision:
         raise HTTPException(status_code=409, detail="表單已被更新，請重新整理後再修改")
-    coordination["form"] = normalize_form(form)
+    form = normalize_form(form)
+    # 寫入前驗證時間格式：LLM 自由文字與 REST 都可能帶入無法解析的日期/時間，
+    # 壞格式一旦落庫會讓 confirm_form 卡死在 409；在這裡擋掉並請使用者修正。
+    _parse_local_interval(form)
+    coordination["form"] = form
     coordination["revision"] = revision + 1
     coordination["confirmations"] = {}
     coordination["updated_at"] = datetime.now(timezone.utc)
@@ -483,3 +487,139 @@ def cancel_coordination_or_event(
         f"對方已取消你們的共同約會「{activity}」，雙方行事曆已同步更新。",
     )
     return public_coordination(updated_coordination)
+
+
+def withdraw_reschedule(
+    user_id: str,
+    other_id: str,
+    event_id: str,
+    *,
+    expected_revision: int | None = None,
+    idempotency_key: str | None = None,
+) -> tuple[dict, dict]:
+    """Undo a pending shared-date reschedule and restore the confirmed original.
+
+    The original time still lives on the calendar event (it was only marked
+    ``pending_reconfirmation``), so this restores the event to ``confirmed``
+    and rewinds the coordination card to the same time with both confirmations
+    set.  The event write is CAS-guarded by status + optional revision; a
+    failing event CAS rolls the coordination back to its pending state so the
+    two projections never diverge.
+    """
+    match = find_accepted_match(user_id, other_id)
+    coordination = match.get("date_coordination") or {}
+    event = calendar_events_coll.find_one({
+        "event_id": event_id,
+        "source_type": "date",
+        "participants": {"$all": [user_id, other_id]},
+    })
+    if not event:
+        raise HTTPException(status_code=404, detail="找不到待確認的改期")
+    # Idempotent retry 必須在 status guard 之前判斷：成功撤回後 coordination 已變
+    # completed、event 已回 confirmed，重送的同一 key 要直接回傳現況而不是 409。
+    if (
+        idempotency_key
+        and coordination.get("last_action_key") == idempotency_key
+        and event.get("last_agent_action_key") == idempotency_key
+    ):
+        return public_coordination(coordination), serialize_event(event, user_id)
+    if (
+        coordination.get("calendar_event_id") != event_id
+        or coordination.get("status") != "active"
+    ):
+        raise HTTPException(status_code=409, detail="目前沒有可撤回的改期")
+    if event.get("status") != "pending_reconfirmation":
+        raise HTTPException(status_code=409, detail="這筆約會目前沒有等待中的改期")
+    if expected_revision is not None and int(event.get("revision", 1) or 1) != expected_revision:
+        raise HTTPException(status_code=409, detail="約會剛剛已變更，請重新確認")
+
+    zone = get_timezone(event.get("timezone", "Asia/Taipei"))
+    start = as_utc(event["start_at"]).astimezone(zone)
+    end = as_utc(event["end_at"]).astimezone(zone)
+    restored_form = normalize_form({
+        "date": start.date().isoformat(),
+        "start_time": start.strftime("%H:%M"),
+        "end_time": end.strftime("%H:%M"),
+        "timezone": event.get("timezone", "Asia/Taipei"),
+        "activity": event.get("activity", ""),
+        "location": event.get("location", ""),
+        "budget": event.get("budget", ""),
+        "notes": event.get("notes", ""),
+    })
+    now = datetime.now(timezone.utc)
+    action_key = idempotency_key or f"withdraw-reschedule:{uuid4().hex}"
+    restored_coordination = {
+        **coordination,
+        "status": "completed",
+        "form": restored_form,
+        "confirmations": {person: True for person in [match["from_user"], match["to_user"]]},
+        "updated_at": now,
+        "last_action_key": action_key,
+    }
+    restored_coordination.pop("rescheduling_event_id", None)
+    updated_match = matches_coll.find_one_and_update(
+        {
+            "_id": match["_id"],
+            "date_coordination.coordination_id": coordination["coordination_id"],
+            "date_coordination.status": "active",
+        },
+        {
+            "$set": {"date_coordination": restored_coordination},
+            "$unset": {
+                "date_coordination.rescheduling_event_id": "",
+                "date_coordination.last_action_key": "",
+            },
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated_match:
+        latest = find_accepted_match(user_id, other_id)
+        latest_coordination = latest.get("date_coordination") or {}
+        if (
+            idempotency_key
+            and latest_coordination.get("last_action_key") == idempotency_key
+        ):
+            return public_coordination(latest_coordination), serialize_event(event, user_id)
+        raise HTTPException(status_code=409, detail="約會剛剛已變更，請重新確認")
+
+    event_query: dict = {"_id": event["_id"], "status": "pending_reconfirmation"}
+    if expected_revision is not None:
+        event_query["revision"] = expected_revision
+    event_result = calendar_events_coll.update_one(
+        event_query,
+        {
+            "$set": {
+                "status": "confirmed",
+                "updated_at": now,
+                "last_agent_action_key": action_key,
+            },
+            "$unset": {"pending_change": ""},
+            "$inc": {"revision": 1},
+        },
+    )
+    if not event_result.modified_count:
+        # 對方可能同時完成了重新確認：event 已不再是 pending_reconfirmation。
+        # 把 coordination 還原成改期狀態，避免兩邊投影不一致。
+        pending_form = normalize_form(coordination.get("form", {}))
+        matches_coll.update_one(
+            {
+                "_id": match["_id"],
+                "date_coordination.coordination_id": coordination["coordination_id"],
+                "date_coordination.last_action_key": action_key,
+            },
+            {
+                "$set": {
+                    "date_coordination.status": "active",
+                    "date_coordination.form": pending_form,
+                    "date_coordination.confirmations": {},
+                    "date_coordination.rescheduling_event_id": event_id,
+                    "date_coordination.last_action_key": action_key,
+                    "date_coordination.updated_at": now,
+                },
+            },
+        )
+        raise HTTPException(status_code=409, detail="約會剛剛已變更，請重新確認")
+
+    updated_event = calendar_events_coll.find_one({"_id": event["_id"]}) or {**event, "status": "confirmed"}
+    _sync_card(updated_match, restored_coordination)
+    return public_coordination(restored_coordination), serialize_event(updated_event, user_id)

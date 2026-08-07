@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from services.ayue_agent.contracts import AgentTurnContext, ToolCall
 from services.ayue_agent.tool_registry import (
@@ -50,12 +51,104 @@ class AyueAgentRegistryTests(unittest.TestCase):
         spec = TOOL_REGISTRY["calendar.find_my_event"]
         self.assertEqual(
             executor_arguments_for_turn(spec, [], {"event_hint": "看電影"}),
-            {"event_hint": "看電影", "date_hint": None, "companion_hint": None},
+            {"event_hint": "看電影", "date_hint": None, "companion_hint": None, "limit": None},
         )
         self.assertEqual(
             executor_arguments_for_turn(spec, [], {"event_hint": "看電影", "date_hint": None}),
-            {"event_hint": "看電影", "date_hint": None, "companion_hint": None},
+            {"event_hint": "看電影", "date_hint": None, "companion_hint": None, "limit": None},
         )
+
+    def test_calendar_find_accepts_limit_and_candidates_cap_at_ten(self):
+        spec = TOOL_REGISTRY["calendar.find_my_event"]
+        self.assertEqual(
+            executor_arguments_for_turn(spec, [], {"event_hint": "看電影", "limit": 20}),
+            {"event_hint": "看電影", "date_hint": None, "companion_hint": None, "limit": 20},
+        )
+        output_schema = spec.output_model.model_json_schema()
+        candidates = output_schema["properties"]["candidates"]
+        self.assertEqual(candidates["maxItems"], 10)
+        ref = candidates["items"]["$ref"].split("/")[-1]
+        candidate_props = output_schema["$defs"][ref]["properties"]
+        self.assertIn("location", candidate_props)
+        self.assertIn("notes", candidate_props)
+        self.assertIn("event_kind", candidate_props)
+
+    def test_calendar_find_output_accepts_found_shape_with_new_fields(self):
+        # found 分支的 data 含 location/notes/event_kind（_calendar_event_fields 展開），
+        # 必須通過 output_model 驗證，否則 execute_tool 回 invalid_tool_output。
+        spec = TOOL_REGISTRY["calendar.find_my_event"]
+        data = {
+            "status": "found", "reason_code": "",
+            "activity": "看醫生", "date": "2026-08-09",
+            "start_time": "08:30", "end_time": "12:05",
+            "location": "台大醫院", "notes": "回診", "event_kind": "personal",
+            "companion_known": False, "companion_display_name": "對方",
+            "companion_safe_summary": "", "candidates": [],
+        }
+        spec.output_model.model_validate(data)
+
+    def test_calendar_find_output_accepts_not_found_shape_with_query(self):
+        # not_found 分支的 data 含 query（原始 hint），必須通過驗證。
+        spec = TOOL_REGISTRY["calendar.find_my_event"]
+        data = {
+            "status": "not_found", "reason_code": "event_not_found",
+            "activity": "", "date": "", "start_time": "", "end_time": "",
+            "location": "", "notes": "", "event_kind": "",
+            "companion_known": False, "companion_display_name": "對方",
+            "companion_safe_summary": "", "query": "不能吃東西", "candidates": [],
+        }
+        spec.output_model.model_validate(data)
+
+    def test_calendar_find_output_accepts_ambiguous_shape_with_candidates(self):
+        spec = TOOL_REGISTRY["calendar.find_my_event"]
+        data = {
+            "status": "ambiguous", "reason_code": "event_ambiguous",
+            "activity": "", "date": "", "start_time": "", "end_time": "",
+            "location": "", "notes": "", "event_kind": "",
+            "companion_known": False, "companion_display_name": "對方",
+            "companion_safe_summary": "", "query": "",
+            "candidates": [
+                {"activity": "吃牛排", "date": "2026-08-12", "start_time": "18:00",
+                 "end_time": "20:00", "location": "", "notes": "", "event_kind": "personal"},
+            ],
+        }
+        spec.output_model.model_validate(data)
+
+    def test_calendar_find_execute_tool_never_returns_invalid_tool_output(self):
+        # 端到端：find_my_event 的 found / not_found / ambiguous 三種回傳
+        # 都不能被 output schema 擋成 invalid_tool_output。
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="查行程")
+        with patch("services.ayue_agent.tools.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.find_owned_events", return_value=[
+                 {
+                     "event_id": "e1", "source_type": "personal", "title": "看醫生",
+                     "activity": "看醫生", "location": "台大醫院", "notes": "回診",
+                     "start_at": __import__("datetime").datetime(2026, 8, 9, 0, 30,
+                         tzinfo=__import__("datetime").timezone.utc),
+                     "end_at": __import__("datetime").datetime(2026, 8, 9, 4, 5,
+                         tzinfo=__import__("datetime").timezone.utc),
+                     "timezone": "Asia/Taipei",
+                 },
+             ]):
+            result = execute_tool(
+                ToolCall(name="calendar.find_my_event", arguments={"event_hint": "看醫生"}),
+                ctx,
+            )
+        self.assertTrue(result.ok)
+        self.assertNotEqual(result.error_code, "invalid_tool_output")
+        self.assertEqual(result.data["status"], "found")
+        self.assertEqual(result.data["location"], "台大醫院")
+
+        with patch("services.ayue_agent.tools.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.find_owned_events", return_value=[]):
+            result = execute_tool(
+                ToolCall(name="calendar.find_my_event", arguments={"event_hint": "不能吃東西"}),
+                ctx,
+            )
+        self.assertTrue(result.ok)
+        self.assertNotEqual(result.error_code, "invalid_tool_output")
+        self.assertEqual(result.data["status"], "not_found")
+        self.assertEqual(result.data["query"], "不能吃東西")
 
 
 if __name__ == "__main__":

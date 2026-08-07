@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from routers import calendar, chat, match, system, frontend
 from routers.match import ensure_match_indexes
 from services.calendar_service import ensure_calendar_indexes
-from services.ayue_agent.runtime import ensure_indexes as ensure_ayue_agent_indexes
+from services.ayue_agent.v3.scheduler import ensure_indexes as ensure_ayue_agent_indexes
 from services.ayue_agent.maps_client import ensure_map_cache_indexes
 from services.profile_skills import ensure_profile_skill_indexes
 from services.ayue_agent.proactive_scheduler import start_proactive_care_scheduler, stop_proactive_care_scheduler

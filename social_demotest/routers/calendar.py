@@ -8,10 +8,9 @@ from models import (
     CalendarRescheduleRequest, CalendarSettingsRequest,
 )
 from services.calendar_service import (
-    _parse_local_interval, as_utc, cancel_event, create_personal_event, get_timezone, list_events,
-    normalize_form, serialize_event, update_personal_event,
+    cancel_event, create_personal_event, get_timezone, list_events,
+    serialize_event, update_personal_event,
 )
-from services.date_coordination_service import find_accepted_match
 
 
 router = APIRouter(prefix="/api/calendar", tags=["Calendar"])
@@ -82,35 +81,20 @@ def reschedule_date_event(event_id: str, req: CalendarRescheduleRequest):
 
 @router.post("/events/{event_id}/reschedule/cancel")
 def cancel_reschedule(event_id: str, req: CalendarActionRequest):
-    event = calendar_events_coll.find_one({"event_id": event_id, "source_type": "date", "participants": req.user_id, "status": "pending_reconfirmation"})
-    if not event:
+    from services.date_coordination_service import withdraw_reschedule
+    other_id = None
+    event = calendar_events_coll.find_one({
+        "event_id": event_id, "source_type": "date",
+        "participants": req.user_id, "status": "pending_reconfirmation",
+    })
+    if event:
+        other_id = next(person for person in event["participants"] if person != req.user_id)
+    if not other_id:
         raise HTTPException(status_code=404, detail="找不到待確認的改期")
-    calendar_events_coll.update_one({"_id": event["_id"]}, {"$set": {"status": "confirmed", "pending_change": None, "updated_at": datetime.now(timezone.utc)}})
-    other_id = next(person for person in event["participants"] if person != req.user_id)
-    match = find_accepted_match(req.user_id, other_id)
-    coordination = match.get("date_coordination") or {}
-    if coordination.get("calendar_event_id") == event_id:
-        zone = get_timezone(event.get("timezone", "Asia/Taipei"))
-        coordination.update({
-            "status": "completed",
-            "form": {
-                "date": as_utc(event["start_at"]).astimezone(zone).date().isoformat(),
-                "start_time": as_utc(event["start_at"]).astimezone(zone).strftime("%H:%M"),
-                "end_time": as_utc(event["end_at"]).astimezone(zone).strftime("%H:%M"),
-                "timezone": event.get("timezone", "Asia/Taipei"),
-                "activity": event.get("activity", ""), "location": event.get("location", ""),
-                "budget": event.get("budget", ""), "notes": event.get("notes", ""),
-            },
-            "confirmations": {person: True for person in event["participants"]},
-        })
-        # 撤回改期後清掉「改期中」標記，避免後續 update_form 誤把 pending_change 寫回已確認行程
-        coordination.pop("rescheduling_event_id", None)
-        coordination.pop("last_action_key", None)
-        from database import matches_coll
-        from services.date_coordination_service import _sync_card
-        matches_coll.update_one({"_id": match["_id"]}, {"$set": {"date_coordination": coordination}, "$unset": {"date_coordination.rescheduling_event_id": "", "date_coordination.last_action_key": ""}})
-        _sync_card(match, coordination)
-    return {"event": serialize_event(calendar_events_coll.find_one({"_id": event["_id"]}), req.user_id)}
+    coordination, updated_event = withdraw_reschedule(
+        req.user_id, other_id, event_id, expected_revision=req.expected_revision,
+    )
+    return {"event": updated_event, "coordination": coordination}
 
 
 @router.get("/settings")

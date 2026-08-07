@@ -1509,7 +1509,7 @@
         function appendPlaceCards(container, cards) {
             const safeCards = Array.isArray(cards) ? cards.filter(card =>
                 card && ["openstreetmap", "google"].includes(card.provider)
-            ).slice(0, 3) : [];
+            ).slice(0, 8) : [];
             if (!safeCards.length) return;
             const list = document.createElement("div");
             list.className = "place-card-list";
@@ -3608,7 +3608,7 @@ if (metadata.event_type === "date_coordination_form") {
             }, 250);
         }
 
-        async function streamPublicAyueChat(payload) {
+        async function streamPublicAyueChat(payload, sendStartedAt) {
             const res = await fetch("/api/direct_chat/stream", {
                 method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)
             });
@@ -3622,6 +3622,8 @@ if (metadata.event_type === "date_coordination_form") {
             let finalResponse = null;
             const debugEvents = [];
             lastDebugTrace = [];
+            window.v3RunElapsedMs = 0;
+            window.v3RunStartedAt = (typeof sendStartedAt === "number" && sendStartedAt > 0) ? sendStartedAt : performance.now();
             try {
                 while (true) {
                     const {done, value} = await reader.read();
@@ -3637,7 +3639,10 @@ if (metadata.event_type === "date_coordination_form") {
                         if (event.type === "run_started") showAyueProgress("阿月正在想一下…");
                         if (event.type === "planner_decision") showAyueProgress("阿月正在想一下…");
                         if (event.type === "tool_started") showAyueProgress(event.text || "我確認一下…");
-                        if (event.type === "final") finalResponse = event.response || {};
+                        if (event.type === "final") {
+                            finalResponse = event.response || {};
+                            window.v3RunElapsedMs = performance.now() - window.v3RunStartedAt;
+                        }
                         if (event.type === "error") throw new Error(event.reply || "伺服器暫時無法回覆");
                         const panel = document.getElementById("llm-metrics-panel");
                         if (panel && !panel.classList.contains("hidden")) renderLlmMetricsContent();
@@ -3648,7 +3653,10 @@ if (metadata.event_type === "date_coordination_form") {
                     const event = JSON.parse(buffer);
                     debugEvents.push(event);
                     lastDebugTrace.push(event);
-                    if (event.type === "final") finalResponse = event.response || {};
+                    if (event.type === "final") {
+                        finalResponse = event.response || {};
+                        window.v3RunElapsedMs = performance.now() - window.v3RunStartedAt;
+                    }
                     if (event.type === "error") throw new Error(event.reply || "伺服器暫時無法回覆");
                     const panel = document.getElementById("llm-metrics-panel");
                     if (panel && !panel.classList.contains("hidden")) renderLlmMetricsContent();
@@ -3700,6 +3708,7 @@ if (metadata.event_type === "date_coordination_form") {
             const requestContactId = activeContactId;
             const isPublicAyue = requestContactId === "ai_assistant";
             if (isPublicAyue && publicAyueSending) return;
+            const sendStartedAt = performance.now();
             const inp = document.getElementById("room-input");
             const msg = inp.value.trim();
             if (!msg) return;
@@ -3728,7 +3737,7 @@ if (metadata.event_type === "date_coordination_form") {
                 let res = null;
                 let data = null;
                 if (isPublicAyue) {
-                    data = await streamPublicAyueChat(payload);
+                    data = await streamPublicAyueChat(payload, sendStartedAt);
                     res = {ok: true};
                     lastLlmCallMetrics = data.llm_call_metrics || null;
                     const panel = document.getElementById("llm-metrics-panel");
@@ -4693,7 +4702,7 @@ if (metadata.event_type === "date_coordination_form") {
             let matchLabel = statusNames[data.match_search_status] || data.match_search_status || "待命";
             if (data.has_pending_confirmation) matchLabel += "（另有待確認操作）";
             setText("demo-current-user", currentUserId || "尚未選擇");
-            setText("demo-agent-version", data.agent_version === "v2" ? "V2 已啟用" : "Legacy rollback");
+            setText("demo-agent-version", data.agent_version === "v3" ? "V3 已啟用" : "Legacy rollback");
             setText("demo-web-status", data.web_search_ready ? "可用" : "尚未設定 API Key");
             setText("demo-location", location.display_name || "尚未設定");
             setText("demo-recent-context", data.recent_context || "尚無近期情境");
@@ -5270,6 +5279,7 @@ if (metadata.event_type === "date_coordination_form") {
                 if (calendarState.mode === "edit") {
                     url = `/api/calendar/events/${encodeURIComponent(calendarState.selectedEvent.event_id)}`;
                     method = "PATCH";
+                    payload.expected_revision = calendarState.selectedEvent.revision;
                 } else if (calendarState.mode === "reschedule") {
                     url = `/api/calendar/events/${encodeURIComponent(calendarState.selectedEvent.event_id)}/reschedule`;
                     payload.activity = calendarState.selectedEvent.activity || "";
@@ -5282,7 +5292,10 @@ if (metadata.event_type === "date_coordination_form") {
                     body: JSON.stringify(payload)
                 });
                 const data = await res.json();
-                if (!res.ok) throw new Error(dateApiError(data, "無法儲存行程"));
+                if (!res.ok) {
+                    if (res.status === 409) throw new Error((data.detail || "行程剛剛已變更") + "，請重新整理後再修改");
+                    throw new Error(dateApiError(data, "無法儲存行程"));
+                }
                 showAppToast(calendarState.mode === "reschedule" ? "改期提議已送出，請回聊天室確認" : "行程已儲存");
                 openCalendarEditor("create");
                 await loadCalendarEvents();
@@ -5302,10 +5315,13 @@ if (metadata.event_type === "date_coordination_form") {
                 const res = await fetch(`/api/calendar/events/${encodeURIComponent(event.event_id)}/cancel`, {
                     method: "POST",
                     headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify({user_id: currentUserId})
+                    body: JSON.stringify({user_id: currentUserId, expected_revision: event.revision})
                 });
                 const data = await res.json();
-                if (!res.ok) throw new Error(dateApiError(data, "無法取消行程"));
+                if (!res.ok) {
+                    if (res.status === 409) throw new Error((data.detail || "行程剛剛已變更") + "，請重新整理後再取消");
+                    throw new Error(dateApiError(data, "無法取消行程"));
+                }
                 showAppToast("行程已取消");
                 await loadCalendarEvents();
                 if (event.source_type === "date" && event.participants?.includes(activeContactId)) {
@@ -5359,6 +5375,15 @@ if (metadata.event_type === "date_coordination_form") {
                 content.innerHTML = '<p class="text-sm text-gray-400">尚無執行數據。傳送訊息後再點擊查看。</p>';
                 return;
             }
+
+            // Detect V3 events
+            const hasV3 = lastDebugTrace.some(e => e.type === "plan_created" || e.type === "subagent_started" || e.type === "subagent_finished");
+            if (hasV3) {
+                renderV3MetricsContent(content);
+                return;
+            }
+
+            // Legacy V2 rendering
             let html = "";
             let loopNum = 0;
             for (const evt of lastDebugTrace) {
@@ -5418,6 +5443,201 @@ if (metadata.event_type === "date_coordination_form") {
                         '<div class="text-[11px] text-[#fff1b8] mt-1">' + (evt.reply || "") + '</div></div>';
                 }
             }
+            content.innerHTML = html;
+            content.scrollTop = content.scrollHeight;
+        }
+
+        const V3_AGENT_COLORS = {
+            "planner": "#ffd166",
+            "calendar": "#55e6d9",
+            "places": "#7dd87f",
+            "match": "#ff6fae",
+            "relationship": "#c084fc",
+            "profile": "#fb923c",
+            "synthesizer": "#ffd166",
+        };
+        const V3_AGENT_LABELS = {
+            "planner": "📋 Planner",
+            "calendar": "📅 Calendar",
+            "places": "📍 Places+Web",
+            "match": "💞 Match",
+            "relationship": "🤝 Relationship",
+            "profile": "👤 Profile",
+            "synthesizer": "✍️ Synthesizer",
+        };
+
+        function renderV3MetricsContent(content) {
+            let totalInput = 0, totalOutput = 0;
+            const agentCards = {};
+            let planData = null;
+            let plannerMetrics = null;
+            let plannerPromptRaw = "";
+            let plannerContentRaw = "";
+            let runStarted = false;
+            let finalReply = "";
+            let errorMsg = "";
+            const runElapsedMs = window.v3RunElapsedMs || 0;
+            for (const evt of lastDebugTrace) {
+                if (evt.type === "run_started") runStarted = true;
+                if (evt.type === "plan_created") {
+                    planData = evt.plan || [];
+                    plannerMetrics = evt.planner_metrics || {};
+                    plannerPromptRaw = evt.prompt_raw || "";
+                    plannerContentRaw = evt.content_raw || "";
+                    totalInput += plannerMetrics.input_tokens || 0;
+                    totalOutput += plannerMetrics.output_tokens || 0;
+                }
+                if (evt.type === "subagent_started") {
+                    const key = evt.task_id + ":" + evt.agent;
+                    if (!agentCards[key]) agentCards[key] = {
+                        task_id: evt.task_id, agent: evt.agent, task_brief: evt.task_brief,
+                        status: "running", input_tokens: 0, output_tokens: 0, duration_ms: 0,
+                        tool_name: null, tool_calls_raw: [], content_raw: "", error: "",
+                    };
+                }
+                if (evt.type === "subagent_finished") {
+                    const key = evt.task_id + ":" + evt.agent;
+                    agentCards[key] = {
+                        task_id: evt.task_id, agent: evt.agent,
+                        task_brief: agentCards[key]?.task_brief || "",
+                        status: evt.status || "unknown",
+                        input_tokens: evt.input_tokens || 0,
+                        output_tokens: evt.output_tokens || 0,
+                        duration_ms: evt.duration_ms || 0,
+                        tool_name: evt.tool_name || null,
+                        tool_calls_raw: evt.tool_calls_raw || [],
+                        content_raw: evt.content_raw || "",
+                        prompt_raw: evt.prompt_raw || "",
+                        error: evt.error || "",
+                    };
+                    totalInput += evt.input_tokens || 0;
+                    totalOutput += evt.output_tokens || 0;
+                }
+                if (evt.type === "tool_started" || evt.type === "tool_finished") {
+                    // tool events supplement the subagent card; already captured in subagent_finished
+                }
+                if (evt.type === "final") finalReply = (evt.response || {}).reply || "";
+                if (evt.type === "error") errorMsg = evt.reply || "";
+            }
+
+            let html = "";
+
+            // Header: run status + total tokens + elapsed time
+            html += '<div class="border-2 border-[#8a72b8] p-2 bg-[#110a22] mb-2">' +
+                '<div class="text-[#ffd166] font-bold text-sm mb-1">▶ V3 Sub-agent Run' +
+                (runElapsedMs ? ' <span class="text-[#ffd166] text-xs font-normal">（總耗時 ' + (runElapsedMs / 1000).toFixed(1) + 's）</span>' : '') +
+                '</div>' +
+                '<div class="grid grid-cols-4 gap-1 text-[11px]">' +
+                '<div><span class="text-gray-400">總 Input</span><br><span class="text-[#55e6d9] font-bold">' + totalInput + '</span></div>' +
+                '<div><span class="text-gray-400">總 Output</span><br><span class="text-[#55e6d9] font-bold">' + totalOutput + '</span></div>' +
+                '<div><span class="text-gray-400">總 Tokens</span><br><span class="text-[#ffd166] font-bold">' + (totalInput + totalOutput) + '</span></div>' +
+                '<div><span class="text-gray-400">耗時</span><br><span class="text-[#ffd166] font-bold">' + (runElapsedMs ? (runElapsedMs / 1000).toFixed(1) + 's' : '—') + '</span></div>' +
+                '</div></div>';
+
+            // Planner card
+            if (planData) {
+                const color = V3_AGENT_COLORS["planner"] || "#ffd166";
+                html += '<div class="border-2 p-2 bg-[#110a22] mb-2" style="border-color:' + color + '">' +
+                    '<div class="flex items-center gap-1 mb-1">' +
+                    '<span class="font-bold text-xs" style="color:' + color + '">' + (V3_AGENT_LABELS["planner"] || "Planner") + '</span>' +
+                    '</div>' +
+                    '<div class="grid grid-cols-4 gap-1 text-[11px] mb-1">' +
+                    '<div><span class="text-gray-400 text-[10px]">Input</span><br><span class="text-[#55e6d9] font-bold">' + (plannerMetrics.input_tokens || 0) + '</span></div>' +
+                    '<div><span class="text-gray-400 text-[10px]">Output</span><br><span class="text-[#55e6d9] font-bold">' + (plannerMetrics.output_tokens || 0) + '</span></div>' +
+                    '<div><span class="text-gray-400 text-[10px]">耗時</span><br><span class="text-[#55e6d9] font-bold">' + (plannerMetrics.duration_ms || 0) + 'ms</span></div>' +
+                    '<div><span class="text-gray-400 text-[10px]">任務數</span><br><span class="text-[#55e6d9] font-bold">' + planData.length + '</span></div>' +
+                    '</div>' +
+                    '<div class="text-[10px] text-gray-400 mt-1">子任務 DAG：</div>' +
+                    '<div class="space-y-0.5 mt-0.5">';
+                for (const t of planData) {
+                    const aColor = V3_AGENT_COLORS[t.agent] || "#fff";
+                    const depStr = t.depends_on && t.depends_on.length ? ' → depends: ' + t.depends_on.join(", ") : '';
+                    html += '<div class="text-[10px]"><span style="color:' + aColor + '" class="font-bold">' + t.id + '</span> ' +
+                        '<span style="color:' + aColor + '">' + (V3_AGENT_LABELS[t.agent] || t.agent) + '</span>' +
+                        '<span class="text-gray-500">' + depStr + '</span>' +
+                        '<div class="text-gray-400 ml-3">' + (t.task_brief || "") + '</div></div>';
+                }
+                html += '</div>';
+
+                // Planner RAW prompt / output expandable sections
+                if (plannerPromptRaw) {
+                    html += '<div class="text-[10px] mt-1"><span class="text-gray-400">RAW Planner Prompt:</span>' +
+                        '<button onclick="toggleDetail(this)" data-detail="' + encodeURIComponent(plannerPromptRaw) + '" class="text-[#55e6d9] underline cursor-pointer ml-1">展開</button></div>';
+                }
+                if (plannerContentRaw) {
+                    html += '<div class="text-[10px] mt-1"><span class="text-gray-400">RAW Planner Output:</span>' +
+                        '<button onclick="toggleDetail(this)" data-detail="' + encodeURIComponent(plannerContentRaw) + '" class="text-[#55e6d9] underline cursor-pointer ml-1">展開</button></div>';
+                }
+                html += '</div>';
+            }
+
+            // Sub-agent cards (ordered by appearance)
+            for (const key of Object.keys(agentCards)) {
+                const card = agentCards[key];
+                const color = V3_AGENT_COLORS[card.agent] || "#fff";
+                const statusColor = card.status === "ok" ? "#55e6d9" : card.status === "running" ? "#ffd166" : card.status === "skipped" ? "#888" : "#ff6fae";
+                const statusLabel = card.status === "ok" ? "✅ 成功" : card.status === "running" ? "⏳ 執行中" : card.status === "skipped" ? "⏭️ 跳過" : "❌ 失敗";
+
+                html += '<div class="border-2 p-2 bg-[#110a22] mb-2" style="border-color:' + color + '">' +
+                    '<div class="flex items-center gap-1 mb-1 flex-wrap">' +
+                    '<span class="font-bold text-xs" style="color:' + color + '">' + (V3_AGENT_LABELS[card.agent] || card.agent) + '</span>' +
+                    '<span class="text-[10px] text-gray-400">(' + card.task_id + ')</span>' +
+                    '<span class="text-[10px] px-1" style="color:' + statusColor + '; border:1px solid ' + statusColor + '">' + statusLabel + '</span>' +
+                    '</div>' +
+                    '<div class="text-[10px] text-gray-400 mb-1">' + (card.task_brief || "") + '</div>';
+
+                if (card.error) {
+                    html += '<div class="text-[10px] text-[#ff6fae] mb-1">錯誤: ' + card.error + '</div>';
+                }
+
+                html += '<div class="grid grid-cols-3 gap-1 text-[11px]">' +
+                    '<div><span class="text-gray-400 text-[10px]">Input</span><br>' +
+                    (card.prompt_raw ?
+                        '<button onclick="toggleDetail(this)" data-detail="' + encodeURIComponent(card.prompt_raw) + '" class="text-[#55e6d9] font-bold text-[11px] underline cursor-pointer">' + card.input_tokens + '</button>'
+                        : '<span class="text-[#55e6d9] font-bold">' + card.input_tokens + '</span>') +
+                    '</div>' +
+                    '<div><span class="text-gray-400 text-[10px]">Output</span><br>' +
+                    (card.content_raw ?
+                        '<button onclick="toggleDetail(this)" data-detail="' + encodeURIComponent(card.content_raw) + '" class="text-[#55e6d9] font-bold text-[11px] underline cursor-pointer">' + card.output_tokens + '</button>'
+                        : '<span class="text-[#55e6d9] font-bold">' + card.output_tokens + '</span>') +
+                    '</div>' +
+                    '<div><span class="text-gray-400 text-[10px]">耗時</span><br><span class="text-[#55e6d9] font-bold">' + card.duration_ms + 'ms</span></div>' +
+                    '</div>';
+
+                // Raw prompt / raw output expandable sections
+                if (card.prompt_raw) {
+                    html += '<div class="text-[10px] mt-1"><span class="text-gray-400">RAW Prompt:</span>' +
+                        '<button onclick="toggleDetail(this)" data-detail="' + encodeURIComponent(card.prompt_raw) + '" class="text-[#55e6d9] underline cursor-pointer ml-1">展開</button></div>';
+                }
+                if (card.content_raw) {
+                    html += '<div class="text-[10px] mt-1"><span class="text-gray-400">RAW Output:</span>' +
+                        '<button onclick="toggleDetail(this)" data-detail="' + encodeURIComponent(card.content_raw) + '" class="text-[#55e6d9] underline cursor-pointer ml-1">展開</button></div>';
+                }
+
+                if (card.tool_name) {
+                    html += '<div class="text-[10px] mt-1"><span class="text-gray-400">Tool:</span> <span class="text-[#fff1b8]">' + card.tool_name + '</span></div>';
+                }
+                if (card.tool_calls_raw && card.tool_calls_raw.length) {
+                    const tcStr = JSON.stringify(card.tool_calls_raw, null, 2).substring(0, 500);
+                    html += '<div class="text-[10px] mt-1"><span class="text-gray-400">Tool calls:</span>' +
+                        '<button onclick="toggleDetail(this)" data-detail="' + encodeURIComponent(tcStr) + '" class="text-[#fff1b8] underline cursor-pointer ml-1">展開</button></div>';
+                }
+
+                html += '</div>';
+            }
+
+            // Final result
+            if (finalReply) {
+                html += '<div class="border-2 border-[#ffd166] p-2 bg-[#110a22]">' +
+                    '<div class="text-[#ffd166] font-bold text-xs mb-1">🏁 最終回覆</div>' +
+                    '<div class="text-[11px] text-[#fff1b8]">' + finalReply.substring(0, 300) + '</div></div>';
+            }
+            if (errorMsg) {
+                html += '<div class="border-2 border-[#ff6fae] p-2 bg-[#110a22]">' +
+                    '<div class="text-[#ff6fae] font-bold text-xs">❌ 錯誤</div>' +
+                    '<div class="text-[11px] text-[#fff1b8] mt-1">' + errorMsg + '</div></div>';
+            }
+
             content.innerHTML = html;
             content.scrollTop = content.scrollHeight;
         }

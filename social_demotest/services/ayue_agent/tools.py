@@ -53,23 +53,88 @@ from .google_places_client import (
 )
 
 
-def _calendar_events(user_id: str, clock: TurnClockV1 | None = None) -> ToolResult:
+def _calendar_events(user_id: str, clock: TurnClockV1 | None = None, arguments: dict | None = None) -> ToolResult:
     if not calendar_access_enabled(user_id):
         return ToolResult(ok=False, error_code="calendar_access_denied", user_message="你目前沒有授權我讀取行事曆。")
     zone = get_timezone(clock.timezone) if clock else timezone(timedelta(hours=8), name="Asia/Taipei")
-    if clock and clock.temporal_references:
-        target_date = next(iter(clock.temporal_references.values()))
-        local_start = datetime.combine(datetime.fromisoformat(target_date).date(), time_value.min, zone)
-        now, end = local_start.astimezone(timezone.utc), (local_start + timedelta(days=1)).astimezone(timezone.utc)
-        range_label = target_date
-    else:
+    arguments = arguments or {}
+    range_label = "next_90_days"
+
+    def _parse_date(value: str) -> datetime.date | None:
+        try:
+            return datetime.fromisoformat(value.strip()).date()
+        except (TypeError, ValueError):
+            return None
+
+    def _local_interval(start_date, end_date):
+        """Convert two inclusive local dates into UTC datetimes (end exclusive)."""
+        local_start = datetime.combine(start_date, time_value.min, zone)
+        local_end = datetime.combine(end_date + timedelta(days=1), time_value.min, zone)
+        return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
+
+    def _month_end(start_of_month):
+        return (start_of_month.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+
+    now_utc, end_utc = None, None
+
+    # Primary path: explicit start_date / end_date range.
+    start_value = (arguments.get("start_date") or "").strip()
+    end_value = (arguments.get("end_date") or "").strip()
+    if start_value or end_value:
+        start_date = _parse_date(start_value) if start_value else None
+        end_date = _parse_date(end_value) if end_value else None
+        if (start_value and start_date is None) or (end_value and end_date is None):
+            return ToolResult(ok=False, error_code="invalid_tool_arguments", user_message="這個日期格式我不太確定，可以再跟我說一次嗎？")
+        # Only one bound given → treat as a single day.
+        if start_date is None:
+            start_date = end_date
+        if end_date is None:
+            end_date = start_date
+        if start_date > end_date:
+            return ToolResult(ok=False, error_code="invalid_tool_arguments", user_message="這個日期範圍我不太確定，可以再跟我說一次嗎？")
+        if (end_date - start_date).days > 366:
+            return ToolResult(ok=False, error_code="invalid_tool_arguments", user_message="這個日期範圍太長，我先幫你確認較近的行程好嗎？")
+        now_utc, end_utc = _local_interval(start_date, end_date)
+        range_label = start_date.isoformat() if start_date == end_date else f"{start_date.isoformat()}~{end_date.isoformat()}"
+
+    # Legacy fallback: single date.
+    if now_utc is None:
+        date_value = (arguments.get("date") or "").strip()
+        if date_value:
+            target_date = _parse_date(date_value)
+            if target_date is None:
+                return ToolResult(ok=False, error_code="invalid_tool_arguments", user_message="這個日期格式我不太確定，可以再跟我說一次嗎？")
+            now_utc, end_utc = _local_interval(target_date, target_date)
+            range_label = target_date.isoformat()
+
+    # Legacy fallback: range_label resolved through the turn clock.
+    if now_utc is None:
+        range_value = (arguments.get("range_label") or "").strip()
+        if range_value and clock and clock.temporal_references:
+            resolved = clock.temporal_references.get(range_value)
+            if resolved:
+                start_date = _parse_date(resolved)
+                if start_date is not None:
+                    if range_value in {"本週", "這週", "下週"}:
+                        end_date = start_date + timedelta(days=6)
+                        now_utc, end_utc = _local_interval(start_date, end_date)
+                        range_label = f"{start_date.isoformat()}~{end_date.isoformat()}"
+                    elif range_value in {"本月", "下個月"}:
+                        end_date = _month_end(start_date)
+                        now_utc, end_utc = _local_interval(start_date, end_date)
+                        range_label = f"{start_date.isoformat()}~{end_date.isoformat()}"
+                    else:
+                        now_utc, end_utc = _local_interval(start_date, start_date)
+                        range_label = start_date.isoformat()
+
+    if now_utc is None:
         # "最近的行程"：從今天 00:00 當地時間起算，含今天已結束的行程
         local_now = (clock_utc(clock) if clock else datetime.now(timezone.utc)).astimezone(zone)
         local_start = datetime.combine(local_now.date(), time_value.min, zone)
-        now = local_start.astimezone(timezone.utc)
-        end = now + timedelta(days=90)
+        now_utc = local_start.astimezone(timezone.utc)
+        end_utc = now_utc + timedelta(days=90)
         range_label = "next_90_days"
-    events = get_calendar_context(user_id, None, now, end).get("viewer_events", [])
+    events = get_calendar_context(user_id, None, now_utc, end_utc).get("viewer_events", [])
     safe_events = []
     for event in events:
         if event.get("status") == "cancelled":
@@ -96,6 +161,9 @@ def _calendar_event_fields(event: dict) -> dict[str, str]:
         "date": start.date().isoformat(),
         "start_time": start.strftime("%H:%M"),
         "end_time": end.strftime("%H:%M"),
+        "location": str(event.get("location") or "")[:160],
+        "notes": str(event.get("notes") or "")[:200],
+        "event_kind": "shared_date" if event.get("source_type") == "date" else "personal",
     }
 
 
@@ -143,33 +211,40 @@ def _calendar_find_event(ctx: AgentTurnContext, arguments: dict[str, Any]) -> To
     event_hint = str(arguments.get("event_hint") or "").strip()
     date_hint = str(arguments.get("date_hint") or "").strip()
     companion_hint = str(arguments.get("companion_hint") or "").strip()
+    try:
+        limit = int(arguments.get("limit") or 10)
+    except (TypeError, ValueError):
+        limit = 10
+    limit = max(1, min(limit, 30))
     companion_ids = accepted_contact_ids_by_display_name(ctx.user_id, companion_hint) if companion_hint else []
     if companion_hint and not companion_ids:
-        return _empty_calendar_find("not_found", "companion_not_found")
+        return _empty_calendar_find("not_found", "companion_not_found", query=event_hint)
     if len(companion_ids) > 1:
         # A public display name is not a unique authority boundary. Do not use
         # calendar contents to infer which same-named accepted contact the
         # owner meant; ask for a different identifying description instead.
-        return _empty_calendar_find("ambiguous", "companion_ambiguous")
+        return _empty_calendar_find("ambiguous", "companion_ambiguous", query=event_hint)
     events: list[dict] = []
     lookup_ids: list[str | None] = companion_ids if companion_ids else [None]
     for companion_user_id in lookup_ids:
         for event in find_owned_events(
             ctx.user_id, event_hint, date_hint=date_hint,
-            companion_user_id=companion_user_id,
+            companion_user_id=companion_user_id, limit=limit,
         ):
             if event not in events:
                 events.append(event)
     if not events:
         reason = "companion_ambiguous" if len(companion_ids) > 1 else "event_not_found"
-        return _empty_calendar_find("ambiguous" if len(companion_ids) > 1 else "not_found", reason)
+        return _empty_calendar_find(
+            "ambiguous" if len(companion_ids) > 1 else "not_found", reason, query=event_hint,
+        )
     if len(events) > 1:
         return ToolResult(ok=True, data={
             "status": "ambiguous", "reason_code": "event_ambiguous",
             "activity": "", "date": "", "start_time": "", "end_time": "",
             "event_kind": "", "companion_known": False, "companion_display_name": "對方",
             "companion_safe_summary": "",
-            "candidates": [_calendar_event_fields(event) for event in events[:3]],
+            "candidates": [_calendar_event_fields(event) for event in events[:limit]],
         })
     event = events[0]
     return ToolResult(ok=True, data={
@@ -178,12 +253,12 @@ def _calendar_find_event(ctx: AgentTurnContext, arguments: dict[str, Any]) -> To
     })
 
 
-def _empty_calendar_find(status: str, reason_code: str) -> ToolResult:
+def _empty_calendar_find(status: str, reason_code: str, query: str = "") -> ToolResult:
     return ToolResult(ok=True, data={
         "status": status, "reason_code": reason_code,
         "activity": "", "date": "", "start_time": "", "end_time": "",
         "event_kind": "", "companion_known": False, "companion_display_name": "對方",
-        "companion_safe_summary": "", "candidates": [],
+        "companion_safe_summary": "", "candidates": [], "query": query,
     })
 
 
@@ -576,7 +651,7 @@ def execute_tool(
     if arguments is None:
         return ToolResult(ok=False, error_code="invalid_tool_arguments", user_message="這個請求的資訊格式不正確，我沒有執行它。")
     executors = {
-        "calendar_events": lambda: _calendar_events(ctx.user_id, clock),
+        "calendar_events": lambda: _calendar_events(ctx.user_id, clock, arguments),
         "calendar_event_find": lambda: _calendar_find_event(ctx, arguments),
         "current_time": lambda: _current_time(clock),
         "match_status": lambda: _match_status(ctx.user_id),

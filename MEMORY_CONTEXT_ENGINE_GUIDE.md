@@ -1,6 +1,6 @@
 # Memory、Graph 與 Context Engine 擴充指南
 
-本文件給負責「長期建議、Graph Memory、Context Engine」的開發者。開始修改前也必須閱讀 [`AGENTS.md`](./AGENTS.md) 與 [`AYUE_V2_ARCHITECTURE.md`](./AYUE_V2_ARCHITECTURE.md)。
+本文件給負責「長期建議、Graph Memory、Context Engine」的開發者。開始修改前也必須閱讀 [`AGENTS.md`](./AGENTS.md) 與 [`AYUE_V3_ARCHITECTURE.md`](./AYUE_V3_ARCHITECTURE.md)。
 
 核心原則：這三項能力可以共用 typed contracts 與安全 projection，但不能共用一個沒有邊界的資料池。
 
@@ -120,7 +120,7 @@ Saved owner message
 
 ### 2.4 Public Context
 
-`services/ayue_agent/context.py` 是 Public V2 唯一 Context Builder。現在的 budget：
+`services/ayue_agent/context.py` 是 Public V3 唯一 Context Builder。現在的 budget：
 
 - 最近 12 則訊息，合計最多 6,000 字元。
 - 本人近期情境一份。
@@ -303,7 +303,7 @@ Context Engine 的輸出應是 provider-neutral typed bundle，而不是 prompt 
 3. 將現有 Graph read/write 包在 repository 或 domain service，保留 API 相容。
 4. 建立 retrieval／ranking／budgeting 的 deterministic tests。
 5. 用 shadow mode 比較舊 `AgentTurnContextV2` 與新 bundle 的選取結果；shadow 只記 metadata，不記內容。
-6. Public runtime adapter 驗證後才切換；V2 失敗仍 fail closed，不回 legacy。
+6. Public runtime adapter 驗證後才切換；V3 失敗仍 fail closed，不回 legacy。
 7. 最後才讓 matchmaker 或 long-term advice 消費新 projection。
 
 不要同時改 Graph schema、Context Builder、match ranking 與 UI。每階段都應能單獨 rollback。

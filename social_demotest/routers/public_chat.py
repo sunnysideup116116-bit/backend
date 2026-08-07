@@ -1,8 +1,8 @@
-"""Public direct-chat HTTP adapters and legacy/V2 orchestration.
+"""Public direct-chat HTTP adapters and V3 orchestration.
 
-This module owns only /api/direct_chat and /api/direct_chat/stream. Public V2
-continues to delegate to services.ayue_agent.runtime; legacy logic remains
-available exclusively through the explicit runtime rollback flag.
+This module owns only /api/direct_chat and /api/direct_chat/stream. Public
+Ayue delegates to services.ayue_agent.v3.scheduler; there is no legacy
+public runtime anymore.
 """
 
 import asyncio
@@ -21,14 +21,14 @@ from config import OLLAMA_FAST_CHAT_MODEL
 from database import matches_coll, messages_coll, profiles_coll
 from models import DirectChatRequest
 from services.ai_service import generate_chat_completion, get_embedding
-from services.ayue_agent import run_public_agent_turn
+from services.ayue_agent import run_public_agent_turn_v3
 from services.ayue_agent.contracts import AgentTurnContext
 from services.ayue_agent.proactive_care import record_proactive_activity
 from services.ayue_agent.public_relationship_projection import (
     mentioned_contact_refs,
     validated_mentioned_contact_ids,
 )
-from services.ayue_agent.runtime import agent_mode_for_user
+from services.ayue_agent.v3.scheduler import agent_mode_for_user_v3
 from services.chat_service import generate_room_id, save_message
 from services.match_state_service import verified_accepted_match_query
 from services.mediator_context_service import (
@@ -624,7 +624,7 @@ def _owner_profile_message(req: DirectChatRequest, mentioned_ids: list[str]) -> 
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
-def _complete_public_v2_turn(
+def _complete_public_turn(
     req: DirectChatRequest,
     room_id: str,
     requested_mentions: list[str],
@@ -633,26 +633,25 @@ def _complete_public_v2_turn(
     background_tasks: BackgroundTasks | None = None,
     user_message_id: str | None = None,
 ) -> dict:
-    """Run and persist one V2 turn after the owner message has been saved."""
+    """Run and persist one V3 turn after the owner message has been saved."""
     history = list(messages_coll.find({"room_id": room_id}).sort("timestamp", -1).limit(12))[::-1]
     user_doc = profiles_coll.find_one({"user_id": req.user_id})
-    agent_result = run_public_agent_turn(
-        AgentTurnContext(
-            user_id=req.user_id,
-            room_id=room_id,
-            message=req.message,
-            message_id=user_message_id,
-            mentioned_ids=requested_mentions,
-            mention_overflow=mention_overflow,
-            user_profile=user_doc or {},
-            recent_history=history,
-        ),
-        mode="on",
-        on_progress=on_progress,
+    agent_ctx = AgentTurnContext(
+        user_id=req.user_id,
+        room_id=room_id,
+        message=req.message,
+        message_id=user_message_id,
+        mentioned_ids=requested_mentions,
+        mention_overflow=mention_overflow,
+        user_profile=user_doc or {},
+        recent_history=history,
+    )
+    agent_result = run_public_agent_turn_v3(
+        agent_ctx, mode="on", on_progress=on_progress,
     )
     ai_reply = agent_result.reply or "我先把這件事記下來。"
     sources = agent_result.sources[:5]
-    place_cards = agent_result.place_cards[:3]
+    place_cards = agent_result.place_cards[:8]
     metadata = {}
     if sources:
         metadata["sources"] = sources
@@ -691,7 +690,7 @@ def _complete_public_v2_turn(
         "profile_process_run_key": profile_process_run_key,
         "agent_run_id": agent_result.agent_run_id,
         "agent_mode": agent_result.agent_mode,
-        "agent_version": "v2",
+        "agent_version": "v3",
         "match_readiness_state": agent_result.match_readiness_state,
         "match_guidance_shown": agent_result.match_guidance_shown,
         "assessment_state": agent_result.assessment_state,
@@ -703,10 +702,10 @@ def _complete_public_v2_turn(
     }
 
 
-def _run_public_v2_stream_turn(
+def _run_public_stream_turn(
     req: DirectChatRequest, background_tasks: BackgroundTasks, on_progress,
 ) -> dict:
-    """Public-only stream path; mirrors the V2 branch of direct_chat exactly once."""
+    """Public-only stream path; mirrors the V3 branch of direct_chat exactly once."""
     room_id = generate_room_id(req.user_id, req.contact_id)
     requested_mentions, mention_overflow = _validated_requested_mentions(req)
     display_message = req.message
@@ -726,7 +725,7 @@ def _run_public_v2_stream_turn(
     profiles_coll.update_one(
         {"user_id": req.user_id}, {"$set": {"last_user_activity_at": time.time()}}, upsert=True,
     )
-    return _complete_public_v2_turn(
+    return _complete_public_turn(
         req, room_id, requested_mentions, mention_overflow, on_progress,
         background_tasks=background_tasks, user_message_id=user_message.get("message_id"),
     )
@@ -740,6 +739,42 @@ def _sanitize_public_stream_event(event: dict) -> dict | None:
     run_id = str(event.get("agent_run_id") or "")[:128]
     if event_type == "run_started" and run_id:
         return {"type": "run_started", "agent_run_id": run_id}
+    if event_type == "plan_created" and run_id:
+        return {
+            "type": "plan_created",
+            "agent_run_id": run_id,
+            "plan": event.get("plan") or [],
+            "planner_metrics": event.get("planner_metrics") or {},
+            "prompt_raw": str(event.get("prompt_raw") or "")[:20000],
+            "content_raw": str(event.get("content_raw") or "")[:5000],
+        }
+    if event_type == "subagent_started" and run_id:
+        return {
+            "type": "subagent_started",
+            "agent_run_id": run_id,
+            "task_id": str(event.get("task_id") or "")[:64],
+            "agent": str(event.get("agent") or "")[:30],
+            "task_brief": str(event.get("task_brief") or "")[:200],
+        }
+    if event_type == "subagent_finished" and run_id:
+        raw_content = str(event.get("content_raw") or "")
+        prompt_raw = str(event.get("prompt_raw") or "")
+        tool_calls_raw = event.get("tool_calls_raw") or []
+        return {
+            "type": "subagent_finished",
+            "agent_run_id": run_id,
+            "task_id": str(event.get("task_id") or "")[:64],
+            "agent": str(event.get("agent") or "")[:30],
+            "status": str(event.get("status") or "")[:20],
+            "error": str(event.get("error") or "")[:100],
+            "input_tokens": max(0, int(event.get("input_tokens") or 0)),
+            "output_tokens": max(0, int(event.get("output_tokens") or 0)),
+            "duration_ms": max(0, int(event.get("duration_ms") or 0)),
+            "tool_name": str(event.get("tool_name") or "")[:80] or None,
+            "tool_calls_raw": tool_calls_raw,
+            "content_raw": raw_content[:5000],
+            "prompt_raw": prompt_raw[:20000],
+        }
     if event_type == "planner_decision" and run_id:
         decision = event.get("decision") or {}
         llm_metrics = decision.get("llm_metrics") or {}
@@ -771,7 +806,6 @@ def _sanitize_public_stream_event(event: dict) -> dict | None:
             "step_id": str(event.get("step_id") or "")[:64],
             "text": str(event.get("text") or "我確認一下…")[:200],
             "tool_name": str(event.get("tool_name") or "")[:80] or None,
-            "arguments": event.get("arguments") or {},
         }
     if event_type == "tool_finished" and run_id:
         outcome = "ok" if event.get("outcome") == "ok" else "error"
@@ -782,7 +816,6 @@ def _sanitize_public_stream_event(event: dict) -> dict | None:
             "outcome": outcome,
             "tool_name": str(event.get("tool_name") or "")[:80] or None,
             "duration_ms": max(0, int(event.get("duration_ms") or 0)),
-            "result_summary": event.get("result_summary"),
         }
     if event_type == "final" and isinstance(event.get("response"), dict):
         return {"type": "final", "response": event["response"]}
@@ -828,8 +861,8 @@ def direct_chat_stream(req: DirectChatRequest, background_tasks: BackgroundTasks
         # connection. Execute them in this worker even if the stream disconnects.
         worker_background_tasks = BackgroundTasks()
         try:
-            if req.contact_id == "ai_assistant" and agent_mode_for_user(req.user_id) == "on":
-                response = _run_public_v2_stream_turn(req, worker_background_tasks, emit)
+            if req.contact_id == "ai_assistant" and agent_mode_for_user_v3(req.user_id) == "on":
+                response = _run_public_stream_turn(req, worker_background_tasks, emit)
             else:
                 # Stream is intentionally optional for legacy/private contacts;
                 # preserve their established direct-chat behavior as one final event.
@@ -892,25 +925,12 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
             {"room_id": room_id, "sender_id": "ai_assistant"},
             sort=[("timestamp", -1)],
         )
-    # V2 owns every public-agent turn when enabled; legacy outcome routing is
-    # retained only for the explicit rollback mode.
-    public_agent_mode = agent_mode_for_user(req.user_id) if req.contact_id == "ai_assistant" else "off"
-    legacy_match_routing = None
-    outcome_followup = False
-    if req.contact_id == "ai_assistant" and public_agent_mode == "off":
-        # Keep rollback-only language routing out of every V2 request.  Importing
-        # here also makes the emergency rollback dependency explicit and testable.
-        from services.ayue_agent import legacy_match_routing as legacy_match_routing_module
-
-        legacy_match_routing = legacy_match_routing_module
-        outcome_followup = legacy_match_routing.should_answer_match_outcome_followup(
-            req.message,
-            (latest_assistant_message or {}).get("content", ""),
-        )
-    if public_agent_mode == "on":
+    # V3 owns every public-agent turn when enabled. There is no legacy public
+    # runtime anymore; the V3 allowlist is the only rollout gate.
+    v3_mode = agent_mode_for_user_v3(req.user_id) if req.contact_id == "ai_assistant" else "off"
+    public_agent_mode = "v3" if v3_mode == "on" else "off"
+    if public_agent_mode == "v3":
         profile_skill_mode = "deferred_to_public_agent"
-    elif outcome_followup:
-        profile_skill_mode = profile_skills_mode_for_user(req.user_id)
     else:
         profile_skill_mode = queue_profile_skills(
             background_tasks, req.user_id, req.message, user_message.get("message_id"),
@@ -943,18 +963,8 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
 
         user_doc = profiles_coll.find_one({"user_id": req.user_id})
 
-        if outcome_followup:
-            ai_reply = match_outcome_followup_reply(req.user_id)
-            save_message(room_id, "ai_assistant", ai_reply)
-            return {
-                "reply": ai_reply, "is_locked": False,
-                "conversation_intent": "match_outcome_followup",
-                "mentioned_other_ids": [], "context_changed": False,
-                "context_confirmation_needed": False,
-            }
-
-        if public_agent_mode == "on":
-            return _complete_public_v2_turn(
+        if public_agent_mode == "v3":
+            return _complete_public_turn(
                 req, room_id, requested_mentions, mention_overflow,
                 background_tasks=background_tasks, user_message_id=user_message.get("message_id"),
             )

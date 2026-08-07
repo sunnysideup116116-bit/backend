@@ -1,10 +1,10 @@
 # Dating-App Agent Rules
 
-本文件適用於 `Dating-App/` 下所有程式。任何接手本專案的 coding agent，在修改前必須先閱讀本文件與 [`AYUE_V2_ARCHITECTURE.md`](./AYUE_V2_ARCHITECTURE.md)。修改長期建議、Graph Memory 或 Context Engine 時，另須閱讀 [`MEMORY_CONTEXT_ENGINE_GUIDE.md`](./MEMORY_CONTEXT_ENGINE_GUIDE.md)。
+本文件適用於 `Dating-App/` 下所有程式。任何接手本專案的 coding agent，在修改前必須先閱讀本文件與 [`AYUE_V3_ARCHITECTURE.md`](./AYUE_V3_ARCHITECTURE.md)（內容已改寫為 V3 sub-agent 架構）。修改長期建議、Graph Memory 或 Context Engine 時，另須閱讀 [`MEMORY_CONTEXT_ENGINE_GUIDE.md`](./MEMORY_CONTEXT_ENGINE_GUIDE.md)。
 
 ## 目標與範圍
 
-- 公開阿月已採 V2 單一 agent loop；後續功能必須在這個架構上擴充，不得再建立平行的關鍵字 router。
+- 公開阿月已採 V3 sub-agent 架構（Scheduler 編排、Planner 拆 DAG、Sub-agents 執行、Synthesizer 回覆）；後續功能必須在這個架構上擴充，不得再建立平行的關鍵字 router，也不得重建 V2 單一 loop。
 - `social_demotest` 是產品後端與前端；`matchmaker_agent` 是候選排序及 Neo4j 記憶服務。
 - 阿月悄悄話目前是獨立的 private runtime。除非任務明確要求，禁止把它與公開阿月合併，也禁止讓公開阿月任意 spawn private agent。
 - Neo4j、模型供應商及正式資料清理不因一般公開阿月功能而自動納入修改範圍。
@@ -12,7 +12,7 @@
 ## 修改前必做
 
 1. 先執行 `git status --short`，保留使用者既有修改；不得 reset、checkout 或覆蓋無關變更。
-2. 依 [`AYUE_V2_ARCHITECTURE.md`](./AYUE_V2_ARCHITECTURE.md) 找到該功能的 owner。不要因呼叫方便把 domain logic 搬回 router 或 runtime。
+2. 依 [`AYUE_V3_ARCHITECTURE.md`](./AYUE_V3_ARCHITECTURE.md) 找到該功能的 owner。不要因呼叫方便把 domain logic 搬回 router 或 runtime。
 3. 先找現有測試及 trajectory。修 bug 時必須先找出失敗層：Planner、Guard、Tool projection、Domain state、Composer、Profile extractor 或 UI。
 4. 只做任務需要的修改。不要格式化整份 `social_demotest/routers/chat.py` 或 `social_demotest/frontend.html`。
 
@@ -20,15 +20,15 @@
 
 ### 1. 公開阿月只有一個 orchestrator
 
-- `social_demotest/services/ayue_agent/runtime.py` 是公開阿月 V2 的唯一 loop。
-- 正常流程固定為：`Context → Planner → Guard → Progress → Tool/Domain Action → Observation → Composer → Final`。
-- `AYUE_AGENT_V2_MODE=on` 時，失敗必須 fail closed；禁止自動掉回 legacy public routing。
-- `AYUE_AGENT_V2_MODE=off` 只作人工緊急 rollback。Legacy helper 必須留在 `legacy_*` 模組並以 lazy import 隔離。
+- `social_demotest/services/ayue_agent/v3/scheduler.py` 是公開阿月 V3 的唯一 orchestrator。
+- 正常流程固定為：`Context → Planner(DAG) → Sub-agents(Guard+Tool) → Synthesizer → Final`。
+- `AYUE_AGENT_V3_MODE=on` 時，失敗必須 fail closed；禁止自動掉回任何 legacy public routing。
+- `AYUE_AGENT_V3_MODE=off` 只作人工緊急 rollback（回 legacy 純聊天，不再有 V2 agent）。
 - 不得在 `routers/chat.py`、前端或另一個 service 再造第二套 public intent router。
 
 ### 2. LLM 做語意判斷，程式做安全與狀態判斷
 
-- Planner 輸出只能遵守 provider-neutral `AgentDecision`：`final | tool_call | confirmation`。
+- V3 Planner 只輸出靜態子任務 DAG（`decompose_tasks` function calling）；Sub-agents 各自以 function calling 提出 tool proposals。
 - 不得用大量中文詞彙 regex 取代 Planner 來判斷「使用者想做什麼」。
 - Deterministic Guard 只能驗證 schema、confidence、evidence span、工具權限、confirmation、唯一狀態、revision、idempotency 與執行額度。
 - 少量 deterministic parsing 只可用於封閉協議，例如明確的「確認／取消」、格式驗證、敏感資訊清理及 legacy rollback。
@@ -40,8 +40,8 @@
 - 每個工具必須定義：風險、planner argument schema、executor argument schema、output schema、executor key、progress text 及 confirmation requirement。
 - Planner 永遠不能提供或修改 `user_id`、match/proposal ID、event ID 或 revision。這些只能由 runtime/executor 根據登入者與 canonical state 注入。
 - 唯讀工具只能回傳完成問題所需的最小 typed projection，不得回傳 Mongo document、raw profile 或內部 ID。
-- 相同 `tool + normalized arguments` 在同一回合不得重跑；重用 observation 後交給 Composer。
-- 每回合最多三個唯讀步驟，最多一個副作用。
+- 相同 `tool + normalized arguments` 在同一 sub-task 內不得重跑；重用 observation 後交給 Synthesizer。
+- 每個 sub-agent 最多三個唯讀步驟；每回合最多一筆待確認副作用（寫入一律先 confirmation）。同一 sub-task 內的多筆 `calendar.create_my_event` 可合併進同一筆 confirmation 的 `batch` 欄位，一次確認即新增多筆行程。
 - 外部 Web／地點工具必須有 timeout、bounded result、URL／輸入安全檢查與明確 failure code；不得把第三方 raw response 直接送入 Planner、trace 或回覆。
 
 ### 4. 副作用必須走 Domain Service
@@ -56,7 +56,7 @@
 ### 5. 所有寫入先確認
 
 - `match.start_search` 與 calendar create/update/cancel 必須先建立 pending confirmation，不能由第一次 Planner decision 直接執行。
-- Pending confirmation 由 Runtime 在 Planner 前處理，只接受封閉的確認／取消協議。
+- Pending confirmation 由 Scheduler 在 Planner 前處理，只接受封閉的確認／取消協議；確認後由 `v3/write_executors.py` 執行。
 - 一般問題不得被 pending action 汙染；使用者可先問日期、配對狀態或近期情境，再於有效期限內確認。
 - Confirmation 逾時、proposal revision 改變或狀態失效後，必須作廢。
 - 任何新副作用工具都要同時設計 confirmation、CAS/ownership、idempotency、stale behavior 與 concurrency tests。
@@ -169,7 +169,7 @@
 - 至少覆蓋：planner sequence、guard、tool schema/output、trajectory、privacy、profile evidence、state/concurrency、stream 與 JSON compatibility。
 - Test harness 必須使用 stub config 或 local test database；自動測試不得連線或修改正式 MongoDB Atlas／Neo4j。
 - Python source 必須 compile；主服務與 matchmaker 必須能啟動，`GET /` 與 port 9001 health endpoint 必須為 200。
-- 修改 runtime contract、tool list、state machine、環境旗標或 App migration 步驟時，必須同步更新 `AYUE_V2_ARCHITECTURE.md`。
+- 修改 runtime contract、tool list、state machine、環境旗標或 App migration 步驟時，必須同步更新 `AYUE_V3_ARCHITECTURE.md`（V3 架構文件）。
 - 交付時列出修改檔案、測試指令／結果、未解決問題；不得把 `.env`、venv、log、cache 或真實 trace 一起交付。
 
 ## 禁止事項
@@ -177,7 +177,7 @@
 - 禁止因單一失敗案例累積更多自然語言 keyword regex。
 - 禁止模型自行提供 user/match/event ID 或 revision。
 - 禁止直接從 router、agent runtime 或 UI 寫入同一份 domain state。
-- 禁止 V2 失敗後自動呼叫 legacy。
+- 禁止 V3 失敗後自動呼叫 legacy。
 - 禁止把 progress 或 trace 變成隱私資料儲存區。
 - 禁止修改 `private_runtime.py`、清理正式資料或更換模型供應商，除非任務明確授權。
 - 禁止刪除 migration、cleanup CLI、seed/demo data、rollback 或啟動腳本，除非先證明無 production、dynamic import、environment flag、test 或人工操作用途，並取得明確同意。
@@ -185,7 +185,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **ayue_for_demo** (3251 symbols, 8040 relationships, 282 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **ayue_for_demo-main** (3630 symbols, 8632 relationships, 288 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -209,10 +209,10 @@ This project is indexed by GitNexus as **ayue_for_demo** (3251 symbols, 8040 rel
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/ayue_for_demo/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/ayue_for_demo/clusters` | All functional areas |
-| `gitnexus://repo/ayue_for_demo/processes` | All execution flows |
-| `gitnexus://repo/ayue_for_demo/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/ayue_for_demo-main/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/ayue_for_demo-main/clusters` | All functional areas |
+| `gitnexus://repo/ayue_for_demo-main/processes` | All execution flows |
+| `gitnexus://repo/ayue_for_demo-main/process/{name}` | Step-by-step execution trace |
 
 ## CLI
 

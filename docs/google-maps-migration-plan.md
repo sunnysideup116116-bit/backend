@@ -2,7 +2,7 @@
 
 > 建立日期:2026-08-04
 > 適用範圍:`Dating-App/social_demotest` 下 Public Ayue V2 的 place 工具與前端 place card。
-> 隱私與架構遵循 [`AGENTS.md`](../AGENTS.md) 第 6、9、10、10.1 條與 [`AYUE_V2_ARCHITECTURE.md`](../AYUE_V2_ARCHITECTURE.md)。
+> 隱私與架構遵循 [`AGENTS.md`](../AGENTS.md) 第 6、9、10、10.1 條與 [`AYUE_V3_ARCHITECTURE.md`](../AYUE_V3_ARCHITECTURE.md)。
 
 ---
 
@@ -393,7 +393,7 @@ AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED=on
 3. **`tool_registry.py:_PlaceOutput`**:移除 `rating`/`user_rating_count`/`opening_hours_summary`,保留 `photo_url`。
 4. **`runtime.py:_public_place_cards`**:卡片上限 3→5;移除 Enterprise 欄位投影,保留 photo_url 嚴格安全檢查。
 5. **`frontend.html:renderCustomPlaceCard`**:移除 rating / 營業狀態區塊,保留照片區塊(off 時無 photo_url,不渲染)。
-6. **`config.py`**:移除 `AYUE_GOOGLE_PLACE_DETAILS_FULL`(同步更新 `.env.example`、`AYUE_V2_ARCHITECTURE.md`、live smoke 測試)。
+6. **`config.py`**:移除 `AYUE_GOOGLE_PLACE_DETAILS_FULL`(同步更新 `.env.example`、`AYUE_V3_ARCHITECTURE.md`、live smoke 測試)。
 7. **測試**:新增「photos 從 Text Search response 直接取」「移除 Enterprise 欄位」「旗標 off 抑制 photo_url」測試。
 
 ### Phase 3:Maps Embed 取代 OSM iframe
@@ -436,7 +436,7 @@ AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED=on
 | `tests/test_ayue_agent_place_cards.py` | 2,3 | 卡片 3→5、移除 rating 斷言、保留 photo 安全測試 |
 | `tests/test_google_places_client.py` | 2 | photos 從 Text Search response 直接取 |
 | `tests/test_google_maps_live_smoke.py` | 2 | 移除 `get_place_details` 測試,改測 photos;移除 FULL 旗標 |
-| `AYUE_V2_ARCHITECTURE.md` | 1-4 | place tools 段落補 Google 為主、OSM 為輔說明與新欄位 |
+| `AYUE_V3_ARCHITECTURE.md` | 1-4 | place tools 段落補 Google 為主、OSM 為輔說明與新欄位 |
 
 > 不會動:`maps_client.py`(OSM 維持現狀)、`private_runtime.py`、Neo4j、模型供應商設定。
 
@@ -476,9 +476,9 @@ AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED=on
 
 ## 8. 同步要更新的文件
 
-依 AGENTS.md 第 10 條與「修改 runtime contract、tool list、state machine、環境旗標時必須同步更新 AYUE_V2_ARCHITECTURE.md」:
+依 AGENTS.md 第 10 條與「修改 runtime contract、tool list、state machine、環境旗標時必須同步更新 AYUE_V3_ARCHITECTURE.md」:
 
-- `AYUE_V2_ARCHITECTURE.md`:在 place tools 段落補 Google 為主、OSM 為輔的說明與新欄位、新環境開關。
+- `AYUE_V3_ARCHITECTURE.md`:在 place tools 段落補 Google 為主、OSM 為輔的說明與新欄位、新環境開關。
 - `.env.example`:補範例值與註解(含計費等級提示)。
 - `MEMORY_CONTEXT_ENGINE_GUIDE.md`:不需動(map 與 memory engine 無關)。
 
@@ -511,4 +511,4 @@ AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED=on
 - [Maps JavaScript API Web Components](https://developers.google.com/maps/documentation/web-components?hl=zh-tw)
 - [API 安全性最佳做法](https://developers.google.com/maps/api-security-best-practices?hl=zh-tw)
 - 專案架構:[`AGENTS.md`](../AGENTS.md) §10.1 外部資訊工具
-- 專案 V2 架構:[`AYUE_V2_ARCHITECTURE.md`](../AYUE_V2_ARCHITECTURE.md)
+- 專案 V2 架構:[`AYUE_V3_ARCHITECTURE.md`](../AYUE_V3_ARCHITECTURE.md)

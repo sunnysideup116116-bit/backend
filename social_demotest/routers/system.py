@@ -9,7 +9,7 @@ from services.ai_service import get_embedding
 from services.profile_projection import safe_recent_context
 from services.language_service import normalize_model_text, normalize_zh_tw
 from services.ayue_agent.proactive_care import normalize_proactive_frequency, schedule_proactive_care
-from services.ayue_agent.runtime import agent_mode_for_user
+from services.ayue_agent.v3.scheduler import agent_mode_for_user_v3
 from services.ayue_agent.web_tools import web_enabled
 from services.profile_location import normalize_profile_location, safe_profile_location
 from services.ayue_agent.public_relationship_projection import anonymize_counterparty_payload
@@ -188,7 +188,7 @@ def get_demo_status(user_id: str):
     search_status = str(search.get("status") or "idle")[:40]
     return {
         "profile_exists": bool(profile),
-        "agent_version": "v2" if agent_mode_for_user(user_id) == "on" else "legacy",
+        "agent_version": "v3" if agent_mode_for_user_v3(user_id) == "on" else "legacy",
         "web_search_ready": web_enabled(),
         "location": safe_profile_location(profile),
         "recent_context": safe_recent_context(profile.get("current_context", ""), "尚無近期情境"),

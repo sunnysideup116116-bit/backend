@@ -48,7 +48,7 @@ categories: list[Literal["restaurant", "cafe", "bar", "attraction", "park"]]
 1. **整段移除 `get_place_details`**（Place Details API 不再呼叫）：它的唯一價值（照片）可由 Text Search 免費取得，`rating` 等屬 Enterprise 太貴。
 2. **Text Search mask 加 `places.photos`**（Pro 等級，不跳級）：`search_nearby_places` 與 `resolve_place` 直接從 response 的 `photos[0].name` 建構 media URL（`_photo_url` helper，server key）。
 3. **照片位元組載入計 Photos SKU**（`GetPhotoMediaRequest`，$7/1000、免費 1,000/月）：由 `AYUE_GOOGLE_PLACE_PHOTOS_ENABLED` 控制（預設 OFF）。
-4. **移除 `AYUE_GOOGLE_PLACE_DETAILS_FULL` 旗標**（config.py、.env.example、AYUE_V2_ARCHITECTURE.md、live smoke 同步）。
+4. **移除 `AYUE_GOOGLE_PLACE_DETAILS_FULL` 旗標**（config.py、.env.example、AYUE_V3_ARCHITECTURE.md、live smoke 同步）。
 5. **卡片與 draft 上限 3→5 筆**：`_public_place_cards` 上限、`_place_search_arguments` draft limit、`_save_place_search_draft`、`_safe_place_search_draft` 投影。**零額外成本**：Text Search 按 request 計費不按筆數。
 
 ### 照片配額 429 與開關修正（2026-08-04 追加）
@@ -94,7 +94,7 @@ categories: list[Literal["restaurant", "cafe", "bar", "attraction", "park"]]
 | `services/ayue_agent/config.py` | **移除 `AYUE_GOOGLE_PLACE_DETAILS_FULL`** |
 | `frontend.html` | **移除 rating / 營業狀態顯示區塊**，保留照片區塊 |
 | `social_demotest/.env.example` | 移除 FULL 旗標、更新計費註解 |
-| `AYUE_V2_ARCHITECTURE.md` | place tools 段落更新（5 張卡、photo_url、Enterprise 排除、旗標移除） |
+| `AYUE_V3_ARCHITECTURE.md` | place tools 段落更新（5 張卡、photo_url、Enterprise 排除、旗標移除） |
 | `docs/google-maps-migration-plan.md` | 計費表修正（rating 屬 Enterprise）、Place Details 移除紀錄、決策紀錄更新 |
 
 ## 測試
