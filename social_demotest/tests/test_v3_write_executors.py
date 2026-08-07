@@ -49,6 +49,7 @@ class V3WriteExecutorsTests(unittest.TestCase):
             ok, reply, code = execute_write(
                 "match.decide_active_proposal", {"decision": "interested"},
                 ctx, turn, "run1", 0,
+                payload={"proposal_revision": 2},
             )
         self.assertTrue(ok)
         self.assertEqual(decide.call_args.kwargs["expected_revision"], 2)
@@ -73,6 +74,7 @@ class V3WriteExecutorsTests(unittest.TestCase):
             ok, reply, code = execute_write(
                 "match.decide_active_proposal", {"decision": "interested"},
                 ctx, turn, "run1", 0,
+                payload={"proposal_revision": 1},
             )
         self.assertTrue(ok)
         self.assertIn("互相接受", reply)
@@ -213,6 +215,23 @@ class V3WritePreflightTests(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(payload["action"], "match.start_search")
         self.assertIn("確認", reply)
+
+    def test_match_decision_preview_binds_proposal_revision(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        turn.active_proposal = {
+            "user_can_decide": True,
+            "proposal_revision": 4,
+            "counterparty": "小安",
+        }
+        payload, reply = prepare_write_confirmation(
+            "match.decide_active_proposal",
+            {"decision": "interested"},
+            ctx,
+            turn,
+        )
+        self.assertEqual(payload["data"]["proposal_revision"], 4)
+        self.assertIn("小安", reply)
 
     def test_calendar_create_preview(self):
         ctx = self._ctx()

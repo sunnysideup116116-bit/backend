@@ -62,7 +62,7 @@
 | `services/ayue_agent/v3/planner.py` | 輕量 LLM：只拆靜態子任務 DAG（`decompose_tasks` function calling） |
 | `services/ayue_agent/v3/guard.py` | 中央 Guard：純程式碼驗證 schema、重複、步數、寫入 confirmation |
 | `services/ayue_agent/v3/context_slicer.py` | 依 sub-agent 角色切 privacy-safe context slice |
-| `services/ayue_agent/v3/confirmation.py` | 多 confirmation 獨立 CAS 管理（`v3_pending_confirmations`） |
+| `services/ayue_agent/v3/confirmation.py` | 每位使用者單一、preview-bound confirmation 的 CAS 管理（`v3_pending_confirmations`） |
 | `services/ayue_agent/v3/write_executors.py` | 已確認寫入的唯一執行路徑（domain service + idempotency） |
 | `services/ayue_agent/v3/synthesizer.py` | 綜合所有 observation 產出最終回覆；地點卡以 typed tool 決定 |
 | `services/ayue_agent/v3/sub_agents/` | calendar / places / match / relationship / profile 五個 sub-agent |
@@ -190,17 +190,18 @@ V3 response 保留既有欄位，並可包含：
 
 ```text
 {"type":"run_started","agent_run_id":"..."}
-{"type":"plan_created","agent_run_id":"...","plan":[...],"planner_metrics":{...}}
-{"type":"subagent_started","agent_run_id":"...","task_id":"t1","agent":"calendar","task_brief":"..."}
-{"type":"tool_started","agent_run_id":"...","step_id":"t1#0:calendar.list_my_events","text":"我看一下你的行事曆…"}
-{"type":"tool_finished","agent_run_id":"...","step_id":"t1#0:calendar.list_my_events","outcome":"ok"}
-{"type":"subagent_finished","agent_run_id":"...","task_id":"t1","agent":"calendar","status":"ok","input_tokens":...}
+{"type":"tool_started","agent_run_id":"...","text":"我看一下你的行事曆…"}
+{"type":"tool_finished","agent_run_id":"...","outcome":"ok","duration_ms":42}
 {"type":"final","response":{"reply":"...","agent_version":"v3","agent_run_id":"..."}}
 ```
 
-公開事件絕不傳 tool arguments/result、prompt、ID、revision 或 raw exception。`_sanitize_public_stream_event` 也保留 `planner_decision` 的 legacy sanitize 分支（V3 Scheduler 不再發出此事件，保留是為了相容舊型消費端；V3 實際事件集以 scheduler 的 `_emit_progress` 呼叫為準）。Web UI 在 progress 持續 250 ms 後才顯示單一暫時泡泡，新進度覆蓋該泡泡；final、error 或斷線時移除。
+公開介面只允許 `run_started`、`tool_started`、`tool_finished`、`final`、`error` 五種事件，絕不傳 plan、sub-agent 身分、task brief、tool 名稱、arguments/result、prompt、內部 ID、revision 或 raw exception。Web UI 在 progress 持續 250 ms 後才顯示單一暫時泡泡，新進度覆蓋該泡泡；final、error 或斷線時移除。
+
+本機 demo 的「執行流程」不重用公開 stream。只有 `AYUE_LOCAL_DEBUG_TRACE=on`，且 client address 與 request host 都是 loopback 時，才可透過 `/api/debug/ayue-runs/{run_id}` 讀取該使用者本輪的暫存診斷。診斷資料只保存在 process memory，最多 16 輪、每輪 96 個 bounded events、30 分鐘 TTL，secret/token/API-key 欄位自動遮蔽，不寫入 Mongo trace。它可呈現 Planner、DAG layers、各 sub-agent input slice、prompt、available function schemas、function calls、Guard、executor arguments、typed result 與 Synthesizer。
 
 Streaming worker 擁有本次 run 的 background tasks。瀏覽器斷線只停止傳送事件，已開始的操作仍由 idempotency 保護並完成。Owner message 只保存一次，progress 不保存，final assistant reply 只保存一次。
+
+Ollama client 必須有 bounded HTTP timeout（`AYUE_OLLAMA_TIMEOUT_SECONDS`，預設 30 秒）；provider 卡住時 Planner/Sub-agent/Synthesizer 必須回到既有 fail-closed/fallback 路徑。Web UI 另以 120 秒 AbortController 作最後一道串流上限，任何結束路徑都清除 progress bubble。
 
 ## 4. 每回合 Context
 
@@ -233,7 +234,8 @@ opportunity: {signal: none|social_opening, evidence_span, confidence} | null
 ```
 
 - `agent` 只能是 `calendar | places | match | relationship | profile | synthesizer`。
-- 一定要有一個 synthesizer task 當終端，且 synthesizer 不得被其他 task 依賴。
+- 一個 plan 最多三個 domain tasks 加一個 synthesizer；簡單聊天只能產生 synthesizer。
+- 一定且只能有一個 synthesizer task 當終端，且必須依賴所有 terminal domain tasks；plan 不得有未知依賴、自我依賴或 cycle。
 - 使用者表達想有人陪、想認識人或獨自參加不舒服時，Planner 在 `opportunity` 標記 `social_opening`（需 confidence ≥ 0.8 且 evidence_span 為原句連續子字串）。
 
 ### Central Guard（純程式碼）
@@ -243,8 +245,8 @@ opportunity: {signal: none|social_opening, evidence_span, confidence} | null
 1. **工具註冊**：名稱存在於 `TOOL_REGISTRY`，否則 `tool_not_registered`。
 2. **Schema 驗證**：arguments 符合該工具的 planner arguments model（`planner_arguments_allowed`），否則 `schema_invalid`。
 3. **Forbidden fields 防線**：`FORBIDDEN_ARG_FIELDS = {user_id, match_id, event_id, revision, expected_status}` 由 `ToolProposal` 的 Pydantic validator 在提案建立時先攔截，Guard 的 schema 檢查是第二道防線（`forbidden_arg_field`）。
-4. **Duplicate call**：同 task 內 `tool + args`（以 executor 參數排序 JSON 為 key）重複 → `duplicate_call`。
-5. **每 agent 唯讀步數上限**：`AYUE_SUBAGENT_MAX_READS`（預設 3）超限 → `step_limit_exceeded`。
+4. **Duplicate call**：同一回合內 `tool + normalized args` 重複 → `duplicate_call`；平行 task 也共用同一份去重狀態。
+5. **全回合唯讀步數上限**：`AYUE_SUBAGENT_MAX_READS`（預設且硬上限 3）超限 → `step_limit_exceeded`。
 6. **WRITE 工具一律回 `WRITE_REQUIRES_CONFIRMATION`**，由 Scheduler 建立 confirmation；READ 工具通過。
 
 Guard 不審核語意、不猜意圖、不檢查參數「內容」的正確性（那由 tool facade 與 domain service 負責）。詳細設計見 `docs/architecture/07-guard.md`。
@@ -258,10 +260,10 @@ calendar / places(+web) / match / relationship / profile 五個 sub-agent，各�
 `run_public_agent_turn_v3` 是唯一 orchestrator：
 
 1. **Assessment 接管**：`awaiting_commit`／active assessment session 存在時，直接處理（commit/cancel/advance），不進 Planner。
-2. **Confirmation 入口**：`confirmation_choice` 只接受封閉的「確認／取消」；確認後由 `write_executors.execute_write` 執行最早一筆 pending confirmation（每回合最多一筆待確認副作用）。同一 sub-task 內的多筆 `calendar.create_my_event` 會合併進**同一筆** confirmation 的 `batch` 欄位，一次確認即新增多筆行程。
+2. **Confirmation 入口**：`confirmation_choice` 只接受封閉的「確認／取消」；確認只執行使用者最後看到、與 preview/request fingerprint 綁定的最新一筆 pending confirmation。建立新 confirmation 時會作廢同一使用者較舊的 pending action，每回合最多建立一筆待確認副作用，不合併多個寫入。
 3. **Planner**：拆 DAG。
 4. **Opportunity 處理**：`social_opening` 且 profile ready → 建立 guidance confirmation；not_ready → 回 missing-basis 問題。
-5. **DAG 執行**：`_topological_layers` 分層，同層平行（`ThreadPoolExecutor`，`AYUE_SUBAGENT_MAX_PARALLEL` 預設 5）。prior observation 只給 `depends_on` 宣告的依賴。
+5. **DAG 執行**：`_topological_layers` 分層，同層平行（`ThreadPoolExecutor`，`AYUE_SUBAGENT_MAX_PARALLEL` 預設且硬上限 2）。prior observation 只給 `depends_on` 宣告的依賴。
 6. **Synthesizer**：彙整所有 observation 產出最終回覆；地點卡以 `decide_place_cards` typed tool 決定顯示。
 
 ### 執行規則
@@ -269,7 +271,7 @@ calendar / places(+web) / match / relationship / profile 五個 sub-agent，各�
 - **同層並行**：`depends_on=[]` 的任務同層執行，無執行順序保證。
 - **prior observation 只給依賴**：同層無依賴任務之間互不可見；synthesizer 例外（彙整所有）。
 - **多 tool calls 全數執行**：單一 call 失敗不使整個 task 標記失敗；只要至少一個 call 成功，task 即為 ok。
-- **duplicate 偵測以 task 為範圍**：平行任務之間不互相去重。
+- **duplicate 與額度以整回合為範圍**：平行任務共用去重狀態、最多三個唯讀步驟與一個寫入 proposal。
 - **MENTIONED 工具需有 @ 對象**：無 @ 時該 call 標記 `FAILED/mentioned_required`，不執行、不崩潰 run。
 - **sub-task 例外不連坐**：任何未捕獲例外轉成 `FAILED`，run 永不因單一 sub-task 崩潰成整段 error。
 - **reuse within task**：`places.measure_distance` 同 task 內等價地點的第二次呼叫重用第一個 observation。
@@ -282,19 +284,20 @@ calendar / places(+web) / match / relationship / profile 五個 sub-agent，各�
 WRITE proposal 通過 Guard 後，Scheduler 呼叫 `prepare_write_confirmation`：
 
 - `match.start_search`：先 `assess_match_opportunity`；not_ready 回 missing-basis 問題，active_match_blocked 回「不重複開新搜尋」，ready 才建立 confirmation。
-- `calendar.*`：解析目標行程、檢查衝突、產生 preview 文字；ambiguous/not_found/too_many 回錯誤，不建立 confirmation。同一 sub-task 內的多筆 calendar 寫入（create/update/cancel 可混合）合併進同一 confirmation 的 `batch` 欄位（每筆 `{tool, arguments, data}`），一次確認即全部執行；跨 sub-task 的 pending calendar confirmations 在執行時也會合併成單一批次。
+- `calendar.*`：解析目標行程、檢查衝突、產生 preview 文字；ambiguous/not_found/too_many 回錯誤，不建立 confirmation。一次只允許一個明確寫入，若要建立或修改多筆行程，需拆成多輪並逐筆確認。
+- `match.decide_active_proposal`：preflight 綁定當下 canonical proposal revision；確認執行時再次比對，stale 即拒絕。
 - `profile.start_assessment`：驗證 kind（basic→big_five、deep→deep_profile）。
 
 Pending payload 只保存 executor-safe 資料（event_id、revision、targets、proposed_form 等），Planner 永遠看不到。
 
 ### 執行
 
-確認後 `ConfirmationManager.execute_confirmed` 以 CAS（pending→executing）逐筆 claim，再呼叫 `write_executors.execute_write`：
+確認後 `ConfirmationManager.execute_confirmed` 先驗證 preview/request fingerprint，再以 CAS（pending→executing）claim 唯一一筆綁定 action，接著呼叫 `write_executors.execute_write`：
 
 - `match.start_search` → `match_action_service.start_match_search`（idempotency key `confirmation:<id>`）
 - `match.decide_active_proposal` → `decide_active_proposal`（revision CAS + stale response）
 - `profile.start_assessment` → `assessment_session_service.start_assessment_session`
-- `calendar.*` → calendar/date coordination service（每筆 confirmation-indexed idempotency key；批次內每筆用 `confirmation:<id>:<index>` 避免重複）
+- `calendar.*` → calendar/date coordination service（confirmation-indexed idempotency key）
 - 修改/取消行程的查詢任務用 `calendar.find_my_event`（預設回傳最多 10 筆候選，含 location/notes/event_kind；`limit` 可到 30）；候選查詢 `not_found` 時，寫入任務標 `no_write_proposed`（OK 而非失敗），Synthesizer 優雅回「找不到『X』行程」。
 
 寫入一律走 domain service；Scheduler 只協調，不直接寫 MongoDB。
@@ -334,8 +337,12 @@ Trace 不保存完整 prompt、owner message、observations、tool arguments/res
 | --- | --- |
 | `AYUE_AGENT_V3_MODE=on\|off` | Sub-agent 架構或人工緊急 rollback（off 回 legacy 純聊天，不再有 V2 agent） |
 | `AYUE_AGENT_V3_USER_ALLOWLIST` | 漸進式指定使用者；空值代表全部適用 mode |
-| `AYUE_SUBAGENT_MAX_READS` | 每個 sub-agent 唯讀上限，預設 3 |
-| `AYUE_SUBAGENT_MAX_PARALLEL` | 同層 sub-agent 最大並發數，預設 5 |
+| `AYUE_SUBAGENT_MAX_READS` | 整個回合唯讀上限，預設且硬上限 3 |
+| `AYUE_SUBAGENT_MAX_PARALLEL` | 同層 sub-agent 最大並發數，預設且硬上限 2 |
+| `AYUE_OLLAMA_TIMEOUT_SECONDS` | 單次 Ollama HTTP 呼叫 timeout，預設 30 秒，限制 5–120 秒 |
+| `AYUE_LOCAL_DEBUG_TRACE` | 本機 demo-only 詳細執行 trace；預設 off，且 endpoint 仍要求 client/host 都是 loopback |
+| `AYUE_RUNTIME_MODEL_SETTINGS_TOKEN` | 啟用 runtime model settings 管理 API 的 server-side admin token；未設定時不可修改 |
+| `AYUE_ALLOWED_RUNTIME_MODELS` | 管理 API 可切換的 model allowlist；未設定時只允許目前設定值 |
 | `AYUE_SUBAGENT_TIMEOUT_MS` | 單一 sub-agent LLM 呼叫逾時（`.env.example` 已保留，目前 scheduler 尚未消費此旗標；LLM 逾時行為由 `ai_service` 提供） |
 | `AYUE_DEFAULT_TIMEZONE` | 預設 `Asia/Taipei` |
 | `AYUE_PROFILE_SKILLS_MODE=on\|shadow\|off` | Profile extractor 寫入、shadow 觀察或停用（`shadow` 只記錄不寫入） |

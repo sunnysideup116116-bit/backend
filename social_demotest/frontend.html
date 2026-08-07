@@ -1252,6 +1252,9 @@
         let userInterest = "";
         let lastLlmCallMetrics = null;
         let lastDebugTrace = [];
+        let lastDebugRunId = null;
+        let lastDebugRunStatus = null;
+        let debugTracePollTimer = null;
         let pendingMediatorNotification = null;
         let acceptedContacts = [];
         let mentionedOtherIds = [];
@@ -3609,10 +3612,23 @@ if (metadata.event_type === "date_coordination_form") {
         }
 
         async function streamPublicAyueChat(payload, sendStartedAt) {
-            const res = await fetch("/api/direct_chat/stream", {
-                method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)
-            });
+            const controller = new AbortController();
+            const streamTimeout = window.setTimeout(() => controller.abort(), 120000);
+            let res;
+            try {
+                res = await fetch("/api/direct_chat/stream", {
+                    method: "POST", headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify(payload), signal: controller.signal
+                });
+            } catch (error) {
+                window.clearTimeout(streamTimeout);
+                if (error && error.name === "AbortError") {
+                    throw new Error("模型等待超過 120 秒，這次已停止，請稍後再試。");
+                }
+                throw error;
+            }
             if (!res.ok || !res.body) {
+                window.clearTimeout(streamTimeout);
                 const data = await res.json().catch(() => ({}));
                 throw new Error(data.detail || "伺服器暫時無法回覆");
             }
@@ -3622,6 +3638,8 @@ if (metadata.event_type === "date_coordination_form") {
             let finalResponse = null;
             const debugEvents = [];
             lastDebugTrace = [];
+            lastDebugRunId = null;
+            lastDebugRunStatus = "running";
             window.v3RunElapsedMs = 0;
             window.v3RunStartedAt = (typeof sendStartedAt === "number" && sendStartedAt > 0) ? sendStartedAt : performance.now();
             try {
@@ -3636,14 +3654,24 @@ if (metadata.event_type === "date_coordination_form") {
                         const event = JSON.parse(line);
                         debugEvents.push(event);
                         lastDebugTrace.push(event);
-                        if (event.type === "run_started") showAyueProgress("阿月正在想一下…");
+                        if (event.type === "run_started") {
+                            lastDebugRunId = event.agent_run_id || null;
+                            showAyueProgress("阿月正在想一下…");
+                            scheduleDebugTraceRefresh(100);
+                        }
                         if (event.type === "planner_decision") showAyueProgress("阿月正在想一下…");
                         if (event.type === "tool_started") showAyueProgress(event.text || "我確認一下…");
                         if (event.type === "final") {
                             finalResponse = event.response || {};
                             window.v3RunElapsedMs = performance.now() - window.v3RunStartedAt;
+                            lastDebugRunStatus = "completed";
+                            scheduleDebugTraceRefresh(50);
                         }
-                        if (event.type === "error") throw new Error(event.reply || "伺服器暫時無法回覆");
+                        if (event.type === "error") {
+                            lastDebugRunStatus = "error";
+                            scheduleDebugTraceRefresh(50);
+                            throw new Error(event.reply || "伺服器暫時無法回覆");
+                        }
                         const panel = document.getElementById("llm-metrics-panel");
                         if (panel && !panel.classList.contains("hidden")) renderLlmMetricsContent();
                     }
@@ -3656,12 +3684,19 @@ if (metadata.event_type === "date_coordination_form") {
                     if (event.type === "final") {
                         finalResponse = event.response || {};
                         window.v3RunElapsedMs = performance.now() - window.v3RunStartedAt;
+                        lastDebugRunStatus = "completed";
+                        scheduleDebugTraceRefresh(50);
                     }
-                    if (event.type === "error") throw new Error(event.reply || "伺服器暫時無法回覆");
+                    if (event.type === "error") {
+                        lastDebugRunStatus = "error";
+                        scheduleDebugTraceRefresh(50);
+                        throw new Error(event.reply || "伺服器暫時無法回覆");
+                    }
                     const panel = document.getElementById("llm-metrics-panel");
                     if (panel && !panel.classList.contains("hidden")) renderLlmMetricsContent();
                 }
             } finally {
+                window.clearTimeout(streamTimeout);
                 clearAyueProgressBubble();
             }
             if (!finalResponse) throw new Error("連線中斷，請稍後再試。");
@@ -5368,6 +5403,39 @@ if (metadata.event_type === "date_coordination_form") {
             }
         }
 
+        function escapeDebugHtml(value) {
+            const node = document.createElement("span");
+            node.textContent = String(value || "");
+            return node.innerHTML;
+        }
+
+        function scheduleDebugTraceRefresh(delay = 500) {
+            if (debugTracePollTimer) window.clearTimeout(debugTracePollTimer);
+            debugTracePollTimer = window.setTimeout(() => {
+                debugTracePollTimer = null;
+                refreshAyueDebugTrace();
+            }, delay);
+        }
+
+        async function refreshAyueDebugTrace() {
+            if (!lastDebugRunId || !currentUserId) return;
+            try {
+                const res = await fetch(
+                    `/api/debug/ayue-runs/${encodeURIComponent(lastDebugRunId)}?user_id=${encodeURIComponent(currentUserId)}`,
+                    {cache: "no-store"}
+                );
+                if (!res.ok) return;
+                const run = await res.json();
+                lastDebugTrace = Array.isArray(run.events) ? run.events : [];
+                lastDebugRunStatus = run.status || lastDebugRunStatus;
+                const panel = document.getElementById("llm-metrics-panel");
+                if (panel && !panel.classList.contains("hidden")) renderLlmMetricsContent();
+                if (lastDebugRunStatus === "running") scheduleDebugTraceRefresh(700);
+            } catch (error) {
+                // Debug telemetry must never affect the user-facing chat.
+            }
+        }
+
         function renderLlmMetricsContent() {
             const content = document.getElementById("llm-metrics-content");
             if (!content) return;
@@ -5377,9 +5445,12 @@ if (metadata.event_type === "date_coordination_form") {
             }
 
             // Detect V3 events
-            const hasV3 = lastDebugTrace.some(e => e.type === "plan_created" || e.type === "subagent_started" || e.type === "subagent_finished");
+            const hasV3 = lastDebugTrace.some(e => [
+                "stage_started", "planner_completed", "plan_created", "subagent_started",
+                "subagent_finished", "function_call"
+            ].includes(e.type));
             if (hasV3) {
-                renderV3MetricsContent(content);
+                renderV3ExecutionTrace(content);
                 return;
             }
 
@@ -5436,11 +5507,11 @@ if (metadata.event_type === "date_coordination_form") {
                     const r = evt.response || {};
                     html += '<div class="border-2 border-[#ffd166] p-2 bg-[#110a22]">' +
                         '<div class="text-[#ffd166] font-bold text-xs">🏁 Agent Run 完成</div>' +
-                        '<div class="text-[11px] text-[#fff1b8] mt-1">' + (r.reply || "").substring(0, 200) + '</div></div>';
+                        '<div class="text-[11px] text-[#fff1b8] mt-1">' + escapeDebugHtml((r.reply || "").substring(0, 200)) + '</div></div>';
                 } else if (evt.type === "error") {
                     html += '<div class="border-2 border-[#ff6fae] p-2 bg-[#110a22]">' +
                         '<div class="text-[#ff6fae] font-bold text-xs">❌ Agent Run 錯誤</div>' +
-                        '<div class="text-[11px] text-[#fff1b8] mt-1">' + (evt.reply || "") + '</div></div>';
+                        '<div class="text-[11px] text-[#fff1b8] mt-1">' + escapeDebugHtml(evt.reply || "") + '</div></div>';
                 }
             }
             content.innerHTML = html;
@@ -5630,16 +5701,181 @@ if (metadata.event_type === "date_coordination_form") {
             if (finalReply) {
                 html += '<div class="border-2 border-[#ffd166] p-2 bg-[#110a22]">' +
                     '<div class="text-[#ffd166] font-bold text-xs mb-1">🏁 最終回覆</div>' +
-                    '<div class="text-[11px] text-[#fff1b8]">' + finalReply.substring(0, 300) + '</div></div>';
+                    '<div class="text-[11px] text-[#fff1b8]">' + escapeDebugHtml(finalReply.substring(0, 300)) + '</div></div>';
             }
             if (errorMsg) {
                 html += '<div class="border-2 border-[#ff6fae] p-2 bg-[#110a22]">' +
                     '<div class="text-[#ff6fae] font-bold text-xs">❌ 錯誤</div>' +
-                    '<div class="text-[11px] text-[#fff1b8] mt-1">' + errorMsg + '</div></div>';
+                    '<div class="text-[11px] text-[#fff1b8] mt-1">' + escapeDebugHtml(errorMsg) + '</div></div>';
             }
 
             content.innerHTML = html;
             content.scrollTop = content.scrollHeight;
+        }
+
+        function debugValueText(value) {
+            if (value === undefined || value === null || value === "") return "(無)";
+            if (typeof value === "string") return value;
+            try { return JSON.stringify(value, null, 2); } catch (error) { return String(value); }
+        }
+
+        function debugDetailButton(label, value, color = "#55e6d9") {
+            const text = debugValueText(value);
+            return '<button type="button" onclick="toggleDetail(this)" data-detail="' +
+                encodeURIComponent(text) + '" class="text-[10px] underline cursor-pointer" style="color:' + color + '">' +
+                escapeDebugHtml(label) + '</button>';
+        }
+
+        function v3PlanLayers(plan) {
+            const remaining = [...(plan || [])];
+            const completed = new Set();
+            const layers = [];
+            while (remaining.length) {
+                const ready = remaining.filter(task => (task.depends_on || []).every(dep => completed.has(dep)));
+                if (!ready.length) {
+                    layers.push(remaining.splice(0));
+                    break;
+                }
+                layers.push(ready);
+                ready.forEach(task => completed.add(task.id));
+                for (const task of ready) {
+                    const index = remaining.indexOf(task);
+                    if (index >= 0) remaining.splice(index, 1);
+                }
+            }
+            return layers;
+        }
+
+        function renderV3ExecutionTrace(content) {
+            const events = Array.isArray(lastDebugTrace) ? lastDebugTrace : [];
+            const planner = [...events].reverse().find(event => event.type === "planner_completed") || {};
+            const planEvent = [...events].reverse().find(event => event.type === "plan_created") || {};
+            const plan = Array.isArray(planEvent.plan) ? planEvent.plan : [];
+            const nodeMap = {};
+            const callMap = {};
+            let finalResponse = null;
+
+            for (const event of events) {
+                if (event.type === "subagent_started") {
+                    const key = event.task_id || event.agent || "unknown";
+                    nodeMap[key] = {...(nodeMap[key] || {}), ...event, calls: nodeMap[key]?.calls || []};
+                } else if (event.type === "subagent_finished") {
+                    const key = event.task_id || event.agent || "unknown";
+                    nodeMap[key] = {...(nodeMap[key] || {}), ...event, calls: nodeMap[key]?.calls || []};
+                } else if (event.type === "function_call") {
+                    const callId = event.call_id || `${event.task_id}#${event.call_index}:${event.function}`;
+                    callMap[callId] = {...(callMap[callId] || {}), ...event};
+                } else if (event.type === "tool_started" || event.type === "tool_finished") {
+                    const callId = event.step_id || `${event.task_id}:${event.function}`;
+                    callMap[callId] = {...(callMap[callId] || {}), ...event};
+                } else if (event.type === "final") {
+                    finalResponse = event.response || null;
+                }
+            }
+
+            for (const [callId, call] of Object.entries(callMap)) {
+                const key = call.task_id || "unknown";
+                if (!nodeMap[key]) nodeMap[key] = {task_id: key, agent: call.agent || "tool", calls: []};
+                nodeMap[key].calls = nodeMap[key].calls || [];
+                nodeMap[key].calls.push({...call, call_id: callId});
+            }
+
+            let totalInput = Number(planner.metrics?.input_tokens || planEvent.planner_metrics?.input_tokens || 0);
+            let totalOutput = Number(planner.metrics?.output_tokens || planEvent.planner_metrics?.output_tokens || 0);
+            Object.values(nodeMap).forEach(node => {
+                totalInput += Number(node.input_tokens || 0);
+                totalOutput += Number(node.output_tokens || 0);
+            });
+            const latest = events[events.length - 1] || {};
+            const statusText = lastDebugRunStatus === "completed" ? "已完成" :
+                lastDebugRunStatus === "running" ? "執行中" : (lastDebugRunStatus || "未知");
+            const statusColor = lastDebugRunStatus === "completed" ? "#55e6d9" : "#ffd166";
+
+            let html = '<div class="border-2 border-[#8a72b8] p-3 bg-[#110a22] mb-3">' +
+                '<div class="flex items-center justify-between gap-2">' +
+                '<div class="text-[#ffd166] font-bold text-sm">V3 執行流程</div>' +
+                '<span class="text-[10px] px-2 py-0.5 border" style="color:' + statusColor + ';border-color:' + statusColor + '">' + statusText + '</span></div>' +
+                '<div class="grid grid-cols-3 gap-2 text-[11px] mt-2">' +
+                '<div><span class="text-gray-400">Input</span><br><b class="text-[#55e6d9]">' + totalInput + '</b></div>' +
+                '<div><span class="text-gray-400">Output</span><br><b class="text-[#55e6d9]">' + totalOutput + '</b></div>' +
+                '<div><span class="text-gray-400">目前階段</span><br><b class="text-[#ffd166]">' + escapeDebugHtml(latest.stage || latest.agent || latest.type || "—") + '</b></div>' +
+                '</div></div>';
+
+            if (planner.type) {
+                const plannerStatus = planner.status === "failed" ? "❌ 失敗" : "✅ 完成";
+                html += '<div class="border-2 border-[#ffd166] p-3 bg-[#110a22] mb-3">' +
+                    '<div class="flex justify-between"><b class="text-[#ffd166] text-xs">📋 Planner</b><span class="text-[10px] text-gray-300">' + plannerStatus + '</span></div>' +
+                    (planner.error ? '<div class="text-[10px] text-[#ff6fae] mt-1">' + escapeDebugHtml(planner.error) + '</div>' : '') +
+                    '<div class="flex flex-wrap gap-3 mt-2">' +
+                    debugDetailButton("Input Prompt", planner.prompt_raw) +
+                    debugDetailButton("可用 Functions", planner.available_functions, "#fff1b8") +
+                    debugDetailButton("Function Calls", planner.function_calls, "#ff6fae") +
+                    debugDetailButton("Raw Output", planner.content_raw, "#c084fc") +
+                    '</div></div>';
+            } else {
+                const stage = events.find(event => event.type === "stage_started" && event.stage === "planner");
+                if (stage) html += '<div class="border-2 border-[#ffd166] p-3 bg-[#110a22] mb-3 text-xs text-[#ffd166]">⏳ ' + escapeDebugHtml(stage.label || "Planner 執行中") + '</div>';
+            }
+
+            if (plan.length) {
+                html += '<div class="border-2 border-[#8a72b8] p-3 bg-[#110a22] mb-3"><div class="text-xs font-bold text-[#d8c7ff] mb-2">任務 DAG／層級關係</div>';
+                const layers = v3PlanLayers(plan);
+                layers.forEach((layer, layerIndex) => {
+                    html += '<div class="text-[9px] text-gray-500 mb-1">Layer ' + layerIndex + '</div><div class="grid gap-2" style="grid-template-columns:repeat(' + Math.max(1, Math.min(layer.length, 3)) + ',minmax(0,1fr))">';
+                    layer.forEach(task => {
+                        const color = V3_AGENT_COLORS[task.agent] || "#d8c7ff";
+                        const deps = (task.depends_on || []).length ? (task.depends_on || []).join(" + ") : "使用者輸入";
+                        html += '<div class="p-2 border bg-[#0a0618] min-w-0" style="border-color:' + color + '">' +
+                            '<div class="font-bold text-[10px]" style="color:' + color + '">' + escapeDebugHtml(task.id + " · " + (V3_AGENT_LABELS[task.agent] || task.agent)) + '</div>' +
+                            '<div class="text-[9px] text-gray-500 mt-1">來源：' + escapeDebugHtml(deps) + '</div>' +
+                            '<div class="text-[10px] text-gray-300 mt-1 break-words">' + escapeDebugHtml(task.task_brief || "") + '</div></div>';
+                    });
+                    html += '</div>';
+                    if (layerIndex < layers.length - 1) html += '<div class="text-center text-[#8a72b8] text-lg leading-5">↓</div>';
+                });
+                html += '</div>';
+            }
+
+            const orderedNodes = Object.values(nodeMap).sort((a, b) => Number(a.at_ms || 0) - Number(b.at_ms || 0));
+            for (const node of orderedNodes) {
+                const color = V3_AGENT_COLORS[node.agent] || "#d8c7ff";
+                const status = node.status || (lastDebugRunStatus === "running" ? "running" : "unknown");
+                html += '<div class="border-2 p-3 bg-[#110a22] mb-3" style="border-color:' + color + '">' +
+                    '<div class="flex items-center justify-between gap-2"><b class="text-xs" style="color:' + color + '">' + escapeDebugHtml((V3_AGENT_LABELS[node.agent] || node.agent || "Tool") + " · " + (node.task_id || "")) + '</b>' +
+                    '<span class="text-[10px] text-gray-300">' + escapeDebugHtml(status) + '</span></div>' +
+                    (node.task_brief ? '<div class="text-[10px] text-gray-400 mt-1">' + escapeDebugHtml(node.task_brief) + '</div>' : '') +
+                    '<div class="flex flex-wrap gap-3 mt-2">' +
+                    debugDetailButton("餵入資料", node.input_payload) +
+                    debugDetailButton("完整 Prompt", node.prompt_raw) +
+                    debugDetailButton("可用 Functions", node.available_functions, "#fff1b8") +
+                    debugDetailButton("模型 Function Calls", node.tool_calls_raw, "#ff6fae") +
+                    debugDetailButton("Raw Output", node.content_raw, "#c084fc") +
+                    debugDetailButton("節點結果", node.results, "#7dd87f") +
+                    '</div>';
+                if (node.calls && node.calls.length) {
+                    html += '<div class="mt-3 text-[10px] text-gray-400">實際 Function／Tool 執行</div>';
+                    node.calls.forEach(call => {
+                        const outcome = call.outcome || call.guard?.code || "proposed";
+                        html += '<div class="mt-1 p-2 border border-[#4f3d75] bg-[#0a0618]">' +
+                            '<div class="flex justify-between gap-2"><b class="text-[10px] text-[#fff1b8] break-all">' + escapeDebugHtml(call.function || "function") + '</b><span class="text-[9px] text-gray-500">' + escapeDebugHtml(outcome) + '</span></div>' +
+                            '<div class="flex flex-wrap gap-3 mt-1">' +
+                            debugDetailButton("Planner args", call.planner_arguments) +
+                            debugDetailButton("Executor args", call.executor_arguments, "#fb923c") +
+                            debugDetailButton("Guard", call.guard, "#ff6fae") +
+                            debugDetailButton("Result", call.result || call.error_code, "#7dd87f") +
+                            '</div></div>';
+                    });
+                }
+                html += '</div>';
+            }
+
+            if (finalResponse) {
+                html += '<div class="border-2 border-[#55e6d9] p-3 bg-[#110a22] mb-3"><b class="text-xs text-[#55e6d9]">🏁 Final</b><div class="text-[11px] text-[#fff1b8] mt-1">' + escapeDebugHtml(finalResponse.reply || "") + '</div></div>';
+            }
+
+            html += '<div class="border border-[#4f3d75] p-2 bg-[#0a0618]"><div class="text-[10px] text-gray-400 mb-1">事件時間軸</div>' +
+                events.map(event => '<div class="text-[9px] text-gray-500">+' + Number(event.at_ms || 0) + 'ms · ' + escapeDebugHtml(event.type) + (event.task_id ? ' · ' + escapeDebugHtml(event.task_id) : '') + '</div>').join("") + '</div>';
+            content.innerHTML = html;
         }
 
         function toggleLlmMetricsPanel() {
@@ -5647,6 +5883,7 @@ if (metadata.event_type === "date_coordination_form") {
             if (panel.classList.contains("hidden")) {
                 renderLlmMetricsContent();
                 panel.classList.remove("hidden");
+                refreshAyueDebugTrace();
             } else {
                 panel.classList.add("hidden");
             }
@@ -5675,6 +5912,13 @@ if (metadata.event_type === "date_coordination_form") {
                 const data = await res.json();
                 const modelSelector = document.getElementById('model-selector');
                 const thinkingSelector = document.getElementById('thinking-level-selector');
+                const mutable = Boolean(data.mutable);
+                modelSelector.disabled = !mutable;
+                thinkingSelector.disabled = !mutable;
+                if (!mutable) {
+                    modelSelector.title = '模型由伺服器設定';
+                    thinkingSelector.title = '思考層級由伺服器設定';
+                }
                 const currentModel = data.model || data.default_model || 'deepseek-v4-flash:cloud';
                 for (const opt of modelSelector.options) {
                     opt.selected = opt.value === currentModel;
@@ -5689,8 +5933,11 @@ if (metadata.event_type === "date_coordination_form") {
         }
 
         async function _postModelSettings() {
-            const model = document.getElementById('model-selector').value;
-            const thinkingLevel = document.getElementById('thinking-level-selector').value;
+            const modelSelector = document.getElementById('model-selector');
+            const thinkingSelector = document.getElementById('thinking-level-selector');
+            if (modelSelector.disabled || thinkingSelector.disabled) return;
+            const model = modelSelector.value;
+            const thinkingLevel = thinkingSelector.value;
             try {
                 await fetch('/api/settings/model', {
                     method: 'POST',
@@ -5809,10 +6056,13 @@ if (metadata.event_type === "date_coordination_form") {
 </div>
 
 <!-- LLM Debug Side Panel -->
-<aside id="llm-metrics-panel" class="hidden fixed top-0 left-0 z-[100] h-full w-[420px] bg-[#1a1033] border-r-2 border-[#d8c7ff] shadow-[8px_0_0_#090612] flex flex-col">
+<aside id="llm-metrics-panel" class="hidden fixed top-0 left-0 z-[100] h-full w-[min(760px,94vw)] bg-[#1a1033] border-r-2 border-[#d8c7ff] shadow-[8px_0_0_#090612] flex flex-col">
     <div class="p-3 border-b-2 border-[#d8c7ff] flex items-center justify-between flex-shrink-0">
         <h3 class="font-bold text-sm text-[#ffd166]">後端執行流程</h3>
-        <button type="button" onclick="hideLlmMetricsPanel()" class="text-xs px-2 py-1 border-2 border-[#d8c7ff]">收起</button>
+        <div class="flex gap-2">
+            <button type="button" onclick="refreshAyueDebugTrace()" class="text-xs px-2 py-1 border-2 border-[#55e6d9] text-[#55e6d9]">重新整理</button>
+            <button type="button" onclick="hideLlmMetricsPanel()" class="text-xs px-2 py-1 border-2 border-[#d8c7ff]">收起</button>
+        </div>
     </div>
     <div id="llm-metrics-content" class="flex-1 p-3 space-y-2 overflow-y-auto"></div>
 </aside>

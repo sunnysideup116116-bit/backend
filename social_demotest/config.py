@@ -12,6 +12,9 @@ if not OLLAMA_FAST_CHAT_MODEL:
     OLLAMA_FAST_CHAT_MODEL = "glm-4.7:cloud" if OLLAMA_CHAT_MODEL == "glm-5.2:cloud" else OLLAMA_CHAT_MODEL
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "https://ollama.com")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
+OLLAMA_REQUEST_TIMEOUT_SECONDS = max(
+    5.0, min(float(os.getenv("AYUE_OLLAMA_TIMEOUT_SECONDS", "30") or "30"), 120.0)
+)
 GOOGLE_EMBEDDING_MODEL = os.getenv("GOOGLE_EMBEDDING_MODEL", "models/gemini-embedding-2")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 TAVILY_PROJECT = os.getenv("TAVILY_PROJECT")

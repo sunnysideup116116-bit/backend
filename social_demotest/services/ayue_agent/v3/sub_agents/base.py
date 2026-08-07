@@ -26,6 +26,8 @@ class SubAgentMetrics:
     tool_calls_raw: list[dict] = field(default_factory=list)
     content_raw: str = ""
     prompt_raw: str = ""
+    tools_raw: list[dict] = field(default_factory=list)
+    input_payload: dict[str, Any] = field(default_factory=dict)
     error: str = ""
 
 
@@ -117,6 +119,8 @@ def run_sub_agents(
         tools = _build_tools(tool_names)
         prompt = _agent_prompt(system_line, task_brief, context_slice.payload)
         metrics.prompt_raw = prompt
+        metrics.tools_raw = tools
+        metrics.input_payload = context_slice.payload
         started = time.perf_counter()
         result = generate_chat_completion_with_tools(prompt, tools, temperature=0)
         metrics.input_tokens = result.input_tokens

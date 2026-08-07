@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import threading
@@ -43,7 +42,6 @@ from .planner import plan_turn, PlannerMetrics
 from . import synthesizer
 from .synthesizer import SynthesizerMetrics
 from .sub_agents.base import SubAgentMetrics
-from .sub_agents.base import SubAgentMetrics
 from .confirmation import ConfirmationManager
 from .sub_agents.calendar_agent import run as run_calendar
 from .sub_agents.places_agent import run as run_places
@@ -51,13 +49,33 @@ from .sub_agents.match_agent import run as run_match
 from .sub_agents.relationship_agent import run as run_relationship
 from .sub_agents.profile_agent import run as run_profile
 from .write_executors import execute_write, prepare_write_confirmation
+from .debug_trace import (
+    append_event as append_debug_event,
+    begin_run as begin_debug_run,
+    finish_run as finish_debug_run,
+)
 
 
 ProgressCallback = Callable[[dict[str, Any]], Any]
-MAX_READS = max(1, int(os.getenv("AYUE_SUBAGENT_MAX_READS", "3")))
-MAX_PARALLEL = max(1, int(os.getenv("AYUE_SUBAGENT_MAX_PARALLEL", "5")))
+MAX_READS = max(1, min(int(os.getenv("AYUE_SUBAGENT_MAX_READS", "3") or "3"), 3))
+MAX_PARALLEL = max(1, min(int(os.getenv("AYUE_SUBAGENT_MAX_PARALLEL", "2") or "2"), 2))
 
-RUNS = db["agent_runs"]
+_TEST_MODE = os.getenv("AYUE_TEST_MODE", "").strip().lower() in {"1", "true", "on"}
+if _TEST_MODE:
+    from .test_store import MemoryCollection
+    _TEST_COLLECTIONS = {
+        "agent_runs": MemoryCollection(),
+        "v3_pending_confirmations": MemoryCollection(),
+    }
+
+
+def _runtime_collection(name: str) -> Any:
+    if _TEST_MODE:
+        return _TEST_COLLECTIONS[name]
+    return db[name]
+
+
+RUNS = _runtime_collection("agent_runs")
 
 
 def ensure_indexes() -> None:
@@ -65,7 +83,7 @@ def ensure_indexes() -> None:
         RUNS.create_index("created_at", expireAfterSeconds=14 * 86400)
         RUNS.create_index([("user_id", 1), ("created_at", -1)])
     except Exception as exc:
-        print(f"Agent run index setup skipped: {exc}")
+        print(f"Agent run index setup skipped: {type(exc).__name__}")
 
 
 def _persist_trace(run_id: str, ctx: Any, payload: dict[str, Any]) -> None:
@@ -113,7 +131,7 @@ def _print_llm_metrics(label: str, metrics: Any) -> None:
     print(f"  [{label}] total_tokens={total}")
 
 
-_CONFIRMATIONS = db["v3_pending_confirmations"]
+_CONFIRMATIONS = _runtime_collection("v3_pending_confirmations")
 
 _SUB_AGENT_RUNNERS = {
     "calendar": run_calendar,
@@ -473,14 +491,14 @@ def _run_sub_task(
     *, seen_keys: set[tuple[str, str]], step_counts: dict[str, int],
     guard_lock: threading.Lock,
     on_progress: ProgressCallback | None, run_id: str, trace: dict[str, Any],
+    debug_enabled: bool = False,
 ) -> tuple[list[SubTaskResult], SubAgentMetrics | None]:
     """Run a single sub-task: slice context, call sub-agent, guard, execute.
 
     The sub-agent may emit multiple tool calls; each proposal is guarded and
     executed independently. A failing call does not discard the others, and
-    duplicate detection is scoped to this task's own seen_keys (parallel
-    tasks never cross-dedupe each other). Shared step state is guarded by
-    guard_lock, never held around LLM or tool calls.
+    Duplicate detection and execution budgets are global to the run. Shared
+    state is guarded by guard_lock, never held around LLM or tool calls.
     """
     context_slice = slice_for_agent(task.agent, turn_ctx, prior_observations=prior_observations)
     runner = _SUB_AGENT_RUNNERS.get(task.agent)
@@ -488,25 +506,27 @@ def _run_sub_task(
         return [SubTaskResult(task_id=task.id, status=SubTaskStatus.SKIPPED,
                               skip_reason=f"no runner for agent {task.agent}")], None
 
-    print(f"\n  [{task.id}] sub_agent={task.agent}  task_brief={task.task_brief}")
+    print(f"\n  [{task.id}] sub_agent={task.agent}")
     _emit_progress(on_progress, "subagent_started", trace=trace, agent_run_id=run_id,
-                    task_id=task.id, agent=task.agent, task_brief=task.task_brief)
+                    task_id=task.id, agent=task.agent)
+    if debug_enabled:
+        append_debug_event(
+            run_id, "subagent_started", task_id=task.id, agent=task.agent,
+            task_brief=task.task_brief, depends_on=task.depends_on,
+            input_payload=context_slice.payload, prior_observations=prior_observations,
+        )
     sub_started = time.perf_counter()
     try:
         proposals, agent_metrics = runner(context_slice, task_brief=task.task_brief)
     except Exception as exc:
         agent_metrics = SubAgentMetrics(error=str(exc))
-        print(f"  [{task.id}] sub_agent EXCEPTION: {exc}")
+        print(f"  [{task.id}] sub_agent EXCEPTION: {type(exc).__name__}")
         return [SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED, error_code="sub_agent_exception")], agent_metrics
 
     if agent_metrics:
         _print_llm_metrics(f"{task.id}:{task.agent}", agent_metrics)
-        if agent_metrics.tool_calls_raw:
-            print(f"  [{task.id}] tool_calls_raw={json.dumps(agent_metrics.tool_calls_raw, ensure_ascii=False)[:300]}")
-        if agent_metrics.content_raw:
-            print(f"  [{task.id}] content_raw={agent_metrics.content_raw[:200]}")
         if agent_metrics.error:
-            print(f"  [{task.id}] error={agent_metrics.error}")
+            print(f"  [{task.id}] error=sub_agent_failed")
 
     if not proposals:
         # 寫入任務在候選查詢後沒有提出任何寫入（例如 find 回 not_found、
@@ -520,7 +540,7 @@ def _run_sub_task(
             and str((obs.get("result") or {}).get("query") or "").strip()
         ]
         if not_found_queries:
-            print(f"  [{task.id}] result=OK (no_write_proposed, not_found={not_found_queries})")
+            print(f"  [{task.id}] result=OK (no_write_proposed)")
             return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK,
                                   tool_name="calendar.find_my_event",
                                   observation={
@@ -531,79 +551,67 @@ def _run_sub_task(
         return [SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED, error_code="sub_agent_no_proposal")], agent_metrics
 
     results: list[SubTaskResult] = []
-    write_confirmations: list[str] = []  # confirmation IDs created in this sub-task
-    write_confirmation_tool: str | None = None  # tool_name of the first write confirmation
     for index, proposal in enumerate(proposals):
-        print(f"  [{task.id}#{index}] proposal: tool={proposal.tool_name}  args={json.dumps(proposal.arguments, ensure_ascii=False)[:200]}")
+        print(f"  [{task.id}#{index}] proposal: tool={proposal.tool_name}")
 
         with guard_lock:
             decision = guard_proposal(
                 proposal, agent_name=task.agent,
-                seen_keys=seen_keys, step_count=step_counts.get(task.agent, 0),
+                seen_keys=seen_keys, step_count=step_counts.get("__reads", 0),
                 max_reads=MAX_READS,
             )
             trace["guard_results"].append(decision.code.value)
+        if debug_enabled:
+            append_debug_event(
+                run_id, "function_call", task_id=task.id, agent=task.agent,
+                call_index=index, call_id=f"{task.id}#{index}:{proposal.tool_name}",
+                function=proposal.tool_name,
+                planner_arguments=proposal.arguments,
+                guard={"ok": decision.ok, "code": decision.code.value, "reason": decision.reason},
+            )
         print(f"  [{task.id}#{index}] guard: ok={decision.ok}  code={decision.code.value}  reason={decision.reason}")
 
         if not decision.ok:
             if decision.code == GuardResultCode.WRITE_REQUIRES_CONFIRMATION:
-                # 同一 sub-task 內的所有 calendar.* 寫入合併進同一 confirmation，
-                # 一次確認即執行多筆（新增/修改/取消可混合）；非 calendar 寫入仍一回合最多一筆。
-                if write_confirmations and not proposal.tool_name.startswith("calendar."):
-                    print(f"  [{task.id}#{index}] result=IGNORED (one write per turn)  tool={proposal.tool_name}")
-                    results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.OK,
-                                                  tool_name=proposal.tool_name,
-                                                  observation={
-                                                      "pending_confirmation": True,
-                                                      "tool_name": proposal.tool_name,
-                                                      "preview": "",
-                                                      "ignored": "one_write_per_turn",
-                                                  }))
-                    continue
                 payload, preview = prepare_write_confirmation(
                     proposal.tool_name, proposal.arguments, turn_ctx._raw_ctx, turn_ctx,
                 )
                 if payload is None:
-                    print(f"  [{task.id}#{index}] result=FAILED  preflight={preview}")
+                    print(f"  [{task.id}#{index}] result=FAILED  preflight_rejected")
                     results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED,
                                                   tool_name=proposal.tool_name,
                                                   error_code="preflight_rejected",
                                                   observation={"preview": preview}))
                     continue
-                confirmation_id = write_confirmations[0] if write_confirmations else uuid.uuid4().hex
-                if confirmation_id in write_confirmations:
-                    # 批次：追加到既有 confirmation 的 batch 欄位（tool + executor arguments + data）
-                    _CONFIRMATIONS.update_one(
-                        {"_id": confirmation_id},
-                        {"$push": {"batch": {
-                            "tool": proposal.tool_name,
-                            "arguments": payload.get("arguments") or {},
-                            "data": payload.get("data") or {},
-                        }}},
-                    )
-                    print(f"  [{task.id}#{index}] result=OK (batch appended to {confirmation_id})")
-                    results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.OK,
-                                                  tool_name=proposal.tool_name,
-                                                  observation={
-                                                      "pending_confirmation": True,
-                                                      "tool_name": proposal.tool_name,
-                                                      "preview": preview or "",
-                                                  }))
+                with guard_lock:
+                    if step_counts.get("__writes", 0) >= 1:
+                        write_budget_available = False
+                    else:
+                        step_counts["__writes"] = 1
+                        write_budget_available = True
+                if not write_budget_available:
+                    print(f"  [{task.id}#{index}] result=IGNORED (global one-write budget)")
+                    results.append(SubTaskResult(
+                        task_id=task.id,
+                        status=SubTaskStatus.OK,
+                        tool_name=proposal.tool_name,
+                        observation={
+                            "pending_confirmation": False,
+                            "tool_name": proposal.tool_name,
+                            "preview": "",
+                            "ignored": "one_write_per_turn",
+                        },
+                    ))
                     continue
-                write_confirmation_tool = proposal.tool_name
-                _CONFIRMATIONS.insert_one({
-                    "_id": confirmation_id,
-                    "user_id": turn_ctx.user_id,
-                    "agent_name": task.agent,
-                    "tool_name": proposal.tool_name,
-                    "arguments": payload.get("arguments") or {},
-                    "payload": payload.get("data") or {},
-                    "batch": [],
-                    "status": "pending",
-                    "created_at": time.time(),
-                    "expires_at": time.time() + 900,
-                })
-                write_confirmations.append(confirmation_id)
+                ConfirmationManager(_CONFIRMATIONS).create_confirmation(
+                    user_id=turn_ctx.user_id,
+                    agent_name=task.agent,
+                    tool_name=proposal.tool_name,
+                    arguments=payload.get("arguments") or {},
+                    payload=payload.get("data") or {},
+                    origin_run_id=run_id,
+                    preview=preview or "",
+                )
                 print(f"  [{task.id}#{index}] result=OK (pending_confirmation for {proposal.tool_name})")
                 results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.OK,
                                               tool_name=proposal.tool_name,
@@ -649,7 +657,7 @@ def _run_sub_task(
                 proposal.arguments if spec.argument_source.value == "planner_grounded" else None,
             )
         except Exception as exc:
-            print(f"  [{task.id}#{index}] result=FAILED  error_code=executor_args_invalid  exc={exc}")
+            print(f"  [{task.id}#{index}] result=FAILED  error_code=executor_args_invalid")
             results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED,
                                           tool_name=proposal.tool_name,
                                           error_code="executor_args_invalid"))
@@ -662,12 +670,24 @@ def _run_sub_task(
                                               tool_name=proposal.tool_name,
                                               guard_code=GuardResultCode.DUPLICATE_CALL))
                 continue
+            if spec.risk is ToolRisk.READ and step_counts.get("__reads", 0) >= MAX_READS:
+                print(f"  [{task.id}#{index}] guard: global read budget exhausted")
+                results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED,
+                                              tool_name=proposal.tool_name,
+                                              guard_code=GuardResultCode.STEP_LIMIT_EXCEEDED))
+                continue
             seen_keys.add(key)
-            step_counts[task.agent] = step_counts.get(task.agent, 0) + 1
+            step_counts["__reads"] = step_counts.get("__reads", 0) + 1
         step_id = f"{task.id}#{index}:{proposal.tool_name}"
         _emit_progress(on_progress, "tool_started", trace=trace, agent_run_id=run_id,
                         step_id=step_id, text=spec.progress_text,
-                        tool_name=proposal.tool_name, arguments=safe_args)
+                        tool_name=proposal.tool_name)
+        if debug_enabled:
+            append_debug_event(
+                run_id, "tool_started", task_id=task.id, agent=task.agent,
+                step_id=step_id, function=proposal.tool_name,
+                planner_arguments=proposal.arguments, executor_arguments=safe_args,
+            )
         tool_started = time.perf_counter()
         try:
             tool_result = execute_tool(
@@ -677,9 +697,14 @@ def _run_sub_task(
         except Exception as exc:
             _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
                             step_id=step_id, outcome="error", tool_name=proposal.tool_name,
-                            duration_ms=0, result_summary=None)
+                            duration_ms=0)
             trace["tool_results"].append({"tool": proposal.tool_name, "ok": False, "code": "tool_exception"})
-            print(f"  [{task.id}#{index}] tool EXCEPTION: {exc}")
+            if debug_enabled:
+                append_debug_event(
+                    run_id, "tool_finished", task_id=task.id, step_id=step_id,
+                    function=proposal.tool_name, outcome="error", error_code="tool_exception",
+                )
+            print(f"  [{task.id}#{index}] tool EXCEPTION: {type(exc).__name__}")
             results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED,
                                           tool_name=proposal.tool_name, error_code="tool_exception"))
             continue
@@ -688,18 +713,28 @@ def _run_sub_task(
         if not tool_result.ok:
             _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
                             step_id=step_id, outcome="error", tool_name=proposal.tool_name,
-                            duration_ms=tool_duration_ms, result_summary={"error_code": tool_result.error_code})
+                            duration_ms=tool_duration_ms)
             trace["tool_results"].append({"tool": proposal.tool_name, "ok": False, "code": tool_result.error_code})
+            if debug_enabled:
+                append_debug_event(
+                    run_id, "tool_finished", task_id=task.id, step_id=step_id,
+                    function=proposal.tool_name, outcome="error",
+                    duration_ms=tool_duration_ms, error_code=tool_result.error_code,
+                )
             print(f"  [{task.id}#{index}] result=FAILED  error_code={tool_result.error_code}")
             results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED,
                                           tool_name=proposal.tool_name, error_code=tool_result.error_code))
             continue
         _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
                         step_id=step_id, outcome="ok", tool_name=proposal.tool_name,
-                        duration_ms=tool_duration_ms, result_summary=tool_result.data)
+                        duration_ms=tool_duration_ms)
         trace["tool_results"].append({"tool": proposal.tool_name, "ok": True, "code": None})
-        obs_summary = json.dumps(tool_result.data, ensure_ascii=False)[:300]
-        print(f"  [{task.id}#{index}] observation: {obs_summary}")
+        if debug_enabled:
+            append_debug_event(
+                run_id, "tool_finished", task_id=task.id, step_id=step_id,
+                function=proposal.tool_name, outcome="ok", duration_ms=tool_duration_ms,
+                result=tool_result.data,
+            )
         print(f"  [{task.id}#{index}] result=OK")
         results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.OK,
                                       tool_name=proposal.tool_name, observation=tool_result.data))
@@ -713,6 +748,7 @@ def _run_sub_task(
 
 def run_public_agent_turn_v3(
     ctx: AgentTurnContext, *, mode: str = "on", on_progress: ProgressCallback | None = None,
+    debug_enabled: bool = False,
 ) -> AgentResult:
     """V3 sub-agent runtime entry point."""
     run_total_started = time.perf_counter()
@@ -732,17 +768,33 @@ def run_public_agent_turn_v3(
         "event_sequence": [], "latency_ms": 0,
         "result": {"handled": True, "conversation_intent": "", "fallback_reason": None},
     }
+    if debug_enabled:
+        begin_debug_run(run_id, ctx.user_id)
+        append_debug_event(
+            run_id, "run_started", agent_run_id=run_id,
+            clock=clock.model_dump(mode="json"),
+        )
     _emit_progress(on_progress, "run_started", trace=trace, agent_run_id=run_id)
 
     _print_separator("V3 RUN START")
     print(f"  run_id={run_id}")
-    print(f"  user_id={ctx.user_id}")
-    print(f"  message={ctx.message[:200]}")
     print(f"  clock={clock.local_date} {clock.local_time} ({clock.weekday_zh_tw})")
 
     total_input_tokens = 0
     total_output_tokens = 0
     all_agent_metrics: list[tuple[str, SubAgentMetrics]] = []
+
+    def _finalize_debug(result: AgentResult) -> AgentResult:
+        if debug_enabled:
+            finish_debug_run(
+                run_id, status="completed",
+                response={
+                    "reply": result.reply or "",
+                    "fallback_reason": result.fallback_reason,
+                    "agent_mode": result.agent_mode,
+                },
+            )
+        return result
 
     def _assessment_result(outcome: dict, session: dict, run_id: str) -> AgentResult:
         state = str(outcome.get("session_state") or outcome.get("status") or "active")
@@ -764,27 +816,27 @@ def run_public_agent_turn_v3(
         if expires_at and expires_at <= time.time():
             outcome = expire_assessment_session(ctx.user_id, session_id, kind)
             _print_separator("V3 RUN END")
-            return _assessment_result(outcome, commit_session, run_id)
+            return _finalize_debug(_assessment_result(outcome, commit_session, run_id))
         choice = assessment_commit_choice(ctx.message)
         if choice == "none":
             _print_separator("V3 RUN END")
-            return AgentResult(
+            return _finalize_debug(AgentResult(
                 handled=True,
                 reply="這份探索結果已整理好。回覆「確認」才會套用；想保留原本資料可以回覆「取消」。",
                 conversation_intent="assessment", agent_run_id=run_id, agent_mode="v3",
                 profile_write_allowed=False, profile_write_reason="assessment",
                 assessment_state="awaiting_commit", assessment_kind=kind, assessment_revision=revision,
-            )
+            ))
         if choice == "cancel":
             outcome = cancel_assessment_session(ctx.user_id, session_id, kind)
             _print_separator("V3 RUN END")
-            return _assessment_result(outcome, commit_session, run_id)
+            return _finalize_debug(_assessment_result(outcome, commit_session, run_id))
         outcome = commit_assessment_session(
             ctx.user_id, session_id, expected_revision=revision,
             idempotency_key=f"assessment-commit:{session_id}:{revision}",
         )
         _print_separator("V3 RUN END")
-        return _assessment_result(outcome, commit_session, run_id)
+        return _finalize_debug(_assessment_result(outcome, commit_session, run_id))
 
     active = active_assessment_session(ctx.user_profile)
     if active:
@@ -794,21 +846,21 @@ def run_public_agent_turn_v3(
         if expires_at and expires_at <= time.time():
             outcome = expire_assessment_session(ctx.user_id, session_id, kind)
             _print_separator("V3 RUN END")
-            return _assessment_result(outcome, active, run_id)
+            return _finalize_debug(_assessment_result(outcome, active, run_id))
         if assessment_cancel_choice(ctx.message):
             outcome = cancel_assessment_session(ctx.user_id, session_id, kind)
             _print_separator("V3 RUN END")
-            return _assessment_result(outcome, active, run_id)
+            return _finalize_debug(_assessment_result(outcome, active, run_id))
         outcome = advance_assessment_session(
             ctx.user_id, session_id, ctx.message, message_id=ctx.message_id,
         )
         _print_separator("V3 RUN END")
-        return _assessment_result(outcome, active, run_id)
+        return _finalize_debug(_assessment_result(outcome, active, run_id))
 
     choice = confirmation_choice(ctx.message)
     mgr = ConfirmationManager(_CONFIRMATIONS)
     if choice == "confirm":
-        print("\n  [entry] confirmation=confirm → executing oldest pending confirmation")
+        print("\n  [entry] confirmation=confirm → executing preview-bound pending confirmation")
         results = mgr.execute_confirmed(
             user_id=ctx.user_id,
             executor=lambda tn, args, uid, payload: execute_write(
@@ -823,31 +875,53 @@ def run_public_agent_turn_v3(
         total_output_tokens += synth_metrics.output_tokens
         _print_separator("V3 RUN END")
         print(f"  total_tokens={total_input_tokens + total_output_tokens} (in={total_input_tokens} out={total_output_tokens})")
-        print(f"  reply={reply[:200]}")
-        return AgentResult(handled=True, reply=reply, agent_run_id=run_id, agent_mode="v3")
+        return _finalize_debug(AgentResult(handled=True, reply=reply, agent_run_id=run_id, agent_mode="v3"))
     if choice == "cancel":
         print("\n  [entry] confirmation=cancel → clearing pending confirmations")
         mgr.cancel_all(user_id=ctx.user_id)
         _print_separator("V3 RUN END")
-        return AgentResult(handled=True, reply="已取消待確認的操作", agent_run_id=run_id, agent_mode="v3")
+        return _finalize_debug(AgentResult(
+            handled=True, reply="已取消待確認的操作", agent_run_id=run_id, agent_mode="v3",
+        ))
 
     # Normal flow: Planner → execute DAG → synthesizer
     _print_separator("PLANNER")
-    plan, planner_metrics = plan_turn(turn, pending_confirmations=mgr.list_active(user_id=ctx.user_id))
+    if debug_enabled:
+        append_debug_event(run_id, "stage_started", stage="planner", label="Planner 正在拆解任務")
+    plan, planner_metrics = plan_turn(
+        turn,
+        pending_confirmations=mgr.planner_projection(user_id=ctx.user_id),
+    )
     _print_llm_metrics("planner", planner_metrics)
     total_input_tokens += planner_metrics.input_tokens
     total_output_tokens += planner_metrics.output_tokens
-    if planner_metrics.raw_content:
-        print(f"  [planner] raw_output={planner_metrics.raw_content[:500]}")
     if planner_metrics.error:
-        print(f"  [planner] error={planner_metrics.error}")
+        print("  [planner] error=planner_failed")
+
+    if debug_enabled:
+        append_debug_event(
+            run_id, "planner_completed", stage="planner",
+            status="ok" if plan is not None else "failed",
+            prompt_raw=planner_metrics.prompt_raw,
+            available_functions=planner_metrics.tools_raw or [],
+            function_calls=planner_metrics.tool_calls_raw or [],
+            content_raw=planner_metrics.raw_content,
+            error=planner_metrics.error,
+            metrics={
+                "input_tokens": planner_metrics.input_tokens,
+                "output_tokens": planner_metrics.output_tokens,
+                "duration_ms": planner_metrics.duration_ms,
+            },
+        )
 
     if plan is None:
         print("\n  [planner] result=FAILED → fail closed")
         _print_separator("V3 RUN END")
         print(f"  total_tokens={total_input_tokens + total_output_tokens} (in={total_input_tokens} out={total_output_tokens})")
-        return AgentResult(handled=True, reply="我現在沒辦法判斷這個請求要不要執行，先跟你聊聊",
-                           agent_run_id=run_id, agent_mode="v3", fallback_reason="planner_invalid")
+        return _finalize_debug(AgentResult(
+            handled=True, reply="我現在沒辦法判斷這個請求要不要執行，先跟你聊聊",
+            agent_run_id=run_id, agent_mode="v3", fallback_reason="planner_invalid",
+        ))
 
     opportunity = getattr(plan, "opportunity", None)
     if opportunity is not None and opportunity.signal == "social_opening":
@@ -856,21 +930,19 @@ def run_public_agent_turn_v3(
     if opportunity is not None:
         assessment = assess_match_opportunity(ctx.user_profile or {}, ctx.user_id, explicit_search=False)
         if assessment.state == "ready":
-            _CONFIRMATIONS.insert_one({
-                "_id": uuid.uuid4().hex,
-                "user_id": ctx.user_id,
-                "agent_name": "match",
-                "tool_name": "match.start_search",
-                "arguments": {},
-                "payload": {"source": "opportunity_guidance", "guidance_fingerprint": assessment.fingerprint},
-                "status": "pending",
-                "created_at": time.time(),
-                "expires_at": time.time() + 900,
-            })
             lead = f"你提到「{opportunity.evidence_span}」。" if opportunity.evidence_span in turn.message else ""
             preview = (
                 f"{lead}感覺這件事有人一起也不錯。"
                 "我可以依你的近況和個性找一位合適人選，不會隨機配；要試試看嗎？"
+            )
+            mgr.create_confirmation(
+                user_id=ctx.user_id,
+                agent_name="match",
+                tool_name="match.start_search",
+                arguments={},
+                payload={"source": "opportunity_guidance", "guidance_fingerprint": assessment.fingerprint},
+                origin_run_id=run_id,
+                preview=preview,
             )
             synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{
                 "task_id": "guidance", "status": "ok", "tool": None,
@@ -880,14 +952,18 @@ def run_public_agent_turn_v3(
             reply, _card_decision, synth_metrics = synthesizer.synthesize(synth_slice)
             _print_llm_metrics("synthesizer", synth_metrics)
             _print_separator("V3 RUN END")
-            return AgentResult(handled=True, reply=reply, agent_run_id=run_id, agent_mode="v3",
-                               match_readiness_state="ready", match_guidance_shown=True)
+            return _finalize_debug(AgentResult(
+                handled=True, reply=reply, agent_run_id=run_id, agent_mode="v3",
+                match_readiness_state="ready", match_guidance_shown=True,
+            ))
         if assessment.state == "not_ready":
             from services.ayue_agent.match_opportunity import missing_basis_question
             reply = "我想先多了解你的方向，才能幫你找得更準。" + missing_basis_question(assessment)
             _print_separator("V3 RUN END")
-            return AgentResult(handled=True, reply=reply, agent_run_id=run_id, agent_mode="v3",
-                               match_readiness_state="not_ready")
+            return _finalize_debug(AgentResult(
+                handled=True, reply=reply, agent_run_id=run_id, agent_mode="v3",
+                match_readiness_state="not_ready",
+            ))
 
     _print_separator("PLAN")
     plan_tasks_json = [{"id": t.id, "agent": t.agent, "depends_on": t.depends_on, "task_brief": t.task_brief} for t in plan.tasks]
@@ -896,19 +972,31 @@ def run_public_agent_turn_v3(
         for t in plan.tasks
     ]
     for t in plan.tasks:
-        print(f"  {t.id}: agent={t.agent}  depends_on={t.depends_on}  brief={t.task_brief}")
+        print(f"  {t.id}: agent={t.agent}  depends_on={t.depends_on}")
     _emit_progress(on_progress, "plan_created", trace=trace, agent_run_id=run_id,
                     plan=plan_tasks_json,
                     planner_metrics={
                         "input_tokens": planner_metrics.input_tokens,
                         "output_tokens": planner_metrics.output_tokens,
                         "duration_ms": planner_metrics.duration_ms,
-                    },
-                    prompt_raw=planner_metrics.prompt_raw,
-                    content_raw=planner_metrics.raw_content)
+                    })
+    if debug_enabled:
+        append_debug_event(
+            run_id, "plan_created", plan=plan_tasks_json,
+            planner_metrics={
+                "input_tokens": planner_metrics.input_tokens,
+                "output_tokens": planner_metrics.output_tokens,
+                "duration_ms": planner_metrics.duration_ms,
+            },
+            prompt_raw=planner_metrics.prompt_raw,
+            content_raw=planner_metrics.raw_content,
+            function_calls=planner_metrics.tool_calls_raw or [],
+            available_functions=planner_metrics.tools_raw or [],
+        )
 
     guard_lock = threading.Lock()
     step_counts: dict[str, int] = {}
+    seen_keys: set[tuple[str, str]] = set()
     task_results: dict[str, list[SubTaskResult]] = {}
 
     _print_separator("SUB-AGENT EXECUTION")
@@ -931,21 +1019,19 @@ def run_public_agent_turn_v3(
                                 task_id=task.id, agent=task.agent,
                                 status="skipped", error="dependency_failed",
                                 input_tokens=0, output_tokens=0, duration_ms=0,
-                                tool_name=None, tool_calls_raw=[], content_raw="")
+                                tool_name=None)
                 return task, result, None
             prior = _prior_observations_for(task, task_results)
-            # Duplicate detection is scoped per sub-task: parallel tasks never
-            # cross-dedupe each other's identical tool+args calls.
-            task_seen: set[tuple[str, str]] = set()
             try:
-                result, agent_metrics = _run_sub_task(task, turn, prior, seen_keys=task_seen,
+                result, agent_metrics = _run_sub_task(task, turn, prior, seen_keys=seen_keys,
                                         step_counts=step_counts, guard_lock=guard_lock,
-                                        on_progress=on_progress, run_id=run_id, trace=trace)
+                                        on_progress=on_progress, run_id=run_id, trace=trace,
+                                        debug_enabled=debug_enabled)
             except Exception as exc:
                 # A sub-task must never crash the whole run: convert any
                 # unexpected exception into a FAILED result so the synthesizer
                 # can still answer with the observations that did succeed.
-                print(f"  [{task.id}] sub_agent UNCAUGHT EXCEPTION: {exc}")
+                print(f"  [{task.id}] sub_agent UNCAUGHT EXCEPTION: {type(exc).__name__}")
                 agent_metrics = SubAgentMetrics(error=str(exc))
                 result = [SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED,
                                         error_code="sub_agent_exception")]
@@ -957,17 +1043,29 @@ def run_public_agent_turn_v3(
                                 input_tokens=agent_metrics.input_tokens,
                                 output_tokens=agent_metrics.output_tokens,
                                 duration_ms=agent_metrics.duration_ms,
-                                tool_name=result[0].tool_name,
-                                tool_calls_raw=agent_metrics.tool_calls_raw,
-                                content_raw=agent_metrics.content_raw,
-                                prompt_raw=agent_metrics.prompt_raw)
+                                tool_name=result[0].tool_name)
+                if debug_enabled:
+                    append_debug_event(
+                        run_id, "subagent_finished", task_id=task.id, agent=task.agent,
+                        status=result[0].status.value,
+                        error=result[0].error_code or result[0].skip_reason or agent_metrics.error or "",
+                        input_tokens=agent_metrics.input_tokens,
+                        output_tokens=agent_metrics.output_tokens,
+                        duration_ms=agent_metrics.duration_ms,
+                        prompt_raw=agent_metrics.prompt_raw,
+                        input_payload=agent_metrics.input_payload,
+                        available_functions=agent_metrics.tools_raw,
+                        tool_calls_raw=agent_metrics.tool_calls_raw,
+                        content_raw=agent_metrics.content_raw,
+                        results=[item.model_dump(mode="json") for item in result],
+                    )
             else:
                 _emit_progress(on_progress, "subagent_finished", trace=trace, agent_run_id=run_id,
                                 task_id=task.id, agent=task.agent,
                                 status=result[0].status.value,
                                 error=result[0].error_code or result[0].skip_reason or "",
                                 input_tokens=0, output_tokens=0, duration_ms=0,
-                                tool_name=result[0].tool_name, tool_calls_raw=[], content_raw="", prompt_raw="")
+                                tool_name=result[0].tool_name)
             return task, result, agent_metrics
 
         if worker_count == 1:
@@ -1011,13 +1109,18 @@ def run_public_agent_turn_v3(
     synth_slice = slice_for_agent("synthesizer", turn, prior_observations=prior)
     candidate_cards = _public_place_cards([r for results in task_results.values() for r in results])
     _emit_progress(on_progress, "subagent_started", trace=trace, agent_run_id=run_id,
-                    task_id="synth", agent="synthesizer", task_brief="綜合所有結果產生回覆")
+                    task_id="synth", agent="synthesizer")
+    if debug_enabled:
+        append_debug_event(
+            run_id, "subagent_started", task_id="synth", agent="synthesizer",
+            task_brief="彙整所有已完成子任務並產生最終回覆",
+            depends_on=[task.id for task in plan.tasks if task.agent != "synthesizer"],
+            input_payload=synth_slice.payload, candidate_cards=candidate_cards,
+        )
     reply, card_decision, synth_metrics = synthesizer.synthesize(synth_slice, candidate_cards=candidate_cards)
     _print_llm_metrics("synthesizer", synth_metrics)
     total_input_tokens += synth_metrics.input_tokens
     total_output_tokens += synth_metrics.output_tokens
-    if synth_metrics.raw_content:
-        print(f"  [synthesizer] raw_output={synth_metrics.raw_content[:500]}")
     print(f"  [synthesizer] card_decision={card_decision}")
     _emit_progress(on_progress, "subagent_finished", trace=trace, agent_run_id=run_id,
                     task_id="synth", agent="synthesizer",
@@ -1025,9 +1128,21 @@ def run_public_agent_turn_v3(
                     input_tokens=synth_metrics.input_tokens,
                     output_tokens=synth_metrics.output_tokens,
                     duration_ms=synth_metrics.duration_ms,
-                    tool_name=None, tool_calls_raw=synth_metrics.tool_calls_raw or [],
-                    content_raw=synth_metrics.raw_content,
-                    prompt_raw=synth_metrics.prompt_raw)
+                    tool_name=None)
+    if debug_enabled:
+        append_debug_event(
+            run_id, "subagent_finished", task_id="synth", agent="synthesizer",
+            status="ok", error="",
+            input_tokens=synth_metrics.input_tokens,
+            output_tokens=synth_metrics.output_tokens,
+            duration_ms=synth_metrics.duration_ms,
+            prompt_raw=synth_metrics.prompt_raw,
+            input_payload=synth_metrics.input_payload or {},
+            available_functions=synth_metrics.tools_raw or [],
+            tool_calls_raw=synth_metrics.tool_calls_raw or [],
+            content_raw=synth_metrics.raw_content,
+            results=[{"reply": reply, "card_decision": card_decision}],
+        )
 
     place_cards = _apply_card_decision(candidate_cards, card_decision)
 
@@ -1037,7 +1152,6 @@ def run_public_agent_turn_v3(
     print(f"  total_tokens={total_input_tokens + total_output_tokens}  (input={total_input_tokens}  output={total_output_tokens})")
     print(f"  total_duration={run_total_ms}ms")
     print(f"  agents_used={[aid for aid, _ in all_agent_metrics]}")
-    print(f"  reply={reply[:300]}")
     print(f"{'='*60}\n")
 
     result = AgentResult(handled=True, reply=reply, agent_run_id=run_id, agent_mode="v3")
@@ -1061,4 +1175,4 @@ def run_public_agent_turn_v3(
     }
     trace["event_sequence"].append("final")
     _persist_trace(run_id, ctx, trace)
-    return result
+    return _finalize_debug(result)

@@ -69,16 +69,25 @@ def _start_search(ctx: Any, run_id: str, index: int, *, confirmation_id: str | N
         return False, "我現在不能安全地開始搜尋，請稍後再試。", type(exc).__name__
 
 
-def _decide_active_proposal(ctx: Any, turn: Any, run_id: str, index: int, arguments: dict[str, Any]) -> tuple[bool, str, str | None]:
+def _decide_active_proposal(
+    ctx: Any, turn: Any, run_id: str, index: int,
+    arguments: dict[str, Any], payload: dict[str, Any] | None,
+) -> tuple[bool, str, str | None]:
     proposal = turn.active_proposal or {}
     decision = str(arguments.get("decision") or "")
-    if not proposal.get("user_can_decide") or not decision:
+    expected_revision = int((payload or {}).get("proposal_revision", 0) or 0)
+    if (
+        not proposal.get("user_can_decide")
+        or not decision
+        or expected_revision <= 0
+        or int(proposal.get("proposal_revision", 0) or 0) != expected_revision
+    ):
         return False, "我需要你對目前這張提案明確表示有興趣或婉拒。", "decision_not_actionable"
     try:
         outcome = decide_active_proposal(
             user_id=ctx.user_id,
             decision=decision,
-            expected_revision=int(proposal.get("proposal_revision", 0)),
+            expected_revision=expected_revision,
             idempotency_key=_idempotency_key(None, run_id, index),
         )
         if outcome.get("stale"):
@@ -289,9 +298,9 @@ def _calendar_execute(ctx: Any, tool_name: str, arguments: dict[str, Any], paylo
 
 
 _WRITE_EXECUTORS = {
-    "match.start_search": lambda ctx, turn, run_id, index, args, cid: _start_search(ctx, run_id, index, confirmation_id=cid),
-    "match.decide_active_proposal": lambda ctx, turn, run_id, index, args, cid: _decide_active_proposal(ctx, turn, run_id, index, args),
-    "profile.start_assessment": lambda ctx, turn, run_id, index, args, cid: _start_assessment(ctx, args, confirmation_id=cid),
+    "match.start_search": lambda ctx, turn, run_id, index, args, cid, payload: _start_search(ctx, run_id, index, confirmation_id=cid),
+    "match.decide_active_proposal": lambda ctx, turn, run_id, index, args, cid, payload: _decide_active_proposal(ctx, turn, run_id, index, args, payload),
+    "profile.start_assessment": lambda ctx, turn, run_id, index, args, cid, payload: _start_assessment(ctx, args, confirmation_id=cid),
 }
 
 
@@ -443,6 +452,21 @@ def prepare_write_confirmation(
         return {"action": tool_name, "arguments": {}, "data": {}}, (
             "我會依你的近況、偏好和個性挑選，不會隨機配對。要我現在開始找就回覆「確認」；也可以先補充條件。"
         )
+    if tool_name == "match.decide_active_proposal":
+        proposal = turn.active_proposal or {}
+        decision = str(arguments.get("decision") or "")
+        if not proposal.get("user_can_decide") or decision not in {"interested", "declined"}:
+            return None, "目前沒有一張可由你決定的配對提案。"
+        revision = int(proposal.get("proposal_revision", 0) or 0)
+        if revision <= 0:
+            return None, "這張提案的狀態已經更新，請重新查看後再決定。"
+        counterparty = str(proposal.get("counterparty") or "對方")
+        action_label = "表示有興趣" if decision == "interested" else "婉拒"
+        return {
+            "action": tool_name,
+            "arguments": {"decision": decision},
+            "data": {"proposal_revision": revision},
+        }, f"要對 {counterparty} 的提案{action_label}嗎？確認後我才會送出。"
     if tool_name == "profile.start_assessment":
         kind = {"basic": "big_five", "deep": "deep_profile"}.get(str(arguments.get("kind") or ""))
         if kind is None:
@@ -472,4 +496,4 @@ def execute_write(
     executor = _WRITE_EXECUTORS.get(tool_name)
     if executor is None:
         return False, "我現在不能安全地處理這個操作。", "write_executor_not_registered"
-    return executor(ctx, turn, run_id, index, arguments, confirmation_id)
+    return executor(ctx, turn, run_id, index, arguments, confirmation_id, payload)

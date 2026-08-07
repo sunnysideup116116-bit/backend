@@ -1,8 +1,12 @@
 ﻿import random
 import requests
+import hmac
+import ipaddress
+import os
+import re
 import time
 import config
-from fastapi import APIRouter
+from fastapi import APIRouter, Header, HTTPException, Request
 from models import ClearRequest, SettingsRequest, MediatorToneRequest, ProfileMemoryActionRequest, ProfileLocationRequest, ModelSettingsRequest
 from database import db, profiles_coll, matches_coll, messages_coll
 from services.ai_service import get_embedding
@@ -10,12 +14,39 @@ from services.profile_projection import safe_recent_context
 from services.language_service import normalize_model_text, normalize_zh_tw
 from services.ayue_agent.proactive_care import normalize_proactive_frequency, schedule_proactive_care
 from services.ayue_agent.v3.scheduler import agent_mode_for_user_v3
+from services.ayue_agent.v3.debug_trace import get_run as get_debug_run, local_debug_enabled
 from services.ayue_agent.web_tools import web_enabled
 from services.profile_location import normalize_profile_location, safe_profile_location
 from services.ayue_agent.public_relationship_projection import anonymize_counterparty_payload
 from services.match_reason_service import V4_REASON_VERSION, reason_for_viewer
 
 router = APIRouter(prefix="/api", tags=["System"])
+
+
+def _is_loopback_debug_request(request: Request) -> bool:
+    if not local_debug_enabled() or request.client is None:
+        return False
+    try:
+        client_is_loopback = ipaddress.ip_address(request.client.host).is_loopback
+    except ValueError:
+        client_is_loopback = request.client.host == "localhost"
+    hostname = (request.url.hostname or "").lower()
+    try:
+        host_is_loopback = hostname == "localhost" or ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        host_is_loopback = hostname == "localhost"
+    return client_is_loopback and host_is_loopback
+
+
+@router.get("/debug/ayue-runs/{run_id}")
+def local_ayue_debug_run(run_id: str, user_id: str, request: Request):
+    """Return one ephemeral raw V3 diagnostic only to a true loopback client."""
+    if not _is_loopback_debug_request(request) or not re.fullmatch(r"[a-f0-9]{32}", run_id):
+        raise HTTPException(status_code=404, detail="Debug trace unavailable")
+    run = get_debug_run(run_id, user_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Debug trace unavailable")
+    return run
 
 
 @router.get("/client-config")
@@ -347,17 +378,30 @@ def update_mediator_tone(req: MediatorToneRequest):
     return {"status": "success", "mediator_tone": tone, "probe_mode": update.get("probe_mode")}
 
 @router.post("/settings/model")
-def update_model_settings(req: ModelSettingsRequest):
-    """Set a process-wide LLM model override (in-memory only, does not touch .env)."""
+def update_model_settings(
+    req: ModelSettingsRequest,
+    x_ayue_admin_token: str | None = Header(default=None),
+):
+    """Admin-only process-wide override for local evaluation."""
     from services.ai_service import set_runtime_model_override, get_runtime_model_override
+    admin_token = os.getenv("AYUE_RUNTIME_MODEL_SETTINGS_TOKEN", "").strip()
+    if not admin_token or not x_ayue_admin_token or not hmac.compare_digest(admin_token, x_ayue_admin_token):
+        raise HTTPException(status_code=403, detail="Runtime model settings are disabled.")
+    allowed_models = {
+        value.strip()
+        for value in os.getenv("AYUE_ALLOWED_RUNTIME_MODELS", config.OLLAMA_CHAT_MODEL).split(",")
+        if value.strip()
+    }
+    if req.model is not None and req.model not in allowed_models:
+        raise HTTPException(status_code=400, detail="Model is not allowlisted.")
     set_runtime_model_override(req.model, req.thinking_level)
     return {"status": "success", **get_runtime_model_override()}
 
 @router.get("/settings/model")
 def get_model_settings():
-    """Return current runtime model override state."""
+    """Return non-sensitive model state; mutation remains admin-only."""
     from services.ai_service import get_runtime_model_override
-    return get_runtime_model_override()
+    return {**get_runtime_model_override(), "mutable": False}
 
 @router.post("/onboarding/complete")
 def complete_onboarding(req: ClearRequest):
