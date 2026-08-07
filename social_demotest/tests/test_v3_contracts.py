@@ -41,6 +41,34 @@ class V3ContractsTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Plan(tasks=[t1])
 
+    def test_plan_requires_exactly_one_synthesizer(self):
+        domain = SubTask(id="t1", agent="calendar", depends_on=[], task_brief="x")
+        with self.assertRaises(ValidationError):
+            Plan(tasks=[domain])
+        syn1 = SubTask(id="s1", agent="synthesizer", depends_on=["t1"], task_brief="reply")
+        syn2 = SubTask(id="s2", agent="synthesizer", depends_on=["t1"], task_brief="reply")
+        with self.assertRaises(ValidationError):
+            Plan(tasks=[domain, syn1, syn2])
+
+    def test_plan_rejects_more_than_three_domain_tasks(self):
+        domains = [
+            SubTask(id=f"t{i}", agent="calendar", depends_on=[], task_brief="x")
+            for i in range(4)
+        ]
+        with self.assertRaises(ValidationError):
+            syn = SubTask(
+                id="syn", agent="synthesizer",
+                depends_on=[task.id for task in domains], task_brief="reply",
+            )
+            Plan(tasks=[*domains, syn])
+
+    def test_plan_rejects_dependency_cycle(self):
+        t1 = SubTask(id="t1", agent="calendar", depends_on=["t2"], task_brief="x")
+        t2 = SubTask(id="t2", agent="places", depends_on=["t1"], task_brief="x")
+        syn = SubTask(id="syn", agent="synthesizer", depends_on=["t1", "t2"], task_brief="reply")
+        with self.assertRaises(ValidationError):
+            Plan(tasks=[t1, t2, syn])
+
     def test_subtask_result_status_enum(self):
         self.assertIn(SubTaskStatus.OK, SubTaskStatus)
         self.assertIn(SubTaskStatus.FAILED, SubTaskStatus)

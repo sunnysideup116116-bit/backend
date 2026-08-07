@@ -6,6 +6,7 @@ public runtime anymore.
 """
 
 import asyncio
+import ipaddress
 import json
 import queue
 import re
@@ -14,7 +15,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from config import OLLAMA_FAST_CHAT_MODEL
@@ -29,6 +30,10 @@ from services.ayue_agent.public_relationship_projection import (
     validated_mentioned_contact_ids,
 )
 from services.ayue_agent.v3.scheduler import agent_mode_for_user_v3
+from services.ayue_agent.v3.debug_trace import (
+    finish_run as finish_debug_run,
+    local_debug_enabled,
+)
 from services.chat_service import generate_room_id, save_message
 from services.match_state_service import verified_accepted_match_query
 from services.mediator_context_service import (
@@ -632,6 +637,7 @@ def _complete_public_turn(
     on_progress=None,
     background_tasks: BackgroundTasks | None = None,
     user_message_id: str | None = None,
+    debug_enabled: bool = False,
 ) -> dict:
     """Run and persist one V3 turn after the owner message has been saved."""
     history = list(messages_coll.find({"room_id": room_id}).sort("timestamp", -1).limit(12))[::-1]
@@ -647,7 +653,7 @@ def _complete_public_turn(
         recent_history=history,
     )
     agent_result = run_public_agent_turn_v3(
-        agent_ctx, mode="on", on_progress=on_progress,
+        agent_ctx, mode="on", on_progress=on_progress, debug_enabled=debug_enabled,
     )
     ai_reply = agent_result.reply or "我先把這件事記下來。"
     sources = agent_result.sources[:5]
@@ -704,6 +710,7 @@ def _complete_public_turn(
 
 def _run_public_stream_turn(
     req: DirectChatRequest, background_tasks: BackgroundTasks, on_progress,
+    *, debug_enabled: bool = False,
 ) -> dict:
     """Public-only stream path; mirrors the V3 branch of direct_chat exactly once."""
     room_id = generate_room_id(req.user_id, req.contact_id)
@@ -728,7 +735,23 @@ def _run_public_stream_turn(
     return _complete_public_turn(
         req, room_id, requested_mentions, mention_overflow, on_progress,
         background_tasks=background_tasks, user_message_id=user_message.get("message_id"),
+        debug_enabled=debug_enabled,
     )
+
+
+def _is_loopback_debug_request(request: Request | None) -> bool:
+    if request is None or not local_debug_enabled() or request.client is None:
+        return False
+    try:
+        client_is_loopback = ipaddress.ip_address(request.client.host).is_loopback
+    except ValueError:
+        client_is_loopback = request.client.host == "localhost"
+    hostname = (request.url.hostname or "").lower()
+    try:
+        host_is_loopback = hostname == "localhost" or ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        host_is_loopback = hostname == "localhost"
+    return client_is_loopback and host_is_loopback
 
 
 def _sanitize_public_stream_event(event: dict) -> dict | None:
@@ -739,82 +762,18 @@ def _sanitize_public_stream_event(event: dict) -> dict | None:
     run_id = str(event.get("agent_run_id") or "")[:128]
     if event_type == "run_started" and run_id:
         return {"type": "run_started", "agent_run_id": run_id}
-    if event_type == "plan_created" and run_id:
-        return {
-            "type": "plan_created",
-            "agent_run_id": run_id,
-            "plan": event.get("plan") or [],
-            "planner_metrics": event.get("planner_metrics") or {},
-            "prompt_raw": str(event.get("prompt_raw") or "")[:20000],
-            "content_raw": str(event.get("content_raw") or "")[:5000],
-        }
-    if event_type == "subagent_started" and run_id:
-        return {
-            "type": "subagent_started",
-            "agent_run_id": run_id,
-            "task_id": str(event.get("task_id") or "")[:64],
-            "agent": str(event.get("agent") or "")[:30],
-            "task_brief": str(event.get("task_brief") or "")[:200],
-        }
-    if event_type == "subagent_finished" and run_id:
-        raw_content = str(event.get("content_raw") or "")
-        prompt_raw = str(event.get("prompt_raw") or "")
-        tool_calls_raw = event.get("tool_calls_raw") or []
-        return {
-            "type": "subagent_finished",
-            "agent_run_id": run_id,
-            "task_id": str(event.get("task_id") or "")[:64],
-            "agent": str(event.get("agent") or "")[:30],
-            "status": str(event.get("status") or "")[:20],
-            "error": str(event.get("error") or "")[:100],
-            "input_tokens": max(0, int(event.get("input_tokens") or 0)),
-            "output_tokens": max(0, int(event.get("output_tokens") or 0)),
-            "duration_ms": max(0, int(event.get("duration_ms") or 0)),
-            "tool_name": str(event.get("tool_name") or "")[:80] or None,
-            "tool_calls_raw": tool_calls_raw,
-            "content_raw": raw_content[:5000],
-            "prompt_raw": prompt_raw[:20000],
-        }
-    if event_type == "planner_decision" and run_id:
-        decision = event.get("decision") or {}
-        llm_metrics = decision.get("llm_metrics") or {}
-        return {
-            "type": "planner_decision",
-            "agent_run_id": run_id,
-            "step_id": str(event.get("step_id") or "")[:64],
-            "decision": {
-                "kind": str(decision.get("kind") or "")[:20],
-                "intent": str(decision.get("intent") or "")[:30],
-                "tool_name": str(decision.get("tool_name") or "")[:80] or None,
-                "confidence": round(float(decision.get("confidence") or 0), 3),
-                "arguments": decision.get("arguments") or {},
-                "reply": str(decision.get("reply") or "")[:500] or None,
-                "duration_ms": max(0, int(decision.get("duration_ms") or 0)),
-                "llm_metrics": {
-                    "input_tokens": max(0, int(llm_metrics.get("input_tokens") or 0)),
-                    "output_tokens": max(0, int(llm_metrics.get("output_tokens") or 0)),
-                    "duration_ms": max(0, int(llm_metrics.get("duration_ms") or 0)),
-                    "prompt": str(llm_metrics.get("prompt") or "")[:20000],
-                    "response": str(llm_metrics.get("response") or json.dumps(llm_metrics.get("tool_calls") or {}, ensure_ascii=False))[:20000],
-                } if llm_metrics else None,
-            },
-        }
     if event_type == "tool_started" and run_id:
         return {
             "type": "tool_started",
             "agent_run_id": run_id,
-            "step_id": str(event.get("step_id") or "")[:64],
             "text": str(event.get("text") or "我確認一下…")[:200],
-            "tool_name": str(event.get("tool_name") or "")[:80] or None,
         }
     if event_type == "tool_finished" and run_id:
         outcome = "ok" if event.get("outcome") == "ok" else "error"
         return {
             "type": "tool_finished",
             "agent_run_id": run_id,
-            "step_id": str(event.get("step_id") or "")[:64],
             "outcome": outcome,
-            "tool_name": str(event.get("tool_name") or "")[:80] or None,
             "duration_ms": max(0, int(event.get("duration_ms") or 0)),
         }
     if event_type == "final" and isinstance(event.get("response"), dict):
@@ -829,11 +788,14 @@ def _sanitize_public_stream_event(event: dict) -> dict | None:
 
 
 @router.post("/direct_chat/stream")
-def direct_chat_stream(req: DirectChatRequest, background_tasks: BackgroundTasks):
+def direct_chat_stream(
+    req: DirectChatRequest, background_tasks: BackgroundTasks, request: Request = None,
+):
     """NDJSON public-agent events; legacy and private chat retain direct JSON."""
     event_queue: queue.Queue[dict | None] = queue.Queue(maxsize=16)
     fallback_run_id = uuid.uuid4().hex
     state = {"agent_run_id": fallback_run_id}
+    debug_enabled = _is_loopback_debug_request(request)
 
     def enqueue(item: dict | None, *, terminal: bool = False) -> bool:
         while True:
@@ -862,13 +824,20 @@ def direct_chat_stream(req: DirectChatRequest, background_tasks: BackgroundTasks
         worker_background_tasks = BackgroundTasks()
         try:
             if req.contact_id == "ai_assistant" and agent_mode_for_user_v3(req.user_id) == "on":
-                response = _run_public_stream_turn(req, worker_background_tasks, emit)
+                if debug_enabled:
+                    response = _run_public_stream_turn(
+                        req, worker_background_tasks, emit, debug_enabled=True,
+                    )
+                else:
+                    response = _run_public_stream_turn(req, worker_background_tasks, emit)
             else:
                 # Stream is intentionally optional for legacy/private contacts;
                 # preserve their established direct-chat behavior as one final event.
                 response = direct_chat(req, worker_background_tasks)
             emit({"type": "final", "response": response})
         except Exception:
+            if debug_enabled:
+                finish_debug_run(state["agent_run_id"], status="error")
             emit({
                 "type": "error", "agent_run_id": state["agent_run_id"],
                 "reply": "我現在沒辦法安全地處理這件事，請稍後再試。",
@@ -1821,7 +1790,7 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
 
         try:
 
-            reply = generate_chat_completion(prompt, temperature=0.7, json_output=False)
+            reply = generate_chat_completion(prompt, temperature=0.7, json_output=False).content
 
         except Exception as e:
 

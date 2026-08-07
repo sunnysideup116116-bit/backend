@@ -83,6 +83,8 @@ class GooglePlacesCuisineTests(unittest.TestCase):
         config.AYUE_GOOGLE_PLACE_PHOTOS_ENABLED = True
         try:
             with self._enabled(), \
+                 patch.object(config, "GOOGLE_MAPS_BROWSER_API_KEY", "browser-test-key"), \
+                 patch.object(config, "GOOGLE_PLACES_SERVER_API_KEY", "server-secret-key"), \
                  patch("services.ayue_agent.google_places_client.requests.post",
                        return_value=_FakeResponse(payload)) as post:
                 places = search_nearby_places("高雄市鹽埕區", 22.62, 120.28, ["restaurant"], limit=3)
@@ -107,6 +109,8 @@ class GooglePlacesCuisineTests(unittest.TestCase):
         config.AYUE_GOOGLE_PLACE_PHOTOS_ENABLED = True
         try:
             with self._enabled(), \
+                 patch.object(config, "GOOGLE_MAPS_BROWSER_API_KEY", "browser-test-key"), \
+                 patch.object(config, "GOOGLE_PLACES_SERVER_API_KEY", "server-secret-key"), \
                  patch("services.ayue_agent.google_places_client.requests.post",
                        return_value=_FakeResponse(payload)):
                 place = resolve_place("示範店")
@@ -158,12 +162,16 @@ class GooglePlacesCuisineTests(unittest.TestCase):
         config.AYUE_GOOGLE_PLACE_PHOTOS_ENABLED = True
         try:
             with self._enabled(), \
+                 patch.object(config, "GOOGLE_MAPS_BROWSER_API_KEY", "browser-test-key"), \
+                 patch.object(config, "GOOGLE_PLACES_SERVER_API_KEY", "server-secret-key"), \
                  patch("services.ayue_agent.google_places_client.requests.post",
                        return_value=_FakeResponse(payload)):
                 places = search_nearby_places("高雄市鹽埕區", 22.62, 120.28, ["restaurant"], limit=3)
         finally:
             config.AYUE_GOOGLE_PLACE_PHOTOS_ENABLED = original
         self.assertIn("places/ChIJabc/photos/ref1/media", places[0]["photo_url"])
+        self.assertIn("browser-test-key", places[0]["photo_url"])
+        self.assertNotIn("server-secret-key", places[0]["photo_url"])
 
 
 if __name__ == "__main__":

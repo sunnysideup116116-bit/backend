@@ -121,7 +121,7 @@ def consent_intent(message: str):
 
 """
 
-        result = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True))
+        result = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True).content)
 
         if float(result.get("confidence", 0)) < 0.55:
 
@@ -479,7 +479,7 @@ def mediator_private_chat(req: MediatorPrivateRequest, background_tasks: Backgro
 
     try:
 
-        reply = generate_chat_completion(prompt, temperature=0.35, json_output=False)
+        reply = generate_chat_completion(prompt, temperature=0.35, json_output=False).content
 
     except Exception as e:
 

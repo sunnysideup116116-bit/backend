@@ -26,6 +26,7 @@ class PlannerMetrics:
     raw_content: str = ""
     prompt_raw: str = ""
     tool_calls_raw: list[dict] | None = None
+    tools_raw: list[dict] | None = None
     error: str = ""
 
 
@@ -72,7 +73,13 @@ def _decompose_tool_schema() -> dict[str, Any]:
 
 
 def _planner_prompt(turn_ctx: AgentTurnContextV2, pending_confirmations: list[dict[str, Any]]) -> str:
-    agents_desc = "\n".join(f"- {k}: {v}" for k, v in _AGENT_DESCRIPTIONS.items())
+    hard_limits = (
+        "硬性限制：最多 3 個領域任務；只有複合需求才拆成多個領域；"
+        "必須且只能有 1 個 terminal synthesizer。簡單聊天只建立 synthesizer。不得建立循環依賴。"
+    )
+    agents_desc = hard_limits + "\n" + "\n".join(
+        f"- {k}: {v}" for k, v in _AGENT_DESCRIPTIONS.items()
+    )
     payload = {
         "message": turn_ctx.message,
         "recent_messages": turn_ctx.recent_messages,
@@ -119,8 +126,9 @@ def plan_turn(turn_ctx: AgentTurnContextV2, *, pending_confirmations: list[dict[
     try:
         prompt = _planner_prompt(turn_ctx, pending_confirmations)
         metrics.prompt_raw = prompt
+        metrics.tools_raw = [_decompose_tool_schema()]
         result = generate_chat_completion_with_tools(
-            prompt, [_decompose_tool_schema()], temperature=0,
+            prompt, metrics.tools_raw, temperature=0,
         )
         metrics.input_tokens = result.input_tokens
         metrics.output_tokens = result.output_tokens

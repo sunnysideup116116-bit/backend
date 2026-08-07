@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from typing import Any
+from urllib.parse import urlencode
 
 import requests
 
@@ -120,7 +121,14 @@ def _photo_url(item: dict[str, Any]) -> str:
     name_attr = _clean(first.get("name"), 200)
     if not name_attr or "/" not in name_attr:
         return ""
-    return f"https://places.googleapis.com/v1/{name_attr}/media?maxWidthPx=400&key={str(config.GOOGLE_PLACES_SERVER_API_KEY)}"
+    # Media is loaded by the browser, so only the explicitly browser-visible,
+    # HTTP-referrer-restricted key may appear here.  The server key is reserved
+    # for server-to-server request headers and must never cross the boundary.
+    browser_key = str(getattr(config, "GOOGLE_MAPS_BROWSER_API_KEY", "") or "").strip()
+    if not browser_key:
+        return ""
+    query = urlencode({"maxWidthPx": 400, "key": browser_key})
+    return f"https://places.googleapis.com/v1/{name_attr}/media?{query}"
 
 
 def search_nearby_places(

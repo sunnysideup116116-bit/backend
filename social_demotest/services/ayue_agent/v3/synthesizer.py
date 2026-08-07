@@ -34,6 +34,8 @@ class SynthesizerMetrics:
     raw_content: str = ""
     prompt_raw: str = ""
     tool_calls_raw: list[dict] | None = None
+    tools_raw: list[dict] | None = None
+    input_payload: dict[str, Any] | None = None
     used_llm: bool = False
 
 
@@ -258,6 +260,8 @@ def synthesize(
     try:
         prompt = _build_prompt(payload, candidate_summaries)
         metrics.prompt_raw = prompt
+        metrics.tools_raw = tools
+        metrics.input_payload = payload
         started = time.perf_counter()
         result = generate_chat_completion_with_tools(prompt, tools, temperature=0.65)
         metrics.input_tokens = result.input_tokens

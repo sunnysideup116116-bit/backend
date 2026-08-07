@@ -184,6 +184,7 @@ class MatchActionServiceTests(unittest.TestCase):
         )
         ok, reply, code = _decide_active_proposal(
             ctx, turn, "run", 0, {"decision": "interested"},
+            {"proposal_revision": 3},
         )
         self.assertTrue(ok)
         self.assertEqual(code, "stale_revision")

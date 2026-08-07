@@ -564,7 +564,7 @@ def _refine_directional_reason(viewer: dict, other: dict, tier: str, fallback: d
 只輸出 JSON：{{"viewer_text":"","conversation_starter":"","accepted_opening":""}}
 資料：{json.dumps(payload, ensure_ascii=False)}"""
     try:
-        raw = json.loads(generate_chat_completion(prompt, temperature=0.55, json_output=True))
+        raw = json.loads(generate_chat_completion(prompt, temperature=0.55, json_output=True).content)
         return _valid_directional_reason(
             raw, fallback, required_context=other_context,
             required_introduced_personality=_public_personality_phrase(other),
@@ -601,7 +601,7 @@ def build_directional_match_explanations(target: dict, candidate: dict, vector_s
 只輸出 JSON：{{"target":{{"viewer_text":"","conversation_starter":""}},"candidate":{{"viewer_text":"","conversation_starter":""}}}}
 資料：{json.dumps(payload, ensure_ascii=False)}"""
     try:
-        raw = json.loads(generate_chat_completion(prompt, temperature=0.35, json_output=True))
+        raw = json.loads(generate_chat_completion(prompt, temperature=0.35, json_output=True).content)
         return _valid_directional_reason(raw.get("target"), target_fallback), _valid_directional_reason(raw.get("candidate"), candidate_fallback)
     except Exception:
         return target_fallback, candidate_fallback

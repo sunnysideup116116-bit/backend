@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from services.ayue_agent.contracts import AgentTurnContext, AgentResult
 from services.ayue_agent.v3.contracts import Plan, SubTask, SubTaskResult, SubTaskStatus, ToolProposal
 from services.ayue_agent.v3.planner import PlannerMetrics
+from services.ayue_agent.v3.confirmation import ConfirmationManager
 from services.ayue_agent.v3.synthesizer import SynthesizerMetrics
 from services.ayue_agent.v3.sub_agents.base import SubAgentMetrics
 from services.ayue_agent.v3.scheduler import (
@@ -239,8 +240,8 @@ class V3SchedulerTests(unittest.TestCase):
     def test_parallelism_respects_max_parallel_flag(self):
         ctx = self._ctx("查很多")
         plan = Plan(tasks=[
-            SubTask(id=f"t{i}", agent="calendar", depends_on=[], task_brief=f"查{i}") for i in range(6)
-        ] + [SubTask(id="syn", agent="synthesizer", depends_on=[f"t{i}" for i in range(6)], task_brief="彙整")])
+            SubTask(id=f"t{i}", agent="calendar", depends_on=[], task_brief=f"查{i}") for i in range(3)
+        ] + [SubTask(id="syn", agent="synthesizer", depends_on=[f"t{i}" for i in range(3)], task_brief="彙整")])
         active = []
         active_lock = threading.Lock()
         max_active = 0
@@ -325,6 +326,7 @@ class V3SchedulerTests(unittest.TestCase):
              patch("services.ayue_agent.v3.scheduler.prepare_write_confirmation",
                    return_value=({"action": "calendar.update_my_event", "arguments": {}, "data": {}},
                                  "要把「吃牛排」改成8/15嗎？回覆「確認」")) as prepare, \
+             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.update_many"), \
              patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one"), \
              patch("services.ayue_agent.v3.synthesizer.synthesize",
                    return_value=("好，等你確認", None, _synth_metrics())):
@@ -375,8 +377,8 @@ class V3SchedulerTests(unittest.TestCase):
             run_public_agent_turn_v3(ctx, mode="on")
         self.assertEqual(len(executed), 2, "both tool calls must execute")
 
-    def test_parallel_tasks_with_identical_calls_do_not_cross_dedupe(self):
-        """Identical tool+args across two parallel tasks must both run (per-task dedup)."""
+    def test_parallel_tasks_with_identical_calls_are_globally_deduped(self):
+        """Identical tool+args across parallel tasks execute once per turn."""
         ctx = self._ctx("分開查兩次附近餐廳")
         plan = Plan(tasks=[
             SubTask(id="t1", agent="places", depends_on=[], task_brief="查餐廳 A"),
@@ -402,7 +404,7 @@ class V3SchedulerTests(unittest.TestCase):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             run_public_agent_turn_v3(ctx, mode="on")
-        self.assertEqual(len(executed), 2, "identical calls in separate parallel tasks must both run")
+        self.assertEqual(len(executed), 1, "identical calls in separate tasks must execute once")
 
     def test_duplicate_calls_within_same_task_are_deduped(self):
         """Same tool+args twice in ONE task: second call must be rejected as duplicate."""
@@ -618,6 +620,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
              }), \
              patch("services.ayue_agent.v3.scheduler.prepare_write_confirmation",
                    return_value=({"action": "match.start_search", "arguments": {}, "data": {}}, "要開始找人嗎？回覆「確認」")) as prepare, \
+             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.update_many"), \
              patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one") as insert, \
              patch("services.ayue_agent.v3.synthesizer.synthesize", side_effect=fake_synth):
             mock_build.return_value = MagicMock()
@@ -645,11 +648,21 @@ class V3SchedulerWriteTests(unittest.TestCase):
              patch("services.ayue_agent.v3.synthesizer.synthesize", side_effect=fake_synth):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
+            origin_run_id = "run-preview"
+            request_fingerprint = ConfirmationManager._request_fingerprint(
+                tool_name="match.start_search",
+                arguments={},
+                payload={},
+                origin_run_id=origin_run_id,
+            )
             coll.find.return_value = [{
                 "_id": "c1", "user_id": "owner", "agent_name": "match",
                 "tool_name": "match.start_search", "arguments": {},
                 "payload": {}, "status": "pending",
                 "created_at": 0, "expires_at": 1e18,
+                "origin_run_id": origin_run_id,
+                "request_fingerprint": request_fingerprint,
+                "preview_fingerprint": "preview-digest",
             }]
             coll.update_one.return_value = MagicMock(modified_count=1)
             result = run_public_agent_turn_v3(ctx, mode="on")
@@ -684,6 +697,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
                      ], _sub_metrics())),
              }), \
              patch("services.ayue_agent.v3.scheduler.prepare_write_confirmation", side_effect=fake_prepare), \
+             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.update_many"), \
              patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one") as insert, \
              patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.update_one") as update_one, \
              patch("services.ayue_agent.v3.synthesizer.synthesize", side_effect=fake_synth):
@@ -696,18 +710,14 @@ class V3SchedulerWriteTests(unittest.TestCase):
         inserted = insert.call_args[0][0]
         self.assertEqual(inserted["tool_name"], "calendar.cancel_my_event")
         # 第二筆 create 併入同一 confirmation 的 batch（新格式 {tool, arguments, data}）
-        update_one.assert_called_once()
-        push_call = update_one.call_args
-        self.assertEqual(push_call.args[0], {"_id": inserted["_id"]})
-        pushed = push_call.args[1]["$push"]["batch"]
-        self.assertEqual(pushed["tool"], "calendar.create_my_event")
-        self.assertEqual(pushed["arguments"]["title"], "B")
+        update_one.assert_not_called()
         obs = seen_obs.get("observations", [])
         confirmed = [o for o in obs if o.get("tool") == "calendar.create_my_event"]
         self.assertEqual(len(confirmed), 1)
-        self.assertTrue(confirmed[0]["result"].get("pending_confirmation"))
+        self.assertFalse(confirmed[0]["result"].get("pending_confirmation"))
+        self.assertEqual(confirmed[0]["result"].get("ignored"), "one_write_per_turn")
 
-    def test_two_create_proposals_merge_into_one_batch_confirmation(self):
+    def test_two_create_proposals_keep_only_first_confirmation(self):
         # 同一 sub-task 提出兩筆 calendar.create_my_event → 一次 confirmation + batch 陣列；
         # 一次「確認」即新增兩筆（需求：一次確認變更多個行程）。
         ctx = self._ctx("幫我新增8/12吃牛排和8/9看醫生")
@@ -746,18 +756,41 @@ class V3SchedulerWriteTests(unittest.TestCase):
         insert.assert_called_once()
         inserted = insert.call_args[0][0]
         self.assertEqual(inserted["tool_name"], "calendar.create_my_event")
-        self.assertEqual(inserted["batch"], [])
         self.assertEqual(inserted["arguments"]["title"], "吃牛排")
         # 第二筆 create 透過 $push 加入 batch（新格式 {tool, arguments, data}）
-        update_one.assert_called_once()
-        push_call = update_one.call_args
-        self.assertEqual(push_call.args[0], {"_id": inserted["_id"]})
-        pushed = push_call.args[1]["$push"]["batch"]
-        self.assertEqual(pushed["tool"], "calendar.create_my_event")
-        self.assertEqual(pushed["arguments"]["title"], "看醫生")
+        update_one.assert_not_called()
 
 
 class V3SchedulerTraceTests(unittest.TestCase):
+    def test_local_debug_trace_records_planner_dag_and_synthesizer(self):
+        from services.ayue_agent.v3.debug_trace import get_run
+
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="嗨")
+        plan = Plan(tasks=[
+            SubTask(id="t1", agent="synthesizer", depends_on=[], task_brief="回覆問候"),
+        ])
+        planner_metrics = _planner_metrics()
+        planner_metrics.prompt_raw = "planner prompt"
+        planner_metrics.tool_calls_raw = [{"name": "decompose_tasks", "arguments": {}}]
+        planner_metrics.tools_raw = [{"type": "function"}]
+        synth_metrics = _synth_metrics()
+        synth_metrics.prompt_raw = "synth prompt"
+        synth_metrics.input_payload = {"message": "嗨"}
+        with patch.dict("os.environ", {"AYUE_LOCAL_DEBUG_TRACE": "on"}), \
+             patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, planner_metrics)), \
+             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("你好", None, synth_metrics)):
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.clock = MagicMock(model_dump=lambda **_kwargs: {})
+            result = run_public_agent_turn_v3(ctx, mode="on", debug_enabled=True)
+            debug_run = get_run(result.agent_run_id, "owner")
+        event_types = [event["type"] for event in debug_run["events"]]
+        self.assertEqual(debug_run["status"], "completed")
+        self.assertIn("planner_completed", event_types)
+        self.assertIn("plan_created", event_types)
+        self.assertIn("subagent_finished", event_types)
+        self.assertEqual(debug_run["events"][-1]["type"], "final")
+
     def test_trace_persisted_with_allowlisted_fields(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="嗨")
         plan = Plan(tasks=[

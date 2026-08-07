@@ -42,16 +42,17 @@ class OpportunitySignal(BaseModel):
 class SubTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(min_length=1)
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     agent: Literal["calendar", "places", "match", "relationship", "profile", "synthesizer"]
-    depends_on: list[str] = Field(default_factory=list)
-    task_brief: str = Field(min_length=1)
+    depends_on: list[str] = Field(default_factory=list, max_length=3)
+    task_brief: str = Field(min_length=1, max_length=500)
 
 
 class Plan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    tasks: list[SubTask] = Field(min_length=1)
+    # At most three domain specialists plus one terminal synthesizer.
+    tasks: list[SubTask] = Field(min_length=1, max_length=4)
     opportunity: OpportunitySignal | None = None
 
     @model_validator(mode="after")
@@ -60,18 +61,41 @@ class Plan(BaseModel):
         if len(ids) != len(self.tasks):
             raise ValueError("duplicate SubTask id")
         for t in self.tasks:
+            if len(set(t.depends_on)) != len(t.depends_on):
+                raise ValueError(f"SubTask {t.id} has duplicate dependencies")
+            if t.id in t.depends_on:
+                raise ValueError(f"SubTask {t.id} cannot depend on itself")
             for dep in t.depends_on:
                 if dep not in ids:
                     raise ValueError(f"SubTask {t.id} depends on unknown {dep}")
-        # synthesizer must be terminal: it must not appear in any other task's depends_on
-        for t in self.tasks:
-            if t.agent != "synthesizer":
-                continue
-            for other in self.tasks:
-                if other.id == t.id:
-                    continue
-                if t.id in other.depends_on:
-                    raise ValueError(f"synthesizer {t.id} must be terminal; referenced by {other.id}")
+        synthesizers = [t for t in self.tasks if t.agent == "synthesizer"]
+        if len(synthesizers) != 1:
+            raise ValueError("plan must contain exactly one synthesizer")
+        synthesizer = synthesizers[0]
+        domain_ids = ids - {synthesizer.id}
+        referenced_domains = {
+            dep
+            for task in self.tasks
+            if task.agent != "synthesizer"
+            for dep in task.depends_on
+        }
+        terminal_domain_ids = domain_ids - referenced_domains
+        if not terminal_domain_ids <= set(synthesizer.depends_on):
+            raise ValueError("synthesizer must depend on every terminal domain task")
+        for other in self.tasks:
+            if other.id != synthesizer.id and synthesizer.id in other.depends_on:
+                raise ValueError(f"synthesizer {synthesizer.id} must be terminal")
+
+        # A valid reference set can still contain a cycle.  Walk the whole DAG
+        # so the Scheduler never receives an unbounded/unexecutable plan.
+        completed: set[str] = set()
+        remaining = list(self.tasks)
+        while remaining:
+            ready = [t for t in remaining if set(t.depends_on) <= completed]
+            if not ready:
+                raise ValueError("plan contains a dependency cycle")
+            completed.update(t.id for t in ready)
+            remaining = [t for t in remaining if t not in ready]
         return self
 
 

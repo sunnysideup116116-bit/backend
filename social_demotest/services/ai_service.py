@@ -13,6 +13,7 @@ from config import (
     GOOGLE_API_KEY, GOOGLE_EMBEDDING_MODEL, OLLAMA_HOST, OLLAMA_API_KEY,
 
     OLLAMA_CHAT_MODEL,
+    OLLAMA_REQUEST_TIMEOUT_SECONDS,
 
 )
 from services.language_service import normalize_model_text, normalize_zh_tw
@@ -60,7 +61,9 @@ ollama_client = Client(
 
     host=OLLAMA_HOST,
 
-    headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else None
+    headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else None,
+
+    timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS,
 
 )
 
