@@ -20,6 +20,7 @@ from services.ayue_agent.private_runtime import (
     private_agent_mode_for_user,
     run_private_agent_turn,
 )
+from services.ayue_agent.private_contracts import PrivateClientAction
 from services.ayue_agent.private_v2 import private_v2_mode_for_user, run_private_agent_turn_v2
 from services.chat_service import generate_room_id, save_message
 from services.mediator_context_service import (
@@ -145,15 +146,18 @@ def consent_intent(message: str):
 
 
 
-def save_private_mediator_reply(room_id: str, reply: str, event_type="text", actions=None):
+def save_private_mediator_reply(room_id: str, reply: str, event_type="text", actions=None, handoff=None):
 
     message_type = "mediator_card" if actions else "text"
+    metadata = {"event_type": event_type, "actions": actions or []}
+    if handoff:
+        metadata["handoff"] = handoff
 
     save_message(
 
         room_id, "ai_assistant", reply, message_type=message_type,
 
-        metadata={"event_type": event_type, "actions": actions or []}
+        metadata=metadata
 
     )
 
@@ -165,10 +169,21 @@ def _run_private_v2_saved_turn(req: MediatorPrivateRequest, match_doc: dict, roo
         match_doc=match_doc, on_progress=on_progress, agent_run_id=agent_run_id,
     )
     reply = result.reply or "我剛才沒能整理好這件事。你最想確認哪一點？"
-    save_private_mediator_reply(room_id, reply, "agentic_private_v2")
+    handoff = result.handoff.model_dump() if getattr(result, "handoff", None) else None
+    actions = []
+    if handoff:
+        actions = [PrivateClientAction(
+            kind="navigate_public_prefill",
+            label="回阿月主聊天室 →",
+            value=handoff["original_message"],
+        ).model_dump()]
+    event_type = "agentic_private_redirect" if handoff else "agentic_private_v2"
+    save_private_mediator_reply(room_id, reply, event_type, actions=actions, handoff=handoff)
     return {
         "reply": reply, "pending_step": None, "agent_run_id": result.agent_run_id,
         "agent_mode": "v2", "agent_version": "v2", "conversation_intent": result.conversation_intent,
+        "handoff": handoff,
+        "actions": actions,
     }
 
 

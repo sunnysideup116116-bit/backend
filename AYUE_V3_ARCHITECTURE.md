@@ -501,6 +501,29 @@ back to the normal Synthesizer path. The fallback is controlled by
 `AYUE_V3_SIMPLE_CHAT_FAST_PATH`, which defaults to off until provider-backed
 semantic evaluation has recorded zero false-direct routing.
 
+### Private Ayue scope and typed public handoff
+
+Private Ayue remains a separate, bounded V2 runtime. It does not mirror the
+Public V3 DAG or create a global surface router. The Private Planner owns
+semantic scope understanding: it decides whether the user's primary goal
+serves the current accepted pair relationship. Python does not classify scope
+with keywords, regular expressions, substring matching, or phrase lists.
+
+The Planner may return `final`, `tool_call`, `confirmation`, or `redirect`.
+`redirect` is valid only with `intent=out_of_scope` and
+`redirect_target=public_ayue`. Runtime validation rejects tool names,
+arguments, confirmation, and side effects on a redirect. The handoff is
+server-owned and carries only the original user message; the frontend switches
+to `ai_assistant`, prefills the contenteditable room input, and waits for an
+explicit user submit. It never auto-sends.
+
+Private has one narrow viewer Calendar read,
+`private.calendar.get_viewer_availability`, for relationship/date-planning
+goals. It returns busy/free intervals only. Personal Calendar CRUD, general
+Places lookup, Match search, Profile edits, and unrelated external information
+redirect to Public. Calendar/date authority and all user-memory extraction
+remain owned by the existing shared services.
+
 Direct-chat runs record only Planner metrics and an allowlisted trace summary
 (`execution_mode`, `llm_call_count`, token totals and latency). Domain flows
 retain the existing Planner → sub-agent → Guard/tool → Synthesizer path.
