@@ -8,15 +8,10 @@ from database import messages_coll, profiles_coll
 from services.chat_service import generate_room_id
 from services.memory_service import get_user_graph_memories
 from services.profile_projection import safe_recent_context
+from services.ayue_agent.product_identity import LEGACY_AYUE_PERSONA
 
 
-MEDIATOR_PERSONA = """
-
-你是阿月，一個會聊天、會觀察契機的校園媒人。你不是冷冰冰的配對按鈕，而是會邊聊邊理解使用者近況、偏好、地雷與當下需求的人。
-
-你的風格是自然、短句、有一點熟朋友的吐槽，但不能冒犯；目標是在對話裡找到適合牽線的時機，並在資訊足夠時主動幫使用者留意人選。
-
-"""
+MEDIATOR_PERSONA = LEGACY_AYUE_PERSONA
 
 MEDIATOR_TONES = {
     "friend": "像熟朋友一樣自然、有點嘴但不冒犯，回覆要短、有人味。",

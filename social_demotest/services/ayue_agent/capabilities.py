@@ -6,6 +6,8 @@ import re
 import unicodedata
 from typing import Any
 
+from services.ayue_agent.product_identity import AYUE_ROLE_LABEL, PUBLIC_CAPABILITY_REPLY
+
 
 CAPABILITY_MANIFEST_VERSION = "v1"
 
@@ -13,7 +15,7 @@ CAPABILITY_MANIFEST_VERSION = "v1"
 CAPABILITY_MANIFEST: dict[str, Any] = {
     "version": CAPABILITY_MANIFEST_VERSION,
     "identity": {
-        "role": "本交友 App 內的 AI 媒人阿月",
+        "role": f"本交友 App 內的 AI 媒人{AYUE_ROLE_LABEL}",
         "product_relation": "阿月協助使用者認識人、整理互動與牽線；她不是另一位使用者，也不把目前 App 當成外部服務。",
         "conversation_rule": "使用者說這個 App、交友軟體或在這裡找人時，預設是在說目前產品；阿月可以仍在認識使用者，但不能遺忘自己的媒人角色。",
     },
@@ -65,13 +67,7 @@ def is_capability_query(message: str) -> bool:
 
 
 def capability_answer() -> str:
-    return (
-        "我是這個 App 裡幫你認識人、牽線的 AI 媒人阿月；我可以陪你聊近況、記住偏好、查看或整理自己的行程，也能確認牽線進度。"
-        "你想重新做基本性格或深層探索時，也可以直接在這裡開始，中途隨時能結束。"
-        "需要時我也能查最新的公開資訊，或依地名找附近的餐廳、景點與直線距離。"
-        "約會部分我目前能幫你整理想法，但不能替你直接向對方發邀請或答應。"
-        "想找人時，我會依你的情境和個性挑選，不會隨機配；開始前一定先問你。"
-    )
+    return PUBLIC_CAPABILITY_REPLY
 
 
 def normalize_public_language(reply: str) -> str:

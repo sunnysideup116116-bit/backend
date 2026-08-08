@@ -22,6 +22,7 @@ from services.ayue_agent.private_runtime import (
 )
 from services.ayue_agent.private_contracts import PrivateClientAction
 from services.ayue_agent.private_v2 import private_v2_mode_for_user, run_private_agent_turn_v2
+from services.ayue_agent.product_identity import PRIVATE_RUNTIME_FALLBACK_REPLY
 from services.chat_service import generate_room_id, save_message
 from services.mediator_context_service import (
     MEDIATOR_PERSONA,
@@ -168,7 +169,7 @@ def _run_private_v2_saved_turn(req: MediatorPrivateRequest, match_doc: dict, roo
         user_id=req.user_id, other_id=req.other_id, message=req.message,
         match_doc=match_doc, on_progress=on_progress, agent_run_id=agent_run_id,
     )
-    reply = result.reply or "我剛才沒能整理好這件事。你最想確認哪一點？"
+    reply = result.reply or PRIVATE_RUNTIME_FALLBACK_REPLY
     handoff = result.handoff.model_dump() if getattr(result, "handoff", None) else None
     actions = []
     if handoff:
@@ -542,7 +543,7 @@ def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: 
             response = _run_private_v2_saved_turn(req, match_doc, room_id, emit, fallback_run_id)
             event_queue.put({"type": "final", "response": response})
         except Exception:
-            event_queue.put({"type": "error", "agent_run_id": fallback_run_id, "reply": "我剛才沒能整理好這件事。你最想確認哪一點？"})
+            event_queue.put({"type": "error", "agent_run_id": fallback_run_id, "reply": PRIVATE_RUNTIME_FALLBACK_REPLY})
         finally:
             try:
                 asyncio.run(worker_tasks())

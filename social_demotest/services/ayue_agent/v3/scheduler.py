@@ -32,6 +32,7 @@ from services.ayue_agent.match_opportunity import (
     decline_guidance_offer,
 )
 from services.ayue_agent.capabilities import is_capability_query
+from services.ayue_agent.product_identity import PUBLIC_PENDING_CANCEL_REPLY, PUBLIC_PLANNER_INVALID_REPLY
 from services.assessment_session_service import (
     active_assessment_session, advance_assessment_session,
     assessment_cancel_choice, assessment_commit_choice,
@@ -1351,7 +1352,7 @@ def run_public_agent_turn_v3(
         mgr.cancel_all(user_id=ctx.user_id)
         _print_separator("V3 RUN END")
         return _finalize_debug(AgentResult(
-            handled=True, reply="已取消待確認的操作", agent_run_id=run_id, agent_mode="v3",
+            handled=True, reply=PUBLIC_PENDING_CANCEL_REPLY, agent_run_id=run_id, agent_mode="v3",
         ))
 
     # Normal flow: Planner → execute DAG → synthesizer
@@ -1390,7 +1391,7 @@ def run_public_agent_turn_v3(
         _print_separator("V3 RUN END")
         print(f"  total_tokens={total_input_tokens + total_output_tokens} (in={total_input_tokens} out={total_output_tokens})")
         return _finalize_debug(AgentResult(
-            handled=True, reply="我現在沒辦法判斷這個請求要不要執行，先跟你聊聊",
+            handled=True, reply=PUBLIC_PLANNER_INVALID_REPLY,
             agent_run_id=run_id, agent_mode="v3", fallback_reason="planner_invalid",
         ))
 

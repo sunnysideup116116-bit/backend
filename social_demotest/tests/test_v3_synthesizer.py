@@ -208,7 +208,7 @@ class V3SynthesizerTests(unittest.TestCase):
             "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
         ) as mock_call:
             reply, card_decision, metrics = synthesize(slc)
-        self.assertIn("AI 媒人", reply)
+        self.assertIn("媒人朋友", reply)
         self.assertIsNone(card_decision)
         self.assertEqual(metrics.reply_source, "capability")
         self.assertFalse(metrics.used_llm)
@@ -237,7 +237,7 @@ class V3SynthesizerTests(unittest.TestCase):
             "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
         ) as mock_call:
             reply, _card_decision, metrics = synthesize(slc)
-        self.assertIn("AI 媒人", reply)
+        self.assertIn("媒人朋友", reply)
         self.assertEqual(metrics.reply_source, "capability")
         mock_call.assert_not_called()
 

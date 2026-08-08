@@ -41,6 +41,20 @@
 
 它不是關鍵字 chatbot，也不是讓模型直接操作資料庫。公開阿月是本交友 App 內協助使用者認識人、牽線的 AI 媒人，不是另一位使用者，也不把目前 App 當成外部服務。LLM 負責語意規劃與自然回答；Scheduler、Guard、typed tools 與 domain services 負責權限、狀態和副作用安全。
 
+## 產品身份與語氣 single source of truth
+
+所有會產生使用者可見自然語言的 Public、Private、assessment 與 proactive-care
+prompt，身份與語氣片段統一由
+`social_demotest/services/ayue_agent/product_identity.py` 提供。公開阿月的定位是
+「關於我」：先理解使用者，再在合適時機陪他牽線；悄悄話是同一位阿月在
+「我和目前這個人」關係中的 bounded surface。兩者可以共用 persona core 與 voice，
+但不能共用 context、權限、history 或 domain state。這個 contract 只負責產品文案，
+不取代 Planner routing、Guard、confirmation、privacy 或 domain service。
+
+Domain sub-agent、schema、Guard、preflight、executor、profile/memory extractor
+不得注入 persona 文案；它們只處理自己的 typed responsibility。若 legacy prompt
+仍需使用 `MEDIATOR_PERSONA`，它也必須由同一個 contract 組合，避免重新建立第二套身份文字。
+
 公開阿月與阿月悄悄話都是 sibling runtimes，不是 parent/subagent 關係。悄悄話使用獨立的 context、registry、trace 與隱私 namespace；公開阿月不能任意把 history 或 prompt 交給它。
 
 ## 2. Repository 結構與責任

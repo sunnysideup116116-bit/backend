@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI 媒人系統 - 通訊版 DEMO</title>
+    <title>阿月媒人事務所｜先懂你，再牽線</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -749,7 +749,7 @@
             <h1 class="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-violet-400 to-sky-400">
                 阿月媒人事務所
             </h1>
-            <p class="text-xs text-gray-400 mt-2">[ AI MATCHMAKER / PIXEL EDITION ]</p>
+            <p class="text-xs text-gray-400 mt-2">[ 先懂你，再牽線；需要時陪你助攻 ]</p>
         </div>
 
         <!-- Profile & Account Switcher -->
@@ -799,7 +799,7 @@
                         </select>
                     </div>
                     <div class="flex items-center gap-2">
-                        <span class="text-xs text-fuchsia-400 whitespace-nowrap">AI 關心頻率</span>
+                        <span class="text-xs text-fuchsia-400 whitespace-nowrap">阿月關心頻率</span>
                         <select id="frequency-select" onchange="updateProactiveFrequency()"
                             class="w-full bg-[#2a2a2a] border border-white/20 text-white text-sm rounded-lg px-2 py-1 focus:outline-none focus:border-fuchsia-500">
                             <option value="none">停用</option>
@@ -850,7 +850,7 @@
                     </div>
                 </div>
                 <div id="bf-messages" class="flex-1 p-6 overflow-y-auto flex flex-col gap-2">
-                    <div class="chat-bubble bubble-other fade-in">你好！我是你的專屬 AI 媒人。為了幫你找到最契合的夥伴，請用幾句話描述一下你自己，平常喜歡做什麼？
+                    <div class="chat-bubble bubble-other fade-in">嗨，我是阿月。先聊幾個生活情境，讓我慢慢認識你的相處節奏；這不是考試，照直覺回答就好。
                     </div>
                 </div>
                 <div id="bf-typing" class="hidden px-6 pb-2">
@@ -860,7 +860,7 @@
                 </div>
                 <div class="p-4 bg-black/20 border-t border-white/10">
                     <form id="bf-form" class="flex gap-3">
-                        <input type="text" id="bf-input" placeholder="回答 AI..." required
+                        <input type="text" id="bf-input" placeholder="跟阿月說說看…" required
                             class="flex-1 bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-violet-500 text-white">
                         <button type="submit"
                             class="bg-violet-600 px-6 py-3 rounded-xl font-medium shadow-lg hover:bg-violet-500 transition-colors">送出</button>
@@ -1055,7 +1055,7 @@
                         <button type="button" onclick="sendPrivateMediatorMessage('你看完我們最近聊天，有什麼觀察？')">看最近聊天</button>
                     </div>
                     <form id="mediator-private-form" class="p-3 border-t border-[#e7c9b7] flex gap-2">
-                        <input id="mediator-private-input" required placeholder="問阿月關於這個人…" class="flex-1 px-3 py-2 text-sm">
+                        <input id="mediator-private-input" required placeholder="私下問阿月你們兩個的事…" class="flex-1 px-3 py-2 text-sm">
                         <button class="px-4 py-2">送出</button>
                     </form>
                 </aside>
@@ -1082,7 +1082,7 @@
                 </div>
                 <div class="p-4 bg-black/20 border-t border-white/10">
                     <form id="dp-form" class="flex gap-3">
-                        <input type="text" id="dp-input" placeholder="分享你的深層想法..." required
+                        <input type="text" id="dp-input" placeholder="跟阿月聊聊你真正在意的事…" required
                             class="flex-1 bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-amber-500 text-white">
                         <button type="submit"
                             class="bg-amber-600 px-6 py-3 rounded-xl font-medium shadow-lg hover:bg-amber-500 transition-colors">送出</button>
@@ -1105,7 +1105,7 @@
         <div class="glass-panel p-8 rounded-3xl max-w-md w-full border border-violet-500/50 shadow-2xl shadow-violet-500/20 text-center">
             <div class="text-3xl mb-4">🎯</div>
             <h2 class="text-xl font-bold mb-2">測試：填寫註冊興趣</h2>
-            <p class="text-sm text-gray-300 mb-6">模擬 Appwrite 註冊頁面。AI 將根據這個興趣作為性格分析的開場白！</p>
+            <p class="text-sm text-gray-300 mb-6">模擬 Appwrite 註冊頁面。阿月會從這個興趣開始認識你！</p>
             <input type="text" id="test-interest-input" placeholder="例如：打籃球、看電影、寫程式..." class="w-full bg-black/50 border border-white/20 rounded-xl px-4 py-3 text-white mb-6 focus:outline-none focus:border-violet-500">
             <button onclick="startWithInterest()" class="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 py-3 rounded-xl font-bold shadow-lg transition">開始測驗</button>
         </div>
@@ -1124,7 +1124,7 @@
                 <div class="text-xs text-gray-500 uppercase font-semibold mb-1">發起人 ID</div>
                 <div id="notif-from" class="font-mono text-lg font-bold text-sky-400 mb-4">loading...</div>
 
-                <div class="text-xs text-gray-500 uppercase font-semibold mb-1">AI 配對理由</div>
+                <div class="text-xs text-gray-500 uppercase font-semibold mb-1">阿月的觀察</div>
                 <p id="notif-reason" class="text-sm leading-relaxed text-gray-200">loading...</p>
             </div>
 
@@ -1211,17 +1211,17 @@
             <section class="onboarding-step" data-onboarding-step="0">
                 <div class="onboarding-illustration">☕</div>
                 <h2 class="text-xl font-bold mb-3">先像朋友一樣聊近況</h2>
-                <p class="text-sm text-[#8b7063] leading-relaxed">跟阿月說最近想做什麼、什麼時間方便、喜歡怎樣的相處。資料夠清楚時，她會主動替你留意；你也能直接說「幫我找下一位」。</p>
+                <p class="text-sm text-[#8b7063] leading-relaxed">跟阿月聊最近的生活、在意的事和相處節奏。她會先理解你，真的適合時再陪你牽線；想找人時，直接說你的想法就好。</p>
             </section>
             <section class="onboarding-step hidden" data-onboarding-step="1">
                 <div class="onboarding-illustration">@</div>
                 <h2 class="text-xl font-bold mb-3">一起聊你配到的人</h2>
-                <p class="text-sm text-[#8b7063] leading-relaxed">輸入 @ 就能選一位或多位配對對象。阿月會使用確實存在的資料與共享聊天，不知道的事就說不知道。</p>
+                <p class="text-sm text-[#8b7063] leading-relaxed">認識人之後，可以在聊天室裡和阿月一起整理互動。她只會使用確實存在、可以分享的資訊，不知道的事就說不知道。</p>
             </section>
             <section class="onboarding-step hidden" data-onboarding-step="2">
                 <div class="onboarding-illustration">🌙</div>
                 <h2 class="text-xl font-bold mb-3">需要時，私下找阿月助攻</h2>
-                <p class="text-sm text-[#8b7063] leading-relaxed mb-4">進入雙人聊天室後，可打開阿月悄悄話，請她看最近聊天、整理想法或協調約會。</p>
+                <p class="text-sm text-[#8b7063] leading-relaxed mb-4">進入雙人聊天室後，可打開阿月悄悄話，請她幫你看最近聊天、整理想法或規劃約會；私下內容只留在這段關係裡。</p>
                 <div class="text-xs font-bold mb-2">你喜歡阿月怎麼說話？</div>
                 <div class="grid grid-cols-3 gap-2">
                     <button data-onboarding-tone="friend" onclick="selectOnboardingTone('friend')" class="onboarding-tone p-2 text-xs">熟朋友</button>
@@ -1565,7 +1565,7 @@
             
             // 重置輸入
             const inp = document.getElementById("bf-input");
-            inp.placeholder = "分享你的深層想法...";
+            inp.placeholder = "跟阿月聊聊你真正在意的事…";
             document.getElementById("bf-typing").classList.remove("hidden");
             
             try {
@@ -1585,7 +1585,7 @@
                         setTimeout(() => {
                             isDeepProfiling = false;
                             headerEl.innerHTML = origHeader;
-                            inp.placeholder = "回答 AI...";
+                            inp.placeholder = "跟阿月說說看…";
                             switchStage(true);
                         }, 3000);
                     }
@@ -1595,7 +1595,7 @@
                 appendBFMessage("連線錯誤，請重試。", false);
                 isDeepProfiling = false;
                 headerEl.innerHTML = origHeader;
-                inp.placeholder = "回答 AI...";
+                inp.placeholder = "跟阿月說說看…";
             }
         }
 
@@ -1627,7 +1627,7 @@
                     appendBFMessage(data.reply, false);
                     document.getElementById("bf-json").innerText = JSON.stringify(data.big_five, null, 2);
                 } else {
-                    appendBFMessage("系統錯誤，無法初始化 AI。", false);
+                    appendBFMessage("系統錯誤，阿月暫時沒辦法開始。", false);
                 }
             } catch(e) {
                 document.getElementById("bf-typing").classList.add("hidden");
@@ -2195,7 +2195,7 @@
                             setTimeout(() => {
                                 isDeepProfiling = false;
                                 headerEl.innerHTML = '🔮 專屬性格解析';
-                                inp.placeholder = "回答 AI...";
+                                inp.placeholder = "跟阿月說說看…";
                                 enterMessengerAfterProfile();
                             }, 3000);
                         } else {
@@ -2293,7 +2293,7 @@
             if (is_locked) {
                 document.getElementById("room-input").disabled = true;
                 document.getElementById("room-submit").disabled = true;
-                document.getElementById("room-input").placeholder = "AI 目前正在休息，等待下次主動聊天...";
+                document.getElementById("room-input").placeholder = "阿月目前正在休息，等待下次主動聊天...";
             } else {
                 document.getElementById("room-input").disabled = false;
                 document.getElementById("room-submit").disabled = false;
@@ -3205,7 +3205,8 @@ if (metadata.event_type === "date_coordination_form") {
             if (whisperCollapseTimer) clearTimeout(whisperCollapseTimer);
             whisperCollapseTimer = null;
             document.getElementById("mediator-private-trigger").classList.remove("whisper-collapsed");
-            document.getElementById("mediator-private-context").textContent = "關於 " + activeContactId + "，只有你看得到";
+            const contactLabel = document.getElementById("room-name").textContent.trim() || "這段關係";
+            document.getElementById("mediator-private-context").textContent = "關於 " + contactLabel + "，只有你看得到";
             panel.classList.remove("hidden");
             panel.classList.add("flex");
             document.getElementById("mediator-unread-dot").classList.add("hidden");
@@ -3283,7 +3284,7 @@ if (metadata.event_type === "date_coordination_form") {
                 "ai_assistant",
                 "阿月",
                 "from-violet-500 to-fuchsia-500",
-                "你的媒人助理",
+                "先懂你，再在合適時機陪你牽線的媒人朋友",
                 false
             );
             clearMention();
@@ -3910,7 +3911,7 @@ if (metadata.event_type === "date_coordination_form") {
                     if (data.is_locked) {
                         document.getElementById("room-input").disabled = true;
                         document.getElementById("room-submit").disabled = true;
-                        document.getElementById("room-input").placeholder = "AI 目前正在休息，等待下次主動聊天...";
+                        document.getElementById("room-input").placeholder = "阿月目前正在休息，等待下次主動聊天...";
                         loadContacts();
                     }
                 } else {
@@ -4281,7 +4282,7 @@ if (metadata.event_type === "date_coordination_form") {
                     </div>
                     <div class="text-xs text-gray-500 uppercase font-semibold">牽線人選</div>
                     <div class="text-lg font-bold text-sky-400">對方</div>
-                    <div class="text-xs text-gray-500 uppercase font-semibold mt-1">AI 推薦理由</div>
+                    <div class="text-xs text-gray-500 uppercase font-semibold mt-1">阿月推薦理由</div>
                     <p class="text-sm leading-relaxed text-gray-200 whitespace-pre-wrap flex-1">${m.recommendation_reason || '無'}</p>
                     ${m.distinctive_tags && m.distinctive_tags.length > 0 ? `<div class="text-xs text-gray-500 mt-1">${m.distinctive_tags.join('、')}</div>` : ''}
                     <div id="card-actions-${idx}" class="flex gap-2 mt-auto pt-2">
@@ -4530,7 +4531,7 @@ if (metadata.event_type === "date_coordination_form") {
             document.getElementById("mediator-toast").classList.remove("toast-collapsed");
             if (!isStageMessenger) switchStage(true);
             await loadContacts();
-            await selectContact("ai_assistant", "媒人阿月", "from-fuchsia-500 to-violet-500", "懂你、牽線，也幫你探口風", false);
+            await selectContact("ai_assistant", "阿月", "from-fuchsia-500 to-violet-500", "先懂你，再在合適時機陪你牽線", false);
         }
 
         async function openMediatorNotification() {
@@ -4691,7 +4692,7 @@ if (metadata.event_type === "date_coordination_form") {
                     if (activeMatchFromUser && activeMatchFromUser !== "對方") {
                         selectContact(activeMatchFromUser, activeMatchFromUser, "from-sky-500 to-indigo-500");
                     } else {
-                        selectContact("ai_assistant", "媒人阿月", "from-fuchsia-500 to-violet-500", "懂你、牽線，也幫你探口風", false);
+                        selectContact("ai_assistant", "阿月", "from-fuchsia-500 to-violet-500", "先懂你，再在合適時機陪你牽線", false);
                     }
                 }
                 const modal = document.getElementById("notif-modal");
@@ -4835,7 +4836,7 @@ if (metadata.event_type === "date_coordination_form") {
 
         async function prefillDemoPrompt(message) {
             if (activeContactId !== "ai_assistant") {
-                await selectContact("ai_assistant", "阿月", "from-violet-500 to-fuchsia-500", "你的媒人助理");
+                await selectContact("ai_assistant", "阿月", "from-violet-500 to-fuchsia-500", "先懂你，再在合適時機陪你牽線");
             }
             const input = document.getElementById("room-input");
             input.value = message;

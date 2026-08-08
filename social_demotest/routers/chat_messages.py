@@ -22,7 +22,7 @@ def get_messages(contact_id: str, user_id: str):
         save_message(
             room_id,
             "ai_assistant",
-            "哈囉，我是阿月。最近想做什麼、想去哪裡，儘管跟我說；我會邊聊邊幫你留意合適的人。",
+            "嗨，我是阿月。先跟我聊聊你最近的事；需要時，我再陪你一起牽線。",
         )
 
     messages = list(messages_coll.find({"room_id": room_id}, {"_id": 0}).sort("timestamp", 1))
@@ -52,7 +52,7 @@ def get_contacts(user_id: str):
         "id": "ai_assistant",
         "name": "阿月",
         "role": "system",
-        "context": "你的媒人助理，會邊聊天邊幫你留意合適的人。",
+        "context": "先懂你，再在合適時機陪你牽線的媒人朋友。",
         "is_locked": ai_locked,
     }]
     for match_doc in matches:
