@@ -38,6 +38,8 @@ EXPECTED_ROUTES = {
     ("POST", "/api/chat"): ("ChatRequest", ()),
     ("POST", "/api/chat/reset"): ("ResetRequest", ()),
     ("POST", "/api/demo/reset_db_state"): (None, ()),
+    ("POST", "/api/demo/clear_graph"): (None, ()),
+    ("POST", "/api/demo/clear_all"): (None, ()),
     ("POST", "/api/direct_chat"): ("DirectChatRequest", ()),
     ("POST", "/api/direct_chat/stream"): ("DirectChatRequest", ()),
     ("POST", "/api/mediator/private"): ("MediatorPrivateRequest", ()),

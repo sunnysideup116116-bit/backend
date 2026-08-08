@@ -75,6 +75,7 @@ _DATE_MARKER_RE = re.compile(r"(?:\d{1,4}[/-])?\d{1,2}月\d{1,2}日?|\d{4}[/-]\d
 
 
 def is_private_calendar_query(message: str) -> bool:
+    """Legacy private-runtime helper; never used for V2 surface scope routing."""
     compact = _compact(message)
     calendar_words = ("行事曆", "日曆", "行程", "時間表")
     range_words = ("本週", "這週", "下週", "這個月", "本月", "下個月", "下月", "哪天", "哪一天", "哪幾天", "哪些日期", "幾月幾號", "什麼時候")
@@ -144,76 +145,15 @@ def is_private_fun_fact_request(message: str) -> bool:
 
 
 def _partner_advisory_profile(other_id: str) -> dict[str, Any]:
-    """Private-only material for the strategy planner, never the renderer."""
-    doc = profiles_coll.find_one({"user_id": other_id}, {
-        "_id": 0,
-        "big_five.summary": 1,
-        "deep_profile.values": 1,
-        "deep_profile.life_goals": 1,
-        "deep_profile.relationship_needs": 1,
-        "deep_profile.stress_coping": 1,
-        "deep_profile.ideal_future": 1,
-        "deep_profile.summary": 1,
-        "current_context": 1,
-        "profile_memory_preview": 1,
-    }) or {}
-    deep = doc.get("deep_profile") or {}
-    memories = []
-    for item in (doc.get("profile_memory_preview") or [])[:8]:
-        if isinstance(item, dict) and item.get("label"):
-            memories.append({
-                "label": str(item.get("label"))[:60],
-                "stance": str(item.get("stance", "like"))[:12],
-                "category": str(item.get("category", ""))[:30],
-            })
-    return {
-        "big_five_summary": (doc.get("big_five") or {}).get("summary", ""),
-        "deep_profile": {
-            key: deep.get(key)
-            for key in ("values", "life_goals", "relationship_needs", "stress_coping", "ideal_future", "summary")
-            if deep.get(key)
-        },
-        "current_context": doc.get("current_context", ""),
-        "memories": memories,
-    }
+    """Compatibility wrapper for the bounded shared projection."""
+    from services.mediator_context_service import private_counterparty_strategy_context
+    return private_counterparty_strategy_context(other_id)
 
 
 def _shared_and_consented_facts(ctx: PrivateAgentTurnContext) -> list[dict[str, str]]:
-    facts: list[dict[str, str]] = []
-    relationship_memory = ctx.match_doc.get("relationship_memory") or {}
-    summary = str(relationship_memory.get("shared_summary") or "").strip()
-    if summary:
-        facts.append({"evidence_id": "shared:summary", "visibility": "shared_fact", "value": summary[:500]})
-
-    pair_room_id = generate_room_id(ctx.match_doc["from_user"], ctx.match_doc["to_user"])
-    messages = list(messages_coll.find(
-        {"room_id": pair_room_id}, {"_id": 0, "sender_id": 1, "content": 1}
-    ).sort("timestamp", -1).limit(12))[::-1]
-    for index, item in enumerate(messages):
-        content = str(item.get("content") or "").strip()
-        if content:
-            facts.append({
-                "evidence_id": f"shared:message:{index}",
-                "visibility": "shared_fact",
-                "value": content[:300],
-            })
-
-    probe_results = ((ctx.match_doc.get("mediator_state") or {}).get("probe_results") or {})
-    for probe_id, result in probe_results.items():
-        if not isinstance(result, dict):
-            continue
-        if result.get("status") != "completed" or not result.get("shareable"):
-            continue
-        if result.get("answered_by") != ctx.other_id:
-            continue
-        answer = str(result.get("answer") or "").strip()
-        if answer:
-            facts.append({
-                "evidence_id": f"consented:probe:{probe_id}",
-                "visibility": "consented_fact",
-                "value": answer[:300],
-            })
-    return facts[:18]
+    """Compatibility wrapper for the bounded shared-facts projection."""
+    from services.mediator_context_service import private_pair_shared_facts
+    return private_pair_shared_facts(ctx.match_doc, ctx.user_id, ctx.other_id)
 
 
 def _partner_busy(ctx: PrivateAgentTurnContext, start: datetime, end: datetime) -> tuple[bool, list[dict[str, str]]]:

@@ -1,6 +1,6 @@
 import unittest
 from dataclasses import replace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from services.ayue_agent.private_v2 import (
     PRIVATE_TOOL_REGISTRY,

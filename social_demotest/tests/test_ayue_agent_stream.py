@@ -386,6 +386,20 @@ class AyueAgentStreamTests(unittest.TestCase):
         self.assertEqual([event["type"] for event in events], ["final"])
         self.assertNotIn("seed_user_08", json.dumps(events, ensure_ascii=False))
 
+    def test_private_redirect_prefills_public_without_auto_submit(self):
+        source = (Path(__file__).resolve().parents[1] / "frontend.html").read_text(encoding="utf-8")
+        start = source.index("async function handoffPrivateToPublic")
+        end = source.index("function setPrivateProgress", start)
+        helper = source[start:end]
+        self.assertIn("closeMediatorPrivatePanel()", helper)
+        self.assertIn('selectContact(\n                "ai_assistant"', helper)
+        self.assertIn("clearMention()", helper)
+        self.assertIn("input.value = message", helper)
+        self.assertIn('new Event("input", {bubbles: true})', helper)
+        self.assertIn("input.focus()", helper)
+        self.assertNotIn("requestSubmit", helper)
+        self.assertNotIn("sendPrivateMediatorMessage", helper)
+
 
 if __name__ == "__main__":
     unittest.main()

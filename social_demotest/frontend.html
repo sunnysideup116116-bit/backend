@@ -3258,7 +3258,12 @@ if (metadata.event_type === "date_coordination_form") {
                     const btn = document.createElement("button");
                     btn.type = "button";
                     btn.textContent = action.label;
-                    btn.onclick = () => {
+                    btn.onclick = async () => {
+                        if ((action.kind || "send_private_message") === "navigate_public_prefill") {
+                            actions.replaceChildren();
+                            await handoffPrivateToPublic(action.value);
+                            return;
+                        }
                         actions.innerHTML = '<span class="text-xs">阿月收到。</span>';
                         sendPrivateMediatorMessage(action.value);
                     };
@@ -3268,6 +3273,24 @@ if (metadata.event_type === "date_coordination_form") {
             }
             container.appendChild(bubble);
             container.scrollTop = container.scrollHeight;
+        }
+
+        async function handoffPrivateToPublic(originalMessage) {
+            const message = String(originalMessage || "").trim();
+            if (!message) return;
+            closeMediatorPrivatePanel();
+            await selectContact(
+                "ai_assistant",
+                "阿月",
+                "from-violet-500 to-fuchsia-500",
+                "你的媒人助理",
+                false
+            );
+            clearMention();
+            const input = document.getElementById("room-input");
+            input.value = message;
+            input.dispatchEvent(new Event("input", {bubbles: true}));
+            input.focus();
         }
 
         function setPrivateProgress(text) {
