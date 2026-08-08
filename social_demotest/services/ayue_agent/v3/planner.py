@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict
 from services.ai_service import generate_chat_completion_with_tools
 from services.ayue_agent.contracts import AgentTurnContextV2
 from .contracts import OpportunitySignal, Plan, SubTask
+from .schema_utils import inline_json_schema_refs
 
 
 @dataclass
@@ -45,13 +46,8 @@ class _DecomposeTasksArguments(BaseModel):
 
 def _decompose_tool_schema() -> dict[str, Any]:
     """Build the Ollama tool definition for the single decompose_tasks function."""
-    schema = _DecomposeTasksArguments.model_json_schema()
+    schema = inline_json_schema_refs(_DecomposeTasksArguments.model_json_schema())
     schema.pop("title", None)
-    for prop in schema.get("properties", {}).values():
-        prop.pop("title", None)
-    if "$defs" in schema:
-        for defn in schema["$defs"].values():
-            defn.pop("title", None)
     return {
         "type": "function",
         "function": {
@@ -66,6 +62,21 @@ _PLANNER_SYSTEM = """你是公開阿月 V3 的 Planner，只負責把本回合�
 
 你不回答 domain 問題、不呼叫 domain tool，也不解析 event identity、revision、confirmation 或其他 server state。
 
+每個 task 都必須是且只能是以下四個欄位：
+{"id":"t1","agent":"synthesizer","depends_on":[],"task_brief":"回覆使用者"}
+- `id` 必填且在整張 DAG 唯一；`agent` 必須使用下方六個值之一。
+- `depends_on` 只能放同一張 DAG 已存在的 task id；沒有依賴就填空陣列。
+- `task_brief` 必填，保留給該 agent 的完整本回合意圖。
+- 欄位名稱只能使用 `id`、`agent`、`depends_on`、`task_brief`；絕對不要使用 `type`、`task_agent` 或其他替代名稱。
+
+Agent routing catalog：
+- `calendar`：查詢本人行程、建立／修改／取消行程與共同日期協調。
+- `places`：搜尋附近地點、餐廳、景點與距離。
+- `match`：查詢配對狀態、候選摘要，或處理明確的開始／重新搜尋要求。
+- `relationship`：查詢已驗證的 accepted relationship 與 mentioned contact projection。
+- `profile`：讀取本人 profile／近期情境，或路由 assessment start/restart。
+- `synthesizer`：只根據本回合 observations 與 bounded context 產生最終回覆。
+
 硬性規則：
 - 最多 3 個 domain task；簡單聊天只建立 synthesizer。
 - 必須且只能有 1 個 terminal synthesizer，且依賴所有需要彙整的 task。
@@ -75,6 +86,7 @@ _PLANNER_SYSTEM = """你是公開阿月 V3 的 Planner，只負責把本回合�
 - 同回合多個 Calendar mutation 保留使用者描述順序與完整 task_brief。
 - explicit match start/retry/search 才建立 match task；孤單或負面情緒本身不是搜尋。
 - 使用者明確開始或重新開始 assessment 時建立 profile task，不由 synthesizer 自行出題。
+- `opportunity.signal="social_opening"` 只用於使用者間接表達想找人一起參與某個活動、但尚未明確要求開始搜尋的情境；`evidence_span` 必須是本回合使用者訊息中的連續原文，`confidence` 必須至少 0.8。明確要求開始／重新配對時建立 match task，不只填 opportunity；單純旅行、寒暄、孤單或負面情緒填 `signal="none"`。
 - 只呼叫 decompose_tasks，不輸出其他文字。"""
 
 

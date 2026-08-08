@@ -20,8 +20,13 @@ from services.ayue_agent.tool_registry import (
 
 from ..calendar_commands import CalendarCommandBatch, normalize_calendar_batch_payload
 from ..contracts import AgentContextSlice, ToolProposal
+from ..schema_utils import inline_json_schema_refs
 from . import base as base_agent
 from .base import SubAgentMetrics
+
+
+# Keep the old private seam for local callers while sharing one implementation.
+_clean_schema = inline_json_schema_refs
 
 
 _SYSTEM = """你是公開阿月的行事曆子代理，負責提出本人行程的 read proposal 或 typed mutation intent。
@@ -70,29 +75,6 @@ class CalendarAgentResult(list):
         super().__init__(reads or [])
         self.commands = list(commands or [])
         self.command_errors = list(command_errors or [])
-
-
-def _clean_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """Inline Pydantic refs because several tool providers ignore $defs."""
-    source = dict(schema)
-    definitions = dict(source.pop("$defs", {}) or {})
-
-    def clean(node: Any) -> Any:
-        if isinstance(node, dict):
-            ref = node.get("$ref")
-            if isinstance(ref, str) and ref.startswith("#/$defs/"):
-                definition = definitions.get(ref.rsplit("/", 1)[-1])
-                return clean(dict(definition or {}))
-            return {
-                key: clean(value)
-                for key, value in node.items()
-                if key not in {"title", "$defs"}
-            }
-        if isinstance(node, list):
-            return [clean(value) for value in node]
-        return node
-
-    return clean(source)
 
 
 def _tools_schema() -> list[dict[str, Any]]:
