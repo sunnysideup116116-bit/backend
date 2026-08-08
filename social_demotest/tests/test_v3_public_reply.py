@@ -39,6 +39,33 @@ class V3PublicReplyTests(unittest.TestCase):
         )
         self.assertEqual(result.reason, "unsupported_claim")
 
+    def test_ordinary_reply_allows_three_sentences_with_160_char_envelope(self):
+        reply = "第一句先接住使用者的具體處境，給一點自然反應。第二句補上一個有根據的看法或下一步，讓對話可以往前走。第三句再留一個輕鬆選項。"
+        result = validate_public_reply(
+            reply,
+            reject_internal_identifiers=True,
+            reject_structured_output=True,
+        )
+        self.assertIsNotNone(result.reply)
+        self.assertIn("第三句再留一個輕鬆選項", result.reply)
+        self.assertLessEqual(len(result.reply), 160)
+
+    def test_ordinary_reply_bounds_fourth_sentence(self):
+        reply = "第一句。第二句。第三句。第四句不應該出現在 ordinary reply。"
+        result = validate_public_reply(
+            reply,
+            reject_internal_identifiers=True,
+            reject_structured_output=True,
+        )
+        self.assertEqual(result.reply, "第一句。第二句。第三句。")
+
+    def test_grounded_reply_keeps_longer_verified_detail_envelope(self):
+        reply = "這是第一段已驗證的行程說明，提供日期、開始時間與活動內容，讓你先知道安排。這是第二段補充，交代使用者需要知道的細節，避免把重要資訊藏起來。這是第三段補充，說明目前資料的範圍與限制，方便你判斷下一步。這是第四段補充，只用於完整呈現 grounded result 的必要內容。這是第五段補充，沒有額外加入客套或未驗證的推測。"
+        result = validate_public_reply(reply, preserve_details=True)
+        self.assertIsNotNone(result.reply)
+        self.assertIn("grounded result", result.reply)
+        self.assertGreater(len(result.reply), 160)
+
 
 if __name__ == "__main__":
     unittest.main()

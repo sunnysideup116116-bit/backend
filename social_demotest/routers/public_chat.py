@@ -25,7 +25,11 @@ from services.ai_service import generate_chat_completion, get_embedding
 from services.ayue_agent import run_public_agent_turn_v3
 from services.ayue_agent.contracts import AgentTurnContext
 from services.ayue_agent.proactive_care import record_proactive_activity
-from services.ayue_agent.product_identity import PUBLIC_AYUE_PERSONA
+from services.ayue_agent.product_identity import (
+    PUBLIC_AYUE_PERSONA,
+    PUBLIC_RETRY_REPLY,
+    PUBLIC_RUNTIME_ERROR_REPLY,
+)
 from services.ayue_agent.public_relationship_projection import (
     mentioned_contact_refs,
     validated_mentioned_contact_ids,
@@ -655,7 +659,7 @@ def _complete_public_turn(
     agent_result = run_public_agent_turn_v3(
         agent_ctx, mode="on", on_progress=on_progress, debug_enabled=debug_enabled,
     )
-    ai_reply = agent_result.reply or "我先把這件事記下來。"
+    ai_reply = agent_result.reply or PUBLIC_RETRY_REPLY
     sources = agent_result.sources[:5]
     place_cards = agent_result.place_cards[:8]
     metadata = {}
@@ -783,7 +787,7 @@ def _sanitize_public_stream_event(event: dict) -> dict | None:
         return {
             "type": "error",
             "agent_run_id": run_id,
-            "reply": "我現在沒辦法安全地處理這件事，請稍後再試。",
+            "reply": PUBLIC_RUNTIME_ERROR_REPLY,
         }
     return None
 
@@ -841,7 +845,7 @@ def direct_chat_stream(
                 finish_debug_run(state["agent_run_id"], status="error")
             emit({
                 "type": "error", "agent_run_id": state["agent_run_id"],
-                "reply": "我現在沒辦法安全地處理這件事，請稍後再試。",
+                "reply": PUBLIC_RUNTIME_ERROR_REPLY,
             })
         finally:
             try:

@@ -43,10 +43,14 @@ _INTERNAL_META_REPLY_RE = re.compile(
 
 
 def _concise_public_reply(reply: str, *, preserve_details: bool = False) -> str:
-    """Bound ordinary chat length without truncating verified structured answers."""
+    """Bound ordinary chat length without truncating verified structured answers.
+
+    Ordinary replies allow up to three sentences and 160 characters.  The
+    larger envelope is reserved for grounded, structured details.
+    """
     text = re.sub(r"[ \t]+", " ", str(reply or "")).strip()
-    limit = 240 if preserve_details else 110
-    max_sentences = 5 if preserve_details else 2
+    limit = 240 if preserve_details else 160
+    max_sentences = 5 if preserve_details else 3
     sentences = [
         part.strip()
         for part in re.split(r"(?<=[。！？!?])", text)

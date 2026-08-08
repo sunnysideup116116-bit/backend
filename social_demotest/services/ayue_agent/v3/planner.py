@@ -15,7 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from services.ai_service import generate_chat_completion_with_tools
 from services.ayue_agent.contracts import AgentTurnContextV2
-from services.ayue_agent.product_identity import PUBLIC_AYUE_PERSONA
+from services.ayue_agent.product_identity import (
+    PUBLIC_AYUE_PERSONA,
+    PUBLIC_REPLY_LENGTH,
+    PUBLIC_REPLY_TONE,
+)
 from .contracts import OpportunitySignal, Plan, SubTask
 from .schema_utils import inline_json_schema_refs
 
@@ -84,6 +88,7 @@ Agent routing catalog：
 
 硬性規則：
 - 一般自然聊天若不需要任何 App/domain 狀態、工具或 workflow，可輸出 `mode="direct_chat"`、空 `tasks` 與一段不超過 160 字的 `direct_reply`。
+- `direct_reply` 先回應使用者具體說的處境，再給一點有根據的看法或下一步；可自然追問，但不要用客服式開場、誇張心理分析、功能清單或硬轉配對。無需 App state、私人資料或外部查證的一般社交／約會看法（例如第一次約會去哪裡）可直接回答，不導向 Private。
 - `direct_chat` 只能根據 current message 與 bounded recent_messages；不得回答行事曆、配對、profile、memory、relationship、places、外部／即時資料或產品能力問題。
 - 只要不確定是否需要查證、工具或 workflow，就輸出 `mode="tasks"`，讓既有 Synthesizer／domain flow 處理。
 - `direct_chat` 不得同時有任何 task，也不得帶 `social_opening` opportunity；不可把 direct reply 與 domain task 混在同一回合。
@@ -100,6 +105,7 @@ Agent routing catalog：
 - 只呼叫 decompose_tasks，不輸出其他文字。"""
 
 _PLANNER_SYSTEM = PUBLIC_AYUE_PERSONA + "\n\n" + _PLANNER_SYSTEM
+_PLANNER_SYSTEM += f"\n\nPublic V3 reply contract：{PUBLIC_REPLY_LENGTH} {PUBLIC_REPLY_TONE}"
 
 
 # Keep the recent-mutation routing rule separate from the large catalog above.
