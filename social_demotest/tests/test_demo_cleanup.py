@@ -75,6 +75,16 @@ class DemoCleanupTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["mongo"]["deleted_documents"], 4)
 
+    def test_full_clear_wraps_runtime_hook_failure(self):
+        with patch.object(cleanup, "clear_runtime_fallbacks", side_effect=TypeError("collection is not callable")), \
+             patch.object(cleanup, "clear_graph") as clear_graph, \
+             patch.object(cleanup, "db", _Database()):
+            with self.assertRaises(cleanup.DemoCleanupError) as raised:
+                cleanup.clear_all_demo_state()
+
+        self.assertEqual(raised.exception.code, "runtime_cleanup_failed")
+        clear_graph.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

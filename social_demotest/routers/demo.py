@@ -1,5 +1,7 @@
 """Demo-only maintenance endpoints, isolated from user chat routing."""
 
+import logging
+
 from fastapi import APIRouter, HTTPException
 
 from database import matches_coll, messages_coll, profiles_coll
@@ -11,6 +13,7 @@ from services.demo_cleanup_service import (
 
 
 router = APIRouter()
+LOGGER = logging.getLogger(__name__)
 
 
 def _cleanup_error(exc: DemoCleanupError) -> HTTPException:
@@ -31,6 +34,11 @@ def clear_all_data():
         return clear_all_demo_state()
     except DemoCleanupError as exc:
         raise _cleanup_error(exc) from exc
+    except Exception as exc:
+        # Keep the destructive endpoint fail-closed and return a stable code
+        # even if a newly added cleanup hook forgets to wrap its exception.
+        LOGGER.exception("unhandled demo cleanup failure: %s", type(exc).__name__)
+        raise HTTPException(status_code=500, detail={"code": "demo_cleanup_failed"}) from exc
 
 
 @router.post("/demo/reset_db_state")
