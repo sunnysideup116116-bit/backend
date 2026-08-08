@@ -353,15 +353,15 @@ class AyueAgentV2PolicyTests(unittest.TestCase):
         self.assertNotIn("物件", reply)
         self.assertIn("不會隨機配對", reply)
 
-    def test_ordinary_chat_reply_is_limited_to_two_short_sentences(self):
+    def test_ordinary_chat_reply_uses_public_three_sentence_envelope(self):
         long_reply = (
             "京都的街道很有味道，慢慢走可以看到很多細節。"
             "你也可以逛市集、喝茶、看看町家。"
             "接著還能去很多地方，安排非常多活動。"
         )
         concise = _concise_public_reply(long_reply)
-        self.assertLessEqual(len(concise), 110)
-        self.assertNotIn("接著還能", concise)
+        self.assertLessEqual(len(concise), 160)
+        self.assertIn("接著還能", concise)
 
     def test_fc_planner_prompt_allows_one_offer_after_sustained_activity_engagement(self):
         ctx = AgentTurnContextV2(

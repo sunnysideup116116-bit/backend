@@ -1238,7 +1238,7 @@ class V3SchedulerTraceTests(unittest.TestCase):
              patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
              patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
              patch("services.ayue_agent.v3.synthesizer.synthesize",
-                   return_value=("我剛剛沒有成功整理出回覆，可以再說一次嗎？", None, synth_metrics)):
+                   return_value=("我剛剛沒接好，但你不用整段重講。把最想先說的那一點丟給我，我從那裡接。", None, synth_metrics)):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda **_kwargs: {})
             result = run_public_agent_turn_v3(ctx, mode="on", debug_enabled=True)

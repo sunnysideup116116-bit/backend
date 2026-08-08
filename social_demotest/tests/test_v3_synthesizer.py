@@ -90,6 +90,36 @@ class V3SynthesizerTests(unittest.TestCase):
         system_prompt = call.call_args.kwargs["system_prompt"]
         self.assertIn("general_conversation", system_prompt)
         self.assertIn("不得宣稱查過", system_prompt)
+        self.assertIn("1–3 句", system_prompt)
+        self.assertIn("不要套公式", system_prompt)
+        self.assertIn("240 字／5 句", system_prompt)
+
+    def test_general_reply_uses_three_sentence_160_char_envelope(self):
+        slc = self._slice([])
+        slc.payload["message"] = "今天有點累"
+        content = "先別急著把今天的累解釋成自己不夠努力。可以先休息一下，再挑一件最小的事做。你想先說說是哪一段最消耗你嗎？"
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content=content),
+        ):
+            reply, _card_decision, _metrics = synthesize(slc)
+        self.assertIn("先別急著把今天的累解釋成自己不夠努力", reply)
+        self.assertIn("最消耗你", reply)
+        self.assertLessEqual(len(reply), 160)
+
+    def test_grounded_reply_keeps_longer_detail_envelope(self):
+        slc = self._slice([{
+            "task_id": "t1", "status": "ok", "tool": "calendar.list_my_events",
+            "result": {"events": [{"title": "家庭聚餐", "date": "2026-08-09", "start_time": "20:00"}]},
+        }])
+        content = "這是第一段已驗證的行程說明，提供日期、開始時間與活動內容，讓你先知道安排。這是第二段補充，交代使用者需要知道的細節，避免把重要資訊藏起來。這是第三段補充，說明目前資料的範圍與限制，方便你判斷下一步。這是第四段補充，只用於完整呈現 grounded result 的必要內容。這是第五段補充，沒有額外加入客套或未驗證的推測。"
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content=content),
+        ):
+            reply, _card_decision, _metrics = synthesize(slc)
+        self.assertIn("grounded result", reply)
+        self.assertGreater(len(reply), 160)
 
     def test_handles_partial_failure(self):
         slc = self._slice([
@@ -196,7 +226,7 @@ class V3SynthesizerTests(unittest.TestCase):
             side_effect=Exception("provider down"),
         ):
             reply, _card_decision, metrics = synthesize(slc)
-        self.assertEqual(reply, "我剛剛沒有成功整理出回覆，可以再說一次嗎？")
+        self.assertEqual(reply, "我剛剛沒接好，但你不用整段重講。把最想先說的那一點丟給我，我從那裡接。")
         self.assertEqual(metrics.reply_source, "general_fallback")
         self.assertEqual(metrics.fallback_reason, "provider_error")
         self.assertEqual(metrics.error_code, "synthesizer_provider_error")

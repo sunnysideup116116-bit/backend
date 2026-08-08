@@ -471,6 +471,15 @@ grounded-result mode when observations exist and a general-conversation mode
 when they do not. Assessment session lifecycle and scoring remain owned by the
 runtime; the basic/deep assessment files are documentation, not runtime-loaded
 skills.
+
+Public V3 reply presentation has one ordinary envelope: 1–3 sentences, usually
+80–140 Chinese characters, with a hard maximum of 160. This range is a prompt
+target rather than a minimum-length validator; greetings, confirmations and
+single facts may be shorter. Grounded results may use the existing 240-character
+and five-sentence envelope only when required to preserve verified calendar,
+candidate or confirmation detail. Server-owned previews and verified mutation
+outcomes are not paraphrased or padded. Tone guidance is presentation-only and
+must not participate in Planner routing, Guard decisions or domain authority.
 # Demo maintenance and match diagnostics
 
 The local Demo destructive tools are guarded by `DEMO_DESTRUCTIVE_TOOLS_ENABLED`.
@@ -514,6 +523,12 @@ active match state, social opening, invalid reply, or uncertain output falls
 back to the normal Synthesizer path. The fallback is controlled by
 `AYUE_V3_SIMPLE_CHAT_FAST_PATH`, which defaults to off until provider-backed
 semantic evaluation has recorded zero false-direct routing.
+
+General social or date advice that needs no private relationship state remains
+valid Public conversation (for example, an opinion about a first-date venue);
+it must not be redirected to Private. Public copy should first address the
+user's concrete situation, then offer a grounded reaction or next step, without
+turning ordinary life topics into a matching pitch.
 
 ### Private Ayue scope and typed public handoff
 

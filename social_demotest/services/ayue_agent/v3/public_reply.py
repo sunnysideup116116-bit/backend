@@ -41,8 +41,9 @@ def validate_public_reply(
 ) -> PublicReplyValidation:
     """Normalize and validate one human-facing model reply.
 
-    Direct Planner replies use the strict options.  Synthesizer replies use
-    ``preserve_details=True`` so verified observations keep their existing
+    Direct Planner and general-conversation Synthesizer replies use the
+    ordinary Public envelope.  Grounded Synthesizer replies use
+    ``preserve_details=True`` so verified observations keep their larger
     presentation limits while sharing the same language and metadata checks.
     """
     raw = str(value or "").strip()
@@ -72,4 +73,3 @@ def validate_public_reply(
     if contains_unsupported_random_match_claim(concise):
         return PublicReplyValidation(None, "unsupported_claim")
     return PublicReplyValidation(concise)
-

@@ -352,6 +352,7 @@ class AyueAgentStreamTests(unittest.TestCase):
             chunks = asyncio.run(_collect(response))
         event = json.loads(chunks[0])
         self.assertEqual(event["type"], "error")
+        self.assertIn("這件事還沒處理", event["reply"])
         self.assertNotIn("seed_user_08", event["reply"])
         self.assertNotIn("database", event["reply"])
 
