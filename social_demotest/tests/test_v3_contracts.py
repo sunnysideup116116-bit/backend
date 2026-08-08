@@ -9,6 +9,33 @@ from services.ayue_agent.v3.contracts import (
 
 
 class V3ContractsTests(unittest.TestCase):
+    def test_direct_chat_plan_is_task_free_and_requires_reply(self):
+        plan = Plan(mode="direct_chat", tasks=[], direct_reply="嗨～怎麼啦？")
+        self.assertEqual(plan.mode, "direct_chat")
+        self.assertEqual(plan.tasks, [])
+        self.assertEqual(plan.direct_reply, "嗨～怎麼啦？")
+        with self.assertRaises(ValidationError):
+            Plan(mode="direct_chat", tasks=[], direct_reply="   ")
+
+    def test_direct_chat_rejects_tasks_and_opportunity(self):
+        task = SubTask(id="t1", agent="synthesizer", depends_on=[], task_brief="回覆")
+        with self.assertRaises(ValidationError):
+            Plan(mode="direct_chat", tasks=[task], direct_reply="嗨")
+        with self.assertRaises(ValidationError):
+            from services.ayue_agent.v3.contracts import OpportunitySignal
+            Plan(
+                mode="direct_chat", tasks=[], direct_reply="嗨",
+                opportunity=OpportunitySignal(
+                    signal="social_opening", evidence_span="有點孤單", confidence=0.9,
+                ),
+            )
+
+    def test_tasks_plan_rejects_direct_reply_but_legacy_shape_still_works(self):
+        task = SubTask(id="t1", agent="synthesizer", depends_on=[], task_brief="回覆")
+        self.assertEqual(Plan(tasks=[task]).mode, "tasks")
+        with self.assertRaises(ValidationError):
+            Plan(mode="tasks", tasks=[task], direct_reply="嗨")
+
     def test_subtask_requires_id_agent_depends_on_task_brief(self):
         with self.assertRaises(ValidationError):
             SubTask(id="", agent="calendar", depends_on=[], task_brief="x")

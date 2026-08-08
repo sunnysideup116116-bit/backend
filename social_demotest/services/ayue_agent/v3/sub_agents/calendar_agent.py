@@ -67,6 +67,10 @@ date normalization, permission checks, target resolution, revision/CAS and
 confirmation. Follow those typed contracts instead of recreating them in
 natural language."""
 
+_SAFETY_ADDENDUM += """
+若 context 明確提供 `calendar_recent_mutation`，且使用者是在確認上一筆行事曆寫入是否成功，請只提出唯讀的 `calendar.verify_recent_mutation`；不要再次提出 create/update/cancel。若使用者描述的是新的變更，才使用 `calendar.submit_commands`。
+"""
+
 
 class CalendarAgentResult(list):
     """Backward-compatible read proposal list plus typed mutation commands."""

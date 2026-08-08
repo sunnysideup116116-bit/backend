@@ -653,6 +653,30 @@ def resolve_owned_event_reference(
     return event, None
 
 
+def get_owned_event_by_id(
+    user_id: str,
+    event_id: str,
+    *,
+    include_cancelled: bool = False,
+    source_type: str | None = None,
+) -> dict | None:
+    """Load one owner-visible event for server-side verification.
+
+    This is intentionally an executor/domain-service seam.  Callers must
+    already possess the opaque server reference; it is never exposed to an
+    LLM or accepted as a planner argument.
+    """
+    event_id = str(event_id or "").strip()
+    if not event_id:
+        return None
+    query: dict[str, object] = {"event_id": event_id, "participants": user_id}
+    if not include_cancelled:
+        query["status"] = {"$in": list(ACTIVE_EVENT_STATUSES)}
+    if source_type:
+        query["source_type"] = source_type
+    return calendar_events_coll.find_one(query)
+
+
 def resolve_owned_events_for_cancel(
     user_id: str, *, mode: str, event_hints: list[str] | None = None, limit: int = 10,
 ) -> tuple[list[dict], str | None]:

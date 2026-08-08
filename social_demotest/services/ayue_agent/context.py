@@ -190,9 +190,15 @@ def build_agent_turn_context_v2(ctx: AgentTurnContext, *, clock: TurnClockV1 | N
     # Calendar follow-up state is a bounded, server-owned projection.  It
     # contains no event ID/revision and expires independently of profile data.
     from .v3.calendar_drafts import get_draft as get_calendar_draft, public_projection as calendar_draft_projection
-    from .v3.calendar_references import get_reference as get_calendar_reference, public_projection as calendar_reference_projection
+    from .v3.calendar_references import (
+        get_reference as get_calendar_reference,
+        get_recent_mutation,
+        public_projection as calendar_reference_projection,
+        recent_mutation_projection,
+    )
     calendar_draft = calendar_draft_projection(get_calendar_draft(ctx.user_id))
     calendar_recent_reference = calendar_reference_projection(get_calendar_reference(ctx.user_id))
+    calendar_recent_mutation = recent_mutation_projection(get_recent_mutation(ctx.user_id))
     now = time.time()
     if action_draft and now - float(action_draft.get("created_at", 0) or 0) > ACTION_DRAFT_TTL_SECONDS:
         profiles_coll.update_one({"user_id": ctx.user_id}, {"$unset": {"agentic_action_draft": ""}})
@@ -229,6 +235,7 @@ def build_agent_turn_context_v2(ctx: AgentTurnContext, *, clock: TurnClockV1 | N
         latest_match_outcome=outcome, pending_confirmation=pending, clock=turn_clock,
         action_draft=action_draft, place_search_draft=place_search_draft,
         calendar_draft=calendar_draft, calendar_recent_reference=calendar_recent_reference,
+        calendar_recent_mutation=calendar_recent_mutation,
         recent_context_draft=recent_context_draft,
         mentioned_contacts=mentioned_contact_refs(ctx.user_id, mentioned_ids),
         mentioned_contact_overflow=bool(ctx.mention_overflow or validation_overflow),

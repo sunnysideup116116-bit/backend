@@ -30,6 +30,7 @@ def slice_for_agent(
             "recent_context": turn_ctx.recent_context,
             "calendar_draft": getattr(turn_ctx, "calendar_draft", None),
             "calendar_recent_reference": getattr(turn_ctx, "calendar_recent_reference", None),
+            "calendar_recent_mutation": getattr(turn_ctx, "calendar_recent_mutation", None),
             "prior_observations": prior_observations,
         })
 

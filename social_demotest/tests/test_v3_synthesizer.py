@@ -62,6 +62,23 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIn("grounded_result", call.call_args.kwargs["system_prompt"])
         self.assertNotIn("clarification_policy", call.call_args.args[0])
 
+    def test_recent_calendar_mutation_verification_is_server_owned_reply(self):
+        slc = self._slice([{
+            "task_id": "t1", "status": "ok", "tool": "calendar.verify_recent_mutation",
+            "result": {"calendar_mutation_verification": {
+                "status": "verified_success", "action": "cancel",
+                "label": "8/12 15:00–16:00 看牙醫", "outcome": "success",
+            }},
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+        ) as provider:
+            reply, card_decision, _metrics = synthesize(slc)
+        provider.assert_not_called()
+        self.assertIn("已取消", reply)
+        self.assertIn("看牙醫", reply)
+        self.assertIsNone(card_decision)
+
     def test_empty_observation_uses_general_conversation_mode(self):
         slc = self._slice([])
         slc.payload["message"] = "我今天有點累"

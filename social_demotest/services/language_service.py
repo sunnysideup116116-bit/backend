@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import json
 
 try:  # OpenCC is optional during a rolling deploy; the fallback covers UI-critical terms.
     from opencc import OpenCC
@@ -49,3 +50,48 @@ def normalize_model_text(value):
     if isinstance(value, dict):
         return {key: normalize_model_text(item) for key, item in value.items()}
     return value
+
+
+_PUBLIC_REPLY_PROTECTED = re.compile(
+    r"```[\s\S]*?```|`[^`\n]+`|https?://[^\s<>]+|\{[^{}\n]*\}|\[[^\[\]\n]*\]",
+)
+
+
+def normalize_public_reply(value: str | None, *, max_length: int | None = None) -> str:
+    """Normalize human-facing model text without rewriting opaque payloads.
+
+    Public V3 replies are prose, but they may contain a URL or a code/JSON
+    fragment that must remain byte-for-byte stable.  OpenCC owns the language
+    conversion; this boundary only protects those opaque fragments and never
+    touches tool arguments, IDs, revisions, or stored JSON.
+    """
+    text = str(value or "")
+    stripped = text.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            json.loads(stripped)
+        except (TypeError, ValueError):
+            pass
+        else:
+            return text[:max_length].rstrip() if max_length else text
+
+    protected: list[str] = []
+
+    def hold(match: re.Match[str]) -> str:
+        protected.append(match.group(0))
+        return f"__AYUE_REPLY_PROTECTED_{len(protected) - 1}__"
+
+    matches = list(_PUBLIC_REPLY_PROTECTED.finditer(text))
+    if not matches:
+        return normalize_zh_tw(text, max_length=max_length)
+    output: list[str] = []
+    cursor = 0
+    for match in matches:
+        output.append(normalize_zh_tw(text[cursor:match.start()]))
+        output.append(hold(match))
+        cursor = match.end()
+    output.append(normalize_zh_tw(text[cursor:]))
+    normalized = "".join(output)
+    for index, original in enumerate(protected):
+        normalized = normalized.replace(f"__AYUE_REPLY_PROTECTED_{index}__", original)
+    return normalized[:max_length].rstrip() if max_length else normalized

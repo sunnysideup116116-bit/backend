@@ -352,6 +352,7 @@ Trace 不保存完整 prompt、owner message、observations、tool arguments/res
 | --- | --- |
 | `AYUE_AGENT_V3_MODE=on\|off` | Sub-agent 架構或人工緊急 rollback（off 回 legacy 純聊天，不再有 V2 agent） |
 | `AYUE_AGENT_V3_USER_ALLOWLIST` | 漸進式指定使用者；空值代表全部適用 mode |
+| `AYUE_V3_SIMPLE_CHAT_FAST_PATH=on\|off` | 允許 Planner 對無 domain/tool/workflow 的 direct-chat 回覆跳過 Synthesizer；預設 off，通過 provider semantic eval 後再開啟 |
 | `AYUE_SUBAGENT_MAX_READS` | 整個回合唯讀上限，預設且硬上限 3 |
 | `AYUE_SUBAGENT_MAX_PARALLEL` | 同層 sub-agent 最大並發數，預設且硬上限 2 |
 | `AYUE_OLLAMA_TIMEOUT_SECONDS` | 單次 Ollama HTTP 呼叫 timeout，預設 30 秒，限制 5–120 秒 |
@@ -471,3 +472,35 @@ and exception messages remain server-side only.
 If Mongo initialization or DNS fails, the HTTP service starts in a fail-closed
 degraded mode. Demo status reports `mongo_status=unavailable`, destructive
 cleanup returns `mongo_unavailable`, and no local fallback database is touched.
+
+### Calendar post-mutation verification
+
+After a confirmed V3 Calendar mutation, the runtime stores one short-lived,
+server-owned verification summary (`calendar_references` key
+`recent_mutation`). It keeps authority fields only on the server and projects
+safe labels/outcome to the next turn. A semantic follow-up that asks whether
+the previous write succeeded routes to the read-only
+`calendar.verify_recent_mutation` tool. That tool rechecks canonical Calendar
+or date-coordination state and cannot submit another mutation. The summary
+expires with the existing 15-minute bounded reference TTL; an unrelated or
+clearly new request follows the normal Planner path. `calendar_state_changed`
+in the public response is only a frontend cache-invalidation hint and is not a
+domain-state authority.
+
+### Simple-chat direct reply fast path
+
+For a genuinely conversational turn that needs no domain task, tool,
+verified App state, write, confirmation, assessment, or opportunity workflow,
+the Planner may return a typed `Plan(mode="direct_chat", tasks=[],
+direct_reply=...)`. Scheduler validates bounded runtime state and public
+reply presentation before returning it; it never treats the Planner's mode as
+authority to answer Calendar, Match, Profile, Relationship, Places, memory or
+external facts. Any pending workflow, active draft, recent Calendar mutation,
+active match state, social opening, invalid reply, or uncertain output falls
+back to the normal Synthesizer path. The fallback is controlled by
+`AYUE_V3_SIMPLE_CHAT_FAST_PATH`, which defaults to off until provider-backed
+semantic evaluation has recorded zero false-direct routing.
+
+Direct-chat runs record only Planner metrics and an allowlisted trace summary
+(`execution_mode`, `llm_call_count`, token totals and latency). Domain flows
+retain the existing Planner → sub-agent → Guard/tool → Synthesizer path.

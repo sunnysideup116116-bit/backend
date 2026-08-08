@@ -18,6 +18,7 @@ from services.ayue_agent.context import build_agent_turn_context_v2
 from services.ayue_agent.public_relationship_projection import validated_mentioned_contact_ids
 from services.ayue_agent.router import confirmation_choice
 from services.ayue_agent.time_context import build_turn_clock
+from services.language_service import normalize_public_reply
 from services.ayue_agent.tool_registry import (
     TOOL_REGISTRY, ToolArgumentSource, ToolRisk, executor_arguments_for_turn, tool_call_key,
 )
@@ -30,6 +31,7 @@ from services.ayue_agent.match_opportunity import (
     claim_guidance_offer,
     decline_guidance_offer,
 )
+from services.ayue_agent.capabilities import is_capability_query
 from services.assessment_session_service import (
     active_assessment_session, advance_assessment_session,
     assessment_cancel_choice, assessment_commit_choice,
@@ -59,9 +61,10 @@ from .calendar_references import (
     public_projection,
 )
 from services.calendar_service import resolve_owned_event_with_candidates
-from .planner import plan_turn, PlannerMetrics
+from .planner import plan_turn, PlannerMetrics, _synthesizer_only_plan
 from . import synthesizer
 from .synthesizer import SynthesizerMetrics
+from .public_reply import validate_public_reply
 from .sub_agents.base import SubAgentMetrics
 from .confirmation import ConfirmationManager
 from .sub_agents.calendar_agent import run as run_calendar
@@ -89,6 +92,45 @@ def _assessment_start_confirmation_requested(message: str, pending: list[dict[st
     if compact not in _ASSESSMENT_START_CONFIRMATIONS or len(pending) != 1:
         return False
     return str(pending[0].get("tool_name") or "") == "profile.start_assessment"
+
+
+def _direct_chat_fast_path_enabled() -> bool:
+    return os.getenv("AYUE_V3_SIMPLE_CHAT_FAST_PATH", "off").strip().lower() in {
+        "1", "true", "on",
+    }
+
+
+def _direct_chat_block_reason(
+    plan: Plan,
+    turn: Any,
+    pending_records: list[dict[str, Any]],
+    active_offer: dict[str, Any] | None,
+) -> str | None:
+    """Validate protocol/state safety without reclassifying natural language."""
+    if not _direct_chat_fast_path_enabled():
+        return "feature_disabled"
+    if pending_records or getattr(turn, "pending_confirmation", None):
+        return "pending_confirmation"
+    if getattr(turn, "calendar_draft", None):
+        return "calendar_draft"
+    if getattr(turn, "calendar_recent_mutation", None):
+        return "recent_calendar_mutation"
+    if any(
+        getattr(turn, field, None)
+        for field in ("action_draft", "place_search_draft", "recent_context_draft")
+    ):
+        return "active_draft"
+    if getattr(turn, "active_proposal", None):
+        return "active_match_proposal"
+    if active_offer:
+        return "active_match_guidance"
+    if getattr(turn, "mentioned_contact_overflow", False):
+        return "mentioned_contact_overflow"
+    if is_capability_query(getattr(turn, "message", "")):
+        return "capability_query"
+    if plan.opportunity is not None and plan.opportunity.signal != "none":
+        return "opportunity"
+    return None
 
 _TEST_MODE = os.getenv("AYUE_TEST_MODE", "").strip().lower() in {"1", "true", "on"}
 if _TEST_MODE:
@@ -1116,6 +1158,9 @@ def run_public_agent_turn_v3(
     trace: dict[str, Any] = {
         "plan": [], "guard_results": [], "tool_results": [],
         "event_sequence": [], "latency_ms": 0,
+        "execution_mode": "dag", "llm_call_count": 0,
+        "total_input_tokens": 0, "total_output_tokens": 0,
+        "direct_chat_fallback_reason": None,
         "result": {"handled": True, "conversation_intent": "", "fallback_reason": None},
     }
     if debug_enabled:
@@ -1135,6 +1180,11 @@ def run_public_agent_turn_v3(
     all_agent_metrics: list[tuple[str, SubAgentMetrics]] = []
 
     def _finalize_debug(result: AgentResult) -> AgentResult:
+        # This is the single public V3 reply boundary.  Synthesizer output and
+        # deterministic branches both pass through it, so model drift to
+        # Simplified Chinese cannot leak to the user.  Opaque URLs/code/JSON
+        # fragments are protected by normalize_public_reply.
+        result = result.model_copy(update={"reply": normalize_public_reply(result.reply)})
         if debug_enabled:
             finish_debug_run(
                 run_id, status="completed",
@@ -1288,7 +1338,14 @@ def run_public_agent_turn_v3(
         total_output_tokens += synth_metrics.output_tokens
         _print_separator("V3 RUN END")
         print(f"  total_tokens={total_input_tokens + total_output_tokens} (in={total_input_tokens} out={total_output_tokens})")
-        return _finalize_debug(AgentResult(handled=True, reply=reply, agent_run_id=run_id, agent_mode="v3"))
+        calendar_state_changed = any(
+            bool(item.get("ok")) and str(item.get("tool_name") or "").startswith("calendar.")
+            for item in results if isinstance(item, dict)
+        )
+        return _finalize_debug(AgentResult(
+            handled=True, reply=reply, agent_run_id=run_id, agent_mode="v3",
+            calendar_state_changed=calendar_state_changed,
+        ))
     if choice == "cancel":
         print("\n  [entry] confirmation=cancel → clearing pending confirmations")
         mgr.cancel_all(user_id=ctx.user_id)
@@ -1324,6 +1381,8 @@ def run_public_agent_turn_v3(
                 "output_tokens": planner_metrics.output_tokens,
                 "duration_ms": planner_metrics.duration_ms,
             },
+            mode=planner_metrics.decision_mode or "tasks",
+            direct_chat_fallback_reason=planner_metrics.direct_chat_fallback_reason or None,
         )
 
     if plan is None:
@@ -1334,6 +1393,81 @@ def run_public_agent_turn_v3(
             handled=True, reply="我現在沒辦法判斷這個請求要不要執行，先跟你聊聊",
             agent_run_id=run_id, agent_mode="v3", fallback_reason="planner_invalid",
         ))
+
+    if plan.mode == "direct_chat":
+        direct_reason = _direct_chat_block_reason(plan, turn, pending_records, active_offer)
+        direct_validation = None
+        if direct_reason is None:
+            direct_validation = validate_public_reply(
+                plan.direct_reply,
+                reject_internal_identifiers=True,
+                reject_structured_output=True,
+            )
+            if direct_validation.reply is None:
+                direct_reason = f"reply_{direct_validation.reason or 'invalid'}"
+        if direct_reason is not None:
+            planner_metrics.direct_chat_fallback_reason = direct_reason
+            trace["direct_chat_fallback_reason"] = direct_reason
+            plan = _synthesizer_only_plan()
+        else:
+            reply = direct_validation.reply if direct_validation is not None else ""
+            trace["execution_mode"] = "direct_chat"
+            trace["llm_call_count"] = 1
+            trace["total_input_tokens"] = total_input_tokens
+            trace["total_output_tokens"] = total_output_tokens
+            trace["latency_ms"] = round((time.perf_counter() - run_total_started) * 1000)
+            trace["plan"] = []
+            trace["result"] = {
+                "handled": True,
+                "conversation_intent": "casual_chat",
+                "fallback_reason": None,
+            }
+            _emit_progress(
+                on_progress, "plan_created", trace=trace, agent_run_id=run_id,
+                plan=[], planner_metrics={
+                    "input_tokens": planner_metrics.input_tokens,
+                    "output_tokens": planner_metrics.output_tokens,
+                    "duration_ms": planner_metrics.duration_ms,
+                    "mode": "direct_chat",
+                },
+            )
+            if debug_enabled:
+                append_debug_event(
+                    run_id, "plan_created", plan=[], mode="direct_chat",
+                    execution_mode="direct_chat", direct_reply=reply,
+                    planner_metrics={
+                        "input_tokens": planner_metrics.input_tokens,
+                        "output_tokens": planner_metrics.output_tokens,
+                        "duration_ms": planner_metrics.duration_ms,
+                    },
+                    prompt_raw=planner_metrics.prompt_raw,
+                    content_raw=planner_metrics.raw_content,
+                    function_calls=planner_metrics.tool_calls_raw or [],
+                    available_functions=planner_metrics.tools_raw or [],
+                )
+                append_debug_event(
+                    run_id, "direct_reply_selected", mode="direct_chat",
+                    status="ok", duration_ms=planner_metrics.duration_ms, reply=reply,
+                )
+            _print_separator("DIRECT CHAT")
+            print(f"  [direct_chat] reply={reply!r}")
+            _print_separator("V3 RUN END")
+            print(f"  total_tokens={total_input_tokens + total_output_tokens} (in={total_input_tokens} out={total_output_tokens})")
+            _persist_trace(run_id, ctx, trace)
+            return _finalize_debug(AgentResult(
+                handled=True,
+                reply=reply,
+                conversation_intent="casual_chat",
+                agent_run_id=run_id,
+                agent_mode="v3",
+                llm_call_metrics=[{
+                    "agent": "planner",
+                    "input_tokens": planner_metrics.input_tokens,
+                    "output_tokens": planner_metrics.output_tokens,
+                    "duration_ms": planner_metrics.duration_ms,
+                    "mode": "direct_chat",
+                }],
+            ))
 
     guidance_observations: list[dict[str, Any]] = []
     match_guidance_shown = False
@@ -1383,6 +1517,9 @@ def run_public_agent_turn_v3(
     if debug_enabled:
         append_debug_event(
             run_id, "plan_created", plan=plan_tasks_json,
+            mode=planner_metrics.decision_mode or "tasks",
+            execution_mode="dag",
+            direct_chat_fallback_reason=planner_metrics.direct_chat_fallback_reason or None,
             planner_metrics={
                 "input_tokens": planner_metrics.input_tokens,
                 "output_tokens": planner_metrics.output_tokens,
@@ -1521,6 +1658,7 @@ def run_public_agent_turn_v3(
             input_payload=synth_slice.payload, candidate_cards=candidate_cards,
         )
     reply, card_decision, synth_metrics = synthesizer.synthesize(synth_slice, candidate_cards=candidate_cards)
+    reply = normalize_public_reply(reply)
     _print_llm_metrics("synthesizer", synth_metrics)
     total_input_tokens += synth_metrics.input_tokens
     total_output_tokens += synth_metrics.output_tokens
@@ -1574,7 +1712,13 @@ def run_public_agent_turn_v3(
     if place_cards:
         result.place_cards = place_cards
     result.sources = _public_sources(task_results)
-    result.llm_call_metrics = [
+    result.llm_call_metrics = [{
+        "agent": "planner",
+        "input_tokens": planner_metrics.input_tokens,
+        "output_tokens": planner_metrics.output_tokens,
+        "duration_ms": planner_metrics.duration_ms,
+        "mode": "tasks",
+    }] + [
         {
             "agent": agent_id,
             "input_tokens": m.input_tokens,
@@ -1583,7 +1727,17 @@ def run_public_agent_turn_v3(
         }
         for agent_id, m in all_agent_metrics
     ]
+    if synth_metrics.used_llm:
+        result.llm_call_metrics.append({
+            "agent": "synthesizer",
+            "input_tokens": synth_metrics.input_tokens,
+            "output_tokens": synth_metrics.output_tokens,
+            "duration_ms": synth_metrics.duration_ms,
+        })
     trace["latency_ms"] = run_total_ms
+    trace["llm_call_count"] = 1 + len(all_agent_metrics) + (1 if synth_metrics.used_llm else 0)
+    trace["total_input_tokens"] = total_input_tokens
+    trace["total_output_tokens"] = total_output_tokens
     trace["result"] = {
         "handled": result.handled,
         "conversation_intent": result.conversation_intent,

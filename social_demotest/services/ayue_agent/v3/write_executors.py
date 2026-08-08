@@ -141,7 +141,7 @@ def _calendar_event_label(event: dict) -> str:
     return f"{start.month}/{start.day} {start:%H:%M}–{end:%H:%M} {title}"
 
 
-def _execute_calendar_mutation_plans(
+def _execute_calendar_mutation_plans_legacy(
     ctx: Any,
     plans_payload: list[dict[str, Any]],
     *,
@@ -169,6 +169,56 @@ def _execute_calendar_mutation_plans(
     if not plans:
         return False, "這次沒有可執行的行程變更。", "calendar_plan_empty"
 
+    from .calendar_references import remember_recent_mutation
+
+    operation_records: list[dict[str, Any]] = []
+    batch_action = (
+        getattr(plans[0].action, "value", str(plans[0].action))
+        if len(plans) == 1 else "batch"
+    )
+
+    def remember_outcome(outcome: str) -> None:
+        try:
+            remember_recent_mutation(
+                ctx.user_id, action=batch_action, outcome=outcome,
+                operations=operation_records,
+            )
+        except Exception:
+            # Verification state is advisory; a storage outage must not turn a
+            # committed Calendar mutation into a failed response.
+            pass
+
+    def append_operation(
+        plan: CalendarMutationPlan,
+        event: dict[str, Any] | None = None,
+        *,
+        expected_status: str,
+    ) -> None:
+        action = getattr(plan.action, "value", str(plan.action))
+        form = dict(plan.form or {})
+        if event:
+            label = _calendar_event_label(event)
+            event_id = str(event.get("event_id") or plan.event_id or "")
+            revision = int(event.get("revision", plan.expected_revision or 0) or 0)
+        else:
+            changes = dict(plan.changes or {})
+            label = str(
+                form.get("title") or form.get("activity")
+                or changes.get("title") or changes.get("activity") or "行程"
+            )[:180]
+            event_id = str(plan.event_id or "")
+            revision = int(plan.expected_revision or 0)
+        operation_records.append({
+            "action": action,
+            "event_id": event_id,
+            "revision": revision,
+            "source_type": str(plan.source_type or "personal"),
+            "other_id": str(plan.other_id or ""),
+            "coordination_id": str(plan.coordination_id or ""),
+            "expected_status": expected_status,
+            "safe_label": label,
+        })
+
     # Preserve the existing all-target stale protection for a pure cancellation
     # batch.  Mixed commands still rely on each domain service's CAS at the
     # exact write point.
@@ -192,13 +242,17 @@ def _execute_calendar_mutation_plans(
             if plan.action == "create":
                 event = create_personal_event(ctx.user_id, plan.form, agent_action_key=item_key)
                 completed.append(_calendar_event_label(event))
+                append_operation(
+                    plan, event,
+                    expected_status=str((event or {}).get("status") or "confirmed"),
+                )
                 continue
 
             event_id = str(plan.event_id or "")
             revision = int(plan.expected_revision or 0)
             if plan.action == "update":
                 if plan.source_type == "date":
-                    coordination, _event = request_reschedule(
+                    coordination, event = request_reschedule(
                         ctx.user_id, str(plan.other_id or ""), event_id,
                         dict(plan.form), expected_revision=revision, idempotency_key=item_key,
                     )
@@ -214,8 +268,13 @@ def _execute_calendar_mutation_plans(
                         expected_revision=revision, agent_action_key=item_key,
                     )
                     completed.append(_calendar_event_label(event))
+                append_operation(
+                    plan, event,
+                    expected_status=str((event or {}).get("status") or "confirmed"),
+                )
                 continue
 
+            event = None
             if plan.source_type == "date":
                 coordination = cancel_coordination_or_event(
                     ctx.user_id, str(plan.other_id or ""), str(plan.coordination_id or ""),
@@ -229,6 +288,7 @@ def _execute_calendar_mutation_plans(
                     expected_revision=revision, agent_action_key=item_key,
                 )
                 completed.append(f"取消「{_calendar_event_label(event)}」")
+            append_operation(plan, event, expected_status="cancelled")
         except HTTPException as exc:
             code = "stale_revision" if exc.status_code == 409 else "calendar_write_failed"
             if not completed:
@@ -236,20 +296,73 @@ def _execute_calendar_mutation_plans(
                     "這筆行程剛剛有變動，我沒有覆寫它。請重新確認。"
                     if code == "stale_revision" else "這筆行程現在無法變更，請重新確認。"
                 )
+                remember_outcome("failed")
                 return False, message, code
+            remember_outcome("partial")
             return True, (
                 "已處理：" + "、".join(completed) +
                 f"。第 {index + 1} 筆沒有完成，後續變更已停止，請重新查看。"
             ), "partial"
         except Exception as exc:
             if not completed:
+                remember_outcome("failed")
                 return False, "這次沒有成功變更行程，我沒有把它當作已完成。", type(exc).__name__
+            remember_outcome("partial")
             return True, (
                 "已處理：" + "、".join(completed) +
                 f"。第 {index + 1} 筆沒有完成，後續變更已停止，請重新查看。"
             ), "partial"
 
+    remember_outcome("success")
     return True, "已處理：" + "、".join(completed) + "。", None
+
+
+def _execute_calendar_mutation_plans(
+    ctx: Any,
+    plans_payload: list[dict[str, Any]],
+    *,
+    confirmation_id: str,
+) -> tuple[bool, str, str | None]:
+    """Normal V3 wrapper that records a bounded post-write verification state."""
+    from .calendar_commands import CalendarMutationPlan
+    from .calendar_references import remember_recent_mutation
+
+    try:
+        plans = [CalendarMutationPlan.model_validate(item) for item in plans_payload]
+    except Exception:
+        plans = []
+    result = _execute_calendar_mutation_plans_legacy(
+        ctx, plans_payload, confirmation_id=confirmation_id,
+    )
+    if not plans:
+        return result
+    ok, _reply, error_code = result
+    outcome = "success" if ok and error_code is None else "partial" if ok else "failed"
+    # The legacy implementation above already records the actual event IDs
+    # returned by the domain services for successful/partial writes (create
+    # has no event ID until execution).  Only add a fallback failure record
+    # when no operation could be recorded there.
+    if ok:
+        return result
+    try:
+        remember_recent_mutation(
+            ctx.user_id,
+            action=(plans[0].action if len(plans) == 1 else "batch"),
+            outcome=outcome,
+            operations=[{
+                "action": plan.action,
+                "event_id": plan.event_id,
+                "revision": plan.expected_revision,
+                "source_type": plan.source_type,
+                "other_id": plan.other_id,
+                "coordination_id": plan.coordination_id,
+                "expected_status": "cancelled" if plan.action == "cancel" else "confirmed",
+                "safe_label": plan.safe_label,
+            } for plan in plans],
+        )
+    except Exception:
+        pass
+    return result
 
 
 def _calendar_execute(ctx: Any, tool_name: str, arguments: dict[str, Any], payload: dict[str, Any] | None, *, confirmation_id: str) -> tuple[bool, str, str | None]:

@@ -13,6 +13,7 @@ from services.calendar_service import as_utc, get_timezone
 
 REFERENCE_TTL_SECONDS = 15 * 60
 DRAFT_TARGET_REFERENCE_KEY = "draft_target"
+RECENT_MUTATION_REFERENCE_KEY = "recent_mutation"
 _COLLECTION = None
 _LOCK = threading.RLock()
 _MEMORY: dict[tuple[str, str], dict[str, Any]] = {}
@@ -101,6 +102,129 @@ def _record(user_id: str, reference_key: str, event: dict[str, Any], *, safe_lab
 
 def remember_event(user_id: str, event: dict[str, Any], *, reference_key: str = "recent_event", safe_label: str = "") -> dict[str, Any]:
     return _record(user_id, reference_key, event, safe_label=safe_label)
+
+
+def remember_recent_mutation(
+    user_id: str,
+    *,
+    action: str,
+    outcome: str,
+    operations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Store a bounded, server-only summary of the latest Calendar write.
+
+    IDs/revisions are retained only for authoritative verification.  The
+    public projection below deliberately exposes labels and outcome only.
+    """
+    now = time.time()
+    safe_operations: list[dict[str, Any]] = []
+    for item in operations[:5]:
+        if not isinstance(item, dict):
+            continue
+        safe_operations.append({
+            "action": str(item.get("action") or action)[:24],
+            "event_id": str(item.get("event_id") or "")[:160],
+            "revision": int(item.get("revision", 0) or 0),
+            "source_type": str(item.get("source_type") or "personal")[:16],
+            "other_id": str(item.get("other_id") or "")[:160],
+            "coordination_id": str(item.get("coordination_id") or "")[:160],
+            "expected_status": str(item.get("expected_status") or "confirmed")[:32],
+            "safe_label": str(item.get("safe_label") or "行程")[:180],
+        })
+    record = {
+        "user_id": user_id,
+        "reference_key": RECENT_MUTATION_REFERENCE_KEY,
+        "action": str(action or "calendar")[:24],
+        "outcome": str(outcome or "failed")[:24],
+        "operations": safe_operations,
+        "created_at": now,
+        "expires_at": now + REFERENCE_TTL_SECONDS,
+    }
+    with _LOCK:
+        _MEMORY[(user_id, RECENT_MUTATION_REFERENCE_KEY)] = dict(record)
+    collection = _collection()
+    try:
+        if collection is not None:
+            collection.update_one(
+                {"user_id": user_id, "reference_key": RECENT_MUTATION_REFERENCE_KEY},
+                {"$set": record},
+                upsert=True,
+            )
+    except Exception:
+        pass
+    return record
+
+
+def get_recent_mutation(user_id: str) -> dict[str, Any] | None:
+    return get_reference(user_id, reference_key=RECENT_MUTATION_REFERENCE_KEY)
+
+
+def recent_mutation_projection(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Project only safe, human-readable mutation state into agent context."""
+    if not record:
+        return None
+    return {
+        "action": str(record.get("action") or "calendar"),
+        "outcome": str(record.get("outcome") or "failed"),
+        "labels": [
+            str(item.get("safe_label") or "行程")[:180]
+            for item in (record.get("operations") or [])[:5]
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def verify_recent_mutation(user_id: str) -> dict[str, Any]:
+    """Verify the latest mutation against canonical Calendar/domain state."""
+    record = get_recent_mutation(user_id)
+    if not record:
+        return {"status": "not_available", "action": "", "label": "", "outcome": ""}
+    outcome = str(record.get("outcome") or "failed")
+    operations = [item for item in (record.get("operations") or []) if isinstance(item, dict)]
+    label = str((operations[0] if operations else {}).get("safe_label") or "行程")[:180]
+    if outcome in {"failed", "error"}:
+        return {"status": "failed", "action": str(record.get("action") or "calendar"), "label": label, "outcome": outcome}
+
+    states: list[bool] = []
+    try:
+        from services.calendar_service import get_owned_event_by_id
+        from services.date_coordination_service import find_accepted_match
+
+        for operation in operations:
+            expected = str(operation.get("expected_status") or "confirmed")
+            event_id = str(operation.get("event_id") or "")
+            current = get_owned_event_by_id(
+                user_id,
+                event_id,
+                include_cancelled=True,
+                source_type=str(operation.get("source_type") or "") or None,
+            ) if event_id else None
+            event_ok = bool(current and str(current.get("status") or "") == expected)
+            if not event_ok and str(operation.get("source_type") or "") == "date":
+                other_id = str(operation.get("other_id") or "")
+                coordination_id = str(operation.get("coordination_id") or "")
+                if other_id and coordination_id:
+                    coordination = (find_accepted_match(user_id, other_id).get("date_coordination") or {})
+                    event_ok = (
+                        str(coordination.get("coordination_id") or "") == coordination_id
+                        and str(coordination.get("status") or "") == expected
+                    )
+            states.append(event_ok)
+    except Exception:
+        states = []
+
+    if states and all(states):
+        status = "verified_success"
+    elif outcome == "partial":
+        status = "partial"
+    else:
+        status = "verification_failed"
+    return {
+        "status": status,
+        "action": str(record.get("action") or "calendar"),
+        "label": label,
+        "outcome": outcome,
+    }
 
 
 def remember_resolved_target(user_id: str, target: Any) -> dict[str, Any]:
