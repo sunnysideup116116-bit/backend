@@ -14,6 +14,7 @@ from routers.system import get_notifications
 from routers.match import get_match_status
 from routers.relationship_dates import cancel_date_coordination
 from routers.relationship_quiz import cancel_relationship_quiz
+from routers.frontend import serve_frontend_image
 
 
 class _Cursor(list):
@@ -22,6 +23,26 @@ class _Cursor(list):
 
 
 class ChatLeafRouterTests(unittest.TestCase):
+    def test_ayue_launcher_artwork_is_served_from_the_replaceable_asset_route(self):
+        response = serve_frontend_image("pet.gif")
+        self.assertEqual(response.media_type, "image/gif")
+        with self.assertRaises(HTTPException) as raised:
+            serve_frontend_image("not-an-ayue-image.png")
+        self.assertEqual(raised.exception.status_code, 404)
+
+    def test_frontend_private_launcher_uses_role_artwork_and_existing_panel_hooks(self):
+        source = (Path(__file__).resolve().parents[1] / "frontend.html").read_text(encoding="utf-8")
+        launcher = source[source.index('id="mediator-private-trigger"'):source.index('id="mediator-private-panel"')]
+        self.assertIn("data-ayue-avatar", launcher)
+        self.assertIn("openMediatorPrivatePanel()", launcher)
+        self.assertIn("mediator-launcher-control", launcher)
+        self.assertIn("aria-controls=\"mediator-private-panel\"", launcher)
+        self.assertNotIn("mediator-launcher-title", launcher)
+        self.assertNotIn("mediator-launcher-subtitle", launcher)
+        panel = source[source.index('id="mediator-private-panel"'):]
+        self.assertIn('id="mediator-private-title"', panel)
+        self.assertIn("私下聊聊你們的互動、怎麼回、怎麼約", panel)
+
     def test_big_five_onboarding_delegates_to_the_shared_session_service(self):
         outcome = {"status": "committed", "reply": "新的結果已套用。", "kind": "big_five"}
         profile = {"big_five": {"O": 7, "summary": "喜歡探索"}, "agentic_assessment_session": {
