@@ -19,6 +19,7 @@ from services.ayue_agent.web_tools import web_enabled
 from services.profile_location import normalize_profile_location, safe_profile_location
 from services.ayue_agent.public_relationship_projection import anonymize_counterparty_payload
 from services.match_reason_service import V4_REASON_VERSION, reason_for_viewer
+from services.demo_cleanup_service import DemoCleanupError, clear_all_demo_state, graph_health
 
 router = APIRouter(prefix="/api", tags=["System"])
 
@@ -225,6 +226,7 @@ def get_demo_status(user_id: str):
         "recent_context": safe_recent_context(profile.get("current_context", ""), "尚無近期情境"),
         "match_search_status": search_status,
         "has_pending_confirmation": bool(profile.get("agentic_pending_confirmation")),
+        "graph_status": graph_health()["status"],
     }
 
 
@@ -279,19 +281,10 @@ def get_recent_context_status(user_id: str, run_key: str | None = None):
 
 @router.post("/clear")
 def clear_data(req: ClearRequest):
-    profiles_coll.delete_many({})
-    matches_coll.delete_many({})
-    messages_coll.delete_many({})
-    
-    # 嘗試通知 9001 埠口的 Agent 清空 Neo4j Graph
     try:
-        resp = requests.post("http://127.0.0.1:9001/api/clear_graph", timeout=10)
-        resp.raise_for_status()
-        print("🧠 已成功通知 Agent 清空 Neo4j Graph")
-    except Exception as e:
-        print(f"⚠️ 通知 Agent 清空 Neo4j Graph 失敗: {e}")
-        
-    return {"status": "success"}
+        return clear_all_demo_state()
+    except DemoCleanupError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
 
 @router.get("/notifications")
 def get_notifications(user_id: str):

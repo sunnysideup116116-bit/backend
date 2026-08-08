@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date as date_value, datetime, timedelta, timezone
+from difflib import SequenceMatcher
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from uuid import uuid4
@@ -14,6 +15,8 @@ from database import calendar_events_coll, profiles_coll
 
 
 ACTIVE_EVENT_STATUSES = {"confirmed", "pending_reconfirmation"}
+_RESOLUTION_CANDIDATES: dict[tuple[str, str], list[dict]] = {}
+_RESOLUTION_KIND: dict[tuple[str, str], str] = {}
 
 
 def get_timezone(zone_name: str):
@@ -157,6 +160,17 @@ def list_events(user_id: str, start: datetime, end: datetime, include_cancelled:
     return [serialize_event(event, user_id) for event in calendar_events_coll.find(query).sort("start_at", 1)]
 
 
+def get_next_event(user_id: str, start: datetime, end: datetime) -> dict | None:
+    """Return the owner's nearest active event in a bounded time window."""
+    query = {
+        "participants": user_id,
+        "status": {"$in": list(ACTIVE_EVENT_STATUSES)},
+        "start_at": {"$gte": as_utc(start), "$lt": as_utc(end)},
+    }
+    event = calendar_events_coll.find_one(query, sort=[("start_at", 1), ("event_id", 1)])
+    return serialize_event(event, user_id) if event else None
+
+
 def find_conflicts(participant_ids: list[str], start_at: datetime, end_at: datetime, exclude_event_id: str | None = None) -> list[dict]:
     query: dict = {
         "participants": {"$in": participant_ids},
@@ -290,7 +304,7 @@ def cancel_event(
     return serialize_event(calendar_events_coll.find_one({"_id": event["_id"]}), user_id)
 
 
-_TEMPORAL_WORDS = ("今天", "明天", "後天", "這週", "本週", "下週", "本月", "下個月", "的行程", "幫我", "取消", "修改", "刪除", "移除", "更改", "在", "去", "到", "原本", "改成", "改到", "移到", "把", "將")
+_TEMPORAL_WORDS = ("今天", "明天", "後天", "這週", "本週", "下週", "本月", "下個月", "的行程", "幫我", "取消", "修改", "刪除", "刪掉", "移除", "更改", "在", "去", "到", "原本", "改成", "改到", "移到", "把", "將")
 
 # 模型回覆常見的全形/特殊標點 → 半形對照，比對前統一正規化避免「09:00–10:00」vs「09:00-10:00」漏抓
 _HINT_NORMALIZE_TABLE = str.maketrans({
@@ -389,8 +403,28 @@ def _normalize_hint_text(s: str) -> str:
     return re.sub(r"\s+", " ", text.translate(_HINT_NORMALIZE_TABLE)).strip()
 
 
+def _clean_event_hint(event_hint: str) -> str:
+    """Remove conversational wrappers while retaining title/date/time signals."""
+    text = _normalize_hint_text(event_hint)
+    if not text:
+        return ""
+    # These are request wrappers, not event identity. Keep this list closed and
+    # structural; do not grow it from individual failures into an intent router.
+    text = re.sub(
+        r"(?:請|麻煩|可以|能不能|幫忙|幫我|我要|我想要|我想|想要|請問|一下|好嗎)",
+        " ", text,
+    )
+    text = re.sub(r"(?:行程|活動)(?:就)?(?:叫|名稱(?:是)?|名叫)?", " ", text)
+    text = re.sub(r"(?:這筆|這個|那筆|那個|剛剛那筆|剛才那筆|上面那筆|上一筆)", " ", text)
+    text = re.sub(r"(?:取消|刪除|刪掉|移除|改掉|修改|更改|編輯)(?:它|這筆|那筆)?", " ", text)
+    text = re.sub(r"(?:阿|啊|喔|哦)", " ", text)
+    text = re.sub(r"的(?:\s|$)", " ", text)
+    text = re.sub(r"[，。！？!?、：:；;（）()\[\]{}<>「」『』]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _event_matches_hint(event: dict, event_hint: str) -> bool:
-    raw = _normalize_hint_text(str(event_hint or ""))
+    raw = _clean_event_hint(str(event_hint or ""))
     if not raw:
         return False
     # 剔除時間詞與動詞（不在行程資料裡），避免整段子字串比對失敗
@@ -438,9 +472,161 @@ def _resolve_event(user_id: str, event_hint: str, *, source_type: str | None = N
     return None, "ambiguous" if len(matches) > 1 else "not_found"
 
 
-def resolve_owned_event(user_id: str, event_hint: str) -> tuple[dict | None, str | None]:
+def _event_matches_explicit_temporal(event: dict, hint: str, temporal_references: dict[str, str] | None = None) -> bool:
+    """Apply only explicit date/time constraints before fuzzy title matching."""
+    normalized = _normalize_hint_text(hint)
+    for term, resolved in (temporal_references or {}).items():
+        if term and resolved:
+            normalized = normalized.replace(str(term), str(resolved))
+    date_tokens = re.findall(r"(?:\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}/\d{1,2}\b)", normalized)
+    time_tokens = re.findall(r"\b\d{1,2}:\d{2}\b", normalized)
+    if not date_tokens and not time_tokens:
+        return True
+    try:
+        zone = get_timezone(event.get("timezone") or "Asia/Taipei")
+        start = as_utc(event["start_at"]).astimezone(zone)
+        end = as_utc(event["end_at"]).astimezone(zone)
+    except Exception:
+        return False
+    if date_tokens:
+        date_ok = False
+        for token in date_tokens:
+            if "-" in token:
+                date_ok = token == start.date().isoformat()
+            else:
+                month, day = (int(part) for part in token.split("/"))
+                date_ok = (month, day) == (start.month, start.day)
+            if date_ok:
+                break
+        if not date_ok:
+            return False
+    if time_tokens:
+        event_times = {start.strftime("%H:%M"), end.strftime("%H:%M")}
+        if not all(f"{int(token[:2]):02d}:{token[3:]}" in event_times for token in time_tokens):
+            return False
+    return True
+
+
+def resolve_owned_event_with_candidates(
+    user_id: str,
+    event_hint: str,
+    *,
+    source_type: str | None = None,
+    temporal_references: dict[str, str] | None = None,
+    limit: int = 3,
+) -> tuple[dict | None, str | None, list[dict]]:
+    """Resolve an event once, returning bounded server-side fuzzy candidates.
+
+    Exact matching remains the compatibility path.  Fuzzy matching is only a
+    suggestion path: explicit date/time constraints are hard filters, short or
+    generic hints never trigger a fuzzy write, and a close second candidate is
+    surfaced as ambiguity instead of being silently selected.
+    """
+    hint = str(event_hint or "").strip()
+    if not hint:
+        return None, "not_found", []
+    query: dict = {"participants": user_id, "status": {"$in": list(ACTIVE_EVENT_STATUSES)}}
+    if source_type:
+        query["source_type"] = source_type
+    events = list(calendar_events_coll.find(query).sort("start_at", 1))
+    exact = [event for event in events if _event_matches_hint(event, hint)]
+    if len(exact) == 1:
+        return exact[0], "exact", []
+    if len(exact) > 1:
+        return None, "ambiguous", exact[:limit]
+
+    cleaned = _clean_event_hint(hint)
+    for term in _TEMPORAL_WORDS:
+        cleaned = cleaned.replace(term, " ")
+    query_identity = re.sub(r"[\d:/\-\s]+", "", cleaned).strip().lower()
+    has_temporal_constraint = bool(re.findall(r"(?:\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}/\d{1,2}\b|\b\d{1,2}:\d{2}\b)", _normalize_hint_text(hint)))
+    if len(query_identity) < 3 and not has_temporal_constraint:
+        return None, "not_found", []
+    scored: list[tuple[float, dict]] = []
+    for event in events:
+        if not _event_matches_explicit_temporal(event, hint, temporal_references):
+            continue
+        identity = " ".join(str(event.get(key) or "") for key in ("title", "activity", "location"))
+        identity = re.sub(r"\s+", "", _normalize_hint_text(identity)).lower()
+        if not identity:
+            continue
+        score = SequenceMatcher(None, query_identity, identity).ratio()
+        # A substring match is stronger than a whole-string typo comparison.
+        if query_identity in identity:
+            score = max(score, 0.9)
+        if len(query_identity) >= 3 and score < 0.66:
+            continue
+        scored.append((score, event))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if not scored:
+        return None, "not_found", []
+    if len(query_identity) < 3 and len(scored) != 1:
+        return None, "ambiguous" if len(scored) > 1 else "not_found", [event for _score, event in scored[:limit]]
+    top_score = scored[0][0]
+    candidates = [event for _score, event in scored[:limit]]
+    if len(scored) > 1 and top_score - scored[1][0] < 0.15:
+        return None, "ambiguous", candidates
+    return scored[0][1], "fuzzy_suggestion", candidates[:1]
+
+
+def resolve_owned_event(
+    user_id: str,
+    event_hint: str,
+    *,
+    temporal_references: dict[str, str] | None = None,
+) -> tuple[dict | None, str | None]:
     """Resolve either a personal event or a shared date visible to this owner."""
-    return _resolve_event(user_id, event_hint)
+    event, resolution, candidates = resolve_owned_event_with_candidates(
+        user_id, event_hint, temporal_references=temporal_references,
+    )
+    _RESOLUTION_CANDIDATES[(user_id, str(event_hint or ""))] = list(candidates)
+    _RESOLUTION_KIND[(user_id, str(event_hint or ""))] = str(resolution or "")
+    # Keep the legacy success shape (event, None) for callers that only need
+    # exact matching; preflight also accepts the richer status values.
+    return event, None if resolution in {"exact", "fuzzy_suggestion"} else resolution
+
+
+def get_owned_event_resolution_candidates(user_id: str, event_hint: str) -> list[dict]:
+    key = (user_id, str(event_hint or ""))
+    candidates = list(_RESOLUTION_CANDIDATES.pop(key, []))
+    return candidates
+
+
+def get_owned_event_resolution_kind(user_id: str, event_hint: str) -> str:
+    key = (user_id, str(event_hint or ""))
+    return str(_RESOLUTION_KIND.pop(key, ""))
+
+
+def resolve_owned_event_reference(
+    user_id: str, reference: dict[str, object],
+) -> tuple[dict | None, str | None]:
+    """Load a previously server-selected event without natural-language matching.
+
+    ``reference`` is created by a trusted calendar read/preflight path.  The
+    caller may pass only the opaque server record; ownership, active status and
+    the snapshot revision are checked here before a mutation plan is built.
+    """
+    event_id = str(reference.get("event_id") or "")
+    if not event_id:
+        return None, "not_found"
+    event = calendar_events_coll.find_one({
+        "event_id": event_id,
+        "participants": user_id,
+        "status": {"$in": list(ACTIVE_EVENT_STATUSES)},
+    })
+    if not event:
+        return None, "stale_revision" if reference.get("revision") else "not_found"
+    expected_revision = reference.get("revision")
+    if expected_revision is not None:
+        try:
+            if int(event.get("revision", 0) or 0) != int(expected_revision):
+                return None, "stale_revision"
+        except (TypeError, ValueError):
+            return None, "stale_revision"
+    expected_source = str(reference.get("source_type") or "")
+    if expected_source and str(event.get("source_type") or "") != expected_source:
+        return None, "stale_revision"
+    return event, None
 
 
 def resolve_owned_events_for_cancel(

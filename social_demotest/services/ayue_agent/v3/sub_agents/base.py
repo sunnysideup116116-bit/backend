@@ -29,6 +29,10 @@ class SubAgentMetrics:
     tools_raw: list[dict] = field(default_factory=list)
     input_payload: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    # Safe parser outcomes for local debug and scheduler classification.  This
+    # contains codes only; raw arguments remain in the existing loopback-only
+    # debug payload and never enter public trace.
+    rejected_calls: list[str] = field(default_factory=list)
 
 
 def _build_tools(tool_names: Iterable[str]) -> list[dict]:
@@ -132,17 +136,23 @@ def run_sub_agents(
             tool_name = tc.get("name", "")
             arguments = tc.get("arguments", {}) or {}
             if tool_name not in tool_names:
+                metrics.rejected_calls.append("tool_not_visible")
                 continue
             spec = get_tool_spec(tool_name)
             if spec is None:
+                metrics.rejected_calls.append("tool_not_registered")
                 continue
             arguments = _repair_categories(tool_name, arguments)
             if not planner_arguments_allowed(spec, arguments):
+                metrics.rejected_calls.append("schema_invalid")
                 continue
             try:
                 proposals.append(ToolProposal(tool_name=tool_name, arguments=arguments))
             except Exception:
+                metrics.rejected_calls.append("forbidden_or_invalid_arguments")
                 continue
+        if result.tool_calls and not proposals and metrics.rejected_calls:
+            metrics.error = "no_valid_proposal"
         return proposals, metrics
     except Exception as exc:
         metrics.error = str(exc)

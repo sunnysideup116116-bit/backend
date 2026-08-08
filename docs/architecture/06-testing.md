@@ -25,12 +25,12 @@ Python compile 檢查：
 | 檔案 | 覆蓋 |
 | --- | --- |
 | `test_v3_contracts.py` | `Plan`/`SubTask`/`ToolProposal` typed contracts、DAG 驗證、forbidden fields |
-| `test_v3_planner.py` | `plan_turn`：牛排範例產生 calendar+places+synthesizer DAG、synthesizer-only、無 tool call／錯工具名／invalid args／timeout → None、opportunity 攜帶 |
+| `test_v3_planner.py` | `plan_turn`：牛排範例產生 calendar+places+synthesizer DAG、assessment intent routing 到 profile、synthesizer-only、無 tool call／錯工具名／invalid args／timeout → None、opportunity 攜帶 |
 | `test_v3_guard.py` | `guard_proposal` 全部 code：pass、unknown tool、schema、duplicate、step limit、write requires confirmation |
 | `test_v3_context_slicer.py` | 各 agent 的 privacy-safe slice 欄位 |
-| `test_v3_scheduler.py` | Scheduler 編排：拓撲層、平行、依賴失敗 skip、confirmation 入口、fail closed |
-| `test_v3_sub_agents.py` | 各 sub-agent 的 tool 集合與 system prompt 行為 |
-| `test_v3_synthesizer.py` | Synthesizer 綜合 observation、place card 決策、內部欄位剝離 |
+| `test_v3_scheduler.py` | Scheduler 編排：拓撲層、平行、依賴失敗 skip、assessment profile confirmation、confirmation 入口、fail closed |
+| `test_v3_sub_agents.py` | 各 sub-agent 的 tool 集合與 system prompt 行為，含 profile.start_assessment 與 Calendar typed command rejection |
+| `test_v3_synthesizer.py` | Synthesizer 綜合 observation、typed clarification／confirmed domain reply 不經 LLM 改寫、place card 決策、內部欄位剝離 |
 | `test_v3_confirmation.py` | ConfirmationManager：CAS claim、batch 合併、多 confirmation 獨立性 |
 | `test_v3_write_executors.py` | 寫入執行器：start_search 冪等重放、decide_active_proposal revision CAS / stale、assessment、calendar batch（混合 update+cancel） |
 | `test_v3_trajectories.py` | 匿名 trajectory fixtures：修真實失敗案例時先新增 trajectory，再修 contract／projection／prompt |
@@ -76,9 +76,14 @@ Python compile 檢查：
 
 同步更新 trace allowlist（`scheduler.py:_persist_trace` 允許的 metadata）與 privacy test（`test_ayue_agent_stream.py` 等）。Trace 不得包含 arguments、tool result、prompt、raw exception、ID 或 revision。
 
+Synthesizer 另須覆蓋：capability/general chat 的 synthesizer-only path 不呼叫 domain tool；`reply_source` 能區分 capability、verified observation、LLM 與 fallback；provider error／空 content／被拒絕的模型內容標為 `degraded`，且 Final 必須與 Synthesizer 節點結果逐字一致。Local debug 的 `模型 Function Calls=[]` 代表該回合沒有需要的卡片決策工具，不是 function failure。
+
 ## 5. 交付檢查清單
 
 - Python source compile 通過。
 - 主服務與 matchmaker 可啟動，`GET /` 與 port 9001 `/health` 回 200。
 - 修改 runtime contract、tool list、state machine、環境旗標或 App migration 步驟時，同步更新 `AYUE_V3_ARCHITECTURE.md`。
 - 交付清單列出修改檔案、測試指令／結果、未解決問題；不交付 `.env`、venv、log、cache 或真實 trace。
+`test_v3_calendar_commands.py` covers the current typed Calendar mutation contract: authority-field rejection, missing-field clarification, unique/ambiguous/not-found preflight, personal/shared-date routing metadata, one confirmation, one-time resolution, sequential stop-on-failure, and stale cancellation batches.
+
+The regression suite also covers the `calendar.get_next_my_event` safe projection, pronoun follow-up via `target_reference="recent_event"`, soft match-opportunity observations (including explicit acceptance into normal confirmation), and stable match-search failure codes/stages for unavailable vector or matchmaker services.

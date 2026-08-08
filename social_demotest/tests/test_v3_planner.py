@@ -71,6 +71,26 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(len(plan.tasks), 1)
         self.assertEqual(plan.tasks[0].agent, "synthesizer")
 
+    def test_basic_assessment_intent_has_profile_task(self):
+        turn = self._turn("那我來做基本性格")
+        expected = {
+            "tasks": [
+                {"id": "p1", "agent": "profile", "depends_on": [],
+                 "task_brief": "開始基本性格探索，呼叫 profile.start_assessment(kind=basic)"},
+                {"id": "s1", "agent": "synthesizer", "depends_on": ["p1"],
+                 "task_brief": "根據探索 confirmation 結果回覆使用者"},
+            ]
+        }
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[
+                {"name": "decompose_tasks", "arguments": expected},
+            ]),
+        ):
+            plan, _metrics = plan_turn(turn, pending_confirmations=[])
+        self.assertIsNotNone(plan)
+        self.assertEqual([task.agent for task in plan.tasks], ["profile", "synthesizer"])
+
     def test_no_tool_call_returns_none(self):
         turn = self._turn("x")
         with patch(

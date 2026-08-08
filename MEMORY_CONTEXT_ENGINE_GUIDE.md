@@ -331,3 +331,11 @@ Context Engine 的輸出應是 provider-neutral typed bundle，而不是 prompt 
 - Shadow 指標只允許 count、latency、selected source type、truncated、error code。
 - 去識別化範例，不提供真實 user ID、raw messages、Graph dump 或 prompt。
 - 所有正式資料 migration 先 dry-run；由 reviewer 明確批准後才 apply。
+# Demo Graph reset and degraded reads
+
+Graph reads used by matching are optional signals. Empty or unavailable Graph
+memory must remain a bounded degraded result and must not be treated as a
+successful write or as a generic pipeline crash. The local Demo Graph reset is
+explicitly guarded and returns no raw Graph data. Full Demo reset clears Graph,
+Mongo app collections, and process-local fallback state in a fixed order; it
+does not promise cross-store rollback.

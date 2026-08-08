@@ -260,18 +260,18 @@ calendar / places(+web) / match / relationship / profile 五個 sub-agent，各�
 `run_public_agent_turn_v3` 是唯一 orchestrator：
 
 1. **Assessment 接管**：`awaiting_commit`／active assessment session 存在時，直接處理（commit/cancel/advance），不進 Planner。
-2. **Confirmation 入口**：`confirmation_choice` 只接受封閉的「確認／取消」；確認只執行使用者最後看到、與 preview/request fingerprint 綁定的最新一筆 pending confirmation。建立新 confirmation 時會作廢同一使用者較舊的 pending action，每回合最多建立一筆待確認副作用，不合併多個寫入。
+2. **Confirmation 入口**：一般副作用只接受封閉的「確認／取消」；`profile.start_assessment` 的 pending confirmation 另外接受「開始／開始吧／開始啊／開始阿」，且只會匹配 assessment confirmation，不會誤確認 calendar 或其他 action。確認只執行使用者最後看到、與 preview/request fingerprint 綁定的最新一筆 pending confirmation。建立新 confirmation 時會作廢同一使用者較舊的 pending action。每回合最多建立一筆待確認副作用；Calendar Agent 可把有順序的多個 typed commands 放入同一個 server-owned plan，仍只需一次確認。
 3. **Planner**：拆 DAG。
 4. **Opportunity 處理**：`social_opening` 且 profile ready → 建立 guidance confirmation；not_ready → 回 missing-basis 問題。
 5. **DAG 執行**：`_topological_layers` 分層，同層平行（`ThreadPoolExecutor`，`AYUE_SUBAGENT_MAX_PARALLEL` 預設且硬上限 2）。prior observation 只給 `depends_on` 宣告的依賴。
-6. **Synthesizer**：彙整所有 observation 產出最終回覆；地點卡以 `decide_place_cards` typed tool 決定顯示。
+6. **Synthesizer**：彙整所有 observation 產出最終回覆；地點卡只有在存在候選卡片時才以 `decide_place_cards` typed tool 決定顯示。Capability/general chat 沒有 tool call 是合法結果。
 
 ### 執行規則
 
 - **同層並行**：`depends_on=[]` 的任務同層執行，無執行順序保證。
 - **prior observation 只給依賴**：同層無依賴任務之間互不可見；synthesizer 例外（彙整所有）。
 - **多 tool calls 全數執行**：單一 call 失敗不使整個 task 標記失敗；只要至少一個 call 成功，task 即為 ok。
-- **duplicate 與額度以整回合為範圍**：平行任務共用去重狀態、最多三個唯讀步驟與一個寫入 proposal。
+- **duplicate 與額度以整回合為範圍**：平行任務共用去重狀態、最多三個唯讀步驟與一筆 pending confirmation；Calendar Agent 的一個 command batch 可包含最多 10 個有序 mutation plans。
 - **MENTIONED 工具需有 @ 對象**：無 @ 時該 call 標記 `FAILED/mentioned_required`，不執行、不崩潰 run。
 - **sub-task 例外不連坐**：任何未捕獲例外轉成 `FAILED`，run 永不因單一 sub-task 崩潰成整段 error。
 - **reuse within task**：`places.measure_distance` 同 task 內等價地點的第二次呼叫重用第一個 observation。
@@ -284,7 +284,8 @@ calendar / places(+web) / match / relationship / profile 五個 sub-agent，各�
 WRITE proposal 通過 Guard 後，Scheduler 呼叫 `prepare_write_confirmation`：
 
 - `match.start_search`：先 `assess_match_opportunity`；not_ready 回 missing-basis 問題，active_match_blocked 回「不重複開新搜尋」，ready 才建立 confirmation。
-- `calendar.*`：解析目標行程、檢查衝突、產生 preview 文字；ambiguous/not_found/too_many 回錯誤，不建立 confirmation。一次只允許一個明確寫入，若要建立或修改多筆行程，需拆成多輪並逐筆確認。
+- `calendar.submit_commands`：Calendar Agent 只提交不含 authority fields 的 `CalendarCommand` batch。Scheduler 使用同一回合的 authoritative clock 做 deterministic preflight；create/update/cancel 的目標若需要只解析一次，產生不暴露給 LLM 的 `CalendarMutationPlan`。missing_fields/invalid_date/ambiguous/not_found/too_many/invalid_interval/stale_revision/invalid_command 是正常 `needs_clarification` outcome，不建立 confirmation。ready 時同一 batch 共用一筆 confirmation，確認後依序執行，第一個真正 failure 後停止。
+- Typed command 只接受 canonical `action/title/target_hint/target_hints`；Scheduler 在嚴格驗證前僅為相容 provider 將 `type/summary/event_hint/event_hints` 映射到 canonical 欄位。最近一次唯一選取的行程與未完成 command 只保存 15 分鐘的 server-owned reference/draft projection；projection 不含 event_id/revision，且 reference stale 時不重新做自然語言辨識。
 - `match.decide_active_proposal`：preflight 綁定當下 canonical proposal revision；確認執行時再次比對，stale 即拒絕。
 - `profile.start_assessment`：驗證 kind（basic→big_five、deep→deep_profile）。
 
@@ -297,8 +298,10 @@ Pending payload 只保存 executor-safe 資料（event_id、revision、targets�
 - `match.start_search` → `match_action_service.start_match_search`（idempotency key `confirmation:<id>`）
 - `match.decide_active_proposal` → `decide_active_proposal`（revision CAS + stale response）
 - `profile.start_assessment` → `assessment_session_service.start_assessment_session`
-- `calendar.*` → calendar/date coordination service（confirmation-indexed idempotency key）
-- 修改/取消行程的查詢任務用 `calendar.find_my_event`（預設回傳最多 10 筆候選，含 location/notes/event_kind；`limit` 可到 30）；候選查詢 `not_found` 時，寫入任務標 `no_write_proposed`（OK 而非失敗），Synthesizer 優雅回「找不到『X』行程」。
+- `calendar.submit_commands` → `_execute_calendar_mutation_plans` → calendar/date coordination service（每個 plan 使用 confirmation-indexed idempotency key；順序執行、stop-on-failure、無 automatic rollback）
+- `calendar.find_my_event` 只用於使用者真的詢問行程內容；mutation 不先做 read task，也不把 read projection 重新組成 `event_hint`。preflight 的 resolver 回傳 canonical event 後，executor 只使用 server-owned event_id/revision。缺少欄位、歧義與找不到目標回正常 clarification，不是 generic agent failure。
+
+Current opportunity contract: an explicit match request (including retry/search wording such as 「再配對一次」) creates a `match` task and follows the normal confirmation path. An indirect `social_opening` is only a soft, expiring observation; it never creates a pending confirmation or claims that a search started. If the user accepts the soft offer, Scheduler converts that explicit confirmation into the normal `match.start_search` confirmation.
 
 寫入一律走 domain service；Scheduler 只協調，不直接寫 MongoDB。
 
@@ -306,8 +309,8 @@ Pending payload 只保存 executor-safe 資料（event_id、revision、targets�
 
 - Planner 在拆解時標記 `social_opening`（想有人陪、想認識人、獨自參加不舒服）。
 - Scheduler 驗證 confidence ≥ 0.8 且 evidence_span 為原句子字串後，評估 profile basis：
-  - `ready` → 建立 `match.start_search` guidance confirmation，回覆「感覺這件事有人一起也不錯…要試試看嗎？」
-  - `not_ready` → 回 missing-basis 問題（想認識什麼樣的人／在意什麼特質…）
+  - `ready` → 產生短期 `match_opportunity_offer` observation，溫和詢問是否想找人；不建立 confirmation、不宣稱已開始搜尋。
+  - `not_ready` → 不啟動配對，也不把這個背景機會當 runtime failure；讓 Synthesizer 依目前訊息自然回覆。
   - `active_match_blocked` → 不重複開新搜尋
 - 明確「開始找人」的請求走同一條 preflight 路徑（`explicit_search=True`）。
 
@@ -329,7 +332,7 @@ V3 agent trace 保存於 `agent_runs`（`agent_version: "v3"`），只允許：
 - tool name/ok/error code
 - event sequence、latency、final intent/fallback code
 
-Trace 不保存完整 prompt、owner message、observations、tool arguments/results、對方資料或 raw exception。新增欄位時必須先加入 allowlist 並補 privacy test。
+Trace 不保存完整 prompt、owner message、observations、tool arguments/results、對方資料或 raw exception。Synthesizer 的 `reply_source`、`fallback_reason` 與 allowlisted `error_code` 只能記錄在本機 debug 或 allowlisted result metadata；`tool_calls=[]` 代表本回合沒有需要的工具，不代表執行失敗。新增欄位時必須先加入 allowlist 並補 privacy test。
 
 ## 10. Runtime flags
 
@@ -345,6 +348,7 @@ Trace 不保存完整 prompt、owner message、observations、tool arguments/res
 | `AYUE_ALLOWED_RUNTIME_MODELS` | 管理 API 可切換的 model allowlist；未設定時只允許目前設定值 |
 | `AYUE_SUBAGENT_TIMEOUT_MS` | 單一 sub-agent LLM 呼叫逾時（`.env.example` 已保留，目前 scheduler 尚未消費此旗標；LLM 逾時行為由 `ai_service` 提供） |
 | `AYUE_DEFAULT_TIMEZONE` | 預設 `Asia/Taipei` |
+| `AYUE_CALENDAR_STATE_MONGO` | Calendar recent reference/draft 是否持久化到 Mongo；預設 `on`（仍有 process-memory fallback，TTL 15 分鐘） |
 | `AYUE_PROFILE_SKILLS_MODE=on\|shadow\|off` | Profile extractor 寫入、shadow 觀察或停用（`shadow` 只記錄不寫入） |
 | `AYUE_PROFILE_SKILLS_USER_ALLOWLIST` | Profile rollout allowlist |
 | `AYUE_PRIVATE_AGENTIC_MODE` | Private runtime，與 Public V3 分開 |
@@ -418,3 +422,24 @@ Trace 不保存完整 prompt、owner message、observations、tool arguments/res
 ## 13. 設計文件
 
 完整 V3 設計見 `docs/superpowers/specs/2026-08-04-sub-agent-architecture-design.md`。
+### Calendar clarification and fuzzy target contract
+
+Calendar target lookup keeps exact matching as the compatibility path and may
+return a bounded fuzzy suggestion for an owner-visible typo. Explicit date and
+time constraints remain hard filters; ambiguous or close candidates become a
+typed clarification with opaque `candidate_1..candidate_3` references. Only
+safe labels reach the model. The Synthesizer may phrase missing-field and
+candidate clarifications, but must not claim a mutation happened or replace a
+server outcome with a fixed field list. A read miss may produce the same
+bounded candidate suggestion, never a generic agent failure.
+# Demo maintenance and match diagnostics
+
+The local Demo destructive tools are guarded by `DEMO_DESTRUCTIVE_TOOLS_ENABLED`.
+Full reset clears Neo4j first, then all non-system collections in the configured
+Mongo database and V3 process-local fallback state; it is not a distributed
+transaction. A failed subsystem must be surfaced as a typed partial failure.
+
+Match search progress separates candidate qualification, matchmaker request,
+matchmaker response, and proposal write. Public status exposes only allowlisted
+error codes and failure stages; raw provider output, prompts, Graph content,
+and exception messages remain server-side only.

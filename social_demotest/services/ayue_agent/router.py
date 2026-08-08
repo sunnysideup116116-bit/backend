@@ -15,6 +15,8 @@ def _compact(message: str) -> str:
 
 
 def _v2_yes(message: str) -> bool:
+    if _compact(message) in {"對", "是", "沒錯"}:
+        return True
     return _compact(message) in {"好", "好的", "可以", "確認", "確定", "要", "yes", "ok"}
 
 

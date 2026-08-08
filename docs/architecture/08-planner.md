@@ -63,20 +63,27 @@ Planner 透過**單一 function calling** `decompose_tasks` 輸出，tool call �
 | `mentioned_contacts` | 本回合 server 驗證過的 @ 已接受聯絡人公開名稱 |
 | `pending_confirmations` | 該使用者目前有效的 pending confirmation 摘要 |
 
-Prompt 中列出六個 sub-agent 的用途描述（`_AGENT_DESCRIPTIONS`），並給 13 條拆解規則，重點包括：
+Prompt 中列出六個 sub-agent 的用途描述（`_AGENT_DESCRIPTIONS`），並給 14 條拆解規則，重點包括：
 
 1. **平行原則**：可平行時 `depends_on=[]`；彼此不能互相依賴。
 2. **synthesizer 必為終端**：必須依賴所有需要彙整的 task。
-3. **agent 選擇**：行程→calendar；地點→places；配對→match；@ 對象/關係→relationship；偏好/近期情境→profile；不確定→只回 synthesizer。
+3. **agent 選擇**：行程→calendar；地點→places；配對→match；@ 對象/關係→relationship；偏好/近期情境或開始／重新開始 assessment→profile；不確定→只回 synthesizer。
 4. **新增行程**：單一 calendar task 即可，不必先查詢（task_brief 直接描述要新增的行程）。
-5. **修改/取消行程**：拆成**兩個** calendar task——「查詢任務」（找出所有原本行程，可並行）+「寫入任務」（`depends_on` 查詢任務）；新增需求獨立成可並行的 calendar task。
+5. **修改/取消行程**：單一 calendar task 直接描述完整 mutation；由 Calendar Agent 產生 typed command，server preflight 唯一 resolve target。
 6. **Opportunity**：使用者表達想有人陪、想認識人或獨自參加不舒服時，在 `opportunity` 填 `social_opening` + 原句 `evidence_span` + `confidence ≥ 0.8`；單純旅行、寒暄或負面情緒一律 `none`。
-7. **只呼叫 `decompose_tasks`**，不輸出其他文字。
+7. **Assessment routing**：做／開始／重新做基本性格或深層探索時，必須建立 profile task，不得只建立 synthesizer task。
+8. **只呼叫 `decompose_tasks`**，不輸出其他文字。
 
 ## 4. 呼叫流程（plan_turn 內部）
 
 ```text
 Scheduler: plan_turn(turn_ctx, pending_confirmations=...)
+
+Current contract corrections:
+
+- An explicit request to start/retry/search for a match (for example, 「再配對一次」) must produce a `match` task. It must not be represented only as `opportunity.social_opening`.
+- `opportunity.social_opening` is a soft, non-actionable suggestion. Scheduler may show it only as an observation; it does not create a confirmation and must not claim that matching started.
+- Calendar update/cancel follow-ups use the server-owned `calendar_recent_reference` when the user refers to the event just shown. The Planner/Calendar Agent may emit `target_reference="recent_event"`; it never emits authority fields.
   → 組 prompt（含本回合 context）
   → generate_chat_completion_with_tools(prompt, [decompose_tasks schema], temperature=0)
   → 檢查 tool_calls:
@@ -89,9 +96,7 @@ Scheduler: plan_turn(turn_ctx, pending_confirmations=...)
 
 ## 5. Scheduler 如何使用 Plan
 
-1. **Opportunity 驗證**：`signal == "social_opening"` 且 `confidence ≥ 0.8` 且 `evidence_span` 是原句連續子字串才採用；接著 `assess_match_opportunity`：
-   - `ready` → 直接建立 `match.start_search` guidance confirmation（不經 match sub-agent）。
-   - `not_ready` → 回 missing-basis 問題（引導補齊 profile）。
+1. **Opportunity 驗證**：`signal == "social_opening"` 且 `confidence ≥ 0.8` 且 `evidence_span` 是原句連續子字串才採用；`ready` 時只產生短期 soft-offer observation，不建立 confirmation。明確開始／重試配對（例如「再配對一次」）必須建立 `match` task，走一般 confirmation。
 2. **拓撲分層**：`_topological_layers` 依 `depends_on` 分層，同層平行執行（`AYUE_SUBAGENT_MAX_PARALLEL` 預設 5）。
 3. **Prior observation 只給依賴**：`_prior_observations_for` 只回傳該 task 宣告的 `depends_on` 的結果——同層無依賴的任務互不可見；synthesizer 例外（彙整全部）。
 4. **依賴失敗**：該 task 標記 `SKIPPED (dependency_failed)`，不執行。

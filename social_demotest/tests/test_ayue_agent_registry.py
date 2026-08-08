@@ -15,7 +15,7 @@ from services.ayue_agent.tools import execute_tool
 class AyueAgentRegistryTests(unittest.TestCase):
     def test_each_registered_read_tool_has_a_runtime_executor_key(self):
         executor_keys = {
-            "calendar_events", "calendar_event_find", "current_time", "match_status",
+            "calendar_events", "calendar_event_find", "calendar_next_event", "current_time", "match_status",
             "counterparty_summary", "recent_context", "relationship_evidence", "mentioned_contact_summary", "accepted_contact_list", "memory_profile",
             "self_profile",
         }
@@ -149,6 +149,26 @@ class AyueAgentRegistryTests(unittest.TestCase):
         self.assertNotEqual(result.error_code, "invalid_tool_output")
         self.assertEqual(result.data["status"], "not_found")
         self.assertEqual(result.data["query"], "不能吃東西")
+
+
+    def test_calendar_next_event_projects_serialized_domain_event(self):
+        from datetime import datetime, timezone
+
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="最近有啥行程")
+        event = {
+            "event_id": "e-next", "source_type": "personal", "participants": ["owner"],
+            "title": "睡覺", "activity": "睡覺", "status": "confirmed", "revision": 2,
+            "start_at": "2026-08-08T09:00:00+00:00",
+            "end_at": "2026-08-08T11:00:00+00:00",
+            "timezone": "Asia/Taipei", "location": "", "notes": "",
+        }
+        with patch("services.ayue_agent.tools.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.get_next_event", return_value=event):
+            result = execute_tool(ToolCall(name="calendar.get_next_my_event"), ctx)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["status"], "found")
+        self.assertEqual(result.data["event"]["activity"], "睡覺")
+        self.assertEqual(result.private_data["calendar_event_reference"]["event"]["event_id"], "e-next")
 
 
 if __name__ == "__main__":

@@ -56,6 +56,7 @@
 | `calendar.update_my_event` | `calendar_update` | `event_hint` + 可改欄位 | `_calendar_execute` → 私人：`update_personal_event`；共同約會：`request_reschedule` |
 | `calendar.cancel_my_event` | `calendar_cancel` | `event_hint` | `_calendar_execute` → `cancel_event` / `cancel_coordination_or_event` |
 | `calendar.cancel_my_events` | `calendar_cancel` | `mode`(selected/all_upcoming) + `event_hints`(2–10) | `_calendar_execute`（batch）→ 逐筆取消，先驗證 `cancel_targets_are_current` |
+| `calendar.submit_commands` | `calendar_commands` | `commands`（1–10 個 authority-free `CalendarCommand`） | Scheduler deterministic preflight → server-owned `CalendarMutationPlan` → `_execute_calendar_mutation_plans`，依序執行、stop-on-failure |
 
 ## 4. 工具可見性（哪些 agent 看得到哪些工具）
 
@@ -65,7 +66,7 @@
 - `WEB_TOOLS` = `{web.search, web.extract}`；`PLACES_TOOLS` = `{places.search_nearby, places.measure_distance, places.resolve_place}`。
 - 只有 `places_agent` 同時有 web + places 工具。
 - `relationship.get_mentioned_contact_summary` 只在 server 驗證過 accepted @ mention 的回合才可見（`planner_tool_names(can_read_mentioned_contacts=...)`）。
-- `match.start_search` 的 confirmation 也可由 Planner 的 opportunity signal 建立（不經 match agent）。
+- 明確配對請求（例如「再配對一次」）必須由 Planner 建立 `match` task；`opportunity.social_opening` 只產生短期溫和提議 observation，不建立 confirmation。
 
 ## 5. 執行與驗證流程
 
@@ -99,3 +100,9 @@ sub-agent LLM function calling 輸出 {tool_name, arguments}
 5. 加入重複請求、stale revision、雙方並發、終態不可覆寫與 effect failure tests。
 
 修改 runtime contract、tool list 或 state machine 時，必須同步更新 `AYUE_V3_ARCHITECTURE.md` 與本文件。
+
+## Current Calendar Agent mutation contract
+
+`calendar.submit_commands` is the registered typed intent entry point for the V3 Calendar Agent. Its `CalendarCommand` schema has no `user_id`, `event_id`, `revision`, `expected_revision`, or `coordination_id`. Scheduler preflight resolves targets once and creates the server-owned `CalendarMutationPlan`; plans never return to the model. Missing fields, ambiguous, and not-found outcomes are normal clarification results. Legacy calendar write tools remain only for compatibility.
+
+`calendar.get_next_my_event` is a bounded read for “最近一筆／最近有啥行程”. Its output is a safe event projection; the executor stores the canonical event reference privately so a subsequent pronoun follow-up can use `target_reference="recent_event"` without another natural-language lookup.

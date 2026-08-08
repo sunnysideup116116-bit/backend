@@ -30,6 +30,10 @@ def health_check():
     """Process-level readiness endpoint; does not read profiles or Neo4j."""
     return {"status": "ok", "service": "matchmaker"}
 
+
+def destructive_tools_enabled() -> bool:
+    return os.getenv("DEMO_DESTRUCTIVE_TOOLS_ENABLED", "off").strip().lower() in {"1", "true", "on"}
+
 # ??????慦?憭扯
 agent = MatchmakerAgent()
 
@@ -239,11 +243,13 @@ async def match_endpoint(req: MatchRequest):
             
         parsed_data = json.loads(clean_response)
 
+        if not isinstance(parsed_data, dict):
+            raise HTTPException(status_code=502, detail={"code": "matchmaker_invalid_response"})
         if parsed_data.get("error"):
             # A provider/runtime failure is not evidence that no candidate is
             # suitable.  Surface a service failure so the caller can preserve
             # the distinction in match state and user messaging.
-            raise HTTPException(status_code=502, detail="Matchmaker provider failed")
+            raise HTTPException(status_code=502, detail={"code": "matchmaker_provider_error"})
         
         # ?? ?????舀 matches ????澆?
         if parsed_data.get("outcome") == "no_suitable_candidate":
@@ -251,7 +257,13 @@ async def match_endpoint(req: MatchRequest):
         if "matches" in parsed_data and isinstance(parsed_data["matches"], list):
             parsed_data["matches"] = parsed_data["matches"][:1]
             if not parsed_data["matches"]:
-                raise HTTPException(status_code=502, detail="Invalid matchmaker response")
+                raise HTTPException(status_code=502, detail={"code": "matchmaker_invalid_response"})
+            if any(
+                not isinstance(item, dict) or not isinstance(item.get("matched_user_id"), str)
+                or not item.get("matched_user_id", "").strip()
+                for item in parsed_data["matches"]
+            ):
+                raise HTTPException(status_code=502, detail={"code": "matchmaker_invalid_response"})
             parsed_data["outcome"] = "selected"
             match_ids = [m.get("matched_user_id", "?") for m in parsed_data["matches"]]
             print(f"Agent matched ids: {match_ids}")
@@ -260,7 +272,7 @@ async def match_endpoint(req: MatchRequest):
             return parsed_data
         else:
             print("⚠️ LLM output did not include a valid match.")
-            raise HTTPException(status_code=502, detail="Invalid matchmaker response")
+            raise HTTPException(status_code=502, detail={"code": "matchmaker_invalid_response"})
         
     except json.JSONDecodeError:
         print("⚠️ 媒婆沒有照格式輸出 JSON，啟動防呆機制！")
@@ -473,17 +485,34 @@ def _neo4j_config():
 @app.post("/api/clear_graph")
 async def clear_graph_endpoint():
     print("🧹 收到清空 Neo4j Graph 請求")
+    if not destructive_tools_enabled():
+        raise HTTPException(status_code=403, detail={"code": "demo_tools_disabled"})
     URI, AUTH, DATABASE = _neo4j_config()
     try:
         with GraphDatabase.driver(URI, auth=AUTH) as driver:
             driver.verify_connectivity()
             with driver.session(database=DATABASE) as session:
                 session.run("MATCH (n) DETACH DELETE n").consume()
+        agent_memory_db.clear()
         print("✅ Neo4j Graph 已清空")
         return {"status": "success", "message": "Neo4j Graph 已清空"}
     except Exception as e:
-        print(f"❌ 清空 Neo4j Graph 失敗: {e}")
-        return {"status": "error", "message": str(e)}
+        print(f"❌ 清空 Neo4j Graph 失敗: {type(e).__name__}")
+        raise HTTPException(status_code=503, detail={"code": "graph_cleanup_failed"}) from e
+
+
+@app.get("/api/graph/health")
+async def graph_health_endpoint():
+    URI, AUTH, DATABASE = _neo4j_config()
+    if not URI:
+        return {"status": "not_configured"}
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH) as driver:
+            driver.verify_connectivity()
+        return {"status": "available"}
+    except Exception as exc:
+        print(f"⚠️ Graph health check failed: {type(exc).__name__}")
+        return {"status": "unavailable"}
 
 @app.post("/api/memory/apply")
 async def apply_memory(req: MemoryApplyRequest):

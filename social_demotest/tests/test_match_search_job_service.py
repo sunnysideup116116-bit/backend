@@ -41,6 +41,7 @@ class MatchSearchJobServiceTests(unittest.TestCase):
         self.assertEqual(result["estimated_seconds_max"], 180)
         self.assertEqual(set(result), {
             "status", "step", "progress_percent", "estimated_seconds_min", "estimated_seconds_max",
+            "reason_code",
         })
 
     @patch.object(jobs, "_finish_job")
@@ -120,6 +121,45 @@ class MatchSearchJobServiceTests(unittest.TestCase):
 
         finish.assert_called_once_with(job, "no_candidates")
         self.assertEqual(queue.call_args.args[2], "match_search_empty")
+
+    @patch.object(jobs, "queue_mediator_event")
+    @patch.object(jobs, "_finish_job", return_value=True)
+    @patch.object(jobs, "_claim_next_job")
+    def test_unavailable_pipeline_is_a_stable_failure_code(self, claim, finish, queue):
+        job = {"_id": "job", "job_id": "safe", "user_id": "owner", "lease_id": "lease"}
+        claim.return_value = job
+        jobs.register_match_search_pipeline(None)
+
+        self.assertTrue(jobs.run_one_match_search_job())
+
+        finish.assert_called_once_with(
+            job, "failed", error_code="pipeline_unavailable", failure_stage="loading_profile",
+        )
+        self.assertEqual(queue.call_args.args[0], "owner")
+        self.assertEqual(queue.call_args.args[2], "match_search_failed")
+
+    @patch.object(jobs, "queue_mediator_event")
+    @patch.object(jobs, "_finish_job", return_value=True)
+    @patch.object(jobs, "_report_progress", return_value=True)
+    @patch.object(jobs, "_claim_next_job")
+    def test_pipeline_error_preserves_allowlisted_code_and_stage(
+        self, claim, report, finish, queue,
+    ):
+        job = {"_id": "job", "job_id": "safe", "user_id": "owner", "lease_id": "lease"}
+        claim.return_value = job
+        jobs.register_match_search_pipeline(
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                jobs.MatchSearchPipelineError("matchmaker_unavailable", "matchmaker_request")
+            )
+        )
+
+        self.assertTrue(jobs.run_one_match_search_job())
+
+        finish.assert_called_once_with(
+            job, "failed", error_code="matchmaker_unavailable", failure_stage="matchmaker_request",
+        )
+        self.assertEqual(queue.call_args.args[0], "owner")
+        self.assertEqual(queue.call_args.args[2], "match_search_failed")
 
     @patch.object(match_router, "matches_coll")
     @patch.object(match_router, "profiles_coll")

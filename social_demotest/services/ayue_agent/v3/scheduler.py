@@ -23,7 +23,13 @@ from services.ayue_agent.tool_registry import (
 )
 from services.ayue_agent.tools import execute_tool
 from services.ayue_agent.web_tools import is_safe_public_url
-from services.ayue_agent.match_opportunity import assess_match_opportunity
+from services.ayue_agent.match_opportunity import (
+    accept_guidance_offer,
+    active_guidance_offer,
+    assess_match_opportunity,
+    claim_guidance_offer,
+    decline_guidance_offer,
+)
 from services.assessment_session_service import (
     active_assessment_session, advance_assessment_session,
     assessment_cancel_choice, assessment_commit_choice,
@@ -38,6 +44,11 @@ from .contracts import (
 )
 from .context_slicer import slice_for_agent
 from .guard import guard_proposal
+from .guard import guard_calendar_commands
+from .calendar_commands import preflight_calendar_commands
+from .calendar_drafts import clear_draft, get_draft, merge_command, save_draft
+from .calendar_references import clear_reference, get_reference, remember_event, remember_candidates, public_projection
+from services.calendar_service import resolve_owned_event_with_candidates
 from .planner import plan_turn, PlannerMetrics
 from . import synthesizer
 from .synthesizer import SynthesizerMetrics
@@ -59,6 +70,15 @@ from .debug_trace import (
 ProgressCallback = Callable[[dict[str, Any]], Any]
 MAX_READS = max(1, min(int(os.getenv("AYUE_SUBAGENT_MAX_READS", "3") or "3"), 3))
 MAX_PARALLEL = max(1, min(int(os.getenv("AYUE_SUBAGENT_MAX_PARALLEL", "2") or "2"), 2))
+_ASSESSMENT_START_CONFIRMATIONS = frozenset({"開始", "開始吧", "開始啊", "開始阿"})
+
+
+def _assessment_start_confirmation_requested(message: str, pending: list[dict[str, Any]]) -> bool:
+    """Accept bounded start wording only for an assessment confirmation."""
+    compact = re.sub(r"\s+", "", str(message or "")).lower()
+    if compact not in _ASSESSMENT_START_CONFIRMATIONS or len(pending) != 1:
+        return False
+    return str(pending[0].get("tool_name") or "") == "profile.start_assessment"
 
 _TEST_MODE = os.getenv("AYUE_TEST_MODE", "").strip().lower() in {"1", "true", "on"}
 if _TEST_MODE:
@@ -132,6 +152,14 @@ def _print_llm_metrics(label: str, metrics: Any) -> None:
 
 
 _CONFIRMATIONS = _runtime_collection("v3_pending_confirmations")
+
+
+def clear_demo_runtime_state() -> None:
+    """Clear in-memory V3 state when the demo database is reset."""
+    for collection in (_CONFIRMATIONS, RUNS):
+        clear = getattr(collection, "clear", None)
+        if callable(clear):
+            clear()
 
 _SUB_AGENT_RUNNERS = {
     "calendar": run_calendar,
@@ -486,6 +514,62 @@ def _web_extract_urls_allowed(turn_ctx: Any, results: list[Any], urls: list[str]
     return bool(urls) and all(str(url) in allowed for url in urls)
 
 
+def _calendar_command_legacy_shape(command: Any) -> tuple[str, dict[str, Any]]:
+    """Build the old action shape for confirmation rollback compatibility."""
+    action = str(getattr(command, "action", "") or "")
+    values = command.model_dump(exclude_none=True)
+    if action == "create":
+        tool_name = "calendar.create_my_event"
+        arguments = {key: values[key] for key in (
+            "title", "date", "start_time", "end_time", "timezone", "location", "notes",
+        ) if key in values}
+    elif action == "update":
+        tool_name = "calendar.update_my_event"
+        arguments = {key: values[key] for key in (
+            "target_hint", "title", "date", "start_time", "end_time", "timezone", "location", "notes",
+        ) if key in values}
+    elif action == "cancel":
+        tool_name = "calendar.cancel_my_event"
+        arguments = {"event_hint": values.get("target_hint", "")}
+    elif action == "cancel_selected":
+        tool_name = "calendar.cancel_my_events"
+        arguments = {"mode": "selected", "event_hints": list(values.get("target_hints") or [])}
+    else:
+        tool_name = "calendar.cancel_my_events"
+        arguments = {"mode": "all_upcoming", "event_hints": []}
+    return tool_name, arguments
+
+
+def _calendar_plan_legacy_data(plan: Any) -> dict[str, Any]:
+    data = plan.model_dump(exclude_none=True)
+    data["event_revision"] = data.pop("expected_revision", None)
+    data["event_source_type"] = data.pop("source_type", "personal")
+    data["proposed_form"] = data.get("form") or None
+    data["event_other_id"] = data.pop("other_id", None)
+    data["event_id"] = data.get("event_id")
+    data["safe_label"] = data.get("safe_label") or "這筆行程"
+    return data
+
+
+def _calendar_plan_legacy_arguments(plan: Any) -> dict[str, Any]:
+    """Build compatibility arguments for a single plan without target IDs."""
+    action = str(getattr(plan, "action", "") or "")
+    if action == "create":
+        return dict(getattr(plan, "form", {}) or {})
+    if action == "update":
+        return dict(getattr(plan, "changes", {}) or {})
+    return {}
+
+
+def _calendar_plan_legacy_tool(plan: Any) -> str:
+    """Return the legacy tool label used by old confirmation projections."""
+    return {
+        "create": "calendar.create_my_event",
+        "update": "calendar.update_my_event",
+        "cancel": "calendar.cancel_my_event",
+    }.get(str(getattr(plan, "action", "") or ""), "calendar.cancel_my_event")
+
+
 def _run_sub_task(
     task: SubTask, turn_ctx: Any, prior_observations: list[dict[str, Any]],
     *, seen_keys: set[tuple[str, str]], step_counts: dict[str, int],
@@ -528,7 +612,27 @@ def _run_sub_task(
         if agent_metrics.error:
             print(f"  [{task.id}] error=sub_agent_failed")
 
-    if not proposals:
+    calendar_commands = list(getattr(proposals, "commands", []) or [])
+    calendar_command_errors = list(getattr(proposals, "command_errors", []) or [])
+    if not proposals and not calendar_commands:
+        if calendar_command_errors:
+            clarification = calendar_command_errors[0]
+            return [SubTaskResult(
+                task_id=task.id,
+                status=SubTaskStatus.OK,
+                tool_name="calendar.submit_commands",
+                observation={
+                    "calendar_command_result": {
+                        "status": "needs_clarification",
+                        "clarification": {
+                            "code": str(clarification.get("code") or "invalid_command"),
+                            "message": str(clarification.get("message") or "請再說一次行程日期與時間。"),
+                            "command_index": 0,
+                            "missing_fields": [],
+                        },
+                    }
+                },
+            )], agent_metrics
         # 寫入任務在候選查詢後沒有提出任何寫入（例如 find 回 not_found、
         # 或候選歧義無法唯一判斷）是「正確地不動作」，不是失敗。
         # 把 prior 的 not_found 查詢帶給 synthesizer，讓它優雅回覆。
@@ -540,6 +644,37 @@ def _run_sub_task(
             and str((obs.get("result") or {}).get("query") or "").strip()
         ]
         if not_found_queries:
+            suggestions: list[dict[str, Any]] = []
+            for query in not_found_queries[:3]:
+                try:
+                    event, resolution, candidates = resolve_owned_event_with_candidates(
+                        turn_ctx.user_id, query, limit=3,
+                    )
+                except Exception:
+                    event, resolution, candidates = None, "not_found", []
+                if not candidates and event is not None:
+                    candidates = [event]
+                if not candidates:
+                    continue
+                records = remember_candidates(turn_ctx.user_id, candidates)
+                projections = [public_projection(record) for record in records if public_projection(record)]
+                if projections:
+                    # Arm only the server-owned candidate as the next-turn
+                    # referent; the model still sees just its safe label.
+                    remember_event(turn_ctx.user_id, candidates[0])
+                    suggestions.append({
+                        "query": query,
+                        "resolution": resolution,
+                        "candidates": projections,
+                    })
+            if suggestions:
+                print(f"  [{task.id}] result=OK (calendar candidate suggestions)")
+                return [SubTaskResult(
+                    task_id=task.id,
+                    status=SubTaskStatus.OK,
+                    tool_name="calendar.find_my_event",
+                    observation={"calendar_candidate_suggestions": suggestions},
+                )], agent_metrics
             print(f"  [{task.id}] result=OK (no_write_proposed)")
             return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK,
                                   tool_name="calendar.find_my_event",
@@ -547,10 +682,29 @@ def _run_sub_task(
                                       "no_write_proposed": True,
                                       "not_found_queries": not_found_queries,
                                   })], agent_metrics
-        print(f"  [{task.id}] result=FAILED  reason=no_proposal")
-        return [SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED, error_code="sub_agent_no_proposal")], agent_metrics
+        error_code = "sub_agent_invalid_proposal" if agent_metrics and agent_metrics.rejected_calls else "sub_agent_no_proposal"
+        print(f"  [{task.id}] result=FAILED  reason={error_code}")
+        return [SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED, error_code=error_code)], agent_metrics
 
     results: list[SubTaskResult] = []
+    if calendar_command_errors:
+        clarification = calendar_command_errors[0]
+        results.append(SubTaskResult(
+            task_id=task.id,
+            status=SubTaskStatus.OK,
+            tool_name="calendar.submit_commands",
+            observation={
+                "calendar_command_result": {
+                    "status": "needs_clarification",
+                    "clarification": {
+                        "code": str(clarification.get("code") or "invalid_command"),
+                        "message": str(clarification.get("message") or "請再說一次行程日期與時間。"),
+                        "command_index": 0,
+                        "missing_fields": [],
+                    },
+                }
+            },
+        ))
     for index, proposal in enumerate(proposals):
         print(f"  [{task.id}#{index}] proposal: tool={proposal.tool_name}")
 
@@ -735,9 +889,133 @@ def _run_sub_task(
                 function=proposal.tool_name, outcome="ok", duration_ms=tool_duration_ms,
                 result=tool_result.data,
             )
+        private_data = getattr(tool_result, "private_data", {}) or {}
+        reference_payload = private_data.get("calendar_event_reference") if isinstance(private_data, dict) else None
+        if proposal.tool_name.startswith("calendar.") and isinstance(reference_payload, dict):
+            event = reference_payload.get("event")
+            if isinstance(event, dict):
+                remember_event(
+                    turn_ctx.user_id,
+                    event,
+                    safe_label=str(reference_payload.get("safe_label") or ""),
+                )
+        if proposal.tool_name in {"calendar.find_my_event", "calendar.list_my_events"}:
+            if not reference_payload:
+                # A new ambiguous/not-found/list-of-many read must not leave a
+                # previous referent armed for a later 「這筆」 mutation.
+                clear_reference(turn_ctx.user_id)
         print(f"  [{task.id}#{index}] result=OK")
         results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.OK,
-                                      tool_name=proposal.tool_name, observation=tool_result.data))
+                                       tool_name=proposal.tool_name, observation=tool_result.data))
+
+    if calendar_commands:
+        print(f"  [{task.id}] typed calendar commands: {len(calendar_commands)}")
+        draft = get_draft(turn_ctx.user_id) if len(calendar_commands) == 1 else None
+        if draft is not None:
+            try:
+                calendar_commands = [merge_command(calendar_commands[0], draft)]
+            except Exception:
+                # A stale/incompatible draft must not turn into an executor
+                # failure; the current typed command remains authoritative.
+                clear_draft(turn_ctx.user_id)
+        recent_reference = None
+        if len(calendar_commands) == 1 and str(calendar_commands[0].action) in {"update", "cancel"}:
+            reference_key = str(calendar_commands[0].target_reference or "recent_event")
+            recent_reference = get_reference(turn_ctx.user_id, reference_key=reference_key)
+        reference_map = {}
+        if recent_reference and str(calendar_commands[0].action) in {"update", "cancel"}:
+            same_turn_selected = any(
+                obs.get("tool") == "calendar.find_my_event"
+                and (obs.get("result") or {}).get("status") == "found"
+                for obs in prior_observations
+            )
+            reference_map[0] = {
+                **recent_reference,
+                "_force": same_turn_selected,
+            }
+        command_guard = guard_calendar_commands(calendar_commands)
+        trace["guard_results"].append(command_guard.code.value)
+        if debug_enabled:
+            append_debug_event(
+                run_id, "function_call", task_id=task.id, agent=task.agent,
+                call_index=len(results), call_id=f"{task.id}:calendar.submit_commands",
+                function="calendar.submit_commands",
+                planner_arguments={"commands": [command.model_dump(exclude_none=True) for command in calendar_commands]},
+                guard={"ok": command_guard.ok, "code": command_guard.code.value, "reason": command_guard.reason},
+            )
+        if not command_guard.ok:
+            results.append(SubTaskResult(
+                task_id=task.id, status=SubTaskStatus.FAILED,
+                tool_name="calendar.submit_commands", guard_code=command_guard.code,
+            ))
+        else:
+            preflight = preflight_calendar_commands(
+                turn_ctx,
+                calendar_commands,
+                recent_references=reference_map,
+            )
+            if preflight.status != "ready":
+                clarification = preflight.clarification
+                if clarification is not None and len(calendar_commands) == 1:
+                    save_draft(
+                        turn_ctx.user_id,
+                        calendar_commands[0],
+                        missing_fields=clarification.missing_fields,
+                        candidates=clarification.candidates,
+                    )
+                safe_result: dict[str, Any] = {
+                    "calendar_command_result": {
+                        "status": preflight.status,
+                        "denial_code": preflight.denial_code,
+                        "preview": preflight.preview,
+                    }
+                }
+                if preflight.clarification is not None:
+                    safe_result["calendar_command_result"]["clarification"] = preflight.clarification.model_dump()
+                print(f"  [{task.id}] result=OK (calendar {preflight.status})")
+                results.append(SubTaskResult(
+                    task_id=task.id, status=SubTaskStatus.OK,
+                    tool_name="calendar.submit_commands", observation=safe_result,
+                ))
+            else:
+                clear_draft(turn_ctx.user_id)
+                plans = [plan.model_dump(exclude_none=True) for plan in preflight.plans]
+                payload: dict[str, Any] = {
+                    "calendar_plan_version": 1,
+                    "plans": plans,
+                }
+                if preflight.plans:
+                    payload.update(_calendar_plan_legacy_data(preflight.plans[0]))
+                if len(preflight.plans) > 1:
+                    payload["batch"] = [
+                        {
+                            "tool": _calendar_plan_legacy_tool(plan),
+                            "arguments": _calendar_plan_legacy_arguments(plan),
+                            "data": _calendar_plan_legacy_data(plan),
+                        }
+                        for plan in preflight.plans
+                    ]
+                # A typed Calendar batch is one logical confirmation even when
+                # it contains several ordered mutations.  The legacy global
+                # one-write budget applies to legacy proposals only.
+                ConfirmationManager(_CONFIRMATIONS).create_confirmation(
+                    user_id=turn_ctx.user_id,
+                    agent_name=task.agent,
+                    tool_name="calendar.submit_commands",
+                    arguments={},
+                    payload=payload,
+                    origin_run_id=run_id,
+                    preview=preflight.preview or "",
+                )
+                results.append(SubTaskResult(
+                    task_id=task.id, status=SubTaskStatus.OK,
+                    tool_name="calendar.submit_commands",
+                    observation={
+                        "pending_confirmation": True,
+                        "tool_name": "calendar.submit_commands",
+                        "preview": preflight.preview or "",
+                    },
+                ))
 
     if any(r.status is SubTaskStatus.OK for r in results):
         print(f"  [{task.id}] result=OK ({len(results)} call(s))")
@@ -859,6 +1137,69 @@ def run_public_agent_turn_v3(
 
     choice = confirmation_choice(ctx.message)
     mgr = ConfirmationManager(_CONFIRMATIONS)
+    pending_records = mgr.list_active(user_id=ctx.user_id)
+    active_offer = active_guidance_offer(ctx.user_profile or {})
+    if not pending_records and active_offer and choice in {"confirm", "cancel"}:
+        fingerprint = str(active_offer.get("fingerprint") or "")
+        if choice == "cancel":
+            decline_guidance_offer(ctx.user_id, fingerprint)
+            return _finalize_debug(AgentResult(
+                handled=True,
+                reply="好，這次先不找人。",
+                conversation_intent="match_guidance",
+                agent_run_id=run_id,
+                agent_mode="v3",
+            ))
+        if accept_guidance_offer(ctx.user_id, fingerprint):
+            payload, preview = prepare_write_confirmation(
+                "match.start_search", {}, ctx, turn,
+            )
+            if payload is None:
+                return _finalize_debug(AgentResult(
+                    handled=True,
+                    reply=preview or "我現在還不能開始搜尋，請稍後再試。",
+                    conversation_intent="match_guidance",
+                    agent_run_id=run_id,
+                    agent_mode="v3",
+                ))
+            confirmation_payload = dict(payload.get("data") or {})
+            confirmation_payload.update({
+                "source": "explicit_after_opportunity",
+                "guidance_fingerprint": fingerprint,
+            })
+            mgr.create_confirmation(
+                user_id=ctx.user_id,
+                agent_name="match",
+                tool_name="match.start_search",
+                arguments=payload.get("arguments") or {},
+                payload=confirmation_payload,
+                origin_run_id=run_id,
+                preview=preview or "",
+            )
+            synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{
+                "task_id": "match_guidance",
+                "status": "ok",
+                "tool": None,
+                "result": [{
+                    "pending_confirmation": True,
+                    "tool_name": "match.start_search",
+                    "preview": preview or "",
+                }],
+                "error_code": None,
+                "skip_reason": None,
+            }])
+            reply, _card_decision, synth_metrics = synthesizer.synthesize(synth_slice)
+            _print_llm_metrics("synthesizer", synth_metrics)
+            return _finalize_debug(AgentResult(
+                handled=True,
+                reply=reply,
+                conversation_intent="match_confirmation",
+                agent_run_id=run_id,
+                agent_mode="v3",
+                match_readiness_state="ready",
+            ))
+    if choice == "none" and _assessment_start_confirmation_requested(ctx.message, pending_records):
+        choice = "confirm"
     if choice == "confirm":
         print("\n  [entry] confirmation=confirm → executing preview-bound pending confirmation")
         results = mgr.execute_confirmed(
@@ -923,47 +1264,35 @@ def run_public_agent_turn_v3(
             agent_run_id=run_id, agent_mode="v3", fallback_reason="planner_invalid",
         ))
 
+    guidance_observations: list[dict[str, Any]] = []
+    match_guidance_shown = False
     opportunity = getattr(plan, "opportunity", None)
     if opportunity is not None and opportunity.signal == "social_opening":
         if opportunity.confidence < 0.8 or not opportunity.evidence_span or opportunity.evidence_span not in turn.message:
             opportunity = None
-    if opportunity is not None:
+    # An explicit match task owns matching semantics.  Ambient opportunity
+    # guidance must never preempt a domain task or create a write confirmation.
+    if opportunity is not None and any(task.agent == "match" for task in plan.tasks):
+        opportunity = None
+    if opportunity is not None and not any(task.agent != "synthesizer" for task in plan.tasks):
         assessment = assess_match_opportunity(ctx.user_profile or {}, ctx.user_id, explicit_search=False)
-        if assessment.state == "ready":
-            lead = f"你提到「{opportunity.evidence_span}」。" if opportunity.evidence_span in turn.message else ""
-            preview = (
-                f"{lead}感覺這件事有人一起也不錯。"
-                "我可以依你的近況和個性找一位合適人選，不會隨機配；要試試看嗎？"
-            )
-            mgr.create_confirmation(
-                user_id=ctx.user_id,
-                agent_name="match",
-                tool_name="match.start_search",
-                arguments={},
-                payload={"source": "opportunity_guidance", "guidance_fingerprint": assessment.fingerprint},
-                origin_run_id=run_id,
-                preview=preview,
-            )
-            synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{
-                "task_id": "guidance", "status": "ok", "tool": None,
-                "result": [{"pending_confirmation": True, "tool_name": "match.start_search", "preview": preview}],
-                "error_code": None, "skip_reason": None,
-            }])
-            reply, _card_decision, synth_metrics = synthesizer.synthesize(synth_slice)
-            _print_llm_metrics("synthesizer", synth_metrics)
-            _print_separator("V3 RUN END")
-            return _finalize_debug(AgentResult(
-                handled=True, reply=reply, agent_run_id=run_id, agent_mode="v3",
-                match_readiness_state="ready", match_guidance_shown=True,
-            ))
-        if assessment.state == "not_ready":
-            from services.ayue_agent.match_opportunity import missing_basis_question
-            reply = "我想先多了解你的方向，才能幫你找得更準。" + missing_basis_question(assessment)
-            _print_separator("V3 RUN END")
-            return _finalize_debug(AgentResult(
-                handled=True, reply=reply, agent_run_id=run_id, agent_mode="v3",
-                match_readiness_state="not_ready",
-            ))
+        if assessment.state == "ready" and claim_guidance_offer(
+            ctx.user_id, assessment.fingerprint,
+        ):
+            match_guidance_shown = True
+            guidance_observations.append({
+                "task_id": "guidance",
+                "status": "ok",
+                "tool": None,
+                "result": {
+                    "match_opportunity_offer": {
+                        "evidence_span": opportunity.evidence_span,
+                        "expires_in_seconds": 900,
+                    },
+                },
+                "error_code": None,
+                "skip_reason": None,
+            })
 
     _print_separator("PLAN")
     plan_tasks_json = [{"id": t.id, "agent": t.agent, "depends_on": t.depends_on, "task_brief": t.task_brief} for t in plan.tasks]
@@ -1057,6 +1386,8 @@ def run_public_agent_turn_v3(
                         available_functions=agent_metrics.tools_raw,
                         tool_calls_raw=agent_metrics.tool_calls_raw,
                         content_raw=agent_metrics.content_raw,
+                        proposal_parse_error=agent_metrics.error,
+                        rejected_calls=agent_metrics.rejected_calls,
                         results=[item.model_dump(mode="json") for item in result],
                     )
             else:
@@ -1102,6 +1433,7 @@ def run_public_agent_turn_v3(
 
     _print_separator("SYNTHESIZER")
     prior: list[dict[str, Any]] = []
+    prior.extend(guidance_observations)
     for task_id in sorted(task_results):
         for r in task_results[task_id]:
             if r.status is not SubTaskStatus.SKIPPED:
@@ -1122,9 +1454,11 @@ def run_public_agent_turn_v3(
     total_input_tokens += synth_metrics.input_tokens
     total_output_tokens += synth_metrics.output_tokens
     print(f"  [synthesizer] card_decision={card_decision}")
+    synth_status = "degraded" if synth_metrics.fallback_reason else "ok"
+    synth_error = synth_metrics.error_code or ""
     _emit_progress(on_progress, "subagent_finished", trace=trace, agent_run_id=run_id,
                     task_id="synth", agent="synthesizer",
-                    status="ok", error="",
+                    status=synth_status, error=synth_error,
                     input_tokens=synth_metrics.input_tokens,
                     output_tokens=synth_metrics.output_tokens,
                     duration_ms=synth_metrics.duration_ms,
@@ -1132,15 +1466,19 @@ def run_public_agent_turn_v3(
     if debug_enabled:
         append_debug_event(
             run_id, "subagent_finished", task_id="synth", agent="synthesizer",
-            status="ok", error="",
+            status=synth_status, error=synth_error,
             input_tokens=synth_metrics.input_tokens,
             output_tokens=synth_metrics.output_tokens,
             duration_ms=synth_metrics.duration_ms,
             prompt_raw=synth_metrics.prompt_raw,
-            input_payload=synth_metrics.input_payload or {},
+            input_payload=synth_metrics.input_payload or synth_slice.payload,
             available_functions=synth_metrics.tools_raw or [],
             tool_calls_raw=synth_metrics.tool_calls_raw or [],
             content_raw=synth_metrics.raw_content,
+            reply_source=synth_metrics.reply_source,
+            fallback_reason=synth_metrics.fallback_reason,
+            error_code=synth_metrics.error_code,
+            used_llm=synth_metrics.used_llm,
             results=[{"reply": reply, "card_decision": card_decision}],
         )
 
@@ -1154,7 +1492,14 @@ def run_public_agent_turn_v3(
     print(f"  agents_used={[aid for aid, _ in all_agent_metrics]}")
     print(f"{'='*60}\n")
 
-    result = AgentResult(handled=True, reply=reply, agent_run_id=run_id, agent_mode="v3")
+    result = AgentResult(
+        handled=True,
+        reply=reply,
+        agent_run_id=run_id,
+        agent_mode="v3",
+        fallback_reason=synth_metrics.fallback_reason,
+        match_guidance_shown=match_guidance_shown,
+    )
     if place_cards:
         result.place_cards = place_cards
     result.sources = _public_sources(task_results)

@@ -122,6 +122,26 @@ class V3SubAgentTests(unittest.TestCase):
         self.assertEqual(len(proposals), 1)
         self.assertEqual(proposals[0].tool_name, "profile.get_self_summary")
 
+    def test_profile_agent_produces_assessment_start_proposal(self):
+        slc = _slice("profile", {
+            "message": "那我來做基本性格",
+            "recent_messages": [],
+            "recent_context": "",
+            "relevant_memories": [],
+            "clock": _clock().model_dump(),
+            "prior_observations": [],
+        })
+        with patch(
+            "services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "profile.start_assessment", "arguments": {"kind": "basic"},
+            }]),
+        ):
+            proposals, _metrics = run_profile(slc, task_brief="開始基本性格探索")
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].tool_name, "profile.start_assessment")
+        self.assertEqual(proposals[0].arguments, {"kind": "basic"})
+
     def test_calendar_agent_returns_none_on_llm_timeout(self):
         slc = _slice("calendar", {
             "message": "x", "recent_messages": [], "clock": _clock().model_dump(),

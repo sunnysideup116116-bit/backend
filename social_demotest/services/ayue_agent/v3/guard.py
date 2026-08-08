@@ -10,6 +10,26 @@ from services.ayue_agent.tool_registry import (
     tool_call_key,
 )
 from .contracts import GuardDecision, GuardResultCode, ToolProposal
+from .calendar_commands import CalendarCommand
+
+
+def guard_calendar_commands(commands: list[CalendarCommand]) -> GuardDecision:
+    """Validate the typed Calendar intent before deterministic preflight.
+
+    Commands are not executable tools, so this check intentionally does not
+    resolve targets or decide whether a command is complete.  Missing business
+    fields are normal preflight outcomes; authority fields are impossible to
+    represent in the strict command model and are checked again here.
+    """
+    if not commands or len(commands) > 10:
+        return GuardDecision(ok=False, code=GuardResultCode.SCHEMA_INVALID,
+                             reason="calendar command batch must contain 1-10 commands")
+    forbidden = {"user_id", "event_id", "revision", "expected_revision", "match_id", "coordination_id", "other_id"}
+    for command in commands:
+        if forbidden.intersection(command.model_dump().keys()):
+            return GuardDecision(ok=False, code=GuardResultCode.FORBIDDEN_ARG_FIELD,
+                                 reason="calendar command contains an authority field")
+    return GuardDecision(ok=True, code=GuardResultCode.PASSED, reason="typed calendar commands accepted")
 
 
 def guard_proposal(

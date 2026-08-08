@@ -8,12 +8,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from database import matches_coll
+from database import matches_coll, profiles_coll
 
 
 GUIDANCE_COOLDOWN_SECONDS = 7 * 86400
 GUIDANCE_DECLINE_SUPPRESSION_SECONDS = 30 * 86400
 RECENT_DECLINE_SUPPRESSION_SECONDS = 86400
+GUIDANCE_OFFER_TTL_SECONDS = 15 * 60
 # Only an unresolved proposal blocks another search.  An accepted match is a
 # completed connection: it remains excluded from future candidate selection,
 # but it must not prevent an explicit request to meet somebody else.
@@ -126,11 +127,20 @@ def assess_match_opportunity(profile: dict[str, Any], user_id: str, *, explicit_
     return MatchOpportunityAssessment("ready", (), fingerprint, count)
 
 
-def record_guidance_shown(user_id: str, fingerprint: str) -> dict[str, Any]:
-    return {
+def record_guidance_shown(
+    user_id: str, fingerprint: str, *, active_offer: bool = True,
+) -> dict[str, Any]:
+    now = time.time()
+    payload = {
         "last_fingerprint": fingerprint,
-        "last_shown_at": time.time(),
+        "last_shown_at": now,
     }
+    if active_offer:
+        payload.update({
+            "active_offer_fingerprint": fingerprint,
+            "active_offer_expires_at": now + GUIDANCE_OFFER_TTL_SECONDS,
+        })
+    return payload
 
 
 def record_guidance_declined(user_id: str, fingerprint: str | None = None) -> dict[str, Any]:
@@ -139,6 +149,103 @@ def record_guidance_declined(user_id: str, fingerprint: str | None = None) -> di
     if fingerprint:
         payload["last_fingerprint"] = fingerprint
     return payload
+
+
+def claim_guidance_offer(user_id: str, fingerprint: str) -> bool:
+    """Atomically claim one ambient offer for a user.
+
+    This is guidance state only; it never authorizes or queues a match search.
+    The atomic predicate prevents two browser tabs from showing the same offer
+    and records the cooldown state that V3 previously forgot to persist.
+    """
+    now = time.time()
+    try:
+        current = profiles_coll.find_one(
+            {"user_id": user_id},
+            {"_id": 0, "match_guidance": 1},
+        ) or {}
+    except Exception:
+        # Guidance is optional UX state.  A profile-store outage must not
+        # turn an ordinary chat turn into a V3 runtime failure.
+        return False
+    guidance = current.get("match_guidance") or {}
+    try:
+        active_expires_at = float(guidance.get("active_offer_expires_at", 0) or 0)
+    except (TypeError, ValueError):
+        active_expires_at = 0.0
+    if str(guidance.get("active_offer_fingerprint") or "") and active_expires_at > now:
+        return False
+    shown = record_guidance_shown(user_id, fingerprint, active_offer=True)
+    try:
+        result = profiles_coll.update_one(
+            {
+                "user_id": user_id,
+                "$and": [
+                    {"$or": [
+                        {"match_guidance.last_fingerprint": {"$exists": False}},
+                        {"match_guidance.last_fingerprint": {"$ne": fingerprint}},
+                    ]},
+                    {"$or": [
+                        {"match_guidance.last_shown_at": {"$exists": False}},
+                        {"match_guidance.last_shown_at": {"$lte": now - GUIDANCE_COOLDOWN_SECONDS}},
+                    ]},
+                ],
+            },
+            {"$set": {"match_guidance": shown}},
+        )
+    except Exception:
+        return False
+    return bool(getattr(result, "modified_count", 0))
+
+
+def active_guidance_offer(profile: dict[str, Any]) -> dict[str, Any] | None:
+    guidance = profile.get("match_guidance") or {}
+    fingerprint = _text(guidance.get("active_offer_fingerprint"))
+    try:
+        expires_at = float(guidance.get("active_offer_expires_at", 0) or 0)
+    except (TypeError, ValueError):
+        expires_at = 0.0
+    if not fingerprint or expires_at <= time.time():
+        return None
+    return {
+        "fingerprint": fingerprint,
+        "expires_at": expires_at,
+    }
+
+
+def accept_guidance_offer(user_id: str, fingerprint: str) -> bool:
+    """Consume an ambient offer before creating an explicit confirmation."""
+    try:
+        result = profiles_coll.update_one(
+            {
+                "user_id": user_id,
+                "match_guidance.active_offer_fingerprint": fingerprint,
+                "match_guidance.active_offer_expires_at": {"$gt": time.time()},
+            },
+            {"$unset": {
+                "match_guidance.active_offer_fingerprint": "",
+                "match_guidance.active_offer_expires_at": "",
+            }},
+        )
+    except Exception:
+        return False
+    return bool(getattr(result, "modified_count", 0))
+
+
+def decline_guidance_offer(user_id: str, fingerprint: str) -> bool:
+    """Consume and suppress an ambient offer after an explicit decline."""
+    payload = record_guidance_declined(user_id, fingerprint)
+    try:
+        result = profiles_coll.update_one(
+            {
+                "user_id": user_id,
+                "match_guidance.active_offer_fingerprint": fingerprint,
+            },
+            {"$set": {"match_guidance": payload}},
+        )
+    except Exception:
+        return False
+    return bool(getattr(result, "modified_count", 0))
 
 
 def missing_basis_question(assessment: MatchOpportunityAssessment) -> str:

@@ -41,6 +41,9 @@ class ToolResult(BaseModel):
     error_code: str | None = None
     user_message: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
+    # Executor-only metadata.  Scheduler may consume this for a server-owned
+    # reference, but it must never be copied into an observation/prompt.
+    private_data: dict[str, Any] = Field(default_factory=dict, repr=False, exclude=True)
 
 
 class AgentTurnContext(BaseModel):
@@ -80,6 +83,8 @@ class AgentTurnContextV2(BaseModel):
     latest_match_outcome: dict[str, Any] | None = None
     pending_confirmation: dict[str, Any] | None = None
     action_draft: dict[str, Any] | None = None
+    calendar_draft: dict[str, Any] | None = None
+    calendar_recent_reference: dict[str, Any] | None = None
     place_search_draft: dict[str, Any] | None = None
     recent_context_draft: dict[str, Any] | None = None
     # Public references only. Their executor-side IDs remain on AgentTurnContext.

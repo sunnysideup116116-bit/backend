@@ -686,6 +686,16 @@
         .calendar-editor-actions { grid-column: 1 / -1; display: flex; gap: 8px; margin-top: 3px; }
         .calendar-editor-actions button { flex: 1; padding: 9px; font-size: 11px; font-weight: 700; }
         .calendar-editor-feedback { grid-column: 1 / -1; padding: 8px; color: #a64740; background: #fff0ee; border: 1px solid #e5b3af; font-size: 10px; }
+
+        /* Keep the demo controls inside the sidebar and let long forms scroll. */
+        #demo-tools-panel {
+            min-height: 0;
+            max-height: min(52vh, 520px);
+            overflow-y: auto;
+            overscroll-behavior: contain;
+            scrollbar-gutter: stable;
+        }
+
         @media (max-width: 720px) {
             body { padding: 8px !important; }
             header { margin-bottom: 8px !important; }
@@ -726,6 +736,7 @@
             .calendar-header-actions button { padding: 7px; }
             .calendar-event { grid-template-columns: 47px minmax(0, 1fr); }
             .calendar-event-actions { grid-column: 1 / -1; justify-content: flex-end; }
+            #demo-tools-panel { max-height: min(60vh, 520px); }
         }
     </style>
 </head>
@@ -865,7 +876,7 @@
                 </div>
                 <div
                     class="glass-panel rounded-2xl p-4 flex justify-between items-center bg-red-900/10 border-red-500/20">
-                    <button onclick="clearSystemData()"
+                    <button onclick="clearSystemDataV2()"
                         class="text-xs text-red-400 hover:text-red-300 transition w-full py-2 bg-red-500/10 rounded">⚙️
                         一鍵清空所有資料</button>
                 </div>
@@ -906,6 +917,7 @@
                             <div class="flex justify-between gap-2"><span>Web Search</span><span id="demo-web-status">檢查中…</span></div>
                             <div class="flex justify-between gap-2"><span>所在地</span><span id="demo-location" class="truncate">—</span></div>
                             <div class="flex justify-between gap-2"><span>近期情境</span><span id="demo-recent-context" class="truncate">—</span></div>
+                            <div class="flex justify-between gap-2"><span>Graph</span><span id="demo-graph-status">unknown</span></div>
                             <div class="flex justify-between gap-2"><span>配對搜尋</span><span id="demo-match-status">—</span></div>
                         </div>
 
@@ -935,9 +947,11 @@
                             <div class="flex flex-col gap-2 mt-2">
                                 <button type="button" onclick="resetDbState()"
                                     class="text-xs text-amber-300 w-full py-2">清除所有人的約會協調進度</button>
+                                <button type="button" onclick="clearGraphData()"
+                                    class="text-xs text-fuchsia-300 w-full py-2">Clear Graph</button>
                                 <button type="button" onclick="fetchSeedAndReload(event)"
                                     class="text-xs text-sky-300 w-full py-2">重建 10 位測試使用者</button>
-                                <button type="button" onclick="clearSystemData()"
+                                <button type="button" onclick="clearSystemDataV2()"
                                     class="text-xs text-red-400 w-full py-2">清空全部資料並重建</button>
                             </div>
                         </details>
@@ -2017,6 +2031,34 @@
             
             // 3. 跳回首頁 (預設 demo_user)
             window.location.href = "/";
+        }
+
+        async function clearGraphData() {
+            if (!confirm("Clear the entire Neo4j graph? This cannot be undone.")) return;
+            try {
+                const res = await fetch('/api/demo/clear_graph', { method: 'POST' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error((data.detail && data.detail.code) || 'Graph cleanup failed');
+                alert('Graph cleared successfully.');
+                refreshDemoToolStatus();
+            } catch (e) {
+                alert(e.message || 'Graph cleanup failed');
+            }
+        }
+
+        async function clearSystemDataV2() {
+            if (!confirm("Clear Graph, all database data (including calendars), and recreate 10 demo users?")) return;
+            try {
+                const clearRes = await fetch('/api/demo/clear_all', { method: 'POST' });
+                const clearData = await clearRes.json().catch(() => ({}));
+                if (!clearRes.ok) throw new Error((clearData.detail && clearData.detail.code) || 'Full cleanup failed');
+                const seedRes = await fetch('/api/seed', { method: 'POST' });
+                const seedData = await seedRes.json().catch(() => ({}));
+                if (!seedRes.ok || seedData.status !== 'success') throw new Error('Demo seed failed after cleanup');
+                window.location.href = "/";
+            } catch (e) {
+                alert(e.message || 'Full cleanup failed; no reload was performed.');
+            }
         }
 
         // --- Helper functions ---
@@ -4741,6 +4783,7 @@ if (metadata.event_type === "date_coordination_form") {
             setText("demo-web-status", data.web_search_ready ? "可用" : "尚未設定 API Key");
             setText("demo-location", location.display_name || "尚未設定");
             setText("demo-recent-context", data.recent_context || "尚無近期情境");
+            setText("demo-graph-status", data.graph_status || "unknown");
             setText("demo-match-status", matchLabel);
         }
 
@@ -5840,17 +5883,24 @@ if (metadata.event_type === "date_coordination_form") {
             for (const node of orderedNodes) {
                 const color = V3_AGENT_COLORS[node.agent] || "#d8c7ff";
                 const status = node.status || (lastDebugRunStatus === "running" ? "running" : "unknown");
+                const statusColor = status === "degraded" ? "#ffd166" : "#d8c7ff";
                 html += '<div class="border-2 p-3 bg-[#110a22] mb-3" style="border-color:' + color + '">' +
                     '<div class="flex items-center justify-between gap-2"><b class="text-xs" style="color:' + color + '">' + escapeDebugHtml((V3_AGENT_LABELS[node.agent] || node.agent || "Tool") + " · " + (node.task_id || "")) + '</b>' +
-                    '<span class="text-[10px] text-gray-300">' + escapeDebugHtml(status) + '</span></div>' +
+                    '<span class="text-[10px]" style="color:' + statusColor + '">' + escapeDebugHtml(status) + '</span></div>' +
                     (node.task_brief ? '<div class="text-[10px] text-gray-400 mt-1">' + escapeDebugHtml(node.task_brief) + '</div>' : '') +
+                    (node.agent === "synthesizer" ? '<div class="text-[10px] text-gray-400 mt-1">' +
+                        'reply_source=' + escapeDebugHtml(node.reply_source || "unknown") +
+                        ' · used_llm=' + escapeDebugHtml(String(Boolean(node.used_llm))) +
+                        (node.fallback_reason ? ' · fallback=' + escapeDebugHtml(node.fallback_reason) : '') +
+                        (node.error_code ? ' · error=' + escapeDebugHtml(node.error_code) : '') +
+                        '</div>' : '') +
                     '<div class="flex flex-wrap gap-3 mt-2">' +
                     debugDetailButton("餵入資料", node.input_payload) +
                     debugDetailButton("完整 Prompt", node.prompt_raw) +
                     debugDetailButton("可用 Functions", node.available_functions, "#fff1b8") +
-                    debugDetailButton("模型 Function Calls", node.tool_calls_raw, "#ff6fae") +
+                    debugDetailButton("模型 Function Calls（卡片決策）", node.tool_calls_raw, "#ff6fae") +
                     debugDetailButton("Raw Output", node.content_raw, "#c084fc") +
-                    debugDetailButton("節點結果", node.results, "#7dd87f") +
+                    debugDetailButton("節點結果（Final 來源）", node.results, "#7dd87f") +
                     '</div>';
                 if (node.calls && node.calls.length) {
                     html += '<div class="mt-3 text-[10px] text-gray-400">實際 Function／Tool 執行</div>';

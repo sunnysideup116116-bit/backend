@@ -8,7 +8,6 @@ typed `decide_place_cards` tool call (function calling), not free-text JSON.
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -37,6 +36,21 @@ class SynthesizerMetrics:
     tools_raw: list[dict] | None = None
     input_payload: dict[str, Any] | None = None
     used_llm: bool = False
+    reply_source: Literal[
+        "capability",
+        "verified_observation",
+        "llm",
+        "matching_truth",
+        "observation_fallback",
+        "general_fallback",
+    ] | None = None
+    fallback_reason: Literal[
+        "provider_error",
+        "empty_content",
+        "internal_meta_reply",
+        "unsupported_claim",
+    ] | None = None
+    error_code: str | None = None
 
 
 class _DecidePlaceCardsArguments(BaseModel):
@@ -119,6 +133,12 @@ def _build_prompt(slice_payload: dict[str, Any], candidate_summaries: list[dict[
         "background_memory": background_memory,
         "user_location": slice_payload.get("user_location") or "",
         "clock": slice_payload.get("clock") or {},
+        "clarification_policy": (
+            "For calendar_command_result status needs_clarification, ask only for the fields listed in "
+            "clarification.missing_fields. If candidates are present, mention their safe labels and ask "
+            "which one. Never claim a write succeeded, never invent IDs/revisions, and never use a fixed "
+            "start/end-time request when those fields are not missing."
+        ),
     }
     return f"""你是這個 App 裡幫使用者認識人、牽線的阿月。請根據以下 observations 把每個 sub-agent 的回應整合成一段自然、簡短、安全的繁體中文回覆給使用者。
 
@@ -140,6 +160,7 @@ def _build_prompt(slice_payload: dict[str, Any], candidate_summaries: list[dict[
 10. 只要 observations 有結果，就必須針對該結果回答（推薦、告知行程、說明查詢結果）。絕對不可使用「我在。你可以跟我聊聊…」這類與本次請求無關的罐頭回應。
 11. 【確認流程】若 observations 中 tool 為 null 且 result 是確認執行結果陣列，直接以其中的 reply 欄位（或 data.reply）回覆（多筆用「、」連接），不要改寫或加罐頭句。
 12. 【待確認】若 observation 有 pending_confirmation 與 preview，直接以 preview 內容回覆使用者，請其回覆「確認」或「取消」。
+12.5. 【配對機會】若 observation 有 match_opportunity_offer，這只是溫和提議，不代表已建立配對或 pending confirmation；用一到兩句自然地詢問使用者是否想找人，不要宣稱已開始搜尋，也不要要求使用者直接確認寫入。
 13. 【找不到行程】若 observation 有 no_write_proposed 與 not_found_queries，直接告知使用者找不到這些行程（例如「我找不到『出國』這筆行程，可以再確認一下名稱或日期嗎？」），不要假裝已處理。{cards_block}
 
 context：{json.dumps(payload, ensure_ascii=False)}"""
@@ -186,8 +207,43 @@ def _observation_fallback(payload: dict[str, Any]) -> str:
     """
     observations = payload.get("observations") or []
     if not observations:
-        return "我這次沒能查到資料，要不要再說一次你想查什麼？"
+        return "我剛剛沒有成功整理出回覆，可以再說一次嗎？"
     for obs in observations:
+        result = obs.get("result")
+        suggestions = obs.get("calendar_candidate_suggestions") if isinstance(obs, dict) else None
+        if isinstance(suggestions, list):
+            lines: list[str] = []
+            for suggestion in suggestions[:3]:
+                if not isinstance(suggestion, dict):
+                    continue
+                labels = "、".join(
+                    str(item.get("label") or "")
+                    for item in (suggestion.get("candidates") or [])[:3]
+                    if isinstance(item, dict) and item.get("label")
+                )
+                if labels:
+                    lines.append(f"「{labels}」")
+            if lines:
+                return "我找到名稱相近的行程：" + "、".join(lines) + "。是這筆嗎？"
+        if isinstance(result, dict):
+            typed = result.get("calendar_command_result")
+            if isinstance(typed, dict) and typed.get("status") == "needs_clarification":
+                clarification = typed.get("clarification") or {}
+                candidates = clarification.get("candidates") or []
+                if candidates:
+                    labels = "、".join(
+                        str(item.get("label") or "") for item in candidates if isinstance(item, dict)
+                    )
+                    if labels:
+                        return f"我找到幾筆相近的行程：{labels}。請告訴我要處理哪一筆。"
+                query = str(clarification.get("query") or "").strip()
+                missing = clarification.get("missing_fields") or []
+                if missing:
+                    return f"我還需要：{'、'.join(str(item) for item in missing)}。"
+                if query:
+                    return f"我目前找不到「{query}」相符的行程，可以補充日期、時間或更完整的名稱嗎？"
+        if isinstance(result, dict) and result.get("match_opportunity_offer"):
+            return "如果你想找人一起，我可以依你的近況幫你挑合適人選；想試試看嗎？"
         if obs.get("tool") is None and isinstance(obs.get("result"), list):
             replies = []
             for r in obs["result"]:
@@ -239,7 +295,38 @@ def _observation_fallback(payload: dict[str, Any]) -> str:
         parts.append("附近找到" + "、".join(place_lines))
     if parts:
         return "，".join(parts) + "，卡片在下面。"
-    return "我這次沒能查到資料，要不要再說一次你想查什麼？"
+    return "我剛剛沒有成功整理出回覆，可以再說一次嗎？"
+
+
+def _verified_observation_reply(payload: dict[str, Any]) -> str | None:
+    """Return replies that must not be paraphrased by the Synthesizer.
+
+    Confirmation execution and pending previews carry server-owned replies.
+    Typed clarification is intentionally left to the Synthesizer so the model
+    can ask for the actual missing fields and present bounded candidates in
+    natural language; it must not claim that a mutation happened.
+    """
+    for obs in payload.get("observations") or []:
+        result = obs.get("result")
+        if obs.get("tool") is None and isinstance(result, list):
+            replies: list[str] = []
+            for item in result:
+                if not isinstance(item, dict):
+                    continue
+                reply = str(item.get("reply") or "")
+                if not reply:
+                    reply = str((item.get("data") or {}).get("reply") or "")
+                if reply:
+                    replies.append(reply)
+            if replies:
+                return "、".join(replies)
+        if not isinstance(result, dict):
+            continue
+        if result.get("pending_confirmation"):
+            preview = str(result.get("preview") or "").strip()
+            if preview:
+                return preview
+    return None
 
 
 def synthesize(
@@ -253,16 +340,22 @@ def synthesize(
     """
     metrics = SynthesizerMetrics()
     payload = context_slice.payload
+    metrics.input_payload = payload
+    metrics.tools_raw = []
+    metrics.tool_calls_raw = []
     if is_capability_query(payload.get("message", "")):
+        metrics.reply_source = "capability"
         return capability_answer(), None, metrics
+    verified_reply = _verified_observation_reply(payload)
+    if verified_reply:
+        metrics.reply_source = "verified_observation"
+        return verified_reply, None, metrics
     candidate_summaries = _candidate_card_summaries(candidate_cards or [])
     tools = [_decide_cards_tool_schema()] if candidate_summaries else []
+    metrics.tools_raw = tools
     try:
         prompt = _build_prompt(payload, candidate_summaries)
         metrics.prompt_raw = prompt
-        metrics.tools_raw = tools
-        metrics.input_payload = payload
-        started = time.perf_counter()
         result = generate_chat_completion_with_tools(prompt, tools, temperature=0.65)
         metrics.input_tokens = result.input_tokens
         metrics.output_tokens = result.output_tokens
@@ -275,12 +368,22 @@ def synthesize(
             normalize_public_language(str(result.content or "").strip()),
             preserve_details=True,
         )
-        if reply and not _INTERNAL_META_REPLY_RE.search(reply) and not contains_unsupported_random_match_claim(reply):
+        if not reply:
+            metrics.fallback_reason = "empty_content"
+        elif _INTERNAL_META_REPLY_RE.search(reply):
+            metrics.fallback_reason = "internal_meta_reply"
+        elif contains_unsupported_random_match_claim(reply):
+            metrics.fallback_reason = "unsupported_claim"
+        else:
+            metrics.reply_source = "llm"
             return reply, card_decision, metrics
     except Exception:
-        pass
+        metrics.fallback_reason = "provider_error"
+        metrics.error_code = "synthesizer_provider_error"
     # Deterministic fallback tied to the actual observations, not a canned line.
     message = payload.get("message", "")
     if any(word in message for word in ("配對", "媒合", "找對象", "找人", "交友")):
+        metrics.reply_source = "matching_truth"
         return matching_truth_reply(), None, metrics
+    metrics.reply_source = "observation_fallback" if payload.get("observations") else "general_fallback"
     return _observation_fallback(payload), None, metrics

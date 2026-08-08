@@ -28,6 +28,8 @@ def slice_for_agent(
             "clock": clock_dump,
             # calendar agent may need recent_context to understand scheduling context
             "recent_context": turn_ctx.recent_context,
+            "calendar_draft": getattr(turn_ctx, "calendar_draft", None),
+            "calendar_recent_reference": getattr(turn_ctx, "calendar_recent_reference", None),
             "prior_observations": prior_observations,
         })
 
