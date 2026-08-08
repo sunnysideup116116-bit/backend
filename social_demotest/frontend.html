@@ -381,12 +381,35 @@
             border-radius: 14px !important;
         }
         #mediator-private-trigger {
-            position: absolute; right: 18px; bottom: 82px; z-index: 35;
-            display: flex; align-items: center; gap: 9px; background: #fff3e9 !important;
-            border: 1px solid #dda98a !important; padding: 9px 12px; color: var(--warm-cocoa) !important;
+            position: absolute; right: 22px; bottom: 88px; z-index: 35;
+            display: flex; flex-direction: column; align-items: center; gap: 3px;
+            width: clamp(68px, 8vw, 96px); min-width: 0; padding: 0;
+            background: transparent !important; border: 0 !important;
+            color: var(--warm-cocoa) !important; border-radius: 0 !important;
+            box-shadow: none !important; cursor: pointer;
+            transition: transform .18s ease, opacity .18s ease;
         }
+        #mediator-private-trigger:hover { transform: translateY(-2px) scale(1.02) !important; box-shadow: none !important; }
+        #mediator-private-trigger:focus-visible { outline: 2px solid rgba(233, 150, 108, .62); outline-offset: 4px; }
         #mediator-private-trigger.hidden { display: none; }
-        .mediator-unread-dot { width: 9px; height: 9px; background: #d85f52; border-radius: 0 !important; }
+        .mediator-launcher-avatar {
+            position: relative; width: 100%; height: clamp(70px, 10vw, 96px); flex: 0 0 auto;
+            overflow: visible; display: grid; place-items: center;
+            border-radius: 0 !important; background: transparent !important;
+            border: 0 !important; box-shadow: none !important;
+        }
+        .mediator-launcher-avatar img { width: 100%; height: 100%; object-fit: contain; object-position: center bottom; display: block; filter: drop-shadow(0 4px 5px rgba(121,77,57,.16)); }
+        .mediator-launcher-avatar-fallback { color: var(--warm-apricot-dark); font-size: 27px; font-weight: 800; line-height: 1; }
+        .mediator-launcher-control {
+            width: 20px; height: 20px; display: grid; place-items: center;
+            color: var(--warm-cocoa); background: rgba(255, 250, 244, .9);
+            border: 1px solid rgba(217, 169, 141, .85); border-radius: 50% !important;
+            box-shadow: 0 2px 5px rgba(121,77,57,.14); font-size: 13px; line-height: 1;
+        }
+        .mediator-unread-dot {
+            position: absolute; right: 4px; top: 2px; width: 8px; height: 8px;
+            background: #d85f52; border-radius: 50% !important; box-shadow: 0 0 0 2px #fff2e9;
+        }
         #mediator-toast {
             background: #fff3e9; color: var(--warm-cocoa); border: 1px solid #dda98a;
             box-shadow: 4px 4px 0 var(--warm-shadow);
@@ -413,11 +436,7 @@
         #mediator-toast.toast-collapsed #mediator-toast-dot {
             display: block; position: absolute; right: 2px; top: 2px;
         }
-        #mediator-private-trigger.whisper-collapsed { width: 46px; height: 46px; padding: 6px; justify-content: center; }
-        #mediator-private-trigger.whisper-collapsed #mediator-trigger-text { display: none; }
-        #mediator-private-trigger.whisper-collapsed .mediator-unread-dot {
-            display: block; position: absolute; right: 2px; top: 2px;
-        }
+        #mediator-private-trigger.whisper-collapsed { opacity: .92; }
         #tone-overlay { background: rgba(87,63,54,.22); }
         #tone-card { background: #fffaf4; border: 1px solid #dda98a; box-shadow: 7px 7px 0 rgba(121,77,57,.18); }
         .onboarding-step { min-height: 230px; }
@@ -719,7 +738,9 @@
             .match-search-process-detail { max-width: 100%; }
             .gif-message-card { width: min(330px, 92%); }
             #mediator-private-panel { left: 6px; right: 6px; bottom: 68px; width: auto; height: min(70%, 560px); }
-            #mediator-private-trigger { right: 8px; bottom: 72px; }
+            #mediator-private-trigger { right: 10px; bottom: 74px; width: 72px; }
+            .mediator-launcher-avatar { height: clamp(58px, 18vw, 76px); }
+            .mediator-launcher-control { width: 18px; height: 18px; font-size: 12px; }
             .date-form-grid { grid-template-columns: 1fr; }
             .date-form-field-wide { grid-column: auto; }
             .date-card-header { align-items: flex-start; }
@@ -1031,20 +1052,31 @@
                     </form>
                 </div>
 
-                <button id="mediator-private-trigger" class="hidden" onclick="openMediatorPrivatePanel()">
-                    <span class="w-8 h-8 bg-[#e9966c] text-white flex items-center justify-center font-bold">月</span>
-                    <span id="mediator-trigger-text" class="text-xs font-bold">問問阿月</span>
-                    <span id="mediator-unread-dot" class="mediator-unread-dot hidden"></span>
+                <button id="mediator-private-trigger" type="button" class="hidden" onclick="openMediatorPrivatePanel()"
+                    aria-controls="mediator-private-panel" aria-expanded="false" aria-label="開啟阿月悄悄話">
+                    <span class="mediator-launcher-avatar" aria-hidden="true">
+                        <img id="mediator-trigger-avatar" data-ayue-avatar alt="" decoding="async"
+                            onerror="handleAyueAvatarError(this)">
+                        <span id="mediator-trigger-avatar-fallback" class="mediator-launcher-avatar-fallback hidden">月</span>
+                    </span>
+                    <span class="mediator-launcher-control" aria-hidden="true">⌄</span>
+                    <span id="mediator-unread-dot" class="mediator-unread-dot hidden" role="status" aria-label="有新的悄悄話"></span>
                 </button>
 
-                <aside id="mediator-private-panel" class="hidden absolute z-40 flex-col">
+                <aside id="mediator-private-panel" class="hidden absolute z-40 flex-col" role="dialog" aria-modal="false"
+                    aria-labelledby="mediator-private-title">
                     <div class="p-3 border-b border-[#e7c9b7] flex items-center gap-3">
-                        <div class="w-9 h-9 bg-[#e9966c] text-white flex items-center justify-center font-bold">月</div>
-                        <div>
-                            <div class="font-bold">阿月悄悄話</div>
-                            <div id="mediator-private-context" class="text-xs text-[#9b6a54]"></div>
+                        <div class="mediator-launcher-avatar !w-10 !h-10 !basis-10" aria-hidden="true">
+                            <img class="mediator-panel-avatar" data-ayue-avatar alt="" decoding="async"
+                                onerror="handleAyueAvatarError(this)">
+                            <span class="mediator-launcher-avatar-fallback hidden">月</span>
                         </div>
-                        <button onclick="closeMediatorPrivatePanel()" class="ml-auto px-3 py-2">收起</button>
+                        <div>
+                            <div id="mediator-private-title" class="font-bold">阿月悄悄話</div>
+                            <div id="mediator-private-context" class="text-xs text-[#9b6a54]"></div>
+                            <div class="text-[11px] text-[#9b6a54] mt-0.5">私下聊聊你們的互動、怎麼回、怎麼約</div>
+                        </div>
+                        <button type="button" onclick="closeMediatorPrivatePanel()" class="ml-auto px-3 py-2" aria-label="收起阿月悄悄話">收起</button>
                     </div>
                     <div id="mediator-private-messages" class="flex-1 overflow-y-auto p-4 flex flex-col gap-3"></div>
                     <div class="private-quick-actions">
@@ -1252,6 +1284,38 @@
 
     <!-- Scripts -->
     <script>
+        // Keep the role artwork replaceable without touching the launcher markup.
+        // A static asset can be added later by filling `static` when needed.
+        const AYUE_AVATAR_SOURCES = Object.freeze({ gif: "/images/pet.GIF", static: "" });
+
+        function configureAyueAvatars() {
+            document.querySelectorAll("[data-ayue-avatar]").forEach(image => {
+                const source = AYUE_AVATAR_SOURCES.gif || AYUE_AVATAR_SOURCES.static;
+                if (source) image.src = source;
+                else handleAyueAvatarError(image);
+            });
+        }
+
+        function handleAyueAvatarError(image) {
+            if (!image) return;
+            if (!image.dataset.staticAttempted && AYUE_AVATAR_SOURCES.static && image.src !== AYUE_AVATAR_SOURCES.static) {
+                image.dataset.staticAttempted = "true";
+                image.src = AYUE_AVATAR_SOURCES.static;
+                image.hidden = false;
+                return;
+            }
+            image.hidden = true;
+            image.parentElement?.querySelector(".mediator-launcher-avatar-fallback")?.classList.remove("hidden");
+        }
+
+        function hasPrivateMediatorAccess(contactId = activeContactId) {
+            return Boolean(
+                contactId &&
+                contactId !== "ai_assistant" &&
+                acceptedContacts.some(contact => contact.id === contactId)
+            );
+        }
+
         // --- State ---
         let currentUserId = "demo_user";
         let isStageMessenger = false;
@@ -2272,10 +2336,11 @@
             document.getElementById("room-avatar").style.display = id === "ai_assistant" ? "none" : "flex";
             const privateTrigger = document.getElementById("mediator-private-trigger");
             privateTrigger.classList.remove("whisper-collapsed");
-            privateTrigger.classList.toggle("hidden", id === "ai_assistant");
-            if (id !== "ai_assistant") {
+            const privateAvailable = hasPrivateMediatorAccess(id);
+            privateTrigger.classList.toggle("hidden", !privateAvailable);
+            privateTrigger.setAttribute("aria-expanded", "false");
+            if (privateAvailable) {
                 const isPendingHere = pendingMediatorNotification && pendingMediatorNotification.other_id === id;
-                document.getElementById("mediator-trigger-text").textContent = isPendingHere ? "阿月有悄悄話" : "問問阿月";
                 document.getElementById("mediator-unread-dot").classList.toggle("hidden", !isPendingHere);
             }
 
@@ -3199,18 +3264,21 @@ if (metadata.event_type === "date_coordination_form") {
         }
 
         async function openMediatorPrivatePanel() {
-            if (!activeContactId || activeContactId === "ai_assistant") return;
+            if (!hasPrivateMediatorAccess()) return;
             const panel = document.getElementById("mediator-private-panel");
             const container = document.getElementById("mediator-private-messages");
+            const launcher = document.getElementById("mediator-private-trigger");
+            if (!panel.classList.contains("hidden")) return;
             if (whisperCollapseTimer) clearTimeout(whisperCollapseTimer);
             whisperCollapseTimer = null;
-            document.getElementById("mediator-private-trigger").classList.remove("whisper-collapsed");
+            launcher.classList.add("hidden");
+            launcher.setAttribute("aria-expanded", "true");
+            launcher.setAttribute("aria-label", "收起阿月悄悄話");
             const contactLabel = document.getElementById("room-name").textContent.trim() || "這段關係";
-            document.getElementById("mediator-private-context").textContent = "關於 " + contactLabel + "，只有你看得到";
+            document.getElementById("mediator-private-context").textContent = "和 " + contactLabel + " 的私下空間・只有你看得到";
             panel.classList.remove("hidden");
             panel.classList.add("flex");
             document.getElementById("mediator-unread-dot").classList.add("hidden");
-            document.getElementById("mediator-trigger-text").textContent = "問問阿月";
             if (pendingMediatorNotification && pendingMediatorNotification.other_id === activeContactId) {
                 pendingMediatorNotification = null;
                 document.getElementById("mediator-toast").classList.add("hidden");
@@ -3232,6 +3300,10 @@ if (metadata.event_type === "date_coordination_form") {
             if (!panel) return;
             panel.classList.add("hidden");
             panel.classList.remove("flex");
+            const launcher = document.getElementById("mediator-private-trigger");
+            if (hasPrivateMediatorAccess()) launcher.classList.remove("hidden", "whisper-collapsed");
+            launcher?.setAttribute("aria-expanded", "false");
+            launcher?.setAttribute("aria-label", "開啟阿月悄悄話");
         }
 
         function appendPrivateMessage(text, isUser, messageData = {}) {
@@ -4555,17 +4627,17 @@ if (metadata.event_type === "date_coordination_form") {
 
         function markRelationshipWhisper(payload) {
             pendingMediatorNotification = payload;
-            if (activeContactId === payload.other_id) {
+            if (activeContactId === payload.other_id && hasPrivateMediatorAccess(payload.other_id)) {
                 const trigger = document.getElementById("mediator-private-trigger");
-                trigger.classList.remove("hidden", "whisper-collapsed");
-                document.getElementById("mediator-trigger-text").textContent = "阿月有悄悄話";
                 document.getElementById("mediator-unread-dot").classList.remove("hidden");
-                if (whisperCollapseTimer) clearTimeout(whisperCollapseTimer);
-                whisperCollapseTimer = setTimeout(() => {
-                    trigger.classList.add("whisper-collapsed");
-                }, 8000);
                 const panel = document.getElementById("mediator-private-panel");
-                if (!panel.classList.contains("hidden")) openMediatorPrivatePanel();
+                if (panel.classList.contains("hidden")) {
+                    trigger.classList.remove("hidden", "whisper-collapsed");
+                    if (whisperCollapseTimer) clearTimeout(whisperCollapseTimer);
+                    whisperCollapseTimer = setTimeout(() => {
+                        trigger.classList.add("whisper-collapsed");
+                    }, 8000);
+                }
             } else {
                 const contact = acceptedContacts.find(item => item.id === payload.other_id);
                 showMediatorToast(`我在你和${contact?.name || "對方"}的聊天室留了話。`, payload);
@@ -4893,6 +4965,7 @@ if (metadata.event_type === "date_coordination_form") {
 
         // Init Check
         window.addEventListener("DOMContentLoaded", async () => {
+            configureAyueAvatars();
             const urlParams = new URLSearchParams(window.location.search);
             if (urlParams.has('user')) {
                 currentUserId = urlParams.get('user');
