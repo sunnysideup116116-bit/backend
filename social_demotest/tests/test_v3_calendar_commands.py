@@ -118,6 +118,56 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertEqual(command.title, "去駁二")
         self.assertIsNone(command.end_time)
 
+    def test_provider_nested_fields_are_flattened_before_strict_validation(self):
+        payload = normalize_calendar_batch_payload({
+            "commands": [{
+                "action": "create",
+                "fields": {
+                    "title": "逛霧時代",
+                    "date": "2026-08-15",
+                    "start_time": "21:00",
+                    "end_time": "22:00",
+                },
+            }],
+        })
+        self.assertNotIn("fields", payload["commands"][0])
+        command = CalendarCommand.model_validate(payload["commands"][0])
+        self.assertEqual(command.title, "逛霧時代")
+        self.assertEqual(command.date, "2026-08-15")
+        self.assertEqual(command.start_time, "21:00")
+        self.assertEqual(command.end_time, "22:00")
+
+    def test_provider_nested_fields_reject_authority_and_unknown_fields(self):
+        for field in ("event_id", "revision"):
+            with self.subTest(field=field):
+                payload = normalize_calendar_batch_payload({
+                    "commands": [{
+                        "action": "create",
+                        "fields": {"title": "行程", field: "server-owned"},
+                    }],
+                })
+                with self.assertRaises(ValidationError):
+                    CalendarCommand.model_validate(payload["commands"][0])
+
+        payload = normalize_calendar_batch_payload({
+            "commands": [{
+                "action": "create",
+                "fields": {"title": "行程", "unexpected": "not allowed"},
+            }],
+        })
+        with self.assertRaises(ValidationError):
+            CalendarCommand.model_validate(payload["commands"][0])
+
+    def test_provider_nested_fields_reject_conflicting_duplicate_values(self):
+        with self.assertRaises(ValueError):
+            normalize_calendar_batch_payload({
+                "commands": [{
+                    "action": "create",
+                    "date": "2026-08-15",
+                    "fields": {"date": "2026-08-16"},
+                }],
+            })
+
     def test_provider_opaque_target_drift_is_normalized_without_granting_semantic_authority(self):
         payload = normalize_calendar_batch_payload({
             "commands": [{"target": "recent_event", "type": "delete"}],
@@ -430,6 +480,11 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertEqual(len(proposals.commands), 0)
         self.assertIn("calendar_command_schema_invalid", metrics.rejected_calls)
         self.assertEqual(metrics.error, "no_valid_proposal")
+        self.assertEqual(
+            proposals.command_errors[0]["message"],
+            "這次行程指令格式無法驗證，請重新描述需求。",
+        )
+        self.assertNotIn("日期", proposals.command_errors[0]["message"])
 
     def test_create_missing_end_time_is_clarification(self):
         command = CalendarCommand(
@@ -638,6 +693,65 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertEqual(result.plans[0].form["start_time"], "08:00")
         self.assertEqual(result.plans[0].form["end_time"], "10:00")
 
+    def test_numeric_dates_use_closed_grammar_and_authoritative_clock(self):
+        ctx = SimpleNamespace(
+            user_id="owner",
+            clock=SimpleNamespace(local_date="2026-08-09", temporal_references={}),
+        )
+        for raw, expected in (
+            ("8/16", "2026-08-16"),
+            ("8-16", "2026-08-16"),
+            ("2026/8/16", "2026-08-16"),
+            ("2026-8-16", "2026-08-16"),
+        ):
+            with self.subTest(raw=raw):
+                canonical, error = canonicalize_calendar_command(
+                    ctx, CalendarCommand(action="create", date=raw),
+                )
+                self.assertIsNone(error)
+                self.assertEqual(canonical.date, expected)
+
+    def test_numeric_invalid_date_is_rejected_as_invalid_date(self):
+        ctx = SimpleNamespace(
+            user_id="owner",
+            clock=SimpleNamespace(local_date="2026-08-09", temporal_references={}),
+        )
+        canonical, error = canonicalize_calendar_command(
+            ctx, CalendarCommand(action="create", date="13/40"),
+        )
+        self.assertEqual(canonical.date, "13/40")
+        self.assertIn("日期無效", error or "")
+        with patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True):
+            result = preflight_calendar_commands(ctx, [canonical])
+        self.assertEqual(result.status, "needs_clarification")
+        self.assertEqual(result.clarification.code, "invalid_date")
+
+    def test_yearless_date_rolls_to_next_year_after_authoritative_clock_date(self):
+        ctx = SimpleNamespace(
+            user_id="owner",
+            clock=SimpleNamespace(local_date="2026-12-30", temporal_references={}),
+        )
+        canonical, error = canonicalize_calendar_command(
+            ctx, CalendarCommand(action="create", date="1/2"),
+        )
+        self.assertIsNone(error)
+        self.assertEqual(canonical.date, "2027-01-02")
+
+    def test_create_preflight_uses_numeric_date_canonicalization(self):
+        ctx = SimpleNamespace(
+            user_id="owner",
+            clock=SimpleNamespace(local_date="2026-08-09", temporal_references={}),
+        )
+        command = CalendarCommand(
+            action="create", title="逛霧時代", date="8/16",
+            start_time="21:00", end_time="22:00",
+        )
+        with patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]):
+            result = preflight_calendar_commands(ctx, [command])
+        self.assertEqual(result.status, "ready")
+        self.assertEqual(result.plans[0].form["date"], "2026-08-16")
+
     def test_weekday_canonicalization_does_not_use_shorter_week_prefix(self):
         command = CalendarCommand(
             action="create", title="看牙醫", date="下週三", start_time="15:00", end_time="16:00",
@@ -691,6 +805,34 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertEqual(result.plans[0].event_id, "event-1")
         self.assertEqual(result.plans[0].expected_revision, 4)
         resolve.assert_called_once_with("owner", "8/25 雞排約會")
+
+    def test_update_inherits_interval_and_title_after_numeric_date_canonicalization(self):
+        event = _event()
+        event.update({
+            "title": "圖書館",
+            "start_at": datetime(2026, 8, 14, 2, 27, tzinfo=timezone.utc),
+            "end_at": datetime(2026, 8, 14, 6, 15, tzinfo=timezone.utc),
+        })
+        ctx = SimpleNamespace(
+            user_id="owner",
+            clock=SimpleNamespace(local_date="2026-08-09", temporal_references={}),
+        )
+        command = CalendarCommand(
+            action="update", target_hint="圖書館", date="8/16", draft_mode="continue",
+        )
+        with patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.resolve_owned_event", return_value=(event, None)), \
+             patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]):
+            result = preflight_calendar_commands(ctx, [command])
+        self.assertEqual(result.status, "ready")
+        form = result.plans[0].form
+        self.assertEqual(form["date"], "2026-08-16")
+        self.assertEqual(form["start_time"], "10:27")
+        self.assertEqual(form["end_time"], "14:15")
+        self.assertEqual(form["title"], "圖書館")
+        self.assertIn("8/16", result.preview)
+        self.assertIn("10:27–14:15", result.preview)
+        self.assertIn("圖書館", result.preview)
 
     def test_shared_date_update_keeps_date_coordination_metadata_server_side(self):
         command = CalendarCommand(action="update", target_hint="8/25 雞排約會", date="2026-08-15")

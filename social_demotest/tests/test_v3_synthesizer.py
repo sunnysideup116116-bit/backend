@@ -62,6 +62,24 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIn("grounded_result", call.call_args.kwargs["system_prompt"])
         self.assertNotIn("clarification_policy", call.call_args.args[0])
 
+    def test_invalid_calendar_command_cannot_supply_a_missing_field_to_synthesizer(self):
+        slc = self._slice([{
+            "task_id": "t1", "status": "ok", "tool": "calendar.submit_commands",
+            "result": {"calendar_command_result": {
+                "status": "needs_clarification",
+                "clarification": {
+                    "code": "invalid_command", "missing_fields": [],
+                    "message": "這次行程指令格式無法驗證，請重新描述需求。",
+                },
+            }},
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="請重新描述需求。"),
+        ) as call:
+            synthesize(slc)
+        self.assertIn("schema validation 沒有建立 authoritative missing field", call.call_args.kwargs["system_prompt"])
+
     def test_recent_calendar_mutation_verification_is_server_owned_reply(self):
         slc = self._slice([{
             "task_id": "t1", "status": "ok", "tool": "calendar.verify_recent_mutation",

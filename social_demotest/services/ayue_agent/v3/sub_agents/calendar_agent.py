@@ -157,7 +157,10 @@ def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[CalendarA
                     metrics.rejected_calls.append("calendar_command_schema_invalid")
                     command_errors.append({
                         "code": "invalid_command",
-                        "message": "這筆行程資訊格式不完整，請再說一次日期、時間與行程名稱。",
+                        # Schema validation never established an authoritative
+                        # missing field.  Keep this neutral so Synthesizer
+                        # cannot turn provider drift into a guessed field ask.
+                        "message": "這次行程指令格式無法驗證，請重新描述需求。",
                     })
                     continue
                 commands.extend(validated.commands)

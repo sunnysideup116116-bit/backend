@@ -8,12 +8,13 @@ from unittest.mock import MagicMock, patch
 from services.ayue_agent.contracts import AgentTurnContext, AgentResult, AgentTurnContextV2, TurnClockV1
 from services.ayue_agent.v3.calendar_commands import CalendarCommand
 from services.ayue_agent.v3.calendar_drafts import clear_draft, get_draft, public_projection
-from services.ayue_agent.v3.sub_agents.calendar_agent import CalendarAgentResult
+from services.ayue_agent.v3.sub_agents.calendar_agent import CalendarAgentResult, run as run_calendar_agent
 from services.ayue_agent.v3.contracts import Plan, SubTask, SubTaskResult, SubTaskStatus, ToolProposal
 from services.ayue_agent.v3.planner import PlannerMetrics
 from services.ayue_agent.v3.confirmation import ConfirmationManager
 from services.ayue_agent.v3.synthesizer import SynthesizerMetrics
 from services.ayue_agent.v3.sub_agents.base import SubAgentMetrics
+from services.ai_service import ToolCallResult
 from services.ayue_agent.v3.scheduler import (
     _apply_card_decision, _assessment_start_confirmation_requested,
     _direct_chat_block_reason, _prior_observations_for, _public_place_cards,
@@ -306,6 +307,84 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertEqual(plan["form"]["start_time"], "15:00")
         self.assertEqual(plan["form"]["end_time"], "16:00")
         self.assertIsNone(get_draft("owner"))
+
+    def test_calendar_two_turn_nested_fields_provider_output_keeps_date_and_derives_end(self):
+        """Provider fields wrapper must survive draft continuation end-to-end."""
+        clear_draft("owner")
+        self.addCleanup(clear_draft, "owner")
+        first_plan = Plan(tasks=[
+            SubTask(id="c1", agent="calendar", depends_on=[], task_brief="新增下週六一筆行事曆"),
+            SubTask(id="s1", agent="synthesizer", depends_on=["c1"], task_brief="彙整行事曆結果"),
+        ])
+        second_plan = Plan(tasks=[
+            SubTask(id="c2", agent="calendar", depends_on=[], task_brief="補上逛霧時代晚上九點一小時"),
+            SubTask(id="s2", agent="synthesizer", depends_on=["c2"], task_brief="彙整行事曆結果"),
+        ])
+        fixed_clock = TurnClockV1(
+            timezone="Asia/Taipei", utc_iso="2026-08-09T04:00:00+00:00",
+            local_iso="2026-08-09T12:00:00+08:00", local_date="2026-08-09",
+            local_time="12:00", weekday_zh_tw="星期日",
+            temporal_references={"下週六": "2026-08-15"},
+        )
+
+        def build_context(raw_ctx, *, clock):
+            return AgentTurnContextV2(
+                user_id=raw_ctx.user_id, room_id=raw_ctx.room_id,
+                message=raw_ctx.message,
+                calendar_draft=public_projection(get_draft(raw_ctx.user_id)),
+                clock=clock,
+            )
+
+        provider_results = [
+            ToolCallResult(content="", tool_calls=[{
+                "name": "calendar.submit_commands",
+                "arguments": {"commands": [{
+                    "action": "create", "title": "行事曆", "date": "下週六",
+                }]},
+            }]),
+            ToolCallResult(content="", tool_calls=[{
+                "name": "calendar.submit_commands",
+                "arguments": {"commands": [{
+                    "action": "create",
+                    "fields": {
+                        "title": "逛霧時代",
+                        "start_time": "21:00",
+                        "duration_minutes": 60,
+                    },
+                }]},
+            }]),
+        ]
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", side_effect=[
+                 (first_plan, _planner_metrics()), (second_plan, _planner_metrics()),
+             ]), \
+             patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
+             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2", side_effect=build_context), \
+             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": run_calendar_agent}), \
+             patch("services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools", side_effect=provider_results), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
+             patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("確認行程", None, _synth_metrics())):
+            first_result = run_public_agent_turn_v3(self._ctx("下週六幫我新增一筆行事曆"), mode="on")
+            draft_after_first = get_draft("owner")
+            second_result = run_public_agent_turn_v3(self._ctx("逛霧時代 晚上九點逛一個小時左右"), mode="on")
+
+        self.assertTrue(first_result.handled)
+        self.assertEqual((draft_after_first or {}).get("command", {}).get("date"), "2026-08-15")
+        self.assertTrue(second_result.handled)
+        self.assertEqual(create_confirmation.call_count, 1)
+        payload = create_confirmation.call_args.kwargs["payload"]
+        form = payload["plans"][0]["form"]
+        self.assertEqual(form["date"], "2026-08-15")
+        self.assertEqual(form["start_time"], "21:00")
+        self.assertEqual(form["end_time"], "22:00")
+        self.assertEqual(form["title"], "逛霧時代")
+        preview = create_confirmation.call_args.kwargs["preview"]
+        self.assertIn("8/15", preview)
+        self.assertIn("21:00–22:00", preview)
+        self.assertIn("逛霧時代", preview)
+        self.assertNotIn("日期", preview)
 
     def test_calendar_two_turn_lowercase_two_weeks_duration_keeps_title_and_date(self):
         """Real regression: date/title from turn one survive a time-only turn."""

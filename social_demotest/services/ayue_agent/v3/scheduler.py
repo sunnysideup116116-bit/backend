@@ -715,7 +715,7 @@ def _run_sub_task(
                         "status": "needs_clarification",
                         "clarification": {
                             "code": str(clarification.get("code") or "invalid_command"),
-                            "message": str(clarification.get("message") or "請再說一次行程日期與時間。"),
+                            "message": str(clarification.get("message") or "這次行程指令格式無法驗證，請重新描述需求。"),
                             "command_index": 0,
                             "missing_fields": [],
                         },
@@ -791,7 +791,7 @@ def _run_sub_task(
                     "status": "needs_clarification",
                     "clarification": {
                         "code": str(clarification.get("code") or "invalid_command"),
-                        "message": str(clarification.get("message") or "請再說一次行程日期與時間。"),
+                        "message": str(clarification.get("message") or "這次行程指令格式無法驗證，請重新描述需求。"),
                         "command_index": 0,
                         "missing_fields": [],
                     },
