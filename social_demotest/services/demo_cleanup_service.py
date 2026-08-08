@@ -85,7 +85,7 @@ def clear_mongo_database() -> dict[str, Any]:
 
 
 def clear_all_demo_state() -> dict[str, Any]:
-    """Clear Graph first, then all configured app data; no cross-store rollback."""
+    """Clear all configured demo stores; no cross-store rollback."""
     if MONGO_INIT_ERROR is not None:
         raise DemoCleanupError("mongo_unavailable", status_code=503)
     try:
@@ -93,7 +93,13 @@ def clear_all_demo_state() -> dict[str, Any]:
     except Exception as exc:
         LOGGER.exception("demo Mongo preflight failed: %s", type(exc).__name__)
         raise DemoCleanupError("mongo_unavailable", status_code=503) from exc
+    try:
+        runtime = clear_runtime_fallbacks()
+    except DemoCleanupError:
+        raise
+    except Exception as exc:
+        LOGGER.exception("demo runtime cleanup failed: %s", type(exc).__name__)
+        raise DemoCleanupError("runtime_cleanup_failed", status_code=500) from exc
     graph = clear_graph()
-    runtime = clear_runtime_fallbacks()
     mongo = clear_mongo_database()
     return {"status": "success", "graph": graph, "runtime": runtime, "mongo": mongo}

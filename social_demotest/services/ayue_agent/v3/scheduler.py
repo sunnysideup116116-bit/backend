@@ -156,6 +156,13 @@ _CONFIRMATIONS = _runtime_collection("v3_pending_confirmations")
 
 def clear_demo_runtime_state() -> None:
     """Clear in-memory V3 state when the demo database is reset."""
+    # In production this module uses PyMongo collections.  PyMongo exposes
+    # unknown attributes as sub-collections, so ``collection.clear`` is not a
+    # callable in-memory method (calling it raises ``TypeError``).  Mongo is
+    # cleared by the centralized demo cleanup service; this hook only needs to
+    # clear the dict-backed stores used by the test runtime.
+    if not _TEST_MODE:
+        return
     for collection in (_CONFIRMATIONS, RUNS):
         clear = getattr(collection, "clear", None)
         if callable(clear):
