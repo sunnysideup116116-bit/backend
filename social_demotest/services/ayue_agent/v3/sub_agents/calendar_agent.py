@@ -35,10 +35,13 @@ _SYSTEM = """你是公開阿月的行事曆子代理，負責提出本人行程�
 - 真正查詢行程時才使用 read tools；新增、修改、取消一律使用 calendar.submit_commands。
 - 不要為 mutation 先呼叫 calendar.find_my_event；target 由 server preflight 唯一 resolve。
 - 只能填入 current user message、明確延續的最近對話，或 server-owned context 明確提供的值；不得自行補齊看似合理的日期、時間、時長、標題、地點或對象。
+- command 欄位必須使用 canonical 名稱：action（不要用 type）、target_reference（不要用 target）、target_hint（自然語言 identity clue）。只有 server 提供的 recent_event 或 candidate_1..candidate_3 才能放入 target_reference。
+- target_hint 只保留活動／地點等辨識線索，例如「牙醫」或「睡覺」；不要把取消／修改、禮貌、情緒、代名詞或完整對話句塞進去。
 - create/update 的 title 只保留活動本身（例如「下下周四我要去駁二玩」應拆成 date=下下周四、title=去駁二玩），不要把日期、時間或操作詞塞進 title。
 - 使用者明確說出「半小時／一小時／一個半小時／兩小時」等持續時間時，填 duration_minutes；不要自行從開始時間猜 duration 或計算 end_time。server 會在 preflight 產生結束時間；若同時有 end_time，兩者不一致時交由 server 追問。
+- 「延後／提前／整段往後或往前」既有行程時，填 update 的 time_shift_minutes signed integer；這不是 duration_minutes，也不要自行計算平移後的 start/end。time_shift_minutes 不要與新的 date/start_time/end_time/duration_minutes 同時提供。
 - 缺欄位仍提交 typed command，讓 server 回 needs_clarification；不要自行改寫成固定的追問或自由文字。
-- 有 calendar_draft 時，使用 draft_mode=continue 只補本回合明確提供的欄位；draft_mode 是提示，不是丟棄 server draft 的權限；新請求才使用 replace。
+- 有 calendar_draft 且 resolved_target.bound=true 時，已選定的行程是 server-owned continuation target；只提交本回合新的 changes，不能要求使用者重複標題、原日期或原時間。除非本回合明確提出另一個 target_hint/target_reference，否則使用 draft_mode=continue；draft_mode 是提示，不是丟棄 server draft 的權限。
 - 使用者以「這筆／那筆／它／他／她／剛剛提到的行程」指涉 server context 的最近唯一行程時，使用 recent_event。
 - ambiguity clarification 中的 candidate_1..candidate_3 只能原樣回傳 calendar_draft.candidates 已提供的 reference，不得發明 token。
 - 同一回合多個 mutation 放在同一批 commands，維持使用者描述順序。

@@ -12,6 +12,7 @@ from services.calendar_service import as_utc, get_timezone
 
 
 REFERENCE_TTL_SECONDS = 15 * 60
+DRAFT_TARGET_REFERENCE_KEY = "draft_target"
 _COLLECTION = None
 _LOCK = threading.RLock()
 _MEMORY: dict[tuple[str, str], dict[str, Any]] = {}
@@ -100,6 +101,30 @@ def _record(user_id: str, reference_key: str, event: dict[str, Any], *, safe_lab
 
 def remember_event(user_id: str, event: dict[str, Any], *, reference_key: str = "recent_event", safe_label: str = "") -> dict[str, Any]:
     return _record(user_id, reference_key, event, safe_label=safe_label)
+
+
+def remember_resolved_target(user_id: str, target: Any) -> dict[str, Any]:
+    """Persist a preflight-resolved target for a clarification continuation.
+
+    The actual event id/revision stay in this server-owned reference store;
+    only the bounded label is projected into the Calendar draft context.
+    """
+    if hasattr(target, "model_dump"):
+        target = target.model_dump()
+    target = dict(target or {})
+    event = {
+        "event_id": target.get("event_id"),
+        "revision": target.get("expected_revision", target.get("revision", 1)),
+        "source_type": target.get("source_type") or "personal",
+        "coordination_id": target.get("coordination_id"),
+        "participants": [user_id] + ([target.get("other_id")] if target.get("other_id") else []),
+    }
+    return _record(
+        user_id,
+        DRAFT_TARGET_REFERENCE_KEY,
+        event,
+        safe_label=str(target.get("safe_label") or "這筆行程"),
+    )
 
 
 def remember_candidates(user_id: str, events: list[dict[str, Any]], *, limit: int = 3) -> list[dict[str, Any]]:

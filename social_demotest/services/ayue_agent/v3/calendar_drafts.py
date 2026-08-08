@@ -69,6 +69,7 @@ def save_draft(
     *,
     missing_fields: list[str] | None = None,
     candidates: list[dict[str, Any]] | None = None,
+    resolved_target: Any | None = None,
 ) -> dict[str, Any]:
     values = command.model_dump(exclude_none=True) if hasattr(command, "model_dump") else dict(command or {})
     # A draft is deliberately authority-free.  Never persist an event identity
@@ -91,6 +92,25 @@ def save_draft(
         "created_at": now,
         "expires_at": now + DRAFT_TTL_SECONDS,
     }
+    if resolved_target:
+        target = resolved_target.model_dump() if hasattr(resolved_target, "model_dump") else dict(resolved_target)
+        # Store only a safe projection in the draft.  The authority-bearing
+        # event id/revision live in calendar_references.draft_target.
+        record["resolved_target"] = {
+            "bound": True,
+            "label": str(target.get("safe_label") or "這筆行程")[:180],
+            "reference_key": "draft_target",
+        }
+    else:
+        # Never leave a previous server-owned target attached to a new
+        # clarification draft.  The command draft itself is authority-free,
+        # so a missing binding means that the next turn must resolve again.
+        record["resolved_target"] = None
+        try:
+            from .calendar_references import clear_reference
+            clear_reference(user_id, reference_key="draft_target")
+        except Exception:
+            pass
     storage_backend = "memory_fallback"
     collection = _collection()
     try:
@@ -136,7 +156,7 @@ def public_projection(record: dict[str, Any] | None) -> dict[str, Any] | None:
     if not record:
         return None
     command = dict(record.get("command") or {})
-    return {
+    projection = {
         "action": command.get("action"),
         "fields": {
             key: value for key, value in command.items()
@@ -153,6 +173,13 @@ def public_projection(record: dict[str, Any] | None) -> dict[str, Any] | None:
             if isinstance(item, dict)
         ],
     }
+    resolved = record.get("resolved_target") or {}
+    if isinstance(resolved, dict) and resolved.get("bound"):
+        projection["resolved_target"] = {
+            "bound": True,
+            "label": str(resolved.get("label") or "這筆行程")[:180],
+        }
+    return projection
 
 
 def candidate_reference_allowed(record: dict[str, Any] | None, reference_key: str) -> bool:
@@ -173,6 +200,16 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
     mode = str(getattr(command, "draft_mode", "none") or "none")
     prior = dict(record.get("command") or {})
     values = command.model_dump(exclude_none=True)
+    incoming_target_hint = str(values.get("target_hint") or "").strip()
+    incoming_target_reference = str(values.get("target_reference") or "").strip()
+    prior_target_hint = str(prior.get("target_hint") or "").strip()
+    has_resolved_target = bool((record.get("resolved_target") or {}).get("bound"))
+    same_target_hint = bool(incoming_target_hint and prior_target_hint and incoming_target_hint == prior_target_hint)
+    explicit_new_target = bool(incoming_target_reference or (incoming_target_hint and not same_target_hint))
+    if has_resolved_target and explicit_new_target:
+        # A new selector is a new mutation target, not a continuation of the
+        # old event's pending changes.
+        return command
     missing_fields = {
         str(field).strip() for field in (record.get("missing_fields") or []) if str(field).strip()
     }
@@ -196,6 +233,11 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
             and (effective_provided_fields - missing_fields) <= set(prior) | {"duration_minutes"}
         )
     )
+    # Once preflight has uniquely resolved an update/cancel target, a
+    # selector-free same-action turn is a continuation even when the
+    # clarification has missing_fields=[] or the provider says replace.
+    if has_resolved_target and not explicit_new_target:
+        clear_continuation = True
     if (
         str(getattr(command, "action", "")) == "create"
         and {"title", "date", "start_time", "end_time"} <= effective_provided_fields
@@ -212,8 +254,16 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
             return command
     if clear_continuation:
         values["draft_mode"] = "continue"
+        # The server-owned draft reference is used by Scheduler.  Do not
+        # carry the old natural-language hint back into preflight and resolve
+        # the same event a second time.
+        if has_resolved_target and not explicit_new_target:
+            values.pop("target_hint", None)
+            values.pop("target_reference", None)
     for key, value in prior.items():
         if key in {"action", "draft_mode"}:
+            continue
+        if has_resolved_target and not explicit_new_target and key in {"target_hint", "target_reference"}:
             continue
         if key == "target_hint" and values.get("target_reference"):
             continue
@@ -234,6 +284,17 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
     return CalendarCommand.model_validate(values)
 
 
+def resolved_target_replaced(command: Any, record: dict[str, Any] | None) -> bool:
+    """Return whether an incoming command explicitly selects a new target."""
+    if not record or not (record.get("resolved_target") or {}).get("bound"):
+        return False
+    values = command.model_dump(exclude_none=True) if hasattr(command, "model_dump") else dict(command or {})
+    target_reference = str(values.get("target_reference") or "").strip()
+    target_hint = str(values.get("target_hint") or "").strip()
+    prior_hint = str((record.get("command") or {}).get("target_hint") or "").strip()
+    return bool(target_reference or (target_hint and target_hint != prior_hint))
+
+
 def clear_draft(user_id: str) -> None:
     with _LOCK:
         _MEMORY.pop(user_id, None)
@@ -241,5 +302,12 @@ def clear_draft(user_id: str) -> None:
     try:
         if collection is not None:
             collection.delete_one({"user_id": user_id})
+    except Exception:
+        pass
+    # Draft target authority is stored separately from the authority-free
+    # command draft and must expire/clear together with it.
+    try:
+        from .calendar_references import clear_reference
+        clear_reference(user_id, reference_key="draft_target")
     except Exception:
         pass

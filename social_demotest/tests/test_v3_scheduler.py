@@ -2,6 +2,7 @@
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from services.ayue_agent.contracts import AgentTurnContext, AgentResult, AgentTurnContextV2, TurnClockV1
@@ -263,6 +264,74 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertEqual(form["date"], "2026-08-20")
         self.assertEqual(form["start_time"], "09:00")
         self.assertEqual(form["end_time"], "10:00")
+        self.assertIsNone(get_draft("owner"))
+
+    def test_calendar_update_target_binding_survives_time_shift_followup(self):
+        """A resolved update target remains bound across a time-only clarification."""
+        clear_draft("owner")
+        first_plan = Plan(tasks=[
+            SubTask(id="c1", agent="calendar", depends_on=[], task_brief="修改看牙醫行程"),
+            SubTask(id="s1", agent="synthesizer", depends_on=["c1"], task_brief="整理結果"),
+        ])
+        second_plan = Plan(tasks=[
+            SubTask(id="c2", agent="calendar", depends_on=[], task_brief="時間延後一小時"),
+            SubTask(id="s2", agent="synthesizer", depends_on=["c2"], task_brief="整理結果"),
+        ])
+        fixed_clock = TurnClockV1(
+            timezone="Asia/Taipei", utc_iso="2026-08-08T12:00:00+00:00",
+            local_iso="2026-08-08T20:00:00+08:00", local_date="2026-08-08",
+            local_time="20:00", weekday_zh_tw="星期六", temporal_references={},
+        )
+        event = {
+            "event_id": "dentist-1", "revision": 4, "source_type": "personal",
+            "participants": ["owner"], "title": "看牙醫",
+            "start_at": datetime(2026, 8, 10, 7, 0, tzinfo=timezone.utc),
+            "end_at": datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc),
+            "timezone": "Asia/Taipei", "location": "", "notes": "", "status": "confirmed",
+        }
+
+        def build_context(raw_ctx, *, clock):
+            return AgentTurnContextV2(
+                user_id=raw_ctx.user_id, room_id=raw_ctx.room_id,
+                message=raw_ctx.message, calendar_draft=public_projection(get_draft(raw_ctx.user_id)),
+                clock=clock,
+            )
+
+        first_command = CalendarCommand(action="update", target_hint="看牙醫")
+        second_command = CalendarCommand(action="update", time_shift_minutes=60)
+        runner = MagicMock(side_effect=[
+            (CalendarAgentResult(commands=[first_command]), _sub_metrics()),
+            (CalendarAgentResult(commands=[second_command]), _sub_metrics()),
+        ])
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", side_effect=[
+                 (first_plan, _planner_metrics()), (second_plan, _planner_metrics()),
+             ]), \
+             patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
+             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2", side_effect=build_context), \
+             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": runner}), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
+             patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.resolve_owned_event", return_value=(event, None)) as resolve_hint, \
+             patch("services.calendar_service.resolve_owned_event_reference", return_value=(event, None)) as resolve_reference, \
+             patch("services.ayue_agent.v3.calendar_commands.get_owned_event_resolution_candidates", return_value=[]), \
+             patch("services.ayue_agent.v3.calendar_commands.get_owned_event_resolution_kind", return_value="exact"), \
+             patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("完成", None, _synth_metrics())):
+            first_result = run_public_agent_turn_v3(self._ctx("我牙醫那筆行程想修改"), mode="on")
+            draft_after_first = get_draft("owner")
+            second_result = run_public_agent_turn_v3(self._ctx("日期一樣，時間延後一小時"), mode="on")
+
+        self.assertTrue(first_result.handled)
+        self.assertTrue((draft_after_first or {}).get("resolved_target", {}).get("bound"))
+        self.assertTrue(second_result.handled)
+        self.assertEqual(resolve_hint.call_count, 1)
+        self.assertEqual(resolve_reference.call_count, 1)
+        create_confirmation.assert_called_once()
+        form = create_confirmation.call_args.kwargs["payload"]["plans"][0]["form"]
+        self.assertEqual(form["date"], "2026-08-10")
+        self.assertEqual(form["start_time"], "16:00")
+        self.assertEqual(form["end_time"], "17:00")
         self.assertIsNone(get_draft("owner"))
 
     def test_calendar_one_turn_relative_weekday_reaches_confirmation(self):

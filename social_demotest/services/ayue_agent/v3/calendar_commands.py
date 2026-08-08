@@ -32,6 +32,10 @@ from services.calendar_service import (
 CalendarAction = Literal["create", "update", "cancel", "cancel_selected", "cancel_all_upcoming"]
 CalendarDraftMode = Literal["none", "continue", "replace"]
 
+_OPAQUE_TARGET_REFERENCES = frozenset({
+    "recent_event", "candidate_1", "candidate_2", "candidate_3",
+})
+
 
 def normalize_calendar_batch_payload(arguments: Any) -> dict[str, Any]:
     """Normalize legacy/provider spellings before strict command validation.
@@ -63,6 +67,18 @@ def normalize_calendar_batch_payload(arguments: Any) -> dict[str, Any]:
         if not isinstance(raw, dict):
             raise ValueError("each calendar command must be an object")
         command = dict(raw)
+        # Some providers use ``target`` for both a natural-language clue and
+        # an opaque server reference.  Only the four advertised opaque tokens
+        # are safe to normalize; arbitrary values must remain extra fields and
+        # be rejected by the strict CalendarCommand contract below.
+        target = command.get("target")
+        if (
+            "target_reference" not in command
+            and isinstance(target, str)
+            and target.strip() in _OPAQUE_TARGET_REFERENCES
+        ):
+            command["target_reference"] = target.strip()
+            command.pop("target", None)
         for alias, canonical in aliases.items():
             if alias in command and canonical not in command:
                 command[canonical] = command.pop(alias)
@@ -79,7 +95,15 @@ class CalendarCommand(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: CalendarAction = Field(description="create、update、cancel、cancel_selected 或 cancel_all_upcoming")
-    target_hint: str | None = Field(default=None, max_length=120, description="update/cancel 的自然語言行程描述，不要填 server 內部識別欄位")
+    target_hint: str | None = Field(
+        default=None,
+        max_length=120,
+        description=(
+            "update/cancel 的行程 identity clue，例如牙醫、睡覺或雞排；"
+            "只填活動／地點等辨識線索，不要填取消／修改等操作詞、禮貌語、情緒、"
+            "完整對話句或 server 內部識別欄位。"
+        ),
+    )
     target_reference: Literal["recent_event", "candidate_1", "candidate_2", "candidate_3"] | None = Field(
         default=None,
         description=(
@@ -96,6 +120,16 @@ class CalendarCommand(BaseModel):
     duration_minutes: int | None = Field(
         default=None, ge=1, le=24 * 60,
         description="使用者明確說出的持續分鐘數，例如半小時=30、一小時=60；不要自行猜測或做權威時鐘計算",
+    )
+    time_shift_minutes: int | None = Field(
+        default=None,
+        ge=-24 * 60,
+        le=24 * 60,
+        description=(
+            "update 專用：將既有行程的開始與結束時間整體平移的分鐘數；"
+            "正數代表延後、負數代表提前。這不是 duration_minutes，"
+            "不可與新的 date/start_time/end_time/duration_minutes 同時提供。"
+        ),
     )
     timezone: str | None = Field(default=None, max_length=64, description="時區；未提供時由 server 使用 Asia/Taipei")
     location: str | None = Field(default=None, max_length=160, description="可選地點")
@@ -138,6 +172,17 @@ class CalendarCommand(BaseModel):
             raise ValueError("target_hints is only valid for cancel_selected")
         if self.action in {"update", "cancel"} and self.target_hint and self.target_reference:
             raise ValueError("target_hint and target_reference are mutually exclusive")
+        if self.time_shift_minutes is not None:
+            if self.action != "update":
+                raise ValueError("time_shift_minutes is only valid for update")
+            if self.time_shift_minutes == 0:
+                raise ValueError("time_shift_minutes cannot be zero")
+            if any(value is not None for value in (
+                self.date, self.start_time, self.end_time, self.duration_minutes,
+            )):
+                raise ValueError(
+                    "time_shift_minutes cannot be combined with date, start_time, end_time or duration_minutes"
+                )
         return self
 
 
@@ -181,6 +226,19 @@ class CalendarMutationPlan(BaseModel):
     safe_label: str = "這筆行程"
 
 
+class CalendarResolvedTarget(BaseModel):
+    """Server-only target binding carried across Calendar clarification turns."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    expected_revision: int
+    source_type: Literal["personal", "date"]
+    other_id: str | None = None
+    coordination_id: str | None = None
+    safe_label: str = "這筆行程"
+
+
 class CalendarPreflightResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -189,6 +247,9 @@ class CalendarPreflightResult(BaseModel):
     clarification: NeedsClarification | None = None
     preview: str = ""
     denial_code: str | None = None
+    # This is consumed only by Scheduler to persist a server-owned draft
+    # binding.  It is excluded from all model projections sent to an LLM.
+    resolved_target: CalendarResolvedTarget | None = Field(default=None, exclude=True)
 
 
 def _event_label(event: dict[str, Any]) -> str:
@@ -203,6 +264,30 @@ def _event_label(event: dict[str, Any]) -> str:
     end = as_utc(value_end).astimezone(zone)
     title = str(event.get("activity") or event.get("title") or "這筆行程").strip()
     return f"{start.month}/{start.day} {start:%H:%M}–{end:%H:%M} {title}"
+
+
+def _resolved_target(event: dict[str, Any], user_id: str = "") -> CalendarResolvedTarget:
+    """Project an already-resolved event into a server-only binding."""
+    source_type = "date" if str(event.get("source_type") or "") == "date" else "personal"
+    other_id = _other_id(event, user_id) if source_type == "date" else None
+    return CalendarResolvedTarget(
+        event_id=str(event.get("event_id") or ""),
+        expected_revision=int(event.get("revision", 1) or 1),
+        source_type=source_type,
+        other_id=other_id,
+        coordination_id=event.get("coordination_id"),
+        safe_label=_event_label(event),
+    )
+
+
+def _with_resolved_target(
+    result: CalendarPreflightResult,
+    event: dict[str, Any],
+    user_id: str = "",
+) -> CalendarPreflightResult:
+    """Attach a private binding without exposing authority in observations."""
+    result.resolved_target = _resolved_target(event, user_id)
+    return result
 
 
 def _other_id(event: dict[str, Any], user_id: str) -> str | None:
@@ -315,6 +400,35 @@ def _apply_duration_to_form(command: CalendarCommand, form: dict[str, Any]) -> t
     return updated, None
 
 
+def _apply_time_shift_to_form(
+    command: CalendarCommand,
+    form: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    """Shift an existing interval at the server authority boundary."""
+    shift = command.time_shift_minutes
+    if shift is None:
+        return form, None
+    date_text = str(form.get("date") or "").strip()
+    start_text = str(form.get("start_time") or "").strip()
+    end_text = str(form.get("end_time") or "").strip()
+    if not date_text or not start_text or not end_text:
+        return form, "目前無法平移這筆行程，請補上明確的日期與時間。"
+    try:
+        zone = get_timezone(str(form.get("timezone") or "Asia/Taipei"))
+        start = datetime.fromisoformat(f"{date_text}T{start_text}").replace(tzinfo=zone)
+        end = datetime.fromisoformat(f"{date_text}T{end_text}").replace(tzinfo=zone)
+        shifted_start = start + timedelta(minutes=int(shift))
+        shifted_end = end + timedelta(minutes=int(shift))
+    except (TypeError, ValueError, HTTPException):
+        return form, "原行程的日期或時間格式不正確，暫時無法平移。"
+    if shifted_start.date() != start.date() or shifted_end.date() != start.date():
+        return form, "平移後會跨日，請直接提供新的日期與完整時間。"
+    updated = dict(form)
+    updated["start_time"] = shifted_start.strftime("%H:%M")
+    updated["end_time"] = shifted_end.strftime("%H:%M")
+    return updated, None
+
+
 def _is_generic_target_hint(value: str) -> bool:
     """Recognize referential phrases that should use a server-side ref."""
     compact = re.sub(r"\s+", "", str(value or "")).strip("，。！？!?、")
@@ -392,15 +506,18 @@ def _plan_for_event(
     action = "cancel" if command.action == "cancel" else "update"
     source_type = str(event.get("source_type") or "personal")
     if action == "update" and source_type == "date" and event.get("status") != "confirmed":
-        return None, _clarification(
+        return None, _with_resolved_target(_clarification(
             "invalid_interval",
             "這筆共同約會正在等待重新確認，請先完成或取消目前的改期。",
             index,
-        )
+        ), event, user_id)
 
     changes = _command_changes(command)
-    if action == "update" and not changes and command.duration_minutes is None:
-        return None, _clarification("missing_fields", f"你想把「{_event_label(event)}」改成什麼呢？", index)
+    if action == "update" and not changes and command.duration_minutes is None and command.time_shift_minutes is None:
+        return None, _with_resolved_target(
+            _clarification("missing_fields", f"你想把「{_event_label(event)}」改成什麼呢？", index),
+            event, user_id,
+        )
 
     proposed_form: dict[str, Any] = {}
     if action == "update":
@@ -410,15 +527,27 @@ def _plan_for_event(
         proposed_form = normalize_form({**current, **changes})
         proposed_form, duration_error = _apply_duration_to_form(command, proposed_form)
         if duration_error:
-            return None, _clarification("invalid_interval", duration_error, index)
+            return None, _with_resolved_target(
+                _clarification("invalid_interval", duration_error, index), event, user_id,
+            )
         if command.duration_minutes is not None:
             # The executor receives the canonical derived end_time, never a
             # free-form duration that it would have to interpret again.
             changes["end_time"] = proposed_form["end_time"]
+        proposed_form, shift_error = _apply_time_shift_to_form(command, proposed_form)
+        if shift_error:
+            return None, _with_resolved_target(
+                _clarification("invalid_interval", shift_error, index), event, user_id,
+            )
+        if command.time_shift_minutes is not None:
+            changes["start_time"] = proposed_form["start_time"]
+            changes["end_time"] = proposed_form["end_time"]
         try:
             start_at, end_at, _ = _parse_local_interval(proposed_form)
         except HTTPException as exc:
-            return None, _clarification("invalid_interval", str(exc.detail), index)
+            return None, _with_resolved_target(
+                _clarification("invalid_interval", str(exc.detail), index), event, user_id,
+            )
         participants = list(event.get("participants") or [user_id]) if source_type == "date" else [user_id]
         conflicts = conflicts_for_viewer(user_id, participants, start_at, end_at, event.get("event_id"))
     else:

@@ -47,9 +47,17 @@ from .guard import guard_proposal
 from .guard import guard_calendar_commands
 from .calendar_commands import canonicalize_calendar_command, preflight_calendar_commands
 from .calendar_drafts import (
-    candidate_reference_allowed, clear_draft, get_draft, merge_command, save_draft,
+    candidate_reference_allowed, clear_draft, get_draft, merge_command, resolved_target_replaced, save_draft,
 )
-from .calendar_references import clear_reference, get_reference, remember_event, remember_candidates, public_projection
+from .calendar_references import (
+    DRAFT_TARGET_REFERENCE_KEY,
+    clear_reference,
+    get_reference,
+    remember_event,
+    remember_resolved_target,
+    remember_candidates,
+    public_projection,
+)
 from services.calendar_service import resolve_owned_event_with_candidates
 from .planner import plan_turn, PlannerMetrics
 from . import synthesizer
@@ -591,6 +599,17 @@ def _calendar_reference_for_command(
     """Load one server reference after validating its opaque draft token."""
     if str(getattr(command, "action", "") or "") not in {"update", "cancel"}:
         return None
+    if (
+        draft
+        and (draft.get("resolved_target") or {}).get("bound")
+        and str(getattr(command, "draft_mode", "") or "") == "continue"
+        and not getattr(command, "target_reference", None)
+    ):
+        reference = get_reference(user_id, reference_key=DRAFT_TARGET_REFERENCE_KEY)
+        if reference:
+            reference["_force"] = True
+            reference["_draft_bound"] = True
+            return reference
     reference_key = str(getattr(command, "target_reference", "") or "recent_event")
     if reference_key.startswith("candidate_") and not candidate_reference_allowed(draft, reference_key):
         return None
@@ -944,6 +963,9 @@ def _run_sub_task(
         draft = get_draft(turn_ctx.user_id) if len(calendar_commands) == 1 else None
         if draft is not None:
             try:
+                if resolved_target_replaced(calendar_commands[0], draft):
+                    clear_draft(turn_ctx.user_id)
+                    draft = None
                 calendar_commands = [merge_command(calendar_commands[0], draft)]
             except Exception:
                 # A stale/incompatible draft must not turn into an executor
@@ -971,7 +993,7 @@ def _run_sub_task(
             )
             reference_map[0] = {
                 **recent_reference,
-                "_force": same_turn_selected,
+                "_force": bool(recent_reference.get("_force") or same_turn_selected),
             }
         command_guard = guard_calendar_commands(calendar_commands)
         trace["guard_results"].append(command_guard.code.value)
@@ -1001,11 +1023,17 @@ def _run_sub_task(
                     and clarification.code != "invalid_date"
                     and len(calendar_commands) == 1
                 ):
+                    if preflight.resolved_target is not None:
+                        remember_resolved_target(
+                            turn_ctx.user_id,
+                            preflight.resolved_target,
+                        )
                     save_draft(
                         turn_ctx.user_id,
                         calendar_commands[0],
                         missing_fields=clarification.missing_fields,
                         candidates=clarification.candidates,
+                        resolved_target=preflight.resolved_target,
                     )
                 safe_result: dict[str, Any] = {
                     "calendar_command_result": {
