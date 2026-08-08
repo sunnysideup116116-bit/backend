@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from services.ayue_agent.contracts import AgentTurnContextV2, TurnClockV1
+from services.ayue_agent.contracts import PublicAgentTurnContext, TurnClockV1
 from services.ayue_agent.v3.contracts import AgentContextSlice, ToolProposal
 from services.ayue_agent.v3.sub_agents.calendar_agent import run as run_calendar
 from services.ayue_agent.v3.sub_agents.places_agent import run as run_places

@@ -69,9 +69,9 @@ class TurnClockV1(BaseModel):
     temporal_references: dict[str, str] = Field(default_factory=dict)
 
 
-class AgentTurnContextV2(BaseModel):
-    """Prompt-safe public-agent state, assembled once for each turn."""
-    version: str = "v2"
+class PublicAgentTurnContext(BaseModel):
+    """Prompt-safe Public V3 state, assembled once for each turn."""
+    version: str = "public-v1"
     user_id: str
     room_id: str
     message: str
@@ -81,12 +81,9 @@ class AgentTurnContextV2(BaseModel):
     relevant_memories: list[str] = Field(default_factory=list)
     active_proposal: dict[str, Any] | None = None
     latest_match_outcome: dict[str, Any] | None = None
-    pending_confirmation: dict[str, Any] | None = None
-    action_draft: dict[str, Any] | None = None
     calendar_draft: dict[str, Any] | None = None
     calendar_recent_reference: dict[str, Any] | None = None
     calendar_recent_mutation: dict[str, Any] | None = None
-    place_search_draft: dict[str, Any] | None = None
     recent_context_draft: dict[str, Any] | None = None
     # Public references only. Their executor-side IDs remain on AgentTurnContext.
     mentioned_contacts: list[dict[str, str]] = Field(default_factory=list)
@@ -132,7 +129,7 @@ class AgentResult(BaseModel):
     context_changed: bool = False
     context_confirmation_needed: bool = False
     agent_run_id: str | None = None
-    agent_mode: str = "legacy"
+    agent_mode: str = "unknown"
     fallback_reason: str | None = None
     match_readiness_state: str | None = None
     match_guidance_shown: bool = False

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.ayue_agent.contracts import AgentTurnContextV2
+from services.ayue_agent.contracts import PublicAgentTurnContext
 from .contracts import AgentContextSlice
 
 
 def slice_for_agent(
     agent_name: str,
-    turn_ctx: AgentTurnContextV2,
+    turn_ctx: PublicAgentTurnContext,
     *,
     prior_observations: list[dict[str, Any]],
 ) -> AgentContextSlice:

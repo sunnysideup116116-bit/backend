@@ -146,4 +146,7 @@ Set-Location .\social_demotest
 - 所有寫入預設需要 confirmation、ownership、CAS 與 idempotency。
 - V3 失敗必須 fail closed，不得自動掉回 legacy。
 - 修真實失敗案例時先新增匿名 trajectory，再修 contract、projection 或 prompt；不要堆疊中文 keyword regex。
-- 多輪地點推薦會保存 15 分鐘的 bounded search draft；條件已足夠或使用者把選擇交給阿月時，必須直接查詢，不能重複追問料理類型。
+- 多輪地點推薦由 Public V3 直接依當回合 bounded context 判斷；條件已足夠或使用者把選擇交給阿月時，必須直接查詢，不能重複追問料理類型。
+
+
+> Current runtime: Public Ayue is always V3. Private Ayue remains a separate current V2 runtime; Public/Private rollout flags are no longer supported.

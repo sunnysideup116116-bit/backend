@@ -1,6 +1,6 @@
 import unittest
 
-from services.ayue_agent.contracts import AgentTurnContextV2, TurnClockV1
+from services.ayue_agent.contracts import PublicAgentTurnContext, TurnClockV1
 from services.ayue_agent.v3.context_slicer import slice_for_agent
 
 
@@ -14,7 +14,7 @@ def _clock():
 
 class V3ContextSlicerTests(unittest.TestCase):
     def setUp(self):
-        self.turn = AgentTurnContextV2(
+        self.turn = PublicAgentTurnContext(
             user_id="owner", room_id="room", message="幫我看看這週末有什麼安排",
             recent_messages=[{"role": "user", "content": "上次去過那家咖啡廳"}],
             recent_context="最近想找個安靜的地方放鬆",

@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 import config
 from services.ayue_agent.contracts import AgentResult, AgentTurnContext
-from services.ayue_agent.context import build_agent_turn_context_v2
+from services.ayue_agent.context import build_public_agent_turn_context
 from services.ayue_agent.public_relationship_projection import validated_mentioned_contact_ids
 from services.ayue_agent.router import confirmation_choice
 from services.ayue_agent.time_context import build_turn_clock
@@ -110,16 +110,13 @@ def _direct_chat_block_reason(
     """Validate protocol/state safety without reclassifying natural language."""
     if not _direct_chat_fast_path_enabled():
         return "feature_disabled"
-    if pending_records or getattr(turn, "pending_confirmation", None):
+    if pending_records:
         return "pending_confirmation"
     if getattr(turn, "calendar_draft", None):
         return "calendar_draft"
     if getattr(turn, "calendar_recent_mutation", None):
         return "recent_calendar_mutation"
-    if any(
-        getattr(turn, field, None)
-        for field in ("action_draft", "place_search_draft", "recent_context_draft")
-    ):
+    if getattr(turn, "recent_context_draft", None):
         return "active_draft"
     if getattr(turn, "active_proposal", None):
         return "active_match_proposal"
@@ -230,12 +227,12 @@ _SUB_AGENT_RUNNERS = {
 }
 
 
-def agent_mode_for_user_v3(user_id: str) -> str:
-    mode = os.getenv("AYUE_AGENT_V3_MODE", "off").strip().lower()
-    if mode not in {"off", "on"}:
-        mode = "off"
-    allowlist = {v.strip() for v in os.getenv("AYUE_AGENT_V3_USER_ALLOWLIST", "").split(",") if v.strip()}
-    return mode if not allowlist or user_id in allowlist else "off"
+def has_active_public_confirmation(user_id: str) -> bool:
+    """Return whether the current V3 confirmation manager has active work."""
+    try:
+        return bool(ConfirmationManager(_CONFIRMATIONS).list_active(user_id=user_id))
+    except Exception:
+        return False
 
 
 def _topological_layers(plan: Plan) -> list[list[SubTask]]:
@@ -401,18 +398,25 @@ def _public_place_cards(task_results: Any) -> list[dict[str, str]]:
     cards_by_category: dict[str, list[dict[str, str]]] = {c: [] for c in _PLACE_CATEGORIES}
     seen: set[str] = set()
     for result in task_results:
-        if result.status is not SubTaskStatus.OK or not result.observation:
+        if isinstance(result, dict):
+            status_ok = result.get("status", "ok") in {"ok", SubTaskStatus.OK, SubTaskStatus.OK.value}
+            tool_name = result.get("tool") or result.get("tool_name")
+            observation = result.get("result") or result.get("observation")
+        else:
+            status_ok = result.status is SubTaskStatus.OK
+            tool_name = result.tool_name
+            observation = result.observation
+        if not status_ok or not observation:
             continue
-        tool_name = result.tool_name
         if tool_name == "places.search_nearby":
-            places = (result.observation or {}).get("places") or []
+            places = (observation or {}).get("places") or []
         elif tool_name == "places.resolve_place":
-            place = (result.observation or {}).get("place") or {}
+            place = (observation or {}).get("place") or {}
             places = [place] if place else []
         else:
             continue
-        attribution = re.sub(r"\s+", " ", str((result.observation or {}).get("attribution") or "")).strip()[:80]
-        attribution_url = str((result.observation or {}).get("attribution_url") or "")
+        attribution = re.sub(r"\s+", " ", str((observation or {}).get("attribution") or "")).strip()[:80]
+        attribution_url = str((observation or {}).get("attribution_url") or "")
         if not is_safe_public_url(attribution_url):
             attribution_url = ""
         for item in places:
@@ -1140,7 +1144,7 @@ def _run_sub_task(
 
 
 def run_public_agent_turn_v3(
-    ctx: AgentTurnContext, *, mode: str = "on", on_progress: ProgressCallback | None = None,
+    ctx: AgentTurnContext, *, on_progress: ProgressCallback | None = None,
     debug_enabled: bool = False,
 ) -> AgentResult:
     """V3 sub-agent runtime entry point."""
@@ -1153,7 +1157,7 @@ def run_public_agent_turn_v3(
     })
     run_id = uuid.uuid4().hex
     clock = build_turn_clock(ctx.message)
-    turn = build_agent_turn_context_v2(ctx, clock=clock)
+    turn = build_public_agent_turn_context(ctx, clock=clock)
     turn._raw_ctx = ctx  # type: ignore[attr-defined]
     turn._mentioned_ids = mentioned_ids  # type: ignore[attr-defined]
     trace: dict[str, Any] = {

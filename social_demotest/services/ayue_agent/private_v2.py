@@ -21,11 +21,7 @@ from .private_contracts import (
     PrivateAgentResult,
     PrivateSurfaceHandoff,
 )
-from .private_runtime import (
-    _calendar_range_for_message,
-    _partner_busy,
-    private_agent_mode_for_user,
-)
+from .private_calendar import calendar_range_for_message, partner_busy
 from services.mediator_context_service import (
     private_counterparty_strategy_context,
     private_pair_shared_facts,
@@ -86,10 +82,6 @@ class PrivateAgentTurnContextV2:
     private_history: list[dict[str, str]]
     shared_facts: list[dict[str, str]]
     local_time: str
-
-
-def private_v2_mode_for_user(user_id: str) -> str:
-    return private_agent_mode_for_user(user_id)
 
 
 def _compact(value: str) -> str:
@@ -231,8 +223,8 @@ def _safe_pair_summary(ctx: PrivateAgentTurnContextV2) -> dict[str, Any]:
 
 
 def _availability(ctx: PrivateAgentTurnContextV2, scope: str) -> dict[str, Any]:
-    start, end, truncated = _calendar_range_for_message(scope or ctx.message)
-    access, busy = _partner_busy(type("PrivateContext", (), {"user_id": ctx.user_id, "other_id": ctx.other_id})(), start, end)
+    start, end, truncated = calendar_range_for_message(scope or ctx.message)
+    access, busy = partner_busy(ctx.user_id, ctx.other_id, start, end)
     return {"access": access, "busy": busy, "truncated": truncated}
 
 
@@ -240,7 +232,7 @@ def _viewer_availability(ctx: PrivateAgentTurnContextV2, scope: str) -> dict[str
     """Return only the viewer's busy intervals for a relationship planning read."""
     from services.calendar_service import calendar_access_enabled, get_calendar_context
 
-    start, end, truncated = _calendar_range_for_message(scope or ctx.message)
+    start, end, truncated = calendar_range_for_message(scope or ctx.message)
     if not calendar_access_enabled(ctx.user_id):
         return {"access": False, "busy": [], "truncated": truncated}
     context = get_calendar_context(ctx.user_id, None, start, end)

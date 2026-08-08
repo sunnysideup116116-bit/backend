@@ -498,3 +498,5 @@ social_demotest/services/ayue_agent/
 ├── tool_registry.py       # 保留（單一 Tool Registry）
 └── tools.py                # 保留（tool executor）
 ```
+
+> ARCHIVED / HISTORICAL SPEC: not current runtime instructions. See AGENTS.md and AYUE_V3_ARCHITECTURE.md.

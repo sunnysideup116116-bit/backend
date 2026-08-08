@@ -86,8 +86,8 @@ V3 runtime 見 `03-v3-runtime-lifecycle.md`；此處列非 V3 檔案：
 
 | 檔案 | 責任 |
 | --- | --- |
-| `context.py` | 每回合 privacy-safe context：`build_public_context`、`build_agent_turn_context_v2` |
-| `contracts.py` | Provider-neutral contracts（`AgentTurnContext`、`AgentTurnContextV2`、`AgentResult`、`ToolResult`） |
+| `context.py` | 每回合 privacy-safe context：`build_public_context`、`build_public_agent_turn_context` |
+| `contracts.py` | Provider-neutral contracts（`AgentTurnContext`、`PublicAgentTurnContext`、`AgentResult`、`ToolResult`） |
 | `router.py` | 只剩 V3 共用的封閉協議：`confirmation_choice`（確認/取消解析）、`_concise_public_reply` |
 | `time_context.py` | `build_turn_clock`：台北時間與訊息中相對日期解析 |
 | `capabilities.py` | 對使用者一致的產品能力與用詞真相 |
@@ -101,7 +101,7 @@ V3 runtime 見 `03-v3-runtime-lifecycle.md`；此處列非 V3 檔案：
 | `proactive_care.py` | 主動關心的 typed care surface：claim、generation、grounding 驗證 |
 | `proactive_scheduler.py` | Server-side 主動關心排程 loop |
 | `private_v2.py` | 悄悄話的獨立 context、registry、composer |
-| `private_runtime.py` | 悄悄話 legacy runtime（**除非任務明確授權，禁止修改**） |
+| `private_calendar.py` | Private V2 的 bounded 日期範圍與 busy/free projection helper |
 
 ### 其他
 
@@ -131,4 +131,7 @@ V3 runtime 見 `03-v3-runtime-lifecycle.md`；此處列非 V3 檔案：
 - 改行事曆 → `calendar_service.py` / `date_coordination_service.py`。
 - 改記憶 → `profile_skills.py`（extraction）與 `memory_service.py`（durable write facade）。
 - 改 UI → 後端 typed contract 完成後才動 `frontend.html`。
-- 禁止直接修改：`private_runtime.py`（未經授權）、正式資料 cleanup CLI、模型供應商設定。
+- 不得把 Private calendar projection 搬回 router；正式資料 cleanup CLI、模型供應商設定也不在一般 runtime 任務範圍。
+
+
+> Current ownership override (2026 cleanup): Public is unconditionally V3. Private is the separate current V2 runtime. Bounded availability helpers live in `services/ayue_agent/private_calendar.py`.

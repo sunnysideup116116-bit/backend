@@ -10,7 +10,7 @@ from database import matches_coll, profiles_coll
 from services.profile_projection import safe_recent_context
 from services.profile_location import safe_profile_location
 
-from .contracts import AgentTurnContext, AgentTurnContextV2, TurnClockV1
+from .contracts import AgentTurnContext, PublicAgentTurnContext, TurnClockV1
 from .capabilities import CAPABILITY_MANIFEST_VERSION
 from .public_relationship_projection import mentioned_contact_refs, validated_mentioned_contact_ids
 from .time_context import build_turn_clock
@@ -19,42 +19,7 @@ from .time_context import build_turn_clock
 INTERNAL_ID_RE = re.compile(r"(?:@?seed_user_[\w-]+|@?demo_user|@?user[_-]?\d+)", re.IGNORECASE)
 MAX_HISTORY_MESSAGES = 12
 MAX_HISTORY_CHARS = 6000
-ACTION_DRAFT_TTL_SECONDS = 15 * 60
-PLACE_SEARCH_DRAFT_TTL_SECONDS = 15 * 60
 RECENT_CONTEXT_DRAFT_TTL_SECONDS = 30 * 60
-
-
-def _safe_place_search_draft(value: Any) -> dict[str, Any] | None:
-    """Project only bounded public place-search state into the planner context."""
-    if not isinstance(value, dict):
-        return None
-    categories = [
-        str(item) for item in (value.get("categories") or [])
-        if str(item) in {"restaurant", "cafe", "bar", "attraction", "park"}
-    ][:3]
-    try:
-        created_at = float(value.get("created_at", 0) or 0)
-    except (TypeError, ValueError):
-        created_at = 0.0
-    try:
-        radius_m = int(value.get("radius_m", 1500) or 1500)
-    except (TypeError, ValueError):
-        radius_m = 1500
-    try:
-        limit = int(value.get("limit", 5) or 5)
-    except (TypeError, ValueError):
-        limit = 5
-    cuisine = value.get("cuisine")
-    return {
-        "version": "v1",
-        "anchor": _clean_text(value.get("anchor"), 160),
-        "categories": categories,
-        "cuisine": _clean_text(cuisine, 30) if isinstance(cuisine, str) else "",
-        "radius_m": max(300, min(radius_m, 5000)),
-        "limit": max(1, min(limit, 5)),
-        "use_saved_location": bool(value.get("use_saved_location")),
-        "created_at": created_at,
-    }
 
 
 def _clean_text(value: Any, limit: int = 900) -> str:
@@ -147,8 +112,8 @@ def build_public_context(ctx: AgentTurnContext) -> dict[str, Any]:
     }
 
 
-def build_agent_turn_context_v2(ctx: AgentTurnContext, *, clock: TurnClockV1 | None = None) -> AgentTurnContextV2:
-    """Assemble the only state the public V2 planner is allowed to see.
+def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1 | None = None) -> PublicAgentTurnContext:
+    """Assemble the only bounded state the Public V3 runtime may see.
 
     Database identifiers, raw profile documents, other users' calendars and old
     unrelated matches deliberately remain outside this object.
@@ -183,9 +148,6 @@ def build_agent_turn_context_v2(ctx: AgentTurnContext, *, clock: TurnClockV1 | N
     # question about an old decline.  A planner asks the canonical status tool
     # when it semantically recognises a match-status question instead.
     outcome = None
-    pending = profile.get("agentic_pending_confirmation") or None
-    action_draft = profile.get("agentic_action_draft") or None
-    place_search_draft = _safe_place_search_draft(profile.get("agentic_place_search_draft"))
     recent_context_draft = profile.get("recent_context_draft") or None
     # Calendar follow-up state is a bounded, server-owned projection.  It
     # contains no event ID/revision and expires independently of profile data.
@@ -200,26 +162,9 @@ def build_agent_turn_context_v2(ctx: AgentTurnContext, *, clock: TurnClockV1 | N
     calendar_recent_reference = calendar_reference_projection(get_calendar_reference(ctx.user_id))
     calendar_recent_mutation = recent_mutation_projection(get_recent_mutation(ctx.user_id))
     now = time.time()
-    if action_draft and now - float(action_draft.get("created_at", 0) or 0) > ACTION_DRAFT_TTL_SECONDS:
-        profiles_coll.update_one({"user_id": ctx.user_id}, {"$unset": {"agentic_action_draft": ""}})
-        action_draft = None
-    if place_search_draft and now - float(place_search_draft.get("created_at", 0) or 0) > PLACE_SEARCH_DRAFT_TTL_SECONDS:
-        profiles_coll.update_one({"user_id": ctx.user_id}, {"$unset": {"agentic_place_search_draft": ""}})
-        place_search_draft = None
     if recent_context_draft and now - float(recent_context_draft.get("created_at", 0) or 0) > RECENT_CONTEXT_DRAFT_TTL_SECONDS:
         profiles_coll.update_one({"user_id": ctx.user_id}, {"$unset": {"recent_context_draft": ""}})
         recent_context_draft = None
-    if pending and (time.time() - float(pending.get("created_at", 0)) > 15 * 60):
-        profiles_coll.update_one({"user_id": ctx.user_id}, {"$unset": {"agentic_pending_confirmation": ""}})
-        pending = None
-    elif pending and active and pending.get("action", pending.get("tool")) == "match.start_search":
-        profiles_coll.update_one({"user_id": ctx.user_id}, {"$unset": {"agentic_pending_confirmation": ""}})
-        pending = None
-    elif pending and active_prompt and pending.get("proposal_revision") not in (
-        None, active_prompt["proposal_revision"],
-    ):
-        profiles_coll.update_one({"user_id": ctx.user_id}, {"$unset": {"agentic_pending_confirmation": ""}})
-        pending = None
     memories = []
     for item in (profile.get("profile_memory_preview") or [])[:8]:
         label = item.get("label") if isinstance(item, dict) else item
@@ -227,13 +172,12 @@ def build_agent_turn_context_v2(ctx: AgentTurnContext, *, clock: TurnClockV1 | N
         if label:
             memories.append(label)
     mentioned_ids, validation_overflow = validated_mentioned_contact_ids(ctx.user_id, ctx.mentioned_ids)
-    return AgentTurnContextV2(
+    return PublicAgentTurnContext(
         user_id=ctx.user_id, room_id=ctx.room_id, message=_clean_text(ctx.message, 1600),
         recent_messages=history, recent_context=safe_recent_context(profile.get("current_context"), ""),
         user_location=safe_profile_location(profile).get("display_name", ""),
         relevant_memories=memories, active_proposal=active_prompt,
-        latest_match_outcome=outcome, pending_confirmation=pending, clock=turn_clock,
-        action_draft=action_draft, place_search_draft=place_search_draft,
+        latest_match_outcome=outcome, clock=turn_clock,
         calendar_draft=calendar_draft, calendar_recent_reference=calendar_recent_reference,
         calendar_recent_mutation=calendar_recent_mutation,
         recent_context_draft=recent_context_draft,

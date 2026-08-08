@@ -22,8 +22,7 @@
 
 - `social_demotest/services/ayue_agent/v3/scheduler.py` 是公開阿月 V3 的唯一 orchestrator。
 - 正常流程固定為：`Context → Planner(DAG) → Sub-agents(Guard+Tool) → Synthesizer → Final`。
-- `AYUE_AGENT_V3_MODE=on` 時，失敗必須 fail closed；禁止自動掉回任何 legacy public routing。
-- `AYUE_AGENT_V3_MODE=off` 只作人工緊急 rollback（回 legacy 純聊天，不再有 V2 agent）。
+- Public Ayue 永遠走 V3；失敗必須 fail closed，rollback 只能透過部署／commit rollback，不能在 request-level 切回 legacy。
 - 不得在 `routers/chat.py`、前端或另一個 service 再造第二套 public intent router。
 
 ### 2. LLM 做語意判斷，程式做安全與狀態判斷
@@ -179,7 +178,7 @@
 - 禁止直接從 router、agent runtime 或 UI 寫入同一份 domain state。
 - 禁止 V3 失敗後自動呼叫 legacy。
 - 禁止把 progress 或 trace 變成隱私資料儲存區。
-- 禁止修改 `private_runtime.py`、清理正式資料或更換模型供應商，除非任務明確授權。
+- `private_runtime.py` 已刪除；Private Ayue 維持獨立 V2 runtime，由 `private_v2.py` 與 `private_calendar.py` 擁有。
 - 禁止刪除 migration、cleanup CLI、seed/demo data、rollback 或啟動腳本，除非先證明無 production、dynamic import、environment flag、test 或人工操作用途，並取得明確同意。
 
 <!-- gitnexus:start -->
@@ -226,3 +225,17 @@ This project is indexed by GitNexus as **ayue_for_demo-main** (3630 symbols, 863
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+## Current runtime ownership (2026 cleanup)
+
+- Public Ayue is unconditionally V3. `routers/public_chat.py` delegates
+  `ai_assistant` turns to `services/ayue_agent/v3/scheduler.py`; no Public V2
+  runtime, rollout flag, allowlist, or request-level legacy fallback exists.
+- Private Ayue remains a separate current V2 runtime owned by
+  `routers/private_mediator.py`, `services/ayue_agent/private_v2.py`, and
+  `services/ayue_agent/private_calendar.py`.
+- `runtime.py`, `legacy_match_routing.py`, and `private_runtime.py` are deleted.
+  Rollback is deployment/commit rollback, never re-enabling a second runtime.
+- Public and Private orchestrators must not import one another. Shared domain
+  services remain the authority for calendar, match, profile, memory, and
+  relationship state.

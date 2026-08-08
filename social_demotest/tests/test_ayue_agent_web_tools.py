@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from services.ayue_agent.contracts import AgentTurnContext, AgentTurnContextV2, ToolCall
+from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext, ToolCall
 from services.ayue_agent.v3.scheduler import _public_sources, _web_extract_urls_allowed
 from services.ayue_agent.tools import execute_tool
 from services.ayue_agent.web_tools import is_safe_public_url, search_web

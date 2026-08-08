@@ -80,8 +80,8 @@ Domain sub-agent、schema、Guard、preflight、executor、profile/memory extrac
 | `services/ayue_agent/v3/write_executors.py` | 已確認寫入的唯一執行路徑（domain service + idempotency） |
 | `services/ayue_agent/v3/synthesizer.py` | 綜合所有 observation 產出最終回覆；地點卡以 typed tool 決定 |
 | `services/ayue_agent/v3/sub_agents/` | calendar / places / match / relationship / profile 五個 sub-agent |
-| `services/ayue_agent/context.py` | 每回合 privacy-safe context（`build_agent_turn_context_v2`） |
-| `services/ayue_agent/contracts.py` | Provider-neutral contracts（`AgentTurnContextV2`、`AgentResult` 等） |
+| `services/ayue_agent/context.py` | 每回合 privacy-safe context（`build_public_agent_turn_context`） |
+| `services/ayue_agent/contracts.py` | Provider-neutral contracts（`PublicAgentTurnContext`、`AgentResult` 等） |
 | `services/ayue_agent/router.py` | 僅保留 V3 共用的封閉協議與回覆清理（`confirmation_choice`、`_concise_public_reply`） |
 | `services/ayue_agent/tool_registry.py` | ToolSpec、risk、schemas、progress、argument ownership |
 | `services/ayue_agent/tools.py` | 唯讀 tool facade 與安全 projection |
@@ -219,7 +219,7 @@ Ollama client 必須有 bounded HTTP timeout（`AYUE_OLLAMA_TIMEOUT_SECONDS`，�
 
 ## 4. 每回合 Context
 
-`build_agent_turn_context_v2()` 每回合重新建立 `AgentTurnContextV2`：
+`build_public_agent_turn_context()` 每回合重新建立 `PublicAgentTurnContext`：
 
 - 本次 owner 原始訊息，清理後最多 1,600 字元。
 - 最近 12 則對話，總長最多 6,000 字元。
@@ -227,7 +227,7 @@ Ollama client 必須有 bounded HTTP timeout（`AYUE_OLLAMA_TIMEOUT_SECONDS`，�
 - 本人手動保存的粗略所在地（城市／行政區）；不含地址或座標。
 - 最多 8 筆本人相關記憶。
 - 唯一可操作 proposal 的安全狀態與 server-side revision。
-- 有效的 pending confirmation、calendar action draft、place-search draft 或 recent-context draft。
+- Scheduler 管理的有效 pending confirmation，以及 context builder 投影的 calendar draft 或 recent-context draft；不再保存 action／place-search draft。
 - 每回合建立一次的 Asia/Taipei authoritative clock 與相對日期解析。
 - Public capability manifest。
 - 本回合經 server 驗證的 @ 已接受聯絡人公開名稱；其內部 ID 僅保留 executor-side。超過三位時只告知 Planner 需要縮小範圍。
@@ -364,7 +364,7 @@ Trace 不保存完整 prompt、owner message、observations、tool arguments/res
 
 | Flag | 用途 |
 | --- | --- |
-| `AYUE_AGENT_V3_MODE=on\|off` | Sub-agent 架構或人工緊急 rollback（off 回 legacy 純聊天，不再有 V2 agent） |
+| （無 Public runtime flag） | Public Ayue 永遠走 V3；rollback 透過部署／commit rollback，不在 request-level fallback |
 | `AYUE_AGENT_V3_USER_ALLOWLIST` | 漸進式指定使用者；空值代表全部適用 mode |
 | `AYUE_V3_SIMPLE_CHAT_FAST_PATH=on\|off` | 允許 Planner 對無 domain/tool/workflow 的 direct-chat 回覆跳過 Synthesizer；預設 off，通過 provider semantic eval 後再開啟 |
 | `AYUE_SUBAGENT_MAX_READS` | 整個回合唯讀上限，預設且硬上限 3 |
@@ -378,8 +378,7 @@ Trace 不保存完整 prompt、owner message、observations、tool arguments/res
 | `AYUE_CALENDAR_STATE_MONGO` | Calendar recent reference/draft 是否持久化到 Mongo；預設 `on`（仍有 process-memory fallback，TTL 15 分鐘） |
 | `AYUE_PROFILE_SKILLS_MODE=on\|shadow\|off` | Profile extractor 寫入、shadow 觀察或停用（`shadow` 只記錄不寫入） |
 | `AYUE_PROFILE_SKILLS_USER_ALLOWLIST` | Profile rollout allowlist |
-| `AYUE_PRIVATE_AGENTIC_MODE` | Private runtime，與 Public V3 分開 |
-| `AYUE_PRIVATE_AGENTIC_USER_ALLOWLIST` | Private rollout allowlist |
+| （無 Private rollout flag） | Private Ayue 維持獨立 current V2 runtime，與 Public V3 分開 |
 | `AYUE_MAPS_ENABLED` | 是否提供 OpenStreetMap／Overpass 地點工具(fallback provider) |
 | `AYUE_MAPS_MONGO_CACHE` | 是否將地點工具 cache 寫入 Mongo；預設 `off` |
 | `AYUE_GOOGLE_PLACE_CARDS_ENABLED` | 啟用 Google Places 為主要地點 provider；需同時設定下列兩把 key |
@@ -397,7 +396,7 @@ Trace 不保存完整 prompt、owner message、observations、tool arguments/res
 ### Backend contract
 
 1. 先部署本版本 backend 與 Mongo indexes，保留既有 `/api/direct_chat` JSON endpoint。
-2. 在測試使用者 allowlist 設定 `AYUE_AGENT_V3_MODE=on`；確認後再擴大範圍。
+2. Public V3 無需 allowlist 或 runtime flag；以部署版本作為 rollout／rollback 邊界。
 3. 不可在 App 自己重建 intent classification。App 只送原始訊息與必要 mention，語意由 V3 Planner 處理。
 4. 不可在 V3 timeout/error 時由 App 再呼叫 legacy endpoint；這會造成訊息及副作用重複。
 
@@ -427,7 +426,7 @@ Trace 不保存完整 prompt、owner message、observations、tool arguments/res
 
 ### Rollback
 
-緊急 rollback 只由部署環境把 `AYUE_AGENT_V3_MODE` 設為 `off` 並重啟服務。Rollback 是人工操作，不是 request-level fallback；App 不需要也不應知道 Planner 是否失敗。
+緊急 rollback 由部署環境回復上一個已驗證的 deployment artifact。Rollback 是人工操作，不是 request-level fallback；App 不需要也不應知道 Planner 是否失敗。
 
 ## 12. 驗收基線
 
@@ -449,6 +448,15 @@ Trace 不保存完整 prompt、owner message、observations、tool arguments/res
 ## 13. 設計文件
 
 完整 V3 設計見 `docs/superpowers/specs/2026-08-04-sub-agent-architecture-design.md`。
+
+## Current cleanup baseline
+
+Public V3 is unconditional; rollback is performed by reverting the deployed
+deployment artifact. Public V2, rollout allowlists, and request-level legacy
+fallbacks are removed. Private Ayue remains an independent current V2 runtime
+using `private_v2.py` and `private_calendar.py`. The calendar compatibility
+tool names remain because they are still accepted by V3 confirmation records;
+normal mutations use the current calendar command service.
 ### Calendar clarification and fuzzy target contract
 
 Calendar target lookup keeps exact matching as the compatibility path and may

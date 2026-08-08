@@ -101,7 +101,7 @@ class ChatLeafRouterTests(unittest.TestCase):
             "established_dates": [],
         })
         save.assert_called_once_with(
-            "room", "ai_assistant", "哈囉，我是阿月。最近想做什麼、想去哪裡，儘管跟我說；我會邊聊邊幫你留意合適的人。",
+            "room", "ai_assistant", "嗨，我是阿月。先跟我聊聊你最近的事；需要時，我再陪你一起牽線。",
         )
 
     def test_date_cancel_remains_a_thin_domain_service_adapter(self):

@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from services.ayue_agent.contracts import AgentTurnContextV2, TurnClockV1
+from services.ayue_agent.contracts import PublicAgentTurnContext, TurnClockV1
 from services.ayue_agent.v3.contracts import Plan
 from services.ayue_agent.v3.planner import (
     _PLANNER_SYSTEM, _decompose_tool_schema, plan_turn,
@@ -37,7 +37,7 @@ def _steak_dag_arguments():
 
 class V3PlannerTests(unittest.TestCase):
     def _turn(self, message):
-        return AgentTurnContextV2(
+        return PublicAgentTurnContext(
             user_id="owner", room_id="room", message=message,
             clock=_clock(),
         )
@@ -50,7 +50,7 @@ class V3PlannerTests(unittest.TestCase):
                 {"name": "decompose_tasks", "arguments": _steak_dag_arguments()},
             ]),
         ):
-            plan, _metrics = plan_turn(turn, pending_confirmations=[])
+            plan, _metrics = plan_turn(turn)
         self.assertIsNotNone(plan)
         self.assertIsInstance(plan, Plan)
         agents = [t.agent for t in plan.tasks]
@@ -70,7 +70,7 @@ class V3PlannerTests(unittest.TestCase):
                 }},
             ]),
         ):
-            plan, _metrics = plan_turn(turn, pending_confirmations=[])
+            plan, _metrics = plan_turn(turn)
         self.assertIsNotNone(plan)
         self.assertEqual(len(plan.tasks), 1)
         self.assertEqual(plan.tasks[0].agent, "synthesizer")
@@ -197,7 +197,7 @@ class V3PlannerTests(unittest.TestCase):
                 }},
             ]),
         ) as call:
-            plan_turn(turn, pending_confirmations=[{"tool_name": "stale"}])
+            plan_turn(turn)
         self.assertTrue(call.call_args.kwargs["system_prompt"])
         user_prompt = call.call_args.args[0]
         self.assertIn("最近有什麼行程", user_prompt)
@@ -221,7 +221,7 @@ class V3PlannerTests(unittest.TestCase):
                 {"name": "decompose_tasks", "arguments": expected},
             ]),
         ):
-            plan, _metrics = plan_turn(turn, pending_confirmations=[])
+            plan, _metrics = plan_turn(turn)
         self.assertIsNotNone(plan)
         self.assertEqual([task.agent for task in plan.tasks], ["profile", "synthesizer"])
 
@@ -231,7 +231,7 @@ class V3PlannerTests(unittest.TestCase):
             "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
             return_value=_fc_result(content="我想先聊聊"),
         ):
-            plan, _metrics = plan_turn(turn, pending_confirmations=[])
+            plan, _metrics = plan_turn(turn)
         self.assertIsNone(plan)
 
     def test_wrong_tool_name_returns_none(self):
@@ -242,7 +242,7 @@ class V3PlannerTests(unittest.TestCase):
                 {"name": "nope.bad", "arguments": {}},
             ]),
         ):
-            plan, _metrics = plan_turn(turn, pending_confirmations=[])
+            plan, _metrics = plan_turn(turn)
         self.assertIsNone(plan)
 
     def test_invalid_arguments_returns_none(self):
@@ -255,7 +255,7 @@ class V3PlannerTests(unittest.TestCase):
                 }},
             ]),
         ):
-            plan, _metrics = plan_turn(turn, pending_confirmations=[])
+            plan, _metrics = plan_turn(turn)
         self.assertIsNone(plan)
 
     def test_planner_does_not_accept_type_as_agent_alias(self):
@@ -270,7 +270,7 @@ class V3PlannerTests(unittest.TestCase):
                 }},
             ]),
         ):
-            plan, _metrics = plan_turn(turn, pending_confirmations=[])
+            plan, _metrics = plan_turn(turn)
         self.assertIsNone(plan)
 
     def test_timeout_returns_none(self):
@@ -279,7 +279,7 @@ class V3PlannerTests(unittest.TestCase):
             "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
             side_effect=TimeoutError("timeout"),
         ):
-            plan, _metrics = plan_turn(turn, pending_confirmations=[])
+            plan, _metrics = plan_turn(turn)
         self.assertIsNone(plan)
 
 
@@ -296,7 +296,7 @@ class V3PlannerOpportunityTests(unittest.TestCase):
 
     def test_plan_turn_carries_opportunity(self):
         from services.ayue_agent.v3.contracts import OpportunitySignal
-        turn = AgentTurnContextV2(
+        turn = PublicAgentTurnContext(
             user_id="owner", room_id="room", message="一個人去有點孤單",
             clock=_clock(),
         )
@@ -309,7 +309,7 @@ class V3PlannerOpportunityTests(unittest.TestCase):
                 }},
             ]),
         ):
-            plan, _metrics = plan_turn(turn, pending_confirmations=[])
+            plan, _metrics = plan_turn(turn)
         self.assertIsNotNone(plan)
         self.assertIsInstance(plan.opportunity, OpportunitySignal)
         self.assertEqual(plan.opportunity.signal, "social_opening")
@@ -324,7 +324,7 @@ class V3PlannerLiveSmokeTests(unittest.TestCase):
     """Optional smoke coverage for the configured real function-calling provider."""
 
     def _turn(self, message):
-        return AgentTurnContextV2(
+        return PublicAgentTurnContext(
             user_id="live-planner-smoke", room_id="live-planner-smoke", message=message,
             clock=_clock(),
         )

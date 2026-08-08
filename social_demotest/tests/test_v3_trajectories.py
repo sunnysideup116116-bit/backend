@@ -32,7 +32,7 @@ class V3TrajectoryTests(unittest.TestCase):
             SubTask(id="t4", agent="synthesizer", depends_on=["t1", "t2", "t3"], task_brief="彙整"),
         ])
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _pm())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "calendar": MagicMock(return_value=([ToolProposal(tool_name="calendar.list_my_events", arguments={})], _sm())),
                  "places": MagicMock(side_effect=[
@@ -50,22 +50,16 @@ class V3TrajectoryTests(unittest.TestCase):
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             mock_build.return_value.user_id = "owner"
             from services.ayue_agent.v3.scheduler import run_public_agent_turn_v3
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         self.assertEqual(result.agent_mode, "v3")
         self.assertIn("家庭聚餐", result.reply)
         self.assertIn("餐廳", result.reply)
 
-    def test_v3_mode_off_falls_back_to_v2(self):
-        from services.ayue_agent.v3.scheduler import agent_mode_for_user_v3
-        with patch.dict("os.environ", {"AYUE_AGENT_V3_MODE": "off"}):
-            self.assertEqual(agent_mode_for_user_v3("anyone"), "off")
-
-    def test_v3_mode_on_with_allowlist_blocks_unlisted_user(self):
-        from services.ayue_agent.v3.scheduler import agent_mode_for_user_v3
-        with patch.dict("os.environ", {"AYUE_AGENT_V3_MODE": "on", "AYUE_AGENT_V3_USER_ALLOWLIST": "alice,bob"}):
-            self.assertEqual(agent_mode_for_user_v3("alice"), "on")
-            self.assertEqual(agent_mode_for_user_v3("charlie"), "off")
+    def test_public_v3_entrypoint_has_no_rollout_mode_argument(self):
+        import inspect
+        from services.ayue_agent.v3.scheduler import run_public_agent_turn_v3
+        self.assertNotIn("mode", inspect.signature(run_public_agent_turn_v3).parameters)
 
 
 if __name__ == "__main__":
