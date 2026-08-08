@@ -1,10 +1,14 @@
 # social_demotest/tests/test_v3_planner.py
+import json
+import os
 import unittest
 from unittest.mock import patch
 
 from services.ayue_agent.contracts import AgentTurnContextV2, TurnClockV1
 from services.ayue_agent.v3.contracts import Plan
-from services.ayue_agent.v3.planner import plan_turn
+from services.ayue_agent.v3.planner import (
+    _PLANNER_SYSTEM, _decompose_tool_schema, plan_turn,
+)
 from services.ai_service import ToolCallResult
 
 
@@ -70,6 +74,36 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(len(plan.tasks), 1)
         self.assertEqual(plan.tasks[0].agent, "synthesizer")
+
+    def test_planner_tool_schema_inlines_subtask_refs(self):
+        schema = _decompose_tool_schema()["function"]["parameters"]
+        serialized = json.dumps(schema, ensure_ascii=False)
+        self.assertNotIn("$defs", serialized)
+        self.assertNotIn("$ref", serialized)
+        task_schema = schema["properties"]["tasks"]["items"]
+        self.assertEqual(
+            set(task_schema["properties"]),
+            {"id", "agent", "depends_on", "task_brief"},
+        )
+        self.assertEqual(
+            set(task_schema["required"]),
+            {"id", "agent", "task_brief"},
+        )
+
+    def test_planner_system_policy_has_routing_catalog_and_task_contract(self):
+        for agent in ("calendar", "places", "match", "relationship", "profile", "synthesizer"):
+            self.assertIn(f"`{agent}`", _PLANNER_SYSTEM)
+        self.assertIn("id", _PLANNER_SYSTEM)
+        self.assertIn("agent", _PLANNER_SYSTEM)
+        self.assertIn("depends_on", _PLANNER_SYSTEM)
+        self.assertIn("task_brief", _PLANNER_SYSTEM)
+        self.assertIn("不要使用 `type`", _PLANNER_SYSTEM)
+
+    def test_planner_system_policy_has_bounded_social_opening_contract(self):
+        self.assertIn('opportunity.signal="social_opening"', _PLANNER_SYSTEM)
+        self.assertIn("evidence_span", _PLANNER_SYSTEM)
+        self.assertIn("0.8", _PLANNER_SYSTEM)
+        self.assertIn('signal="none"', _PLANNER_SYSTEM)
 
     def test_planner_uses_system_role_and_minimal_routing_context(self):
         turn = self._turn("最近有什麼行程？")
@@ -147,6 +181,21 @@ class V3PlannerTests(unittest.TestCase):
             plan, _metrics = plan_turn(turn, pending_confirmations=[])
         self.assertIsNone(plan)
 
+    def test_planner_does_not_accept_type_as_agent_alias(self):
+        turn = self._turn("幫我回覆這句話")
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[
+                {"name": "decompose_tasks", "arguments": {
+                    "tasks": [{
+                        "type": "synthesizer", "depends_on": [], "task_brief": "回覆",
+                    }],
+                }},
+            ]),
+        ):
+            plan, _metrics = plan_turn(turn, pending_confirmations=[])
+        self.assertIsNone(plan)
+
     def test_timeout_returns_none(self):
         turn = self._turn("x")
         with patch(
@@ -188,6 +237,35 @@ class V3PlannerOpportunityTests(unittest.TestCase):
         self.assertIsInstance(plan.opportunity, OpportunitySignal)
         self.assertEqual(plan.opportunity.signal, "social_opening")
         self.assertEqual(plan.opportunity.evidence_span, "一個人去有點孤單")
+
+
+@unittest.skipUnless(
+    os.getenv("AYUE_LIVE_PLANNER_SMOKE", "").strip().lower() in {"1", "true", "on"},
+    "set AYUE_LIVE_PLANNER_SMOKE=1 to run provider-backed Planner smoke tests",
+)
+class V3PlannerLiveSmokeTests(unittest.TestCase):
+    """Optional smoke coverage for the configured real function-calling provider."""
+
+    def _turn(self, message):
+        return AgentTurnContextV2(
+            user_id="live-planner-smoke", room_id="live-planner-smoke", message=message,
+            clock=_clock(),
+        )
+
+    def _assert_agents(self, message, expected):
+        plan, metrics = plan_turn(self._turn(message))
+        self.assertIsNotNone(plan, metrics.error)
+        self.assertEqual({task.agent for task in plan.tasks}, set(expected) | {"synthesizer"})
+        self.assertEqual(sum(task.agent == "synthesizer" for task in plan.tasks), 1)
+
+    def test_live_simple_chat(self):
+        self._assert_agents("我今天有點累", set())
+
+    def test_live_places_request(self):
+        self._assert_agents("幫我找台北車站附近的咖啡廳", {"places"})
+
+    def test_live_explicit_match_request(self):
+        self._assert_agents("請開始幫我找一位適合一起吃飯的人", {"match"})
 
 
 if __name__ == "__main__":
