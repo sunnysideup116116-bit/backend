@@ -8,7 +8,7 @@ they must never be included in an agent context or observation.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date as date_value, datetime, timedelta
 import re
 from typing import Any, Literal
 
@@ -36,6 +36,43 @@ _OPAQUE_TARGET_REFERENCES = frozenset({
     "recent_event", "candidate_1", "candidate_2", "candidate_3",
 })
 
+# ``fields`` is a provider-compatibility wrapper, not a second Calendar
+# schema.  Keep this allowlist explicit so authority fields can never become
+# accepted merely because a provider nested them.
+_CALENDAR_COMMAND_FIELDS = frozenset({
+    "action", "target_hint", "target_reference", "target_hints", "title", "date",
+    "start_time", "end_time", "duration_minutes", "time_shift_minutes", "timezone",
+    "location", "notes", "draft_mode",
+})
+_CALENDAR_FIELD_ALIASES = {
+    "type": "action", "operation": "action", "summary": "title",
+    "activity": "title", "name": "title", "event_hint": "target_hint",
+    "event_hints": "target_hints", "start": "start_time", "end": "end_time",
+    "duration": "duration_minutes",
+}
+_CALENDAR_ACTION_ALIASES = {
+    "add": "create", "new": "create", "edit": "update", "modify": "update",
+    "delete": "cancel", "remove": "cancel",
+}
+
+
+def _normalize_calendar_command_aliases(command: dict[str, Any]) -> None:
+    """Apply only the existing closed provider aliases to one command map."""
+    target = command.get("target")
+    if (
+        "target_reference" not in command
+        and isinstance(target, str)
+        and target.strip() in _OPAQUE_TARGET_REFERENCES
+    ):
+        command["target_reference"] = target.strip()
+        command.pop("target", None)
+    for alias, canonical in _CALENDAR_FIELD_ALIASES.items():
+        if alias in command and canonical not in command:
+            command[canonical] = command.pop(alias)
+    if isinstance(command.get("action"), str):
+        action = command["action"].strip().lower()
+        command["action"] = _CALENDAR_ACTION_ALIASES.get(action, action)
+
 
 def normalize_calendar_batch_payload(arguments: Any) -> dict[str, Any]:
     """Normalize legacy/provider spellings before strict command validation.
@@ -52,39 +89,32 @@ def normalize_calendar_batch_payload(arguments: Any) -> dict[str, Any]:
         raw_commands = [arguments]
     if not isinstance(raw_commands, list):
         raise ValueError("calendar command arguments must contain commands")
-    aliases = {
-        "type": "action", "operation": "action", "summary": "title",
-        "activity": "title", "name": "title", "event_hint": "target_hint",
-        "event_hints": "target_hints", "start": "start_time", "end": "end_time",
-        "duration": "duration_minutes",
-    }
-    action_aliases = {
-        "add": "create", "new": "create", "edit": "update", "modify": "update",
-        "delete": "cancel", "remove": "cancel",
-    }
     normalized_commands: list[dict[str, Any]] = []
     for raw in raw_commands:
         if not isinstance(raw, dict):
             raise ValueError("each calendar command must be an object")
         command = dict(raw)
-        # Some providers use ``target`` for both a natural-language clue and
-        # an opaque server reference.  Only the four advertised opaque tokens
-        # are safe to normalize; arbitrary values must remain extra fields and
-        # be rejected by the strict CalendarCommand contract below.
-        target = command.get("target")
-        if (
-            "target_reference" not in command
-            and isinstance(target, str)
-            and target.strip() in _OPAQUE_TARGET_REFERENCES
-        ):
-            command["target_reference"] = target.strip()
-            command.pop("target", None)
-        for alias, canonical in aliases.items():
-            if alias in command and canonical not in command:
-                command[canonical] = command.pop(alias)
-        if isinstance(command.get("action"), str):
-            action = command["action"].strip().lower()
-            command["action"] = action_aliases.get(action, action)
+        _normalize_calendar_command_aliases(command)
+
+        # A few providers wrap semantic command fields in ``fields``.  Flatten
+        # only the canonical CalendarCommand vocabulary.  Keep the wrapper in
+        # place when it contains anything else so strict validation rejects the
+        # whole command instead of silently dropping unknown/authority data.
+        nested_fields = command.get("fields")
+        if isinstance(nested_fields, dict):
+            nested = dict(nested_fields)
+            _normalize_calendar_command_aliases(nested)
+            unknown_nested_fields = set(nested) - _CALENDAR_COMMAND_FIELDS
+            for key, value in nested.items():
+                if key not in _CALENDAR_COMMAND_FIELDS:
+                    continue
+                if key in command:
+                    if command[key] != value:
+                        raise ValueError(f"conflicting calendar field: {key}")
+                else:
+                    command[key] = value
+            if not unknown_nested_fields:
+                command.pop("fields", None)
         normalized_commands.append(command)
     return {"commands": normalized_commands}
 
@@ -455,6 +485,63 @@ def _clock_temporal_references(ctx: Any) -> dict[str, str]:
     return {}
 
 
+_FULL_NUMERIC_DATE_RE = re.compile(
+    r"(?P<year>\d{4})(?P<separator>[-/])(?P<month>\d{1,2})(?P=separator)(?P<day>\d{1,2})"
+)
+_YEARLESS_NUMERIC_DATE_RE = re.compile(
+    r"(?P<month>\d{1,2})(?P<separator>[-/])(?P<day>\d{1,2})"
+)
+
+
+def _clock_local_date(ctx: Any) -> date_value | None:
+    """Read the authoritative local date without consulting wall-clock time."""
+    clock = getattr(ctx, "clock", None)
+    local_date = getattr(clock, "local_date", None)
+    if local_date is None and isinstance(clock, dict):
+        local_date = clock.get("local_date")
+    if local_date is None and hasattr(clock, "model_dump"):
+        try:
+            dumped = clock.model_dump()
+            local_date = dumped.get("local_date") if isinstance(dumped, dict) else None
+        except Exception:
+            local_date = None
+    try:
+        return date_value.fromisoformat(str(local_date or "").strip())
+    except ValueError:
+        return None
+
+
+def _canonicalize_numeric_date(ctx: Any, raw: str) -> tuple[str, str | None] | None:
+    """Canonicalize the small closed numeric Calendar date grammar."""
+    match = _FULL_NUMERIC_DATE_RE.fullmatch(raw)
+    if match:
+        year = int(match.group("year"))
+        month = int(match.group("month"))
+        day = int(match.group("day"))
+    else:
+        match = _YEARLESS_NUMERIC_DATE_RE.fullmatch(raw)
+        if not match:
+            return None
+        today = _clock_local_date(ctx)
+        if today is None:
+            return raw, "目前無法依 authoritative clock 確認這個日期，請補上四位數年份。"
+        year = today.year
+        month = int(match.group("month"))
+        day = int(match.group("day"))
+    try:
+        candidate = date_value(year, month, day)
+    except ValueError:
+        return raw, "日期無效，請提供有效的年月日。"
+    if not match.groupdict().get("year"):
+        today = _clock_local_date(ctx)
+        if today is not None and candidate < today:
+            try:
+                candidate = date_value(today.year + 1, candidate.month, candidate.day)
+            except ValueError:
+                return raw, "日期無效，請提供有效的年月日。"
+    return candidate.isoformat(), None
+
+
 def _canonicalize_date(ctx: Any, value: Any) -> tuple[str, str | None]:
     raw = str(value or "").strip()
     if not raw:
@@ -477,6 +564,9 @@ def _canonicalize_date(ctx: Any, value: Any) -> tuple[str, str | None]:
     resolved = references.get(raw)
     if resolved:
         return resolved, None
+    numeric = _canonicalize_numeric_date(ctx, raw)
+    if numeric is not None:
+        return numeric
     return raw, None
 
 
