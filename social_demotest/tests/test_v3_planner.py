@@ -105,6 +105,12 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIn("0.8", _PLANNER_SYSTEM)
         self.assertIn('signal="none"', _PLANNER_SYSTEM)
 
+    def test_planner_system_policy_routes_calendar_draft_continuations(self):
+        self.assertIn("calendar_draft", _PLANNER_SYSTEM)
+        self.assertIn("missing_fields", _PLANNER_SYSTEM)
+        self.assertIn("candidates", _PLANNER_SYSTEM)
+        self.assertIn("只負責路由", _PLANNER_SYSTEM)
+
     def test_planner_uses_system_role_and_minimal_routing_context(self):
         turn = self._turn("最近有什麼行程？")
         turn = turn.model_copy(update={

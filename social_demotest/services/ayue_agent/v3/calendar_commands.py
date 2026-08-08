@@ -8,12 +8,12 @@ they must never be included in an agent context or observation.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 from typing import Any, Literal
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from services.calendar_service import (
     _parse_local_interval,
@@ -52,6 +52,7 @@ def normalize_calendar_batch_payload(arguments: Any) -> dict[str, Any]:
         "type": "action", "operation": "action", "summary": "title",
         "activity": "title", "name": "title", "event_hint": "target_hint",
         "event_hints": "target_hints", "start": "start_time", "end": "end_time",
+        "duration": "duration_minutes",
     }
     action_aliases = {
         "add": "create", "new": "create", "edit": "update", "modify": "update",
@@ -91,7 +92,11 @@ class CalendarCommand(BaseModel):
     title: str | None = Field(default=None, max_length=120, description="活動名稱，例如「去日本」；不要包含日期或時間")
     date: str | None = Field(default=None, max_length=32, description="優先使用 YYYY-MM-DD；今天／明天／後天也可由 server 依 authoritative clock 轉換")
     start_time: str | None = Field(default=None, max_length=16, description="開始時間，使用 HH:MM")
-    end_time: str | None = Field(default=None, max_length=16, description="結束時間，使用 HH:MM")
+    end_time: str | None = Field(default=None, max_length=16, description="結束時間，使用 HH:MM；若使用 duration_minutes 可省略")
+    duration_minutes: int | None = Field(
+        default=None, ge=1, le=24 * 60,
+        description="使用者明確說出的持續分鐘數，例如半小時=30、一小時=60；不要自行猜測或做權威時鐘計算",
+    )
     timezone: str | None = Field(default=None, max_length=64, description="時區；未提供時由 server 使用 Asia/Taipei")
     location: str | None = Field(default=None, max_length=160, description="可選地點")
     notes: str | None = Field(default=None, max_length=500, description="可選備註")
@@ -99,6 +104,27 @@ class CalendarCommand(BaseModel):
         default="none",
         description="補齊既有 Calendar 草稿用 continue；新請求用 replace；一般用 none",
     )
+
+    @field_validator("duration_minutes", mode="before")
+    @classmethod
+    def _coerce_explicit_duration(cls, value: Any) -> Any:
+        """Accept a small closed vocabulary from compatible providers.
+
+        The canonical tool schema remains an integer.  This adapter only
+        handles literal duration phrases; it does not infer duration from an
+        event title or from a pair of clock values.
+        """
+        if value is None or isinstance(value, int):
+            return value
+        text = str(value).strip().replace("大約", "").replace("大概", "").replace("約", "")
+        aliases = {
+            "半小時": 30, "一小時": 60, "1小時": 60,
+            "一個半小時": 90, "1個半小時": 90,
+            "兩小時": 120, "二小時": 120, "2小時": 120,
+        }
+        if text in aliases:
+            return aliases[text]
+        return value
 
     @model_validator(mode="after")
     def _validate_target_shape(self) -> "CalendarCommand":
@@ -214,10 +240,12 @@ def _required_create_fields(command: CalendarCommand) -> list[str]:
     }
     generic_titles = {"行事曆", "日曆", "行程", "這筆行程", "一筆行程"}
     missing: list[str] = []
-    for key in labels:
+    for key in ("title", "date", "start_time"):
         value = str(getattr(command, key) or "").strip()
         if not value or (key == "title" and value in generic_titles):
             missing.append(key)
+    if not str(command.end_time or "").strip() and command.duration_minutes is None:
+        missing.append("end_time")
     return missing
 
 
@@ -250,6 +278,41 @@ def _command_changes(command: CalendarCommand) -> dict[str, Any]:
             "notes": command.notes,
         }.items() if value is not None
     }
+
+
+def _apply_duration_to_form(command: CalendarCommand, form: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Derive an end time from an explicit duration at the authority boundary.
+
+    A model may extract ``duration_minutes``, but it must not perform the clock
+    arithmetic.  If both duration and end_time are present they must agree;
+    silently choosing one would make a confirmation preview misleading.
+    """
+    duration = command.duration_minutes
+    if duration is None:
+        return form, None
+    date_text = str(form.get("date") or "").strip()
+    start_text = str(form.get("start_time") or "").strip()
+    if not date_text or not start_text:
+        # The normal required-field validation will report the missing input.
+        return form, None
+    try:
+        zone = get_timezone(str(form.get("timezone") or "Asia/Taipei"))
+        start = datetime.fromisoformat(f"{date_text}T{start_text}").replace(tzinfo=zone)
+        derived_end = start + timedelta(minutes=int(duration))
+    except (TypeError, ValueError, HTTPException):
+        return form, "日期、開始時間或持續時間格式不正確。"
+    if derived_end.date() != start.date():
+        return form, "行程持續時間不能跨日，請補上明確的結束時間。"
+    derived_end_text = derived_end.strftime("%H:%M")
+    # For an update, ``form`` contains the event's current end_time even when
+    # the user supplied only a duration.  Only the command's own end_time is
+    # an explicit competing value; an inherited value must be replaced.
+    explicit_end = str(form.get("end_time") or "").strip() if command.end_time is not None else ""
+    if explicit_end and explicit_end != derived_end_text:
+        return form, "結束時間與持續時間不一致，請確認其中一個即可。"
+    updated = dict(form)
+    updated["end_time"] = derived_end_text
+    return updated, None
 
 
 def _is_generic_target_hint(value: str) -> bool:
@@ -289,12 +352,36 @@ def _canonicalize_date(ctx: Any, value: Any) -> tuple[str, str | None]:
             return resolved, None
         return raw, "目前無法確認「%s」是哪一天，請補上明確日期。" % raw
     references = _clock_temporal_references(ctx)
-    for term, resolved in references.items():
-        if raw.startswith(term) and len(raw) <= len(term) + 4:
-            return resolved, None
-    if raw in {"本週", "這週", "下週", "本月", "下個月"}:
+    # Match the complete relative expression first.  Prefix matching would
+    # turn ``下週三`` into the Monday represented by ``下週``.
+    if raw in {
+        "本週", "這週", "下週", "本周", "這周", "下周",
+        "下下週", "下下星期", "下下禮拜", "下下周",
+        "本月", "下個月",
+    }:
         return raw, "「%s」不是單一日期，請補上明確的年月日。" % raw
+    resolved = references.get(raw)
+    if resolved:
+        return resolved, None
     return raw, None
+
+
+def canonicalize_calendar_command(
+    ctx: Any, command: CalendarCommand,
+) -> tuple[CalendarCommand, str | None]:
+    """Return a command with server-owned relative dates canonicalized.
+
+    This helper is shared by Scheduler draft persistence and preflight so a
+    resolvable date never remains as authority-free natural language state.
+    """
+    if not command.date:
+        return command, None
+    canonical_date, date_error = _canonicalize_date(ctx, command.date)
+    if date_error:
+        return command, date_error
+    if canonical_date == command.date:
+        return command, None
+    return command.model_copy(update={"date": canonical_date}), None
 
 
 def _plan_for_event(
@@ -312,12 +399,7 @@ def _plan_for_event(
         )
 
     changes = _command_changes(command)
-    if "date" in changes:
-        canonical_date, date_error = _canonicalize_date(ctx, changes["date"])
-        if date_error:
-            return None, _clarification("invalid_date", date_error, index)
-        changes["date"] = canonical_date
-    if action == "update" and not changes:
+    if action == "update" and not changes and command.duration_minutes is None:
         return None, _clarification("missing_fields", f"你想把「{_event_label(event)}」改成什麼呢？", index)
 
     proposed_form: dict[str, Any] = {}
@@ -326,6 +408,13 @@ def _plan_for_event(
         if source_type == "date" and "title" in changes:
             changes = {**changes, "activity": changes.pop("title")}
         proposed_form = normalize_form({**current, **changes})
+        proposed_form, duration_error = _apply_duration_to_form(command, proposed_form)
+        if duration_error:
+            return None, _clarification("invalid_interval", duration_error, index)
+        if command.duration_minutes is not None:
+            # The executor receives the canonical derived end_time, never a
+            # free-form duration that it would have to interpret again.
+            changes["end_time"] = proposed_form["end_time"]
         try:
             start_at, end_at, _ = _parse_local_interval(proposed_form)
         except HTTPException as exc:
@@ -380,6 +469,9 @@ def _preflight_one(
     *,
     recent_reference: dict[str, Any] | None = None,
 ) -> CalendarPreflightResult:
+    command, date_error = canonicalize_calendar_command(ctx, command)
+    if date_error:
+        return _clarification("invalid_date", date_error, index)
     if command.action == "create":
         missing = _required_create_fields(command)
         if missing:
@@ -390,15 +482,15 @@ def _preflight_one(
                 index,
                 missing_fields=missing,
             )
-        canonical_date, date_error = _canonicalize_date(ctx, command.date)
-        if date_error:
-            return _clarification("invalid_date", date_error, index)
         form = normalize_form({
-            "title": command.title, "date": canonical_date,
+            "title": command.title, "date": command.date,
             "start_time": command.start_time, "end_time": command.end_time,
             "timezone": command.timezone or "Asia/Taipei",
             "location": command.location or "", "notes": command.notes or "",
         })
+        form, duration_error = _apply_duration_to_form(command, form)
+        if duration_error:
+            return _clarification("invalid_interval", duration_error, index)
         try:
             start_at, end_at, _ = _parse_local_interval(form)
         except HTTPException as exc:
@@ -486,20 +578,32 @@ def _preflight_one(
     if resolution == "ambiguous" and candidates:
         projections = _remember_candidate_projection(ctx.user_id, candidates)
         return _clarification(
-            "ambiguous", "", index, query=target_hint,
+            "ambiguous", "我找到幾筆相近的行程，請告訴我你要處理哪一筆。", index, query=target_hint,
             searched_count=len(candidates), candidates=projections,
         )
     if resolution == "ambiguous":
         return _clarification("ambiguous", "我找到不只一筆符合的行程，請補上日期或完整名稱。", index)
     if not event and not use_recent_reference:
-        return _clarification("not_found", "", index, query=target_hint, searched_count=0)
+        return _clarification(
+            "not_found", "我沒有找到相近的行程，大概是哪一天或是在做什麼？", index,
+            query=target_hint, searched_count=0,
+        )
     if resolution == "stale_revision":
         return _clarification("stale_revision", "剛剛提到的那筆行程已經有變動，請重新告訴我想處理哪一筆。", index)
     if not event:
-        return _clarification("not_found", "我找不到這筆自己的行程，請補上日期或名稱。", index)
+        return _clarification("not_found", "我沒有找到相近的行程，大概是哪一天或是在做什麼？", index)
+    if resolution_kind == "fuzzy_suggestion":
+        # Fuzzy retrieval is useful for typo tolerance, but it is never enough
+        # authority for a destructive mutation.  Store the bounded candidate as
+        # an opaque server reference and require the user to select it.
+        fuzzy_candidates = candidates or [event]
+        projections = _remember_candidate_projection(ctx.user_id, fuzzy_candidates[:1])
+        label = _event_label(event)
+        return _clarification(
+            "ambiguous", f"你是指 {label} 嗎？", index,
+            query=target_hint, searched_count=len(fuzzy_candidates), candidates=projections,
+        )
     plan, result = _plan_for_event(ctx, command, event, index, resolution_kind=resolution_kind)
-    if result and resolution_kind == "fuzzy_suggestion" and plan:
-        result.preview = f"我找到名稱相近的「{plan.safe_label}」，你是要變更這筆嗎？\n{result.preview}"
     return result or CalendarPreflightResult(status="denied")
 
 

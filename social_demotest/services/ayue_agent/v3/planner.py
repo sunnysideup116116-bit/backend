@@ -84,6 +84,7 @@ Agent routing catalog：
 - Calendar query 建立 calendar task；Calendar create/update/cancel 建立一個 calendar task。
 - 不要把 Calendar mutation 拆成 read → write；mutation task_brief 保留完整使用者 intent。
 - 同回合多個 Calendar mutation 保留使用者描述順序與完整 task_brief。
+- 若 `calendar_draft` 存在，且本回合看起來是在補 `missing_fields`、修正該 draft，或選擇其 candidates，必須路由一個 calendar task；只負責路由，不合併 draft，也不自行計算日期。
 - explicit match start/retry/search 才建立 match task；孤單或負面情緒本身不是搜尋。
 - 使用者明確開始或重新開始 assessment 時建立 profile task，不由 synthesizer 自行出題。
 - `opportunity.signal="social_opening"` 只用於使用者間接表達想找人一起參與某個活動、但尚未明確要求開始搜尋的情境；`evidence_span` 必須是本回合使用者訊息中的連續原文，`confidence` 必須至少 0.8。明確要求開始／重新配對時建立 match task，不只填 opportunity；單純旅行、寒暄、孤單或負面情緒填 `signal="none"`。
