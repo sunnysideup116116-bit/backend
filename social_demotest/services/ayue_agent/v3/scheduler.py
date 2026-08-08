@@ -46,7 +46,9 @@ from .context_slicer import slice_for_agent
 from .guard import guard_proposal
 from .guard import guard_calendar_commands
 from .calendar_commands import preflight_calendar_commands
-from .calendar_drafts import clear_draft, get_draft, merge_command, save_draft
+from .calendar_drafts import (
+    candidate_reference_allowed, clear_draft, get_draft, merge_command, save_draft,
+)
 from .calendar_references import clear_reference, get_reference, remember_event, remember_candidates, public_projection
 from services.calendar_service import resolve_owned_event_with_candidates
 from .planner import plan_turn, PlannerMetrics
@@ -522,7 +524,11 @@ def _web_extract_urls_allowed(turn_ctx: Any, results: list[Any], urls: list[str]
 
 
 def _calendar_command_legacy_shape(command: Any) -> tuple[str, dict[str, Any]]:
-    """Build the old action shape for confirmation rollback compatibility."""
+    """Build the legacy action shape for compatibility only.
+
+    V3 Calendar Agent never emits this shape. It remains for older
+    confirmation records and compatibility callers.
+    """
     action = str(getattr(command, "action", "") or "")
     values = command.model_dump(exclude_none=True)
     if action == "create":
@@ -559,7 +565,7 @@ def _calendar_plan_legacy_data(plan: Any) -> dict[str, Any]:
 
 
 def _calendar_plan_legacy_arguments(plan: Any) -> dict[str, Any]:
-    """Build compatibility arguments for a single plan without target IDs."""
+    """Build legacy compatibility arguments without target IDs."""
     action = str(getattr(plan, "action", "") or "")
     if action == "create":
         return dict(getattr(plan, "form", {}) or {})
@@ -569,12 +575,26 @@ def _calendar_plan_legacy_arguments(plan: Any) -> dict[str, Any]:
 
 
 def _calendar_plan_legacy_tool(plan: Any) -> str:
-    """Return the legacy tool label used by old confirmation projections."""
+    """Return a legacy tool label for old confirmation projections only."""
     return {
         "create": "calendar.create_my_event",
         "update": "calendar.update_my_event",
         "cancel": "calendar.cancel_my_event",
     }.get(str(getattr(plan, "action", "") or ""), "calendar.cancel_my_event")
+
+
+def _calendar_reference_for_command(
+    user_id: str,
+    command: Any,
+    draft: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Load one server reference after validating its opaque draft token."""
+    if str(getattr(command, "action", "") or "") not in {"update", "cancel"}:
+        return None
+    reference_key = str(getattr(command, "target_reference", "") or "recent_event")
+    if reference_key.startswith("candidate_") and not candidate_reference_allowed(draft, reference_key):
+        return None
+    return get_reference(user_id, reference_key=reference_key)
 
 
 def _run_sub_task(
@@ -926,9 +946,10 @@ def _run_sub_task(
                 # failure; the current typed command remains authoritative.
                 clear_draft(turn_ctx.user_id)
         recent_reference = None
-        if len(calendar_commands) == 1 and str(calendar_commands[0].action) in {"update", "cancel"}:
-            reference_key = str(calendar_commands[0].target_reference or "recent_event")
-            recent_reference = get_reference(turn_ctx.user_id, reference_key=reference_key)
+        if len(calendar_commands) == 1:
+            recent_reference = _calendar_reference_for_command(
+                turn_ctx.user_id, calendar_commands[0], draft,
+            )
         reference_map = {}
         if recent_reference and str(calendar_commands[0].action) in {"update", "cancel"}:
             same_turn_selected = any(
@@ -1238,7 +1259,6 @@ def run_public_agent_turn_v3(
         append_debug_event(run_id, "stage_started", stage="planner", label="Planner 正在拆解任務")
     plan, planner_metrics = plan_turn(
         turn,
-        pending_confirmations=mgr.planner_projection(user_id=ctx.user_id),
     )
     _print_llm_metrics("planner", planner_metrics)
     total_input_tokens += planner_metrics.input_tokens

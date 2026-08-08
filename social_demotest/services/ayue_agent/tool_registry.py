@@ -565,6 +565,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
     "calendar.create_my_event": ToolSpec(
+        # Legacy compatibility surface; V3 Calendar Agent exposes only
+        # calendar.submit_commands for mutations.
         "calendar.create_my_event", ToolRisk.WRITE, "calendar_create",
         "新增本人的私人行程；必須先向使用者確認日期、時間與內容。",
         "我確認一下要新增的行程…",
@@ -574,6 +576,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
     "calendar.update_my_event": ToolSpec(
+        # Legacy compatibility surface; not visible to the V3 Calendar Agent.
         "calendar.update_my_event", ToolRisk.WRITE, "calendar_update",
         "修改本人行事曆中的唯一一筆行程；私人行程直接修改，共同約會會提出改期並通知對方重新確認。",
         "我確認一下要修改的行程…",
@@ -583,6 +586,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
     "calendar.cancel_my_event": ToolSpec(
+        # Legacy compatibility surface; not visible to the V3 Calendar Agent.
         "calendar.cancel_my_event", ToolRisk.WRITE, "calendar_cancel",
         "取消本人行事曆中的唯一一筆行程；共同約會會同步取消並通知對方。",
         "我確認一下要取消的行程…",
@@ -592,6 +596,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
     "calendar.cancel_my_events": ToolSpec(
+        # Legacy compatibility surface; not visible to the V3 Calendar Agent.
         "calendar.cancel_my_events", ToolRisk.WRITE, "calendar_cancel",
         "取消多筆自己的行程；mode=selected 時提供 2–10 個行程描述，mode=all_upcoming 時取消最多 10 筆未來有效行程。必須先向使用者確認。",
         "我確認一下要取消的行程…",

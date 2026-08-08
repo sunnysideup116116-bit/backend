@@ -126,6 +126,17 @@ def public_projection(record: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def candidate_reference_allowed(record: dict[str, Any] | None, reference_key: str) -> bool:
+    """Check that an opaque candidate token came from the active draft."""
+    key = str(reference_key or "").strip()
+    if not key.startswith("candidate_") or not record:
+        return False
+    return any(
+        isinstance(item, dict) and str(item.get("reference") or "").strip() == key
+        for item in (record.get("candidates") or [])
+    )
+
+
 def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
     """Merge one same-domain continuation into the prior typed command."""
     if not record or str(getattr(command, "action", "")) != str((record.get("command") or {}).get("action")):

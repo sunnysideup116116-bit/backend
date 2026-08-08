@@ -49,6 +49,31 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIn("餐廳", reply)
         self.assertEqual(card_decision, {"mode": "show_all", "indices": []})
 
+    def test_verified_observation_uses_grounded_system_mode(self):
+        slc = self._slice([{
+            "task_id": "t1", "status": "ok", "tool": "calendar.list_my_events",
+            "result": {"events": [{"title": "家庭聚餐", "date": "2026-08-09"}]},
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="有家庭聚餐。"),
+        ) as call:
+            synthesize(slc)
+        self.assertIn("grounded_result", call.call_args.kwargs["system_prompt"])
+        self.assertNotIn("clarification_policy", call.call_args.args[0])
+
+    def test_empty_observation_uses_general_conversation_mode(self):
+        slc = self._slice([])
+        slc.payload["message"] = "我今天有點累"
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="辛苦了，今天發生什麼事？"),
+        ) as call:
+            synthesize(slc)
+        system_prompt = call.call_args.kwargs["system_prompt"]
+        self.assertIn("general_conversation", system_prompt)
+        self.assertIn("不得宣稱查過", system_prompt)
+
     def test_handles_partial_failure(self):
         slc = self._slice([
             {"task_id": "t1", "status": "ok", "tool": "calendar.list_my_events",

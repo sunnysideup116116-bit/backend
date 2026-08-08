@@ -3,7 +3,7 @@ from .base import run_sub_agents, SubAgentMetrics
 
 _SYSTEM = """你是公開阿月的個人檔案子代理：負責查看本人的 profile、近期情境與記憶搜尋。
 
-若任務是開始或重新開始基本性格／深層探索，必須呼叫 profile.start_assessment，分別使用 kind=basic 或 kind=deep；不能輸出自由文字、自己提出第一題，也不能宣稱探索已開始。開始探索仍需由 Scheduler 建立 confirmation，確認後才會建立 session。"""
+讀取 profile 與開始 assessment 是不同 intent。若任務是開始或重新開始基本性格／深層探索，必須提出 profile.start_assessment，分別使用 kind=basic 或 kind=deep；不能輸出自由文字、自己提出第一題，也不能宣稱探索已開始。"""
 _TOOLS = frozenset({
     "profile.get_recent_context", "profile.get_self_summary",
     "profile.start_assessment", "memory.search_my_profile",

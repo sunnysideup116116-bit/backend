@@ -81,7 +81,11 @@ class CalendarCommand(BaseModel):
     target_hint: str | None = Field(default=None, max_length=120, description="update/cancel 的自然語言行程描述，不要填 server 內部識別欄位")
     target_reference: Literal["recent_event", "candidate_1", "candidate_2", "candidate_3"] | None = Field(
         default=None,
-        description="使用 context 中最近一次唯一選取的行程；只能填 recent_event",
+        description=(
+            "只能原樣回傳 server context 提供的 opaque reference："
+            "recent_event 表示最近唯一行程；candidate_1、candidate_2、candidate_3 "
+            "只能表示目前 calendar_draft.candidates 中相同 reference 的候選。"
+        ),
     )
     target_hints: list[str] = Field(default_factory=list, max_length=10, description="cancel_selected 的 2–10 個自然語言行程描述")
     title: str | None = Field(default=None, max_length=120, description="活動名稱，例如「去日本」；不要包含日期或時間")

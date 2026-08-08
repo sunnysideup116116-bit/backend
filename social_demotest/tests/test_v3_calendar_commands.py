@@ -13,13 +13,15 @@ from services.ayue_agent.v3.calendar_commands import (
     normalize_calendar_batch_payload,
     preflight_calendar_commands,
 )
-from services.ayue_agent.v3.calendar_drafts import clear_draft, get_draft, merge_command, save_draft
+from services.ayue_agent.v3.calendar_drafts import (
+    candidate_reference_allowed, clear_draft, get_draft, merge_command, save_draft,
+)
 from services.ayue_agent.v3.sub_agents.calendar_agent import _tools_schema
 from services.ayue_agent.v3.sub_agents.calendar_agent import CalendarAgentResult
 from services.ayue_agent.v3.sub_agents.calendar_agent import run as run_calendar_agent
 from services.ayue_agent.v3.contracts import SubTask
 from services.ayue_agent.v3.contracts import AgentContextSlice
-from services.ayue_agent.v3.scheduler import _run_sub_task
+from services.ayue_agent.v3.scheduler import _calendar_reference_for_command, _run_sub_task
 from services.ayue_agent.v3.sub_agents.base import SubAgentMetrics
 from services.ai_service import ToolCallResult
 from services.ayue_agent.v3.write_executors import execute_write
@@ -82,6 +84,37 @@ class V3CalendarCommandTests(unittest.TestCase):
 
     def test_draft_continuation_fills_only_missing_fields(self):
         clear_draft("owner")
+
+    def test_candidate_reference_must_be_advertised_by_active_draft(self):
+        record = {"candidates": [{"reference": "candidate_1", "label": "8/25 雞排約會"}]}
+        self.assertTrue(candidate_reference_allowed(record, "candidate_1"))
+        self.assertFalse(candidate_reference_allowed(record, "candidate_2"))
+        self.assertFalse(candidate_reference_allowed(None, "candidate_1"))
+
+    def test_target_reference_schema_documents_all_server_owned_options(self):
+        field = CalendarCommand.model_fields["target_reference"]
+        description = str(field.description or "")
+        self.assertIn("recent_event", description)
+        self.assertIn("candidate_1", description)
+        self.assertIn("calendar_draft.candidates", description)
+
+    def test_scheduler_does_not_load_unadvertised_candidate_reference(self):
+        command = CalendarCommand(action="cancel", target_reference="candidate_1")
+        with patch("services.ayue_agent.v3.scheduler.get_reference") as get_reference:
+            result = _calendar_reference_for_command("owner", command, None)
+        self.assertIsNone(result)
+        get_reference.assert_not_called()
+
+    def test_scheduler_loads_advertised_candidate_reference(self):
+        command = CalendarCommand(action="cancel", target_reference="candidate_1")
+        draft = {"candidates": [{"reference": "candidate_1", "label": "8/25 雞排約會"}]}
+        with patch(
+            "services.ayue_agent.v3.scheduler.get_reference",
+            return_value={"event_id": "event-1", "revision": 4},
+        ) as get_reference:
+            result = _calendar_reference_for_command("owner", command, draft)
+        self.assertEqual(result["event_id"], "event-1")
+        get_reference.assert_called_once_with("owner", reference_key="candidate_1")
         original = CalendarCommand(
             action="create", title="去駁二", date="後天", start_time="08:00",
         )

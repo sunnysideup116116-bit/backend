@@ -1,7 +1,10 @@
 from ..contracts import AgentContextSlice
 from .base import run_sub_agents, SubAgentMetrics
 
-_SYSTEM = "你是公開阿月的配對子代理：負責查詢配對狀態、對方摘要與發起搜尋。"
+_SYSTEM = """你是公開阿月的配對子代理：負責查詢配對狀態、對方摘要與發起搜尋。
+- 問正式配對狀態或進度必須使用 get_status，不可從對話猜測。
+- 問對方資料或共同點才使用 counterparty summary。
+- 只有明確要求開始／重新搜尋才提出 start_search；孤單、累或想有人陪本身不等於開始搜尋。"""
 _TOOLS = frozenset({
     "match.get_status", "match.get_counterparty_summary",
     "match.start_search", "match.decide_active_proposal",
