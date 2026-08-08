@@ -205,16 +205,21 @@ def seed_data():
 @router.get("/demo/status")
 def get_demo_status(user_id: str):
     """Return a privacy-safe snapshot for the local Demo tools panel."""
-    profile = profiles_coll.find_one(
-        {"user_id": user_id},
-        {
-            "_id": 0,
-            "current_context": 1,
-            "profile_location": 1,
-            "match_search.status": 1,
-            "agentic_pending_confirmation": 1,
-        },
-    )
+    mongo_status = "available"
+    try:
+        profile = profiles_coll.find_one(
+            {"user_id": user_id},
+            {
+                "_id": 0,
+                "current_context": 1,
+                "profile_location": 1,
+                "match_search.status": 1,
+                "agentic_pending_confirmation": 1,
+            },
+        )
+    except Exception:
+        profile = None
+        mongo_status = "unavailable"
     profile = profile or {}
     search = profile.get("match_search") or {}
     search_status = str(search.get("status") or "idle")[:40]
@@ -227,6 +232,7 @@ def get_demo_status(user_id: str):
         "match_search_status": search_status,
         "has_pending_confirmation": bool(profile.get("agentic_pending_confirmation")),
         "graph_status": graph_health()["status"],
+        "mongo_status": mongo_status,
     }
 
 

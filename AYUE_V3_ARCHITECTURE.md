@@ -443,3 +443,7 @@ Match search progress separates candidate qualification, matchmaker request,
 matchmaker response, and proposal write. Public status exposes only allowlisted
 error codes and failure stages; raw provider output, prompts, Graph content,
 and exception messages remain server-side only.
+
+If Mongo initialization or DNS fails, the HTTP service starts in a fail-closed
+degraded mode. Demo status reports `mongo_status=unavailable`, destructive
+cleanup returns `mongo_unavailable`, and no local fallback database is touched.

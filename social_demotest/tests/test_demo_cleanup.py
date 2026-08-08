@@ -26,6 +26,10 @@ class _Database:
     def list_collection_names(self):
         return list(self.collections)
 
+    def command(self, name):
+        self.command_name = name
+        return {"ok": 1}
+
     def __getitem__(self, name):
         return self.collections[name]
 
@@ -43,17 +47,29 @@ class DemoCleanupTests(unittest.TestCase):
 
     def test_full_clear_stops_before_mongo_when_graph_fails(self):
         with patch.object(cleanup, "clear_graph", side_effect=cleanup.DemoCleanupError("graph_unavailable")), \
-             patch.object(cleanup, "clear_mongo_database") as clear_mongo:
+             patch.object(cleanup, "clear_mongo_database") as clear_mongo, \
+             patch.object(cleanup, "db", _Database()):
             with self.assertRaises(cleanup.DemoCleanupError) as raised:
                 cleanup.clear_all_demo_state()
 
         self.assertEqual(raised.exception.code, "graph_unavailable")
         clear_mongo.assert_not_called()
 
+    def test_full_clear_reports_mongo_unavailable_before_graph(self):
+        database = _Database()
+        database.command = lambda _name: (_ for _ in ()).throw(RuntimeError("dns"))
+        with patch.object(cleanup, "db", database), patch.object(cleanup, "clear_graph") as clear_graph:
+            with self.assertRaises(cleanup.DemoCleanupError) as raised:
+                cleanup.clear_all_demo_state()
+
+        self.assertEqual(raised.exception.code, "mongo_unavailable")
+        clear_graph.assert_not_called()
+
     def test_full_clear_returns_each_subsystem(self):
         with patch.object(cleanup, "clear_graph", return_value={"status": "cleared"}), \
              patch.object(cleanup, "clear_runtime_fallbacks", return_value={"status": "cleared"}), \
-             patch.object(cleanup, "clear_mongo_database", return_value={"status": "cleared", "collections": 2, "deleted_documents": 4}):
+             patch.object(cleanup, "clear_mongo_database", return_value={"status": "cleared", "collections": 2, "deleted_documents": 4}), \
+             patch.object(cleanup, "db", _Database()):
             result = cleanup.clear_all_demo_state()
 
         self.assertEqual(result["status"], "success")
