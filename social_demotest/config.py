@@ -5,6 +5,8 @@ if os.getenv("AYUE_SKIP_DOTENV", "").strip().lower() not in {"1", "true", "on"}:
     load_dotenv(override=False)
 
 MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "profiling_db").strip() or "profiling_db"
+DEMO_DESTRUCTIVE_TOOLS_ENABLED = os.getenv("DEMO_DESTRUCTIVE_TOOLS_ENABLED", "off").strip().lower() in {"1", "true", "on"}
 GOOGLE_API_KEY = os.getenv("GOOGLE_AI_STUDIO_API_KEY") or os.getenv("GOOGLE_API_KEY")
 OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "deepseek-v4-flash:cloud")
 OLLAMA_FAST_CHAT_MODEL = os.getenv("OLLAMA_FAST_CHAT_MODEL")

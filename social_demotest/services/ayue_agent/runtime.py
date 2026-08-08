@@ -664,7 +664,9 @@ def _handle_match_opportunity(
         },
         {"$set": {
             "agentic_pending_confirmation": pending,
-            "match_guidance": record_guidance_shown(ctx.user_id, assessment.fingerprint),
+            "match_guidance": record_guidance_shown(
+                ctx.user_id, assessment.fingerprint, active_offer=False,
+            ),
         }},
     )
     if not getattr(claimed, "modified_count", 0):

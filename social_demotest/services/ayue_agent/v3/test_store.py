@@ -16,6 +16,10 @@ class MemoryCollection:
     def create_index(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
+    def clear(self) -> None:
+        with self._lock:
+            self._docs.clear()
+
     def insert_one(self, document: dict[str, Any]) -> SimpleNamespace:
         with self._lock:
             key = str(document.get("_id") or document.get("run_id") or len(self._docs))

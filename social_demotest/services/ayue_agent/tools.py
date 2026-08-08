@@ -16,6 +16,7 @@ from services.calendar_service import (
     calendar_access_enabled,
     find_owned_events,
     get_calendar_context,
+    get_next_event,
     get_timezone,
 )
 from services.match_state_service import (
@@ -136,9 +137,11 @@ def _calendar_events(user_id: str, clock: TurnClockV1 | None = None, arguments: 
         range_label = "next_90_days"
     events = get_calendar_context(user_id, None, now_utc, end_utc).get("viewer_events", [])
     safe_events = []
+    active_events = []
     for event in events:
         if event.get("status") == "cancelled":
             continue
+        active_events.append(event)
         zone = get_timezone(event.get("timezone") or "Asia/Taipei")
         start = datetime.fromisoformat(str(event["start_at"]).replace("Z", "+00:00")).astimezone(zone)
         end = datetime.fromisoformat(str(event["end_at"]).replace("Z", "+00:00")).astimezone(zone)
@@ -149,13 +152,45 @@ def _calendar_events(user_id: str, clock: TurnClockV1 | None = None, arguments: 
             "activity": event.get("activity") or event.get("title") or "行程",
             "status": event.get("status", "confirmed"),
         })
-    return ToolResult(ok=True, data={"events": safe_events, "range": range_label})
+    private_data: dict[str, Any] = {}
+    if len(safe_events) == 1 and len(active_events) == 1:
+        private_data["calendar_event_reference"] = {
+            "event": active_events[0],
+            "safe_label": (
+                f"{safe_events[0]['date'][5:].replace('-', '/')} "
+                f"{safe_events[0]['start_time']}–{safe_events[0]['end_time']} "
+                f"{safe_events[0]['activity']}"
+            ),
+        }
+    return ToolResult(ok=True, data={"events": safe_events, "range": range_label}, private_data=private_data)
+
+
+def _calendar_next_event(user_id: str, clock: TurnClockV1 | None = None) -> ToolResult:
+    if not calendar_access_enabled(user_id):
+        return ToolResult(ok=False, error_code="calendar_access_denied", user_message="你目前沒有授權我讀取行事曆。")
+    now_utc = clock_utc(clock) if clock else datetime.now(timezone.utc)
+    event = get_next_event(user_id, now_utc, now_utc + timedelta(days=90))
+    if not event:
+        return ToolResult(ok=True, data={"status": "not_found", "event": None})
+    safe_event = _calendar_event_fields(event)
+    safe_event["status"] = str(event.get("status") or "confirmed")
+    return ToolResult(
+        ok=True,
+        data={"status": "found", "event": safe_event},
+        private_data={"calendar_event_reference": {"event": event}},
+    )
 
 
 def _calendar_event_fields(event: dict) -> dict[str, str]:
     zone = get_timezone(event.get("timezone") or "Asia/Taipei")
-    start = as_utc(event["start_at"]).astimezone(zone)
-    end = as_utc(event["end_at"]).astimezone(zone)
+    start_value = event["start_at"]
+    end_value = event["end_at"]
+    if isinstance(start_value, str):
+        start_value = datetime.fromisoformat(start_value.replace("Z", "+00:00"))
+    if isinstance(end_value, str):
+        end_value = datetime.fromisoformat(end_value.replace("Z", "+00:00"))
+    start = as_utc(start_value).astimezone(zone)
+    end = as_utc(end_value).astimezone(zone)
     return {
         "activity": str(event.get("activity") or event.get("title") or "行程")[:120],
         "date": start.date().isoformat(),
@@ -250,7 +285,7 @@ def _calendar_find_event(ctx: AgentTurnContext, arguments: dict[str, Any]) -> To
     return ToolResult(ok=True, data={
         "status": "found", "reason_code": "", **_calendar_event_fields(event),
         **_calendar_event_companion(event, ctx.user_id), "candidates": [],
-    })
+    }, private_data={"calendar_event_reference": {"event": event}})
 
 
 def _empty_calendar_find(status: str, reason_code: str, query: str = "") -> ToolResult:
@@ -652,6 +687,7 @@ def execute_tool(
         return ToolResult(ok=False, error_code="invalid_tool_arguments", user_message="這個請求的資訊格式不正確，我沒有執行它。")
     executors = {
         "calendar_events": lambda: _calendar_events(ctx.user_id, clock, arguments),
+        "calendar_next_event": lambda: _calendar_next_event(ctx.user_id, clock),
         "calendar_event_find": lambda: _calendar_find_event(ctx, arguments),
         "current_time": lambda: _current_time(clock),
         "match_status": lambda: _match_status(ctx.user_id),

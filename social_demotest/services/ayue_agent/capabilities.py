@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any
 
 
@@ -45,6 +46,14 @@ _ABILITY_QUERY_RE = re.compile(
     r"(?:你(?:有什麼|能|可以).{0,6}(?:能力|功能|做什麼|幹嘛)|你會(?:什麼|做什麼)|有什麼工具)",
 )
 
+_INVISIBLE_QUERY_CHARS = frozenset({"\u200b", "\u2060", "\ufeff"})
+
+
+def _normalize_capability_query(message: str) -> str:
+    text = unicodedata.normalize("NFKC", str(message or ""))
+    text = "".join(char for char in text if char not in _INVISIBLE_QUERY_CHARS)
+    return re.sub(r"\s+", " ", text).strip()
+
 
 def public_manifest() -> dict[str, Any]:
     """Return only static, non-sensitive product facts suitable for an LLM prompt."""
@@ -52,12 +61,12 @@ def public_manifest() -> dict[str, Any]:
 
 
 def is_capability_query(message: str) -> bool:
-    return bool(_ABILITY_QUERY_RE.search(message or ""))
+    return bool(_ABILITY_QUERY_RE.search(_normalize_capability_query(message)))
 
 
 def capability_answer() -> str:
     return (
-        "我是這個 App 裡幫你認識人、牽線的阿月；我可以陪你聊近況、記住偏好、查看或整理自己的行程，也能確認牽線進度。"
+        "我是這個 App 裡幫你認識人、牽線的 AI 媒人阿月；我可以陪你聊近況、記住偏好、查看或整理自己的行程，也能確認牽線進度。"
         "你想重新做基本性格或深層探索時，也可以直接在這裡開始，中途隨時能結束。"
         "需要時我也能查最新的公開資訊，或依地名找附近的餐廳、景點與直線距離。"
         "約會部分我目前能幫你整理想法，但不能替你直接向對方發邀請或答應。"

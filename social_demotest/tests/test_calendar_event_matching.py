@@ -107,6 +107,11 @@ class EventMatchesHintTests(unittest.TestCase):
         self.assertTrue(_event_matches_hint(ev, "幫我移除吃牛排的行程"))
         self.assertTrue(_event_matches_hint(ev, "把吃牛排移除"))
 
+    def test_conversational_cancel_wrappers_are_not_identity(self):
+        ev = _make_event(title="睡覺", day=12, start="17:00", end="19:00")
+        self.assertTrue(_event_matches_hint(ev, "睡覺刪掉"))
+        self.assertTrue(_event_matches_hint(ev, "行程就叫睡覺阿 今天的"))
+
     def test_relative_weekday_matches_chinese_weekday(self):
         # 2026-08-12 是星期三；「下禮拜三/下週三/下星期三」→ 星期三
         ev = _make_event(title="吃牛排", day=12, start="18:00", end="20:00")

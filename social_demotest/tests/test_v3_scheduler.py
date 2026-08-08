@@ -11,7 +11,8 @@ from services.ayue_agent.v3.confirmation import ConfirmationManager
 from services.ayue_agent.v3.synthesizer import SynthesizerMetrics
 from services.ayue_agent.v3.sub_agents.base import SubAgentMetrics
 from services.ayue_agent.v3.scheduler import (
-    _apply_card_decision, _prior_observations_for, _public_place_cards,
+    _apply_card_decision, _assessment_start_confirmation_requested,
+    _prior_observations_for, _public_place_cards,
     run_public_agent_turn_v3,
 )
 
@@ -35,6 +36,47 @@ def _synth_metrics():
 class V3SchedulerTests(unittest.TestCase):
     def _ctx(self, message="幫我看看行程和附近餐廳"):
         return AgentTurnContext(user_id="owner", room_id="room", message=message)
+
+    def test_assessment_start_wording_only_confirms_assessment_pending(self):
+        self.assertTrue(_assessment_start_confirmation_requested(
+            "開始阿", [{"tool_name": "profile.start_assessment"}],
+        ))
+        self.assertFalse(_assessment_start_confirmation_requested(
+            "開始阿", [{"tool_name": "calendar.submit_commands"}],
+        ))
+        self.assertFalse(_assessment_start_confirmation_requested(
+            "開始阿", [],
+        ))
+
+    def test_assessment_intent_routes_to_profile_write_confirmation(self):
+        ctx = self._ctx("那我來做基本性格")
+        plan = Plan(tasks=[
+            SubTask(id="p1", agent="profile", depends_on=[], task_brief="開始基本性格探索"),
+            SubTask(id="s1", agent="synthesizer", depends_on=["p1"], task_brief="回覆確認預覽"),
+        ])
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
+                 "profile": MagicMock(return_value=(
+                     _proposal("profile.start_assessment", {"kind": "basic"}), _sub_metrics(),
+                 )),
+             }), \
+             patch("services.ayue_agent.v3.scheduler.prepare_write_confirmation", return_value=(
+                 {"action": "profile.start_assessment", "arguments": {"kind": "basic"}, "data": {}},
+                 "要重新開始基本性格嗎？回覆「確認」就開始。",
+             )), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation") as create_confirmation, \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=(
+                 "要重新開始基本性格嗎？回覆「確認」就開始。", None, _synth_metrics(),
+             )):
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
+            result = run_public_agent_turn_v3(ctx, mode="on")
+        self.assertTrue(result.handled)
+        self.assertIn("重新開始基本性格", result.reply)
+        create_confirmation.assert_called_once()
+        self.assertEqual(create_confirmation.call_args.kwargs["tool_name"], "profile.start_assessment")
 
     def test_steak_example_full_flow(self):
         ctx = self._ctx("我下週五晚上想吃牛排，幫我找餐廳並看看我那天有沒有空")
@@ -776,6 +818,8 @@ class V3SchedulerTraceTests(unittest.TestCase):
         synth_metrics = _synth_metrics()
         synth_metrics.prompt_raw = "synth prompt"
         synth_metrics.input_payload = {"message": "嗨"}
+        synth_metrics.reply_source = "llm"
+        synth_metrics.used_llm = True
         with patch.dict("os.environ", {"AYUE_LOCAL_DEBUG_TRACE": "on"}), \
              patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, planner_metrics)), \
              patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
@@ -790,6 +834,44 @@ class V3SchedulerTraceTests(unittest.TestCase):
         self.assertIn("plan_created", event_types)
         self.assertIn("subagent_finished", event_types)
         self.assertEqual(debug_run["events"][-1]["type"], "final")
+        synth_event = next(
+            event for event in debug_run["events"]
+            if event["type"] == "subagent_finished" and event.get("agent") == "synthesizer"
+        )
+        self.assertEqual(synth_event["status"], "ok")
+        self.assertEqual(synth_event["reply_source"], "llm")
+        self.assertTrue(synth_event["used_llm"])
+        self.assertEqual(synth_event["input_payload"], {"message": "嗨"})
+        self.assertEqual(synth_event["results"][0]["reply"], result.reply)
+
+    def test_local_debug_trace_marks_synth_fallback_as_degraded(self):
+        from services.ayue_agent.v3.debug_trace import get_run
+
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="你可以幹嘛")
+        plan = Plan(tasks=[
+            SubTask(id="t1", agent="synthesizer", depends_on=[], task_brief="回覆能力問題"),
+        ])
+        synth_metrics = _synth_metrics()
+        synth_metrics.reply_source = "general_fallback"
+        synth_metrics.fallback_reason = "provider_error"
+        synth_metrics.error_code = "synthesizer_provider_error"
+        with patch.dict("os.environ", {"AYUE_LOCAL_DEBUG_TRACE": "on"}), \
+             patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.synthesizer.synthesize",
+                   return_value=("我剛剛沒有成功整理出回覆，可以再說一次嗎？", None, synth_metrics)):
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.clock = MagicMock(model_dump=lambda **_kwargs: {})
+            result = run_public_agent_turn_v3(ctx, mode="on", debug_enabled=True)
+            debug_run = get_run(result.agent_run_id, "owner")
+        synth_event = next(
+            event for event in debug_run["events"]
+            if event["type"] == "subagent_finished" and event.get("agent") == "synthesizer"
+        )
+        self.assertEqual(synth_event["status"], "degraded")
+        self.assertEqual(synth_event["fallback_reason"], "provider_error")
+        self.assertEqual(synth_event["error_code"], "synthesizer_provider_error")
+        self.assertEqual(synth_event["results"][0]["reply"], result.reply)
 
     def test_trace_persisted_with_allowlisted_fields(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="嗨")
@@ -822,7 +904,27 @@ class V3SchedulerTraceTests(unittest.TestCase):
 
 
 class V3SchedulerOpportunityTests(unittest.TestCase):
-    def test_social_opening_creates_guidance_confirmation(self):
+    def test_accepting_soft_offer_enters_normal_match_confirmation(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="好")
+        synth_metrics = _synth_metrics()
+        with patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.active_guidance_offer",
+                   return_value={"fingerprint": "fp1", "expires_at": 1e18}), \
+             patch("services.ayue_agent.v3.scheduler.accept_guidance_offer", return_value=True), \
+             patch("services.ayue_agent.v3.scheduler.prepare_write_confirmation",
+                   return_value=({"data": {}, "arguments": {}}, "要依你的近況開始找合適人選嗎？")), \
+             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one") as insert, \
+             patch("services.ayue_agent.v3.synthesizer.synthesize",
+                   return_value=("要依你的近況開始找合適人選嗎？", None, synth_metrics)):
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
+            mock_build.return_value.user_profile = {}
+            result = run_public_agent_turn_v3(ctx, mode="on")
+        self.assertTrue(result.handled)
+        self.assertEqual(result.conversation_intent, "match_confirmation")
+        insert.assert_called_once()
+
+    def test_social_opening_creates_soft_guidance_without_confirmation(self):
         from services.ayue_agent.v3.contracts import OpportunitySignal
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="一個人去有點孤單")
         plan = Plan(tasks=[
@@ -835,6 +937,7 @@ class V3SchedulerOpportunityTests(unittest.TestCase):
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
              patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
              patch("services.ayue_agent.v3.scheduler.assess_match_opportunity") as assess, \
+             patch("services.ayue_agent.v3.scheduler.claim_guidance_offer", return_value=True), \
              patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one") as insert, \
              patch("services.ayue_agent.v3.synthesizer.synthesize", side_effect=fake_synth):
             mock_build.return_value = MagicMock()
@@ -844,17 +947,16 @@ class V3SchedulerOpportunityTests(unittest.TestCase):
             assess.return_value = MagicMock(state="ready", reason_codes=(), fingerprint="fp1")
             result = run_public_agent_turn_v3(ctx, mode="on")
         self.assertTrue(result.handled)
-        insert.assert_called_once()
+        insert.assert_not_called()
+        self.assertTrue(result.match_guidance_shown)
         obs = seen_obs.get("observations", [])
         self.assertTrue(any(
-            (isinstance(o.get("result"), dict) and o["result"].get("pending_confirmation"))
-            or (isinstance(o.get("result"), list) and any(
-                isinstance(r, dict) and r.get("pending_confirmation") for r in o["result"]
-            ))
+            isinstance(o.get("result"), dict)
+            and o["result"].get("match_opportunity_offer")
             for o in obs
         ))
 
-    def test_social_opening_not_ready_asks_basis(self):
+    def test_social_opening_not_ready_does_not_start_match(self):
         from services.ayue_agent.v3.contracts import OpportunitySignal
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="一個人去有點孤單")
         plan = Plan(tasks=[
@@ -871,8 +973,8 @@ class V3SchedulerOpportunityTests(unittest.TestCase):
                                             missing_basis=("preferences",))
             result = run_public_agent_turn_v3(ctx, mode="on")
         self.assertTrue(result.handled)
-        self.assertEqual(result.match_readiness_state, "not_ready")
-        self.assertIn("多了解你的方向", result.reply)
+        self.assertIsNone(result.match_readiness_state)
+        self.assertFalse(result.match_guidance_shown)
 
 
 class V3SchedulerAssessmentTests(unittest.TestCase):

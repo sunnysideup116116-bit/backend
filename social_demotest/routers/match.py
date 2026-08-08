@@ -31,6 +31,7 @@ from services.match_action_service import (
     start_match_search,
 )
 from services.match_search_job_service import (
+    MatchSearchPipelineError,
     cancel_match_search,
     public_match_search_status,
     register_match_search_pipeline,
@@ -850,10 +851,9 @@ def generate_matches_for_user(
         step_start = time.perf_counter()
         raw_candidates = list(profiles_coll.aggregate(pipeline))
         print(f"[TIMING][V1 /api/match] Mongo vector search: {time.perf_counter() - step_start:.3f}s raw_candidates={len(raw_candidates)}")
-    except Exception as e:
+    except Exception:
         print(f"[TIMING][V1 /api/match] Mongo vector search failed after {time.perf_counter() - step_start:.3f}s")
-        print(f"Vector search failed: {e}")
-        raise HTTPException(status_code=500, detail="Vector search failed. 請確認已在 MongoDB Atlas 建立 vector_index 且具備 context_embedding 欄位。")
+        raise MatchSearchPipelineError("vector_search_unavailable", "vector_search")
 
     top_5_candidates = []
     for c in raw_candidates:
@@ -885,6 +885,8 @@ def generate_matches_for_user(
 
     vector_scores = {candidate.get("user_id"): score for score, candidate in top_5_candidates}
     target_stances = _trait_stances(user_doc.get("user_id"))
+    if not report("candidate_qualification", candidate_count=len(clean_candidates)):
+        return {"status": "stale", "matches": [], "debug_info": []}
     qualification_by_id = {}
     for candidate in clean_candidates:
         candidate_id = candidate.get("user_id")
@@ -936,30 +938,66 @@ def generate_matches_for_user(
         print(f"[TIMING][V1 /api/match] Agent payload size logging failed: {e}")
     
     try:
-        if not report("graph_check", candidate_count=len(qualified_candidates)):
+        if not report("matchmaker_request", candidate_count=len(qualified_candidates)):
             return {"status": "stale", "matches": [], "debug_info": []}
         print("📞 正在打電話給 9001 港口的媒婆 Agent...")
         step_start = time.perf_counter()
         agent_resp = requests.post("http://127.0.0.1:9001/api/match", json=payload, timeout=120)
         print(f"[TIMING][V1 /api/match] 9001 Agent HTTP roundtrip: {time.perf_counter() - step_start:.3f}s status={agent_resp.status_code}")
+    except requests.Timeout:
+        print("❌ 無法連線到 9001 Agent")
+        raise MatchSearchPipelineError("matchmaker_unavailable", "matchmaker_request")
+    except requests.ConnectionError:
+        print("9001 Agent connection failed")
+        raise MatchSearchPipelineError("matchmaker_unavailable", "matchmaker_request")
+    except requests.HTTPError:
+        print("❌ 9001 Agent 回傳 HTTP 錯誤")
+        raise MatchSearchPipelineError("matchmaker_http_error", "matchmaker_request")
+    except requests.RequestException:
+        print("❌ 9001 Agent request failed")
+        raise MatchSearchPipelineError("matchmaker_unavailable", "matchmaker_request")
+    try:
         agent_resp.raise_for_status()
-        
+        if not report("matchmaker_response", candidate_count=len(qualified_candidates)):
+            return {"status": "stale", "matches": [], "debug_info": []}
         step_start = time.perf_counter()
-        agent_data = agent_resp.json()
+        try:
+            agent_data = agent_resp.json()
+        except ValueError:
+            raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response")
         print(f"[TIMING][V1 /api/match] parse Agent response JSON: {time.perf_counter() - step_start:.3f}s")
+        if not isinstance(agent_data, dict) or not isinstance(agent_data.get("matches", []), list):
+            raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response")
         # 🥚 雙黃蛋：解析 matches 陣列
         if agent_data.get("outcome") == "no_suitable_candidate":
             return {"status": "no_suitable_candidate", "matches": [], "debug_info": []}
         agent_matches = agent_data.get("matches", [])
         if not agent_matches:
             return {"status": "no_suitable_candidate", "matches": [], "debug_info": []}
+        if any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("matched_user_id"), str)
+            or not item.get("matched_user_id", "").strip()
+            for item in agent_matches
+        ):
+            raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response")
         print(f"✅ Agent 回應: {len(agent_matches)} 位候選人")
-    except requests.RequestException as e:
-        print(f"❌ 無法連線到 9001 Agent: {e}")
-        raise HTTPException(status_code=503, detail=f"配對 Agent (port 9001) 無法連線: {e}")
+    except requests.HTTPError:
+        code = "matchmaker_http_error"
+        try:
+            detail = agent_resp.json().get("detail")
+            if isinstance(detail, dict) and detail.get("code") in {"matchmaker_provider_error", "matchmaker_invalid_response"}:
+                code = detail["code"]
+        except (ValueError, AttributeError):
+            pass
+        raise MatchSearchPipelineError(code, "matchmaker_response")
+    except (TypeError, AttributeError, KeyError) as exc:
+        raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response") from exc
+    except MatchSearchPipelineError:
+        raise
     
     # 阿月一次只牽一條線，避免同時丟出候選人清單。
-    if not report("writing_reason"):
+    if not report("proposal_write"):
         return {"status": "stale", "matches": [], "debug_info": []}
     step_start = time.perf_counter()
     result_matches = []
@@ -1144,7 +1182,8 @@ def get_match_status(user_id: str):
     }
     return {"search": search, "match_search": search,
             "active_proposal_card": build_status_proposal_card(active, user_id) if active else None,
-            "status_snapshot": public_snapshot}
+            "status_snapshot": public_snapshot,
+            "search_reason_code": search.get("reason_code") or None}
 
 @router.get("/state")
 def get_single_match_state(user_id: str, match_id: str):

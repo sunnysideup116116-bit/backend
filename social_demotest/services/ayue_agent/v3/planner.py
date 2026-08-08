@@ -48,7 +48,7 @@ _AGENT_DESCRIPTIONS = {
     "places": "地點小幫手：查詢附近餐廳、景點，依條件篩選並推薦約會地點。",
     "match": "配對小幫手：依條件搜尋候選人選、回報目前配對狀態與結果。",
     "relationship": "關係小幫手：查詢已建立聯絡的對象資訊與互動脈絡。",
-    "profile": "個人資料小幫手：讀取或維護本人 profile 偏好與近期情境。",
+    "profile": "個人資料小幫手：讀取本人 profile、維護近期情境，或開始／重新開始基本性格與深層探索。開始探索時會呼叫 profile.start_assessment，不能由 Synthesizer 自行出題或宣稱已開始。",
     "synthesizer": "綜合小幫手：彙整其他 sub-agent 的觀察結果，產生最終回覆給使用者。",
 }
 
@@ -74,6 +74,7 @@ def _decompose_tool_schema() -> dict[str, Any]:
 
 def _planner_prompt(turn_ctx: AgentTurnContextV2, pending_confirmations: list[dict[str, Any]]) -> str:
     hard_limits = (
+        "Explicit workflow overrides: explicit start/retry/search match requests (for example, 再配對一次) require a match task and must not be represented only as an opportunity signal. An opportunity is a non-actionable soft opening: it does not create confirmation or claim matching started. Calendar follow-ups referring to the event just shown must preserve the typed recent-event reference and never invent an event identifier.\n"
         "硬性限制：最多 3 個領域任務；只有複合需求才拆成多個領域；"
         "必須且只能有 1 個 terminal synthesizer。簡單聊天只建立 synthesizer。不得建立循環依賴。"
     )
@@ -88,6 +89,8 @@ def _planner_prompt(turn_ctx: AgentTurnContextV2, pending_confirmations: list[di
         "relevant_memories": turn_ctx.relevant_memories,
         "clock": turn_ctx.clock.model_dump(),
         "active_proposal": turn_ctx.active_proposal,
+        "calendar_draft": getattr(turn_ctx, "calendar_draft", None),
+        "calendar_recent_reference": getattr(turn_ctx, "calendar_recent_reference", None),
         "mentioned_contacts": turn_ctx.mentioned_contacts,
         "pending_confirmations": pending_confirmations,
     }
@@ -103,15 +106,15 @@ def _planner_prompt(turn_ctx: AgentTurnContextV2, pending_confirmations: list[di
 5. 需要找地點/餐廳/約會地點的任務用 places agent。
 6. 需要配對/候選人選的任務用 match agent。
 7. 需要 @ 對象或查關係脈絡的任務用 relationship agent。
-8. 需要更新偏好/近期情境的任務用 profile agent。
+8. 需要讀取 profile、更新偏好/近期情境，或開始／重新開始基本性格、深層探索的任務用 profile agent。
 9. 不確定時用 synthesizer 回覆即可。
 10. 若使用者表達想有人陪、想認識人或獨自參加不舒服時，在 opportunity 欄位填 signal="social_opening"、evidence_span（原句連續子字串）、confidence（0.0-1.0，需 ≥0.8）。只有明確表達期待或投入時才標；單純提到旅行、普通寒暄或負面情緒一律填 none。
-11. 「新增行程」不需要先查詢：用一個 calendar 任務即可，task_brief 直接描述要新增的行程（標題、日期、時間），不指定工具名稱；一次要新增多筆行程時併入同一個 calendar 任務。
-12. 當使用者要求「修改或取消」行程（例如「把 8/25 的雞排約會改到 8/15」「移除出國行程」）時，拆成兩個 calendar 任務：
-    - 第一個是「查詢任務」：task_brief 描述「找出使用者提到的所有原本行程」（例如「找出『看醫生』與『出國』兩筆行程」），不指定工具名稱；sub-agent 會自行用查詢工具一次找出所有候選。
-    - 第二個是「寫入任務」，depends_on 查詢任務：task_brief 描述修改與移除的目標（例如「把看醫生改到 8/10、移除出國」），不指定工具名稱；sub-agent 會依前一任務的候選結果提出對應寫入。
-    - 若同時還有「新增」需求，新增獨立成一個 calendar 任務（可與查詢任務並行）。
+11. Calendar 的新增、修改、取消都只建立一個 calendar 任務；task_brief 描述完整使用者意圖，不指定工具名稱。
+Calendar sub-agent 會將寫入意圖輸出成 typed command，server 會在 preflight 階段唯一解析目標並建立 confirmation。
+12. 不要把 Calendar mutation 拆成 read task → write task，也不要為了修改或取消先安排 calendar.find_my_event；find_my_event 只用於使用者真的詢問某筆行程時。
+    若同一回合有「刪 A、改 B、新增 C」，仍放在同一個 calendar 任務，由 server 依序執行。
 13. 只呼叫 decompose_tasks 工具，不要輸出其他文字。
+14. 使用者說「做／開始／重新做基本性格」或「做／開始／重新做深層探索」時，必須建立 profile task；不得只建立 synthesizer task。若種類無法從本回合或最近明確訊息判斷，仍建立 profile task，讓 profile agent 回傳正常 clarification。
 
 本回合 context：{json.dumps(payload, ensure_ascii=False)}"""
 

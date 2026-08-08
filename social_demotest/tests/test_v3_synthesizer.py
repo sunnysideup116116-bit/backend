@@ -153,8 +153,51 @@ class V3SynthesizerTests(unittest.TestCase):
             "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
             side_effect=Exception("provider down"),
         ):
+            reply, _card_decision, metrics = synthesize(slc)
+        self.assertEqual(reply, "我剛剛沒有成功整理出回覆，可以再說一次嗎？")
+        self.assertEqual(metrics.reply_source, "general_fallback")
+        self.assertEqual(metrics.fallback_reason, "provider_error")
+        self.assertEqual(metrics.error_code, "synthesizer_provider_error")
+
+    def test_capability_query_is_deterministic_and_does_not_call_tools(self):
+        slc = self._slice([])
+        slc.payload["message"] = "你可以幹嘛"
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+        ) as mock_call:
+            reply, card_decision, metrics = synthesize(slc)
+        self.assertIn("AI 媒人", reply)
+        self.assertIsNone(card_decision)
+        self.assertEqual(metrics.reply_source, "capability")
+        self.assertFalse(metrics.used_llm)
+        self.assertEqual(metrics.tools_raw, [])
+        self.assertEqual(metrics.tool_calls_raw, [])
+        self.assertEqual(metrics.input_payload, slc.payload)
+        mock_call.assert_not_called()
+
+    def test_soft_match_opportunity_fallback_does_not_claim_search_started(self):
+        slc = self._slice([{
+            "task_id": "guidance", "status": "ok", "tool": None,
+            "result": {"match_opportunity_offer": {"expires_in_seconds": 900}},
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            side_effect=Exception("provider down"),
+        ):
             reply, _card_decision, _metrics = synthesize(slc)
-        self.assertIn("沒能查到", reply)
+        self.assertIn("想試試看", reply)
+        self.assertNotIn("已開始", reply)
+
+    def test_capability_query_normalizes_invisible_characters(self):
+        slc = self._slice([])
+        slc.payload["message"] = "那你可\u200b以幹嘛？"
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+        ) as mock_call:
+            reply, _card_decision, metrics = synthesize(slc)
+        self.assertIn("AI 媒人", reply)
+        self.assertEqual(metrics.reply_source, "capability")
+        mock_call.assert_not_called()
 
     def test_no_write_proposed_returns_graceful_not_found_reply(self):
         # 寫入任務因候選查詢 not_found 而沒有提出寫入時，fallback 必須
@@ -171,6 +214,35 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIn("出國", reply)
         self.assertIn("找不到", reply)
         self.assertNotIn("我在。你可以跟我聊聊", reply)
+
+    def test_typed_calendar_clarification_is_rephrased_by_llm_or_safe_fallback(self):
+        slc = self._slice([
+            {"task_id": "calendar-1", "status": "ok", "tool": "calendar.submit_commands",
+             "result": {"calendar_command_result": {
+                 "status": "needs_clarification",
+                 "clarification": {"code": "missing_fields", "message": "請補上：結束時間。"},
+             }}},
+        ])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+        ) as mock_call:
+            reply, _card_decision, _metrics = synthesize(slc)
+        self.assertTrue(reply)
+        mock_call.assert_called_once()
+
+    def test_confirmed_domain_reply_is_returned_without_llm_rewrite(self):
+        slc = self._slice([
+            {"task_id": "confirm", "status": "ok", "tool": None, "result": [
+                {"ok": True, "tool_name": "profile.start_assessment",
+                 "data": {"reply": "好，我們從第一題開始。"}},
+            ]},
+        ])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+        ) as mock_call:
+            reply, _card_decision, _metrics = synthesize(slc)
+        self.assertEqual(reply, "好，我們從第一題開始。")
+        mock_call.assert_not_called()
 
     def test_place_internals_stripped_from_prompt(self):
         """address_summary/map_url/provider/place_id/photo_url must not reach the model."""

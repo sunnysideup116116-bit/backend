@@ -9,6 +9,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from services.ayue_agent.v3.calendar_commands import CalendarCommandBatch
+
 
 class ToolRisk(str, Enum):
     READ = "read"
@@ -171,12 +173,21 @@ class _CalendarEventOutput(BaseModel):
     end_time: str
     activity: str
     status: str
+    location: str = ""
+    notes: str = ""
+    event_kind: Literal["personal", "shared_date", ""] = ""
 
 
 class _CalendarOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     events: list[_CalendarEventOutput]
     range: str
+
+
+class _CalendarNextOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["found", "not_found"]
+    event: _CalendarEventOutput | None = None
 
 
 class _CalendarEventCandidateOutput(BaseModel):
@@ -417,6 +428,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         output_model=_CalendarOutput,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
+    "calendar.get_next_my_event": ToolSpec(
+        "calendar.get_next_my_event", ToolRisk.READ, "calendar_next_event",
+        "讀取本人接下來 90 天內最近的一筆有效行程；適用於『最近一筆』『下一個行程』『最近有什麼行程』，會回傳唯一可供後續這筆／它／他／她指涉的行程。",
+        "我看一下你最近的一筆行程…",
+        output_model=_CalendarNextOutput,
+    ),
     "calendar.find_my_event": ToolSpec(
         "calendar.find_my_event", ToolRisk.READ, "calendar_event_find",
         "查詢本人一筆指定行程及其是否為已確認共同約會；適用於問某個行程的日期、內容或跟誰去。可用已接受聯絡人的公開名稱縮小共同約會，但只會從該筆行程回答，不能用目前配對對象猜測。",
@@ -581,6 +598,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         requires_confirmation=True,
         planner_arguments_model=_CalendarBatchCancelArguments,
         executor_arguments_model=_CalendarBatchCancelArguments,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
+    ),
+    "calendar.submit_commands": ToolSpec(
+        "calendar.submit_commands", ToolRisk.WRITE, "calendar_commands",
+        "提交一個或多個行事曆 mutation command；只描述使用者意圖，不含 event_id、revision 或其他 authority fields。",
+        "我整理一下要變更的行程…",
+        requires_confirmation=True,
+        planner_arguments_model=CalendarCommandBatch,
+        executor_arguments_model=CalendarCommandBatch,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
 }

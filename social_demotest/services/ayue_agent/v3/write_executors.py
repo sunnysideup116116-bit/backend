@@ -141,6 +141,117 @@ def _calendar_event_label(event: dict) -> str:
     return f"{start.month}/{start.day} {start:%H:%M}–{end:%H:%M} {title}"
 
 
+def _execute_calendar_mutation_plans(
+    ctx: Any,
+    plans_payload: list[dict[str, Any]],
+    *,
+    confirmation_id: str,
+) -> tuple[bool, str, str | None]:
+    """Execute server-owned Calendar plans sequentially.
+
+    The plan contains canonical IDs/revisions produced by preflight.  This
+    function deliberately never calls a natural-language resolver.  A batch
+    stops at the first real failure; already committed operations are retained
+    because Calendar writes do not provide a distributed transaction.
+    """
+    from fastapi import HTTPException
+    from services.calendar_service import (
+        cancel_event, cancel_targets_are_current, create_personal_event,
+        update_personal_event,
+    )
+    from services.date_coordination_service import cancel_coordination_or_event, request_reschedule
+    from .calendar_commands import CalendarMutationPlan
+
+    try:
+        plans = [CalendarMutationPlan.model_validate(item) for item in plans_payload]
+    except Exception:
+        return False, "這次行程確認資料已失效，請重新告訴我想怎麼安排。", "calendar_plan_invalid"
+    if not plans:
+        return False, "這次沒有可執行的行程變更。", "calendar_plan_empty"
+
+    # Preserve the existing all-target stale protection for a pure cancellation
+    # batch.  Mixed commands still rely on each domain service's CAS at the
+    # exact write point.
+    if all(plan.action == "cancel" for plan in plans):
+        targets = [
+            {
+                "event_id": plan.event_id,
+                "event_revision": plan.expected_revision,
+                "event_source_type": plan.source_type,
+            }
+            for plan in plans
+        ]
+        if not cancel_targets_are_current(ctx.user_id, targets):
+            return False, "其中一筆行程剛剛有變動，我沒有刪除任何行程。請重新確認。", "stale_revision"
+
+    key = f"calendar-confirmation:{confirmation_id}"
+    completed: list[str] = []
+    for index, plan in enumerate(plans):
+        item_key = f"{key}:{index}"
+        try:
+            if plan.action == "create":
+                event = create_personal_event(ctx.user_id, plan.form, agent_action_key=item_key)
+                completed.append(_calendar_event_label(event))
+                continue
+
+            event_id = str(plan.event_id or "")
+            revision = int(plan.expected_revision or 0)
+            if plan.action == "update":
+                if plan.source_type == "date":
+                    coordination, _event = request_reschedule(
+                        ctx.user_id, str(plan.other_id or ""), event_id,
+                        dict(plan.form), expected_revision=revision, idempotency_key=item_key,
+                    )
+                    form = coordination.get("form") or {}
+                    completed.append(
+                        f"改期：{str(form.get('date') or '')[5:].replace('-', '/')} "
+                        f"{form.get('start_time', '')}–{form.get('end_time', '')} "
+                        f"{form.get('activity') or '共同約會'}"
+                    )
+                else:
+                    event = update_personal_event(
+                        ctx.user_id, event_id, dict(plan.changes),
+                        expected_revision=revision, agent_action_key=item_key,
+                    )
+                    completed.append(_calendar_event_label(event))
+                continue
+
+            if plan.source_type == "date":
+                coordination = cancel_coordination_or_event(
+                    ctx.user_id, str(plan.other_id or ""), str(plan.coordination_id or ""),
+                    expected_revision=revision, idempotency_key=item_key,
+                )
+                title = str((coordination.get("form") or {}).get("activity") or "共同約會")
+                completed.append(f"取消共同約會「{title}」")
+            else:
+                event = cancel_event(
+                    ctx.user_id, event_id, personal_only=True,
+                    expected_revision=revision, agent_action_key=item_key,
+                )
+                completed.append(f"取消「{_calendar_event_label(event)}」")
+        except HTTPException as exc:
+            code = "stale_revision" if exc.status_code == 409 else "calendar_write_failed"
+            if not completed:
+                message = (
+                    "這筆行程剛剛有變動，我沒有覆寫它。請重新確認。"
+                    if code == "stale_revision" else "這筆行程現在無法變更，請重新確認。"
+                )
+                return False, message, code
+            return True, (
+                "已處理：" + "、".join(completed) +
+                f"。第 {index + 1} 筆沒有完成，後續變更已停止，請重新查看。"
+            ), "partial"
+        except Exception as exc:
+            if not completed:
+                return False, "這次沒有成功變更行程，我沒有把它當作已完成。", type(exc).__name__
+            return True, (
+                "已處理：" + "、".join(completed) +
+                f"。第 {index + 1} 筆沒有完成，後續變更已停止，請重新查看。"
+            ), "partial"
+
+    return True, "已處理：" + "、".join(completed) + "。", None
+
+
 def _calendar_execute(ctx: Any, tool_name: str, arguments: dict[str, Any], payload: dict[str, Any] | None, *, confirmation_id: str) -> tuple[bool, str, str | None]:
     from fastapi import HTTPException
     from services.calendar_service import (
@@ -150,6 +261,12 @@ def _calendar_execute(ctx: Any, tool_name: str, arguments: dict[str, Any], paylo
     from services.date_coordination_service import cancel_coordination_or_event, request_reschedule
 
     payload = payload or {}
+    if payload.get("calendar_plan_version") == 1:
+        return _execute_calendar_mutation_plans(
+            ctx,
+            list(payload.get("plans") or []),
+            confirmation_id=confirmation_id,
+        )
     key = f"calendar-confirmation:{confirmation_id}"
     try:
         batch = payload.get("batch")
@@ -212,11 +329,12 @@ def _calendar_execute(ctx: Any, tool_name: str, arguments: dict[str, Any], paylo
                     failed += 1
                 except Exception:
                     failed += 1
+                    break
             if not labels:
                 return False, "這些行程現在無法變更；我沒有確認到任何變更結果。", "calendar_write_failed"
             reply = "已處理：" + "、".join(labels) + "。"
             if failed:
-                reply += f"另有 {failed} 筆沒有變更，請再查看後重試。"
+                reply += f"第 {len(labels) + 1} 筆沒有變更，後續已停止，請再查看後重試。"
             return True, reply, "partial" if failed else None
         if tool_name == "calendar.create_my_event":
             event = create_personal_event(ctx.user_id, arguments, agent_action_key=key)

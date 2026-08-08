@@ -1,50 +1,205 @@
-from services.ayue_agent.tool_registry import planner_tool_names
-from ..contracts import AgentContextSlice
-from .base import run_sub_agents, SubAgentMetrics
+"""V3 Calendar sub-agent.
 
-_SYSTEM = """你是公開阿月的行事曆子代理：負責查看與管理本人行程。
+Calendar reads remain ordinary registered read-tool proposals.  Calendar
+mutations are emitted as a typed command batch and are not executable tool
+calls; the Scheduler performs the deterministic preflight and owns all
+authority fields.
+"""
 
-【查詢範圍規則】
-- 使用 calendar.list_my_events 時，用 start_date 與 end_date（YYYY-MM-DD）指定查詢區間。
-- clock 提供今天日期（local_date）與星期；任何相對時間詞（這個月、本月、本週、這週、上週、下週、明天、後天、月底前、過去一週等）都要自行換算成具體日期填入 start_date/end_date。
-  例如今天是 2026-08-04：
-  - 「這個月」→ start_date="2026-08-01", end_date="2026-08-31"
-  - 「本週」→ 依今天星期往前找到本週一，往後到週日
-  - 「過去一週」→ start_date=今天往前 7 天, end_date=今天
-  - 「某一天」→ start_date 與 end_date 都填同一天
-- 查詢區間可以涵蓋今天之前（過去）與之後（未來），不要只查未來。
-- 使用者沒指定範圍時，不填 start_date/end_date（系統預設未來 90 天）。
-- 不要使用 date 或 range_label 欄位；除非系統明確指示才用。
+from __future__ import annotations
 
-【新增／修改／取消行程規則】
-- 你在同一發回覆裡可以同時呼叫「查詢工具」與「寫入工具」（calendar.create_my_event / calendar.update_my_event / calendar.cancel_my_event / calendar.cancel_my_events）。查詢結果不會回來給你，所以不要只查詢就停手。
-- calendar.create_my_event 只能填 title、date、start_time、end_time、timezone、location、notes，不填 event_hint；一次要新增多筆行程時，在同一發回覆裡提出多個 create_my_event 呼叫。
-- calendar.update_my_event / calendar.cancel_my_event 的 event_hint 必須描述「原本那筆行程」，包含原本的日期與時間（例如「8月25日下午5點到8點與簡的雞排約會」）；date/start_time/end_time 等欄位填新值。
-- 寫入工具不會直接執行：系統會先向使用者確認，使用者確認後才真的變更，所以請放心提出寫入呼叫。
-- 若使用者資訊不足以填寫寫入工具的必要欄位，才只回查詢或向使用者追問。
+import json
+from typing import Any
 
-【候選行程判斷規則】（context 的 prior_observations 內有前一任務的查詢結果時）
-- 修改／取消前，先比對候選行程再決定是否提出寫入工具；不要跳過比對直接猜，也不要重新查詢（候選已在 context 內）。
-- prior_observations 內的 calendar.find_my_event 結果：
-  - status=found：直接用該筆的 activity、date、start_time 組 event_hint（不要重新猜）。
-  - status=ambiguous 且有 candidates：逐一比對候選的 activity、date、start_time、location 是否吻合使用者描述的活動、日期、時間，選出唯一最吻合的一筆填 event_hint；若無吻合或無法唯一判斷，就不要提出寫入呼叫，改為只回查詢（讓系統向使用者追問）。
-- prior_observations 內的 calendar.list_my_events 結果：從 events 陣列找出與使用者描述吻合（活動名＋日期＋時間）的一筆，用其內容組 event_hint；找不到吻合者就不提出寫入。
-- 絕不可因「找不到吻合候選」而硬選一筆，也不可在沒有候選時自行捏造 event_hint。
+from services.ayue_agent.tool_registry import (
+    get_tool_spec,
+    planner_arguments_allowed,
+    planner_arguments_schema,
+    planner_tool_names,
+)
 
-【查詢任務規則】（task_brief 要求「找出多筆原本行程」時）
-- 一次回覆裡對每一筆要找的行程各呼叫一次 calendar.find_my_event（event_hint 用使用者描述的活動名，可帶日期/時間），不要只查一筆就停手。
-- 使用者要求更多候選時，可在 find_my_event 帶 limit 欄位（預設 10，最多 30）。"""
+from ..calendar_commands import CalendarCommandBatch, normalize_calendar_batch_payload
+from ..contracts import AgentContextSlice, ToolProposal
+from . import base as base_agent
+from .base import SubAgentMetrics
 
-_TOOLS = planner_tool_names(
-    can_start_search=False, can_decide_active_proposal=False, can_edit_calendar=True,
-    can_read_mentioned_contacts=False, can_use_web=False, can_use_places=False,
+
+_SYSTEM = """你是公開阿月的行事曆子代理，負責查看與管理本人行程。
+
+【讀取】
+- 使用 calendar.get_next_my_event 回答「最近一筆／下一個／最近有什麼行程」；使用 calendar.list_my_events 回答明確日期區間或全部行程。
+- 使用 calendar.list_my_events 時，將相對日期換算成 start_date/end_date（YYYY-MM-DD）。
+- 使用 calendar.find_my_event 只在使用者真的要查詢某筆行程時使用。
+- 讀取工具回傳的 projection 不含 event_id/revision；不要猜測或補寫任何 authority field。
+
+【寫入】
+- 新增、修改、取消都必須呼叫 calendar.submit_commands，不能呼叫 calendar.* write tools。
+- arguments 必須是 {"commands": [{"action": ..., ...}]}；使用 action/title/target_hint/target_hints 這些 canonical 欄位，不要使用 type/summary。
+- update/cancel 提供自然語言 target_hint，或在 context 有唯一 recent event 時提供 target_reference="recent_event"；系統會在 server 端唯一解析行程。
+- create/update 的 date 優先依目前 clock 轉成 YYYY-MM-DD；若保留「今天／明天／後天」，server 會依同一份 authoritative clock 轉換，不能自行猜日期。
+- 缺少日期、開始或結束時間等資料時，仍輸出 command，讓系統回覆 needs_clarification；不要改成自由文字或假造資料。
+- 若 context 有 calendar_draft，使用 draft_mode="continue" 補齊同一筆；新請求使用 draft_mode="replace"。
+- 若 context 有 calendar_recent_reference，使用者說「這筆／那筆／它／他／她／剛剛提到的行程」時，使用 target_reference="recent_event"，server 會使用最近一次已選取的行程；不要把代名詞填成 event_hint。
+- 一句話中的多個 Calendar mutation 放在同一個 commands 陣列，順序依使用者描述。
+- 不要輸出 user_id、event_id、revision、expected_revision、match_id、coordination_id 或對方帳號。
+
+【重要】
+- 不要為了修改/取消先呼叫 find_my_event；mutation target 由 server preflight resolve 一次。
+- calendar.submit_commands 只代表使用者意圖，尚未執行任何副作用，也不需要自行確認。
+"""
+
+
+_READ_TOOLS = planner_tool_names(
+    can_start_search=False,
+    can_decide_active_proposal=False,
+    can_edit_calendar=False,
+    can_read_mentioned_contacts=False,
+    can_use_web=False,
+    can_use_places=False,
     can_start_assessments=False,
-) | frozenset({"calendar.list_my_events", "calendar.find_my_event"})
-_TOOLS = frozenset(t for t in _TOOLS if t.startswith("calendar."))
+)
+_READ_TOOLS = frozenset(name for name in _READ_TOOLS if name.startswith("calendar."))
+_COMMAND_TOOL_NAME = "calendar.submit_commands"
+
+_SAFETY_ADDENDUM = """
+Additional contract:
+- Do not use generic titles such as 行事曆、行程 or 一筆行程 as a create title;
+  ask for the real activity name by emitting a typed create command.
+- If calendar_draft.missing_fields exists, continue that draft and fill only the
+  fields the user supplied; do not replace it with a fixed start/end request.
+- If calendar_draft.candidates exists, preserve the candidate reference key
+  (candidate_1..candidate_3) when the user selects one. These keys are opaque
+  server references, not event IDs. Never invent an authority field.
+"""
 
 
-def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[list, SubAgentMetrics]:
-    return run_sub_agents(
-        tool_names=_TOOLS, system_line=_SYSTEM,
-        context_slice=context_slice, task_brief=task_brief,
+class CalendarAgentResult(list):
+    """Backward-compatible read proposal list plus typed mutation commands."""
+
+    def __init__(
+        self,
+        reads: list[ToolProposal] | None = None,
+        commands: list[Any] | None = None,
+        command_errors: list[dict[str, str]] | None = None,
+    ):
+        super().__init__(reads or [])
+        self.commands = list(commands or [])
+        self.command_errors = list(command_errors or [])
+
+
+def _clean_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Inline Pydantic refs because several tool providers ignore $defs."""
+    source = dict(schema)
+    definitions = dict(source.pop("$defs", {}) or {})
+
+    def clean(node: Any) -> Any:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                definition = definitions.get(ref.rsplit("/", 1)[-1])
+                return clean(dict(definition or {}))
+            return {
+                key: clean(value)
+                for key, value in node.items()
+                if key not in {"title", "$defs"}
+            }
+        if isinstance(node, list):
+            return [clean(value) for value in node]
+        return node
+
+    return clean(source)
+
+
+def _tools_schema() -> list[dict[str, Any]]:
+    tools: list[dict[str, Any]] = []
+    for name in sorted(_READ_TOOLS):
+        spec = get_tool_spec(name)
+        if spec is None:
+            continue
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": spec.description,
+                "parameters": _clean_schema(planner_arguments_schema(spec)),
+            },
+        })
+    command_spec = get_tool_spec(_COMMAND_TOOL_NAME)
+    command_schema = _clean_schema(
+        planner_arguments_schema(command_spec)
+        if command_spec is not None else CalendarCommandBatch.model_json_schema()
     )
+    tools.append({
+        "type": "function",
+        "function": {
+            "name": _COMMAND_TOOL_NAME,
+            "description": command_spec.description if command_spec is not None else "提交 typed Calendar mutation command；只解析意圖，不執行寫入。",
+            "parameters": command_schema,
+        },
+    })
+    return tools
+
+
+def _prompt(context_slice: AgentContextSlice, task_brief: str) -> str:
+    return f"""{_SYSTEM}
+{_SAFETY_ADDENDUM}
+
+任務說明：{task_brief}
+
+目前可公開的 context：
+{json.dumps(context_slice.payload, ensure_ascii=False)}
+
+只呼叫一個或多個上述 function，不要輸出其他文字。"""
+
+
+def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[CalendarAgentResult, SubAgentMetrics]:
+    metrics = SubAgentMetrics()
+    reads: list[ToolProposal] = []
+    commands: list[Any] = []
+    command_errors: list[dict[str, str]] = []
+    try:
+        tools = _tools_schema()
+        prompt = _prompt(context_slice, task_brief)
+        metrics.prompt_raw = prompt
+        metrics.tools_raw = tools
+        metrics.input_payload = context_slice.payload
+        result = base_agent.generate_chat_completion_with_tools(prompt, tools, temperature=0)
+        metrics.input_tokens = result.input_tokens
+        metrics.output_tokens = result.output_tokens
+        metrics.duration_ms = result.duration_ms
+        metrics.tool_calls_raw = result.tool_calls or []
+        metrics.content_raw = result.content or ""
+        for tool_call in result.tool_calls or []:
+            name = str(tool_call.get("name") or "")
+            arguments = tool_call.get("arguments") or {}
+            if name == _COMMAND_TOOL_NAME:
+                try:
+                    validated = CalendarCommandBatch.model_validate(
+                        normalize_calendar_batch_payload(arguments)
+                    )
+                except Exception:
+                    metrics.rejected_calls.append("calendar_command_schema_invalid")
+                    command_errors.append({
+                        "code": "invalid_command",
+                        "message": "這筆行程資訊格式不完整，請再說一次日期、時間與行程名稱。",
+                    })
+                    continue
+                commands.extend(validated.commands)
+                continue
+            if name not in _READ_TOOLS:
+                metrics.rejected_calls.append("tool_not_visible")
+                continue
+            spec = get_tool_spec(name)
+            if spec is None or not planner_arguments_allowed(spec, arguments):
+                metrics.rejected_calls.append("schema_invalid")
+                continue
+            try:
+                reads.append(ToolProposal(tool_name=name, arguments=arguments))
+            except Exception:
+                metrics.rejected_calls.append("forbidden_or_invalid_arguments")
+        if result.tool_calls and not reads and not commands and metrics.rejected_calls:
+            metrics.error = "no_valid_proposal"
+        return CalendarAgentResult(reads, commands, command_errors), metrics
+    except Exception as exc:
+        metrics.error = str(exc)
+        return CalendarAgentResult(reads, commands, command_errors), metrics
