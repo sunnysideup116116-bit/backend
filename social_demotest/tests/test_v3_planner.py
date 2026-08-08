@@ -75,11 +75,67 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(len(plan.tasks), 1)
         self.assertEqual(plan.tasks[0].agent, "synthesizer")
 
+    def test_simple_chat_can_produce_strict_direct_reply_plan(self):
+        turn = self._turn("哈囉")
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[
+                {"name": "decompose_tasks", "arguments": {
+                    "mode": "direct_chat", "tasks": [], "direct_reply": "嗨～怎麼啦？",
+                }},
+            ]),
+        ):
+            plan, metrics = plan_turn(turn)
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.mode, "direct_chat")
+        self.assertEqual(plan.tasks, [])
+        self.assertEqual(plan.direct_reply, "嗨～怎麼啦？")
+        self.assertEqual(metrics.decision_mode, "direct_chat")
+
+    def test_incompatible_direct_payload_preserves_valid_domain_dag(self):
+        turn = self._turn("幫我查明天行程")
+        tasks = [{
+            "id": "t1", "agent": "calendar", "depends_on": [], "task_brief": "查行程",
+        }, {
+            "id": "s1", "agent": "synthesizer", "depends_on": ["t1"], "task_brief": "彙整",
+        }]
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[
+                {"name": "decompose_tasks", "arguments": {
+                    "mode": "direct_chat", "tasks": tasks, "direct_reply": "我幫你看",
+                }},
+            ]),
+        ):
+            plan, metrics = plan_turn(turn)
+        self.assertEqual(plan.mode, "tasks")
+        self.assertEqual([task.agent for task in plan.tasks], ["calendar", "synthesizer"])
+        self.assertEqual(metrics.direct_chat_fallback_reason, "incompatible_direct_chat_payload")
+
+    def test_malformed_direct_payload_falls_back_to_synthesizer_only(self):
+        turn = self._turn("笑死")
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[
+                {"name": "decompose_tasks", "arguments": {
+                    "mode": "direct_chat", "tasks": [], "direct_reply": 42,
+                }},
+            ]),
+        ):
+            plan, metrics = plan_turn(turn)
+        self.assertEqual(plan.mode, "tasks")
+        self.assertEqual([task.agent for task in plan.tasks], ["synthesizer"])
+        self.assertEqual(metrics.direct_chat_fallback_reason, "direct_chat_schema_invalid")
+
     def test_planner_tool_schema_inlines_subtask_refs(self):
         schema = _decompose_tool_schema()["function"]["parameters"]
         serialized = json.dumps(schema, ensure_ascii=False)
         self.assertNotIn("$defs", serialized)
         self.assertNotIn("$ref", serialized)
+        self.assertEqual(
+            set(schema["properties"]),
+            {"mode", "tasks", "direct_reply", "opportunity"},
+        )
         task_schema = schema["properties"]["tasks"]["items"]
         self.assertEqual(
             set(task_schema["properties"]),
@@ -98,6 +154,9 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIn("depends_on", _PLANNER_SYSTEM)
         self.assertIn("task_brief", _PLANNER_SYSTEM)
         self.assertIn("不要使用 `type`", _PLANNER_SYSTEM)
+        self.assertIn('mode="direct_chat"', _PLANNER_SYSTEM)
+        self.assertIn("direct_reply", _PLANNER_SYSTEM)
+        self.assertIn("不得回答行事曆", _PLANNER_SYSTEM)
 
     def test_planner_system_policy_has_bounded_social_opening_contract(self):
         self.assertIn('opportunity.signal="social_opening"', _PLANNER_SYSTEM)
@@ -110,6 +169,18 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIn("missing_fields", _PLANNER_SYSTEM)
         self.assertIn("candidates", _PLANNER_SYSTEM)
         self.assertIn("只負責路由", _PLANNER_SYSTEM)
+
+    def test_planner_exposes_recent_mutation_only_as_bounded_verification_context(self):
+        turn = self._turn("剛才那筆有成功嗎？").model_copy(update={
+            "calendar_recent_mutation": {
+                "action": "cancel", "outcome": "success", "labels": ["看牙醫"],
+            },
+        })
+        from services.ayue_agent.v3.planner import _planner_prompt
+        prompt = _planner_prompt(turn)
+        self.assertIn("calendar_recent_mutation", prompt)
+        self.assertIn("calendar_recent_mutation", _PLANNER_SYSTEM)
+        self.assertIn("唯讀驗證", _PLANNER_SYSTEM)
 
     def test_planner_uses_system_role_and_minimal_routing_context(self):
         turn = self._turn("最近有什麼行程？")
@@ -261,11 +332,16 @@ class V3PlannerLiveSmokeTests(unittest.TestCase):
     def _assert_agents(self, message, expected):
         plan, metrics = plan_turn(self._turn(message))
         self.assertIsNotNone(plan, metrics.error)
+        self.assertEqual(plan.mode, "tasks")
         self.assertEqual({task.agent for task in plan.tasks}, set(expected) | {"synthesizer"})
         self.assertEqual(sum(task.agent == "synthesizer" for task in plan.tasks), 1)
 
     def test_live_simple_chat(self):
-        self._assert_agents("我今天有點累", set())
+        plan, metrics = plan_turn(self._turn("我今天有點累"))
+        self.assertIsNotNone(plan, metrics.error)
+        self.assertEqual(plan.mode, "direct_chat")
+        self.assertEqual(plan.tasks, [])
+        self.assertTrue(plan.direct_reply)
 
     def test_live_places_request(self):
         self._assert_agents("幫我找台北車站附近的咖啡廳", {"places"})

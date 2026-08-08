@@ -15,14 +15,12 @@ from pydantic import BaseModel, ConfigDict
 
 from services.ai_service import generate_chat_completion_with_tools
 from services.ayue_agent.capabilities import (
-    contains_unsupported_random_match_claim,
     is_capability_query,
     matching_truth_reply,
-    normalize_public_language,
     capability_answer,
 )
-from services.ayue_agent.router import _concise_public_reply, _INTERNAL_META_REPLY_RE
 from .contracts import AgentContextSlice
+from .public_reply import validate_public_reply
 
 
 @dataclass
@@ -354,8 +352,32 @@ def _verified_observation_reply(payload: dict[str, Any]) -> str | None:
     can ask for the actual missing fields and present bounded candidates in
     natural language; it must not claim that a mutation happened.
     """
+    mutation_verbs = {
+        "create": "新增",
+        "update": "修改",
+        "cancel": "取消",
+        "batch": "執行",
+    }
     for obs in payload.get("observations") or []:
         result = obs.get("result")
+        if isinstance(result, dict):
+            verification = result.get("calendar_mutation_verification")
+            if isinstance(verification, dict):
+                status = str(verification.get("status") or "")
+                action = mutation_verbs.get(str(verification.get("action") or ""), "處理")
+                label = str(verification.get("label") or "這筆行程").strip()
+                if status == "verified_success":
+                    return f"我確認過了，剛才已{action}「{label}」。"
+                if status == "failed":
+                    return f"我確認過了，剛才的{action}「{label}」沒有成功。"
+                if status == "still_active":
+                    return f"我確認過了，「{label}」目前仍在行事曆裡，剛才的操作沒有生效。"
+                if status == "partial":
+                    return f"剛才的行事曆批次只完成一部分；「{label}」的狀態需要再確認。"
+                if status == "verification_failed":
+                    return f"我暫時無法確認「{label}」的最新狀態，剛才的操作沒有再次送出。"
+                if status == "not_available":
+                    return "我目前沒有可核對的上一筆行事曆操作；如果你要處理新的行程，請直接告訴我。"
         if obs.get("tool") is None and isinstance(result, list):
             replies: list[str] = []
             for item in result:
@@ -416,16 +438,17 @@ def synthesize(
         metrics.tool_calls_raw = result.tool_calls or []
         metrics.used_llm = True
         card_decision = _parse_card_decision(result)
-        reply = _concise_public_reply(
-            normalize_public_language(str(result.content or "").strip()),
+        validation = validate_public_reply(
+            str(result.content or ""),
             preserve_details=True,
         )
-        if not reply:
-            metrics.fallback_reason = "empty_content"
-        elif _INTERNAL_META_REPLY_RE.search(reply):
-            metrics.fallback_reason = "internal_meta_reply"
-        elif contains_unsupported_random_match_claim(reply):
-            metrics.fallback_reason = "unsupported_claim"
+        reply = validation.reply
+        if reply is None:
+            metrics.fallback_reason = {
+                "empty_reply": "empty_content",
+                "unsupported_claim": "unsupported_claim",
+                "internal_meta_reply": "internal_meta_reply",
+            }.get(validation.reason or "", "internal_meta_reply")
         else:
             metrics.reply_source = "llm"
             return reply, card_decision, metrics

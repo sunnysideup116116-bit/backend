@@ -288,6 +288,15 @@ def _calendar_find_event(ctx: AgentTurnContext, arguments: dict[str, Any]) -> To
     }, private_data={"calendar_event_reference": {"event": event}})
 
 
+def _calendar_verify_recent_mutation(ctx: AgentTurnContext) -> ToolResult:
+    """Verify the latest short-lived Calendar write against canonical state."""
+    from services.ayue_agent.v3.calendar_references import verify_recent_mutation
+
+    return ToolResult(ok=True, data={
+        "calendar_mutation_verification": verify_recent_mutation(ctx.user_id),
+    })
+
+
 def _empty_calendar_find(status: str, reason_code: str, query: str = "") -> ToolResult:
     return ToolResult(ok=True, data={
         "status": status, "reason_code": reason_code,
@@ -689,6 +698,7 @@ def execute_tool(
         "calendar_events": lambda: _calendar_events(ctx.user_id, clock, arguments),
         "calendar_next_event": lambda: _calendar_next_event(ctx.user_id, clock),
         "calendar_event_find": lambda: _calendar_find_event(ctx, arguments),
+        "calendar_mutation_verification": lambda: _calendar_verify_recent_mutation(ctx),
         "current_time": lambda: _current_time(clock),
         "match_status": lambda: _match_status(ctx.user_id),
         "counterparty_summary": lambda: _counterparty_summary(ctx),

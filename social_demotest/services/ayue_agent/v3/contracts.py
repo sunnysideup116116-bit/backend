@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # Forbidden ID/revision fields a sub-agent must never fill.
@@ -51,12 +51,42 @@ class SubTask(BaseModel):
 class Plan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # ``tasks`` remains the default for compatibility with older provider
+    # payloads that predate the direct-chat optimization.
+    mode: Literal["tasks", "direct_chat"] = Field(
+        default="tasks",
+        description="tasks runs the existing DAG; direct_chat is a task-free conversational reply",
+    )
     # At most three domain specialists plus one terminal synthesizer.
-    tasks: list[SubTask] = Field(min_length=1, max_length=4)
+    tasks: list[SubTask] = Field(default_factory=list, max_length=4)
+    direct_reply: str | None = Field(
+        default=None,
+        max_length=160,
+        description="Only for direct_chat; a short plain-text reply with no App/domain claims",
+    )
     opportunity: OpportunitySignal | None = None
+
+    @field_validator("direct_reply")
+    @classmethod
+    def _trim_direct_reply(cls, value: str | None) -> str | None:
+        return value.strip() if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _validate_dag(self) -> "Plan":
+        if self.mode == "direct_chat":
+            if self.tasks:
+                raise ValueError("direct_chat plan cannot contain tasks")
+            if not self.direct_reply:
+                raise ValueError("direct_chat plan requires direct_reply")
+            if self.opportunity is not None and self.opportunity.signal != "none":
+                raise ValueError("direct_chat plan cannot contain an opportunity")
+            return self
+
+        if self.direct_reply is not None:
+            raise ValueError("tasks plan cannot contain direct_reply")
+        if not self.tasks:
+            raise ValueError("tasks plan requires at least one task")
+
         ids = {t.id for t in self.tasks}
         if len(ids) != len(self.tasks):
             raise ValueError("duplicate SubTask id")

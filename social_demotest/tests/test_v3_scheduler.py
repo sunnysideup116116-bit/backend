@@ -16,7 +16,7 @@ from services.ayue_agent.v3.synthesizer import SynthesizerMetrics
 from services.ayue_agent.v3.sub_agents.base import SubAgentMetrics
 from services.ayue_agent.v3.scheduler import (
     _apply_card_decision, _assessment_start_confirmation_requested,
-    _prior_observations_for, _public_place_cards,
+    _direct_chat_block_reason, _prior_observations_for, _public_place_cards,
     run_public_agent_turn_v3,
 )
 
@@ -40,6 +40,74 @@ def _synth_metrics():
 class V3SchedulerTests(unittest.TestCase):
     def _ctx(self, message="幫我看看行程和附近餐廳"):
         return AgentTurnContext(user_id="owner", room_id="room", message=message)
+
+    def _direct_turn(self, message="哈囉", **updates):
+        turn = AgentTurnContextV2(
+            user_id="owner", room_id="room", message=message,
+            clock=TurnClockV1(
+                timezone="Asia/Taipei", utc_iso="2026-08-04T12:00:00+00:00",
+                local_iso="2026-08-04T20:00:00+08:00", local_date="2026-08-04",
+                local_time="20:00", weekday_zh_tw="星期二",
+            ),
+        )
+        return turn.model_copy(update=updates)
+
+    def test_direct_chat_returns_without_synthesizer(self):
+        ctx = self._ctx("哈囉")
+        plan = Plan(mode="direct_chat", tasks=[], direct_reply="这是簡體中文。")
+        with patch.dict("os.environ", {"AYUE_V3_SIMPLE_CHAT_FAST_PATH": "on"}), \
+             patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2",
+                   return_value=self._direct_turn()), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.active_assessment_session", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.synthesizer.synthesize") as synth, \
+             patch("services.ayue_agent.v3.scheduler._persist_trace") as persist_trace:
+            result = run_public_agent_turn_v3(ctx, mode="on")
+        self.assertEqual(result.reply, "這是簡體中文。")
+        self.assertEqual(len(result.llm_call_metrics), 1)
+        self.assertEqual(result.llm_call_metrics[0]["agent"], "planner")
+        trace = persist_trace.call_args.args[2]
+        self.assertEqual(trace["execution_mode"], "direct_chat")
+        self.assertEqual(trace["llm_call_count"], 1)
+        synth.assert_not_called()
+
+    def test_direct_chat_is_blocked_by_calendar_draft_and_uses_synthesizer(self):
+        ctx = self._ctx("早上九點")
+        plan = Plan(mode="direct_chat", tasks=[], direct_reply="好的")
+        with patch.dict("os.environ", {"AYUE_V3_SIMPLE_CHAT_FAST_PATH": "on"}), \
+             patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2",
+                   return_value=self._direct_turn(
+                       "早上九點", calendar_draft={"action": "create", "missing_fields": ["date"]},
+                   )), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.active_assessment_session", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.synthesizer.synthesize",
+                   return_value=("我會依照正常流程處理。", None, _synth_metrics())) as synth, \
+             patch("services.ayue_agent.v3.scheduler._persist_trace"):
+            result = run_public_agent_turn_v3(ctx, mode="on")
+        self.assertEqual(result.reply, "我會依照正常流程處理。")
+        synth.assert_called_once()
+
+    def test_direct_chat_gate_rejects_pending_and_match_workflow_state(self):
+        plan = Plan(mode="direct_chat", tasks=[], direct_reply="嗨")
+        turn = self._direct_turn()
+        with patch.dict("os.environ", {"AYUE_V3_SIMPLE_CHAT_FAST_PATH": "off"}):
+            self.assertEqual(_direct_chat_block_reason(plan, turn, [], None), "feature_disabled")
+        with patch.dict("os.environ", {"AYUE_V3_SIMPLE_CHAT_FAST_PATH": "on"}):
+            self.assertEqual(_direct_chat_block_reason(
+                plan, turn, [{"tool_name": "calendar.submit_commands"}], None,
+            ), "pending_confirmation")
+            self.assertEqual(_direct_chat_block_reason(
+                plan, turn, [], {"fingerprint": "fp"}), "active_match_guidance")
+            self.assertEqual(_direct_chat_block_reason(
+                plan, turn.model_copy(update={"active_proposal": {"status": "pending"}}), [], None,
+            ), "active_match_proposal")
 
     def test_assessment_start_wording_only_confirms_assessment_pending(self):
         self.assertTrue(_assessment_start_confirmation_requested(
@@ -108,6 +176,42 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertIsInstance(result, AgentResult)
         self.assertTrue(result.handled)
         self.assertEqual(result.agent_mode, "v3")
+
+    def test_recent_calendar_mutation_challenge_uses_read_verification_not_new_write(self):
+        plan = Plan(tasks=[
+            SubTask(id="c1", agent="calendar", depends_on=[], task_brief="確認剛才的行事曆操作"),
+            SubTask(id="s1", agent="synthesizer", depends_on=["c1"], task_brief="整理驗證結果"),
+        ])
+        runner = MagicMock(return_value=(
+            CalendarAgentResult(commands=[], reads=[ToolProposal(
+                tool_name="calendar.verify_recent_mutation", arguments={},
+            )]),
+            _sub_metrics(),
+        ))
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": runner}), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation") as create_confirmation, \
+             patch("services.ayue_agent.v3.scheduler.execute_tool", return_value=MagicMock(
+                 ok=True,
+                 data={"calendar_mutation_verification": {
+                     "status": "verified_success", "action": "cancel",
+                     "label": "看牙醫", "outcome": "success",
+                 }},
+                 error_code=None,
+                 private_data={},
+             )) as execute_tool, \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=(
+                 "我確認過了，剛才已取消「看牙醫」。", None, _synth_metrics(),
+             )):
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
+            result = run_public_agent_turn_v3(self._ctx("剛才取消有成功嗎？"), mode="on")
+
+        self.assertTrue(result.handled)
+        self.assertEqual(execute_tool.call_args.args[0].name, "calendar.verify_recent_mutation")
+        create_confirmation.assert_not_called()
 
     def test_failed_sub_agent_skipped_and_synthesizer_handles_gap(self):
         ctx = self._ctx("你好嗎")
@@ -1045,6 +1149,40 @@ class V3SchedulerWriteTests(unittest.TestCase):
 
 
 class V3SchedulerTraceTests(unittest.TestCase):
+    def test_local_debug_trace_marks_direct_chat_fast_path(self):
+        from services.ayue_agent.v3.debug_trace import get_run
+
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="嗨")
+        plan = Plan(mode="direct_chat", tasks=[], direct_reply="嗨～怎麼啦？")
+        planner_metrics = _planner_metrics()
+        planner_metrics.decision_mode = "direct_chat"
+        planner_metrics.prompt_raw = "planner prompt"
+        planner_metrics.tool_calls_raw = [{"name": "decompose_tasks", "arguments": {}}]
+        planner_metrics.tools_raw = [{"type": "function"}]
+        with patch.dict("os.environ", {
+            "AYUE_LOCAL_DEBUG_TRACE": "on",
+            "AYUE_V3_SIMPLE_CHAT_FAST_PATH": "on",
+        }), \
+             patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, planner_metrics)), \
+             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.active_assessment_session", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler._direct_chat_block_reason", return_value=None):
+            mock_build.return_value = MagicMock()
+            result = run_public_agent_turn_v3(ctx, mode="on", debug_enabled=True)
+            debug_run = get_run(result.agent_run_id, "owner")
+        plan_event = next(event for event in debug_run["events"] if event["type"] == "plan_created")
+        self.assertEqual(plan_event["mode"], "direct_chat")
+        self.assertEqual(plan_event["execution_mode"], "direct_chat")
+        self.assertEqual(plan_event["direct_reply"], result.reply)
+        self.assertTrue(any(
+            event["type"] == "direct_reply_selected" and event.get("mode") == "direct_chat"
+            for event in debug_run["events"]
+        ))
+        self.assertFalse(any(event["type"] == "subagent_started" for event in debug_run["events"]))
+
     def test_local_debug_trace_records_planner_dag_and_synthesizer(self):
         from services.ayue_agent.v3.debug_trace import get_run
 

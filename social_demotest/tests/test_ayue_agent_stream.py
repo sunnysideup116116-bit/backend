@@ -217,6 +217,16 @@ class AyueAgentStreamTests(unittest.TestCase):
         self.assertEqual(source.count("setTimeout(refreshMatchStatus, 100)"), 1)
         self.assertNotIn("match-progress-card", source)
 
+    def test_debug_trace_shows_direct_chat_fast_path_or_fallback(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "frontend.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn('event.mode === "direct_chat"', source)
+        self.assertIn("direct_chat · Fast Path", source)
+        self.assertIn("Direct Chat Fast Path", source)
+        self.assertIn("Direct Chat 未採用", source)
+        self.assertIn("direct_chat_fallback_reason", source)
+
     def test_giphy_message_is_rendered_from_typed_safe_media(self):
         source = (
             Path(__file__).resolve().parents[1] / "frontend.html"
@@ -243,6 +253,14 @@ class AyueAgentStreamTests(unittest.TestCase):
         self.assertIn('url.pathname !== "/export/embed.html"', source)
         self.assertIn('frame.loading = "lazy"', source)
         self.assertIn('appendPlaceCards(div', source)
+
+    def test_calendar_mutation_response_invalidates_open_calendar_cache(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "frontend.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn("data.calendar_state_changed", source)
+        self.assertIn('document.getElementById("calendar-modal")', source)
+        self.assertIn("await loadCalendarEvents()", source)
 
     def test_debug_panel_escapes_final_reply_before_inner_html(self):
         source = (

@@ -3833,6 +3833,16 @@ if (metadata.event_type === "date_coordination_form") {
                         sources: data.sources || [], place_cards: data.place_cards || [],
                     }});
                     if (isPublicAyue) refreshMatchStatus();
+                    if (
+                        isPublicAyue
+                        && data.calendar_state_changed
+                        && typeof loadCalendarEvents === "function"
+                    ) {
+                        const calendarModal = document.getElementById("calendar-modal");
+                        if (calendarModal && !calendarModal.classList.contains("hidden")) {
+                            await loadCalendarEvents();
+                        }
+                    }
                     if (data.mediator_card) {
                         const meta = data.mediator_card.metadata || {};
                         if (meta.match_id) window.activeMatchProposalId = meta.match_id;
@@ -5794,6 +5804,14 @@ if (metadata.event_type === "date_coordination_form") {
             const planner = [...events].reverse().find(event => event.type === "planner_completed") || {};
             const planEvent = [...events].reverse().find(event => event.type === "plan_created") || {};
             const plan = Array.isArray(planEvent.plan) ? planEvent.plan : [];
+            const directPlanEvent = [...events].reverse().find(event =>
+                event.type === "plan_created" && event.mode === "direct_chat"
+            ) || null;
+            const directReplyEvent = [...events].reverse().find(event =>
+                event.type === "direct_reply_selected" && event.mode === "direct_chat"
+            ) || null;
+            const directFallbackReason = planEvent.direct_chat_fallback_reason ||
+                planner.direct_chat_fallback_reason || "";
             const nodeMap = {};
             const callMap = {};
             let finalResponse = null;
@@ -5833,14 +5851,17 @@ if (metadata.event_type === "date_coordination_form") {
             const statusText = lastDebugRunStatus === "completed" ? "已完成" :
                 lastDebugRunStatus === "running" ? "執行中" : (lastDebugRunStatus || "未知");
             const statusColor = lastDebugRunStatus === "completed" ? "#55e6d9" : "#ffd166";
+            const executionMode = directPlanEvent ? "direct_chat · Fast Path" :
+                (planEvent.mode === "tasks" ? "tasks · 正常 DAG" : (planEvent.mode || "—"));
 
             let html = '<div class="border-2 border-[#8a72b8] p-3 bg-[#110a22] mb-3">' +
                 '<div class="flex items-center justify-between gap-2">' +
                 '<div class="text-[#ffd166] font-bold text-sm">V3 執行流程</div>' +
                 '<span class="text-[10px] px-2 py-0.5 border" style="color:' + statusColor + ';border-color:' + statusColor + '">' + statusText + '</span></div>' +
-                '<div class="grid grid-cols-3 gap-2 text-[11px] mt-2">' +
+                '<div class="grid grid-cols-4 gap-2 text-[11px] mt-2">' +
                 '<div><span class="text-gray-400">Input</span><br><b class="text-[#55e6d9]">' + totalInput + '</b></div>' +
                 '<div><span class="text-gray-400">Output</span><br><b class="text-[#55e6d9]">' + totalOutput + '</b></div>' +
+                '<div><span class="text-gray-400">執行模式</span><br><b class="text-[#ffd166]">' + escapeDebugHtml(executionMode) + '</b></div>' +
                 '<div><span class="text-gray-400">目前階段</span><br><b class="text-[#ffd166]">' + escapeDebugHtml(latest.stage || latest.agent || latest.type || "—") + '</b></div>' +
                 '</div></div>';
 
@@ -5849,6 +5870,8 @@ if (metadata.event_type === "date_coordination_form") {
                 html += '<div class="border-2 border-[#ffd166] p-3 bg-[#110a22] mb-3">' +
                     '<div class="flex justify-between"><b class="text-[#ffd166] text-xs">📋 Planner</b><span class="text-[10px] text-gray-300">' + plannerStatus + '</span></div>' +
                     (planner.error ? '<div class="text-[10px] text-[#ff6fae] mt-1">' + escapeDebugHtml(planner.error) + '</div>' : '') +
+                    '<div class="text-[10px] text-gray-400 mt-1">mode=' + escapeDebugHtml(planner.mode || planEvent.mode || "tasks") +
+                    (directFallbackReason ? ' · direct_chat fallback=' + escapeDebugHtml(directFallbackReason) : '') + '</div>' +
                     '<div class="flex flex-wrap gap-3 mt-2">' +
                     debugDetailButton("Input Prompt", planner.prompt_raw) +
                     debugDetailButton("可用 Functions", planner.available_functions, "#fff1b8") +
@@ -5858,6 +5881,22 @@ if (metadata.event_type === "date_coordination_form") {
             } else {
                 const stage = events.find(event => event.type === "stage_started" && event.stage === "planner");
                 if (stage) html += '<div class="border-2 border-[#ffd166] p-3 bg-[#110a22] mb-3 text-xs text-[#ffd166]">⏳ ' + escapeDebugHtml(stage.label || "Planner 執行中") + '</div>';
+            }
+
+            if (directPlanEvent) {
+                const directReply = directReplyEvent?.reply || directPlanEvent.direct_reply || "";
+                html += '<div class="border-2 border-[#55e6d9] p-3 bg-[#110a22] mb-3">' +
+                    '<div class="flex items-center justify-between gap-2">' +
+                    '<b class="text-[#55e6d9] text-xs">⚡ Direct Chat Fast Path</b>' +
+                    '<span class="text-[10px] text-[#55e6d9]">已觸發</span></div>' +
+                    '<div class="text-[10px] text-gray-400 mt-1">本回合只執行 Planner，已跳過 Synthesizer 與所有 domain sub-agent。</div>' +
+                    '<div class="text-[10px] text-[#fff1b8] mt-1">Planner 回覆：' + escapeDebugHtml(directReply) + '</div></div>';
+            } else if (directFallbackReason) {
+                html += '<div class="border-2 border-[#ffd166] p-3 bg-[#110a22] mb-3">' +
+                    '<div class="flex items-center justify-between gap-2">' +
+                    '<b class="text-[#ffd166] text-xs">↩ Direct Chat 未採用</b>' +
+                    '<span class="text-[10px] text-[#ffd166]">回到正常 DAG</span></div>' +
+                    '<div class="text-[10px] text-gray-400 mt-1">原因：' + escapeDebugHtml(directFallbackReason) + '</div></div>';
             }
 
             if (plan.length) {

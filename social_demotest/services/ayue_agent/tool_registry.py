@@ -221,6 +221,22 @@ class _CalendarFindOutput(BaseModel):
     candidates: list[_CalendarEventCandidateOutput] = Field(default_factory=list, max_length=10)
 
 
+class _CalendarMutationVerificationStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal[
+        "verified_success", "still_active", "failed", "partial",
+        "verification_failed", "not_available",
+    ]
+    action: str = ""
+    label: str = ""
+    outcome: str = ""
+
+
+class _CalendarMutationVerificationOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    calendar_mutation_verification: _CalendarMutationVerificationStatus
+
+
 class _MatchStatusOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     state: str
@@ -433,6 +449,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         "讀取本人接下來 90 天內最近的一筆有效行程；適用於『最近一筆』『下一個行程』『最近有什麼行程』，會回傳唯一可供後續這筆／它／他／她指涉的行程。",
         "我看一下你最近的一筆行程…",
         output_model=_CalendarNextOutput,
+    ),
+    "calendar.verify_recent_mutation": ToolSpec(
+        "calendar.verify_recent_mutation", ToolRisk.READ, "calendar_mutation_verification",
+        "確認最近一次行事曆變更是否已套用；只適用於使用者追問剛才的新增、修改或取消結果，不會再次執行寫入。",
+        "驗證最近一次行事曆變更是否成功。",
+        output_model=_CalendarMutationVerificationOutput,
     ),
     "calendar.find_my_event": ToolSpec(
         "calendar.find_my_event", ToolRisk.READ, "calendar_event_find",

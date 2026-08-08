@@ -85,6 +85,7 @@ class AgentTurnContextV2(BaseModel):
     action_draft: dict[str, Any] | None = None
     calendar_draft: dict[str, Any] | None = None
     calendar_recent_reference: dict[str, Any] | None = None
+    calendar_recent_mutation: dict[str, Any] | None = None
     place_search_draft: dict[str, Any] | None = None
     recent_context_draft: dict[str, Any] | None = None
     # Public references only. Their executor-side IDs remain on AgentTurnContext.
@@ -123,6 +124,9 @@ class AgentDecision(BaseModel):
 class AgentResult(BaseModel):
     handled: bool
     reply: str | None = None
+    # True only when a confirmed Calendar write committed in this turn.  The
+    # public UI uses this as a cache-invalidation hint; it is not domain state.
+    calendar_state_changed: bool = False
     conversation_intent: str = "casual_chat"
     mentioned_other_ids: list[str] = Field(default_factory=list)
     context_changed: bool = False
