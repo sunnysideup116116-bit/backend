@@ -2,7 +2,7 @@ import json
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from pydantic import ValidationError
 
@@ -10,6 +10,7 @@ from services.ayue_agent.v3.calendar_commands import (
     CalendarCommand,
     CalendarMutationPlan,
     CalendarPreflightResult,
+    canonicalize_calendar_command,
     normalize_calendar_batch_payload,
     preflight_calendar_commands,
 )
@@ -25,6 +26,7 @@ from services.ayue_agent.v3.scheduler import _calendar_reference_for_command, _r
 from services.ayue_agent.v3.sub_agents.base import SubAgentMetrics
 from services.ai_service import ToolCallResult
 from services.ayue_agent.v3.write_executors import execute_write
+from services.calendar_service import resolve_owned_event_with_candidates
 
 
 def _event(event_id="event-1", revision=4, *, source_type="personal"):
@@ -48,6 +50,36 @@ def _event(event_id="event-1", revision=4, *, source_type="personal"):
 class V3CalendarCommandTests(unittest.TestCase):
     def _ctx(self):
         return SimpleNamespace(user_id="owner")
+
+    @staticmethod
+    def _resolver_cursor(events):
+        class Cursor:
+            def __init__(self, values):
+                self.values = list(values)
+
+            def sort(self, *_args, **_kwargs):
+                return self
+
+            def __iter__(self):
+                return iter(self.values)
+
+        return Cursor(events)
+
+    @staticmethod
+    def _dentist_event(event_id, title, day):
+        return {
+            "event_id": event_id,
+            "revision": 1,
+            "source_type": "personal",
+            "participants": ["owner"],
+            "title": title,
+            "start_at": datetime(day.year, day.month, day.day, 7, 0, tzinfo=timezone.utc),
+            "end_at": datetime(day.year, day.month, day.day, 8, 0, tzinfo=timezone.utc),
+            "timezone": "Asia/Taipei",
+            "location": "",
+            "notes": "",
+            "status": "confirmed",
+        }
 
     def test_llm_command_rejects_authority_fields(self):
         with self.assertRaises(ValidationError):
@@ -82,7 +114,32 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertEqual(command.title, "去駁二")
         self.assertIsNone(command.end_time)
 
+    def test_literal_duration_phrases_are_coerced_to_typed_minutes(self):
+        for phrase, minutes in (("半小時", 30), ("一小時", 60), ("一個半小時", 90), ("兩小時", 120)):
+            with self.subTest(phrase=phrase):
+                command = CalendarCommand(action="create", duration_minutes=phrase)
+                self.assertEqual(command.duration_minutes, minutes)
+
+    def test_provider_duration_alias_is_normalized(self):
+        payload = normalize_calendar_batch_payload({
+            "commands": [{"action": "create", "duration": "大概一小時"}],
+        })
+        command = CalendarCommand.model_validate(payload["commands"][0])
+        self.assertEqual(command.duration_minutes, 60)
+
     def test_draft_continuation_fills_only_missing_fields(self):
+        clear_draft("owner")
+        original = CalendarCommand(action="create", title="看牙醫", date="2026-08-12")
+        record = save_draft("owner", original, missing_fields=["start_time", "end_time"])
+        continuation = CalendarCommand(
+            action="create", start_time="15:00", end_time="16:00", draft_mode="replace",
+        )
+        merged = merge_command(continuation, record)
+        self.assertEqual(merged.title, "看牙醫")
+        self.assertEqual(merged.date, "2026-08-12")
+        self.assertEqual(merged.start_time, "15:00")
+        self.assertEqual(merged.end_time, "16:00")
+        self.assertEqual(merged.draft_mode, "continue")
         clear_draft("owner")
 
     def test_candidate_reference_must_be_advertised_by_active_draft(self):
@@ -90,6 +147,20 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertTrue(candidate_reference_allowed(record, "candidate_1"))
         self.assertFalse(candidate_reference_allowed(record, "candidate_2"))
         self.assertFalse(candidate_reference_allowed(None, "candidate_1"))
+
+    def test_candidate_selection_replaces_prior_natural_language_hint(self):
+        clear_draft("owner")
+        original = CalendarCommand(action="cancel", target_hint="看牙一那個取消")
+        record = save_draft(
+            "owner", original,
+            candidates=[{"reference": "candidate_1", "label": "8/12 15:00–16:00 看牙醫"}],
+        )
+        selected = merge_command(
+            CalendarCommand(action="cancel", target_reference="candidate_1"), record,
+        )
+        self.assertEqual(selected.target_reference, "candidate_1")
+        self.assertIsNone(selected.target_hint)
+        clear_draft("owner")
 
     def test_target_reference_schema_documents_all_server_owned_options(self):
         field = CalendarCommand.model_fields["target_reference"]
@@ -115,17 +186,50 @@ class V3CalendarCommandTests(unittest.TestCase):
             result = _calendar_reference_for_command("owner", command, draft)
         self.assertEqual(result["event_id"], "event-1")
         get_reference.assert_called_once_with("owner", reference_key="candidate_1")
-        original = CalendarCommand(
-            action="create", title="去駁二", date="後天", start_time="08:00",
-        )
-        record = save_draft("owner", original, missing_fields=["end_time"])
+
+    def test_draft_continuation_allows_explicit_date_correction(self):
+        clear_draft("owner")
+
+    def test_draft_continuation_treats_duration_as_missing_end_time(self):
+        clear_draft("owner")
+        original = CalendarCommand(action="create", title="去駁二玩", date="2026-08-20")
+        record = save_draft("owner", original, missing_fields=["start_time", "end_time"])
         continuation = CalendarCommand(
-            action="create", start_time="08:00", end_time="10:00", draft_mode="continue",
+            action="create", start_time="09:00", duration_minutes=60, draft_mode="replace",
         )
         merged = merge_command(continuation, record)
-        self.assertEqual(merged.title, "去駁二")
-        self.assertEqual(merged.date, "後天")
-        self.assertEqual(merged.end_time, "10:00")
+        self.assertEqual(merged.title, "去駁二玩")
+        self.assertEqual(merged.date, "2026-08-20")
+        self.assertEqual(merged.start_time, "09:00")
+        self.assertEqual(merged.duration_minutes, 60)
+        self.assertEqual(merged.draft_mode, "continue")
+        clear_draft("owner")
+        original = CalendarCommand(action="create", title="看牙醫", date="2026-08-12")
+        record = save_draft("owner", original, missing_fields=["start_time", "end_time"])
+        correction = CalendarCommand(
+            action="create", date="2026-08-13", start_time="15:00", end_time="16:00",
+            draft_mode="replace",
+        )
+        merged = merge_command(correction, record)
+        self.assertEqual(merged.title, "看牙醫")
+        self.assertEqual(merged.date, "2026-08-13")
+        self.assertEqual(merged.start_time, "15:00")
+        self.assertEqual(merged.end_time, "16:00")
+        clear_draft("owner")
+
+    def test_complete_new_create_does_not_merge_into_old_draft(self):
+        clear_draft("owner")
+        record = save_draft(
+            "owner", CalendarCommand(action="create", title="看牙醫", date="2026-08-12"),
+            missing_fields=["start_time", "end_time"],
+        )
+        new_command = CalendarCommand(
+            action="create", title="新行程", date="2026-08-14", start_time="10:00", end_time="11:00",
+            draft_mode="replace",
+        )
+        merged = merge_command(new_command, record)
+        self.assertEqual(merged.title, "新行程")
+        self.assertEqual(merged.date, "2026-08-14")
         clear_draft("owner")
 
     def test_recent_reference_resolves_without_event_hint(self):
@@ -220,16 +324,148 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertEqual((draft or {}).get("command", {}).get("action"), "cancel")
         clear_draft("owner")
 
-    def test_fuzzy_unique_resolution_is_server_owned_and_requires_confirmation(self):
+    def test_fuzzy_unique_resolution_requires_candidate_clarification_before_mutation(self):
         command = CalendarCommand(action="cancel", target_hint="睡覺")
         with patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
              patch("services.ayue_agent.v3.calendar_commands.resolve_owned_event", return_value=(_event(), "fuzzy_suggestion")), \
              patch("services.ayue_agent.v3.calendar_commands.get_owned_event_resolution_candidates", return_value=[_event()]), \
              patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]):
             result = preflight_calendar_commands(self._ctx(), [command])
+        self.assertEqual(result.status, "needs_clarification")
+        self.assertEqual(result.clarification.code, "ambiguous")
+        self.assertEqual(len(result.clarification.candidates), 1)
+        self.assertIn("嗎", result.clarification.message)
+
+    def test_calendar_resolver_exact_wrappers_are_retrieval_first(self):
+        event = self._dentist_event("dentist-1", "看牙醫", datetime(2026, 8, 12).date())
+        collection = MagicMock()
+        collection.find.return_value = self._resolver_cursor([event])
+        with patch("services.calendar_service.calendar_events_coll", collection):
+            resolved, kind, candidates = resolve_owned_event_with_candidates(
+                "owner", "看牙醫那個行程不去了",
+            )
+        self.assertEqual(resolved["event_id"], "dentist-1")
+        self.assertEqual(kind, "exact")
+        self.assertEqual(candidates, [])
+
+    def test_calendar_resolver_typo_returns_fuzzy_candidate_not_not_found(self):
+        event = self._dentist_event("dentist-1", "看牙醫", datetime(2026, 8, 12).date())
+        collection = MagicMock()
+        collection.find.return_value = self._resolver_cursor([event])
+        with patch("services.calendar_service.calendar_events_coll", collection):
+            resolved, kind, candidates = resolve_owned_event_with_candidates(
+                "owner", "看牙一那個取消",
+            )
+        self.assertEqual(resolved["event_id"], "dentist-1")
+        self.assertEqual(kind, "fuzzy_suggestion")
+        self.assertEqual([item["event_id"] for item in candidates], ["dentist-1"])
+
+    def test_preflight_typo_returns_candidate_clarification_without_plan(self):
+        event = self._dentist_event("dentist-1", "看牙醫", datetime(2026, 8, 12).date())
+        collection = MagicMock()
+        collection.find.return_value = self._resolver_cursor([event])
+        command = CalendarCommand(action="cancel", target_hint="看牙一那個不去了")
+        with patch("services.calendar_service.calendar_events_coll", collection), \
+             patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True):
+            result = preflight_calendar_commands(self._ctx(), [command])
+        self.assertEqual(result.status, "needs_clarification")
+        self.assertEqual(result.clarification.code, "ambiguous")
+        self.assertEqual(len(result.clarification.candidates), 1)
+        self.assertFalse(result.plans)
+
+    def test_calendar_resolver_removes_previous_event_wrappers(self):
+        event = self._dentist_event("dentist-1", "看牙醫", datetime(2026, 8, 12).date())
+        collection = MagicMock()
+        collection.find.return_value = self._resolver_cursor([event])
+        with patch("services.calendar_service.calendar_events_coll", collection):
+            resolved, kind, _candidates = resolve_owned_event_with_candidates(
+                "owner", "上次牙醫那個行程不要了",
+            )
+        self.assertEqual(resolved["event_id"], "dentist-1")
+        self.assertEqual(kind, "exact")
+
+    def test_calendar_resolver_ambiguous_returns_bounded_candidates(self):
+        first = self._dentist_event("dentist-1", "看牙醫", datetime(2026, 8, 12).date())
+        second = self._dentist_event("dentist-2", "牙醫回診", datetime(2026, 9, 3).date())
+        collection = MagicMock()
+        collection.find.return_value = self._resolver_cursor([first, second])
+        with patch("services.calendar_service.calendar_events_coll", collection):
+            resolved, kind, candidates = resolve_owned_event_with_candidates(
+                "owner", "牙醫那個不去了",
+            )
+        self.assertIsNone(resolved)
+        self.assertEqual(kind, "ambiguous")
+        self.assertEqual([item["event_id"] for item in candidates], ["dentist-1", "dentist-2"])
+
+    def test_calendar_resolver_weekday_constraint_ranks_matching_candidate(self):
+        wednesday = self._dentist_event("dentist-wed", "看牙醫", datetime(2026, 8, 12).date())
+        thursday = self._dentist_event("dentist-thu", "牙醫回診", datetime(2026, 8, 13).date())
+        collection = MagicMock()
+        collection.find.return_value = self._resolver_cursor([wednesday, thursday])
+        with patch("services.calendar_service.calendar_events_coll", collection):
+            resolved, kind, candidates = resolve_owned_event_with_candidates(
+                "owner", "禮拜三牙醫那個取消",
+                temporal_references={"禮拜三": "2026-08-12"},
+            )
+        self.assertEqual(resolved["event_id"], "dentist-wed")
+        self.assertIn(kind, {"exact", "fuzzy_suggestion"})
+        if kind == "fuzzy_suggestion":
+            self.assertEqual([item["event_id"] for item in candidates], ["dentist-wed"])
+
+    def test_calendar_resolver_no_relevant_event_requests_minimal_clue(self):
+        event = self._dentist_event("lunch-1", "吃午餐", datetime(2026, 8, 12).date())
+        collection = MagicMock()
+        collection.find.return_value = self._resolver_cursor([event])
+        with patch("services.calendar_service.calendar_events_coll", collection):
+            resolved, kind, candidates = resolve_owned_event_with_candidates(
+                "owner", "牙醫那個不去了",
+            )
+        self.assertIsNone(resolved)
+        self.assertEqual(kind, "not_found")
+        self.assertEqual(candidates, [])
+
+    def test_calendar_resolver_low_similarity_typo_never_binds(self):
+        event = self._dentist_event("dentist-1", "看牙醫", datetime(2026, 8, 12).date())
+        collection = MagicMock()
+        collection.find.return_value = self._resolver_cursor([event])
+        with patch("services.calendar_service.calendar_events_coll", collection):
+            resolved, kind, candidates = resolve_owned_event_with_candidates(
+                "owner", "xyz那個取消",
+            )
+        self.assertIsNone(resolved)
+        self.assertEqual(kind, "not_found")
+        self.assertEqual(candidates, [])
+
+    def test_create_duration_derives_end_time_server_side(self):
+        command = CalendarCommand(
+            action="create", title="去駁二玩", date="2026-08-20", start_time="09:00",
+            duration_minutes=60,
+        )
+        with patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]):
+            result = preflight_calendar_commands(self._ctx(), [command])
         self.assertEqual(result.status, "ready")
-        self.assertEqual(result.plans[0].resolution_kind, "fuzzy_suggestion")
-        self.assertIn("變更", result.preview)
+        self.assertEqual(result.plans[0].form["end_time"], "10:00")
+
+    def test_duration_and_explicit_end_mismatch_is_clarification(self):
+        command = CalendarCommand(
+            action="create", title="去駁二玩", date="2026-08-20", start_time="09:00",
+            end_time="11:00", duration_minutes=60,
+        )
+        with patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True):
+            result = preflight_calendar_commands(self._ctx(), [command])
+        self.assertEqual(result.status, "needs_clarification")
+        self.assertEqual(result.clarification.code, "invalid_interval")
+
+    def test_update_duration_derives_end_time_from_existing_start(self):
+        command = CalendarCommand(action="update", target_hint="雞排約會", duration_minutes=30)
+        with patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.resolve_owned_event", return_value=(_event(), None)), \
+             patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]):
+            result = preflight_calendar_commands(self._ctx(), [command])
+        self.assertEqual(result.status, "ready")
+        self.assertEqual(result.plans[0].form["end_time"], "18:30")
+        self.assertEqual(result.plans[0].changes["end_time"], "18:30")
 
     def test_create_preflight_returns_server_owned_plan_without_resolution(self):
         command = CalendarCommand(
@@ -264,6 +500,37 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertEqual(result.plans[0].form["date"], "2026-08-10")
         self.assertEqual(result.plans[0].form["start_time"], "08:00")
         self.assertEqual(result.plans[0].form["end_time"], "10:00")
+
+    def test_weekday_canonicalization_does_not_use_shorter_week_prefix(self):
+        command = CalendarCommand(
+            action="create", title="看牙醫", date="下週三", start_time="15:00", end_time="16:00",
+        )
+        ctx = SimpleNamespace(
+            user_id="owner",
+            clock=SimpleNamespace(temporal_references={
+                "下週": "2026-08-10", "下週三": "2026-08-12",
+            }),
+        )
+        canonical, error = canonicalize_calendar_command(ctx, command)
+        self.assertIsNone(error)
+        self.assertEqual(canonical.date, "2026-08-12")
+
+    def test_create_missing_time_persists_canonical_relative_date(self):
+        command = CalendarCommand(action="create", title="看牙醫", date="下禮拜三")
+        clock = SimpleNamespace(
+            temporal_references={"下禮拜三": "2026-08-12"},
+        )
+        ctx = SimpleNamespace(user_id="owner", clock=clock)
+        canonical, error = canonicalize_calendar_command(ctx, command)
+        self.assertIsNone(error)
+        self.assertEqual(canonical.date, "2026-08-12")
+        with patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True):
+            result = preflight_calendar_commands(ctx, [canonical])
+        self.assertEqual(result.status, "needs_clarification")
+        self.assertEqual(result.clarification.missing_fields, ["start_time", "end_time"])
+        save_draft("owner", canonical, missing_fields=result.clarification.missing_fields)
+        self.assertEqual(get_draft("owner")["command"]["date"], "2026-08-12")
+        clear_draft("owner")
 
     def test_unknown_relative_date_is_clarification(self):
         command = CalendarCommand(
@@ -310,6 +577,9 @@ class V3CalendarCommandTests(unittest.TestCase):
                 result = preflight_calendar_commands(self._ctx(), [command])
             self.assertEqual(result.status, "needs_clarification")
             self.assertEqual(result.clarification.code, expected)
+            if expected == "not_found":
+                self.assertIn("相近", result.clarification.message)
+                self.assertNotIn("完整日期、時間和行程名稱", result.clarification.message)
 
     def test_selected_cancel_uses_bounded_resolution_once(self):
         command = CalendarCommand(
@@ -321,6 +591,16 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertEqual(result.status, "ready")
         self.assertEqual([plan.event_id for plan in result.plans], ["a", "b"])
         resolve.assert_called_once_with("owner", mode="selected", event_hints=["A", "B"])
+
+    def test_selected_cancel_does_not_execute_fuzzy_target(self):
+        command = CalendarCommand(action="cancel_selected", target_hints=["牙一", "另一筆"])
+        with patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.calendar_service.resolve_owned_event", return_value=(_event(), None)), \
+             patch("services.calendar_service.get_owned_event_resolution_kind", return_value="fuzzy_suggestion"):
+            result = preflight_calendar_commands(self._ctx(), [command])
+        self.assertEqual(result.status, "needs_clarification")
+        self.assertEqual(result.clarification.code, "ambiguous")
+        self.assertFalse(result.plans)
 
     def test_plan_executor_is_sequential_and_stops_after_first_failure(self):
         payload = {

@@ -4,7 +4,10 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from services.ayue_agent.contracts import AgentTurnContext, AgentResult
+from services.ayue_agent.contracts import AgentTurnContext, AgentResult, AgentTurnContextV2, TurnClockV1
+from services.ayue_agent.v3.calendar_commands import CalendarCommand
+from services.ayue_agent.v3.calendar_drafts import clear_draft, get_draft, public_projection
+from services.ayue_agent.v3.sub_agents.calendar_agent import CalendarAgentResult
 from services.ayue_agent.v3.contracts import Plan, SubTask, SubTaskResult, SubTaskStatus, ToolProposal
 from services.ayue_agent.v3.planner import PlannerMetrics
 from services.ayue_agent.v3.confirmation import ConfirmationManager
@@ -135,6 +138,175 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertTrue(result.handled)
         self.assertEqual(result.agent_mode, "v3")
         self.assertIsNotNone(result.fallback_reason)
+
+    def test_calendar_two_turn_missing_time_continuation_keeps_canonical_draft(self):
+        """Exercise Planner → Calendar → preflight across the real turn boundary."""
+        clear_draft("owner")
+        first_plan = Plan(tasks=[
+            SubTask(id="c1", agent="calendar", depends_on=[], task_brief="新增下禮拜三看牙醫"),
+            SubTask(id="s1", agent="synthesizer", depends_on=["c1"], task_brief="彙整行事曆結果"),
+        ])
+        second_plan = Plan(tasks=[
+            SubTask(id="c2", agent="calendar", depends_on=[], task_brief="補上行程時間"),
+            SubTask(id="s2", agent="synthesizer", depends_on=["c2"], task_brief="彙整行事曆結果"),
+        ])
+        fixed_clock = TurnClockV1(
+            timezone="Asia/Taipei", utc_iso="2026-08-08T12:00:00+00:00",
+            local_iso="2026-08-08T20:00:00+08:00", local_date="2026-08-08",
+            local_time="20:00", weekday_zh_tw="星期六",
+            temporal_references={"下禮拜三": "2026-08-12"},
+        )
+
+        def build_context(raw_ctx, *, clock):
+            draft = public_projection(get_draft(raw_ctx.user_id))
+            return AgentTurnContextV2(
+                user_id=raw_ctx.user_id, room_id=raw_ctx.room_id,
+                message=raw_ctx.message, calendar_draft=draft, clock=clock,
+            )
+
+        first_command = CalendarCommand(action="create", title="看牙醫", date="下禮拜三")
+        second_command = CalendarCommand(
+            action="create", start_time="15:00", end_time="16:00", draft_mode="replace",
+        )
+        runner = MagicMock(side_effect=[
+            (CalendarAgentResult(commands=[first_command]), _sub_metrics()),
+            (CalendarAgentResult(commands=[second_command]), _sub_metrics()),
+        ])
+        ctx1 = self._ctx("幫我新增一個行事曆 我下禮拜三看牙醫")
+        ctx2 = self._ctx("下午三點到四點")
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", side_effect=[
+                 (first_plan, _planner_metrics()), (second_plan, _planner_metrics()),
+             ]), \
+             patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
+             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2", side_effect=build_context), \
+             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": runner}), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
+             patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("確認行程", None, _synth_metrics())):
+            first_result = run_public_agent_turn_v3(ctx1, mode="on")
+            draft_after_first = get_draft("owner")
+            second_result = run_public_agent_turn_v3(ctx2, mode="on")
+
+        self.assertTrue(first_result.handled)
+        self.assertEqual((draft_after_first or {}).get("command", {}).get("date"), "2026-08-12")
+        self.assertTrue(second_result.handled)
+        self.assertEqual(runner.call_count, 2)
+        self.assertEqual(create_confirmation.call_count, 1)
+        payload = create_confirmation.call_args.kwargs["payload"]
+        plan = payload["plans"][0]
+        self.assertEqual(plan["form"]["title"], "看牙醫")
+        self.assertEqual(plan["form"]["date"], "2026-08-12")
+        self.assertEqual(plan["form"]["start_time"], "15:00")
+        self.assertEqual(plan["form"]["end_time"], "16:00")
+        self.assertIsNone(get_draft("owner"))
+
+    def test_calendar_two_turn_lowercase_two_weeks_duration_keeps_title_and_date(self):
+        """Real regression: date/title from turn one survive a time-only turn."""
+        clear_draft("owner")
+        first_plan = Plan(tasks=[
+            SubTask(id="c1", agent="calendar", depends_on=[], task_brief="新增下下周四去駁二玩"),
+            SubTask(id="s1", agent="synthesizer", depends_on=["c1"], task_brief="彙整行事曆結果"),
+        ])
+        second_plan = Plan(tasks=[
+            SubTask(id="c2", agent="calendar", depends_on=[], task_brief="補上早上九點一小時"),
+            SubTask(id="s2", agent="synthesizer", depends_on=["c2"], task_brief="彙整行事曆結果"),
+        ])
+        fixed_clock = TurnClockV1(
+            timezone="Asia/Taipei", utc_iso="2026-08-08T12:00:00+00:00",
+            local_iso="2026-08-08T20:00:00+08:00", local_date="2026-08-08",
+            local_time="20:00", weekday_zh_tw="星期六",
+            temporal_references={"下下周四": "2026-08-20"},
+        )
+
+        def build_context(raw_ctx, *, clock):
+            draft = public_projection(get_draft(raw_ctx.user_id))
+            return AgentTurnContextV2(
+                user_id=raw_ctx.user_id, room_id=raw_ctx.room_id,
+                message=raw_ctx.message, calendar_draft=draft, clock=clock,
+            )
+
+        first_command = CalendarCommand(action="create", title="去駁二玩", date="下下周四")
+        second_command = CalendarCommand(
+            action="create", start_time="09:00", duration_minutes=60, draft_mode="replace",
+        )
+        runner = MagicMock(side_effect=[
+            (CalendarAgentResult(commands=[first_command]), _sub_metrics()),
+            (CalendarAgentResult(commands=[second_command]), _sub_metrics()),
+        ])
+        ctx1 = self._ctx("下下周四我要去駁二玩 幫我新增到行事曆")
+        ctx2 = self._ctx("早上9點 大概一小時")
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", side_effect=[
+                 (first_plan, _planner_metrics()), (second_plan, _planner_metrics()),
+             ]), \
+             patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
+             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2", side_effect=build_context), \
+             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": runner}), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
+             patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("確認行程", None, _synth_metrics())):
+            first_result = run_public_agent_turn_v3(ctx1, mode="on")
+            draft_after_first = get_draft("owner")
+            second_result = run_public_agent_turn_v3(ctx2, mode="on")
+
+        self.assertTrue(first_result.handled)
+        self.assertEqual((draft_after_first or {}).get("command", {}).get("title"), "去駁二玩")
+        self.assertEqual((draft_after_first or {}).get("command", {}).get("date"), "2026-08-20")
+        self.assertTrue(second_result.handled)
+        create_confirmation.assert_called_once()
+        payload = create_confirmation.call_args.kwargs["payload"]
+        form = payload["plans"][0]["form"]
+        self.assertEqual(form["title"], "去駁二玩")
+        self.assertEqual(form["date"], "2026-08-20")
+        self.assertEqual(form["start_time"], "09:00")
+        self.assertEqual(form["end_time"], "10:00")
+        self.assertIsNone(get_draft("owner"))
+
+    def test_calendar_one_turn_relative_weekday_reaches_confirmation(self):
+        clear_draft("owner")
+        plan = Plan(tasks=[
+            SubTask(id="c1", agent="calendar", depends_on=[], task_brief="新增下禮拜三看牙醫"),
+            SubTask(id="s1", agent="synthesizer", depends_on=["c1"], task_brief="彙整行事曆結果"),
+        ])
+        fixed_clock = TurnClockV1(
+            timezone="Asia/Taipei", utc_iso="2026-08-08T12:00:00+00:00",
+            local_iso="2026-08-08T20:00:00+08:00", local_date="2026-08-08",
+            local_time="20:00", weekday_zh_tw="星期六",
+            temporal_references={"下禮拜三": "2026-08-12"},
+        )
+        command = CalendarCommand(
+            action="create", title="看牙醫", date="下禮拜三", start_time="15:00", end_time="16:00",
+        )
+
+        def build_context(raw_ctx, *, clock):
+            return AgentTurnContextV2(
+                user_id=raw_ctx.user_id, room_id=raw_ctx.room_id,
+                message=raw_ctx.message, clock=clock,
+            )
+
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
+             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2", side_effect=build_context), \
+             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
+                 "calendar": MagicMock(return_value=(CalendarAgentResult(commands=[command]), _sub_metrics())),
+             }), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
+             patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("確認行程", None, _synth_metrics())):
+            result = run_public_agent_turn_v3(
+                self._ctx("我下禮拜三三點到四點要看牙醫 幫我加到行事曆"), mode="on",
+            )
+
+        self.assertTrue(result.handled)
+        create_confirmation.assert_called_once()
+        payload = create_confirmation.call_args.kwargs["payload"]
+        self.assertEqual(payload["plans"][0]["form"]["date"], "2026-08-12")
+        self.assertIsNone(get_draft("owner"))
 
     def test_failed_dependency_skips_dependent_task(self):
         ctx = self._ctx("幫我找餐廳並篩選")

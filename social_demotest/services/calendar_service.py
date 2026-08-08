@@ -304,7 +304,11 @@ def cancel_event(
     return serialize_event(calendar_events_coll.find_one({"_id": event["_id"]}), user_id)
 
 
-_TEMPORAL_WORDS = ("今天", "明天", "後天", "這週", "本週", "下週", "本月", "下個月", "的行程", "幫我", "取消", "修改", "刪除", "刪掉", "移除", "更改", "在", "去", "到", "原本", "改成", "改到", "移到", "把", "將")
+_TEMPORAL_WORDS = (
+    "今天", "明天", "後天", "這週", "本週", "下週", "下下週", "下下星期", "下下禮拜", "下下周",
+    "這周", "本周", "下周", "本月", "下個月", "的行程", "幫我", "取消", "修改", "刪除", "刪掉",
+    "移除", "更改", "在", "去", "到", "原本", "改成", "改到", "移到", "把", "將",
+)
 
 # 模型回覆常見的全形/特殊標點 → 半形對照，比對前統一正規化避免「09:00–10:00」vs「09:00-10:00」漏抓
 _HINT_NORMALIZE_TABLE = str.maketrans({
@@ -343,14 +347,14 @@ def _normalize_chinese_temporal(text: str) -> str:
             return hour if hour < 12 else hour - 12
         return hour  # 早上／上午／無前綴：依原數字
 
-    # 相對星期：上/本/下（禮拜|週|星期|周）X → 星期三
+    # 相對星期：上/本/下下/下（禮拜|週|星期|周）X → 星期三
     text = re.sub(
-        r"(?:上|這|本|下)\s*(?:禮拜|週|星期|周)\s*([一二三四五六日天])",
-        r"\1", text,
+        r"(?:上|這|本|下下|下)\s*(?:禮拜|週|星期|周)\s*([一二三四五六日天])",
+        r" \1 ", text,
     )
     text = re.sub(
         r"(?:禮拜|星期|周)\s*([一二三四五六日天])",
-        r"\1", text,
+        r" \1 ", text,
     )
 
     # 日期：2026年8月25日 → 2026-08-25；8月25日 → 8/25（對齊 haystack 的 m/d 格式）
@@ -411,12 +415,15 @@ def _clean_event_hint(event_hint: str) -> str:
     # These are request wrappers, not event identity. Keep this list closed and
     # structural; do not grow it from individual failures into an intent router.
     text = re.sub(
-        r"(?:請|麻煩|可以|能不能|幫忙|幫我|我要|我想要|我想|想要|請問|一下|好嗎)",
+        r"(?:請|麻煩|可以|能不能|幫忙|幫我|我要|我想要|我想|想要|請問|上次|上回|之前|剛剛|剛才|一下|好嗎)",
         " ", text,
     )
     text = re.sub(r"(?:行程|活動)(?:就)?(?:叫|名稱(?:是)?|名叫)?", " ", text)
     text = re.sub(r"(?:這筆|這個|那筆|那個|剛剛那筆|剛才那筆|上面那筆|上一筆)", " ", text)
-    text = re.sub(r"(?:取消|刪除|刪掉|移除|改掉|修改|更改|編輯)(?:它|這筆|那筆)?", " ", text)
+    text = re.sub(
+        r"(?:取消|刪除|刪掉|移除|改掉|修改|更改|編輯|不去了|不要了|不用了|不想去了|不去|不需要了|不做了|不參加了)(?:它|這筆|那筆)?",
+        " ", text,
+    )
     text = re.sub(r"(?:阿|啊|喔|哦)", " ", text)
     text = re.sub(r"的(?:\s|$)", " ", text)
     text = re.sub(r"[，。！？!?、：:；;（）()\[\]{}<>「」『』]", " ", text)
@@ -474,11 +481,18 @@ def _resolve_event(user_id: str, event_hint: str, *, source_type: str | None = N
 
 def _event_matches_explicit_temporal(event: dict, hint: str, temporal_references: dict[str, str] | None = None) -> bool:
     """Apply only explicit date/time constraints before fuzzy title matching."""
-    normalized = _normalize_hint_text(hint)
+    raw_hint = str(hint or "")
+    normalized = _normalize_hint_text(raw_hint)
+    date_tokens: list[str] = []
     for term, resolved in (temporal_references or {}).items():
+        if term and resolved and str(term) in raw_hint:
+            # ``_normalize_chinese_temporal`` intentionally turns weekday
+            # phrases into a short display token, so preserve the authoritative
+            # date from the turn clock before that normalization loses the term.
+            date_tokens.append(str(resolved)[:10])
         if term and resolved:
             normalized = normalized.replace(str(term), str(resolved))
-    date_tokens = re.findall(r"(?:\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}/\d{1,2}\b)", normalized)
+    date_tokens.extend(re.findall(r"(?:\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}/\d{1,2}\b)", normalized))
     time_tokens = re.findall(r"\b\d{1,2}:\d{2}\b", normalized)
     if not date_tokens and not time_tokens:
         return True
@@ -540,7 +554,7 @@ def resolve_owned_event_with_candidates(
         cleaned = cleaned.replace(term, " ")
     query_identity = re.sub(r"[\d:/\-\s]+", "", cleaned).strip().lower()
     has_temporal_constraint = bool(re.findall(r"(?:\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}/\d{1,2}\b|\b\d{1,2}:\d{2}\b)", _normalize_hint_text(hint)))
-    if len(query_identity) < 3 and not has_temporal_constraint:
+    if len(query_identity) < 2 and not has_temporal_constraint:
         return None, "not_found", []
     scored: list[tuple[float, dict]] = []
     for event in events:
@@ -551,10 +565,20 @@ def resolve_owned_event_with_candidates(
         if not identity:
             continue
         score = SequenceMatcher(None, query_identity, identity).ratio()
+        if len(query_identity) <= len(identity):
+            score = max(
+                score,
+                max(
+                    SequenceMatcher(None, query_identity, identity[offset:offset + len(query_identity)]).ratio()
+                    for offset in range(len(identity) - len(query_identity) + 1)
+                ),
+            )
         # A substring match is stronger than a whole-string typo comparison.
         if query_identity in identity:
             score = max(score, 0.9)
         if len(query_identity) >= 3 and score < 0.66:
+            continue
+        if len(query_identity) == 2 and score < 0.5:
             continue
         scored.append((score, event))
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -646,6 +670,11 @@ def resolve_owned_events_for_cancel(
         seen_ids: set[str] = set()
         for hint in hints:
             event, resolution = resolve_owned_event(user_id, hint)
+            resolution_kind = get_owned_event_resolution_kind(user_id, hint)
+            if resolution_kind == "fuzzy_suggestion":
+                # A fuzzy suggestion is safe for candidate retrieval but not
+                # for a bounded destructive batch without an explicit choice.
+                return [], "ambiguous"
             if resolution:
                 return [], resolution
             if not event or str(event.get("event_id") or "") in seen_ids:

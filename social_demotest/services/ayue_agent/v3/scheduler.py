@@ -45,7 +45,7 @@ from .contracts import (
 from .context_slicer import slice_for_agent
 from .guard import guard_proposal
 from .guard import guard_calendar_commands
-from .calendar_commands import preflight_calendar_commands
+from .calendar_commands import canonicalize_calendar_command, preflight_calendar_commands
 from .calendar_drafts import (
     candidate_reference_allowed, clear_draft, get_draft, merge_command, save_draft,
 )
@@ -660,6 +660,9 @@ def _run_sub_task(
                     }
                 },
             )], agent_metrics
+        # LEGACY-ONLY compatibility path: old read-tool trajectories may still
+        # return a bounded candidate projection, but normal V3 Calendar writes
+        # use submit_commands → preflight and must not chain read → LLM → write.
         # 寫入任務在候選查詢後沒有提出任何寫入（例如 find 回 not_found、
         # 或候選歧義無法唯一判斷）是「正確地不動作」，不是失敗。
         # 把 prior 的 not_found 查詢帶給 synthesizer，讓它優雅回覆。
@@ -686,9 +689,10 @@ def _run_sub_task(
                 records = remember_candidates(turn_ctx.user_id, candidates)
                 projections = [public_projection(record) for record in records if public_projection(record)]
                 if projections:
-                    # Arm only the server-owned candidate as the next-turn
-                    # referent; the model still sees just its safe label.
-                    remember_event(turn_ctx.user_id, candidates[0])
+                    # Candidate suggestions are retrieval-only.  Do not arm a
+                    # fuzzy result as ``recent_event``: a later terse cancel
+                    # must still carry an explicit candidate choice before any
+                    # destructive plan can be built.
                     suggestions.append({
                         "query": query,
                         "resolution": resolution,
@@ -945,6 +949,14 @@ def _run_sub_task(
                 # A stale/incompatible draft must not turn into an executor
                 # failure; the current typed command remains authoritative.
                 clear_draft(turn_ctx.user_id)
+        # Canonicalize before either guard/preflight or clarification
+        # persistence.  The same helper is also used by preflight for direct
+        # callers, so a relative date can never leak into the next turn's draft.
+        canonical_commands = []
+        for command in calendar_commands:
+            canonical_command, _date_error = canonicalize_calendar_command(turn_ctx, command)
+            canonical_commands.append(canonical_command)
+        calendar_commands = canonical_commands
         recent_reference = None
         if len(calendar_commands) == 1:
             recent_reference = _calendar_reference_for_command(
@@ -984,7 +996,11 @@ def _run_sub_task(
             )
             if preflight.status != "ready":
                 clarification = preflight.clarification
-                if clarification is not None and len(calendar_commands) == 1:
+                if (
+                    clarification is not None
+                    and clarification.code != "invalid_date"
+                    and len(calendar_commands) == 1
+                ):
                     save_draft(
                         turn_ctx.user_id,
                         calendar_commands[0],
