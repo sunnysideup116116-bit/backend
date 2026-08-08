@@ -2247,3 +2247,5 @@ Plan complete and saved to `docs/superpowers/plans/2026-08-04-sub-agent-architec
 **2. Inline Execution** - Execute tasks in this session using executing-plans, batch execution with checkpoints
 
 Which approach?
+
+> ARCHIVED / HISTORICAL PLAN: not current runtime instructions. See AGENTS.md and AYUE_V3_ARCHITECTURE.md.

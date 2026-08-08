@@ -14,7 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.ai_service import generate_chat_completion_with_tools
-from services.ayue_agent.contracts import AgentTurnContextV2
+from services.ayue_agent.contracts import PublicAgentTurnContext
 from services.ayue_agent.product_identity import (
     PUBLIC_AYUE_PERSONA,
     PUBLIC_REPLY_LENGTH,
@@ -115,13 +115,8 @@ _PLANNER_SYSTEM += """
 """
 
 
-def _planner_prompt(turn_ctx: AgentTurnContextV2, pending_confirmations: list[dict[str, Any]] | None = None) -> str:
-    """Build only the user/context message for the Planner.
-
-    ``pending_confirmations`` remains an ignored compatibility argument for
-    older tests/callers; Scheduler handles the closed confirmation protocol
-    before Planner and normal routing does not need that state.
-    """
+def _planner_prompt(turn_ctx: PublicAgentTurnContext) -> str:
+    """Build only the user/context message for the Planner."""
     payload = {
         "message": turn_ctx.message,
         "recent_messages": turn_ctx.recent_messages,
@@ -159,7 +154,7 @@ def _synthesizer_only_plan(*, opportunity: OpportunitySignal | None = None) -> P
     )
 
 
-def plan_turn(turn_ctx: AgentTurnContextV2, *, pending_confirmations: list[dict[str, Any]] | None = None) -> tuple[Plan | None, PlannerMetrics]:
+def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMetrics]:
     """Call LLM (function calling) to decompose the request into a static Plan.
 
     Returns (plan_or_none, metrics). The tool-call arguments ARE the Plan.
@@ -167,7 +162,7 @@ def plan_turn(turn_ctx: AgentTurnContextV2, *, pending_confirmations: list[dict[
     metrics = PlannerMetrics()
     started = time.perf_counter()
     try:
-        prompt = _planner_prompt(turn_ctx, pending_confirmations)
+        prompt = _planner_prompt(turn_ctx)
         metrics.prompt_raw = f"SYSTEM:\n{_PLANNER_SYSTEM}\nUSER:\n{prompt}"
         metrics.tools_raw = [_decompose_tool_schema()]
         result = generate_chat_completion_with_tools(

@@ -1726,3 +1726,6 @@ git commit -m "docs: rewrite architecture docs for V3 sub-agent runtime"
 **Placeholder scan:** 無 TBD/TODO；每步含完整程式碼。
 
 **Type consistency:** `execute_write` 簽名在 Task 1 定義、Task 3 使用一致；`prepare_write_confirmation` 回傳 `(payload, reply)` 在 Task 2/3 一致；`ConfirmationManager.create_confirmation` 的 `payload` 參數在 Task 2 定義、Task 3 使用一致；`_persist_trace(run_id, ctx, payload)` 在 Task 4 定義與測試一致；`OpportunitySignal` 在 Task 5 定義與使用一致。
+
+
+> ARCHIVED / HISTORICAL PLAN: not current runtime instructions. See AGENTS.md and AYUE_V3_ARCHITECTURE.md.

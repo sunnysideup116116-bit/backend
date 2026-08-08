@@ -438,7 +438,7 @@ AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED=on
 | `tests/test_google_maps_live_smoke.py` | 2 | 移除 `get_place_details` 測試,改測 photos;移除 FULL 旗標 |
 | `AYUE_V3_ARCHITECTURE.md` | 1-4 | place tools 段落補 Google 為主、OSM 為輔說明與新欄位 |
 
-> 不會動:`maps_client.py`(OSM 維持現狀)、`private_runtime.py`、Neo4j、模型供應商設定。
+> 不會動:`maps_client.py`(OSM 維持現狀)、Private V2 的 `private_calendar.py`、Neo4j、模型供應商設定。
 
 ---
 

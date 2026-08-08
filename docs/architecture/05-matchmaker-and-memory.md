@@ -68,7 +68,7 @@
 
 ### 3.3 Context Engine 邊界（現況）
 
-`context.py:build_agent_turn_context_v2` 每回合組 bounded context（`relevant_memories` ≤8 筆等）。新 Context Engine 若建置，只能輸出 bounded、versioned typed bundle；Public／Private runtime 各自套用 privacy adapter。Retrieval 必須先做 owner／room／accepted-relation 硬隔離，再做相關度排序、budget、dedup；失敗時回 bounded empty projection 與 error code，不得改抓 raw data。
+`context.py:build_public_agent_turn_context` 每回合組 bounded context（`relevant_memories` ≤8 筆等）。新 Context Engine 若建置，只能輸出 bounded、versioned typed bundle；Public／Private runtime 各自套用 privacy adapter。Retrieval 必須先做 owner／room／accepted-relation 硬隔離，再做相關度排序、budget、dedup；失敗時回 bounded empty projection 與 error code，不得改抓 raw data。
 
 ## 4. 配對狀態真相（canonical lifecycle）
 

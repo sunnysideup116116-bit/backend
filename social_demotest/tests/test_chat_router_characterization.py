@@ -129,22 +129,10 @@ class ChatRouterCharacterizationTests(unittest.TestCase):
         direct.assert_called_once()
         public_v2.assert_not_called()
 
-    def test_private_stream_does_not_fall_back_when_private_v2_is_disabled(self):
-        req = MediatorPrivateRequest(user_id="owner", other_id="other", message="想問問")
-        endpoint, module = _route_module("POST", "/api/mediator/private/stream")
-        with patch.object(module, "private_v2_mode_for_user", return_value="off"), \
-             patch.object(module, "find_accepted_match") as accepted:
-            with self.assertRaises(HTTPException) as raised:
-                endpoint(req, BackgroundTasks())
-
-        self.assertEqual(raised.exception.status_code, 409)
-        accepted.assert_not_called()
-
     def test_private_stream_requires_an_accepted_match(self):
         req = MediatorPrivateRequest(user_id="owner", other_id="other", message="想問問")
         endpoint, module = _route_module("POST", "/api/mediator/private/stream")
-        with patch.object(module, "private_v2_mode_for_user", return_value="on"), \
-             patch.object(module, "find_accepted_match", return_value=None):
+        with patch.object(module, "find_accepted_match", return_value=None):
             with self.assertRaises(HTTPException) as raised:
                 endpoint(req, BackgroundTasks())
 
@@ -158,8 +146,7 @@ class ChatRouterCharacterizationTests(unittest.TestCase):
             "conversation_intent": "advice",
         }
         endpoint, module = _route_module("POST", "/api/mediator/private/stream")
-        with patch.object(module, "private_v2_mode_for_user", return_value="on"), \
-             patch.object(module, "find_accepted_match", return_value={"_id": "match-1"}), \
+        with patch.object(module, "find_accepted_match", return_value={"_id": "match-1"}), \
              patch.object(module, "save_message", return_value={"message_id": "owner-message"}), \
              patch.object(module, "queue_profile_skills"), \
              patch.object(module, "_run_private_v2_saved_turn", return_value=expected):
@@ -187,9 +174,7 @@ class ChatRouterCharacterizationTests(unittest.TestCase):
              patch.object(module.profiles_coll, "find_one", return_value={"user_id": "owner"}), \
              patch.object(module, "queue_profile_skills") as queue_profile, \
              patch.object(module, "consume_pending_probe_answer", return_value=None), \
-             patch.object(module, "private_v2_mode_for_user", return_value="on"), \
-             patch.object(module, "_run_private_v2_saved_turn", return_value=expected) as run_v2, \
-             patch.object(module, "run_private_agent_turn") as legacy:
+             patch.object(module, "_run_private_v2_saved_turn", return_value=expected) as run_v2:
             response = endpoint(req, tasks)
 
         self.assertEqual(response, expected)
@@ -198,7 +183,6 @@ class ChatRouterCharacterizationTests(unittest.TestCase):
             tasks, "owner", "想問問", "owner-message", "relationship_private", "match-1",
         )
         run_v2.assert_called_once_with(req, match, "private-room")
-        legacy.assert_not_called()
 
     def test_proactive_check_for_unknown_user_has_no_side_effects(self):
         with patch.object(proactive_delivery_service.profiles_coll, "find_one", return_value=None), \

@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from services.ayue_agent.contracts import AgentTurnContext, AgentTurnContextV2, ToolCall
+from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext, ToolCall
 from services.ayue_agent.tools import execute_tool
 from services.ayue_agent.public_relationship_projection import (
     accepted_contact_ids_by_display_name,

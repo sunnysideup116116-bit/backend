@@ -141,7 +141,7 @@ Calendar Agent 提出 `calendar.submit_commands` typed command batch
 | profile | message、recent_messages、recent_context、relevant_memories、clock、prior_observations |
 | synthesizer | message、recent_messages、recent_context、user_location、clock、observations |
 
-`AgentTurnContextV2`（`context.py:build_agent_turn_context_v2` 組建）的總體限制：最近 12 則訊息、合計 6000 字元；近期記憶最多 8 筆；prompt 不含 `seed_user_*`、Mongo document、未公開 ID、對方私人記憶或行事曆內容。
+`PublicAgentTurnContext`（`context.py:build_public_agent_turn_context` 組建）的總體限制：最近 12 則訊息、合計 6000 字元；近期記憶最多 8 筆；prompt 不含 `seed_user_*`、Mongo document、未公開 ID、對方私人記憶或行事曆內容。
 
 ## 5. 背景流程（非同步）
 
@@ -162,3 +162,6 @@ Calendar Agent 提出 `calendar.submit_commands` typed command batch
 | confirmation 逾期 | 執行時視同失效（expires_at 過期不再列為 active） |
 | stale revision | 回報最新狀態，不覆寫終態 |
 | effect 失敗（通知等） | transition 已提交，effect 失敗不重送 |
+
+
+> Current lifecycle override: Public requests no longer branch on rollout flags or fall back to a legacy runtime. Rollback is deployment/commit rollback.

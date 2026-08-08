@@ -1,6 +1,6 @@
 import unittest
 
-from services.ayue_agent.runtime import _public_place_cards, _google_embed_url
+from services.ayue_agent.v3.scheduler import _public_place_cards, _google_embed_url
 
 
 class AyueAgentPlaceCardTests(unittest.TestCase):

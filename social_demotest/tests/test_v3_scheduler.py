@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-from services.ayue_agent.contracts import AgentTurnContext, AgentResult, AgentTurnContextV2, TurnClockV1
+from services.ayue_agent.contracts import AgentTurnContext, AgentResult, PublicAgentTurnContext, TurnClockV1
 from services.ayue_agent.v3.calendar_commands import CalendarCommand
 from services.ayue_agent.v3.calendar_drafts import clear_draft, get_draft, public_projection
 from services.ayue_agent.v3.sub_agents.calendar_agent import CalendarAgentResult, run as run_calendar_agent
@@ -43,7 +43,7 @@ class V3SchedulerTests(unittest.TestCase):
         return AgentTurnContext(user_id="owner", room_id="room", message=message)
 
     def _direct_turn(self, message="哈囉", **updates):
-        turn = AgentTurnContextV2(
+        turn = PublicAgentTurnContext(
             user_id="owner", room_id="room", message=message,
             clock=TurnClockV1(
                 timezone="Asia/Taipei", utc_iso="2026-08-04T12:00:00+00:00",
@@ -58,7 +58,7 @@ class V3SchedulerTests(unittest.TestCase):
         plan = Plan(mode="direct_chat", tasks=[], direct_reply="这是簡體中文。")
         with patch.dict("os.environ", {"AYUE_V3_SIMPLE_CHAT_FAST_PATH": "on"}), \
              patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2",
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
                    return_value=self._direct_turn()), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
              patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
@@ -66,7 +66,7 @@ class V3SchedulerTests(unittest.TestCase):
              patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=None), \
              patch("services.ayue_agent.v3.scheduler.synthesizer.synthesize") as synth, \
              patch("services.ayue_agent.v3.scheduler._persist_trace") as persist_trace:
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertEqual(result.reply, "這是簡體中文。")
         self.assertEqual(len(result.llm_call_metrics), 1)
         self.assertEqual(result.llm_call_metrics[0]["agent"], "planner")
@@ -80,7 +80,7 @@ class V3SchedulerTests(unittest.TestCase):
         plan = Plan(mode="direct_chat", tasks=[], direct_reply="好的")
         with patch.dict("os.environ", {"AYUE_V3_SIMPLE_CHAT_FAST_PATH": "on"}), \
              patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2",
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
                    return_value=self._direct_turn(
                        "早上九點", calendar_draft={"action": "create", "missing_fields": ["date"]},
                    )), \
@@ -91,7 +91,7 @@ class V3SchedulerTests(unittest.TestCase):
              patch("services.ayue_agent.v3.scheduler.synthesizer.synthesize",
                    return_value=("我會依照正常流程處理。", None, _synth_metrics())) as synth, \
              patch("services.ayue_agent.v3.scheduler._persist_trace"):
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertEqual(result.reply, "我會依照正常流程處理。")
         synth.assert_called_once()
 
@@ -128,7 +128,7 @@ class V3SchedulerTests(unittest.TestCase):
             SubTask(id="s1", agent="synthesizer", depends_on=["p1"], task_brief="回覆確認預覽"),
         ])
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "profile": MagicMock(return_value=(
                      _proposal("profile.start_assessment", {"kind": "basic"}), _sub_metrics(),
@@ -145,7 +145,7 @@ class V3SchedulerTests(unittest.TestCase):
              )):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         self.assertIn("重新開始基本性格", result.reply)
         create_confirmation.assert_called_once()
@@ -160,7 +160,7 @@ class V3SchedulerTests(unittest.TestCase):
             SubTask(id="t4", agent="synthesizer", depends_on=["t1", "t2", "t3"], task_brief="彙整"),
         ])
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "calendar": MagicMock(return_value=([ToolProposal(tool_name="calendar.list_my_events", arguments={})], _sub_metrics())),
                  "places": MagicMock(side_effect=[
@@ -173,7 +173,7 @@ class V3SchedulerTests(unittest.TestCase):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             mock_exec.return_value = MagicMock(ok=True, data={"events": []}, error_code=None)
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertIsInstance(result, AgentResult)
         self.assertTrue(result.handled)
         self.assertEqual(result.agent_mode, "v3")
@@ -190,7 +190,7 @@ class V3SchedulerTests(unittest.TestCase):
             _sub_metrics(),
         ))
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": runner}), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation") as create_confirmation, \
@@ -208,7 +208,7 @@ class V3SchedulerTests(unittest.TestCase):
              )):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            result = run_public_agent_turn_v3(self._ctx("剛才取消有成功嗎？"), mode="on")
+            result = run_public_agent_turn_v3(self._ctx("剛才取消有成功嗎？"))
 
         self.assertTrue(result.handled)
         self.assertEqual(execute_tool.call_args.args[0].name, "calendar.verify_recent_mutation")
@@ -222,7 +222,7 @@ class V3SchedulerTests(unittest.TestCase):
             SubTask(id="t3", agent="synthesizer", depends_on=["t1", "t2"], task_brief="彙整"),
         ])
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "calendar": MagicMock(return_value=([ToolProposal(tool_name="calendar.list_my_events", arguments={})], _sub_metrics())),
                  "places": MagicMock(return_value=([], _sub_metrics())),
@@ -231,16 +231,16 @@ class V3SchedulerTests(unittest.TestCase):
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("部分資訊ok，但部分沒找到", None, _synth_metrics())):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
 
     def test_planner_returns_none_yields_fail_closed(self):
         ctx = self._ctx("嗨")
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(None, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build:
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         self.assertEqual(result.agent_mode, "v3")
         self.assertIsNotNone(result.fallback_reason)
@@ -265,7 +265,7 @@ class V3SchedulerTests(unittest.TestCase):
 
         def build_context(raw_ctx, *, clock):
             draft = public_projection(get_draft(raw_ctx.user_id))
-            return AgentTurnContextV2(
+            return PublicAgentTurnContext(
                 user_id=raw_ctx.user_id, room_id=raw_ctx.room_id,
                 message=raw_ctx.message, calendar_draft=draft, clock=clock,
             )
@@ -284,16 +284,16 @@ class V3SchedulerTests(unittest.TestCase):
                  (first_plan, _planner_metrics()), (second_plan, _planner_metrics()),
              ]), \
              patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2", side_effect=build_context), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", side_effect=build_context), \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": runner}), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
              patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
              patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]), \
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("確認行程", None, _synth_metrics())):
-            first_result = run_public_agent_turn_v3(ctx1, mode="on")
+            first_result = run_public_agent_turn_v3(ctx1)
             draft_after_first = get_draft("owner")
-            second_result = run_public_agent_turn_v3(ctx2, mode="on")
+            second_result = run_public_agent_turn_v3(ctx2)
 
         self.assertTrue(first_result.handled)
         self.assertEqual((draft_after_first or {}).get("command", {}).get("date"), "2026-08-12")
@@ -328,7 +328,7 @@ class V3SchedulerTests(unittest.TestCase):
         )
 
         def build_context(raw_ctx, *, clock):
-            return AgentTurnContextV2(
+            return PublicAgentTurnContext(
                 user_id=raw_ctx.user_id, room_id=raw_ctx.room_id,
                 message=raw_ctx.message,
                 calendar_draft=public_projection(get_draft(raw_ctx.user_id)),
@@ -358,7 +358,7 @@ class V3SchedulerTests(unittest.TestCase):
                  (first_plan, _planner_metrics()), (second_plan, _planner_metrics()),
              ]), \
              patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2", side_effect=build_context), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", side_effect=build_context), \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": run_calendar_agent}), \
              patch("services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools", side_effect=provider_results), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
@@ -366,9 +366,9 @@ class V3SchedulerTests(unittest.TestCase):
              patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
              patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]), \
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("確認行程", None, _synth_metrics())):
-            first_result = run_public_agent_turn_v3(self._ctx("下週六幫我新增一筆行事曆"), mode="on")
+            first_result = run_public_agent_turn_v3(self._ctx("下週六幫我新增一筆行事曆"))
             draft_after_first = get_draft("owner")
-            second_result = run_public_agent_turn_v3(self._ctx("逛霧時代 晚上九點逛一個小時左右"), mode="on")
+            second_result = run_public_agent_turn_v3(self._ctx("逛霧時代 晚上九點逛一個小時左右"))
 
         self.assertTrue(first_result.handled)
         self.assertEqual((draft_after_first or {}).get("command", {}).get("date"), "2026-08-15")
@@ -406,7 +406,7 @@ class V3SchedulerTests(unittest.TestCase):
 
         def build_context(raw_ctx, *, clock):
             draft = public_projection(get_draft(raw_ctx.user_id))
-            return AgentTurnContextV2(
+            return PublicAgentTurnContext(
                 user_id=raw_ctx.user_id, room_id=raw_ctx.room_id,
                 message=raw_ctx.message, calendar_draft=draft, clock=clock,
             )
@@ -425,16 +425,16 @@ class V3SchedulerTests(unittest.TestCase):
                  (first_plan, _planner_metrics()), (second_plan, _planner_metrics()),
              ]), \
              patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2", side_effect=build_context), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", side_effect=build_context), \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": runner}), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
              patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
              patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]), \
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("確認行程", None, _synth_metrics())):
-            first_result = run_public_agent_turn_v3(ctx1, mode="on")
+            first_result = run_public_agent_turn_v3(ctx1)
             draft_after_first = get_draft("owner")
-            second_result = run_public_agent_turn_v3(ctx2, mode="on")
+            second_result = run_public_agent_turn_v3(ctx2)
 
         self.assertTrue(first_result.handled)
         self.assertEqual((draft_after_first or {}).get("command", {}).get("title"), "去駁二玩")
@@ -474,7 +474,7 @@ class V3SchedulerTests(unittest.TestCase):
         }
 
         def build_context(raw_ctx, *, clock):
-            return AgentTurnContextV2(
+            return PublicAgentTurnContext(
                 user_id=raw_ctx.user_id, room_id=raw_ctx.room_id,
                 message=raw_ctx.message, calendar_draft=public_projection(get_draft(raw_ctx.user_id)),
                 clock=clock,
@@ -490,7 +490,7 @@ class V3SchedulerTests(unittest.TestCase):
                  (first_plan, _planner_metrics()), (second_plan, _planner_metrics()),
              ]), \
              patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2", side_effect=build_context), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", side_effect=build_context), \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": runner}), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
@@ -501,9 +501,9 @@ class V3SchedulerTests(unittest.TestCase):
              patch("services.ayue_agent.v3.calendar_commands.get_owned_event_resolution_kind", return_value="exact"), \
              patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]), \
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("完成", None, _synth_metrics())):
-            first_result = run_public_agent_turn_v3(self._ctx("我牙醫那筆行程想修改"), mode="on")
+            first_result = run_public_agent_turn_v3(self._ctx("我牙醫那筆行程想修改"))
             draft_after_first = get_draft("owner")
-            second_result = run_public_agent_turn_v3(self._ctx("日期一樣，時間延後一小時"), mode="on")
+            second_result = run_public_agent_turn_v3(self._ctx("日期一樣，時間延後一小時"))
 
         self.assertTrue(first_result.handled)
         self.assertTrue((draft_after_first or {}).get("resolved_target", {}).get("bound"))
@@ -534,14 +534,14 @@ class V3SchedulerTests(unittest.TestCase):
         )
 
         def build_context(raw_ctx, *, clock):
-            return AgentTurnContextV2(
+            return PublicAgentTurnContext(
                 user_id=raw_ctx.user_id, room_id=raw_ctx.room_id,
                 message=raw_ctx.message, clock=clock,
             )
 
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
              patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2", side_effect=build_context), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", side_effect=build_context), \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "calendar": MagicMock(return_value=(CalendarAgentResult(commands=[command]), _sub_metrics())),
              }), \
@@ -551,7 +551,7 @@ class V3SchedulerTests(unittest.TestCase):
              patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]), \
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("確認行程", None, _synth_metrics())):
             result = run_public_agent_turn_v3(
-                self._ctx("我下禮拜三三點到四點要看牙醫 幫我加到行事曆"), mode="on",
+                self._ctx("我下禮拜三三點到四點要看牙醫 幫我加到行事曆"),
             )
 
         self.assertTrue(result.handled)
@@ -569,13 +569,13 @@ class V3SchedulerTests(unittest.TestCase):
         ])
         places_runner = MagicMock(return_value=([], _sub_metrics()))
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"places": places_runner}), \
              patch("services.ayue_agent.v3.scheduler.execute_tool", return_value=MagicMock(ok=True, data={}, error_code=None)), \
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("沒找到適合的餐廳", None, _synth_metrics())):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         self.assertEqual(places_runner.call_count, 1)
 
@@ -599,7 +599,7 @@ class V3SchedulerTests(unittest.TestCase):
                                       arguments={"event_hint": "出國"})], _sub_metrics())
             return ([], _sub_metrics())  # write task: no proposal
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "calendar": MagicMock(side_effect=fake_runner),
              }), \
@@ -612,7 +612,7 @@ class V3SchedulerTests(unittest.TestCase):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             mock_build.return_value._mentioned_ids = []
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         obs = seen_obs.get("observations", [])
         write_obs = [o for o in obs if o.get("task_id") == "t2"]
@@ -632,13 +632,13 @@ class V3SchedulerTests(unittest.TestCase):
             events.append(event)
         cal_runner = MagicMock(return_value=([ToolProposal(tool_name="calendar.list_my_events", arguments={})], _sub_metrics()))
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": cal_runner}), \
              patch("services.ayue_agent.v3.scheduler.execute_tool", return_value=MagicMock(ok=True, data={"events": []}, error_code=None)), \
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("行程ok", None, _synth_metrics())):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            run_public_agent_turn_v3(ctx, mode="on", on_progress=capture)
+            run_public_agent_turn_v3(ctx, on_progress=capture)
         event_types = [e["type"] for e in events]
         self.assertIn("run_started", event_types)
         self.assertIn("tool_started", event_types)
@@ -653,10 +653,10 @@ class V3SchedulerTests(unittest.TestCase):
         def capture(event):
             events.append(event)
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(None, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build:
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build:
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            run_public_agent_turn_v3(ctx, mode="on", on_progress=capture)
+            run_public_agent_turn_v3(ctx, on_progress=capture)
         event_types = [e["type"] for e in events]
         self.assertIn("run_started", event_types)
         self.assertNotIn("tool_started", event_types)
@@ -690,7 +690,7 @@ class V3SchedulerTests(unittest.TestCase):
             "relationship": [ToolProposal(tool_name="relationship.list_accepted_contacts", arguments={})],
         }
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "calendar": lambda slc, task_brief: slow_runner(proposals["calendar"], _sub_metrics()),
                  "places": lambda slc, task_brief: slow_runner(proposals["places"], _sub_metrics()),
@@ -700,7 +700,7 @@ class V3SchedulerTests(unittest.TestCase):
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("都查好了", None, _synth_metrics())):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            run_public_agent_turn_v3(ctx, mode="on")
+            run_public_agent_turn_v3(ctx)
         self.assertGreaterEqual(max_active, 2, "same-layer tasks should overlap in time")
 
     def test_parallelism_respects_max_parallel_flag(self):
@@ -724,13 +724,13 @@ class V3SchedulerTests(unittest.TestCase):
 
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
              patch("services.ayue_agent.v3.scheduler.MAX_PARALLEL", 2), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": slow_runner}), \
              patch("services.ayue_agent.v3.scheduler.execute_tool", return_value=MagicMock(ok=True, data={}, error_code=None)), \
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("ok", None, _synth_metrics())):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            run_public_agent_turn_v3(ctx, mode="on")
+            run_public_agent_turn_v3(ctx)
         self.assertLessEqual(max_active, 2, "parallelism must be capped by AYUE_SUBAGENT_MAX_PARALLEL")
 
     def test_prior_observations_only_include_declared_dependencies(self):
@@ -783,7 +783,7 @@ class V3SchedulerTests(unittest.TestCase):
             "candidates": [],
         }
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "calendar": MagicMock(side_effect=fake_runner),
              }), \
@@ -800,7 +800,7 @@ class V3SchedulerTests(unittest.TestCase):
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             mock_build.return_value._mentioned_ids = []
             mock_build.return_value.user_id = "owner"
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         # t1 read 執行一次；t2 write 的 context 必須帶入 t1 的 find_my_event observation
         mock_exec.assert_called_once()
@@ -832,7 +832,7 @@ class V3SchedulerTests(unittest.TestCase):
                          arguments={"anchor": "高雄市三民區", "categories": ["cafe"], "cuisine": "冰"}),
         ]
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "places": MagicMock(return_value=(multi, _sub_metrics())),
              }), \
@@ -840,7 +840,7 @@ class V3SchedulerTests(unittest.TestCase):
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("牛排和冰都查好了", None, _synth_metrics())):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            run_public_agent_turn_v3(ctx, mode="on")
+            run_public_agent_turn_v3(ctx)
         self.assertEqual(len(executed), 2, "both tool calls must execute")
 
     def test_parallel_tasks_with_identical_calls_are_globally_deduped(self):
@@ -863,13 +863,13 @@ class V3SchedulerTests(unittest.TestCase):
             _sub_metrics(),
         ))
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"places": runner}), \
              patch("services.ayue_agent.v3.scheduler.execute_tool", side_effect=fake_exec), \
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("兩邊都查好了", None, _synth_metrics())):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            run_public_agent_turn_v3(ctx, mode="on")
+            run_public_agent_turn_v3(ctx)
         self.assertEqual(len(executed), 1, "identical calls in separate tasks must execute once")
 
     def test_duplicate_calls_within_same_task_are_deduped(self):
@@ -890,7 +890,7 @@ class V3SchedulerTests(unittest.TestCase):
             ToolProposal(tool_name="calendar.list_my_events", arguments={}),
         ]
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "calendar": MagicMock(return_value=(multi, _sub_metrics())),
              }), \
@@ -898,7 +898,7 @@ class V3SchedulerTests(unittest.TestCase):
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("行程查好了", None, _synth_metrics())):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            run_public_agent_turn_v3(ctx, mode="on")
+            run_public_agent_turn_v3(ctx)
         self.assertEqual(len(executed), 1, "duplicate call within one task must be rejected")
 
     def test_mentioned_tool_without_mention_fails_cleanly(self):
@@ -915,7 +915,7 @@ class V3SchedulerTests(unittest.TestCase):
             return ("小晴的資料這次沒查到", None, _synth_metrics())
 
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "relationship": MagicMock(return_value=(
                      [ToolProposal(tool_name="relationship.get_mentioned_contact_summary",
@@ -928,7 +928,7 @@ class V3SchedulerTests(unittest.TestCase):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             mock_build.return_value._mentioned_ids = []
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         self.assertIsNone(result.fallback_reason)
         mock_exec.assert_not_called()
@@ -955,7 +955,7 @@ class V3SchedulerTests(unittest.TestCase):
             raise RuntimeError("boom")
 
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "calendar": MagicMock(return_value=(
                      [ToolProposal(tool_name="calendar.list_my_events", arguments={})], _sub_metrics())),
@@ -966,7 +966,7 @@ class V3SchedulerTests(unittest.TestCase):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             mock_build.return_value._mentioned_ids = []
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         self.assertIsNone(result.fallback_reason)
         obs = {o["task_id"]: o for o in seen_observations.get("observations", [])}
@@ -1079,7 +1079,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
             seen_obs["observations"] = slice_payload.payload.get("observations", [])
             return ("好", None, _synth_metrics())
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "match": MagicMock(return_value=(
                      [ToolProposal(tool_name="match.start_search", arguments={})], _sub_metrics())),
@@ -1092,7 +1092,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             mock_build.return_value._mentioned_ids = []
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         prepare.assert_called_once()
         insert.assert_called_once()
@@ -1107,7 +1107,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
         def fake_synth(slice_payload, candidate_cards=None):
             seen_obs["observations"] = slice_payload.payload.get("observations", [])
             return ("好，我開始幫你找", None, _synth_metrics())
-        with patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+        with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS") as coll, \
              patch("services.ayue_agent.v3.scheduler.execute_write",
                    return_value=(True, "好，我開始幫你找，通常約需要 1–3 分鐘。", None)) as exec_write, \
@@ -1131,7 +1131,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
                 "preview_fingerprint": "preview-digest",
             }]
             coll.update_one.return_value = MagicMock(modified_count=1)
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         exec_write.assert_called_once()
         self.assertEqual(exec_write.call_args.kwargs["payload"]["_confirmation_id"], "c1")
@@ -1152,7 +1152,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
             return ({"action": tool_name, "arguments": arguments, "data": {}},
                     f"要執行{tool_name}嗎？回覆「確認」")
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "calendar": MagicMock(return_value=(
                      [
@@ -1170,7 +1170,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             mock_build.return_value._mentioned_ids = []
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         insert.assert_called_once()
         inserted = insert.call_args[0][0]
@@ -1192,7 +1192,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
             SubTask(id="t2", agent="synthesizer", depends_on=["t1"], task_brief="彙整"),
         ])
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "calendar": MagicMock(return_value=(
                      [
@@ -1216,7 +1216,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             mock_build.return_value._mentioned_ids = []
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         # 只建立一筆 confirmation；第二筆 create 是 push 到同一 confirmation 的 batch 欄位
         insert.assert_called_once()
@@ -1243,14 +1243,14 @@ class V3SchedulerTraceTests(unittest.TestCase):
             "AYUE_V3_SIMPLE_CHAT_FAST_PATH": "on",
         }), \
              patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, planner_metrics)), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
              patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
              patch("services.ayue_agent.v3.scheduler.active_assessment_session", return_value=None), \
              patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=None), \
              patch("services.ayue_agent.v3.scheduler._direct_chat_block_reason", return_value=None):
             mock_build.return_value = MagicMock()
-            result = run_public_agent_turn_v3(ctx, mode="on", debug_enabled=True)
+            result = run_public_agent_turn_v3(ctx, debug_enabled=True)
             debug_run = get_run(result.agent_run_id, "owner")
         plan_event = next(event for event in debug_run["events"] if event["type"] == "plan_created")
         self.assertEqual(plan_event["mode"], "direct_chat")
@@ -1280,11 +1280,11 @@ class V3SchedulerTraceTests(unittest.TestCase):
         synth_metrics.used_llm = True
         with patch.dict("os.environ", {"AYUE_LOCAL_DEBUG_TRACE": "on"}), \
              patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, planner_metrics)), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("你好", None, synth_metrics)):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda **_kwargs: {})
-            result = run_public_agent_turn_v3(ctx, mode="on", debug_enabled=True)
+            result = run_public_agent_turn_v3(ctx, debug_enabled=True)
             debug_run = get_run(result.agent_run_id, "owner")
         event_types = [event["type"] for event in debug_run["events"]]
         self.assertEqual(debug_run["status"], "completed")
@@ -1315,12 +1315,12 @@ class V3SchedulerTraceTests(unittest.TestCase):
         synth_metrics.error_code = "synthesizer_provider_error"
         with patch.dict("os.environ", {"AYUE_LOCAL_DEBUG_TRACE": "on"}), \
              patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.synthesizer.synthesize",
                    return_value=("我剛剛沒接好，但你不用整段重講。把最想先說的那一點丟給我，我從那裡接。", None, synth_metrics)):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda **_kwargs: {})
-            result = run_public_agent_turn_v3(ctx, mode="on", debug_enabled=True)
+            result = run_public_agent_turn_v3(ctx, debug_enabled=True)
             debug_run = get_run(result.agent_run_id, "owner")
         synth_event = next(
             event for event in debug_run["events"]
@@ -1338,7 +1338,7 @@ class V3SchedulerTraceTests(unittest.TestCase):
             SubTask(id="t2", agent="synthesizer", depends_on=["t1"], task_brief="彙整"),
         ])
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "calendar": MagicMock(return_value=(
                      [ToolProposal(tool_name="calendar.list_my_events", arguments={})], _sub_metrics())),
@@ -1351,7 +1351,7 @@ class V3SchedulerTraceTests(unittest.TestCase):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             mock_build.return_value.user_id = "owner"
-            run_public_agent_turn_v3(ctx, mode="on")
+            run_public_agent_turn_v3(ctx)
         self.assertEqual(persist.call_count, 1)
         payload = persist.call_args.args[2]
         self.assertIn("plan", payload)
@@ -1365,7 +1365,7 @@ class V3SchedulerOpportunityTests(unittest.TestCase):
     def test_accepting_soft_offer_enters_normal_match_confirmation(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="好")
         synth_metrics = _synth_metrics()
-        with patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+        with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler.active_guidance_offer",
                    return_value={"fingerprint": "fp1", "expires_at": 1e18}), \
              patch("services.ayue_agent.v3.scheduler.accept_guidance_offer", return_value=True), \
@@ -1377,7 +1377,7 @@ class V3SchedulerOpportunityTests(unittest.TestCase):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             mock_build.return_value.user_profile = {}
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         self.assertEqual(result.conversation_intent, "match_confirmation")
         insert.assert_called_once()
@@ -1393,7 +1393,7 @@ class V3SchedulerOpportunityTests(unittest.TestCase):
             seen_obs["observations"] = slice_payload.payload.get("observations", [])
             return ("好", None, _synth_metrics())
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler.assess_match_opportunity") as assess, \
              patch("services.ayue_agent.v3.scheduler.claim_guidance_offer", return_value=True), \
              patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one") as insert, \
@@ -1403,7 +1403,7 @@ class V3SchedulerOpportunityTests(unittest.TestCase):
             mock_build.return_value.user_profile = {}
             mock_build.return_value.message = "一個人去有點孤單"
             assess.return_value = MagicMock(state="ready", reason_codes=(), fingerprint="fp1")
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         insert.assert_not_called()
         self.assertTrue(result.match_guidance_shown)
@@ -1421,7 +1421,7 @@ class V3SchedulerOpportunityTests(unittest.TestCase):
             SubTask(id="t1", agent="synthesizer", depends_on=[], task_brief="回覆"),
         ], opportunity=OpportunitySignal(signal="social_opening", evidence_span="一個人去有點孤單", confidence=0.9))
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler.assess_match_opportunity") as assess:
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
@@ -1429,7 +1429,7 @@ class V3SchedulerOpportunityTests(unittest.TestCase):
             mock_build.return_value.message = "一個人去有點孤單"
             assess.return_value = MagicMock(state="not_ready", reason_codes=("profile_basis_insufficient",),
                                             missing_basis=("preferences",))
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         self.assertIsNone(result.match_readiness_state)
         self.assertFalse(result.match_guidance_shown)
@@ -1438,7 +1438,7 @@ class V3SchedulerOpportunityTests(unittest.TestCase):
 class V3SchedulerAssessmentTests(unittest.TestCase):
     def test_active_assessment_advances_without_planner(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="我喜歡戶外活動")
-        with patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+        with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler.active_assessment_session",
                    return_value={"session_id": "s1", "kind": "big_five", "expires_at": 1e18, "revision": 1}), \
              patch("services.ayue_agent.v3.scheduler.advance_assessment_session",
@@ -1447,7 +1447,7 @@ class V3SchedulerAssessmentTests(unittest.TestCase):
              patch("services.ayue_agent.v3.scheduler.plan_turn") as plan:
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         self.assertEqual(result.assessment_state, "active")
         self.assertEqual(result.assessment_kind, "big_five")
@@ -1455,7 +1455,7 @@ class V3SchedulerAssessmentTests(unittest.TestCase):
 
     def test_awaiting_commit_confirm_commits(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="確認")
-        with patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+        with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit",
                    return_value={"session_id": "s1", "kind": "big_five", "revision": 3, "expires_at": 1e18}), \
              patch("services.ayue_agent.v3.scheduler.assessment_commit_choice", return_value="confirm"), \
@@ -1465,7 +1465,7 @@ class V3SchedulerAssessmentTests(unittest.TestCase):
              patch("services.ayue_agent.v3.scheduler.plan_turn") as plan:
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         self.assertEqual(result.assessment_state, "completed")
         plan.assert_not_called()
@@ -1479,7 +1479,7 @@ class V3SchedulerMetadataTests(unittest.TestCase):
             SubTask(id="t2", agent="synthesizer", depends_on=["t1"], task_brief="彙整"),
         ])
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "places": MagicMock(return_value=(
                      [ToolProposal(tool_name="places.search_nearby",
@@ -1493,7 +1493,7 @@ class V3SchedulerMetadataTests(unittest.TestCase):
                    return_value=("找到店A", None, _synth_metrics())):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.sources)
         self.assertEqual(result.sources[0]["title"], "店A")
         self.assertTrue(result.llm_call_metrics)
@@ -1522,7 +1522,7 @@ class V3SchedulerReuseTests(unittest.TestCase):
                          arguments={"origin": "中壢市", "destination": "台北市"}),
         ]
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "places": MagicMock(return_value=(multi, _sub_metrics())),
              }), \
@@ -1531,7 +1531,7 @@ class V3SchedulerReuseTests(unittest.TestCase):
                    return_value=("約 40 公里", None, _synth_metrics())):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            run_public_agent_turn_v3(ctx, mode="on")
+            run_public_agent_turn_v3(ctx)
         self.assertEqual(len(executed), 1, "paraphrased distance call must reuse the first observation")
 
     def test_web_extract_url_not_bound_fails(self):
@@ -1545,7 +1545,7 @@ class V3SchedulerReuseTests(unittest.TestCase):
             seen_obs["observations"] = slice_payload.payload.get("observations", [])
             return ("沒查到", None, _synth_metrics())
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_agent_turn_context_v2") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "places": MagicMock(return_value=(
                      [ToolProposal(tool_name="web.extract",
@@ -1556,7 +1556,7 @@ class V3SchedulerReuseTests(unittest.TestCase):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             mock_build.return_value.message = "幫我看看這個網頁"
-            result = run_public_agent_turn_v3(ctx, mode="on")
+            result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         mock_exec.assert_not_called()
         obs = seen_obs.get("observations", [])

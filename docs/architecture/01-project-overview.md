@@ -64,7 +64,7 @@ Neo4j 只在需要完整媒婆記憶功能時設定；沒有 Neo4j 時媒婆仍�
 | | 公開阿月 | 阿月悄悄話 |
 | --- | --- | --- |
 | 身分 | 對使用者本人的 AI 媒人助手 | 已接受配對的雙人聊天室內的專屬媒人視角 |
-| Runtime | `services/ayue_agent/v3/scheduler.py`（V3 sub-agent） | `services/ayue_agent/private_v2.py` + `private_runtime.py` |
+| Runtime | `services/ayue_agent/v3/scheduler.py`（V3 sub-agent） | `services/ayue_agent/private_v2.py` + `private_calendar.py` |
 | HTTP 入口 | `/api/direct_chat`、`/api/direct_chat/stream` | `/api/mediator/private*`（`routers/private_mediator.py`） |
 | Context / Tool policy / Trace | 獨立 namespace | 獨立 namespace |
 | 資料邊界 | 本人 profile、行事曆、配對狀態、記憶 | 只讀雙人關係內可公開／已同意的 projection |

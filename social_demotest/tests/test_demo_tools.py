@@ -6,10 +6,10 @@ from routers.system import get_demo_status, get_recent_context_status
 
 class DemoToolsTests(unittest.TestCase):
     @patch("routers.system.web_enabled", return_value=True)
-    @patch("routers.system.agent_mode_for_user_v3", return_value="on")
+    @patch("routers.system.has_active_public_confirmation", return_value=True)
     @patch("routers.system.profiles_coll")
     def test_status_is_minimal_and_reflects_v3_capabilities(
-        self, profiles, _agent_mode, _web_enabled,
+        self, profiles, _pending, _web_enabled,
     ):
         profiles.find_one.return_value = {
             "current_context": "最近想去駁二看展",
@@ -30,17 +30,17 @@ class DemoToolsTests(unittest.TestCase):
         self.assertNotIn("agentic_pending_confirmation", result)
 
     @patch("routers.system.web_enabled", return_value=False)
-    @patch("routers.system.agent_mode_for_user_v3", return_value="off")
+    @patch("routers.system.has_active_public_confirmation", return_value=False)
     @patch("routers.system.profiles_coll")
     def test_status_handles_missing_profile(
-        self, profiles, _agent_mode, _web_enabled,
+        self, profiles, _pending, _web_enabled,
     ):
         profiles.find_one.return_value = None
 
         result = get_demo_status("owner")
 
         self.assertFalse(result["profile_exists"])
-        self.assertEqual(result["agent_version"], "legacy")
+        self.assertEqual(result["agent_version"], "v3")
         self.assertFalse(result["web_search_ready"])
         self.assertEqual(result["location"], {})
         self.assertEqual(result["recent_context"], "尚無近期情境")

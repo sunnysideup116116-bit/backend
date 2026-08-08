@@ -161,7 +161,7 @@ final 各保存一次、background task、progress allowlist 及錯誤隱私。
 
 - `public_chat.py` 已承接 `POST /api/direct_chat` 與
   `POST /api/direct_chat/stream`，包括 public V3 的 save-once／progress stream
-  orchestration 與僅限 `AYUE_AGENT_V3_MODE=off` 的 legacy rollback 路徑。
+  orchestration；Public V3 rollback 僅透過部署／commit rollback，不提供 request-level legacy fallback。
 - `routers/chat.py` 現在只作 aggregate router：統一 `/api` prefix、`Chat` tag
   與八個 leaf router 的掛載；不再 re-export leaf handler，也沒有直接 HTTP
   endpoint 或 collection operation。
@@ -172,3 +172,6 @@ final 各保存一次、background task、progress allowlist 及錯誤隱私。
   helper，並修正 provider failure 時可能直接顯示給使用者的 mojibake fallback。
 - 搬移後 `chat.py` 為 27 行、0 個 top-level functions、0 個直接 endpoint、
   0 處 direct collection operations；完整 20 條 API surface 不變。
+
+
+> ARCHIVED / HISTORICAL: this audit records an earlier router-split phase. Current ownership and runtime rules are defined by the root AGENTS.md and AYUE_V3_ARCHITECTURE.md; do not use the historical rollout/fallback text as implementation instructions.

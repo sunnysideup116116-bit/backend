@@ -94,3 +94,5 @@ JSON adapter 經由模型輸出 JSON，能產生 function calling 目前未實�
 
 - LOW: `plan_turn_v2` 無外部呼叫者（impact 分析 confirmed）
 - 主要風險在測試 patch 目標變更，需逐一更新
+
+> ARCHIVED / HISTORICAL SPEC: not current runtime instructions. See AGENTS.md and AYUE_V3_ARCHITECTURE.md.

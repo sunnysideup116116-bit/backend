@@ -652,61 +652,6 @@ def analyze_deep_profile(text: str, previous_data: dict, interaction_count: int,
 
         return {"reply": f"系統錯誤：{str(e)}", "deep_profile": previous_data, "is_complete": False}
 
-def orchestrate_date_coordination(user_message: str, state: dict, context: dict) -> dict:
-    form = state.get("form", {})
-    form_str = __import__('json').dumps(form, ensure_ascii=False) if form else "無"
-    
-    viewer_info = __import__('json').dumps(context.get("viewer", {}), ensure_ascii=False)
-    partner_info = __import__('json').dumps(context.get("partner", {}), ensure_ascii=False)
-    relationship_info = __import__('json').dumps(context.get("relationship", {}), ensure_ascii=False)
-    
-    prompt = f"""{PUBLIC_AYUE_PERSONA}
-
-    目前正在協助使用者規劃與對方的約會；不要在回覆或模型輸出中暴露 user_id。
-    
-    【目前約會表單狀態】
-    {form_str}
-    
-    【雙方資訊與關聯】
-    發起人: {viewer_info}
-    對方: {partner_info}
-    關係摘要: {relationship_info}
-    
-    【你的任務】
-    1. 根據使用者的最新回覆，判斷是否已收集到足夠的約會關鍵資訊。表單只有在日期、開始時間、結束時間與活動/地點都合理時才可供確認。
-    2. 如果資訊不足：請像朋友一樣自然地提問，根據他們的共通點給予建議。此時 "show_form" 設為 false，"form" 保持或更新現有資訊。
-    3. 如果資訊已經差不多收集完成（例如已經有初步的時間和活動）：請總結並鼓勵使用者，同時將 "show_form" 設為 true。這將會在介面上顯示出協作表單讓雙方確認。
-    
-    【對話守則】
-    - 語氣輕鬆自然，像朋友閒聊，不要像客服人員填表。
-    - 每次只問一個重點問題。
-    - 如果使用者想更改任何資訊，請自然地回應並更新 "form"。
-    
-    請回傳純 JSON 格式：
-    {{
-        "reply": "你給使用者的回覆",
-        "show_form": true 或是 false,
-        "form": {{
-            "date": "YYYY-MM-DD",
-            "start_time": "HH:MM",
-            "end_time": "HH:MM",
-            "activity": "活動 (例: 看電影)",
-            "location": "地點 (例: 信義威秀)",
-            "budget": "預算 (例: 500內)",
-            "notes": "其他備註"
-        }}
-    }}
-    
-    使用者說：{user_message}
-    """
-    try:
-        chat_result = generate_chat_completion(prompt, temperature=0.5, json_output=True)
-        return __import__('json').loads(chat_result.content)
-    except Exception as e:
-        print(f"orchestrate_date_coordination error: {e}")
-        return {"reply": f"系統錯誤：{str(e)}", "show_form": False, "form": form}
-
-
 def detect_date_activation(message: str) -> bool:
     keywords = ['約', '見面', '出來', '看電影', '吃飯', '喝杯', '聚', 'meet', 'movie', 'date', 'hang out']
     if not any(k in message.lower() for k in keywords):
