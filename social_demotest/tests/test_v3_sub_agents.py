@@ -188,6 +188,25 @@ class V3SubAgentTests(unittest.TestCase):
         self.assertEqual(proposals[0].tool_name, "places.search_nearby")
         self.assertEqual(proposals[0].arguments["categories"], ["cafe"])
 
+    def test_places_agent_rejects_unknown_only_category_without_cafe_fallback(self):
+        slc = _slice("places", {
+            "message": "幫我找附近的神秘場所",
+            "recent_messages": [],
+            "user_location": "台北車站",
+            "clock": _clock().model_dump(),
+            "prior_observations": [],
+        })
+        with patch(
+            "services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "places.search_nearby",
+                "arguments": {"anchor": "台北車站", "categories": ["mystery_place"]},
+            }]),
+        ):
+            proposals, metrics = run_places(slc, task_brief="搜尋神秘場所")
+        self.assertEqual(proposals, [])
+        self.assertIn("schema_invalid", metrics.rejected_calls)
+
     def test_places_agent_repairs_invalid_chicken_category_to_restaurant(self):
         """炸雞類別必須被修正為合法的 restaurant。"""
         slc = _slice("places", {

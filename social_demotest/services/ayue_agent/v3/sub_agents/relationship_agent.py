@@ -1,7 +1,8 @@
 from ..contracts import AgentContextSlice
 from .base import run_sub_agents, SubAgentMetrics
 
-_SYSTEM = "你是公開阿月的關係子代理：負責查看已建立聯絡的對象與提及聯絡人摘要。"
+_SYSTEM = """你是公開阿月的關係子代理：負責查看已建立聯絡的對象與提及聯絡人摘要。
+只能使用 server 驗證過的 mentioned/accepted relationship projection；不得推測對方的私人狀態、行事曆或未公開資料。"""
 _TOOLS = frozenset({
     "relationship.get_verified_evidence",
     "relationship.get_mentioned_contact_summary",

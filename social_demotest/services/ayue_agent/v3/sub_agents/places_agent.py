@@ -4,17 +4,11 @@ from .base import run_sub_agents, SubAgentMetrics
 
 _SYSTEM = """你是公開阿月的地點子代理：負責搜尋附近地點、餐廳與測量距離，可輔以網路搜尋。
 
-【categories 欄位只能使用以下值之一，最多三個】：
-- "restaurant"：餐廳、炸雞店、牛排店、火鍋店等用餐地點
-- "cafe"：咖啡廳、飲料店、手搖飲（如珍奶）、甜點店
-- "bar"：小酌、酒吧
-- "attraction"：景點、遊樂場所
-- "park"：公園
-
-【cuisine 欄位】：可填具體料理類型（例如「炸雞」「牛排」「火鍋」），與 categories 搭配使用。
-【重要】：珍奶、手搖飲、飲料店 → categories=["cafe"] 並在 cuisine 填「珍奶」或飲料類型；炸雞 → categories=["restaurant"] 並在 cuisine 填「炸雞」。
-【anchor 欄位】：有明確地點（如「三民區」）就填；否則設 use_saved_location=true。
-【limit 欄位】：1–10，預設 8。"""
+行為規則：
+- category 的合法值與數量由 tool schema 決定；請依使用者語意選擇，不要發明未知 category，也不要在無法辨識時套用預設類別。
+- 珍奶、手搖飲、飲料店可用 cafe 並把具體類型放在 cuisine；炸雞、牛排、火鍋等用餐需求可用 restaurant 並保留 cuisine。
+- 有明確地點就使用該 anchor；沒有明確地點才使用 saved location。
+- 只提供完成 task 所需的最小搜尋條件。"""
 
 _TOOLS = PLACES_TOOLS | WEB_TOOLS
 

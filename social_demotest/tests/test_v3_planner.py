@@ -71,6 +71,29 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(len(plan.tasks), 1)
         self.assertEqual(plan.tasks[0].agent, "synthesizer")
 
+    def test_planner_uses_system_role_and_minimal_routing_context(self):
+        turn = self._turn("最近有什麼行程？")
+        turn = turn.model_copy(update={
+            "recent_context": "不要送進 Planner",
+            "user_location": "不要送進 Planner",
+            "relevant_memories": ["不要送進 Planner"],
+        })
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[
+                {"name": "decompose_tasks", "arguments": {
+                    "tasks": [{"id": "t1", "agent": "synthesizer", "depends_on": [], "task_brief": "回覆"}],
+                }},
+            ]),
+        ) as call:
+            plan_turn(turn, pending_confirmations=[{"tool_name": "stale"}])
+        self.assertTrue(call.call_args.kwargs["system_prompt"])
+        user_prompt = call.call_args.args[0]
+        self.assertIn("最近有什麼行程", user_prompt)
+        self.assertNotIn("不要送進 Planner", user_prompt)
+        self.assertNotIn("pending_confirmations", user_prompt)
+        self.assertNotIn("find_my_event", call.call_args.kwargs["system_prompt"])
+
     def test_basic_assessment_intent_has_profile_task(self):
         turn = self._turn("那我來做基本性格")
         expected = {

@@ -24,28 +24,19 @@ from . import base as base_agent
 from .base import SubAgentMetrics
 
 
-_SYSTEM = """你是公開阿月的行事曆子代理，負責查看與管理本人行程。
+_SYSTEM = """你是公開阿月的行事曆子代理，負責提出本人行程的 read proposal 或 typed mutation intent。
 
-【讀取】
-- 使用 calendar.get_next_my_event 回答「最近一筆／下一個／最近有什麼行程」；使用 calendar.list_my_events 回答明確日期區間或全部行程。
-- 使用 calendar.list_my_events 時，將相對日期換算成 start_date/end_date（YYYY-MM-DD）。
-- 使用 calendar.find_my_event 只在使用者真的要查詢某筆行程時使用。
-- 讀取工具回傳的 projection 不含 event_id/revision；不要猜測或補寫任何 authority field。
-
-【寫入】
-- 新增、修改、取消都必須呼叫 calendar.submit_commands，不能呼叫 calendar.* write tools。
-- arguments 必須是 {"commands": [{"action": ..., ...}]}；使用 action/title/target_hint/target_hints 這些 canonical 欄位，不要使用 type/summary。
-- update/cancel 提供自然語言 target_hint，或在 context 有唯一 recent event 時提供 target_reference="recent_event"；系統會在 server 端唯一解析行程。
-- create/update 的 date 優先依目前 clock 轉成 YYYY-MM-DD；若保留「今天／明天／後天」，server 會依同一份 authoritative clock 轉換，不能自行猜日期。
-- 缺少日期、開始或結束時間等資料時，仍輸出 command，讓系統回覆 needs_clarification；不要改成自由文字或假造資料。
-- 若 context 有 calendar_draft，使用 draft_mode="continue" 補齊同一筆；新請求使用 draft_mode="replace"。
-- 若 context 有 calendar_recent_reference，使用者說「這筆／那筆／它／他／她／剛剛提到的行程」時，使用 target_reference="recent_event"，server 會使用最近一次已選取的行程；不要把代名詞填成 event_hint。
-- 一句話中的多個 Calendar mutation 放在同一個 commands 陣列，順序依使用者描述。
-- 不要輸出 user_id、event_id、revision、expected_revision、match_id、coordination_id 或對方帳號。
-
-【重要】
-- 不要為了修改/取消先呼叫 find_my_event；mutation target 由 server preflight resolve 一次。
-- calendar.submit_commands 只代表使用者意圖，尚未執行任何副作用，也不需要自行確認。
+行為規則：
+- 真正查詢行程時才使用 read tools；新增、修改、取消一律使用 calendar.submit_commands。
+- 不要為 mutation 先呼叫 calendar.find_my_event；target 由 server preflight 唯一 resolve。
+- 只能填入 current user message、明確延續的最近對話，或 server-owned context 明確提供的值；不得自行補齊看似合理的日期、時間、時長、標題、地點或對象。
+- 缺欄位仍提交 typed command，讓 server 回 needs_clarification；不要自行改寫成固定的追問或自由文字。
+- 有 calendar_draft 時，使用 draft_mode=continue 只補本回合明確提供的欄位；新請求才使用 replace。
+- 使用者以「這筆／那筆／它／他／她／剛剛提到的行程」指涉 server context 的最近唯一行程時，使用 recent_event。
+- ambiguity clarification 中的 candidate_1..candidate_3 只能原樣回傳 calendar_draft.candidates 已提供的 reference，不得發明 token。
+- 同一回合多個 mutation 放在同一批 commands，維持使用者描述順序。
+- submit_commands 只描述意圖，不執行副作用，也不自行決定 confirmation。
+- 不得提供 user_id、event_id、revision、expected_revision、match_id、coordination_id 或其他 authority field。
 """
 
 
@@ -61,16 +52,10 @@ _READ_TOOLS = planner_tool_names(
 _READ_TOOLS = frozenset(name for name in _READ_TOOLS if name.startswith("calendar."))
 _COMMAND_TOOL_NAME = "calendar.submit_commands"
 
-_SAFETY_ADDENDUM = """
-Additional contract:
-- Do not use generic titles such as 行事曆、行程 or 一筆行程 as a create title;
-  ask for the real activity name by emitting a typed create command.
-- If calendar_draft.missing_fields exists, continue that draft and fill only the
-  fields the user supplied; do not replace it with a fixed start/end request.
-- If calendar_draft.candidates exists, preserve the candidate reference key
-  (candidate_1..candidate_3) when the user selects one. These keys are opaque
-  server references, not event IDs. Never invent an authority field.
-"""
+_SAFETY_ADDENDUM = """Calendar schema and preflight own field names, enums, missing-field calculation,
+date normalization, permission checks, target resolution, revision/CAS and
+confirmation. Follow those typed contracts instead of recreating them in
+natural language."""
 
 
 class CalendarAgentResult(list):
@@ -141,10 +126,7 @@ def _tools_schema() -> list[dict[str, Any]]:
 
 
 def _prompt(context_slice: AgentContextSlice, task_brief: str) -> str:
-    return f"""{_SYSTEM}
-{_SAFETY_ADDENDUM}
-
-任務說明：{task_brief}
+    return f"""任務說明：{task_brief}
 
 目前可公開的 context：
 {json.dumps(context_slice.payload, ensure_ascii=False)}
@@ -160,10 +142,13 @@ def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[CalendarA
     try:
         tools = _tools_schema()
         prompt = _prompt(context_slice, task_brief)
-        metrics.prompt_raw = prompt
+        system_prompt = f"{_SYSTEM}\n{_SAFETY_ADDENDUM}"
+        metrics.prompt_raw = f"SYSTEM:\n{system_prompt}\nUSER:\n{prompt}"
         metrics.tools_raw = tools
         metrics.input_payload = context_slice.payload
-        result = base_agent.generate_chat_completion_with_tools(prompt, tools, temperature=0)
+        result = base_agent.generate_chat_completion_with_tools(
+            prompt, tools, temperature=0, system_prompt=system_prompt,
+        )
         metrics.input_tokens = result.input_tokens
         metrics.output_tokens = result.output_tokens
         metrics.duration_ms = result.duration_ms

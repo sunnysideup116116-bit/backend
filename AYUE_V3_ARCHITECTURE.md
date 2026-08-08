@@ -274,7 +274,7 @@ calendar / places(+web) / match / relationship / profile 五個 sub-agent，各�
 - **duplicate 與額度以整回合為範圍**：平行任務共用去重狀態、最多三個唯讀步驟與一筆 pending confirmation；Calendar Agent 的一個 command batch 可包含最多 10 個有序 mutation plans。
 - **MENTIONED 工具需有 @ 對象**：無 @ 時該 call 標記 `FAILED/mentioned_required`，不執行、不崩潰 run。
 - **sub-task 例外不連坐**：任何未捕獲例外轉成 `FAILED`，run 永不因單一 sub-task 崩潰成整段 error。
-- **reuse within task**：`places.measure_distance` 同 task 內等價地點的第二次呼叫重用第一個 observation。
+- **reuse within task**：只有 prior observation 已驗證同一個 query 所需的相同 fact/arguments 時，才重用完全相同或冗餘 read；不同 target、日期、欄位或問題仍需重新查詢。
 - **web.extract URL binding**：只能抽取本回合 web.search 結果或 owner 原句提供的公開 URL。
 
 ## 6. Confirmation 與寫入執行
@@ -300,6 +300,16 @@ Pending payload 只保存 executor-safe 資料（event_id、revision、targets�
 - `profile.start_assessment` → `assessment_session_service.start_assessment_session`
 - `calendar.submit_commands` → `_execute_calendar_mutation_plans` → calendar/date coordination service（每個 plan 使用 confirmation-indexed idempotency key；順序執行、stop-on-failure、無 automatic rollback）
 - `calendar.find_my_event` 只用於使用者真的詢問行程內容；mutation 不先做 read task，也不把 read projection 重新組成 `event_hint`。preflight 的 resolver 回傳 canonical event 後，executor 只使用 server-owned event_id/revision。缺少欄位、歧義與找不到目標回正常 clarification，不是 generic agent failure。
+
+Calendar target references are server-owned opaque tokens. `recent_event` must
+come from the current recent-event projection. `candidate_1..candidate_3` are
+accepted only when the same token is present in the active calendar draft
+projection; an unadvertised or stale token cannot load an authority-bearing
+reference. The legacy `calendar.create_my_event`, `calendar.update_my_event`,
+`calendar.cancel_my_event` and `calendar.cancel_my_events` registry paths remain
+for compatibility with older callers and confirmation records, but are not part
+of the normal V3 Calendar Agent surface; V3 mutations use
+`calendar.submit_commands`.
 
 Current opportunity contract: an explicit match request (including retry/search wording such as 「再配對一次」) creates a `match` task and follows the normal confirmation path. An indirect `social_opening` is only a soft, expiring observation; it never creates a pending confirmation or claims that a search started. If the user accepts the soft offer, Scheduler converts that explicit confirmation into the normal `match.start_search` confirmation.
 
@@ -432,6 +442,18 @@ safe labels reach the model. The Synthesizer may phrase missing-field and
 candidate clarifications, but must not claim a mutation happened or replace a
 server outcome with a fixed field list. A read miss may produce the same
 bounded candidate suggestion, never a generic agent failure.
+
+### Prompt role and context boundary
+
+The AI provider receives a separate `system` message for role, hard semantic
+policy and tool-selection behavior, and a `user` message for the current task
+and bounded context data. Legacy callers may keep the single-user compatibility
+path. Planner receives only routing context; domain-specific memory, location
+and observations are sliced for the responsible sub-agent. Synthesizer uses a
+grounded-result mode when observations exist and a general-conversation mode
+when they do not. Assessment session lifecycle and scoring remain owned by the
+runtime; the basic/deep assessment files are documentation, not runtime-loaded
+skills.
 # Demo maintenance and match diagnostics
 
 The local Demo destructive tools are guarded by `DEMO_DESTRUCTIVE_TOOLS_ENABLED`.

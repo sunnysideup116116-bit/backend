@@ -55,15 +55,28 @@ def _build_tools(tool_names: Iterable[str]) -> list[dict]:
     return tools
 
 
-def _agent_prompt(system_line: str, task_brief: str, slice_payload: dict[str, Any]) -> str:
-    return f"""{system_line}
+_SHARED_SYSTEM_POLICY = """所有 sub-agent 共用的語意規則：
+- 不得自行補入使用者未提供、最近對話未明確延續或 server context 未明確提供的事實。
+- tool arguments 必須能由 current message、allowed context 或 prior observation 明確 grounding。
+- 只呼叫完成 task 所需的最小工具集合。
+- 只有在 prior observation 已驗證同一個 query 所需的相同 fact/arguments 時，才可避免完全相同或冗餘的 read；不同 target、日期、欄位或問題仍必須重新查詢。
+- 無法安全映射成 schema value 時，不要選最接近的值，也不要 invent default。
+- 不得自行提供 user ID、match ID、event ID、revision 或其他 server-owned authority field。
+"""
 
-任務說明：{task_brief}
 
-重要規則：你只能使用上述工具，且不可自行填寫使用者 ID、match ID、event ID 或 revision。這些欄位由系統依登入者與目前狀態自動注入。請只提供上述 schema 允許的欄位。
+def _agent_user_prompt(task_brief: str, slice_payload: dict[str, Any]) -> str:
+    return f"""任務說明：{task_brief}
 
 目前可公開的 context：
-{json.dumps(slice_payload, ensure_ascii=False)}"""
+{json.dumps(slice_payload, ensure_ascii=False)}
+
+只呼叫可用 schema 允許的 function，不要輸出其他文字。"""
+
+
+def _agent_prompt(system_line: str, task_brief: str, slice_payload: dict[str, Any]) -> str:
+    """Backward-compatible debug rendering of the two prompt sections."""
+    return f"SYSTEM:\n{_SHARED_SYSTEM_POLICY}\n{system_line}\nUSER:\n{_agent_user_prompt(task_brief, slice_payload)}"
 
 
 def _repair_categories(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -98,7 +111,9 @@ def _repair_categories(tool_name: str, arguments: dict[str, Any]) -> dict[str, A
             repaired.append("park")
     repaired = list(dict.fromkeys(repaired))[:3]
     if not repaired:
-        repaired = ["cafe"]
+        # Unknown-only input must fail schema validation instead of silently
+        # changing the user's intent into a cafe search.
+        repaired = [str(item or "").strip().lower() for item in categories if str(item or "").strip()]
     arguments = dict(arguments)
     arguments["categories"] = repaired
     return arguments
@@ -121,12 +136,15 @@ def run_sub_agents(
     proposals: list[ToolProposal] = []
     try:
         tools = _build_tools(tool_names)
-        prompt = _agent_prompt(system_line, task_brief, context_slice.payload)
-        metrics.prompt_raw = prompt
+        prompt = _agent_user_prompt(task_brief, context_slice.payload)
+        system_prompt = f"{_SHARED_SYSTEM_POLICY}\n{system_line}"
+        metrics.prompt_raw = f"SYSTEM:\n{system_prompt}\nUSER:\n{prompt}"
         metrics.tools_raw = tools
         metrics.input_payload = context_slice.payload
         started = time.perf_counter()
-        result = generate_chat_completion_with_tools(prompt, tools, temperature=0)
+        result = generate_chat_completion_with_tools(
+            prompt, tools, temperature=0, system_prompt=system_prompt,
+        )
         metrics.input_tokens = result.input_tokens
         metrics.output_tokens = result.output_tokens
         metrics.duration_ms = result.duration_ms

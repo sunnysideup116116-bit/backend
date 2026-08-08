@@ -1,4 +1,9 @@
-"""Thin trusted loader for the two local Profile Skill instruction packs."""
+"""Thin trusted loader for local Profile Skill instruction packs.
+
+Runtime currently loads the reusable recent-context and memory skills. The
+basic/deep assessment files are contract documentation and are not loaded by
+the assessment session runtime.
+"""
 
 from __future__ import annotations
 

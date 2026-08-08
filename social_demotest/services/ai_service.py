@@ -98,6 +98,18 @@ def get_embedding(text: str) -> list:
         raise HTTPException(status_code=500, detail=f"Google Embedding 錯誤: {e}")
 
 
+def _chat_messages(prompt: str, system_prompt: str | None = None) -> list[dict[str, str]]:
+    """Build provider messages while preserving the legacy single-user path."""
+    user_message = str(prompt or "")
+    system_message = str(system_prompt or "").strip()
+    if system_message:
+        return [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message},
+        ]
+    return [{"role": "user", "content": user_message}]
+
+
 def generate_chat_completion(
 
     prompt: str,
@@ -109,6 +121,10 @@ def generate_chat_completion(
     model: str | None = None,
 
     max_tokens: int = 8192,
+
+    *,
+
+    system_prompt: str | None = None,
 
 ) -> ChatResult:
 
@@ -122,7 +138,7 @@ def generate_chat_completion(
 
         "model": effective_model,
 
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": _chat_messages(prompt, system_prompt),
 
         "options": {"temperature": temperature, "num_predict": max_tokens},
 
@@ -189,6 +205,10 @@ def generate_chat_completion_with_tools(
     temperature: float = 0,
     model: str | None = None,
     max_tokens: int = 8192,
+
+    *,
+
+    system_prompt: str | None = None,
 ) -> ToolCallResult:
     """Native function-calling path using Ollama's tools parameter."""
     if not OLLAMA_API_KEY:
@@ -202,7 +222,7 @@ def generate_chat_completion_with_tools(
     started = time.perf_counter()
     response = ollama_client.chat(
         model=effective_model,
-        messages=[{"role": "user", "content": prompt}],
+        messages=_chat_messages(prompt, system_prompt),
         tools=tools,
         options=options,
     )
