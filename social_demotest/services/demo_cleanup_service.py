@@ -8,7 +8,7 @@ from typing import Any
 import requests
 
 from config import DEMO_DESTRUCTIVE_TOOLS_ENABLED
-from database import db
+from database import MONGO_INIT_ERROR, db
 
 
 LOGGER = logging.getLogger(__name__)
@@ -64,10 +64,18 @@ def clear_runtime_fallbacks() -> dict[str, str]:
 
 
 def clear_mongo_database() -> dict[str, Any]:
-    names = sorted(name for name in db.list_collection_names() if not name.startswith("system."))
+    try:
+        names = sorted(name for name in db.list_collection_names() if not name.startswith("system."))
+    except Exception as exc:
+        LOGGER.exception("demo Mongo collection discovery failed: %s", type(exc).__name__)
+        raise DemoCleanupError("mongo_unavailable", status_code=503) from exc
     deleted: dict[str, int] = {}
     for name in names:
-        result = db[name].delete_many({})
+        try:
+            result = db[name].delete_many({})
+        except Exception as exc:
+            LOGGER.exception("demo Mongo cleanup failed collection=%s error=%s", name, type(exc).__name__)
+            raise DemoCleanupError("mongo_cleanup_failed", status_code=500) from exc
         deleted[name] = int(getattr(result, "deleted_count", 0) or 0)
     return {
         "status": "cleared",
@@ -78,11 +86,14 @@ def clear_mongo_database() -> dict[str, Any]:
 
 def clear_all_demo_state() -> dict[str, Any]:
     """Clear Graph first, then all configured app data; no cross-store rollback."""
+    if MONGO_INIT_ERROR is not None:
+        raise DemoCleanupError("mongo_unavailable", status_code=503)
+    try:
+        db.command("ping")
+    except Exception as exc:
+        LOGGER.exception("demo Mongo preflight failed: %s", type(exc).__name__)
+        raise DemoCleanupError("mongo_unavailable", status_code=503) from exc
     graph = clear_graph()
     runtime = clear_runtime_fallbacks()
-    try:
-        mongo = clear_mongo_database()
-    except Exception as exc:
-        LOGGER.exception("demo Mongo cleanup failed: %s", type(exc).__name__)
-        raise DemoCleanupError("mongo_cleanup_failed", status_code=500) from exc
+    mongo = clear_mongo_database()
     return {"status": "success", "graph": graph, "runtime": runtime, "mongo": mongo}
