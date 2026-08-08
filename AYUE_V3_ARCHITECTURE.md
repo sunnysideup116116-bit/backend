@@ -285,7 +285,7 @@ WRITE proposal 通過 Guard 後，Scheduler 呼叫 `prepare_write_confirmation`�
 
 - `match.start_search`：先 `assess_match_opportunity`；not_ready 回 missing-basis 問題，active_match_blocked 回「不重複開新搜尋」，ready 才建立 confirmation。
 - `calendar.submit_commands`：Calendar Agent 只提交不含 authority fields 的 `CalendarCommand` batch。Scheduler 使用同一回合的 authoritative clock 做 deterministic preflight；create/update/cancel 的目標若需要只解析一次，產生不暴露給 LLM 的 `CalendarMutationPlan`。missing_fields/invalid_date/ambiguous/not_found/too_many/invalid_interval/stale_revision/invalid_command 是正常 `needs_clarification` outcome，不建立 confirmation。ready 時同一 batch 共用一筆 confirmation，確認後依序執行，第一個真正 failure 後停止。
-- Typed command 只接受 canonical `action/title/target_hint/target_hints`，以及明確持續時間的 `duration_minutes`；Scheduler 在嚴格驗證前僅為相容 provider 將 `type/summary/event_hint/event_hints` 映射到 canonical 欄位。最近一次唯一選取的行程與未完成 command 只保存 15 分鐘的 server-owned reference/draft projection；projection 不含 event_id/revision，且 reference stale 時不重新做自然語言辨識。
+- Typed command 只接受 canonical `action/title/target_reference/target_hint/target_hints`，以及明確持續時間的 `duration_minutes` 與既有區間平移的 `time_shift_minutes`；Scheduler 在嚴格驗證前僅為相容 provider 將 `type/summary/event_hint/event_hints` 映射到 canonical 欄位。最近一次唯一選取的行程與未完成 command 只保存 15 分鐘的 server-owned reference/draft projection；projection 不含 event_id/revision，且 reference stale 時不重新做自然語言辨識。
 - `match.decide_active_proposal`：preflight 綁定當下 canonical proposal revision；確認執行時再次比對，stale 即拒絕。
 - `profile.start_assessment`：驗證 kind（basic→big_five、deep→deep_profile）。
 
@@ -301,6 +301,7 @@ Pending payload 只保存 executor-safe 資料（event_id、revision、targets�
 - `calendar.submit_commands` → `_execute_calendar_mutation_plans` → calendar/date coordination service（每個 plan 使用 confirmation-indexed idempotency key；順序執行、stop-on-failure、無 automatic rollback）
 - `calendar.find_my_event` 只用於使用者真的詢問行程內容；mutation 不先做 read task，也不把 read projection 重新組成 `event_hint`。preflight 的 resolver 會先對 active owner events 做 bounded exact/fuzzy retrieval：唯一 exact 可進 confirmation，fuzzy 或多筆候選只能回 server-owned candidate clarification，低相似度才要求一個 discriminating clue。preflight 的 resolver 回傳 canonical event 後，executor 只使用 server-owned event_id/revision。缺少欄位、歧義與找不到目標回正常 clarification，不是 generic agent failure。
 - `duration_minutes` 由 server 依 canonical start time 推導 end time；同時提供的 explicit end time 必須與推導值一致，否則回 `invalid_interval` clarification，不自行猜測。
+- `time_shift_minutes` 僅適用既有行程 update；LLM 只提出 signed semantic offset，server 依已解析事件的 canonical interval 做權威平移，並拒絕與 date/start_time/end_time/duration_minutes 混用。若 update 先解析出唯一事件但仍需追問，draft 只保存安全 label，event_id/revision 留在 server-owned `draft_target` reference，後續 selector-free clarification 直接沿用該 reference，直到 TTL 或 stale revision。
 
 Calendar target references are server-owned opaque tokens. `recent_event` must
 come from the current recent-event projection. `candidate_1..candidate_3` are

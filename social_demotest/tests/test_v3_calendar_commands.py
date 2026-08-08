@@ -15,7 +15,8 @@ from services.ayue_agent.v3.calendar_commands import (
     preflight_calendar_commands,
 )
 from services.ayue_agent.v3.calendar_drafts import (
-    candidate_reference_allowed, clear_draft, get_draft, merge_command, save_draft,
+    candidate_reference_allowed, clear_draft, get_draft, merge_command,
+    public_projection, resolved_target_replaced, save_draft,
 )
 from services.ayue_agent.v3.sub_agents.calendar_agent import _tools_schema
 from services.ayue_agent.v3.sub_agents.calendar_agent import CalendarAgentResult
@@ -23,6 +24,7 @@ from services.ayue_agent.v3.sub_agents.calendar_agent import run as run_calendar
 from services.ayue_agent.v3.contracts import SubTask
 from services.ayue_agent.v3.contracts import AgentContextSlice
 from services.ayue_agent.v3.scheduler import _calendar_reference_for_command, _run_sub_task
+from services.ayue_agent.v3.calendar_references import get_reference, remember_resolved_target
 from services.ayue_agent.v3.sub_agents.base import SubAgentMetrics
 from services.ai_service import ToolCallResult
 from services.ayue_agent.v3.write_executors import execute_write
@@ -101,6 +103,8 @@ class V3CalendarCommandTests(unittest.TestCase):
         schema_text = json.dumps(command_tool["function"]["parameters"])
         self.assertNotIn("$ref", schema_text)
         self.assertNotIn("$defs", schema_text)
+        self.assertIn("time_shift_minutes", schema_text)
+        self.assertIn("target_reference", schema_text)
 
     def test_provider_aliases_are_normalized_before_strict_validation(self):
         payload = normalize_calendar_batch_payload({
@@ -113,6 +117,139 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertEqual(command.action, "create")
         self.assertEqual(command.title, "去駁二")
         self.assertIsNone(command.end_time)
+
+    def test_provider_opaque_target_drift_is_normalized_without_granting_semantic_authority(self):
+        payload = normalize_calendar_batch_payload({
+            "commands": [{"target": "recent_event", "type": "delete"}],
+        })
+        command = CalendarCommand.model_validate(payload["commands"][0])
+        self.assertEqual(command.action, "cancel")
+        self.assertEqual(command.target_reference, "recent_event")
+        self.assertIsNone(command.target_hint)
+
+        semantic_target = normalize_calendar_batch_payload({
+            "commands": [{"target": "牙醫", "type": "delete"}],
+        })
+        with self.assertRaises(ValidationError):
+            CalendarCommand.model_validate(semantic_target["commands"][0])
+
+    def test_calendar_command_rejects_time_shift_mixed_with_duration(self):
+        with self.assertRaises(ValidationError):
+            CalendarCommand(
+                action="update", target_hint="看牙醫",
+                time_shift_minutes=60, duration_minutes=60,
+            )
+
+    def test_update_time_shift_moves_existing_interval_server_side(self):
+        command = CalendarCommand(action="update", target_hint="雞排約會", time_shift_minutes=60)
+        with patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.resolve_owned_event", return_value=(_event(), None)), \
+             patch("services.ayue_agent.v3.calendar_commands.get_owned_event_resolution_candidates", return_value=[]), \
+             patch("services.ayue_agent.v3.calendar_commands.get_owned_event_resolution_kind", return_value="exact"), \
+             patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]):
+            result = preflight_calendar_commands(self._ctx(), [command])
+        self.assertEqual(result.status, "ready")
+        self.assertEqual(result.plans[0].form["start_time"], "19:00")
+        self.assertEqual(result.plans[0].form["end_time"], "20:00")
+        self.assertEqual(result.plans[0].changes["start_time"], "19:00")
+        self.assertEqual(result.plans[0].changes["end_time"], "20:00")
+
+    def test_exact_resolved_update_without_changes_returns_private_binding(self):
+        command = CalendarCommand(action="update", target_hint="看牙醫")
+        event = self._dentist_event("dentist-1", "看牙醫", datetime(2026, 8, 10).date())
+        with patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.resolve_owned_event", return_value=(event, None)), \
+             patch("services.ayue_agent.v3.calendar_commands.get_owned_event_resolution_candidates", return_value=[]), \
+             patch("services.ayue_agent.v3.calendar_commands.get_owned_event_resolution_kind", return_value="exact"):
+            result = preflight_calendar_commands(self._ctx(), [command])
+        self.assertEqual(result.status, "needs_clarification")
+        self.assertEqual(result.clarification.missing_fields, [])
+        self.assertIsNotNone(result.resolved_target)
+        self.assertEqual(result.resolved_target.event_id, "dentist-1")
+
+    def test_resolved_target_continuation_uses_server_reference_once(self):
+        """A clarification follow-up must not resolve the natural-language hint again."""
+        clear_draft("owner")
+        event = self._dentist_event("dentist-1", "看牙醫", datetime(2026, 8, 10).date())
+        first = CalendarCommand(action="update", target_hint="看牙醫")
+        with patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.resolve_owned_event", return_value=(event, None)) as resolve_hint, \
+             patch("services.ayue_agent.v3.calendar_commands.get_owned_event_resolution_candidates", return_value=[]), \
+             patch("services.ayue_agent.v3.calendar_commands.get_owned_event_resolution_kind", return_value="exact"):
+            first_result = preflight_calendar_commands(self._ctx(), [first])
+        resolve_hint.assert_called_once()
+        self.assertIsNotNone(first_result.resolved_target)
+        record = save_draft(
+            "owner", first, missing_fields=[], resolved_target=first_result.resolved_target,
+        )
+        remember_resolved_target("owner", first_result.resolved_target)
+        projection = public_projection(record)
+        projection_text = json.dumps(projection, ensure_ascii=False)
+        self.assertNotIn("event_id", projection_text)
+        self.assertNotIn("revision", projection_text)
+
+        continuation = merge_command(
+            CalendarCommand(action="update", time_shift_minutes=60), record,
+        )
+        reference = get_reference("owner", reference_key="draft_target")
+        self.assertIsNotNone(reference)
+        with patch("services.calendar_service.resolve_owned_event_reference", return_value=(event, None)) as resolve_reference, \
+             patch("services.ayue_agent.v3.calendar_commands.resolve_owned_event", side_effect=AssertionError("hint was re-resolved")) as resolve_again, \
+             patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]):
+            second_result = preflight_calendar_commands(
+                self._ctx(), [continuation],
+                recent_references={0: {**reference, "_force": True}},
+            )
+        self.assertEqual(second_result.status, "ready")
+        resolve_reference.assert_called_once()
+        resolve_again.assert_not_called()
+        clear_draft("owner")
+
+    def test_resolved_target_continuation_survives_empty_missing_fields_and_replace_mode(self):
+        clear_draft("owner")
+        original = CalendarCommand(action="update", target_hint="看牙醫")
+        record = save_draft(
+            "owner", original, missing_fields=[],
+            resolved_target={
+                "event_id": "dentist-1", "expected_revision": 4,
+                "source_type": "personal", "safe_label": "8/10 09:00–10:00 看牙醫",
+            },
+        )
+        remember_resolved_target("owner", {
+            "event_id": "dentist-1", "expected_revision": 4,
+            "source_type": "personal", "safe_label": "8/10 09:00–10:00 看牙醫",
+        })
+        continuation = CalendarCommand(
+            action="update", start_time="10:00", end_time="11:00", draft_mode="replace",
+        )
+        merged = merge_command(continuation, record)
+        self.assertEqual(merged.draft_mode, "continue")
+        self.assertIsNone(merged.target_hint)
+        reference = _calendar_reference_for_command("owner", merged, get_draft("owner"))
+        self.assertEqual(reference["event_id"], "dentist-1")
+        self.assertTrue(reference["_force"])
+        clear_draft("owner")
+
+    def test_explicit_new_target_replaces_resolved_draft_binding(self):
+        clear_draft("owner")
+        original = CalendarCommand(action="update", target_hint="看牙醫")
+        record = save_draft(
+            "owner", original,
+            resolved_target={
+                "event_id": "dentist-1", "expected_revision": 4,
+                "source_type": "personal", "safe_label": "8/10 09:00–10:00 看牙醫",
+            },
+        )
+        replacement = CalendarCommand(
+            action="update", target_hint="健身", start_time="18:00", end_time="19:00",
+        )
+        self.assertTrue(resolved_target_replaced(replacement, record))
+        merged = merge_command(replacement, record)
+        self.assertEqual(merged.target_hint, "健身")
+        self.assertEqual(merged.start_time, "18:00")
+        self.assertIsNone(merged.title)
+        clear_draft("owner")
 
     def test_literal_duration_phrases_are_coerced_to_typed_minutes(self):
         for phrase, minutes in (("半小時", 30), ("一小時", 60), ("一個半小時", 90), ("兩小時", 120)):

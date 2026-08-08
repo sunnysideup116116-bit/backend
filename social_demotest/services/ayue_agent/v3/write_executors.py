@@ -422,6 +422,10 @@ _WRITE_EXECUTORS = {
 }
 
 
+# Compatibility-only direct Calendar executors.  The normal V3 Calendar Agent
+# surface is ``calendar.submit_commands``; these names remain solely for older
+# confirmation records and non-V3 callers and must not be added to the Agent
+# tool prompt as an alternative mutation path.
 _CALENDAR_WRITE_ACTIONS = {
     "calendar.create_my_event", "calendar.update_my_event",
     "calendar.cancel_my_event", "calendar.cancel_my_events",

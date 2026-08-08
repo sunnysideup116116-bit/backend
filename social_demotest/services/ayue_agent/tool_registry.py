@@ -607,7 +607,9 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "calendar.submit_commands": ToolSpec(
         "calendar.submit_commands", ToolRisk.WRITE, "calendar_commands",
-        "提交一個或多個行事曆 mutation command；只描述使用者意圖，不含 event_id、revision 或其他 authority fields。",
+        "提交一個或多個行事曆 mutation command；欄位必須使用 canonical action、target_reference 或 target_hint，"
+        "不要使用 type 或 target；target_reference 只能是 server context 提供的 recent_event/candidate_1..candidate_3，"
+        "target_hint 只放自然語言行程 identity clue，不含操作詞；不含 event_id、revision 或其他 authority fields。",
         "我整理一下要變更的行程…",
         requires_confirmation=True,
         planner_arguments_model=CalendarCommandBatch,
