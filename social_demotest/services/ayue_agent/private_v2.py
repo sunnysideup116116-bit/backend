@@ -31,6 +31,13 @@ from services.mediator_context_service import (
     private_pair_shared_facts,
     private_viewer_profile_context,
 )
+from services.ayue_agent.product_identity import (
+    PRIVATE_AYUE_PERSONA,
+    PRIVATE_CLARIFICATION_REPLY,
+    PRIVATE_CONFIRMATION_REPLY,
+    PRIVATE_REDIRECT_COPY,
+    PRIVATE_RUNTIME_FALLBACK_REPLY,
+)
 from .public_relationship_projection import display_name, safe_public_profile
 
 
@@ -127,8 +134,7 @@ def build_private_turn_context_v2(user_id: str, other_id: str, message: str, mat
     )
 
 PRIVATE_SCOPE_POLICY = """
-你是同一位阿月在目前 user 與 other 關係中的悄悄話模式，不是另一個人格，也不是 Public Ayue 的代理。
-先判斷使用者的主要 goal 是否直接服務目前兩人的 relationship，再選擇 final、tool_call、confirmation 或 redirect。
+Scope policy：先判斷使用者的主要 goal 是否直接服務目前兩人的 relationship，再選擇 final、tool_call、confirmation 或 redirect。
 不要因為任何單一 domain noun 就決定 scope；scope 只能由本回合完整語意判斷。
 
 Private 主要處理 conversation coaching、relationship understanding、pair/shared context、safe shared facts、
@@ -176,7 +182,9 @@ def _legacy_planner_prompt(ctx: PrivateAgentTurnContextV2, observations: list[di
         # labels below, never text or factual output.
         "counterparty_advisory_strategy_only": ctx.counterparty_advisory,
     }
-    return f"""你是阿月悄悄話的單一回合規劃與回覆器。先判斷是否需要工具；若輸出 final，reply 必須是可直接給使用者的完整自然回答。
+    return f"""{PRIVATE_AYUE_PERSONA}
+
+你是阿月悄悄話的單一回合規劃與回覆器。先判斷是否需要工具；若輸出 final，reply 必須是可直接給使用者的完整自然回答。
 你正在協助一位已接受配對中的使用者。本人與對方資料已分開標示；對方 advisory 僅能影響 strategy（warm/playful/calm/direct），不可出現在事實、工具參數或回答裡。
 只能使用 visible_tools。對方行事曆只能查 busy/free。開始約會協調會打擾對方，必須輸出 confirmation，不能直接 tool_call。問趣事功能目前暫停，不可提議或執行；被問到時自然說功能先收起來，並改為協助想開場。一般建議、看共同聊天、問對方是誰或近況可用 read tools；沒有需要讀取時輸出 final。不可輸出 ID、revision、資料庫欄位、私人資料或工具內部資訊。
 reply 只能依 safe context 與 observations 作答，以繁體中文、1 到 3 句；不可提及工具、模型、系統、權限、私人資料、ID、revision 或資料庫。對方行事曆只能說 busy/free。
@@ -268,7 +276,7 @@ def _save_confirmation(ctx: PrivateAgentTurnContextV2, decision: PrivateAgentDec
         "other_id": ctx.other_id, "action": decision.tool_name, "pair_revision": ctx.pair_revision,
         "created_at": time.time(), "strategy": decision.strategy,
     }}}, upsert=True)
-    return "要我現在送出這個邀請嗎？你回覆「確認」我才會進行。"
+    return PRIVATE_CONFIRMATION_REPLY
 
 
 def _consume_confirmation(ctx: PrivateAgentTurnContextV2, match_doc: dict[str, Any]) -> tuple[bool, str | None]:
@@ -300,7 +308,9 @@ def _compose(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]],
         "counterparty_shareable": ctx.counterparty_shareable, "shared_history": ctx.shared_history,
         "shared_facts": ctx.shared_facts, "observations": observations, "strategy": strategy,
     }
-    prompt = f"""你是阿月，正在私下協助一段已接受配對。以繁體中文、1 到 3 句自然回答。
+    prompt = f"""{PRIVATE_AYUE_PERSONA}
+
+你正在私下協助一段已接受配對。以繁體中文、1 到 3 句自然回答。
 只能依 safe context 回答；不能提及、猜測或暗示對方未公開的私人資料、私人悄悄話或行事曆內容。calendar observation 只能說是否有既有安排與時段，不能說活動內容。不要提及工具、模型、系統或權限。
 安全 context：{json.dumps(safe, ensure_ascii=False)}"""
     try:
@@ -363,7 +373,7 @@ def run_private_agent_turn_v2(
                 if decision.kind == "redirect":
                     result = PrivateAgentResult(
                         handled=True,
-                        reply="這個需求要到阿月主聊天室處理。按下面的按鈕，我會把你原本的訊息帶到輸入框，確認後再由你送出。",
+                        reply=PRIVATE_REDIRECT_COPY.get(decision.strategy, PRIVATE_REDIRECT_COPY["warm"]),
                         conversation_intent="private_redirect",
                         agent_run_id=run_id,
                         agent_mode="v2",
@@ -408,7 +418,7 @@ def run_private_agent_turn_v2(
                 emit("tool_finished", step_id=step, outcome="ok" if ok else "error")
                 trace["tools"].append({"name": spec.name, "ok": ok, "code": code})
                 if not ok:
-                    result = AgentResult(handled=True, reply="我剛才沒有取得足夠的資訊；你想先換個問法，還是告訴我你最想確認哪一點？", conversation_intent="private_clarification", agent_run_id=run_id, agent_mode="v2")
+                    result = AgentResult(handled=True, reply=PRIVATE_CLARIFICATION_REPLY, conversation_intent="private_clarification", agent_run_id=run_id, agent_mode="v2")
                     break
                 observations.append({"tool": spec.name, "result": data})
             if result is None:
@@ -417,7 +427,7 @@ def run_private_agent_turn_v2(
                 trace["model_ms"].append(round((time.perf_counter() - compose_started) * 1000))
     except Exception as exc:
         trace["exception"] = type(exc).__name__
-        result = AgentResult(handled=True, reply="我剛才沒能整理好這件事。你可以換個方式告訴我，你最想確認哪一點？", conversation_intent="private_clarification", agent_run_id=run_id, agent_mode="v2", fallback_reason=type(exc).__name__)
+        result = AgentResult(handled=True, reply=PRIVATE_RUNTIME_FALLBACK_REPLY, conversation_intent="private_clarification", agent_run_id=run_id, agent_mode="v2", fallback_reason=type(exc).__name__)
     trace["latency_ms"] = round((time.perf_counter() - started) * 1000)
     trace["result"] = {"intent": result.conversation_intent, "fallback": result.fallback_reason}
     _trace(run_id, trace)

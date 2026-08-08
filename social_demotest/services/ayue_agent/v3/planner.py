@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from services.ai_service import generate_chat_completion_with_tools
 from services.ayue_agent.contracts import AgentTurnContextV2
+from services.ayue_agent.product_identity import PUBLIC_AYUE_PERSONA
 from .contracts import OpportunitySignal, Plan, SubTask
 from .schema_utils import inline_json_schema_refs
 
@@ -97,6 +98,8 @@ Agent routing catalog：
 - 使用者明確開始或重新開始 assessment 時建立 profile task，不由 synthesizer 自行出題。
 - `opportunity.signal="social_opening"` 只用於使用者間接表達想找人一起參與某個活動、但尚未明確要求開始搜尋的情境；`evidence_span` 必須是本回合使用者訊息中的連續原文，`confidence` 必須至少 0.8。明確要求開始／重新配對時建立 match task，不只填 opportunity；單純旅行、寒暄、孤單或負面情緒填 `signal="none"`。
 - 只呼叫 decompose_tasks，不輸出其他文字。"""
+
+_PLANNER_SYSTEM = PUBLIC_AYUE_PERSONA + "\n\n" + _PLANNER_SYSTEM
 
 
 # Keep the recent-mutation routing rule separate from the large catalog above.

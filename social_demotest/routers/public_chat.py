@@ -25,6 +25,7 @@ from services.ai_service import generate_chat_completion, get_embedding
 from services.ayue_agent import run_public_agent_turn_v3
 from services.ayue_agent.contracts import AgentTurnContext
 from services.ayue_agent.proactive_care import record_proactive_activity
+from services.ayue_agent.product_identity import PUBLIC_AYUE_PERSONA
 from services.ayue_agent.public_relationship_projection import (
     mentioned_contact_refs,
     validated_mentioned_contact_ids,
@@ -37,7 +38,6 @@ from services.ayue_agent.v3.debug_trace import (
 from services.chat_service import generate_room_id, save_message
 from services.match_state_service import verified_accepted_match_query
 from services.mediator_context_service import (
-    MEDIATOR_PERSONA,
     latest_shared_chat,
     mediator_style,
     relevant_graph_memories,
@@ -1293,15 +1293,9 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
 
 
 
-        sys_prompt = f"""
-
-{MEDIATOR_PERSONA}
+        sys_prompt = f"""{PUBLIC_AYUE_PERSONA}
 
 媒人語氣：{mediator_style(req.user_id)}
-
-
-
-你是阿月，一個會聊天、會觀察契機的媒人。你的目標不是硬推配對，而是在自然聊天中理解使用者最近想做什麼、何時想做、是否想找人一起。
 
 
 

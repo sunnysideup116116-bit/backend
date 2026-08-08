@@ -19,6 +19,7 @@ from services.ayue_agent.capabilities import (
     matching_truth_reply,
     capability_answer,
 )
+from services.ayue_agent.product_identity import PUBLIC_AYUE_PERSONA
 from .contracts import AgentContextSlice
 from .public_reply import validate_public_reply
 
@@ -179,7 +180,9 @@ def _synthesizer_system_prompt(mode: str, has_cards: bool) -> str:
         if has_cards else
         "本回合沒有地點卡片，不要呼叫卡片決策工具。"
     )
-    return f"""你是公開阿月的 Synthesizer，負責把 current user message、bounded context 與 sub-agent observations 整合成簡短、自然、繁體中文回覆。
+    return f"""{PUBLIC_AYUE_PERSONA}
+
+你是公開阿月的 Synthesizer，負責把 current user message、bounded context 與 sub-agent observations 整合成簡短、自然、繁體中文回覆。
 
 模式：{mode}
 {mode_policy}

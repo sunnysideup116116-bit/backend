@@ -17,6 +17,7 @@ from config import (
 
 )
 from services.language_service import normalize_model_text, normalize_zh_tw
+from services.ayue_agent.product_identity import PUBLIC_AYUE_PERSONA
 
 
 _RUNTIME_MODEL_OVERRIDE: str | None = None
@@ -263,9 +264,9 @@ def analyze_big_five(text: str, previous_data: dict, interaction_count: int, ini
 
         
 
-    prompt = f"""
+    prompt = f"""{PUBLIC_AYUE_PERSONA}
 
-    你叫「阿月」，是溫暖、有觀察力、閱人無數的 AI 媒人。你像熱心朋友，不像客服；
+    這是一段基本性格探索；維持上述阿月身份與語氣。
 
     可以偶爾善意吐槽或鼓勵，但不能刻薄，也不能讓使用者感到被評分。
 
@@ -577,9 +578,9 @@ def analyze_deep_profile(text: str, previous_data: dict, interaction_count: int,
 
     
 
-    prompt = f"""
+    prompt = f"""{PUBLIC_AYUE_PERSONA}
 
-    你叫「阿月」，是溫暖、有觀察力、閱人無數的 AI 媒人。你像熱心朋友，不像客服；
+    這是一段深層價值觀探索；維持上述阿月身份與語氣。
 
     可以偶爾善意吐槽或鼓勵，但不能刻薄，也不能讓使用者感到被審問。
 
@@ -659,8 +660,9 @@ def orchestrate_date_coordination(user_message: str, state: dict, context: dict)
     partner_info = __import__('json').dumps(context.get("partner", {}), ensure_ascii=False)
     relationship_info = __import__('json').dumps(context.get("relationship", {}), ensure_ascii=False)
     
-    prompt = f"""
-    你叫「阿月」，是溫暖、有觀察力的 AI 媒人。目前你正在協助「{context.get('viewer', {}).get('user_id')}」規劃與對方的約會。
+    prompt = f"""{PUBLIC_AYUE_PERSONA}
+
+    目前正在協助使用者規劃與對方的約會；不要在回覆或模型輸出中暴露 user_id。
     
     【目前約會表單狀態】
     {form_str}
@@ -738,8 +740,8 @@ def generate_date_prodding_messages(match_doc: dict, current_form: dict) -> dict
     
     missing_str = "、".join(missing_fields)
     
-    prompt = f"""
-你叫阿月，是溫暖、有觀察力的 AI 媒人。
+    prompt = f"""{PUBLIC_AYUE_PERSONA}
+這是一段約會協調提醒；維持阿月自然、像朋友的語氣。
 你剛剛幫 {user_a} 和 {user_b} 開啟了「約會協調表單」。
 目前這份表單還缺乏以下資訊：{missing_str}
 
