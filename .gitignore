@@ -37,7 +37,6 @@ dist/
 *.egg-info/
 
 # Agent / tooling working dirs (machine-local, not part of the product)
-.gitnexus/
 .superpowers/
 .claude/
 

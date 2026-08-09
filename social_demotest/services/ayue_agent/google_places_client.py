@@ -8,7 +8,7 @@ import re
 import threading
 import time
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import requests
 
@@ -16,10 +16,10 @@ import config
 
 
 _TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
-# Field mask drives billing (migration plan §3.7.2). Text Search Pro SKU only:
+# Field mask drives billing. Keep the projection bounded:
 #   places.photos is Pro (not Enterprise), so photo names ride along free.
-#   rating/userRatingCount/currentOpeningHours are Enterprise ($35/1000) and
-#   must never be requested here.
+#   rating/userRatingCount/currentOpeningHours are higher-cost fields and must
+#   never be requested here.
 _FIELD_MASK = (
     "places.id,places.displayName,places.formattedAddress,places.location,"
     "places.types,places.googleMapsUri,places.photos"
@@ -34,7 +34,7 @@ _CATEGORY_QUERIES = {
 
 # Process-local TTL cache. Google Places is billed per call, so caching the
 # typed projection (never the raw payload) keeps the planner-facing surface
-# identical while protecting quota. See docs/google-maps-migration-plan.md §3.5.
+# identical while protecting quota.
 TEXT_SEARCH_TTL_SECONDS = 15 * 60
 
 _CACHE_LOCK = threading.Lock()
@@ -55,8 +55,30 @@ def google_place_cards_enabled() -> bool:
     )
 
 
+def google_routes_enabled() -> bool:
+    """Routes is server-to-server and does not depend on the browser map key."""
+    return bool(
+        getattr(config, "AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED", True)
+        and getattr(config, "GOOGLE_PLACES_SERVER_API_KEY", "")
+    )
+
+
 def _clean(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+def _safe_google_maps_url(value: Any) -> str:
+    url = _clean(value, 500)
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return ""
+    host = str(parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return ""
+    if host not in {"google.com", "www.google.com", "maps.google.com", "maps.app.goo.gl"}:
+        return ""
+    return url
 
 
 def _cache_key(prefix: str, payload: dict[str, Any]) -> str:
@@ -133,7 +155,7 @@ def _photo_url(item: dict[str, Any]) -> str:
 
 def search_nearby_places(
     anchor_label: str, lat: float, lon: float, categories: list[str], *, limit: int,
-    cuisine: str = "",
+    cuisine: str = "", radius_m: int = 1500,
 ) -> list[dict[str, Any]]:
     """Resolve a bounded set of public places; no raw Google payload escapes."""
     if not google_place_cards_enabled():
@@ -146,16 +168,23 @@ def search_nearby_places(
     if cuisine_clean:
         query = f"{cuisine_clean} {query}"
     safe_limit = max(1, min(int(limit), 10))
+    safe_radius = max(300, min(int(radius_m), 5_000))
     cache_key = _cache_key("g_nearby", {
         "label": anchor_label.lower(), "lat": round(lat, 5), "lon": round(lon, 5),
         "categories": tuple(requested), "cuisine": cuisine_clean, "limit": safe_limit,
+        "radius_m": safe_radius,
     })
     cached = _cache_get(cache_key)
     if cached is not None:
         return list(cached)
     body = {
         "textQuery": f"{query} near {anchor_label}",
-        "locationBias": {"circle": {"center": {"latitude": lat, "longitude": lon}, "radius": 5000.0}},
+        "locationBias": {
+            "circle": {
+                "center": {"latitude": lat, "longitude": lon},
+                "radius": float(safe_radius),
+            }
+        },
         "maxResultCount": safe_limit,
         "languageCode": "zh-TW",
     }
@@ -198,13 +227,19 @@ def search_nearby_places(
         if not place_id or not name or place_id in seen:
             continue
         seen.add(place_id)
-        map_url = _clean(item.get("googleMapsUri"), 500)
-        if not map_url.startswith("https://"):
+        map_url = _safe_google_maps_url(item.get("googleMapsUri"))
+        if not map_url:
+            continue
+        distance_m = _distance_m(lat, lon, item_lat, item_lon)
+        # Text Search locationBias is not a hard restriction.  Enforce the
+        # planner-approved radius on the typed projection before any result can
+        # become a candidate card or Web research subject.
+        if distance_m > safe_radius:
             continue
         places.append({
             "name": name,
             "category": _category(item.get("types") or [], requested),
-            "distance_m": _distance_m(lat, lon, item_lat, item_lon),
+            "distance_m": distance_m,
             "address_summary": _clean(item.get("formattedAddress"), 120),
             "map_url": map_url,
             "provider": "google",
@@ -260,8 +295,8 @@ def resolve_place(query: str) -> dict[str, Any] | None:
     place_id = _clean(item.get("id"), 180)
     display = item.get("displayName") or {}
     name = _clean(display.get("text") if isinstance(display, dict) else display, 80)
-    map_url = _clean(item.get("googleMapsUri"), 500)
-    if not place_id or not name or not map_url.startswith("https://"):
+    map_url = _safe_google_maps_url(item.get("googleMapsUri"))
+    if not place_id or not name or not map_url:
         _cache_put(cache_key, None, TEXT_SEARCH_TTL_SECONDS)
         return None
     types = [str(value) for value in (item.get("types") or [])]
@@ -285,11 +320,8 @@ def measure_distance_matrix(origin: str, destination: str) -> dict[str, Any] | N
 
     Returns {distance_m, duration_text, distance_basis: "driving"} or None on
     failure. The caller falls back to OSM haversine when this returns None.
-    See docs/google-maps-migration-plan.md §3.3 D.
     """
-    if not google_place_cards_enabled():
-        return None
-    if not getattr(config, "AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED", True):
+    if not google_routes_enabled():
         return None
     origin_clean = _clean(origin, 160)
     dest_clean = _clean(destination, 160)

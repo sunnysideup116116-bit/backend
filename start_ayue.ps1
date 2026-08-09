@@ -5,7 +5,9 @@ param(
     [ValidateRange(1, 65535)]
     [int]$Port = 8000,
     [ValidateRange(1, 65535)]
-    [int]$AgentPort = 9001
+    [int]$AgentPort = 9001,
+    [ValidateRange(10, 300)]
+    [int]$StartupTimeoutSeconds = 90
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,8 +17,11 @@ $appDirectory = Join-Path $projectRoot "social_demotest"
 $agentDirectory = Join-Path $projectRoot "matchmaker_agent"
 $pythonPath = Join-Path $projectRoot ".project-venv\Scripts\python.exe"
 $healthUrl = "http://127.0.0.1:$Port/"
-$agentHealthUrl = "http://127.0.0.1:$AgentPort/docs"
+$readinessUrl = "http://127.0.0.1:$Port/api/health"
+$openApiUrl = "http://127.0.0.1:$Port/openapi.json"
+$agentHealthUrl = "http://127.0.0.1:$AgentPort/health"
 $netstatPath = Join-Path $env:SystemRoot "System32\netstat.exe"
+$maxHealthAttempts = [Math]::Max(1, [Math]::Ceiling($StartupTimeoutSeconds * 2))
 
 if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
     throw "Project Python was not found: $pythonPath"
@@ -42,18 +47,33 @@ function Get-ListeningProcessIds {
 
 function Test-AyueHealth {
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 2
-        return $response.StatusCode -eq 200 -and $response.Content -match "<title>AI .*DEMO</title>"
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $readinessUrl -TimeoutSec 2
+        $payload = $response.Content | ConvertFrom-Json
+        return $response.StatusCode -eq 200 -and $payload.status -eq "ok" -and $payload.service -eq "ayue"
     }
     catch {
-        return $false
+        # Migration fallback: recognize an already-running Ayue version that
+        # predates /api/health, so the launcher can safely restart it once.
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri $openApiUrl -TimeoutSec 2
+            $payload = $response.Content | ConvertFrom-Json
+            return (
+                $response.StatusCode -eq 200 -and
+                $payload.info.title -eq "Profiling System API" -and
+                $null -ne $payload.paths."/api/direct_chat"
+            )
+        }
+        catch {
+            return $false
+        }
     }
 }
 
 function Test-MatchmakerHealth {
     try {
         $response = Invoke-WebRequest -UseBasicParsing -Uri $agentHealthUrl -TimeoutSec 2
-        return $response.StatusCode -eq 200
+        $payload = $response.Content | ConvertFrom-Json
+        return $response.StatusCode -eq 200 -and $payload.status -eq "ok" -and $payload.service -eq "matchmaker"
     }
     catch {
         return $false
@@ -111,7 +131,7 @@ if ($listeningProcessIds.Count -gt 0) {
 $agentProcess = $null
 if ($agentListeningProcessIds.Count -eq 0) {
     $agentProcess = Start-HiddenPython -Arguments @("agent_api.py") -WorkingDirectory $agentDirectory
-    for ($attempt = 1; $attempt -le 60; $attempt++) {
+    for ($attempt = 1; $attempt -le $maxHealthAttempts; $attempt++) {
         Start-Sleep -Milliseconds 500
         $newAgentProcessIds = @(Get-ListeningProcessIds -TargetPort $AgentPort)
         if ($agentProcess.HasExited -and $newAgentProcessIds.Count -eq 0) {
@@ -124,7 +144,7 @@ if ($agentListeningProcessIds.Count -eq 0) {
     }
     if ($agentListeningProcessIds.Count -eq 0) {
         Stop-Process -Id $agentProcess.Id -Force -ErrorAction SilentlyContinue
-        throw "Ayue matchmaker did not pass its health check within 30 seconds."
+        throw "Ayue matchmaker did not pass its health check within $StartupTimeoutSeconds seconds."
     }
 }
 
@@ -157,7 +177,7 @@ if (-not $Background) {
 
 $serverProcess = Start-HiddenPython -Arguments $uvicornArguments -WorkingDirectory $appDirectory
 
-for ($attempt = 1; $attempt -le 60; $attempt++) {
+for ($attempt = 1; $attempt -le $maxHealthAttempts; $attempt++) {
     Start-Sleep -Milliseconds 500
     $newListeningProcessIds = @(Get-ListeningProcessIds -TargetPort $Port)
     if ($serverProcess.HasExited -and $newListeningProcessIds.Count -eq 0) {
@@ -178,4 +198,4 @@ Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
 if ($agentProcess) {
     Stop-Process -Id $agentProcess.Id -Force -ErrorAction SilentlyContinue
 }
-throw "Ayue did not pass its health check within 30 seconds. PID $($serverProcess.Id) was stopped."
+throw "Ayue did not pass its health check within $StartupTimeoutSeconds seconds. PID $($serverProcess.Id) was stopped."

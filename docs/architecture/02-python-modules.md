@@ -111,7 +111,7 @@ V3 runtime 見 `03-v3-runtime-lifecycle.md`；此處列非 V3 檔案：
 | `chat_service.py` | room id 產生、`save_message`（使用者訊息只存一次）、system message 去重 |
 | `giphy_service.py` | 配對成功慶祝 GIF（選用） |
 | `language_service.py` | 繁中文字正規化 |
-| `mediator_context_service.py` | Legacy public/private mediator 共用的 bounded context projection |
+| `mediator_context_service.py` | Private Ayue 的 bounded viewer／counterparty／shared context projection |
 | `mediator_event_service.py` | Mediator 事件佇列：`queue_mediator_event`、`claim_next_mediator_event`（polling 用） |
 | `proactive_delivery_service.py` | Polling 時 mediator event／care delivery 的 claim 與投遞 |
 | `skill_loader.py` | 讀取 `skills/` 下的 versioned prompt policy |
@@ -134,4 +134,4 @@ V3 runtime 見 `03-v3-runtime-lifecycle.md`；此處列非 V3 檔案：
 - 不得把 Private calendar projection 搬回 router；正式資料 cleanup CLI、模型供應商設定也不在一般 runtime 任務範圍。
 
 
-> Current ownership override (2026 cleanup): Public is unconditionally V3. Private is the separate current V2 runtime. Bounded availability helpers live in `services/ayue_agent/private_calendar.py`.
+> Current ownership: Public is unconditionally V3. Private is the separate current V2 runtime. Bounded availability helpers live in `services/ayue_agent/private_calendar.py`.

@@ -4,7 +4,7 @@
 
 ## 1. 系統定位
 
-公開阿月 V3 是目前的正式 sub-agent 架構（取代舊的 V2 單一 agent loop）。它由五種角色協作：**Planner**（LLM）只做任務拆解、**Sub-agents**（LLM）提出工具呼叫、**Central Guard**（純程式碼）審核每個提案、**Scheduler**（純程式碼）編排執行與確認、**Synthesizer**（LLM）彙整成最終回覆。用「一句話」來說明這條流程：
+公開阿月 V3 是目前唯一的正式 public runtime。它由五種角色協作：**Planner**（LLM）只做任務拆解、**Sub-agents**（LLM）提出工具呼叫、**Central Guard**（純程式碼）審核每個提案、**Scheduler**（純程式碼）編排執行與確認、**Synthesizer**（LLM）彙整成最終回覆。用「一句話」來說明這條流程：
 
 ```text
 你問阿月一句話
@@ -52,7 +52,7 @@ prompt，身份與語氣片段統一由
 不取代 Planner routing、Guard、confirmation、privacy 或 domain service。
 
 Domain sub-agent、schema、Guard、preflight、executor、profile/memory extractor
-不得注入 persona 文案；它們只處理自己的 typed responsibility。若 legacy prompt
+不得注入 persona 文案；它們只處理自己的 typed responsibility。若相容性 prompt
 仍需使用 `MEDIATOR_PERSONA`，它也必須由同一個 contract 組合，避免重新建立第二套身份文字。
 
 公開阿月與阿月悄悄話都是 sibling runtimes，不是 parent/subagent 關係。悄悄話使用獨立的 context、registry、trace 與隱私 namespace；公開阿月不能任意把 history 或 prompt 交給它。
@@ -95,7 +95,7 @@ Domain sub-agent、schema、Guard、preflight、executor、profile/memory extrac
 | `services/proactive_delivery_service.py` | Polling 時 mediator event／care delivery 的 claim 與投遞流程 |
 | `services/profile_task_service.py` | 已保存 owner 訊息的 profile extraction 排程 facade |
 | `services/assessment_session_service.py` | 公開阿月聊天室內基本性格／深層探索的 owner-scoped、短期 session lifecycle |
-| `services/mediator_context_service.py` | Legacy public／private mediator 共用的 bounded context projection |
+| `services/mediator_context_service.py` | Private Ayue 使用的 bounded viewer／counterparty／shared context projection |
 | `services/relationship_quiz_service.py` | 默契小測驗 lifecycle、答案驗證與完成結果 projection |
 | `services/ayue_agent/private_v2.py` | 悄悄話的獨立 context、registry 與 composer |
 | `services/match_state_service.py` | Canonical match read model |
@@ -260,7 +260,7 @@ opportunity: {signal: none|social_opening, evidence_span, confidence} | null
 2. **Schema 驗證**：arguments 符合該工具的 planner arguments model（`planner_arguments_allowed`），否則 `schema_invalid`。
 3. **Forbidden fields 防線**：`FORBIDDEN_ARG_FIELDS = {user_id, match_id, event_id, revision, expected_status}` 由 `ToolProposal` 的 Pydantic validator 在提案建立時先攔截，Guard 的 schema 檢查是第二道防線（`forbidden_arg_field`）。
 4. **Duplicate call**：同一回合內 `tool + normalized args` 重複 → `duplicate_call`；平行 task 也共用同一份去重狀態。
-5. **全回合唯讀步數上限**：`AYUE_SUBAGENT_MAX_READS`（預設且硬上限 3）超限 → `step_limit_exceeded`。
+5. **每個 sub-task 唯讀步數上限**：`AYUE_SUBAGENT_MAX_READS`（預設且硬上限 3）以 task id 個別計數；同回合不同 sub-task 不會互相吃掉 read 額度，單一 task 超限 → `step_limit_exceeded`。
 6. **WRITE 工具一律回 `WRITE_REQUIRES_CONFIRMATION`**，由 Scheduler 建立 confirmation；READ 工具通過。
 
 Guard 不審核語意、不猜意圖、不檢查參數「內容」的正確性（那由 tool facade 與 domain service 負責）。詳細設計見 `docs/architecture/07-guard.md`。
@@ -284,8 +284,8 @@ calendar / places / web / match / relationship / profile 六個 sub-agent，各�
 
 - **同層並行**：`depends_on=[]` 的任務同層執行，無執行順序保證。
 - **prior observation 只給依賴**：同層無依賴任務之間互不可見；synthesizer 例外（彙整所有）。
-- **多 tool calls 全數執行**：單一 call 失敗不使整個 task 標記失敗；只要至少一個 call 成功，task 即為 ok。
-- **duplicate 與額度以整回合為範圍**：平行任務共用去重狀態、最多三個唯讀步驟與一筆 pending confirmation；Calendar Agent 的一個 command batch 可包含最多 10 個有序 mutation plans。
+- **多 tool calls 全數執行**：單一 call 失敗不使整個 task 標記失敗；只要至少一個 call 成功，task 即為 ok，依賴 task 也以「至少一筆 OK」判定可繼續。
+- **duplicate 與額度以整回合為範圍**：平行任務共用去重狀態與一筆 pending confirmation；每個 sub-task 個別最多三個唯讀步驟；Calendar Agent 的一個 command batch 可包含最多 10 個有序 mutation plans。
 - **MENTIONED 工具需有 @ 對象**：無 @ 時該 call 標記 `FAILED/mentioned_required`，不執行、不崩潰 run。
 - **sub-task 例外不連坐**：任何未捕獲例外轉成 `FAILED`，run 永不因單一 sub-task 崩潰成整段 error。
 - **reuse within task**：只有 prior observation 已驗證同一個 query 所需的相同 fact/arguments 時，才重用完全相同或冗餘 read；不同 target、日期、欄位或問題仍需重新查詢。
@@ -365,15 +365,13 @@ Trace 不保存完整 prompt、owner message、observations、tool arguments/res
 | Flag | 用途 |
 | --- | --- |
 | （無 Public runtime flag） | Public Ayue 永遠走 V3；rollback 透過部署／commit rollback，不在 request-level fallback |
-| `AYUE_AGENT_V3_USER_ALLOWLIST` | 漸進式指定使用者；空值代表全部適用 mode |
 | `AYUE_V3_SIMPLE_CHAT_FAST_PATH=on\|off` | 允許 Planner 對無 domain/tool/workflow 的 direct-chat 回覆跳過 Synthesizer；預設 off，通過 provider semantic eval 後再開啟 |
-| `AYUE_SUBAGENT_MAX_READS` | 整個回合唯讀上限，預設且硬上限 3 |
+| `AYUE_SUBAGENT_MAX_READS` | 每個 sub-task 的唯讀上限，預設且硬上限 3；同回合不同 task 各自計數 |
 | `AYUE_SUBAGENT_MAX_PARALLEL` | 同層 sub-agent 最大並發數，預設且硬上限 2 |
 | `AYUE_OLLAMA_TIMEOUT_SECONDS` | 單次 Ollama HTTP 呼叫 timeout，預設 30 秒，限制 5–120 秒 |
 | `AYUE_LOCAL_DEBUG_TRACE` | 本機 demo-only 詳細執行 trace；預設 off，且 endpoint 仍要求 client/host 都是 loopback |
 | `AYUE_RUNTIME_MODEL_SETTINGS_TOKEN` | 啟用 runtime model settings 管理 API 的 server-side admin token；未設定時不可修改 |
 | `AYUE_ALLOWED_RUNTIME_MODELS` | 管理 API 可切換的 model allowlist；未設定時只允許目前設定值 |
-| `AYUE_SUBAGENT_TIMEOUT_MS` | 單一 sub-agent LLM 呼叫逾時（`.env.example` 已保留，目前 scheduler 尚未消費此旗標；LLM 逾時行為由 `ai_service` 提供） |
 | `AYUE_DEFAULT_TIMEZONE` | 預設 `Asia/Taipei` |
 | `AYUE_CALENDAR_STATE_MONGO` | Calendar recent reference/draft 是否持久化到 Mongo；預設 `on`（仍有 process-memory fallback，TTL 15 分鐘） |
 | `AYUE_PROFILE_SKILLS_MODE=on\|shadow\|off` | Profile extractor 寫入、shadow 觀察或停用（`shadow` 只記錄不寫入） |
@@ -384,10 +382,12 @@ Trace 不保存完整 prompt、owner message、observations、tool arguments/res
 | `AYUE_GOOGLE_PLACE_CARDS_ENABLED` | 啟用 Google Places 為主要地點 provider；需同時設定下列兩把 key |
 | `GOOGLE_PLACES_SERVER_API_KEY` | 後端 Places API New Text Search + Routes API key；僅限這些 API |
 | `GOOGLE_MAPS_BROWSER_API_KEY` | 前端 Maps JavaScript / Maps Embed API key；必須限制 HTTP referrer；Embed 無限免費 |
-| `AYUE_GOOGLE_PLACE_PHOTOS_ENABLED` | Place Details Photos SKU；預設 `off`，**2026-08-04 決議不顯示照片** |
+| `AYUE_GOOGLE_PLACE_PHOTOS_ENABLED` | 選用 photo-media request；預設 `off`，需先確認 quota 與成本 |
 | `AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED` | Routes API Compute Routes Essentials；預設 `on`；`off` 時只回 OSM haversine 直線距離 |
 
-> 計費等級注意：rating / userRatingCount / currentOpeningHours 屬 **Enterprise** SKU，本專案基於成本控制**一律不要求這些欄位**，place card 不顯示評分、評論數或營業狀態。
+Google Routes 距離能力只依賴 `AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED` 與 server API key；不依賴 browser key，也不與 Google 地點卡片的顯示開關綁定。
+
+> 成本邊界：本專案不要求 rating / userRatingCount / currentOpeningHours，place card 不顯示評分、評論數或營業狀態。啟用 Google 能力前應重新核對 provider 的即時計價與 quota。
 
 基礎服務另需 `MONGO_URI`、LLM/Ollama、Google embedding；設定 `TAVILY_API_KEY` 後才開啟 Web Search／Extract。地點工具的 provider 優先序為 Google Places(主要)→ OSM Nominatim/Overpass(fallback)。port 9001 matchmaker 需要 `LLM_*` 與 Neo4j 設定。可提交的欄位範例見 `social_demotest/.env.example` 與 `matchmaker_agent/.env.example`；包含真實密鑰的 `.env` 不得提交或交付。
 
@@ -396,6 +396,10 @@ Trace 不保存完整 prompt、owner message、observations、tool arguments/res
 ### Backend contract
 
 1. 先部署本版本 backend 與 Mongo indexes，保留既有 `/api/direct_chat` JSON endpoint。
+   `GET /api/health` 是 Public App 的 process-readiness endpoint，只回傳
+   `{"status":"ok","service":"ayue"}`，不得探測或洩漏使用者、Mongo、
+   Neo4j 或模型資料。Windows launcher 以此 typed identity 判斷 8000，
+   預設允許 90 秒冷啟動。
 2. Public V3 無需 allowlist 或 runtime flag；以部署版本作為 rollout／rollback 邊界。
 3. 不可在 App 自己重建 intent classification。App 只送原始訊息與必要 mention，語意由 V3 Planner 處理。
 4. 不可在 V3 timeout/error 時由 App 再呼叫 legacy endpoint；這會造成訊息及副作用重複。
@@ -445,18 +449,20 @@ Trace 不保存完整 prompt、owner message、observations、tool arguments/res
 
 新增真實失敗案例時，優先將它匿名化後加入 V3 trajectory 測試，再修對應 contract、projection 或 prompt；不要先增加一句特例 regex。
 
-## 13. 設計文件
+## 13. 現行文件索引
 
-完整 V3 設計見 `docs/superpowers/specs/2026-08-04-sub-agent-architecture-design.md`。
+- `docs/architecture/01-project-overview.md`：服務與 runtime 邊界。
+- `docs/architecture/03-v3-runtime-lifecycle.md`：單回合的實際執行生命週期。
+- `docs/architecture/04-tool-registry.md`：22 個現行工具與 confirmation 契約。
+- `docs/architecture/subagent-*.md`：六個 domain sub-agent 的個別責任。
+- `MEMORY_CONTEXT_ENGINE_GUIDE.md`：durable memory、Graph 與 Context Engine 邊界。
 
-## Current cleanup baseline
+## Current runtime baseline
 
-Public V3 is unconditional; rollback is performed by reverting the deployed
-deployment artifact. Public V2, rollout allowlists, and request-level legacy
-fallbacks are removed. Private Ayue remains an independent current V2 runtime
-using `private_v2.py` and `private_calendar.py`. The calendar compatibility
-tool names remain because they are still accepted by V3 confirmation records;
-normal mutations use the current calendar command service.
+Public requests always use `v3/scheduler.py`; runtime mode flags and
+request-level fallback do not exist. Private Ayue remains an independent V2
+runtime using `private_v2.py` and `private_calendar.py`. Rollback is performed
+by reverting the deployment or commit, not by enabling another request path.
 ### Calendar clarification and fuzzy target contract
 
 Calendar target lookup keeps exact matching as the compatibility path and may
@@ -472,7 +478,7 @@ bounded candidate suggestion, never a generic agent failure.
 
 The AI provider receives a separate `system` message for role, hard semantic
 policy and tool-selection behavior, and a `user` message for the current task
-and bounded context data. Legacy callers may keep the single-user compatibility
+and bounded context data. Existing single-user API callers may keep the compatibility
 path. Planner receives only routing context; domain-specific memory, location
 and observations are sliced for the responsible sub-agent. Synthesizer uses a
 grounded-result mode when observations exist and a general-conversation mode
@@ -484,13 +490,25 @@ Public V3 reply presentation is typed: ordinary conversation and social opening
 use one or two bubbles (160 characters per bubble), product information uses one
 or two bubbles (240-character envelope), and transactions, capability replies
 and fallbacks stay in one bubble. Greetings, confirmations and single facts may
-be shorter. Grounded results may use the 240-character envelope only when needed
-to preserve verified calendar, candidate or confirmation detail. Server-owned
+be shorter. Verified calendar and confirmation detail keep the 240-character
+envelope. Web／Places synthesis uses the separate `grounded_recommendation`
+envelope (up to three bubbles, 1,400 characters per bubble and 3,600 characters
+total), so multi-source or multi-candidate answers are not truncated to the
+ordinary chat limit. Server-owned
 previews and verified mutation outcomes are not paraphrased or padded. The
 Synthesizer may use one `compose_public_reply` function call to produce bubbles
 and place-card decisions together; `reply` remains the compatibility projection.
 Tone guidance is presentation-only and must not participate in Planner routing,
 Guard decisions or domain authority.
+
+For a day-trip or activity-plus-day request, Planner may set the additive
+`Plan.presentation_mode="itinerary"`. This remains the same V3 DAG: Places
+supplies server-owned candidate cards and an optional Web task supplies a typed
+`primary_activity`; Synthesizer then calls `compose_public_reply` with a
+bounded itinerary contract (3--7 ordered, non-overlapping stops). If no date
+was requested, the rendered Markdown explicitly says it is an undated
+suggestion and does not claim volatile opening hours. Place card references
+remain server-owned, and the field defaults to `default` for compatibility.
 # Demo maintenance and match diagnostics
 
 The local Demo destructive tools are guarded by `DEMO_DESTRUCTIVE_TOOLS_ENABLED`.
@@ -652,6 +670,15 @@ composition.
 
 Before finishing, the Web Agent emits a typed evidence assessment
 (`aligned|conflict` plus `direct_sufficient|direct_partial|adjacent_only|none`).
+Each Web task also carries `evidence_policy`: `casual_discovery` for ordinary
+activities, restaurants, travel, events, promotions, sports, and shops, or
+`strict_verification` for explicit official/confirmed requests and
+medical/legal/financial/security-risk claims. Casual mode may use relevant
+public social, community, venue, or business announcements with a visible
+change-warning; strict mode keeps the direct-evidence threshold.
+For simple casual questions, a directly relevant bounded Search result may be
+used without forcing an Extract call. Extract remains available for exact
+details, full schedules, or strict confirmation requests.
 Direct evidence is required for an `answered` result. Adjacent or conflicting
 evidence produces `partial` or `insufficient_evidence` with explicit
 limitations; unavailable credentials and tool failures remain distinct
@@ -676,6 +703,13 @@ Likewise, a provider's bounded string-only finish findings are normalized into
 the typed finding shape and overlong explanation text is truncated before
 strict validation; URLs and evidence coverage are never invented by this
 normalization.
+Ordinary Web searches use a schema that does not expose Places-only
+`subject_refs`; the stricter subject-bound search schema is enabled only when
+the current task actually has server-owned place candidates. This prevents a
+normal entity search from being misclassified as a candidate verification run.
+Observed Web rows receive short per-run `web_source_01`-style references for
+finish findings. The server resolves those references back to URLs from the
+current observation catalog; unobserved model references are discarded.
 Provider-specific or localized source-type labels are conservatively normalized
 to `other`; this preserves the observed URL and claim without pretending the
 source is official, news, or social.
@@ -687,12 +721,25 @@ URL. If the finish decision is still invalid after successful Web calls, the
 result is `degraded/model_failure` and retains the observed safe source catalog
 instead of rewriting the whole run as unavailable with empty sources.
 
+A malformed or missing Web decision function call receives exactly one
+typed-decision retry with the same round tools and budgets. The retry does not
+execute a Web capability by itself and does not enlarge the three-round,
+three-tool-call research budget; a second invalid decision still fails closed
+as `model_failure`. Retryable provider timeout, rate-limit, and 5xx failures
+use stable trace-safe codes. If a Web observation already succeeded but a
+later decision call fails, Scheduler spends the remaining finish-only round to
+recover the evidence result; it never issues an extra search or opens an
+unbounded loop.
+
 `web_finish_decision` asks the model only for bounded semantic booleans
 (`evidence_conflicts_target`, `has_direct_evidence`,
 `direct_evidence_complete`) plus source-bound findings. Runtime derives
 `coverage` and final status from those values, so descriptive model prose
 cannot enter closed enum fields. No evidence is not treated as target conflict;
 only observed evidence that contradicts the answer target sets that flag.
+Each finding's own `direct` value is also enforced. One direct finding cannot
+upgrade another explicitly adjacent finding merely because the round-level
+`has_direct_evidence` flag is true.
 Findings without an observed safe URL cannot become direct supported claims.
 For ordinary, low-risk discovery such as events, restaurants, and itinerary
 ideas, evidence relevance is separate from source authority. A matching public
@@ -718,27 +765,67 @@ Planner may create `places -> web -> synthesizer`. The Web task receives at
 most five privacy-safe candidate summaries and server-owned current-turn
 `place_candidate_*` references. Web findings, source URLs, and Synthesizer
 card selection must retain that subject binding; name matching is forbidden.
+For a new public activity plus a full-day plan, the Planner may instead create
+`web -> places -> web -> synthesizer`: the first Web task finds one
+direct-supported activity, Places uses its typed venue observation as the
+anchor, and the second Web task verifies only the bounded place candidates.
+The second Web decision also receives a bounded projection of upstream Web
+findings so activity date/location constraints are not lost between tasks.
 
 The Synthesizer keeps retrieval and presentation separate. Places may retrieve
 up to eight candidates, while a grounded recommendation normally selects two
 or three cards and never more than four unless the user explicitly requests a
 larger set. `grounded_recommendation` is a separate bounded presentation class
-(one or two bubbles, 260 characters per bubble, 420 characters total) and is
-not a transaction state. Current UI receives plain prose; Markdown rendering
-and source links remain separate structured UI work.
+(up to three bubbles, 1,400 characters per bubble, 3,600 characters total) and is
+not a transaction state. Web／Places prose may use the UI's safe Markdown subset
+(`###` headings, lists, numbering, bold and inline code). The UI builds DOM
+nodes without accepting model HTML or model-provided source links; typed source
+metadata remains the only clickable citation surface.
+When cards are shown, the optional `presentation_blocks` projection groups a
+Markdown fragment with at most one server-resolved `place_card_index`. The
+Markdown fragment keeps the user-facing place explanation and the card owns
+the map link; new responses do not emit `card_description`. The deprecated
+optional field remains accepted only for historical compatibility and is not
+rendered by the UI.
+`messages`, `reply`, `place_cards`, and `sources` remain backward-compatible projections, while
+source links and the final reminder stay in the last bubble.
 
-## External pattern audit (design validation only)
+The requested Places radius is a hard server-side bound for both OpenStreetMap
+and Google candidates. Google Text Search location bias is not treated as
+enforcement; candidates outside the approved radius are removed before card
+projection or Web subject binding. Map URLs remain on typed place cards and
+are not published in the Web evidence/source section, because a map entity
+does not prove a current criterion such as opening hours.
 
-The following primary patterns were reviewed as concepts, not adopted as
-runtime dependencies:
+When candidate discovery succeeds but Web is unavailable or returns
+insufficient evidence, the Synthesizer does not spend another model call trying
+to manufacture a recommendation. It returns a Markdown candidate summary plus
+a natural limitation, keeps at most three nearby cards explicitly labelled as
+unconfirmed candidates, and never presents them as verified recommendations.
+Adjacent findings may be shown only under an explicit unconfirmed heading. If
+direct source-bound findings exist but composition fails, fallback card
+selection follows only those finding subject refs. For Web-only results,
+deterministic fallback must
+retain validated direct findings; an `answered` result may never collapse into
+a generic insufficient-information sentence merely because final composition
+failed.
 
-| Pattern | Useful principle for Ayue | Do not copy | V3 decision |
-| --- | --- | --- | --- |
-| OpenClaw | Keep typed web/search/browser capabilities separate from workflow instructions (`SKILL.md`). | Do not import its plugin/skill runtime or browser automation. | Keep `web.search`/`web.extract` in the Tool Registry; keep research policy in the Web Agent contract and Planner task brief. |
-| OpenAI Agents SDK | Model -> tool -> observation -> model is the correct sequential observation shape; tool output is returned before the next decision. | Do not migrate the harness or inherit an unbounded runner loop. | Existing Scheduler-owned bounded loop remains; observations are projected before the next Web decision. |
-| LangGraph Agentic RAG | Retrieve -> relevance grade -> query rewrite -> retrieve again -> generate directly addresses adjacent-result drift. | Do not add LangGraph or a general graph runtime. | Keep the lightweight typed evidence assessment, target-aligned query anchoring, and one bounded refinement round. |
-| Deep Research-style systems | Adapt/pivot only when evidence shows the current query is insufficient. | Do not build an open-ended research product, long-form report flow, or browser agent. | Keep Web at three decision rounds / three calls and finish with explicit partial or insufficient evidence. |
+The public-reply language boundary converts model text to Traditional Chinese
+per line, retaining Markdown newlines and blank-line structure. The frontend
+renders only headings, lists, numbering, bold, and inline code through DOM
+nodes; it never inserts model HTML. This keeps Web/Places results readable
+without allowing formatting to become an injection surface.
 
-These comparisons do not change Ayue's native V3 ownership model; they validate
-the Web capability/workflow split, observation loop, relevance check, query
-refinement, and explicit insufficient-evidence outcome.
+### Directional match-copy projection
+
+Match explanations are generated and stored per viewer/counterparty direction.
+`match_reason_style_id` deterministically selects one of five approved few-shot
+styles from the pair IDs and creation-context revision; the selected style is
+stored internally with the proposal, while public cards expose only one
+viewer-bound reason. V7 provider calls return separate
+`other_sentence`/`viewer_bridge_sentence`/`ask_sentence` fragments. The server
+validates each fragment against the correct person's snapshot and composes
+`viewer_text`, so a counterparty's recent context cannot be swapped into the
+viewer direction. Invalid or older stored output uses the same selected-style
+fallback. Reprojection is read-only for live proposals; accepted/declined
+history is never rewritten.

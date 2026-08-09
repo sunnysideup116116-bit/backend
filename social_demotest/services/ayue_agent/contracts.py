@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class DecisionKind(str, Enum):
@@ -121,6 +121,28 @@ class AgentDecision(BaseModel):
     place_search_followup: Literal["none", "recommend"] = "none"
 
 
+class PresentationBlock(BaseModel):
+    """Bounded server/UI projection for Markdown fragments and place cards."""
+    model_config = ConfigDict(extra="forbid")
+
+    message_index: int = Field(ge=0, le=2)
+    # Empty markdown is allowed only when a card is bound. Older persisted
+    # blocks may still carry the deprecated card_description field.
+    markdown: str = Field(default="", max_length=1400)
+    place_card_indices: list[int] = Field(default_factory=list, max_length=1)
+    # Deprecated compatibility input. New responses must keep explanations in
+    # markdown and leave this field unset.
+    card_description: str | None = Field(default=None, min_length=1, max_length=180)
+
+    @model_validator(mode="after")
+    def validate_projection(self):
+        if self.card_description and not self.place_card_indices:
+            raise ValueError("card_description requires one place_card_indices entry")
+        if not self.markdown and not self.place_card_indices:
+            raise ValueError("presentation block needs markdown or a place card")
+        return self
+
+
 class AgentResult(BaseModel):
     handled: bool
     reply: str | None = None
@@ -141,8 +163,9 @@ class AgentResult(BaseModel):
     fallback_reason: str | None = None
     match_readiness_state: str | None = None
     match_guidance_shown: bool = False
-    # Legacy/private compatibility metadata. Public V2 always lets the isolated
-    # profile extractor inspect the saved owner message and ignores this gate.
+    # Compatibility metadata. The Public HTTP layer excludes assessment turns
+    # through profile_write_reason; ordinary saved owner messages still reach
+    # the isolated extractor.
     profile_write_allowed: bool = True
     assessment_state: str | None = None
     assessment_kind: str | None = None
@@ -150,5 +173,6 @@ class AgentResult(BaseModel):
     profile_write_reason: str = "casual"
     sources: list[dict[str, str]] = Field(default_factory=list)
     place_cards: list[dict[str, str]] = Field(default_factory=list)
+    presentation_blocks: list[PresentationBlock] = Field(default_factory=list, max_length=12)
     llm_call_metrics: list[dict[str, Any]] = Field(default_factory=list)
 

@@ -13,6 +13,14 @@ class PublicLanguageNormalizationTests(unittest.TestCase):
         raw_json = '{"text":"这是"}'
         self.assertEqual(normalize_public_reply(raw_json), raw_json)
 
+    def test_markdown_layout_keeps_headings_lists_and_blank_lines(self):
+        value = "### 查詢結果\n\n- **第一筆**：內容\n- 第二筆\n\n### 參考來源\n\n1. `官方頁面`"
+        normalized = normalize_public_reply(value)
+        self.assertIn("### 查詢結果\n\n", normalized)
+        self.assertIn("- **第一筆**:內容\n- 第二筆", normalized)
+        self.assertIn("\n\n### 參考來源", normalized)
+        self.assertEqual(normalize_public_reply(normalized), normalized)
+
 
 if __name__ == "__main__":
     unittest.main()

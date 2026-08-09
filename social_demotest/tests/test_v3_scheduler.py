@@ -18,6 +18,7 @@ from services.ai_service import ToolCallResult
 from services.ayue_agent.v3.scheduler import (
     _apply_card_decision, _assessment_start_confirmation_requested,
     _direct_chat_block_reason, _prior_observations_for, _public_place_cards,
+    _resolve_presentation_blocks,
     run_public_agent_turn_v3,
 )
 
@@ -785,65 +786,6 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertNotIn("t1", [p["task_id"] for p in prior])
         self.assertNotIn("t3", [p["task_id"] for p in prior])
 
-    @unittest.skip("legacy direct Calendar proposal contract removed; typed command flow is covered below")
-    def test_find_candidates_flow_into_dependent_calendar_write_task(self):
-        """修改/取消行程兩階段：read task 的 find_my_event 候選必須進入
-        write task 的 context slice（含 ambiguous 的 candidates 陣列）。"""
-        ctx = self._ctx("把8/12的吃牛排改到8/15")
-        plan = Plan(tasks=[
-            SubTask(id="t1", agent="calendar", depends_on=[], task_brief="查詢原本行程"),
-            SubTask(id="t2", agent="calendar", depends_on=["t1"], task_brief="提出修改"),
-            SubTask(id="t3", agent="synthesizer", depends_on=["t2"], task_brief="彙整"),
-        ])
-        seen_slices: list[dict] = []
-
-        def fake_runner(context_slice, *, task_brief):
-            seen_slices.append({"slice": context_slice, "brief": task_brief})
-            if task_brief == "查詢原本行程":
-                return ([ToolProposal(tool_name="calendar.find_my_event",
-                                      arguments={"event_hint": "吃牛排"})], _sub_metrics())
-            return ([ToolProposal(tool_name="calendar.update_my_event", arguments={
-                "event_hint": "8月12日18:00到20:00吃牛排",
-                "date": "2026-08-15", "start_time": "18:00", "end_time": "20:00",
-            })], _sub_metrics())
-
-        find_result = {
-            "status": "found", "reason_code": "", "activity": "吃牛排",
-            "date": "2026-08-12", "start_time": "18:00", "end_time": "20:00",
-            "event_kind": "personal", "companion_known": False,
-            "companion_display_name": "對方", "companion_safe_summary": "",
-            "candidates": [],
-        }
-        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
-             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
-                 "calendar": MagicMock(side_effect=fake_runner),
-             }), \
-             patch("services.ayue_agent.v3.scheduler.execute_tool",
-                   return_value=MagicMock(ok=True, data=find_result, error_code=None)) as mock_exec, \
-             patch("services.ayue_agent.v3.scheduler.prepare_write_confirmation",
-                   return_value=({"action": "calendar.update_my_event", "arguments": {}, "data": {}},
-                                 "要把「吃牛排」改成8/15嗎？回覆「確認」")) as prepare, \
-             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.update_many"), \
-             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one"), \
-             patch("services.ayue_agent.v3.synthesizer.synthesize",
-                   return_value=("好，等你確認", None, _synth_metrics())):
-            mock_build.return_value = MagicMock()
-            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            mock_build.return_value._mentioned_ids = []
-            mock_build.return_value.user_id = "owner"
-            result = run_public_agent_turn_v3(ctx)
-        self.assertTrue(result.handled)
-        # t1 read 執行一次；t2 write 的 context 必須帶入 t1 的 find_my_event observation
-        mock_exec.assert_called_once()
-        self.assertEqual(len(seen_slices), 2)
-        write_slice = seen_slices[1]["slice"]
-        prior = write_slice.payload.get("prior_observations") or []
-        self.assertEqual(len(prior), 1)
-        self.assertEqual(prior[0]["tool"], "calendar.find_my_event")
-        self.assertEqual(prior[0]["result"]["date"], "2026-08-12")
-        prepare.assert_called_once()
-
     def test_multi_call_sub_agent_executes_every_proposal(self):
         """A sub-agent emitting two tool calls must execute both, not just the first."""
         ctx = self._ctx("在高雄市三民區找牛排餐廳和冰店")
@@ -1186,99 +1128,6 @@ class V3SchedulerWriteTests(unittest.TestCase):
         exec_write.assert_called_once()
         self.assertEqual(exec_write.call_args.kwargs["payload"]["_confirmation_id"], "c1")
 
-    @unittest.skip("legacy direct Calendar proposal contract removed; typed batch confirmation is covered above")
-    def test_only_one_write_confirmation_created_per_subtask(self):
-        # 同一 sub-task 提出兩個寫入工具時，calendar 寫入合併進同一 confirmation；
-        # 非 calendar 寫入（match）仍一回合最多一筆。
-        ctx = self._ctx("幫我取消A和新增B")
-        plan = Plan(tasks=[
-            SubTask(id="t1", agent="calendar", depends_on=[], task_brief="處理行程"),
-            SubTask(id="t2", agent="synthesizer", depends_on=["t1"], task_brief="彙整"),
-        ])
-        seen_obs = {}
-        def fake_synth(slice_payload, candidate_cards=None):
-            seen_obs["observations"] = slice_payload.payload.get("observations", [])
-            return ("好", None, _synth_metrics())
-        def fake_prepare(tool_name, arguments, ctx_obj, turn_obj):
-            return ({"action": tool_name, "arguments": arguments, "data": {}},
-                    f"要執行{tool_name}嗎？回覆「確認」")
-        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
-             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
-                 "calendar": MagicMock(return_value=(
-                     [
-                         ToolProposal(tool_name="calendar.cancel_my_event", arguments={"event_hint": "A"}),
-                         ToolProposal(tool_name="calendar.create_my_event", arguments={
-                             "title": "B", "date": "2026-08-20", "start_time": "10:00", "end_time": "11:00",
-                         }),
-                     ], _sub_metrics())),
-             }), \
-             patch("services.ayue_agent.v3.scheduler.prepare_write_confirmation", side_effect=fake_prepare), \
-             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.update_many"), \
-             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one") as insert, \
-             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.update_one") as update_one, \
-             patch("services.ayue_agent.v3.synthesizer.synthesize", side_effect=fake_synth):
-            mock_build.return_value = MagicMock()
-            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            mock_build.return_value._mentioned_ids = []
-            result = run_public_agent_turn_v3(ctx)
-        self.assertTrue(result.handled)
-        insert.assert_called_once()
-        inserted = insert.call_args[0][0]
-        self.assertEqual(inserted["tool_name"], "calendar.cancel_my_event")
-        # 第二筆 create 併入同一 confirmation 的 batch（新格式 {tool, arguments, data}）
-        update_one.assert_not_called()
-        obs = seen_obs.get("observations", [])
-        confirmed = [o for o in obs if o.get("tool") == "calendar.create_my_event"]
-        self.assertEqual(len(confirmed), 1)
-        self.assertFalse(confirmed[0]["result"].get("pending_confirmation"))
-        self.assertEqual(confirmed[0]["result"].get("ignored"), "one_write_per_turn")
-
-    @unittest.skip("legacy direct Calendar proposal contract removed; typed batch confirmation is covered above")
-    def test_two_create_proposals_keep_only_first_confirmation(self):
-        # 同一 sub-task 提出兩筆 calendar.create_my_event → 一次 confirmation + batch 陣列；
-        # 一次「確認」即新增兩筆（需求：一次確認變更多個行程）。
-        ctx = self._ctx("幫我新增8/12吃牛排和8/9看醫生")
-        plan = Plan(tasks=[
-            SubTask(id="t1", agent="calendar", depends_on=[], task_brief="新增兩筆行程"),
-            SubTask(id="t2", agent="synthesizer", depends_on=["t1"], task_brief="彙整"),
-        ])
-        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
-             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
-                 "calendar": MagicMock(return_value=(
-                     [
-                         ToolProposal(tool_name="calendar.create_my_event", arguments={
-                             "title": "吃牛排", "date": "2026-08-12", "start_time": "18:00", "end_time": "20:00",
-                         }),
-                         ToolProposal(tool_name="calendar.create_my_event", arguments={
-                             "title": "看醫生", "date": "2026-08-09", "start_time": "08:30", "end_time": "12:05",
-                         }),
-                     ], _sub_metrics())),
-             }), \
-             patch("services.ayue_agent.v3.scheduler.prepare_write_confirmation",
-                   side_effect=lambda tn, args, c, t: (
-                       {"action": tn, "arguments": args, "data": {}},
-                       f"要新增{args['title']}嗎？回覆「確認」",
-                   )), \
-             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one") as insert, \
-             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.update_one") as update_one, \
-             patch("services.ayue_agent.v3.synthesizer.synthesize",
-                   return_value=("好，等你確認", None, _synth_metrics())):
-            mock_build.return_value = MagicMock()
-            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
-            mock_build.return_value._mentioned_ids = []
-            result = run_public_agent_turn_v3(ctx)
-        self.assertTrue(result.handled)
-        # 只建立一筆 confirmation；第二筆 create 是 push 到同一 confirmation 的 batch 欄位
-        insert.assert_called_once()
-        inserted = insert.call_args[0][0]
-        self.assertEqual(inserted["tool_name"], "calendar.create_my_event")
-        self.assertEqual(inserted["arguments"]["title"], "吃牛排")
-        # 第二筆 create 透過 $push 加入 batch（新格式 {tool, arguments, data}）
-        update_one.assert_not_called()
-
-
 class V3SchedulerTraceTests(unittest.TestCase):
     def test_local_debug_trace_marks_direct_chat_fast_path(self):
         from services.ayue_agent.v3.debug_trace import get_run
@@ -1615,7 +1464,44 @@ class V3SchedulerAssessmentTests(unittest.TestCase):
 
 
 class V3SchedulerMetadataTests(unittest.TestCase):
-    def test_sources_and_llm_metrics_populated(self):
+    def test_presentation_block_keeps_explanation_in_markdown_and_selected_index(self):
+        blocks = _resolve_presentation_blocks(
+            [{
+                "message_index": 0,
+                "markdown": "",
+                "card_description": "這是距離較近的候選，可以優先比較。",
+                "candidate_refs": ["place_candidate_a"],
+            }],
+            [{
+                "candidate_ref": "place_candidate_a",
+                "name": "店A",
+                "category": "restaurant",
+                "distance_label": "約 200 公尺",
+            }],
+            ["附近有一個候選。"],
+        )
+        card_block = next(block for block in blocks if block.place_card_indices)
+        self.assertEqual(card_block.place_card_indices, [0])
+        self.assertEqual(card_block.markdown, "這是距離較近的候選，可以優先比較。")
+        self.assertIsNone(card_block.card_description)
+
+    def test_presentation_block_missing_note_gets_safe_fallback(self):
+        blocks = _resolve_presentation_blocks(
+            [],
+            [{
+                "candidate_ref": "place_candidate_a",
+                "name": "店A",
+                "category": "restaurant",
+                "distance_label": "約 200 公尺",
+            }],
+            ["附近有一個候選。"],
+        )
+        card_block = next(block for block in blocks if block.place_card_indices)
+        self.assertIn("**店A**", card_block.markdown)
+        self.assertIn("餐廳", card_block.markdown)
+        self.assertIsNone(card_block.card_description)
+
+    def test_place_cards_are_separate_from_web_sources_and_metrics_populated(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="查一下附近餐廳")
         plan = Plan(tasks=[
             SubTask(id="t1", agent="places", depends_on=[], task_brief="找餐廳"),
@@ -1637,8 +1523,9 @@ class V3SchedulerMetadataTests(unittest.TestCase):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             result = run_public_agent_turn_v3(ctx)
-        self.assertTrue(result.sources)
-        self.assertEqual(result.sources[0]["title"], "店A")
+        self.assertEqual(result.sources, [])
+        self.assertTrue(result.place_cards)
+        self.assertEqual(result.place_cards[0]["name"], "店A")
         self.assertTrue(result.llm_call_metrics)
         self.assertIn("input_tokens", result.llm_call_metrics[0])
 

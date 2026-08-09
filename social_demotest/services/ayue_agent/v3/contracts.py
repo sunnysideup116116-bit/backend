@@ -46,6 +46,16 @@ class SubTask(BaseModel):
     agent: Literal["calendar", "places", "web", "match", "relationship", "profile", "synthesizer"]
     depends_on: list[str] = Field(default_factory=list, max_length=3)
     task_brief: str = Field(min_length=1, max_length=500)
+    evidence_policy: Literal["casual_discovery", "strict_verification"] | None = None
+
+    @model_validator(mode="after")
+    def _normalize_evidence_policy(self) -> "SubTask":
+        if self.agent == "web":
+            if self.evidence_policy is None:
+                self.evidence_policy = "casual_discovery"
+        elif self.evidence_policy is not None:
+            raise ValueError("evidence_policy is only valid for Web tasks")
+        return self
 
 
 class Plan(BaseModel):
@@ -57,6 +67,7 @@ class Plan(BaseModel):
         default="tasks",
         description="tasks runs the existing DAG; direct_chat is a task-free conversational reply",
     )
+    presentation_mode: Literal["default", "itinerary"] = "default"
     # At most three domain specialists plus one terminal synthesizer.
     tasks: list[SubTask] = Field(default_factory=list, max_length=4)
     direct_reply: str | None = Field(
@@ -93,6 +104,8 @@ class Plan(BaseModel):
                 raise ValueError("direct_chat plan cannot contain product_info_topics")
             if self.opportunity is not None and self.opportunity.signal != "none":
                 raise ValueError("direct_chat plan cannot contain an opportunity")
+            if self.presentation_mode != "default":
+                raise ValueError("direct_chat plan cannot use itinerary presentation")
             return self
 
         if self.mode == "product_info":
@@ -100,6 +113,8 @@ class Plan(BaseModel):
                 raise ValueError("product_info plan cannot contain tasks or opportunity")
             if self.direct_reply is not None or self.direct_messages:
                 raise ValueError("product_info plan cannot contain direct reply")
+            if self.presentation_mode != "default":
+                raise ValueError("product_info plan cannot use itinerary presentation")
             if not self.product_info_topics:
                 raise ValueError("product_info plan requires topics")
             if len(set(self.product_info_topics)) != len(self.product_info_topics):
@@ -110,6 +125,8 @@ class Plan(BaseModel):
             raise ValueError("tasks plan cannot contain direct reply or product_info topics")
         if not self.tasks:
             raise ValueError("tasks plan requires at least one task")
+        if self.presentation_mode == "itinerary" and not any(t.agent == "places" for t in self.tasks):
+            raise ValueError("itinerary plan requires a places task")
 
         ids = {t.id for t in self.tasks}
         if len(ids) != len(self.tasks):

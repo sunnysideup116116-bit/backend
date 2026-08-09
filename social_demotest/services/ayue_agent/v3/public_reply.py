@@ -51,19 +51,18 @@ class AyueReplyPresentation(BaseModel):
     @model_validator(mode="after")
     def _validate_messages(self) -> "AyueReplyPresentation":
         limits = {
-            "conversation": (1, 2, 160),
-            "social_opportunity": (1, 2, 200),
-            "product_info": (1, 2, 240),
-            "transaction": (1, 1, 240),
-            "capability": (1, 1, 160),
-            "fallback": (1, 1, 160),
-            "onboarding": (3, 3, 240),
-            # A bounded editorial envelope for multi-candidate discovery.
-            # Keep this separate from transaction: length is not a domain
-            # state and must not change the presentation meaning.
-            "grounded_recommendation": (1, 2, 260),
+            "conversation": (1, 2, 160, 3),
+            "social_opportunity": (1, 2, 200, 4),
+            "product_info": (1, 2, 240, 5),
+            "transaction": (1, 1, 240, 5),
+            "capability": (1, 1, 160, 3),
+            "fallback": (1, 1, 160, 3),
+            "onboarding": (3, 3, 240, 5),
+            # A generous but finite editorial envelope for Web/Places
+            # discovery. Length is presentation budget, not a domain state.
+            "grounded_recommendation": (1, 3, 1400, 28),
         }
-        low, high, max_chars = limits[self.presentation_class]
+        low, high, max_chars, max_sentences = limits[self.presentation_class]
         if not low <= len(self.messages) <= high:
             raise ValueError("invalid message count for presentation class")
         normalized: list[str] = []
@@ -76,6 +75,8 @@ class AyueReplyPresentation(BaseModel):
                 },
                 reject_internal_identifiers=True,
                 reject_structured_output=True,
+                max_chars=max_chars,
+                max_sentences=max_sentences,
             )
             if validation.reply is None or len(validation.reply) > max_chars:
                 raise ValueError(f"invalid presentation message: {validation.reason or 'too_long'}")
@@ -84,7 +85,7 @@ class AyueReplyPresentation(BaseModel):
             normalized.append(validation.reply)
         if (
             self.presentation_class == "grounded_recommendation"
-            and sum(len(message) for message in normalized) > 420
+            and sum(len(message) for message in normalized) > 3_600
         ):
             raise ValueError("grounded recommendation envelope too long")
         self.messages = normalized
@@ -111,6 +112,8 @@ def validate_public_reply(
     preserve_details: bool = False,
     reject_internal_identifiers: bool = False,
     reject_structured_output: bool = False,
+    max_chars: int | None = None,
+    max_sentences: int | None = None,
 ) -> PublicReplyValidation:
     """Normalize and validate one human-facing model reply.
 
@@ -136,7 +139,12 @@ def validate_public_reply(
                 return PublicReplyValidation(None, "structured_reply")
 
     normalized = normalize_public_language(normalize_public_reply(raw))
-    concise = _concise_public_reply(normalized, preserve_details=preserve_details)
+    concise = _concise_public_reply(
+        normalized,
+        preserve_details=preserve_details,
+        max_chars=max_chars,
+        max_sentences=max_sentences,
+    )
     if not concise:
         return PublicReplyValidation(None, "empty_reply")
     if _INTERNAL_META_REPLY_RE.search(concise):

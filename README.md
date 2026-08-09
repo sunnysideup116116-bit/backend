@@ -30,7 +30,7 @@ Context Builder
 | [01-project-overview.md](./docs/architecture/01-project-overview.md) | 系統定位、兩個服務、公開阿月 vs 悄悄話、主要資料流 |
 | [02-python-modules.md](./docs/architecture/02-python-modules.md) | 每個 Python 模組在做什麼（routers / services 對照表） |
 | [03-v3-runtime-lifecycle.md](./docs/architecture/03-v3-runtime-lifecycle.md) | 一回合完整生命週期：Planner → Guard → 工具 → Synthesizer、確認流程、trace |
-| [04-tool-registry.md](./docs/architecture/04-tool-registry.md) | 23 個工具的契約、執行流程與新增工具檢查清單 |
+| [04-tool-registry.md](./docs/architecture/04-tool-registry.md) | 22 個現行工具的契約、執行流程與新增工具檢查清單 |
 | [05-matchmaker-and-memory.md](./docs/architecture/05-matchmaker-and-memory.md) | port 9001 媒婆、Neo4j 圖記憶、profile pipeline、配對狀態真相 |
 | [06-testing.md](./docs/architecture/06-testing.md) | 測試指令、分類與必覆蓋面向 |
 | [07-guard.md](./docs/architecture/07-guard.md) | Central Guard：審核什麼、GuardResultCode 全表、被拒絕後的處理 |
@@ -38,6 +38,7 @@ Context Builder
 | [subagent-calendar.md](./docs/architecture/subagent-calendar.md) | 行事曆子代理：能做什麼、呼叫哪些 function、端到端範例 |
 | [subagent-match.md](./docs/architecture/subagent-match.md) | 配對子代理：狀態查詢、搜尋 job、提案 CAS、主動牽線 |
 | [subagent-places.md](./docs/architecture/subagent-places.md) | 地點子代理：附近地點、距離、地點卡、OSM/Google provider |
+| [subagent-web.md](./docs/architecture/subagent-web.md) | Web 子代理：Tavily 查詢、證據等級、活動探索與 Places 串接 |
 | [subagent-relationship.md](./docs/architecture/subagent-relationship.md) | 關係子代理：@ 驗證、已接受聯絡人、可驗證互動摘要 |
 | [subagent-profile.md](./docs/architecture/subagent-profile.md) | 個人檔案子代理：self summary、記憶、性格探索 session |
 
@@ -46,7 +47,7 @@ Context Builder
 - [AYUE_V3_ARCHITECTURE.md](./AYUE_V3_ARCHITECTURE.md)：實際 runtime、tool、state、API 與 App 遷移方式（內容為 V3 sub-agent 架構）
 - [AGENTS.md](./AGENTS.md)：後續 coding agent 必須遵守的邊界與擴充規則
 - [MEMORY_CONTEXT_ENGINE_GUIDE.md](./MEMORY_CONTEXT_ENGINE_GUIDE.md)：長期建議、Neo4j Graph Memory 與 Context Engine 的資料邊界、Hermes Agent 參考方式和實作順序
-- [docs/](./docs/)：其他詳細設計與變更說明（Google Maps 遷移計畫、行事曆已知問題、地點菜系支援等）
+- [docs/architecture/](./docs/architecture/)：以現行程式為準的架構與 sub-agent 文件；已完成的 migration／Phase 計畫不保留為現況文件
 
 ## 專案結構
 
@@ -55,7 +56,7 @@ Context Builder
 | `social_demotest/` | FastAPI 主服務、Web Demo、Public/Private Ayue 與測試（port 8000） |
 | `matchmaker_agent/` | 候選排序、Neo4j 記憶與 feedback service（port 9001） |
 | `docs/architecture/` | 架構導覽與 sub-agent 流程文件（本文檔） |
-| `docs/` | 其他詳細設計與技術規格說明 |
+| `docs/` | 現行架構與技術契約文件 |
 | `skills/` | 近期情境、長期記憶與性格探索的 versioned policy |
 | `start_ayue.ps1` | Windows 啟動與 health check |
 | `start_ayue.cmd` | PowerShell 啟動腳本的 cmd wrapper |
@@ -107,9 +108,14 @@ start_ayue.cmd -Background
 啟動腳本會啟動並檢查：
 
 - Web Demo：<http://127.0.0.1:8000/>
+- Web Demo health：<http://127.0.0.1:8000/api/health>
 - Matchmaker API 文件：<http://127.0.0.1:9001/docs>
+- Matchmaker health：<http://127.0.0.1:9001/health>
 
 `9001/docs` 是後端 API 文件，不是 App 畫面。
+冷啟動健康檢查預設等待 90 秒；較慢的本機環境可用
+`-StartupTimeoutSeconds 120` 調整。健康檢查使用固定 JSON service identity，
+不依賴首頁標題或畫面文字。
 
 ## 測試
 

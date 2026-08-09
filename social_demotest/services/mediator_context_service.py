@@ -1,4 +1,4 @@
-"""Shared, bounded context helpers for legacy public and private mediator chat."""
+"""Bounded context helpers used by the current Private Ayue runtime."""
 
 from __future__ import annotations
 

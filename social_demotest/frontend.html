@@ -96,6 +96,61 @@
             word-wrap: break-word;
         }
 
+        .message-markdown { white-space: normal; }
+        .message-markdown > :first-child { margin-top: 0; }
+        .message-markdown > :last-child { margin-bottom: 0; }
+        .message-markdown h3,
+        .message-markdown h4 {
+            margin: .7rem 0 .35rem;
+            font-size: .95rem;
+            font-weight: 800;
+            line-height: 1.4;
+        }
+        .message-markdown h3 {
+            padding-bottom: .25rem;
+            border-bottom: 1px solid rgba(161, 94, 63, .28);
+            color: #7c3f2c;
+        }
+        .message-markdown h4 { color: #8d543d; font-size: .9rem; }
+        .message-markdown p { margin: .35rem 0; }
+        .message-markdown ul,
+        .message-markdown ol {
+            margin: .35rem 0 .55rem 1.15rem;
+            padding: 0;
+        }
+        .message-markdown ul { list-style: disc; }
+        .message-markdown ol { list-style: decimal; }
+        .message-markdown li { margin: .3rem 0; padding-left: .1rem; }
+        .message-markdown li::marker { color: #b36547; font-weight: 800; }
+        .message-markdown strong { color: #5b3326; font-weight: 800; }
+        .message-markdown code {
+            padding: .08rem .3rem;
+            border-radius: .3rem;
+            background: rgba(0, 0, 0, .08);
+            font-size: .9em;
+        }
+        .public-source-list {
+            margin-top: .8rem;
+            padding-top: .55rem;
+            border-top: 1px solid rgba(161, 94, 63, .25);
+            display: flex;
+            flex-direction: column;
+            gap: .3rem;
+            font-size: .74rem;
+        }
+        .public-source-list > span {
+            color: #8d543d;
+            font-weight: 800;
+        }
+        .public-source-link {
+            display: block;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #8d4d32;
+            text-decoration: underline;
+        }
+
         .bubble-user {
             background: linear-gradient(135deg, #8b5cf6, #6366f1);
             color: white;
@@ -1605,7 +1660,7 @@
             if (!safeCards.length) return;
             const list = document.createElement("div");
             list.className = "place-card-list";
-            safeCards.forEach(card => {
+            safeCards.forEach((card, index) => {
                 const wrapper = document.createElement("div");
                 wrapper.className = "place-card place-card-custom";
                 renderCustomPlaceCard(wrapper, card);
@@ -3027,9 +3082,130 @@
             });
         }
 
+        function appendInlineMarkdown(container, text) {
+            const value = String(text || "");
+            const tokenPattern = /(\*\*[^*\n]+\*\*|`[^`\n]+`)/g;
+            let cursor = 0;
+            for (const match of value.matchAll(tokenPattern)) {
+                if (match.index > cursor) {
+                    container.appendChild(document.createTextNode(value.slice(cursor, match.index)));
+                }
+                const token = match[0];
+                const node = document.createElement(token.startsWith("**") ? "strong" : "code");
+                node.textContent = token.startsWith("**") ? token.slice(2, -2) : token.slice(1, -1);
+                container.appendChild(node);
+                cursor = match.index + token.length;
+            }
+            if (cursor < value.length) {
+                container.appendChild(document.createTextNode(value.slice(cursor)));
+            }
+        }
+
+        function appendAssistantMarkdown(container, text) {
+            container.textContent = "";
+            container.classList.add("message-markdown");
+            const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+            let activeList = null;
+            let activeListType = "";
+
+            for (const rawLine of lines) {
+                const line = rawLine.trim();
+                if (!line) {
+                    activeList = null;
+                    activeListType = "";
+                    continue;
+                }
+                const heading = line.match(/^(#{2,4})\s+(.+)$/);
+                const unordered = line.match(/^[-*]\s+(.+)$/);
+                const ordered = line.match(/^\d+\.\s+(.+)$/);
+                if (heading) {
+                    activeList = null;
+                    activeListType = "";
+                    const node = document.createElement(heading[1].length <= 2 ? "h3" : "h4");
+                    appendInlineMarkdown(node, heading[2]);
+                    container.appendChild(node);
+                    continue;
+                }
+                if (unordered || ordered) {
+                    const listType = ordered ? "ol" : "ul";
+                    if (!activeList || activeListType !== listType) {
+                        activeList = document.createElement(listType);
+                        activeListType = listType;
+                        container.appendChild(activeList);
+                    }
+                    const item = document.createElement("li");
+                    appendInlineMarkdown(item, (ordered || unordered)[1]);
+                    activeList.appendChild(item);
+                    continue;
+                }
+                activeList = null;
+                activeListType = "";
+                const paragraph = document.createElement("p");
+                appendInlineMarkdown(paragraph, line);
+                container.appendChild(paragraph);
+            }
+        }
+
         function appendRoomMessage(text, isUser, messageData = {}) {
             const cm = document.getElementById("room-messages");
             const presentationMessages = messageData?.metadata?.presentation_messages;
+            const presentationBlocks = messageData?.metadata?.presentation_blocks;
+            if (!isUser && Array.isArray(presentationBlocks) && presentationBlocks.length) {
+                const bubbles = (Array.isArray(presentationMessages) && presentationMessages.length
+                    ? presentationMessages : [text]).slice(0, 3);
+                const safeCards = Array.isArray(messageData?.metadata?.place_cards)
+                    ? messageData.metadata.place_cards.slice(0, 8) : [];
+                const sources = Array.isArray(messageData?.metadata?.sources)
+                    ? messageData.metadata.sources.slice(0, 5) : [];
+                bubbles.forEach((bubble, messageIndex) => {
+                    const div = document.createElement("div");
+                    div.className = "chat-bubble bubble-other fade-in whitespace-pre-wrap";
+                    const blocks = presentationBlocks.filter(block => Number(block?.message_index) === messageIndex);
+                    if (blocks.length) {
+                        blocks.slice(0, 12).forEach(block => {
+                            const section = document.createElement("div");
+                            section.className = "presentation-block";
+                            appendAssistantMarkdown(section, block?.markdown || "");
+                            const cardIndices = Array.isArray(block?.place_card_indices)
+                                ? block.place_card_indices : [];
+                            const cards = cardIndices
+                                .map(index => Number(index))
+                                .filter(index => Number.isInteger(index) && index >= 0 && index < safeCards.length)
+                                .map(index => safeCards[index]);
+                            if (cards.length) {
+                                appendPlaceCards(section, cards);
+                            }
+                            div.appendChild(section);
+                        });
+                    } else {
+                        appendAssistantMarkdown(div, String(bubble || ""));
+                    }
+                    if (messageIndex === bubbles.length - 1 && sources.length) {
+                        const sourceList = document.createElement("div");
+                        sourceList.className = "public-source-list";
+                        const label = document.createElement("span");
+                        label.textContent = "參考來源";
+                        sourceList.appendChild(label);
+                        sources.forEach(source => {
+                            try {
+                                const url = new URL(String(source?.url || ""));
+                                if (!["http:", "https:"].includes(url.protocol)) return;
+                                const link = document.createElement("a");
+                                link.href = url.href;
+                                link.target = "_blank";
+                                link.rel = "noopener noreferrer";
+                                link.className = "public-source-link";
+                                link.textContent = String(source?.title || url.hostname).slice(0, 140);
+                                sourceList.appendChild(link);
+                            } catch (_) {}
+                        });
+                        if (sourceList.childElementCount > 1) div.appendChild(sourceList);
+                    }
+                    cm.appendChild(div);
+                });
+                cm.scrollTop = cm.scrollHeight;
+                return;
+            }
             if (!isUser && Array.isArray(presentationMessages) && presentationMessages.length > 1) {
                 presentationMessages.slice(0, 3).forEach((bubble, index) => {
                     const nextData = {...messageData, metadata: {...(messageData.metadata || {})}};
@@ -3194,7 +3370,11 @@ if (metadata.event_type === "date_coordination_form") {
 
             const div = document.createElement("div");
             div.className = `chat-bubble ${isUser ? 'bubble-user' : 'bubble-other'} fade-in whitespace-pre-wrap`;
-            appendMessageText(div, text, isUser ? (messageData.metadata || {}).mention_labels : []);
+            if (isUser) {
+                appendMessageText(div, text, (messageData.metadata || {}).mention_labels);
+            } else {
+                appendAssistantMarkdown(div, text);
+            }
             const placeCards = !isUser ? ((messageData.metadata || {}).place_cards || []) : [];
             const placeUrls = new Set(Array.isArray(placeCards) ? placeCards.map(card => String(card?.map_url || "")) : []);
             const sources = !isUser && Array.isArray((messageData.metadata || {}).sources)
@@ -3202,9 +3382,9 @@ if (metadata.event_type === "date_coordination_form") {
                 : [];
             if (Array.isArray(sources) && sources.length) {
                 const sourceList = document.createElement("div");
-                sourceList.className = "mt-3 pt-2 border-t border-white/20 flex flex-col gap-1 text-xs";
+                sourceList.className = "public-source-list";
                 const label = document.createElement("span");
-                label.textContent = "公開來源";
+                label.textContent = "參考來源";
                 sourceList.appendChild(label);
                 sources.slice(0, 5).forEach(source => {
                     try {
@@ -3214,7 +3394,7 @@ if (metadata.event_type === "date_coordination_form") {
                         link.href = url.href;
                         link.target = "_blank";
                         link.rel = "noopener noreferrer";
-                        link.className = "underline text-sky-300";
+                        link.className = "public-source-link";
                         link.textContent = String(source.title || url.hostname).slice(0, 140);
                         sourceList.appendChild(link);
                     } catch (_) {}
@@ -3921,6 +4101,7 @@ if (metadata.event_type === "date_coordination_form") {
                     if (isPublicAyue) updateAssessmentControls(data);
                     appendRoomMessage(data.reply, false, {metadata: {
                         presentation_messages: Array.isArray(data.messages) ? data.messages : [data.reply],
+                        presentation_blocks: data.presentation_blocks || [],
                         sources: data.sources || [], place_cards: data.place_cards || [],
                     }});
                     if (isPublicAyue) refreshMatchStatus();

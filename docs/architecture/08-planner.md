@@ -1,128 +1,84 @@
 # 08. Planner：任務拆解器
 
-> 本篇說明 V3 架構中的 Planner：它是誰、怎麼把一句話變成子任務 DAG、輸出契約、失敗行為，以及與其他層的關係。程式碼真相在 `social_demotest/services/ayue_agent/v3/planner.py`。
+> 程式碼真相：`social_demotest/services/ayue_agent/v3/planner.py` 與 `v3/contracts.py`。Planner 只做語意規劃，不執行工具、不審核、不寫資料，也不直接保存 domain state。
 
-## 1. Planner 是什麼
+## 1. 唯一輸出：`decompose_tasks`
 
-Planner 是 V3 架構中的**輕量 LLM**，職責只有一個：把使用者這一回合的訊息拆解成一張**靜態子任務 DAG**。
+Planner 透過一次 function calling 輸出 typed `Plan`；不解析自由文字 JSON。Plan 有三種 mode：
 
-```text
-使用者訊息 → Scheduler → Planner (LLM) → Plan (DAG) → Scheduler 執行
-```
+| mode | 用途 | 限制 |
+| --- | --- | --- |
+| `tasks` | 需要 domain tool、查證或 workflow | 1–4 個 task，必須恰有一個 terminal synthesizer |
+| `direct_chat` | 不需要 App/domain 真相的一般聊天 | 不含 task、opportunity 或 product topics；只有 bounded reply/messages |
+| `product_info` | 阿月身份、Public／Private 分工、能力與配對原理 | 不含 task；只輸出 allowlisted `product_info_topics` |
 
-**刻意不做**的事：
+`presentation_mode` 預設 `default`；一日遊、半日遊或整天安排使用 `itinerary`，而且 tasks 中必須包含 Places。
 
-- 不填工具參數（arguments 由 sub-agents 各自以 function calling 提出）。
-- 不審核（審核是 Central Guard 的職責，見 `07-guard.md`）。
-- 不回覆使用者（回覆是 Synthesizer 的職責）。
-- 不提供 `user_id`、match/event ID、revision 或 `expected_status`（這些欄位在 `Plan`/`SubTask`/`ToolProposal` 契約中根本不存在，模型無法輸出）。
+## 2. Task 契約
 
-## 2. 輸出契約：decompose_tasks
-
-Planner 透過**單一 function calling** `decompose_tasks` 輸出，tool call 的 arguments 就是 typed `Plan`（`v3/contracts.py`），不做自由文字 JSON 解析：
+每個 `SubTask` 只有：
 
 ```json
 {
-  "tasks": [
-    {"id": "t1", "agent": "calendar", "depends_on": [], "task_brief": "查詢這週日本人行事曆是否有空檔"},
-    {"id": "t2", "agent": "places", "depends_on": [], "task_brief": "搜尋三民區附近的牛排餐廳"},
-    {"id": "t3", "agent": "synthesizer", "depends_on": ["t1", "t2"], "task_brief": "綜合行程衝突與餐廳推薦回覆"}
-  ],
-  "opportunity": {"signal": "none", "evidence_span": "", "confidence": 0.0}
+  "id": "t1",
+  "agent": "web",
+  "depends_on": [],
+  "task_brief": "找鹽埕區近期可公開查證的新活動，保留日期、時間與場地",
+  "evidence_policy": "casual_discovery"
 }
 ```
 
-- `agent` 只能是：`calendar | places | web | match | relationship | profile | synthesizer`。
-- 每個 task 有 `id`、`agent`、`depends_on[]`、`task_brief`（給該 sub-agent 的簡短中文指示）。
-- `opportunity` 為選用：`signal`（`none`/`social_opening`）、`evidence_span`（原句連續子字串）、`confidence`（0.0–1.0）。
+- `agent`：`calendar | places | web | match | relationship | profile | synthesizer`
+- `depends_on`：最多 3 個已存在 task id。
+- `task_brief`：描述目標與限制，不填 tool arguments。
+- `evidence_policy`：只允許 Web task 使用；`casual_discovery | strict_verification`。
 
-### Plan 的 DAG 驗證（純程式碼，`contracts.py:Plan`）
+Planner 永遠不能提供 `user_id`、match／event ID、revision、expected status 或 executor authority fields。
 
-模型輸出先經 `_DecomposeTasksArguments.model_validate`，再過 `Plan` 的 model_validator：
+## 3. DAG 驗證
 
-1. task id 不可重複。
-2. `depends_on` 必須指向存在的 task id。
-3. synthesizer 必須是**終端**：不能被任何其他 task 依賴。
-4. 至少一個 task。
+`Plan` 的純程式 validator 會拒絕：
 
-任何一項失敗 → `plan_turn` 回 `None` → Scheduler **fail closed**（不執行任何工具，直接回覆「我現在沒辦法判斷這個請求要不要執行」）。
+- 重複 id、未知 dependency、自我依賴、重複 dependency 或 cycle。
+- 沒有／多個 synthesizer，或 synthesizer 不是 terminal。
+- terminal domain task 沒有被 synthesizer 依賴。
+- 非 Web task 帶 `evidence_policy`。
+- `direct_chat`／`product_info` 混入 tasks 或不相容欄位。
+- itinerary 沒有 Places task。
 
-## 3. Planner 的輸入（_planner_prompt）
+任何 schema 或 function-call 錯誤、timeout、缺少 tool call 都使 `plan_turn` 回 `None`；Scheduler fail closed，不執行工具或副作用。
 
-`planner.py:_planner_prompt` 組出 prompt，內含：
+## 4. Routing ownership
 
-| 欄位 | 內容 |
-| --- | --- |
-| `message` | 本次 owner 原始訊息 |
-| `recent_messages` | 最近對話（已清理） |
-| `recent_context` | 本人已保存近期情境 |
-| `user_location` | 本人手動保存的粗略所在地 |
-| `relevant_memories` | 本人相關記憶（≤8） |
-| `clock` | 本回合 Asia/Taipei clock 與相對日期解析 |
-| `active_proposal` | 唯一可操作提案的安全狀態（無內部 ID） |
-| `mentioned_contacts` | 本回合 server 驗證過的 @ 已接受聯絡人公開名稱 |
-| `pending_confirmations` | 該使用者目前有效的 pending confirmation 摘要 |
+Planner 依語意選 agent；程式不另建 keyword router：
 
-Prompt 中列出六個 domain sub-agent 加上 synthesizer 的用途描述（`_AGENT_DESCRIPTIONS`），並給拆解規則，重點包括：
+- 本人行程、空檔、增修取消 → Calendar。
+- 附近地點、距離、地圖卡 → Places。
+- 近期／外部資訊、活動、新聞、公開文章或 URL → Web。
+- 配對狀態、對象、開始搜尋或提案決策 → Match。
+- 已接受聯絡人、`@` 對象與互動摘要 → Relationship。
+- 本人 profile、近期情境、記憶、開始性格探索 → Profile。
+- 無需工具的一般對話 → `direct_chat`；需要 domain synthesis 但沒有 read 的情況可用 synthesizer-only task。
 
-1. **平行原則**：可平行時 `depends_on=[]`；彼此不能互相依賴。
-2. **synthesizer 必為終端**：必須依賴所有需要彙整的 task。
-3. **agent 選擇**：行程→calendar；地點→places；最新／外部／新聞／文章／公開論壇或 URL→web；配對→match；@ 對象/關係→relationship；偏好/近期情境或開始／重新開始 assessment→profile；不確定→只回 synthesizer。Web 不負責地點卡片，且 task_brief 必須保留原始 proposition 與 evidence class。
-4. **新增行程**：單一 calendar task 即可，不必先查詢（task_brief 直接描述要新增的行程）。
-5. **修改/取消行程**：單一 calendar task 直接描述完整 mutation；由 Calendar Agent 產生 typed command，server preflight 唯一 resolve target。
-6. **Opportunity**：使用者表達想有人陪、想認識人或獨自參加不舒服時，在 `opportunity` 填 `social_opening` + 原句 `evidence_span` + `confidence ≥ 0.8`；單純旅行、寒暄或負面情緒一律 `none`。
-7. **Assessment routing**：做／開始／重新做基本性格或深層探索時，必須建立 profile task，不得只建立 synthesizer task。
-8. **只呼叫 `decompose_tasks`**，不輸出其他文字。
+明確要求開始／重試配對必須建立 Match task，不能只輸出 `opportunity.social_opening`。Opportunity 只是有原句 evidence span 且 confidence ≥ 0.8 的柔性建議，不建立 confirmation。
 
-## 4. 呼叫流程（plan_turn 內部）
+## 5. Web／Places／Itinerary
 
-```text
-Scheduler: plan_turn(turn_ctx, pending_confirmations=...)
+- 一般外部查詢：`web → synthesizer`。
+- 地點候選需查目前條件：`places → web → synthesizer`。
+- 未要求新活動的一般區域一日遊：`places → synthesizer` + `presentation_mode="itinerary"`。
+- 找新活動並排整天：`web → places → web → synthesizer` + itinerary。
 
-Current contract corrections:
+Web task 必須保留原始 answer target、地區／時間與證據需求；不能以相鄰背景資料代替答案。一般探索使用 `casual_discovery`，明確官方查證或高風險問題使用 `strict_verification`。詳細契約見 `subagent-web.md`。
 
-- An explicit request to start/retry/search for a match (for example, 「再配對一次」) must produce a `match` task. It must not be represented only as `opportunity.social_opening`.
-- `opportunity.social_opening` is a soft, non-actionable suggestion. Scheduler may show it only as an observation; it does not create a confirmation and must not claim that matching started.
-- Calendar update/cancel follow-ups use the server-owned `calendar_recent_reference` when the user refers to the event just shown. The Planner/Calendar Agent may emit `target_reference="recent_event"`; it never emits authority fields.
-  → 組 prompt（含本回合 context）
-  → generate_chat_completion_with_tools(prompt, [decompose_tasks schema], temperature=0)
-  → 檢查 tool_calls:
-      - 無 tool call            → (None, metrics)  → fail closed
-      - 名稱不是 decompose_tasks → (None, metrics)  → fail closed
-      - arguments 無法通過 _DecomposeTasksArguments 驗證 → (None, metrics) → fail closed
-      - 例外（逾時等）           → (None, metrics)  → fail closed
-  → 組 Plan（含 opportunity）→ 回傳
-```
+## 6. Scheduler 如何使用 Plan
 
-### Web routing contract
-
-When the request asks for current/external information, news, articles,
-public forum or community discussion, or a supplied public URL, Planner emits
-one `web` task and a terminal synthesizer task. The `task_brief` must preserve
-the original proposition and evidence class (for example, forum discussion)
-and explicitly reject adjacent background facts as substitutes. Places is
-never a Web fallback.
-
-## 5. Scheduler 如何使用 Plan
-
-1. **Opportunity 驗證**：`signal == "social_opening"` 且 `confidence ≥ 0.8` 且 `evidence_span` 是原句連續子字串才採用；`ready` 時只產生短期 soft-offer observation，不建立 confirmation。明確開始／重試配對（例如「再配對一次」）必須建立 `match` task，走一般 confirmation。
-2. **拓撲分層**：`_topological_layers` 依 `depends_on` 分層，同層平行執行（`AYUE_SUBAGENT_MAX_PARALLEL` 預設 5）。
-3. **Prior observation 只給依賴**：`_prior_observations_for` 只回傳該 task 宣告的 `depends_on` 的結果——同層無依賴的任務互不可見；synthesizer 例外（彙整全部）。
-4. **依賴失敗**：該 task 標記 `SKIPPED (dependency_failed)`，不執行。
-
-## 6. 與 Sub-agents 的分工
-
-| | Planner | Sub-agents |
-| --- | --- | --- |
-| 輸入 | 整回合 context（含記憶、clock、提案） | 自己的 context slice + task_brief + prior observations |
-| 輸出 | `Plan`（誰來做、順序、做什麼） | `ToolProposal` 列表（具體呼叫哪個工具、填什麼參數） |
-| LLM 呼叫 | 一次（decompose_tasks） | 每 task 一次（可多 tool calls） |
-| 失敗 | fail closed，整回合不執行 | 單一 task 失敗不影響其他 task |
+1. 特殊 assessment／confirmation 入口已在 Planner 前完成。
+2. `_topological_layers` 依 dependency 分層，同層以 `AYUE_SUBAGENT_MAX_PARALLEL` 執行，預設且硬上限 2。
+3. Domain task 只看自己宣告依賴的 prior observations；Synthesizer 彙整全部可用 observation。
+4. 依賴沒有任何成功 observation 時，下游 task 標記 `SKIPPED/dependency_failed`。
+5. 每個 domain sub-agent 再用自己的 function calling 產生具體 `ToolProposal`，由 Guard 與 Scheduler 審核／執行。
 
 ## 7. 測試
 
-`tests/test_v3_planner.py` 覆蓋：牛排範例產生 calendar+places+synthesizer DAG、簡單聊天只產 synthesizer、無 tool call / 錯工具名 / invalid args / timeout → `None`、opportunity 攜帶與驗證。新增拆解規則時必須同步補 planner sequence 測試（不得只靠真實模型手測）。
-
-## 8. 總結
-
-Planner 是 V3「LLM 做語意判斷」的**最小**實現：它只回答「這句請求需要誰、以什麼順序做」，不接觸工具參數、不審核、不回覆。參數由 sub-agents 填、審核由 Guard 做、執行由 Scheduler 編排、回覆由 Synthesizer 產生——每一層的職責都不可越界。
+`test_v3_planner.py` 覆蓋三種 Plan mode、DAG、配對／assessment routing、Web evidence policy、Places 與 itinerary sequence，以及 invalid function call／schema／timeout 的 fail-closed 行為。`test_v3_contracts.py` 固定 validator；真實誤路由案例應再加入匿名 trajectory fixture。

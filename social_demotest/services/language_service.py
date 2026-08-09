@@ -23,7 +23,7 @@ _FALLBACK_S2T = str.maketrans({
     "关": "關", "发": "發", "现": "現", "处": "處", "资": "資", "讯": "訊",
     "实": "實", "际": "際", "还": "還", "没": "沒", "点": "點", "种": "種",
     "从": "從", "经": "經", "过": "過", "谈": "談", "题": "題", "问": "問",
-    "想": "想", "国": "國", "门": "門", "书": "書", "乐": "樂", "观": "觀",
+    "想": "想", "国": "國", "门": "門", "书": "書", "乐": "樂", "观": "觀", "简": "簡", "体": "體",
     "爱": "愛", "觉": "覺", "习": "習", "习": "習", "绪": "緒", "长": "長",
 })
 
@@ -57,6 +57,13 @@ _PUBLIC_REPLY_PROTECTED = re.compile(
 )
 
 
+def _normalize_public_reply_line(value: str) -> str:
+    """Normalize one visible reply line without destroying Markdown layout."""
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = _OPENCC.convert(text) if _OPENCC else text.translate(_FALLBACK_S2T)
+    return re.sub(r"[ \t\f\v]+", " ", text).strip()
+
+
 def normalize_public_reply(value: str | None, *, max_length: int | None = None) -> str:
     """Normalize human-facing model text without rewriting opaque payloads.
 
@@ -65,7 +72,7 @@ def normalize_public_reply(value: str | None, *, max_length: int | None = None) 
     conversion; this boundary only protects those opaque fragments and never
     touches tool arguments, IDs, revisions, or stored JSON.
     """
-    text = str(value or "")
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
     stripped = text.strip()
     if stripped.startswith(("{", "[")):
         try:
@@ -83,15 +90,24 @@ def normalize_public_reply(value: str | None, *, max_length: int | None = None) 
 
     matches = list(_PUBLIC_REPLY_PROTECTED.finditer(text))
     if not matches:
-        return normalize_zh_tw(text, max_length=max_length)
+        normalized = "\n".join(
+            _normalize_public_reply_line(line) for line in text.split("\n")
+        )
+        normalized = re.sub(r"[ \t]*\n[ \t]*", "\n", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
+        return normalized[:max_length].rstrip() if max_length else normalized
     output: list[str] = []
     cursor = 0
     for match in matches:
-        output.append(normalize_zh_tw(text[cursor:match.start()]))
+        output.append(text[cursor:match.start()])
         output.append(hold(match))
         cursor = match.end()
-    output.append(normalize_zh_tw(text[cursor:]))
-    normalized = "".join(output)
+    output.append(text[cursor:])
+    normalized = "\n".join(
+        _normalize_public_reply_line(line) for line in "".join(output).split("\n")
+    )
+    normalized = re.sub(r"[ \t]*\n[ \t]*", "\n", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
     for index, original in enumerate(protected):
         normalized = normalized.replace(f"__AYUE_REPLY_PROTECTED_{index}__", original)
     return normalized[:max_length].rstrip() if max_length else normalized

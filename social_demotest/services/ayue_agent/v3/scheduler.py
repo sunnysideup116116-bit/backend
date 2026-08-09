@@ -14,7 +14,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import config
-from services.ayue_agent.contracts import AgentResult, AgentTurnContext
+from services.ayue_agent.contracts import AgentResult, AgentTurnContext, PresentationBlock
 from services.ayue_agent.context import build_public_agent_turn_context
 from services.ayue_agent.public_relationship_projection import validated_mentioned_contact_ids
 from services.ayue_agent.router import confirmation_choice
@@ -345,7 +345,13 @@ def _distance_label(value: Any) -> str:
 
 
 def _public_sources(task_results: Any) -> list[dict[str, str]]:
-    """Keep only display-safe citations; never persist web page content."""
+    """Keep display-safe Web citations; map links stay on their place cards.
+
+    A Google/OSM place URL proves that a map entity exists, not that a current
+    criterion such as opening hours or an event schedule is true.  Publishing
+    those URLs in the evidence section would visually mislabel candidates as
+    Web support and duplicate the card's own map link.
+    """
     sources: list[dict[str, str]] = []
     seen: set[str] = set()
     if isinstance(task_results, dict):
@@ -374,19 +380,6 @@ def _public_sources(task_results: Any) -> list[dict[str, str]]:
                 candidates = data.get("results") or []
             elif tool_name == "web.extract":
                 candidates = data.get("pages") or []
-            elif tool_name == "places.search_nearby":
-                candidates = [
-                    {"title": str(item.get("name") or "地圖"), "url": str(item.get("map_url") or "")}
-                    for item in (data.get("places") or [])
-                ]
-            elif tool_name == "places.resolve_place":
-                place = data.get("place") or {}
-                candidates = [{"title": str(place.get("name") or "地圖"), "url": str(place.get("map_url") or "")}]
-            elif tool_name == "places.measure_distance":
-                candidates = [{
-                    "title": str(data.get("attribution") or "OpenStreetMap"),
-                    "url": str(data.get("attribution_url") or ""),
-                }]
             else:
                 continue
             for item in candidates:
@@ -556,6 +549,91 @@ def _apply_card_decision(
     if not selected:
         return candidate_cards[:3]
     return selected
+
+
+def _resolve_presentation_blocks(
+    raw_blocks: list[dict[str, Any]] | None,
+    selected_cards: list[dict[str, Any]],
+    messages: list[str],
+) -> list[PresentationBlock]:
+    """Resolve model candidate refs to safe final card indices for the UI."""
+    if not selected_cards or not messages:
+        return []
+    ref_to_index = {
+        str(card.get("candidate_ref")): index
+        for index, card in enumerate(selected_cards)
+        if card.get("candidate_ref")
+    }
+    blocks: list[PresentationBlock] = []
+    assigned: set[int] = set()
+    card_block_messages: set[int] = set()
+    text_block_messages: set[int] = set()
+    for raw in (raw_blocks or [])[:12]:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            message_index = int(raw.get("message_index", 0))
+        except (TypeError, ValueError):
+            continue
+        markdown = str(raw.get("markdown") or "").strip()[:1400]
+        # Older composer payloads put the user-facing explanation in
+        # card_description. Keep that explanation as ordinary Markdown so
+        # the card remains only the map/place surface; never pass the legacy
+        # field to the UI card renderer.
+        if not markdown:
+            markdown = str(raw.get("card_description") or "").strip()[:1400]
+        if message_index < 0 or message_index >= len(messages):
+            continue
+        card_indices: list[int] = []
+        for ref in (raw.get("candidate_refs") or [])[:1]:
+            index = ref_to_index.get(str(ref))
+            if index is not None and index not in assigned:
+                card_indices.append(index)
+                assigned.add(index)
+        if not markdown and not card_indices:
+            continue
+        if markdown:
+            text_block_messages.add(message_index)
+        if card_indices:
+            card_block_messages.add(message_index)
+        blocks.append(PresentationBlock(
+            message_index=message_index,
+            markdown=markdown,
+            place_card_indices=card_indices,
+        ))
+    # A model may choose cards without emitting blocks (old fixtures) or omit
+    # one of its selected refs. Keep every rendered card paired with a bounded
+    # Markdown label instead of dumping all cards at the final bubble.
+    for index, card in enumerate(selected_cards):
+        if index in assigned:
+            continue
+        category_labels = {
+            "restaurant": "餐廳", "cafe": "咖啡廳", "bar": "酒吧",
+            "attraction": "景點", "park": "公園",
+        }
+        category = category_labels.get(str(card.get("category") or ""), "地點")
+        distance = str(card.get("distance_label") or "").strip()
+        suffix = "，".join(value for value in (category, distance) if value)
+        name = re.sub(r"\s+", " ", str(card.get("name") or "地點")).strip()[:80]
+        blocks.append(PresentationBlock(
+            message_index=min(index, len(messages) - 1, 2),
+            markdown=f"- **{name}**" + (f" — {suffix}" if suffix else ""),
+            place_card_indices=[index],
+        ))
+        card_block_messages.add(min(index, len(messages) - 1, 2))
+    # New card-only blocks must not hide the compatibility reply.  If the
+    # synthesizer omitted a standalone text block, keep its validated bubble
+    # before the cards.  Older markdown blocks take precedence unchanged.
+    for message_index in sorted(card_block_messages - text_block_messages):
+        fallback_text = str(messages[message_index] or "").strip()[:1400]
+        if not fallback_text:
+            continue
+        blocks.insert(0, PresentationBlock(
+            message_index=message_index,
+            markdown=fallback_text,
+            place_card_indices=[],
+        ))
+    return blocks[:12]
 
 
 def _same_public_place_reference(requested: Any, resolved: Any) -> bool:
@@ -798,6 +876,7 @@ def _run_web_research(
 ) -> tuple[list[SubTaskResult], SubAgentMetrics]:
     """Run the fixed three-round Web observation loop."""
     aggregate = SubAgentMetrics()
+    evidence_policy = task.evidence_policy or "casual_discovery"
     place_cards = _public_place_cards(
         context_slice.payload.get("prior_observations") or [],
         run_id=run_id,
@@ -829,6 +908,7 @@ def _run_web_research(
             execution_status="unavailable",
             stop_reason="tool_unavailable",
             allowed_subject_refs=allowed_subject_refs if place_candidates else None,
+            evidence_policy=evidence_policy,
         )
         return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
 
@@ -850,11 +930,13 @@ def _run_web_research(
             search_calls_used=search_calls_used,
             extract_calls_used=extract_calls_used,
             place_candidates=place_candidates,
+            evidence_policy=evidence_policy,
         )
         aggregate.input_tokens += metrics.input_tokens
         aggregate.output_tokens += metrics.output_tokens
         aggregate.duration_ms += metrics.duration_ms
         aggregate.tool_calls_raw.extend(metrics.tool_calls_raw or [])
+        aggregate.rejected_calls.extend(metrics.rejected_calls or [])
         aggregate.content_raw = metrics.content_raw
         aggregate.prompt_raw = metrics.prompt_raw
         aggregate.tools_raw = metrics.tools_raw
@@ -862,6 +944,12 @@ def _run_web_research(
         if metrics.error:
             aggregate.error = metrics.error
         if decision is None:
+            # A failed decision after at least one successful Web observation
+            # can still be recovered by the bounded finish-only final round.
+            # Do not spend another Web capability call and do not turn a
+            # transient provider failure into a source-only answer too early.
+            if observations and round_index < MAX_WEB_ROUNDS:
+                continue
             stop_reason = "model_failure"
             result = build_research_result(
                 research_question=turn_ctx.message,
@@ -871,8 +959,13 @@ def _run_web_research(
                 execution_status="degraded" if observations else "unavailable",
                 stop_reason=stop_reason,
                 allowed_subject_refs=allowed_subject_refs if place_candidates else None,
+                evidence_policy=evidence_policy,
             )
             return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
+        if aggregate.error and not metrics.error:
+            # The prior attempt is retained in rejected_calls for local
+            # diagnostics, but the recovered decision itself is healthy.
+            aggregate.error = ""
         last_decision = decision
 
         if decision.assessment is not None and decision.assessment.target_alignment == "conflict":
@@ -885,6 +978,7 @@ def _run_web_research(
                 execution_status="degraded",
                 stop_reason=stop_reason,
                 allowed_subject_refs=allowed_subject_refs if place_candidates else None,
+                evidence_policy=evidence_policy,
             )
             return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
 
@@ -900,6 +994,7 @@ def _run_web_research(
                     execution_status="unavailable",
                     stop_reason=stop_reason,
                     allowed_subject_refs=allowed_subject_refs if place_candidates else None,
+                    evidence_policy=evidence_policy,
                 )
             else:
                 stop_reason = "tool_failure" if failures and not observations else "evidence_sufficient"
@@ -911,6 +1006,7 @@ def _run_web_research(
                     execution_status="degraded" if failures else "completed",
                     stop_reason=stop_reason,
                     allowed_subject_refs=allowed_subject_refs if place_candidates else None,
+                    evidence_policy=evidence_policy,
                 )
             return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
 
@@ -925,6 +1021,7 @@ def _run_web_research(
                 execution_status="unavailable",
                 stop_reason=stop_reason,
                 allowed_subject_refs=allowed_subject_refs if place_candidates else None,
+                evidence_policy=evidence_policy,
             )
             return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
 
@@ -1045,6 +1142,7 @@ def _run_web_research(
         execution_status="degraded" if failures else "completed",
         stop_reason="budget_exhausted" if tool_calls_used >= MAX_WEB_TOTAL_TOOL_CALLS else "model_failure",
         allowed_subject_refs=allowed_subject_refs if place_candidates else None,
+        evidence_policy=evidence_policy,
     )
     return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
 
@@ -1060,8 +1158,9 @@ def _run_sub_task(
 
     The sub-agent may emit multiple tool calls; each proposal is guarded and
     executed independently. A failing call does not discard the others, and
-    Duplicate detection and execution budgets are global to the run. Shared
-    state is guarded by guard_lock, never held around LLM or tool calls.
+    Duplicate detection and the one-write budget are global to the run; the
+    read budget is counted per task id. Shared state is guarded by guard_lock,
+    never held around LLM or tool calls.
     """
     context_slice = slice_for_agent(task.agent, turn_ctx, prior_observations=prior_observations)
     runner = _SUB_AGENT_RUNNERS.get(task.agent)
@@ -1206,7 +1305,8 @@ def _run_sub_task(
         with guard_lock:
             decision = guard_proposal(
                 proposal, agent_name=task.agent,
-                seen_keys=seen_keys, step_count=step_counts.get("__reads", 0),
+                step_count=step_counts.get(f"__reads:{task.id}", 0),
+                seen_keys=seen_keys,
                 max_reads=MAX_READS,
             )
             trace["guard_results"].append(decision.code.value)
@@ -1319,14 +1419,16 @@ def _run_sub_task(
                                               tool_name=proposal.tool_name,
                                               guard_code=GuardResultCode.DUPLICATE_CALL))
                 continue
-            if spec.risk is ToolRisk.READ and step_counts.get("__reads", 0) >= MAX_READS:
-                print(f"  [{task.id}#{index}] guard: global read budget exhausted")
+            read_key = f"__reads:{task.id}"
+            if spec.risk is ToolRisk.READ and step_counts.get(read_key, 0) >= MAX_READS:
+                print(f"  [{task.id}#{index}] guard: sub-task read budget exhausted")
                 results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED,
                                               tool_name=proposal.tool_name,
                                               guard_code=GuardResultCode.STEP_LIMIT_EXCEEDED))
                 continue
             seen_keys.add(key)
-            step_counts["__reads"] = step_counts.get("__reads", 0) + 1
+            if spec.risk is ToolRisk.READ:
+                step_counts[read_key] = step_counts.get(read_key, 0) + 1
         step_id = f"{task.id}#{index}:{proposal.tool_name}"
         _emit_progress(on_progress, "tool_started", trace=trace, agent_run_id=run_id,
                         step_id=step_id, text=spec.progress_text,
@@ -1993,7 +2095,13 @@ def run_public_agent_turn_v3(
             })
 
     _print_separator("PLAN")
-    plan_tasks_json = [{"id": t.id, "agent": t.agent, "depends_on": t.depends_on, "task_brief": t.task_brief} for t in plan.tasks]
+    plan_tasks_json = [{
+        "id": t.id,
+        "agent": t.agent,
+        "depends_on": t.depends_on,
+        "task_brief": t.task_brief,
+        **({"evidence_policy": t.evidence_policy} if t.agent == "web" else {}),
+    } for t in plan.tasks]
     trace["plan"] = [
         {"id": t.id, "agent": t.agent, "depends_on": t.depends_on}
         for t in plan.tasks
@@ -2039,7 +2147,7 @@ def run_public_agent_turn_v3(
 
         def _run_one(task: SubTask) -> tuple[SubTask, list[SubTaskResult], SubAgentMetrics | None]:
             deps_ok = all(
-                task_results.get(dep, [SubTaskResult(task_id=dep, status=SubTaskStatus.FAILED)])[0].status == SubTaskStatus.OK
+                any(result.status is SubTaskStatus.OK for result in task_results.get(dep, []))
                 for dep in task.depends_on
             )
             if not deps_ok:
@@ -2141,6 +2249,7 @@ def run_public_agent_turn_v3(
             if r.status is not SubTaskStatus.SKIPPED:
                 prior.append(_observation_dict(task_id, r))
     synth_slice = slice_for_agent("synthesizer", turn, prior_observations=prior)
+    synth_slice.payload["presentation_mode"] = getattr(plan, "presentation_mode", "default")
     candidate_cards = _public_place_cards(
         [r for results in task_results.values() for r in results],
         run_id=run_id,
@@ -2189,7 +2298,14 @@ def run_public_agent_turn_v3(
             results=[{"reply": reply, "card_decision": card_decision}],
         )
 
-    place_cards = _apply_card_decision(candidate_cards, card_decision)
+    selected_place_cards = _apply_card_decision(candidate_cards, card_decision)
+    presentation_messages = synth_metrics.presentation_messages or [reply]
+    presentation_blocks = _resolve_presentation_blocks(
+        synth_metrics.presentation_blocks,
+        selected_place_cards,
+        presentation_messages,
+    )
+    place_cards = selected_place_cards
     place_cards = [
         {key: value for key, value in card.items() if key not in {"candidate_ref", "distance_m"}}
         for card in place_cards
@@ -2206,7 +2322,7 @@ def run_public_agent_turn_v3(
     result = AgentResult(
         handled=True,
         reply=reply,
-        messages=synth_metrics.presentation_messages or [reply],
+        messages=presentation_messages,
         presentation_class=synth_metrics.presentation_class,
         agent_run_id=run_id,
         agent_mode="v3",
@@ -2215,6 +2331,8 @@ def run_public_agent_turn_v3(
     )
     if place_cards:
         result.place_cards = place_cards
+    if presentation_blocks:
+        result.presentation_blocks = presentation_blocks
     result.sources = _public_sources(task_results)
     result.llm_call_metrics = [{
         "agent": "planner",

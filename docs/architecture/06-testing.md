@@ -1,101 +1,70 @@
 # 06. 測試策略
 
-> 本篇說明測試怎麼跑、覆蓋哪些契約。**所有行為修改都必須有 deterministic test**；不可只用真實模型手測。Test harness 使用 stub config 或 local test database，自動測試不得連線或修改正式 MongoDB Atlas／Neo4j。
+> 所有行為修改都必須有 deterministic test；自動測試不得連線或修改正式 MongoDB Atlas、Neo4j、Tavily 或 Google APIs。測試檔清單以 `social_demotest/tests/test_*.py` 為準，不在文件固定容易過期的檔案數量。
 
-## 1. 執行指令
+## 1. 基本指令
 
-在 `social_demotest/` 下：
+在 `social_demotest/` 下執行：
 
 ```powershell
 $env:AYUE_SKIP_DOTENV = "1"
 $env:MONGO_URI = "mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=50&connectTimeoutMS=50"
 ..\.project-venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
-```
-
-Python compile 檢查：
-
-```powershell
 ..\.project-venv\Scripts\python.exe -m compileall -q .
 ```
 
-## 2. 測試分類（`social_demotest/tests/`，46 檔）
+列出目前測試：
 
-### V3 runtime（9 檔）
+```powershell
+rg --files tests -g "test_*.py" | Sort-Object
+```
 
-| 檔案 | 覆蓋 |
+`test_google_maps_live_smoke.py`、`test_ayue_persona_live.py` 與其他標示 live 的案例需要真實 provider 設定，預設不得成為離線 CI 的必要條件。
+
+## 2. Public V3 核心
+
+| 測試 | 主要契約 |
 | --- | --- |
-| `test_v3_contracts.py` | `Plan`/`SubTask`/`ToolProposal` typed contracts、DAG 驗證、forbidden fields |
-| `test_v3_planner.py` | `plan_turn`：牛排範例產生 calendar+places+synthesizer DAG、assessment intent routing 到 profile、synthesizer-only、無 tool call／錯工具名／invalid args／timeout → None、opportunity 攜帶 |
-| `test_v3_guard.py` | `guard_proposal` 全部 code：pass、unknown tool、schema、duplicate、step limit、write requires confirmation |
-| `test_v3_context_slicer.py` | 各 agent 的 privacy-safe slice 欄位 |
-| `test_v3_scheduler.py` | Scheduler 編排：拓撲層、平行、依賴失敗 skip、assessment profile confirmation、confirmation 入口、fail closed |
-| `test_v3_sub_agents.py` | 各 sub-agent 的 tool 集合與 system prompt 行為，含 profile.start_assessment 與 Calendar typed command rejection |
-| `test_v3_synthesizer.py` | Synthesizer 綜合 observation、typed clarification／confirmed domain reply 不經 LLM 改寫、place card 決策、內部欄位剝離 |
-| `test_v3_web_research.py` | Web bounded loop 的 search→observation→extract 順序、evidence relevance、query budget、URL projection、insufficient/unavailable fallback |
-| `test_v3_confirmation.py` | ConfirmationManager：CAS claim、batch 合併、多 confirmation 獨立性 |
-| `test_v3_write_executors.py` | 寫入執行器：start_search 冪等重放、decide_active_proposal revision CAS / stale、assessment、calendar batch（混合 update+cancel） |
-| `test_v3_trajectories.py` | 匿名 trajectory fixtures：修真實失敗案例時先新增 trajectory，再修 contract／projection／prompt |
+| `test_v3_contracts.py` | `Plan` modes、DAG、evidence policy、forbidden authority fields |
+| `test_v3_planner.py` | `decompose_tasks` function calling、direct chat／product info、Web／Places／itinerary routing、fail closed |
+| `test_v3_guard.py` | registry、schema、duplicate、每 task read budget、write confirmation |
+| `test_v3_context_slicer.py` | 六個 domain sub-agent 與 Synthesizer 的 privacy-safe slice |
+| `test_v3_scheduler.py` | 拓撲層、最大並發 2、dependency skip、confirmation、assessment、fail closed |
+| `test_v3_sub_agents.py` | 各 sub-agent 可見工具與 proposal contract |
+| `test_v3_synthesizer.py`、`test_v3_public_reply.py`、`test_v3_product_surface.py` | grounded reply、presentation、product identity、place-card selection |
+| `test_v3_web_research.py` | bounded Web loop、證據分級、來源綁定、Places 協作與 itinerary |
+| `test_v3_calendar_commands.py`、`test_v3_calendar_verification.py` | typed Calendar mutation、preflight、clarification、recent mutation verification |
+| `test_v3_confirmation.py`、`test_v3_write_executors.py` | pending CAS、batch、idempotency、stale 與 domain write path |
+| `test_v3_debug_trace.py`、`test_ayue_agent_stream.py` | trace／NDJSON allowlist 與隱私 |
+| `test_v3_trajectories.py` + `tests/fixtures/` | 匿名化真實失敗案例回放 |
 
-### 公開阿月元件（8 檔）
+## 3. Domain 與 API
 
-| 檔案 | 覆蓋 |
-| --- | --- |
-| `test_ayue_agent_context.py` | Context builder 限制（12 則訊息／6000 字元）、內部 ID 清理 |
-| `test_ayue_agent_registry.py` | ToolSpec 契約、write tool 不能 bypass runtime executor、output model 驗證 |
-| `test_ayue_agent_maps_tools.py` | OSM/Google 地點工具：saved location 只在要求時使用、Google 失敗回退、distance 無 origin 不猜位置 |
-| `test_ayue_agent_mentions.py` | @ 驗證：公開欄位 only、非 accepted 拒絕 |
-| `test_ayue_agent_stream.py` | NDJSON stream 事件形狀與 sanitize |
-| `test_ayue_agent_time_context.py` | Turn clock 與相對日期解析 |
-| `test_ayue_agent_web_tools.py` | Tavily 搜尋／extract、URL 安全、saved location |
-| `test_ayue_match_opportunity.py` | 配對機會評估：basis、block、fingerprint |
+- 配對：`test_match_*`、`test_accepted_match_integrity.py`，覆蓋 qualification、job、directional reason、CAS／stale／終態。
+- 行事曆／共同約會：`test_calendar_*`、`test_date_coordination_service.py`、`test_private_calendar.py`。
+- Profile／Memory：`test_profile_*`、`test_memory_service.py`、`test_assessment_session_service.py`，特別驗證 owner evidence span 與 message-id idempotency。
+- Private Ayue：`test_private_v2.py`、`test_private_context_projection.py`、`test_private_mediator_extraction.py`、`test_private_redirect.py`；不得和 Public V3 混用 context 或 runtime。
+- 主動關心：`test_proactive_*`；驗證 atomic claim、grounding 與不重複投遞。
+- HTTP／相容性：`test_chat_leaf_routers.py`、`test_chat_router_characterization.py`、`test_start_ayue_launcher.py`；保護 JSON contract、NDJSON final 與 health identity。
+- 外部工具：`test_ayue_agent_web_tools.py`、`test_ayue_agent_maps_tools.py`、`test_google_places_client.py`；一律 stub provider，驗證 timeout、URL／位置安全與 bounded output。
 
-### Domain services（其餘）
+## 4. 必覆蓋的不變量
 
-- 配對：`test_match_action_service.py`、`test_match_decision_service.py`（CAS/stale/idempotency/並發）、`test_match_state_service.py`、`test_match_qualification.py`、`test_match_search_job_service.py`、`test_accepted_match_integrity.py`
-- 行事曆／約會：`test_calendar_event_matching.py`、`test_date_coordination_service.py`
-- 記憶／profile：`test_memory_service.py`、`test_profile_skills.py`、`test_profile_task_service.py`、`test_assessment_session_service.py`
-- 悄悄話：`test_private_ayue_agent.py`、`test_private_mediator_extraction.py`、`test_private_v2.py`
-- 主動關心：`test_proactive_care.py`、`test_proactive_delivery_service.py`、`test_proactive_scheduler.py`
-- 關係：`test_relationship_engagement_service.py`、`test_relationship_quiz_service.py`
-- Router 相容：`test_chat_leaf_routers.py`、`test_chat_router_characterization.py`、`test_chat_service_system_messages.py`
-- 其他：`test_giphy_service.py`、`test_google_places_client.py`、`test_google_maps_live_smoke.py`（live smoke 需真實 key，預設不執行）、`test_demo_tools.py`
+- Planner sequence、DAG 與 fail-closed 行為。
+- Guard result code、tool schema／output、重複呼叫與額度。
+- Confirmation、ownership、CAS、idempotency、stale 與 concurrency。
+- Context／trace／stream／mention 的隱私邊界。
+- Profile evidence 只來自已保存 owner 原句。
+- Public V3 與 Private V2 的 runtime／context 隔離。
+- `POST /api/direct_chat` JSON 相容性與 public NDJSON event allowlist。
+- Web／Places 的來源綁定、卡片 projection、partial evidence 與 itinerary presentation。
 
-## 3. 必覆蓋面向（AGENTS.md 交付標準）
+新增 fallback、result code 或 trace 欄位時，必須同步更新 allowlist 與 privacy test。修真實失敗案例時，先把案例匿名化加入 trajectory fixture，再修 contract、projection 或 prompt；不要新增自然語言 keyword router。
 
-至少覆蓋：
+## 5. 交付檢查
 
-- planner sequence（DAG 拆解）
-- guard（全部 GuardResultCode）
-- tool schema / output（registry + tools facade）
-- trajectory（匿名失敗案例）
-- privacy（context、tool projection、trace allowlist、mention 邊界）
-- profile evidence（evidence_span 驗證、message_id 冪等）
-- state/concurrency（CAS、stale、雙寫入並發、終態不可覆寫）
-- stream 與 JSON compatibility（`/api/direct_chat` contract 只加 optional fields）
-- Product identity/surface contract：same-Ayue identity、bounded cross-surface context、Private 不回流 Public profile/memory、Private 新配對 redirect。
-- Presentation contract：`Plan.mode=product_info`、`AyueReplyPresentation` bubble limits、`AgentResult.messages` additive projection、單回合單筆 assistant storage、onboarding version/idempotency。
-- `tests/fixtures/ayue_voice_eval_v1.json` 提供 40 個 deterministic voice/privacy/product cases；eval 應檢查 hard-fail privacy/transaction/unverified-success 規則，不比對 LLM 完整字串。
-
-## 4. 新增 fallback／result code 時
-
-同步更新 trace allowlist（`scheduler.py:_persist_trace` 允許的 metadata）與 privacy test（`test_ayue_agent_stream.py` 等）。Trace 不得包含 arguments、tool result、prompt、raw exception、ID 或 revision。
-
-Synthesizer 另須覆蓋：capability/general chat 的 synthesizer-only path 不呼叫 domain tool；`reply_source` 能區分 capability、verified observation、LLM 與 fallback；provider error／空 content／被拒絕的模型內容標為 `degraded`，且 Final 必須與 Synthesizer 節點結果逐字一致。Local debug 的 `模型 Function Calls=[]` 代表該回合沒有需要的卡片決策工具，不是 function failure。
-
-## 5. 交付檢查清單
-
-- Python source compile 通過。
-- 主服務與 matchmaker 可啟動，`GET /` 與 port 9001 `/health` 回 200。
-- 修改 runtime contract、tool list、state machine、環境旗標或 App migration 步驟時，同步更新 `AYUE_V3_ARCHITECTURE.md`。
-- 交付清單列出修改檔案、測試指令／結果、未解決問題；不交付 `.env`、venv、log、cache 或真實 trace。
-`test_v3_calendar_commands.py` covers the current typed Calendar mutation contract: authority-field rejection, missing-field clarification, unique/ambiguous/not-found preflight, personal/shared-date routing metadata, one confirmation, one-time resolution, sequential stop-on-failure, and stale cancellation batches.
-
-The regression suite also covers the `calendar.get_next_my_event` safe projection, pronoun follow-up via `target_reference="recent_event"`, soft match-opportunity observations (including explicit acceptance into normal confirmation), and stable match-search failure codes/stages for unavailable vector or matchmaker services.
-
-Places/Web regression coverage also includes dependency projection, ephemeral
-candidate-ref binding, wrong-place source rejection, query anchoring, partial
-evidence, Places-only versus Places->Web routing, and retrieval/display count
-separation. Presentation tests cover curated 2-3 card recommendations,
-broad browse, explicit five-card requests, partial A/C verification, text/card
-mismatch, simple short replies, and the bounded
-`grounded_recommendation` envelope.
+- 相關 deterministic tests 通過，並記錄完整 suite 是否有既有環境型失敗。
+- Python compile 通過。
+- 主服務 `GET /`、`GET /api/health` 與 matchmaker `/health` 回 200。
+- 修改 runtime contract、tool list、state machine 或環境旗標時，同步更新 `AYUE_V3_ARCHITECTURE.md` 與對應 `docs/architecture/` 文件。
+- 不交付 `.env`、venv、log、cache、真實 trace 或 provider raw payload。

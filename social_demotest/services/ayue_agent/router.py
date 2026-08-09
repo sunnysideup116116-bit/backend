@@ -42,26 +42,34 @@ _INTERNAL_META_REPLY_RE = re.compile(
 )
 
 
-def _concise_public_reply(reply: str, *, preserve_details: bool = False) -> str:
+def _concise_public_reply(
+    reply: str,
+    *,
+    preserve_details: bool = False,
+    max_chars: int | None = None,
+    max_sentences: int | None = None,
+) -> str:
     """Bound ordinary chat length without truncating verified structured answers.
 
     Ordinary replies allow up to three sentences and 160 characters.  The
     larger envelope is reserved for grounded, structured details.
     """
     text = re.sub(r"[ \t]+", " ", str(reply or "")).strip()
-    limit = 240 if preserve_details else 160
-    max_sentences = 5 if preserve_details else 3
+    limit = max_chars if max_chars is not None else (240 if preserve_details else 160)
+    sentence_limit = (
+        max_sentences if max_sentences is not None else (5 if preserve_details else 3)
+    )
     sentences = [
         part.strip()
         for part in re.split(r"(?<=[。！？!?])", text)
         if part.strip()
     ]
-    if len(text) <= limit and len(sentences) <= max_sentences:
+    if len(text) <= limit and len(sentences) <= sentence_limit:
         return text
     selected: list[str] = []
     for sentence in sentences:
         candidate = "".join(selected) + sentence
-        if len(candidate) > limit or len(selected) >= max_sentences:
+        if len(candidate) > limit or len(selected) >= sentence_limit:
             break
         selected.append(sentence)
     if selected:

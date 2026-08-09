@@ -15,10 +15,12 @@ from services.match_state_service import get_match_status_snapshot, has_verified
 from services.match_reason_service import (
     FRIEND_COPY_VERSION,
     MATCH_PROPOSAL_FEW_SHOTS,
+    MATCH_PROPOSAL_STYLE_IDS,
     PRIVATE_OPENING_FEW_SHOTS,
     V4_REASON_VERSION,
     build_v4_snapshot_fallback,
     friend_intro_fallback,
+    match_reason_style_id,
     public_personality_phrase,
     reason_for_viewer,
     short_public_text as reason_public_text,
@@ -523,10 +525,66 @@ def _directional_reason_fallback(viewer: dict, other: dict, tier: str) -> dict:
 def _valid_directional_reason(
     value: object, fallback: dict, *, required_context: str = "",
     required_introduced_personality: str = "", required_viewer_personality: str = "",
+    forbidden_viewer_context: str = "",
 ) -> dict:
     """Allow only short, person-first hypotheses; fall back on any provider drift."""
     if not isinstance(value, dict):
         return fallback
+    # V7 asks the provider for role-separated fragments.  Compose them here,
+    # after checking each fragment against the correct person's evidence, so a
+    # model cannot silently move the other person's recent context onto the
+    # viewer (or vice versa).  Keep accepting the V6 viewer_text shape for
+    # immutable in-flight proposals and existing deterministic tests.
+    if any(key in value for key in ("other_sentence", "viewer_bridge_sentence", "ask_sentence")):
+        other_sentence = _short_text(value.get("other_sentence"), 100)
+        viewer_bridge = _short_text(value.get("viewer_bridge_sentence"), 100)
+        ask_sentence = _short_text(value.get("ask_sentence"), 100)
+        if (
+            not other_sentence or not viewer_bridge or not ask_sentence
+            or (required_context and required_context not in other_sentence)
+            or (required_introduced_personality and required_introduced_personality not in other_sentence)
+            or (required_viewer_personality and required_viewer_personality not in viewer_bridge)
+            or (
+                forbidden_viewer_context
+                and forbidden_viewer_context != required_context
+                and forbidden_viewer_context in other_sentence
+            )
+            or (required_context and required_context in viewer_bridge)
+            or "你" not in viewer_bridge
+            or not ask_sentence.endswith(("？", "?"))
+        ):
+            return fallback
+        # A viewer's activity/personality must not be presented as the
+        # counterparty's evidence.  The current context is optional, so only
+        # reject it when it is explicitly available and distinct.
+        text = f"{other_sentence}{viewer_bridge}{ask_sentence}"
+        validated = valid_friend_intro_text(
+            text,
+            required_context=required_context,
+            introduced_personality=required_introduced_personality,
+            viewer_personality=required_viewer_personality,
+            role_bound=True,
+        )
+        if not validated:
+            return fallback
+        starter = _short_text(value.get("conversation_starter"), 72)
+        accepted_opening = valid_accepted_opening_text(
+            value.get("accepted_opening"),
+            required_context=required_context,
+            introduced_personality=required_introduced_personality,
+            viewer_personality=required_viewer_personality,
+        )
+        return {
+            **fallback,
+            "viewer_text": validated,
+            "conversation_starter": starter or fallback["conversation_starter"],
+            "accepted_opening": accepted_opening or fallback["accepted_opening"],
+            "role_segments": {
+                "other_sentence": other_sentence,
+                "viewer_bridge_sentence": viewer_bridge,
+                "ask_sentence": ask_sentence,
+            },
+        }
     text = valid_friend_intro_text(
         value.get("viewer_text"), required_context=required_context,
         introduced_personality=required_introduced_personality,
@@ -551,7 +609,13 @@ def _refine_directional_reason(viewer: dict, other: dict, tier: str, fallback: d
     other_context = reason_public_text(other.get("current_context"), 56)
     if not other_context:
         return fallback
+    style_id = str(fallback.get("style_id") or match_reason_style_id(viewer, other))
+    try:
+        style_index = MATCH_PROPOSAL_STYLE_IDS.index(style_id)
+    except ValueError:
+        style_index = 0
     payload = {
+        "style_id": style_id,
         "recommendation_tier": tier,
         "person_being_introduced_recent_context": other_context,
         "person_being_introduced_personality": _public_personality_phrase(other),
@@ -560,9 +624,11 @@ def _refine_directional_reason(viewer: dict, other: dict, tier: str, fallback: d
     prompt = f"""你是交友軟體裡像朋友一樣牽線的阿月。只寫給一位收件人，不要產生雙向欄位。
 用自然、有變化的繁體中文寫 2 到 3 句：先介紹另一位人選最近想做的事與個性，再用假設語氣說明兩人的個性在那個情境裡可能有什麼舒服、有趣的互動，最後真誠問收件人是否想認識對方或一起參加。
 必須原樣保留「person_being_introduced_recent_context」文字，避免角色顛倒。不同活動不可說成共同興趣；不可說對方已答應、已同意或一定合適；不可補名字、地點、活動、個性或其他事實；禁止「物件」、ID、資料庫與技術詞。不要使用固定標題或條列。
-以下是語氣與結構的參考，必須依資料重新組織，不得逐字複製：{json.dumps(MATCH_PROPOSAL_FEW_SHOTS, ensure_ascii=False)}
+只參考這一種指定語氣，不要讀取或重現其他示例：{json.dumps(MATCH_PROPOSAL_FEW_SHOTS[style_index], ensure_ascii=False)}
+為避免把舊版固定開頭當成唯一模板，請不要固定使用「欸，我想到一個你可能會想認識的人」；本回合以 style_id 為準。
 同時寫一則只會在配對成功後才使用的 accepted_opening：1 到 3 句、像朋友幫忙遞第一句話、須保留 {{{{counterparty}}}} 這個 placeholder 一次，且須包含對方近期情境與雙方公開性格；不可使用真實姓名或補充其他事實。其語氣參考：{json.dumps(PRIVATE_OPENING_FEW_SHOTS, ensure_ascii=False)}
-只輸出 JSON：{{"viewer_text":"","conversation_starter":"","accepted_opening":""}}
+只輸出 JSON：{{"other_sentence":"","viewer_bridge_sentence":"","ask_sentence":"","conversation_starter":"","accepted_opening":""}}
+其中 other_sentence 只能描述被介紹者的近期情境與個性，viewer_bridge_sentence 只能描述收件人的個性與可能的互動，ask_sentence 才能提出是否想認識的問題；三段都必須使用假設語氣。
 資料：{json.dumps(payload, ensure_ascii=False)}"""
     try:
         raw = json.loads(generate_chat_completion(prompt, temperature=0.55, json_output=True).content)
@@ -570,6 +636,7 @@ def _refine_directional_reason(viewer: dict, other: dict, tier: str, fallback: d
             raw, fallback, required_context=other_context,
             required_introduced_personality=_public_personality_phrase(other),
             required_viewer_personality=_public_personality_phrase(viewer),
+            forbidden_viewer_context=reason_public_text(viewer.get("current_context"), 56),
         )
     except Exception:
         return fallback
@@ -674,7 +741,14 @@ def _friend_intro_entry(viewer: dict, other: dict, tier: str, *, refine: bool) -
     other_id = str(other.get("user_id") or "")
     if not viewer_id or not other_id or viewer_id == other_id:
         return {}
-    fallback = _directional_reason_fallback(viewer, other, tier)
+    context_revision = str(
+        other.get("context_revision")
+        or other.get("profile_revision")
+        or other.get("updated_at")
+        or ""
+    )
+    style_id = match_reason_style_id(viewer, other, context_revision=context_revision)
+    fallback = friend_intro_fallback(viewer, other, tier, style_id=style_id)
     reason = _refine_directional_reason(viewer, other, tier, fallback) if refine else fallback
     text = _short_text(reason.get("viewer_text"), 220)
     if not text or any(token in text.lower() for token in ("seed_user", "user_id", "mongo", "資料庫", "物件")):
@@ -682,6 +756,8 @@ def _friend_intro_entry(viewer: dict, other: dict, tier: str, *, refine: bool) -
         text = _short_text(reason.get("viewer_text"), 110)
     return {
         "copy_version": FRIEND_COPY_VERSION,
+        # Internal only: public card projections deliberately drop this field.
+        "style_id": style_id,
         "viewer_id": viewer_id,
         "counterparty_id": other_id,
         "counterparty_context_snapshot": reason_public_text(other.get("current_context"), 56),

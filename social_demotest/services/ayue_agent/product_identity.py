@@ -62,7 +62,8 @@ PUBLIC_REPLY_TONE = (
 )
 PUBLIC_REPLY_LENGTH = (
     "通常 1–2 句；短問候、確認／取消或單一事實可以只回一句，不為湊字數加話。"
-    "一般回覆最多 160 字，已驗證的行程、地點或確認細節最多 240 字。"
+    "一般回覆最多 160 字，已驗證的行程或確認細節最多 240 字。"
+    "Web／Places 的多來源整理不套用一般短聊上限，可用分段、清單完整呈現，單回合仍維持 1,600 字的產品上限。"
 )
 
 PUBLIC_AYUE_PERSONA = "\n\n".join((AYUE_CORE_IDENTITY, AYUE_SURFACE_IDENTITY, PUBLIC_AYUE_ROLE, AYUE_VOICE))

@@ -73,10 +73,21 @@ class V3PublicReplyTests(unittest.TestCase):
         )
         self.assertIsNotNone(presentation)
         self.assertEqual(presentation.presentation_class, "grounded_recommendation")
-        self.assertLessEqual(sum(len(item) for item in presentation.messages), 420)
+        self.assertLessEqual(sum(len(item) for item in presentation.messages), 1_600)
+
+    def test_grounded_recommendation_keeps_markdown_beyond_short_chat_limit(self):
+        message = "### 查詢結果\n\n" + "\n".join(
+            f"- **候選 {index}** — 這是有來源支持的整理內容，包含使用者需要比較的細節。"
+            for index in range(10)
+        )
+        presentation = build_presentation([message], "grounded_recommendation")
+        self.assertIsNotNone(presentation)
+        self.assertGreater(len(presentation.messages[0]), 240)
+        self.assertIn("### 查詢結果", presentation.messages[0])
+        self.assertIn("**候選 9**", presentation.messages[0])
 
     def test_grounded_recommendation_rejects_overlong_total_envelope(self):
-        message = "候選資訊 " * 80
+        message = "候選資訊 " * 240
         self.assertIsNone(build_presentation([message, message], "grounded_recommendation"))
 
 
