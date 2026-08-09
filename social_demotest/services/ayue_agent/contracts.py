@@ -127,7 +127,7 @@ class AgentResult(BaseModel):
     messages: list[str] = Field(default_factory=list, max_length=3)
     presentation_class: Literal[
         "conversation", "social_opportunity", "product_info", "transaction",
-        "capability", "fallback", "onboarding",
+        "capability", "fallback", "onboarding", "grounded_recommendation",
     ] = "conversation"
     # True only when a confirmed Calendar write committed in this turn.  The
     # public UI uses this as a cache-invalidation hint; it is not domain state.

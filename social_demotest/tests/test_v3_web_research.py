@@ -16,6 +16,7 @@ from services.ayue_agent.v3.synthesizer import synthesize
 from services.ayue_agent.v3.web_research import (
     WebEvidenceAssessmentV1,
     anchor_web_search_query,
+    anchor_place_search_query,
     build_research_result,
     project_web_observations,
 )
@@ -111,6 +112,34 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertEqual(decision.queries, ["refined one"])
         self.assertEqual(metrics.error, "")
 
+    def test_web_agent_receives_bounded_place_candidates_and_subject_refs(self):
+        ref = "place_candidate_0123456789abcdef"
+        provider_result = SimpleNamespace(
+            input_tokens=1, output_tokens=1, duration_ms=1, content="",
+            tool_calls=[{"name": "web_search_decision", "arguments": {
+                "queries": ["A Cafe hours"], "subject_refs": [ref],
+            }}],
+        )
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            return_value=provider_result,
+        ):
+            decision, metrics = decide_web(
+                _slice(), task_brief="確認今晚是否營業", round_index=1,
+                observations=[], tool_calls_used=0, search_calls_used=0,
+                extract_calls_used=0,
+                place_candidates=[{
+                    "candidate_ref": ref, "name": "A Cafe", "category": "cafe",
+                    "address_summary": "楠梓區", "distance_m": 800,
+                    "map_url": "https://internal.invalid", "place_id": "secret",
+                }],
+            )
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.subject_refs, [ref])
+        self.assertEqual(metrics.input_payload["place_candidates"][0]["name"], "A Cafe")
+        self.assertNotIn("map_url", metrics.input_payload["place_candidates"][0])
+        self.assertNotIn("place_id", metrics.input_payload["place_candidates"][0])
+
     def test_finish_booleans_derive_insufficient_evidence(self):
         provider_result = SimpleNamespace(
             input_tokens=1, output_tokens=1, duration_ms=1, content="",
@@ -180,6 +209,45 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertIn("weekend events", query)
         self.assertLessEqual(len(query), 300)
 
+    def test_place_query_keeps_candidate_and_unresolved_criterion(self):
+        query = anchor_place_search_query(
+            candidate_name="A Cafe",
+            address_summary="楠梓區",
+            answer_target="確認今晚十點後是否營業",
+            suggested_query="hours",
+        )
+        self.assertIn("A Cafe", query)
+        self.assertIn("今晚十點後是否營業", query)
+        self.assertLessEqual(len(query), 300)
+
+    def test_place_finding_requires_same_subject_source(self):
+        ref_a = "place_candidate_0123456789abcdef"
+        ref_b = "place_candidate_fedcba9876543210"
+        observations = [{
+            "tool": "web.search",
+            "subject_ref": ref_a,
+            "result": _search_result(),
+        }]
+        decision = WebResearchDecision(
+            action="finish",
+            assessment=WebEvidenceAssessmentV1(
+                target_alignment="aligned", coverage="direct_sufficient",
+            ),
+            status="answered",
+            findings=[{
+                "claim": "B is open",
+                "relation": "direct",
+                "subject_ref": ref_b,
+                "source_urls": ["https://example.com/forum/post"],
+            }],
+        )
+        result = build_research_result(
+            research_question="q", answer_target="a", decision=decision,
+            observations=observations, execution_status="completed",
+            stop_reason="evidence_sufficient", allowed_subject_refs={ref_a, ref_b},
+        )
+        self.assertEqual(result.findings, [])
+
     def test_scheduler_executes_anchored_query(self):
         target = "Find 2026-08-10 to 2026-08-16 events at Kaohsiung Pier-2 Art Center."
         decisions = [
@@ -207,6 +275,68 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertEqual(results[0].status, SubTaskStatus.OK)
         self.assertIn("Kaohsiung Pier-2 Art Center", executed_queries[0])
         self.assertIn("2026-08-10", executed_queries[0])
+
+    def test_scheduler_passes_place_candidates_and_preserves_subject_binding(self):
+        target = "Find tonight's public hours at a nearby cafe."
+        slc = _slice(target)
+        slc.payload["prior_observations"] = [{
+            "task_id": "places1",
+            "status": "ok",
+            "tool": "places.search_nearby",
+            "result": {"places": [{
+                "provider": "openstreetmap",
+                "name": "A Cafe",
+                "category": "cafe",
+                "address_summary": "Central District",
+                "distance_m": 700,
+                "map_url": "https://www.openstreetmap.org/?mlat=22.62&mlon=120.31#map=18/22.62/120.31",
+            }]},
+        }]
+        captured_candidates = []
+        executed_queries = []
+
+        def fake_decide(*args, **kwargs):
+            candidates = kwargs.get("place_candidates") or []
+            captured_candidates.append(candidates)
+            ref = candidates[0]["candidate_ref"]
+            if len(captured_candidates) == 1:
+                return WebResearchDecision(
+                    action="search", queries=["opening hours"], subject_refs=[ref],
+                ), SubAgentMetrics(input_tokens=1)
+            return WebResearchDecision(
+                action="finish",
+                assessment=WebEvidenceAssessmentV1(
+                    target_alignment="aligned", coverage="direct_sufficient",
+                ),
+                status="answered",
+                findings=[{
+                    "claim": "A Cafe is open tonight.",
+                    "relation": "direct",
+                    "subject_ref": ref,
+                    "source_urls": ["https://example.com/forum/post"],
+                }],
+            ), SubAgentMetrics(input_tokens=1)
+
+        def fake_execute(tc, raw_ctx, *, clock):
+            executed_queries.append(tc.arguments["query"])
+            return SimpleNamespace(ok=True, data=_search_result())
+
+        with patch.object(scheduler, "web_enabled", return_value=True), \
+             patch.object(scheduler.web_agent, "decide", side_effect=fake_decide), \
+             patch.object(scheduler, "execute_tool", side_effect=fake_execute):
+            results, _metrics = scheduler._run_web_research(
+                SubTask(id="web1", agent="web", task_brief=target),
+                _turn(target), slc, seen_keys=set(), guard_lock=threading.Lock(),
+                on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
+            )
+
+        self.assertEqual(len(captured_candidates), 2)
+        self.assertEqual(captured_candidates[0][0]["name"], "A Cafe")
+        self.assertNotIn("map_url", captured_candidates[0][0])
+        self.assertIn("A Cafe", executed_queries[0])
+        observation = results[0].observation
+        self.assertEqual(observation["status"], "answered")
+        self.assertEqual(observation["findings"][0]["subject_ref"], captured_candidates[0][0]["candidate_ref"])
 
     def _finish(self, *, coverage="direct_sufficient", status="answered", relation="direct"):
         return WebResearchDecision(

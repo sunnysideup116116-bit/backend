@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from services.ayue_agent.v3.contracts import AgentContextSlice
-from services.ayue_agent.v3.synthesizer import synthesize
+from services.ayue_agent.v3.synthesizer import _parse_composed_reply, synthesize
 from services.ai_service import ToolCallResult
 
 
@@ -193,6 +193,44 @@ class V3SynthesizerTests(unittest.TestCase):
         ):
             reply, card_decision, _metrics = synthesize(slc, candidate_cards=self._candidate_cards())
         self.assertEqual(card_decision, {"mode": "none", "indices": []})
+
+    def test_composed_reply_binds_recommendation_refs_to_selected_cards(self):
+        result = _fc_result(tool_calls=[{
+            "name": "compose_public_reply",
+            "arguments": {
+                "messages": ["先選 A，因為目前公開資訊直接支持它。"],
+                "presentation_class": "grounded_recommendation",
+                "card_mode": "select",
+                "card_intent": "curated",
+                "selected_candidate_refs": ["place_candidate_0123456789abcdef"],
+                "recommended_candidate_refs": ["place_candidate_0123456789abcdef"],
+                "discussed_candidate_refs": ["place_candidate_0123456789abcdef"],
+            },
+        }])
+        parsed = _parse_composed_reply(result, [{
+            "candidate_ref": "place_candidate_0123456789abcdef",
+            "name": "A", "category": "cafe", "distance_label": "100 公尺",
+        }])
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed[1]["indices"], [0])
+
+    def test_composed_reply_rejects_recommendation_hidden_from_cards(self):
+        result = _fc_result(tool_calls=[{
+            "name": "compose_public_reply",
+            "arguments": {
+                "messages": ["推薦 A。"],
+                "presentation_class": "grounded_recommendation",
+                "card_mode": "select",
+                "card_intent": "curated",
+                "selected_candidate_refs": ["place_candidate_0123456789abcdef"],
+                "recommended_candidate_refs": ["place_candidate_fedcba9876543210"],
+                "discussed_candidate_refs": ["place_candidate_0123456789abcdef", "place_candidate_fedcba9876543210"],
+            },
+        }])
+        self.assertIsNone(_parse_composed_reply(result, [
+            {"candidate_ref": "place_candidate_0123456789abcdef", "name": "A"},
+            {"candidate_ref": "place_candidate_fedcba9876543210", "name": "B"},
+        ]))
 
     def test_no_candidates_no_tool_exposed(self):
         """Without candidates the tool must not be exposed; no tool call is expected."""

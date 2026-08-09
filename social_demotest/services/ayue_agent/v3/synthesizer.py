@@ -1,8 +1,8 @@
 # social_demotest/services/ayue_agent/v3/synthesizer.py
 """V3 Synthesizer: combines all sub-agent observations into the final user reply.
 
-When place candidates exist, the synthesizer decides card display through a
-typed `decide_place_cards` tool call (function calling), not free-text JSON.
+When place candidates exist, the synthesizer emits one typed composition call
+that contains both the grounded prose and the server-owned card references.
 """
 
 from __future__ import annotations
@@ -54,14 +54,14 @@ class SynthesizerMetrics:
     presentation_messages: list[str] | None = None
     presentation_class: Literal[
         "conversation", "social_opportunity", "product_info", "transaction",
-        "capability", "fallback", "onboarding",
+        "capability", "fallback", "onboarding", "grounded_recommendation",
     ] = "conversation"
 
 
 class _DecidePlaceCardsArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["show_all", "select", "none"]
-    indices: list[int] = []
+    indices: list[int] = Field(default_factory=list)
 
 
 class _ComposePublicReplyArguments(BaseModel):
@@ -69,13 +69,18 @@ class _ComposePublicReplyArguments(BaseModel):
     messages: list[str] = Field(max_length=3)
     presentation_class: Literal[
         "conversation", "social_opportunity", "product_info", "transaction",
-        "capability", "fallback", "onboarding",
+        "capability", "fallback", "onboarding", "grounded_recommendation",
     ] = "conversation"
     card_mode: Literal["show_all", "select", "none"] = "none"
-    indices: list[int] = []
+    card_intent: Literal["browse", "curated", "explicit_set", "none"] = "none"
+    selected_candidate_refs: list[str] = Field(default_factory=list, max_length=8)
+    recommended_candidate_refs: list[str] = Field(default_factory=list, max_length=8)
+    discussed_candidate_refs: list[str] = Field(default_factory=list, max_length=8)
+    # Compatibility input for old local fixtures. Active prompts use refs.
+    indices: list[int] = Field(default_factory=list)
 
 
-def _candidate_card_summaries(candidate_cards: list[dict[str, str]]) -> list[dict[str, str]]:
+def _candidate_card_summaries(candidate_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Bounded public summary of candidate cards for the model.
 
     Only name / category / distance are exposed; map_url, place_id and
@@ -84,14 +89,19 @@ def _candidate_card_summaries(candidate_cards: list[dict[str, str]]) -> list[dic
     summaries = []
     for card in candidate_cards:
         summaries.append({
+            "candidate_ref": str(card.get("candidate_ref") or "")[:80],
             "name": str(card.get("name") or "")[:80],
             "category": str(card.get("category") or "")[:20],
             "distance_label": str(card.get("distance_label") or "")[:40],
+            "distance_m": card.get("distance_m"),
         })
     return summaries
 
 
-_PLACE_INTERNAL_FIELDS = frozenset({"address_summary", "map_url", "provider", "place_id", "photo_url"})
+_PLACE_INTERNAL_FIELDS = frozenset({
+    "address_summary", "map_url", "provider", "place_id", "photo_url",
+    "candidate_ref", "distance_m",
+})
 
 
 def _strip_place_internals(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -125,7 +135,7 @@ def _strip_place_internals(observations: list[dict[str, Any]]) -> list[dict[str,
     return stripped
 
 
-def _legacy_build_prompt(slice_payload: dict[str, Any], candidate_summaries: list[dict[str, str]]) -> str:
+def _legacy_build_prompt(slice_payload: dict[str, Any], candidate_summaries: list[dict[str, Any]]) -> str:
     """Deprecated combined prompt kept only for old local debug fixtures."""
     cards_block = ""
     if candidate_summaries:
@@ -193,8 +203,8 @@ def _synthesizer_system_prompt(mode: str, has_cards: bool) -> str:
     )
     cards_policy = (
         "若 user payload 有 candidate_cards，優先呼叫 compose_public_reply 同時產生 bounded bubbles 與卡片決定；"
-        "舊版 decide_place_cards 只作相容；"
-        "不確定時使用 show_all。"
+        "browse 才使用 show_all；一般推薦使用 card_intent=curated 並選 1-4 張（通常 2-3 張），"
+        "explicit_set 依使用者要求最多 8 張；資料不確定不等於必須 show_all。"
         if has_cards else
         "本回合沒有地點卡片，不要呼叫卡片決策工具。"
     )
@@ -214,12 +224,23 @@ def _synthesizer_system_prompt(mode: str, has_cards: bool) -> str:
 - 若 observations 有結果，必須針對該結果回答，不可改回無關的罐頭聊天。
 - Calendar clarification 只依 clarification.missing_fields、safe candidates、query 回覆；不可固定要求開始與結束時間，也不可宣稱 mutation 已完成。若 code 是 invalid_command，missing_fields 視為空，不得點名任何特定缺漏欄位，因為 schema validation 沒有建立 authoritative missing field。
 - confirmed reply 或 pending confirmation preview若已由 runtime提供，直接忠實呈現，不自行改寫成另一個結果。
-- Calendar observation若有行程，要清楚告知活動與時間；Places card已顯示的店名、地址、距離不要重複列出。
+- Calendar observation若有行程，要清楚告知活動與時間；Places card的完整地址、map URL、provider與每個距離不必機械重複，但可根據 verified observations 討論候選名稱、理由與取捨。
 - match_opportunity_offer只是溫和提議，不代表搜尋已開始或已有 pending confirmation。
 - no_write_proposed/not_found_queries必須誠實說明找不到，不可假裝完成。
 - observation 若包含 product_info，只能使用其中所選 topic 的 facts 回答使用者當下真正問的問題。用自己的自然說法直接回答，不背誦 manifest、不列完整功能清單，也不要改回通用身份介紹；presentation_class 使用 product_info。
 {cards_policy}"""
     prompt += """
+
+Editorial grounded recommendation contract:
+- Use presentation_class=grounded_recommendation only when multiple candidates or findings benefit from synthesis.
+- The answer is primary: conclusion first, then 2-4 grounded findings, comparison/tradeoffs, and verified versus unverified criteria.
+- Do not repeat full addresses, provider names, map URLs, or every distance; cards already carry structured fields.
+- Do discuss candidate names and recommendation reasons when observations support them.
+- card_intent=browse means show_all for broad browsing; card_intent=curated selects 1-4 refs (normally 2-3); explicit_set honors the requested set up to 8.
+- selected_candidate_refs must be the cards that the prose uses. recommended_candidate_refs must be a subset of selected refs, and selected refs must be a subset of discussed refs.
+- Use candidate_ref values exactly as supplied. Never invent refs, URLs, map links, or unsupported atmosphere/quality claims.
+- Current UI does not safely render Markdown: emit plain prose only, with no Markdown syntax or free-form source links.
+- Do not make casual chat, calendar confirmation, or simple Places answers longer just because this class exists.
 
 Web research grounding contract:
 - When an observation contains schema_version=web_research.v1, use its research_question and answer_target as the question authority.
@@ -233,7 +254,7 @@ Web research grounding contract:
     )
 
 
-def _build_prompt(slice_payload: dict[str, Any], candidate_summaries: list[dict[str, str]]) -> str:
+def _build_prompt(slice_payload: dict[str, Any], candidate_summaries: list[dict[str, Any]]) -> str:
     """Build only the Synthesizer user/data message."""
     message = str(slice_payload.get("message") or "").strip()[:1600]
     observations = _strip_place_internals(slice_payload.get("observations") or [])
@@ -297,7 +318,10 @@ def _parse_card_decision(result) -> dict[str, Any] | None:
     return {"mode": validated.mode, "indices": [int(i) for i in validated.indices]}
 
 
-def _parse_composed_reply(result) -> tuple[list[str], dict[str, Any] | None, str] | None:
+def _parse_composed_reply(
+    result,
+    candidate_summaries: list[dict[str, Any]] | None = None,
+) -> tuple[list[str], dict[str, Any] | None, str] | None:
     if not result.tool_calls:
         return None
     tc = result.tool_calls[0]
@@ -310,9 +334,72 @@ def _parse_composed_reply(result) -> tuple[list[str], dict[str, Any] | None, str
     presentation = build_presentation(validated.messages, validated.presentation_class)
     if presentation is None:
         return None
+    summaries = candidate_summaries or []
+    ref_to_index = {
+        str(item.get("candidate_ref")): index
+        for index, item in enumerate(summaries)
+        if str(item.get("candidate_ref") or "")
+    }
+    selected_refs = list(validated.selected_candidate_refs)
+    discussed_refs = list(validated.discussed_candidate_refs)
+    recommended_refs = list(validated.recommended_candidate_refs)
+    # Older local fixtures used indices. Keep parsing them while active model
+    # output is required to use server-owned refs.
+    if validated.indices and ref_to_index:
+        return None
+    if not selected_refs and validated.indices and summaries:
+        selected_refs = [
+            str(summaries[index].get("candidate_ref"))
+            for index in validated.indices
+            if 0 <= int(index) < len(summaries) and summaries[int(index)].get("candidate_ref")
+        ]
+        discussed_refs = discussed_refs or list(selected_refs)
+        recommended_refs = recommended_refs or list(selected_refs)
+    if len(set(selected_refs)) != len(selected_refs):
+        return None
+    if len(set(discussed_refs)) != len(discussed_refs):
+        return None
+    if len(set(recommended_refs)) != len(recommended_refs):
+        return None
+    if not set(selected_refs).issubset(ref_to_index):
+        return None
+    if not set(discussed_refs).issubset(ref_to_index):
+        return None
+    if not set(recommended_refs).issubset(ref_to_index):
+        return None
+    if not set(recommended_refs).issubset(selected_refs):
+        return None
+    if not set(selected_refs).issubset(discussed_refs):
+        return None
+
+    intent = validated.card_intent
+    if intent == "none" and validated.card_mode != "none":
+        intent = "curated"
+    if intent == "browse":
+        if validated.card_mode != "show_all" or selected_refs or recommended_refs:
+            return None
+    elif intent == "curated":
+        if validated.card_mode != "select" or not 1 <= len(selected_refs) <= 4:
+            return None
+    elif intent == "explicit_set":
+        if validated.card_mode != "select" or not 1 <= len(selected_refs) <= 8:
+            return None
+    elif (
+        validated.card_mode != "none"
+        or validated.indices
+        or selected_refs
+        or recommended_refs
+        or discussed_refs
+    ):
+        return None
+
     card_decision = None if validated.card_mode == "none" else {
         "mode": validated.card_mode,
-        "indices": [int(i) for i in validated.indices],
+        "indices": [ref_to_index[ref] for ref in selected_refs],
+        "card_intent": intent,
+        "selected_candidate_refs": selected_refs,
+        "recommended_candidate_refs": recommended_refs,
+        "discussed_candidate_refs": discussed_refs,
     }
     return presentation.messages, card_decision, validated.presentation_class
 
@@ -465,6 +552,16 @@ def _web_research_fallback(result: dict[str, Any]) -> str:
     return "目前公開資料不足以安全整理成答案。"
 
 
+def _place_research_fallback(result: dict[str, Any]) -> str:
+    limitation = "；".join(
+        str(item).strip()[:120]
+        for item in (result.get("limitations") or [])[:1]
+        if str(item).strip()
+    )
+    suffix = f"{limitation}" if limitation else "目前公開資料還不足以確認你問的條件"
+    return f"我先整理幾個附近候選給你，{suffix}。"[:420]
+
+
 def _verified_observation_reply(payload: dict[str, Any]) -> str | None:
     """Return replies that must not be paraphrased by the Synthesizer.
 
@@ -522,12 +619,12 @@ def _verified_observation_reply(payload: dict[str, Any]) -> str | None:
 
 def synthesize(
     context_slice: AgentContextSlice,
-    candidate_cards: list[dict[str, str]] | None = None,
+    candidate_cards: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any] | None, SynthesizerMetrics]:
     """Produce the final user reply from all sub-agent observations.
 
-    Returns (reply, card_decision, metrics). card_decision is None when the
-    model did not call decide_place_cards (caller falls back to show_all).
+    Returns (reply, card_decision, metrics). Card decisions are resolved from
+    server-owned candidate refs before they leave the Synthesizer boundary.
     """
     metrics = SynthesizerMetrics()
     payload = context_slice.payload
@@ -543,7 +640,7 @@ def synthesize(
     candidate_summaries = _candidate_card_summaries(candidate_cards or [])
     product_info = _product_info_from_payload(payload)
     web_research = _web_research_from_payload(payload)
-    if web_research is not None and (
+    if web_research is not None and not candidate_summaries and (
         web_research.get("status") == "insufficient_evidence"
         or web_research.get("execution_status") == "unavailable"
     ):
@@ -553,8 +650,11 @@ def synthesize(
         metrics.presentation_messages = [fallback]
         metrics.presentation_class = "fallback"
         return fallback, None, metrics
-    tools = ([_compose_public_reply_tool_schema(), _decide_cards_tool_schema()]
-             if candidate_summaries else [])
+    direct_finding_count = sum(
+        1 for item in (web_research or {}).get("findings", [])
+        if isinstance(item, dict) and item.get("relation") == "direct"
+    )
+    tools = [_compose_public_reply_tool_schema()] if candidate_summaries or direct_finding_count >= 2 else []
     metrics.tools_raw = tools
     try:
         prompt = _build_prompt(payload, candidate_summaries)
@@ -570,7 +670,7 @@ def synthesize(
         metrics.raw_content = str(result.content or "")
         metrics.tool_calls_raw = result.tool_calls or []
         metrics.used_llm = True
-        composed = _parse_composed_reply(result)
+        composed = _parse_composed_reply(result, candidate_summaries)
         if composed is not None:
             composed_messages, card_decision, presentation_class = composed
             metrics.reply_source = "llm"
@@ -596,9 +696,16 @@ def synthesize(
                 and item["result"].get("match_opportunity_offer")
                 for item in payload.get("observations") or []
             )
+            has_place_observation = any(
+                isinstance(item, dict)
+                and item.get("tool") in {"places.search_nearby", "places.resolve_place"}
+                for item in payload.get("observations") or []
+            )
             presentation_class = "product_info" if product_info is not None else (
                 "social_opportunity" if has_opportunity else (
-                "transaction" if payload.get("observations") and len(reply) > 160 else "conversation"
+                "grounded_recommendation"
+                if candidate_summaries and (web_research is not None or has_place_observation) and len(reply) > 160
+                else "transaction" if payload.get("observations") and len(reply) > 160 else "conversation"
                 )
             )
             presentation = build_presentation([reply], presentation_class)
@@ -622,6 +729,20 @@ def synthesize(
             metrics.presentation_messages = presentation.messages
             metrics.presentation_class = "product_info"
             return "\n\n".join(presentation.messages), None, metrics
+    if web_research is not None and candidate_summaries:
+        fallback = _place_research_fallback(web_research)
+        card_decision = {
+            "mode": "select",
+            "indices": list(range(min(3, len(candidate_summaries)))),
+            "card_intent": "curated",
+        }
+        presentation = build_presentation([fallback], "grounded_recommendation")
+        if presentation is not None:
+            metrics.reply_source = "observation_fallback"
+            metrics.fallback_reason = "web_research_fallback"
+            metrics.presentation_messages = presentation.messages
+            metrics.presentation_class = "grounded_recommendation"
+            return fallback, card_decision, metrics
     if web_research is not None:
         fallback = _web_research_fallback(web_research)
         metrics.reply_source = "observation_fallback"
