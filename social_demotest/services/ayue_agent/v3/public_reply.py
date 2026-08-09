@@ -10,6 +10,9 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from services.ayue_agent.capabilities import (
     contains_unsupported_random_match_claim,
@@ -30,6 +33,64 @@ _INTERNAL_IDENTIFIER_RE = re.compile(
 class PublicReplyValidation:
     reply: str | None
     reason: str | None = None
+
+
+PresentationClass = Literal[
+    "conversation", "social_opportunity", "product_info", "transaction",
+    "capability", "fallback", "onboarding",
+]
+
+
+class AyueReplyPresentation(BaseModel):
+    """Typed, bounded multi-bubble presentation for one public turn."""
+
+    model_config = ConfigDict(extra="forbid")
+    presentation_class: PresentationClass
+    messages: list[str] = Field(min_length=1, max_length=3)
+
+    @model_validator(mode="after")
+    def _validate_messages(self) -> "AyueReplyPresentation":
+        limits = {
+            "conversation": (1, 2, 160),
+            "social_opportunity": (1, 2, 200),
+            "product_info": (1, 2, 240),
+            "transaction": (1, 1, 240),
+            "capability": (1, 1, 160),
+            "fallback": (1, 1, 160),
+            "onboarding": (3, 3, 240),
+        }
+        low, high, max_chars = limits[self.presentation_class]
+        if not low <= len(self.messages) <= high:
+            raise ValueError("invalid message count for presentation class")
+        normalized: list[str] = []
+        for message in self.messages:
+            validation = validate_public_reply(
+                message,
+                preserve_details=self.presentation_class in {"product_info", "transaction", "onboarding"},
+                reject_internal_identifiers=True,
+                reject_structured_output=True,
+            )
+            if validation.reply is None or len(validation.reply) > max_chars:
+                raise ValueError(f"invalid presentation message: {validation.reason or 'too_long'}")
+            if validation.reply in normalized:
+                raise ValueError("duplicate presentation message")
+            normalized.append(validation.reply)
+        self.messages = normalized
+        return self
+
+
+def build_presentation(
+    messages: list[str] | tuple[str, ...],
+    presentation_class: PresentationClass,
+) -> AyueReplyPresentation | None:
+    """Validate an entire presentation atomically; invalid output is rejected."""
+    try:
+        return AyueReplyPresentation(
+            presentation_class=presentation_class,
+            messages=list(messages),
+        )
+    except Exception:
+        return None
 
 
 def validate_public_reply(

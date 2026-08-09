@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 FORBIDDEN_ARG_FIELDS = frozenset({"user_id", "match_id", "event_id", "revision", "expected_status"})
 
 VALID_AGENTS = frozenset({
-    "calendar", "places", "match", "relationship", "profile", "synthesizer",
+    "calendar", "places", "web", "match", "relationship", "profile", "synthesizer",
 })
 
 
@@ -43,7 +43,7 @@ class SubTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
-    agent: Literal["calendar", "places", "match", "relationship", "profile", "synthesizer"]
+    agent: Literal["calendar", "places", "web", "match", "relationship", "profile", "synthesizer"]
     depends_on: list[str] = Field(default_factory=list, max_length=3)
     task_brief: str = Field(min_length=1, max_length=500)
 
@@ -53,7 +53,7 @@ class Plan(BaseModel):
 
     # ``tasks`` remains the default for compatibility with older provider
     # payloads that predate the direct-chat optimization.
-    mode: Literal["tasks", "direct_chat"] = Field(
+    mode: Literal["tasks", "direct_chat", "product_info"] = Field(
         default="tasks",
         description="tasks runs the existing DAG; direct_chat is a task-free conversational reply",
     )
@@ -64,6 +64,12 @@ class Plan(BaseModel):
         max_length=160,
         description="Only for direct_chat; a short plain-text reply with no App/domain claims",
     )
+    direct_messages: list[str] = Field(default_factory=list, max_length=3)
+    product_info_topics: list[Literal[
+        "capabilities", "same_identity", "surface_scope", "cross_surface_context",
+        "private_message_visibility", "where_to_ask", "matching_principles",
+        "relationship_chat_access",
+    ]] = Field(default_factory=list, max_length=3)
     opportunity: OpportunitySignal | None = None
 
     @field_validator("direct_reply")
@@ -71,19 +77,37 @@ class Plan(BaseModel):
     def _trim_direct_reply(cls, value: str | None) -> str | None:
         return value.strip() if isinstance(value, str) else value
 
+    @field_validator("direct_messages")
+    @classmethod
+    def _trim_direct_messages(cls, value: list[str]) -> list[str]:
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
     @model_validator(mode="after")
     def _validate_dag(self) -> "Plan":
         if self.mode == "direct_chat":
             if self.tasks:
                 raise ValueError("direct_chat plan cannot contain tasks")
-            if not self.direct_reply:
-                raise ValueError("direct_chat plan requires direct_reply")
+            if bool(self.direct_reply) == bool(self.direct_messages):
+                raise ValueError("direct_chat plan requires exactly one reply shape")
+            if self.product_info_topics:
+                raise ValueError("direct_chat plan cannot contain product_info_topics")
             if self.opportunity is not None and self.opportunity.signal != "none":
                 raise ValueError("direct_chat plan cannot contain an opportunity")
             return self
 
-        if self.direct_reply is not None:
-            raise ValueError("tasks plan cannot contain direct_reply")
+        if self.mode == "product_info":
+            if self.tasks or self.opportunity is not None:
+                raise ValueError("product_info plan cannot contain tasks or opportunity")
+            if self.direct_reply is not None or self.direct_messages:
+                raise ValueError("product_info plan cannot contain direct reply")
+            if not self.product_info_topics:
+                raise ValueError("product_info plan requires topics")
+            if len(set(self.product_info_topics)) != len(self.product_info_topics):
+                raise ValueError("duplicate product_info topic")
+            return self
+
+        if self.direct_reply is not None or self.direct_messages or self.product_info_topics:
+            raise ValueError("tasks plan cannot contain direct reply or product_info topics")
         if not self.tasks:
             raise ValueError("tasks plan requires at least one task")
 
@@ -132,7 +156,7 @@ class Plan(BaseModel):
 class AgentContextSlice(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    agent: Literal["calendar", "places", "match", "relationship", "profile", "synthesizer"]
+    agent: Literal["calendar", "places", "web", "match", "relationship", "profile", "synthesizer"]
     payload: dict[str, Any] = Field(default_factory=dict)
 
 

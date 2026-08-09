@@ -6,7 +6,13 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 router = APIRouter(tags=["Frontend"])
 _IMAGE_DIR = Path(__file__).resolve().parents[1] / "images"
-_AYUE_IMAGE_NAME = "pet.gif"
+_AYUE_IMAGE_ASSETS = {
+    "pet.gif": (_IMAGE_DIR / "pet.GIF", "image/gif"),
+    "ayue-app-icon.png": (_IMAGE_DIR / "PNG-JPG" / "App Icon.PNG", "image/png"),
+    "ayue-assessment.png": (_IMAGE_DIR / "PNG-JPG" / "皮康寫筆記.png", "image/png"),
+    "ayue-match.png": (_IMAGE_DIR / "PNG-JPG" / "皮康愛心.png", "image/png"),
+    "ayue-whisper.png": (_IMAGE_DIR / "PNG-JPG" / "講悄悄話.PNG", "image/png"),
+}
 
 @router.get("/", response_class=HTMLResponse)
 def serve_frontend(response: __import__('fastapi').Response):
@@ -22,17 +28,11 @@ def serve_frontend(response: __import__('fastapi').Response):
 
 @router.get("/images/{filename}")
 def serve_frontend_image(filename: str):
-    """Serve the replaceable Ayue launcher artwork without exposing a directory."""
-    if filename.lower() != _AYUE_IMAGE_NAME:
+    """Serve allowlisted Ayue artwork without exposing the asset directory."""
+    asset = _AYUE_IMAGE_ASSETS.get(filename.lower())
+    if asset is None:
         raise HTTPException(status_code=404, detail="Image not found")
-    image_path = next(
-        (
-            candidate
-            for candidate in _IMAGE_DIR.glob("*")
-            if candidate.is_file() and candidate.name.lower() == _AYUE_IMAGE_NAME
-        ),
-        None,
-    )
-    if image_path is None:
+    image_path, media_type = asset
+    if not image_path.is_file():
         raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(image_path, media_type="image/gif")
+    return FileResponse(image_path, media_type=media_type)

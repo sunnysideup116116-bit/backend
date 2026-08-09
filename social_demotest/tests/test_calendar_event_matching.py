@@ -42,11 +42,11 @@ class EventMatchesHintTests(unittest.TestCase):
     def test_name_with_em_dash_time(self):
         self.assertTrue(_event_matches_hint(self.event, "8/3 09:00\u201410:00 50嵐 喝飲料"))
 
-    def test_temporal_word_today(self):
-        self.assertTrue(_event_matches_hint(self.event, "今天8/3 09:00-10:00 50嵐喝飲料"))
+    def test_untyped_temporal_wrapper_does_not_bind(self):
+        self.assertFalse(_event_matches_hint(self.event, "今天8/3 09:00-10:00 50嵐喝飲料"))
 
-    def test_temporal_word_with_particles(self):
-        self.assertTrue(_event_matches_hint(self.event, "今天 8/3 09:00–10:00 在 50嵐 喝飲料"))
+    def test_untyped_temporal_wrapper_with_particles_does_not_bind(self):
+        self.assertFalse(_event_matches_hint(self.event, "今天 8/3 09:00–10:00 在 50嵐 喝飲料"))
 
     def test_reversed_order(self):
         # hint 欄位順序與 event 不同，仍應命中
@@ -100,17 +100,17 @@ class EventMatchesHintTests(unittest.TestCase):
         ev = _make_event(title="與簡的雞排約會", day=25, start="17:00", end="20:00")
         self.assertFalse(_event_matches_hint(ev, "8月25日 晚上7點到9點 與簡的雞排約會"))
 
-    def test_remove_verb_stripped(self):
-        # 「移除」不在行程資料裡，必須先被剝掉；修改/移除場景常見
+    def test_remove_verb_wrapper_fails_closed(self):
+        # Conversational CRUD wrappers are not event identity and fail closed.
         ev = _make_event(title="吃牛排", day=12, start="18:00", end="20:00")
-        self.assertTrue(_event_matches_hint(ev, "移除吃牛排"))
-        self.assertTrue(_event_matches_hint(ev, "幫我移除吃牛排的行程"))
-        self.assertTrue(_event_matches_hint(ev, "把吃牛排移除"))
+        self.assertFalse(_event_matches_hint(ev, "移除吃牛排"))
+        self.assertFalse(_event_matches_hint(ev, "幫我移除吃牛排的行程"))
+        self.assertFalse(_event_matches_hint(ev, "把吃牛排移除"))
 
     def test_conversational_cancel_wrappers_are_not_identity(self):
         ev = _make_event(title="睡覺", day=12, start="17:00", end="19:00")
-        self.assertTrue(_event_matches_hint(ev, "睡覺刪掉"))
-        self.assertTrue(_event_matches_hint(ev, "行程就叫睡覺阿 今天的"))
+        self.assertFalse(_event_matches_hint(ev, "睡覺刪掉"))
+        self.assertFalse(_event_matches_hint(ev, "行程就叫睡覺阿 今天的"))
 
     def test_relative_weekday_matches_chinese_weekday(self):
         # 2026-08-12 是星期三；「下禮拜三/下週三/下星期三」→ 星期三

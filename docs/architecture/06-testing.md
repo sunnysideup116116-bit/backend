@@ -31,6 +31,7 @@ Python compile 檢查：
 | `test_v3_scheduler.py` | Scheduler 編排：拓撲層、平行、依賴失敗 skip、assessment profile confirmation、confirmation 入口、fail closed |
 | `test_v3_sub_agents.py` | 各 sub-agent 的 tool 集合與 system prompt 行為，含 profile.start_assessment 與 Calendar typed command rejection |
 | `test_v3_synthesizer.py` | Synthesizer 綜合 observation、typed clarification／confirmed domain reply 不經 LLM 改寫、place card 決策、內部欄位剝離 |
+| `test_v3_web_research.py` | Web bounded loop 的 search→observation→extract 順序、evidence relevance、query budget、URL projection、insufficient/unavailable fallback |
 | `test_v3_confirmation.py` | ConfirmationManager：CAS claim、batch 合併、多 confirmation 獨立性 |
 | `test_v3_write_executors.py` | 寫入執行器：start_search 冪等重放、decide_active_proposal revision CAS / stale、assessment、calendar batch（混合 update+cancel） |
 | `test_v3_trajectories.py` | 匿名 trajectory fixtures：修真實失敗案例時先新增 trajectory，再修 contract／projection／prompt |
@@ -71,6 +72,9 @@ Python compile 檢查：
 - profile evidence（evidence_span 驗證、message_id 冪等）
 - state/concurrency（CAS、stale、雙寫入並發、終態不可覆寫）
 - stream 與 JSON compatibility（`/api/direct_chat` contract 只加 optional fields）
+- Product identity/surface contract：same-Ayue identity、bounded cross-surface context、Private 不回流 Public profile/memory、Private 新配對 redirect。
+- Presentation contract：`Plan.mode=product_info`、`AyueReplyPresentation` bubble limits、`AgentResult.messages` additive projection、單回合單筆 assistant storage、onboarding version/idempotency。
+- `tests/fixtures/ayue_voice_eval_v1.json` 提供 40 個 deterministic voice/privacy/product cases；eval 應檢查 hard-fail privacy/transaction/unverified-success 規則，不比對 LLM 完整字串。
 
 ## 4. 新增 fallback／result code 時
 

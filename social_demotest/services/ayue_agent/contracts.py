@@ -50,6 +50,9 @@ class AgentTurnContext(BaseModel):
     user_id: str
     room_id: str
     message: str
+    # Server-owned control plane input.  Public V3 handles this before the
+    # planner; it is never copied into prompt-safe context or trace payloads.
+    assessment_action: Literal["cancel"] | None = None
     message_id: str | None = None
     mentioned_ids: list[str] = Field(default_factory=list)
     mention_overflow: bool = False
@@ -88,7 +91,7 @@ class PublicAgentTurnContext(BaseModel):
     # Public references only. Their executor-side IDs remain on AgentTurnContext.
     mentioned_contacts: list[dict[str, str]] = Field(default_factory=list)
     mentioned_contact_overflow: bool = False
-    capability_manifest_version: str = "v1"
+    capability_manifest_version: str = "v2"
     match_opportunity_state: str = "not_ready"
     guidance_directive: str = "none"
     clock: TurnClockV1 = Field(default_factory=lambda: TurnClockV1(
@@ -121,6 +124,11 @@ class AgentDecision(BaseModel):
 class AgentResult(BaseModel):
     handled: bool
     reply: str | None = None
+    messages: list[str] = Field(default_factory=list, max_length=3)
+    presentation_class: Literal[
+        "conversation", "social_opportunity", "product_info", "transaction",
+        "capability", "fallback", "onboarding",
+    ] = "conversation"
     # True only when a confirmed Calendar write committed in this turn.  The
     # public UI uses this as a cache-invalidation hint; it is not domain state.
     calendar_state_changed: bool = False

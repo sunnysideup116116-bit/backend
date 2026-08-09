@@ -9,9 +9,9 @@ class V3ConfirmationTests(unittest.TestCase):
         self.coll = MagicMock()
         self.mgr = ConfirmationManager(self.coll)
 
-    def _record(self, *, confirmation_id="c1", created_at=1.0, tool_name="calendar.cancel_my_event"):
-        arguments = {"event_hint": "tomorrow"}
-        payload = {"event_revision": 3}
+    def _record(self, *, confirmation_id="c1", created_at=1.0, tool_name="calendar.submit_commands"):
+        arguments = {}
+        payload = {"calendar_plan_version": 1, "plans": []}
         origin_run_id = "run-preview"
         return {
             "_id": confirmation_id,
@@ -38,9 +38,9 @@ class V3ConfirmationTests(unittest.TestCase):
         self.mgr.create_confirmation(
             user_id="owner",
             agent_name="calendar",
-            tool_name="calendar.cancel_my_event",
-            arguments={"event_hint": "tomorrow"},
-            payload={"event_revision": 3},
+            tool_name="calendar.submit_commands",
+            arguments={},
+            payload={"calendar_plan_version": 1, "plans": []},
             ttl_seconds=900,
             origin_run_id="run-preview",
             preview="Cancel tomorrow's event?",
@@ -71,7 +71,7 @@ class V3ConfirmationTests(unittest.TestCase):
         newer = self._record(
             confirmation_id="new",
             created_at=2.0,
-            tool_name="calendar.create_my_event",
+            tool_name="calendar.submit_commands",
         )
         self.coll.find.return_value = [older, newer]
         self.coll.update_one.side_effect = [
@@ -85,7 +85,7 @@ class V3ConfirmationTests(unittest.TestCase):
             return (True, "done", None)
 
         results = self.mgr.execute_confirmed(user_id="owner", executor=executor)
-        self.assertEqual(executed, [("calendar.create_my_event", "new")])
+        self.assertEqual(executed, [("calendar.submit_commands", "new")])
         self.assertTrue(results[0]["ok"])
         self.assertEqual(results[0]["confirmation_id"], "new")
 

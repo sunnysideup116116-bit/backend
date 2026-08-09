@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from enum import Enum
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from services.ayue_agent.v3.calendar_commands import CalendarCommandBatch
 
@@ -48,52 +48,6 @@ class _ProposalDecisionArguments(BaseModel):
 class _AssessmentStartArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: Literal["basic", "deep"]
-
-
-class _CalendarCreateArguments(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    title: str = Field(min_length=1, max_length=120)
-    date: str = Field(min_length=10, max_length=10)
-    start_time: str = Field(min_length=4, max_length=5)
-    end_time: str = Field(min_length=4, max_length=5)
-    timezone: str = "Asia/Taipei"
-    location: str = Field(default="", max_length=160)
-    notes: str = Field(default="", max_length=500)
-
-
-class _CalendarUpdateArguments(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    event_hint: str = Field(min_length=1, max_length=120)
-    title: str | None = Field(default=None, min_length=1, max_length=120)
-    date: str | None = Field(default=None, min_length=10, max_length=10)
-    start_time: str | None = Field(default=None, min_length=4, max_length=5)
-    end_time: str | None = Field(default=None, min_length=4, max_length=5)
-    timezone: str | None = None
-    location: str | None = Field(default=None, max_length=160)
-    notes: str | None = Field(default=None, max_length=500)
-
-
-class _CalendarCancelArguments(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    event_hint: str = Field(min_length=1, max_length=120)
-
-
-class _CalendarBatchCancelArguments(BaseModel):
-    """A bounded, public description of one or more calendar cancellations."""
-
-    model_config = ConfigDict(extra="forbid")
-    mode: Literal["selected", "all_upcoming"]
-    event_hints: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(
-        default_factory=list, max_length=10,
-    )
-
-    @model_validator(mode="after")
-    def validate_mode_payload(self) -> "_CalendarBatchCancelArguments":
-        if self.mode == "selected" and not 2 <= len(self.event_hints) <= 10:
-            raise ValueError("selected mode requires 2-10 event hints")
-        if self.mode == "all_upcoming" and self.event_hints:
-            raise ValueError("all_upcoming mode does not accept event hints")
-        return self
 
 
 class _CalendarFindArguments(BaseModel):
@@ -586,47 +540,6 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         executor_arguments_model=_AssessmentStartArguments,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
-    "calendar.create_my_event": ToolSpec(
-        # Legacy compatibility surface; V3 Calendar Agent exposes only
-        # calendar.submit_commands for mutations.
-        "calendar.create_my_event", ToolRisk.WRITE, "calendar_create",
-        "新增本人的私人行程；必須先向使用者確認日期、時間與內容。",
-        "我確認一下要新增的行程…",
-        requires_confirmation=True,
-        planner_arguments_model=_CalendarCreateArguments,
-        executor_arguments_model=_CalendarCreateArguments,
-        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
-    ),
-    "calendar.update_my_event": ToolSpec(
-        # Legacy compatibility surface; not visible to the V3 Calendar Agent.
-        "calendar.update_my_event", ToolRisk.WRITE, "calendar_update",
-        "修改本人行事曆中的唯一一筆行程；私人行程直接修改，共同約會會提出改期並通知對方重新確認。",
-        "我確認一下要修改的行程…",
-        requires_confirmation=True,
-        planner_arguments_model=_CalendarUpdateArguments,
-        executor_arguments_model=_CalendarUpdateArguments,
-        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
-    ),
-    "calendar.cancel_my_event": ToolSpec(
-        # Legacy compatibility surface; not visible to the V3 Calendar Agent.
-        "calendar.cancel_my_event", ToolRisk.WRITE, "calendar_cancel",
-        "取消本人行事曆中的唯一一筆行程；共同約會會同步取消並通知對方。",
-        "我確認一下要取消的行程…",
-        requires_confirmation=True,
-        planner_arguments_model=_CalendarCancelArguments,
-        executor_arguments_model=_CalendarCancelArguments,
-        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
-    ),
-    "calendar.cancel_my_events": ToolSpec(
-        # Legacy compatibility surface; not visible to the V3 Calendar Agent.
-        "calendar.cancel_my_events", ToolRisk.WRITE, "calendar_cancel",
-        "取消多筆自己的行程；mode=selected 時提供 2–10 個行程描述，mode=all_upcoming 時取消最多 10 筆未來有效行程。必須先向使用者確認。",
-        "我確認一下要取消的行程…",
-        requires_confirmation=True,
-        planner_arguments_model=_CalendarBatchCancelArguments,
-        executor_arguments_model=_CalendarBatchCancelArguments,
-        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
-    ),
     "calendar.submit_commands": ToolSpec(
         "calendar.submit_commands", ToolRisk.WRITE, "calendar_commands",
         "提交一個或多個行事曆 mutation command；欄位必須使用 canonical action、target_reference 或 target_hint，"
@@ -700,7 +613,7 @@ def tool_call_key(spec: ToolSpec, arguments: dict[str, Any]) -> tuple[str, str]:
 
 
 def planner_tool_names(
-    *, can_start_search: bool, can_decide_active_proposal: bool, can_edit_calendar: bool = True,
+    *, can_start_search: bool, can_decide_active_proposal: bool,
     can_read_mentioned_contacts: bool = False, can_use_web: bool = False, can_use_places: bool = False,
     can_start_assessments: bool = True,
 ) -> frozenset[str]:
@@ -718,11 +631,6 @@ def planner_tool_names(
         names.add("match.start_search")
     if can_decide_active_proposal:
         names.add("match.decide_active_proposal")
-    if can_edit_calendar:
-        names.update({
-            "calendar.create_my_event", "calendar.update_my_event",
-            "calendar.cancel_my_event", "calendar.cancel_my_events",
-        })
     if can_start_assessments:
         names.update(ASSESSMENT_TOOLS)
     return frozenset(names)

@@ -1,5 +1,7 @@
 from enum import Enum
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
 
 class ChatType(str, Enum):
     big_five = "big_five"
@@ -41,6 +43,15 @@ class DirectChatRequest(BaseModel):
     mentioned_other_id: str | None = None
     mentioned_other_ids: list[str] | None = None
     mentions_inline: bool = False
+    # A server-typed assessment action.  It is intentionally narrow so the
+    # public chat adapter cannot turn arbitrary client values into commands.
+    assessment_action: Literal["cancel"] | None = None
+
+    @model_validator(mode="after")
+    def _validate_assessment_action_scope(self):
+        if self.assessment_action is not None and self.contact_id != "ai_assistant":
+            raise ValueError("assessment_action is only available for ai_assistant")
+        return self
 
 class MediatorPrivateRequest(BaseModel):
     user_id: str

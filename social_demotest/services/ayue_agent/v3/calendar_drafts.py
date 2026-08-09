@@ -202,10 +202,20 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
     values = command.model_dump(exclude_none=True)
     incoming_target_hint = str(values.get("target_hint") or "").strip()
     incoming_target_reference = str(values.get("target_reference") or "").strip()
+    incoming_target_selector = dict(values.get("target_selector") or {})
     prior_target_hint = str(prior.get("target_hint") or "").strip()
+    prior_target_selector = dict(prior.get("target_selector") or {})
     has_resolved_target = bool((record.get("resolved_target") or {}).get("bound"))
     same_target_hint = bool(incoming_target_hint and prior_target_hint and incoming_target_hint == prior_target_hint)
-    explicit_new_target = bool(incoming_target_reference or (incoming_target_hint and not same_target_hint))
+    same_target_selector = bool(
+        incoming_target_selector and prior_target_selector
+        and incoming_target_selector == prior_target_selector
+    )
+    explicit_new_target = bool(
+        incoming_target_reference
+        or (incoming_target_hint and not same_target_hint)
+        or (incoming_target_selector and not same_target_selector)
+    )
     if has_resolved_target and explicit_new_target:
         # A new selector is a new mutation target, not a continuation of the
         # old event's pending changes.
@@ -265,9 +275,13 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
             continue
         if has_resolved_target and not explicit_new_target and key in {"target_hint", "target_reference"}:
             continue
+        if has_resolved_target and not explicit_new_target and key == "target_selector":
+            continue
         if key == "target_hint" and values.get("target_reference"):
             continue
-        if key == "target_reference" and values.get("target_hint"):
+        if key == "target_reference" and (values.get("target_hint") or values.get("target_selector")):
+            continue
+        if key == "target_selector" and values.get("target_reference"):
             continue
         if key not in values or values.get(key) in (None, "", []):
             values[key] = value
@@ -275,6 +289,8 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
     # recent reference with a natural-language hint (or vice versa), but the
     # two must never be merged into an invalid command.
     if values.get("target_hint"):
+        values.pop("target_reference", None)
+    if values.get("target_selector"):
         values.pop("target_reference", None)
     elif values.get("target_reference"):
         values.pop("target_hint", None)
@@ -291,8 +307,14 @@ def resolved_target_replaced(command: Any, record: dict[str, Any] | None) -> boo
     values = command.model_dump(exclude_none=True) if hasattr(command, "model_dump") else dict(command or {})
     target_reference = str(values.get("target_reference") or "").strip()
     target_hint = str(values.get("target_hint") or "").strip()
+    target_selector = dict(values.get("target_selector") or {})
     prior_hint = str((record.get("command") or {}).get("target_hint") or "").strip()
-    return bool(target_reference or (target_hint and target_hint != prior_hint))
+    prior_selector = dict((record.get("command") or {}).get("target_selector") or {})
+    return bool(
+        target_reference
+        or (target_hint and target_hint != prior_hint)
+        or (target_selector and target_selector != prior_selector)
+    )
 
 
 def clear_draft(user_id: str) -> None:

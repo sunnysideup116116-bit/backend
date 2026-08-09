@@ -113,13 +113,13 @@ class V3ContractsTests(unittest.TestCase):
 
     def test_tool_proposal_rejects_forbidden_id_fields(self):
         with self.assertRaises(ValidationError):
-            ToolProposal(tool_name="calendar.cancel_my_event", arguments={"user_id": "x"})
+            ToolProposal(tool_name="calendar.submit_commands", arguments={"user_id": "x"})
         with self.assertRaises(ValidationError):
             ToolProposal(tool_name="match.decide_active_proposal", arguments={"match_id": "x"})
         with self.assertRaises(ValidationError):
-            ToolProposal(tool_name="calendar.cancel_my_event", arguments={"revision": 1})
+            ToolProposal(tool_name="calendar.submit_commands", arguments={"revision": 1})
         with self.assertRaises(ValidationError):
-            ToolProposal(tool_name="calendar.cancel_my_event", arguments={"expected_status": "draft"})
+            ToolProposal(tool_name="calendar.submit_commands", arguments={"expected_status": "draft"})
 
     def test_guard_decision_pass_or_fail_with_code(self):
         ok = GuardDecision(ok=True, code=GuardResultCode.PASSED)

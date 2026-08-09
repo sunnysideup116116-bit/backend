@@ -1,4 +1,4 @@
-from services.ayue_agent.tool_registry import PLACES_TOOLS, WEB_TOOLS
+from services.ayue_agent.tool_registry import PLACES_TOOLS
 from ..contracts import AgentContextSlice
 from .base import run_sub_agents, SubAgentMetrics
 
@@ -10,7 +10,7 @@ _SYSTEM = """你是公開阿月的地點子代理：負責搜尋附近地點、�
 - 有明確地點就使用該 anchor；沒有明確地點才使用 saved location。
 - 只提供完成 task 所需的最小搜尋條件。"""
 
-_TOOLS = PLACES_TOOLS | WEB_TOOLS
+_TOOLS = PLACES_TOOLS
 
 
 def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[list, SubAgentMetrics]:

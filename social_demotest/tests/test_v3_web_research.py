@@ -1,0 +1,384 @@
+import threading
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from services.ayue_agent.v3 import planner, scheduler
+from services.ayue_agent.v3.contracts import AgentContextSlice, SubTask, SubTaskStatus, VALID_AGENTS
+from services.ayue_agent.v3.sub_agents import places_agent
+from services.ayue_agent.v3.sub_agents.base import SubAgentMetrics
+from services.ayue_agent.v3.sub_agents.web_agent import (
+    WebResearchDecision,
+    _decision_tools,
+    decide as decide_web,
+)
+from services.ayue_agent.v3.synthesizer import synthesize
+from services.ayue_agent.v3.web_research import (
+    WebEvidenceAssessmentV1,
+    anchor_web_search_query,
+    build_research_result,
+    project_web_observations,
+)
+from services.ayue_agent.tool_registry import PLACES_TOOLS, WEB_TOOLS
+
+
+def _search_result(url="https://example.com/forum/post"):
+    return {"results": [{
+        "title": "Public result",
+        "url": url,
+        "snippet": "A directly relevant public result.",
+        "published_date": "2026-08-09",
+    }]}
+
+
+def _turn(message="What did the public source say?"):
+    return SimpleNamespace(
+        message=message,
+        user_location="Kaohsiung",
+        clock=SimpleNamespace(model_dump=lambda: {"timezone": "Asia/Taipei"}),
+        _raw_ctx=SimpleNamespace(),
+    )
+
+
+def _slice(message="What did the public source say?"):
+    return AgentContextSlice(agent="web", payload={
+        "message": message,
+        "recent_messages": [],
+        "user_location": "Kaohsiung",
+        "clock": {"timezone": "Asia/Taipei"},
+        "prior_observations": [],
+    })
+
+
+def _trace():
+    return {"guard_results": [], "tool_results": [], "event_sequence": []}
+
+
+class V3WebResearchTests(unittest.TestCase):
+    def test_web_capabilities_are_separate_from_places(self):
+        self.assertIn("web", VALID_AGENTS)
+        self.assertEqual(places_agent._TOOLS, PLACES_TOOLS)
+        self.assertTrue(WEB_TOOLS.isdisjoint(places_agent._TOOLS))
+        self.assertIn("web", planner._PLANNER_SYSTEM)
+
+    def test_invalid_optional_recency_falls_back_to_none(self):
+        decision = WebResearchDecision(
+            action="search", queries=["Pier-2 events 2026-08-10"], recency="2026",
+        )
+        self.assertEqual(decision.recency, "none")
+
+    def test_first_round_schema_excludes_conclusion_fields(self):
+        tools = _decision_tools(1)
+        self.assertEqual(
+            [tool["function"]["name"] for tool in tools],
+            ["web_search_decision", "web_extract_decision"],
+        )
+        for tool in tools:
+            properties = tool["function"]["parameters"]["properties"]
+            self.assertNotIn("assessment", properties)
+            self.assertNotIn("findings", properties)
+
+    def test_final_round_schema_requires_finish(self):
+        tools = _decision_tools(3)
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["web_finish_decision"])
+        parameters = tools[0]["function"]["parameters"]
+        self.assertIn("has_direct_evidence", parameters["required"])
+        self.assertNotIn("coverage", parameters["properties"])
+        self.assertNotIn("status", parameters["properties"])
+
+    def test_second_round_allows_only_one_refined_query(self):
+        tools = _decision_tools(2)
+        search = next(tool for tool in tools if tool["function"]["name"] == "web_search_decision")
+        queries = search["function"]["parameters"]["properties"]["queries"]
+        self.assertEqual(queries["maxItems"], 1)
+
+    def test_second_round_parser_bounds_extra_refined_queries(self):
+        provider_result = SimpleNamespace(
+            input_tokens=1, output_tokens=1, duration_ms=1, content="",
+            tool_calls=[{"name": "web_search_decision", "arguments": {
+                "queries": ["refined one", "refined two"], "recency": "none",
+            }}],
+        )
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            return_value=provider_result,
+        ):
+            decision, metrics = decide_web(
+                _slice(), task_brief="Find exact dated events", round_index=2,
+                observations=[{"tool": "web.search", "result": _search_result()}],
+                tool_calls_used=1, search_calls_used=1, extract_calls_used=0,
+            )
+        self.assertEqual(decision.queries, ["refined one"])
+        self.assertEqual(metrics.error, "")
+
+    def test_finish_booleans_derive_insufficient_evidence(self):
+        provider_result = SimpleNamespace(
+            input_tokens=1, output_tokens=1, duration_ms=1, content="",
+            tool_calls=[{"name": "web_finish_decision", "arguments": {
+                "evidence_conflicts_target": False,
+                "has_direct_evidence": False,
+                "findings": [{"finding": "Only generic venue background was found."}],
+                "limitations": ["No dated schedule was found."],
+            }}],
+        )
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            return_value=provider_result,
+        ):
+            decision, metrics = decide_web(
+                _slice(), task_brief="Find exact dated events", round_index=3,
+                observations=[{"tool": "web.search", "result": _search_result()}],
+                tool_calls_used=1, search_calls_used=1, extract_calls_used=0,
+            )
+        self.assertEqual(metrics.error, "")
+        self.assertEqual(decision.status, "insufficient_evidence")
+        self.assertEqual(decision.assessment.coverage, "adjacent_only")
+
+    def test_finish_normalizes_provider_drift_without_losing_evidence(self):
+        source_url = "https://www.playsport.cc/gamesData/result?allianceid=1"
+        provider_result = SimpleNamespace(
+            input_tokens=1, output_tokens=1, duration_ms=1, content="",
+            tool_calls=[{"name": "web_finish_decision", "arguments": {
+                "has_direct_evidence": "true",
+                "direct_evidence_complete": False,
+                "evidence_conflicts_target": False,
+                "findings": ["Guardians 8:2 White Sox.", "Twins 8:6 Brewers."],
+                "limitations": ["one", "two", "three", "four must be truncated"],
+                "supporting_source_urls": [source_url],
+                "supporting_source_types": ["sportsbook result page"],
+                "missing_evidence": "x" * 400,
+                "provider_extra_prose": "must not reject the whole decision",
+            }}],
+        )
+        observations = [{"tool": "web.search", "result": _search_result(source_url)}]
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            return_value=provider_result,
+        ):
+            decision, metrics = decide_web(
+                _slice(), task_brief="Find today's MLB scores", round_index=3,
+                observations=observations, tool_calls_used=3,
+                search_calls_used=2, extract_calls_used=1,
+            )
+        result = build_research_result(
+            research_question="MLB today?", answer_target="Find today's MLB scores",
+            decision=decision, observations=observations,
+            execution_status="completed", stop_reason="evidence_sufficient",
+        )
+        self.assertEqual(metrics.error, "")
+        self.assertEqual(len(decision.limitations), 3)
+        self.assertEqual(len(decision.assessment.missing_evidence), 300)
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(len(result.findings), 2)
+        self.assertEqual(result.sources[0].source_type, "other")
+
+    def test_search_query_is_anchored_to_planner_target(self):
+        target = "Find 2026-08-10 to 2026-08-16 events at Kaohsiung Pier-2 Art Center."
+        query = anchor_web_search_query(target, "weekend events")
+        self.assertIn("Kaohsiung Pier-2 Art Center", query)
+        self.assertIn("2026-08-10", query)
+        self.assertIn("weekend events", query)
+        self.assertLessEqual(len(query), 300)
+
+    def test_scheduler_executes_anchored_query(self):
+        target = "Find 2026-08-10 to 2026-08-16 events at Kaohsiung Pier-2 Art Center."
+        decisions = [
+            WebResearchDecision(action="search", queries=["weekend events"], recency="2026"),
+            self._finish(),
+        ]
+        executed_queries = []
+
+        def fake_execute(tc, raw_ctx, *, clock):
+            executed_queries.append(tc.arguments["query"])
+            return SimpleNamespace(ok=True, data=_search_result())
+
+        with patch.object(scheduler, "web_enabled", return_value=True), \
+             patch.object(scheduler.web_agent, "decide", side_effect=[
+                 (decisions[0], SubAgentMetrics(input_tokens=1)),
+                 (decisions[1], SubAgentMetrics(input_tokens=1)),
+             ]), \
+             patch.object(scheduler, "execute_tool", side_effect=fake_execute):
+            results, _metrics = scheduler._run_web_research(
+                SubTask(id="web1", agent="web", task_brief=target),
+                _turn(target), _slice(target), seen_keys=set(),
+                guard_lock=threading.Lock(), on_progress=None,
+                run_id="run", trace=_trace(), debug_enabled=False,
+            )
+        self.assertEqual(results[0].status, SubTaskStatus.OK)
+        self.assertIn("Kaohsiung Pier-2 Art Center", executed_queries[0])
+        self.assertIn("2026-08-10", executed_queries[0])
+
+    def _finish(self, *, coverage="direct_sufficient", status="answered", relation="direct"):
+        return WebResearchDecision(
+            action="finish",
+            assessment=WebEvidenceAssessmentV1(
+                target_alignment="aligned", coverage=coverage, missing_evidence="",
+            ),
+            status=status,
+            findings=[{
+                "claim": "The requested proposition is directly supported.",
+                "relation": relation,
+                "source_urls": ["https://example.com/forum/post"],
+                "source_types": ["forum"],
+            }],
+        )
+
+    def test_web_agent_keeps_search_observation_before_extract(self):
+        decisions = [
+            WebResearchDecision(action="search", queries=["exact public question"]),
+            WebResearchDecision(action="extract", urls=["https://example.com/forum/post"]),
+            self._finish(),
+        ]
+        calls = []
+
+        def fake_execute(tc, raw_ctx, *, clock):
+            calls.append(tc.name)
+            if tc.name == "web.search":
+                return SimpleNamespace(ok=True, data=_search_result())
+            return SimpleNamespace(ok=True, data={"pages": [{
+                "url": "https://example.com/forum/post",
+                "content": "Direct public evidence.", "truncated": False,
+            }]})
+
+        with patch.object(scheduler, "web_enabled", return_value=True), \
+             patch.object(scheduler.web_agent, "decide", side_effect=[
+                 (decisions[0], SubAgentMetrics(input_tokens=1)),
+                 (decisions[1], SubAgentMetrics(input_tokens=1)),
+                 (decisions[2], SubAgentMetrics(input_tokens=1)),
+             ]), \
+             patch.object(scheduler, "execute_tool", side_effect=fake_execute):
+            results, metrics = scheduler._run_web_research(
+                SubTask(id="web1", agent="web", task_brief="Find exact public evidence"),
+                _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
+                on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
+            )
+        self.assertEqual(calls, ["web.search", "web.extract"])
+        self.assertEqual(results[0].observation["status"], "answered")
+        self.assertEqual(metrics.input_tokens, 3)
+
+    def test_adjacent_only_is_insufficient_evidence(self):
+        decisions = [
+            WebResearchDecision(action="search", queries=["background recap"]),
+            WebResearchDecision(
+                action="finish",
+                assessment=WebEvidenceAssessmentV1(
+                    target_alignment="aligned", coverage="adjacent_only",
+                    missing_evidence="No direct evidence was found.",
+                ),
+                status="insufficient_evidence",
+                findings=[{
+                    "claim": "A related recap exists.", "relation": "adjacent_context",
+                    "source_urls": ["https://example.com/forum/post"],
+                    "source_types": ["news"],
+                }],
+            ),
+        ]
+        with patch.object(scheduler, "web_enabled", return_value=True), \
+             patch.object(scheduler.web_agent, "decide", side_effect=[
+                 (decisions[0], SubAgentMetrics(input_tokens=1)),
+                 (decisions[1], SubAgentMetrics(input_tokens=1)),
+             ]), \
+             patch.object(scheduler, "execute_tool", return_value=SimpleNamespace(
+                 ok=True, data=_search_result(),
+             )):
+            results, _metrics = scheduler._run_web_research(
+                SubTask(id="web1", agent="web", task_brief="Find exact reactions"),
+                _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
+                on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
+            )
+        self.assertEqual(results[0].observation["status"], "insufficient_evidence")
+        self.assertEqual(results[0].observation["coverage"], "adjacent_only")
+
+    def test_finish_before_observation_fails_closed(self):
+        with patch.object(scheduler, "web_enabled", return_value=True), \
+             patch.object(scheduler.web_agent, "decide", return_value=(
+                 self._finish(), SubAgentMetrics(input_tokens=1),
+             )), \
+             patch.object(scheduler, "execute_tool") as execute:
+            results, _metrics = scheduler._run_web_research(
+                SubTask(id="web1", agent="web", task_brief="Find evidence"),
+                _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
+                on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
+            )
+        self.assertEqual(results[0].observation["execution_status"], "unavailable")
+        execute.assert_not_called()
+
+    def test_parser_failure_after_successful_search_preserves_sources(self):
+        decisions = [WebResearchDecision(action="search", queries=["direct query"]), None]
+        with patch.object(scheduler, "web_enabled", return_value=True), \
+             patch.object(scheduler.web_agent, "decide", side_effect=[
+                 (decisions[0], SubAgentMetrics(input_tokens=1)),
+                 (None, SubAgentMetrics(input_tokens=1, error="web_decision_schema_invalid")),
+             ]), \
+             patch.object(scheduler, "execute_tool", return_value=SimpleNamespace(
+                 ok=True, data=_search_result(),
+             )):
+            results, _metrics = scheduler._run_web_research(
+                SubTask(id="web1", agent="web", task_brief="Find evidence"),
+                _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
+                on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
+            )
+        observation = results[0].observation
+        self.assertEqual(observation["execution_status"], "degraded")
+        self.assertEqual(observation["stop_reason"], "model_failure")
+        self.assertEqual(len(observation["sources"]), 1)
+
+    def test_web_unavailable_is_distinct_from_no_evidence(self):
+        with patch.object(scheduler, "web_enabled", return_value=False), \
+             patch.object(scheduler.web_agent, "decide") as decide:
+            results, _metrics = scheduler._run_web_research(
+                SubTask(id="web1", agent="web", task_brief="Find evidence"),
+                _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
+                on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
+            )
+        self.assertEqual(results[0].observation["execution_status"], "unavailable")
+        self.assertEqual(results[0].observation["stop_reason"], "tool_unavailable")
+        decide.assert_not_called()
+
+    def test_projection_is_bounded_and_keeps_only_safe_urls(self):
+        observations = [{"tool": "web.search", "result": {"results": [
+            {"title": "safe", "url": "https://example.com/a", "snippet": "x" * 2000},
+            {"title": "private", "url": "http://127.0.0.1/a", "snippet": "private"},
+        ]}}]
+        rows = project_web_observations(observations)[0]["result"]["results"]
+        self.assertEqual(len(rows), 1)
+        self.assertLessEqual(len(rows[0]["snippet"]), 600)
+
+    def test_synthesizer_surfaces_safe_adjacent_findings_without_llm(self):
+        slc = AgentContextSlice(agent="synthesizer", payload={
+            "message": "Find exact reactions", "recent_messages": [],
+            "recent_context": "", "user_location": "", "clock": {},
+            "observations": [{
+                "task_id": "web1", "status": "ok", "tool": None,
+                "result": {
+                    "schema_version": "web_research.v1",
+                    "research_question": "Find exact reactions",
+                    "answer_target": "forum reactions",
+                    "status": "insufficient_evidence",
+                    "execution_status": "completed",
+                    "coverage": "adjacent_only",
+                    "findings": [{
+                        "claim": "A related public recap exists.",
+                        "relation": "adjacent_context",
+                        "source_urls": ["https://example.com/forum/post"],
+                    }],
+                    "sources": [{
+                        "url": "https://example.com/forum/post",
+                        "title": "Related recap", "source_type": "news",
+                    }],
+                    "limitations": ["No direct forum evidence was found."],
+                    "stop_reason": "no_direct_evidence",
+                },
+            }],
+        })
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+        ) as provider:
+            reply, _cards, metrics = synthesize(slc)
+        provider.assert_not_called()
+        self.assertIn("A related public recap exists", reply)
+        self.assertEqual(metrics.fallback_reason, "web_research_insufficient")
+
+
+if __name__ == "__main__":
+    unittest.main()

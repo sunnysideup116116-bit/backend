@@ -14,15 +14,15 @@ from services.language_service import normalize_zh_tw
 
 
 V4_REASON_VERSION = "v4_friend_intro"
-FRIEND_COPY_VERSION = "v5_five_style_examples"
+FRIEND_COPY_VERSION = "v6_calibrated_identity_voice"
 LIVE_PROPOSAL_STATUSES = frozenset({"draft", "pending"})
 COUNTERPARTY_PLACEHOLDER = "{{counterparty}}"
 MATCH_PROPOSAL_FEW_SHOTS = (
     "欸，我想到一個你可能會想認識的人。他最近想找人參加〔近期活動〕，個性〔對方性格〕；你〔本人性格〕，或許能形成舒服的互動節奏。想讓我幫你們牽個線嗎？",
     "我腦中突然有個畫面：〔活動中的自然互動畫面〕。他〔對方性格〕、你〔本人性格〕，感覺不用硬找話題也能相處得不錯。你會想認識看看嗎？",
     "我這裡有一位感覺可以介紹給你。他最近〔近期情境〕，個性〔對方性格〕；照你的互動方式，可能滿容易和他進入狀況的。要不要讓我問問他？",
-    "有個人的近況讓我想到你。他〔對方性格〕，最近又想〔近期活動〕；你的〔本人性格〕，可能會讓這個情境多一點舒服的火花。你對這樣的人有興趣嗎？",
-    "等等，我好像牽到一條不錯的線 👀 有個〔對方性格〕的人，最近想〔近期活動〕；你們的節奏或許滿搭的。要不要讓阿月幫你問問？",
+    "有個人的近況讓我想到你。他〔對方性格〕，最近又想〔近期活動〕；你的〔本人性格〕，至少和這個情境有一個具體話題。你想認識看看嗎？",
+    "等等，我想到一位值得認識看看的人 👀 他〔對方性格〕，最近想〔近期活動〕；你們可能有具體話題可以聊，但不保證一定合拍。要不要讓阿月先問問？",
 )
 PRIVATE_OPENING_FEW_SHOTS = (
     "好消息，{{counterparty}}也點頭了！你可以先從〔對方近期情境〕聊起，問問他最期待哪一部分，應該很好接話。",
@@ -90,7 +90,7 @@ def friend_intro_fallback(viewer: dict, other: dict, tier: str) -> dict:
 
     if viewer_trait and other_trait:
         second = (
-            f"你{viewer_trait}，你們的互動節奏或許能讓這個情境多一點舒服的火花；"
+            f"你{viewer_trait}，你們至少有一個具體話題可以自然聊起來；"
             "你會想認識對方，看看要不要一起參加嗎？"
         )
     elif viewer_trait:

@@ -40,7 +40,7 @@ _OPAQUE_TARGET_REFERENCES = frozenset({
 # schema.  Keep this allowlist explicit so authority fields can never become
 # accepted merely because a provider nested them.
 _CALENDAR_COMMAND_FIELDS = frozenset({
-    "action", "target_hint", "target_reference", "target_hints", "title", "date",
+    "action", "target_hint", "target_reference", "target_selector", "target_hints", "title", "date",
     "start_time", "end_time", "duration_minutes", "time_shift_minutes", "timezone",
     "location", "notes", "draft_mode",
 })
@@ -119,6 +119,27 @@ def normalize_calendar_batch_payload(arguments: Any) -> dict[str, Any]:
     return {"commands": normalized_commands}
 
 
+class CalendarTargetSelector(BaseModel):
+    """Typed hard filters for the existing event being mutated.
+
+    These fields describe the *current* event that should be selected.  They
+    are intentionally separate from ``CalendarCommand.date`` and the mutation
+    time fields, which always describe the proposed new form.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    date: str | None = Field(default=None, max_length=32)
+    start_time: str | None = Field(default=None, max_length=16)
+    end_time: str | None = Field(default=None, max_length=16)
+
+    @model_validator(mode="after")
+    def _require_selector_field(self) -> "CalendarTargetSelector":
+        if not any(str(value or "").strip() for value in (self.date, self.start_time, self.end_time)):
+            raise ValueError("target_selector must contain date, start_time or end_time")
+        return self
+
+
 class CalendarCommand(BaseModel):
     """LLM-owned, authority-free description of one calendar mutation."""
 
@@ -140,6 +161,13 @@ class CalendarCommand(BaseModel):
             "只能原樣回傳 server context 提供的 opaque reference："
             "recent_event 表示最近唯一行程；candidate_1、candidate_2、candidate_3 "
             "只能表示目前 calendar_draft.candidates 中相同 reference 的候選。"
+        ),
+    )
+    target_selector: CalendarTargetSelector | None = Field(
+        default=None,
+        description=(
+            "Optional hard filter for the existing event: date, start_time and/or end_time. "
+            "These fields select the old event; mutation date/time fields are the new values."
         ),
     )
     target_hints: list[str] = Field(default_factory=list, max_length=10, description="cancel_selected 的 2–10 個自然語言行程描述")
@@ -194,14 +222,25 @@ class CalendarCommand(BaseModel):
     def _validate_target_shape(self) -> "CalendarCommand":
         if self.action in {"create", "update", "cancel"} and self.target_hints:
             raise ValueError("target_hints is only valid for cancel_selected")
-        if self.action in {"create", "cancel_all_upcoming"} and (self.target_hint or self.target_reference):
+        if self.action in {"create", "cancel_all_upcoming"} and (
+            self.target_hint or self.target_reference or self.target_selector
+        ):
             raise ValueError("target selector is not valid for this action")
-        if self.action == "cancel_selected" and (self.target_hint or self.target_reference):
+        if self.action == "cancel_selected" and (
+            self.target_hint or self.target_reference or self.target_selector
+        ):
             raise ValueError("target selector is only valid for update/cancel")
         if self.action != "cancel_selected" and self.target_hints:
             raise ValueError("target_hints is only valid for cancel_selected")
-        if self.action in {"update", "cancel"} and self.target_hint and self.target_reference:
-            raise ValueError("target_hint and target_reference are mutually exclusive")
+        if self.action in {"update", "cancel"} and self.target_reference and (
+            self.target_hint or self.target_selector
+        ):
+            raise ValueError("target_reference is mutually exclusive with target_hint/target_selector")
+        if self.action == "cancel" and any(value is not None for value in (
+            self.title, self.date, self.start_time, self.end_time, self.duration_minutes,
+            self.time_shift_minutes, self.timezone, self.location, self.notes,
+        )):
+            raise ValueError("cancel accepts only a target selector")
         if self.time_shift_minutes is not None:
             if self.action != "update":
                 raise ValueError("time_shift_minutes is only valid for update")
@@ -570,6 +609,49 @@ def _canonicalize_date(ctx: Any, value: Any) -> tuple[str, str | None]:
     return raw, None
 
 
+_SELECTOR_TIME_RE = re.compile(r"^(?P<hour>\d{1,2}):(?P<minute>\d{2})$")
+
+
+def _canonicalize_selector_time(value: Any) -> tuple[str | None, str | None]:
+    """Canonicalize one typed selector clock value to ``HH:MM``."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None, None
+    match = _SELECTOR_TIME_RE.fullmatch(raw)
+    if not match:
+        return raw, "target_selector_time: expected H:MM or HH:MM"
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute"))
+    if hour > 23 or minute > 59:
+        return raw, "target_selector_time: clock value is out of range"
+    return f"{hour:02d}:{minute:02d}", None
+
+
+def _canonicalize_target_selector(
+    ctx: Any, selector: CalendarTargetSelector,
+) -> tuple[CalendarTargetSelector, str | None]:
+    """Canonicalize selector date and exact local start/end clock filters."""
+    updates: dict[str, Any] = {}
+    if selector.date is not None:
+        canonical_date, date_error = _canonicalize_date(ctx, selector.date)
+        if date_error:
+            return selector, date_error
+        if canonical_date != selector.date:
+            updates["date"] = canonical_date
+    for field_name in ("start_time", "end_time"):
+        raw = getattr(selector, field_name)
+        if raw is None:
+            continue
+        canonical_time, time_error = _canonicalize_selector_time(raw)
+        if time_error:
+            return selector, time_error
+        if canonical_time != raw:
+            updates[field_name] = canonical_time
+    if not updates:
+        return selector, None
+    return selector.model_copy(update=updates), None
+
+
 def canonicalize_calendar_command(
     ctx: Any, command: CalendarCommand,
 ) -> tuple[CalendarCommand, str | None]:
@@ -578,14 +660,22 @@ def canonicalize_calendar_command(
     This helper is shared by Scheduler draft persistence and preflight so a
     resolvable date never remains as authority-free natural language state.
     """
-    if not command.date:
+    updates: dict[str, Any] = {}
+    if command.date:
+        canonical_date, date_error = _canonicalize_date(ctx, command.date)
+        if date_error:
+            return command, date_error
+        if canonical_date != command.date:
+            updates["date"] = canonical_date
+    if command.target_selector is not None:
+        selector, selector_error = _canonicalize_target_selector(ctx, command.target_selector)
+        if selector_error:
+            return command, selector_error
+        if selector != command.target_selector:
+            updates["target_selector"] = selector
+    if not updates:
         return command, None
-    canonical_date, date_error = _canonicalize_date(ctx, command.date)
-    if date_error:
-        return command, date_error
-    if canonical_date == command.date:
-        return command, None
-    return command.model_copy(update={"date": canonical_date}), None
+    return command.model_copy(update=updates), None
 
 
 def _plan_for_event(
@@ -690,7 +780,8 @@ def _preflight_one(
 ) -> CalendarPreflightResult:
     command, date_error = canonicalize_calendar_command(ctx, command)
     if date_error:
-        return _clarification("invalid_date", date_error, index)
+        code = "invalid_interval" if date_error.startswith("target_selector_time:") else "invalid_date"
+        return _clarification(code, date_error.removeprefix("target_selector_time: ").strip(), index)
     if command.action == "create":
         missing = _required_create_fields(command)
         if missing:
@@ -768,7 +859,8 @@ def _preflight_one(
 
     target_hint = str(command.target_hint or "").strip()
     target_reference = str(command.target_reference or "").strip()
-    use_recent_reference = bool(recent_reference) and (
+    target_selector = command.target_selector
+    use_recent_reference = bool(recent_reference) and target_selector is None and (
         bool(recent_reference.get("_force"))
         or bool(target_reference)
         or not target_hint
@@ -786,11 +878,17 @@ def _preflight_one(
     else:
         references = _clock_temporal_references(ctx)
         if references:
-            event, resolution = resolve_owned_event(
-                ctx.user_id, target_hint, temporal_references=references,
-            )
+            resolver_kwargs: dict[str, Any] = {"temporal_references": references}
+            if target_selector is not None:
+                resolver_kwargs["target_selector"] = target_selector
+            event, resolution = resolve_owned_event(ctx.user_id, target_hint, **resolver_kwargs)
         else:
-            event, resolution = resolve_owned_event(ctx.user_id, target_hint)
+            if target_selector is None:
+                event, resolution = resolve_owned_event(ctx.user_id, target_hint)
+            else:
+                event, resolution = resolve_owned_event(
+                    ctx.user_id, target_hint, target_selector=target_selector,
+                )
         candidates = get_owned_event_resolution_candidates(ctx.user_id, target_hint)
         if resolution == "fuzzy_suggestion" or get_owned_event_resolution_kind(ctx.user_id, target_hint) == "fuzzy_suggestion":
             resolution_kind = "fuzzy_suggestion"

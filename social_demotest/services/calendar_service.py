@@ -304,12 +304,6 @@ def cancel_event(
     return serialize_event(calendar_events_coll.find_one({"_id": event["_id"]}), user_id)
 
 
-_TEMPORAL_WORDS = (
-    "今天", "明天", "後天", "這週", "本週", "下週", "下下週", "下下星期", "下下禮拜", "下下周",
-    "這周", "本周", "下周", "本月", "下個月", "的行程", "幫我", "取消", "修改", "刪除", "刪掉",
-    "移除", "更改", "在", "去", "到", "原本", "改成", "改到", "移到", "把", "將",
-)
-
 # 模型回覆常見的全形/特殊標點 → 半形對照，比對前統一正規化避免「09:00–10:00」vs「09:00-10:00」漏抓
 _HINT_NORMALIZE_TABLE = str.maketrans({
     "\u2013": "-", "\u2014": "-",   # en dash / em dash
@@ -408,24 +402,12 @@ def _normalize_hint_text(s: str) -> str:
 
 
 def _clean_event_hint(event_hint: str) -> str:
-    """Remove conversational wrappers while retaining title/date/time signals."""
+    """Apply only structural normalization before event identity matching."""
     text = _normalize_hint_text(event_hint)
     if not text:
         return ""
-    # These are request wrappers, not event identity. Keep this list closed and
-    # structural; do not grow it from individual failures into an intent router.
-    text = re.sub(
-        r"(?:請|麻煩|可以|能不能|幫忙|幫我|我要|我想要|我想|想要|請問|上次|上回|之前|剛剛|剛才|一下|好嗎)",
-        " ", text,
-    )
-    text = re.sub(r"(?:行程|活動)(?:就)?(?:叫|名稱(?:是)?|名叫)?", " ", text)
-    text = re.sub(r"(?:這筆|這個|那筆|那個|剛剛那筆|剛才那筆|上面那筆|上一筆)", " ", text)
-    text = re.sub(
-        r"(?:取消|刪除|刪掉|移除|改掉|修改|更改|編輯|不去了|不要了|不用了|不想去了|不去|不需要了|不做了|不參加了)(?:它|這筆|那筆)?",
-        " ", text,
-    )
-    text = re.sub(r"(?:阿|啊|喔|哦)", " ", text)
-    text = re.sub(r"的(?:\s|$)", " ", text)
+    # Keep punctuation handling structural; semantic wrappers stay in the
+    # query and therefore cannot silently become an event identity.
     text = re.sub(r"[，。！？!?、：:；;（）()\[\]{}<>「」『』]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
@@ -434,9 +416,6 @@ def _event_matches_hint(event: dict, event_hint: str) -> bool:
     raw = _clean_event_hint(str(event_hint or ""))
     if not raw:
         return False
-    # 剔除時間詞與動詞（不在行程資料裡），避免整段子字串比對失敗
-    for term in _TEMPORAL_WORDS:
-        raw = raw.replace(term, " ")
     # 「的」不整顆剝離（名稱如「與簡的雞排約會」需要它），但作為 segment 拆分符號，
     # 避免「14:05的接小孩上學」黏成一段而比對失敗。
     segments = [s for s in re.split(r"[\s,，、]+|的", raw) if s.strip()]
@@ -521,12 +500,47 @@ def _event_matches_explicit_temporal(event: dict, hint: str, temporal_references
     return True
 
 
+def _target_selector_value(selector: object, field_name: str) -> str:
+    """Read a typed selector without importing the V3 command model."""
+    if selector is None:
+        return ""
+    if isinstance(selector, dict):
+        return str(selector.get(field_name) or "").strip()
+    value = getattr(selector, field_name, None)
+    return str(value or "").strip()
+
+
+def _event_matches_target_selector(event: dict, target_selector: object | None) -> bool:
+    """Apply exact local date/start/end filters before identity matching."""
+    if target_selector is None:
+        return True
+    selector_date = _target_selector_value(target_selector, "date")
+    selector_start = _target_selector_value(target_selector, "start_time")
+    selector_end = _target_selector_value(target_selector, "end_time")
+    if not any((selector_date, selector_start, selector_end)):
+        return True
+    try:
+        zone = get_timezone(event.get("timezone") or "Asia/Taipei")
+        start = as_utc(event["start_at"]).astimezone(zone)
+        end = as_utc(event["end_at"]).astimezone(zone)
+    except Exception:
+        return False
+    if selector_date and selector_date != start.date().isoformat():
+        return False
+    if selector_start and selector_start != start.strftime("%H:%M"):
+        return False
+    if selector_end and selector_end != end.strftime("%H:%M"):
+        return False
+    return True
+
+
 def resolve_owned_event_with_candidates(
     user_id: str,
     event_hint: str,
     *,
     source_type: str | None = None,
     temporal_references: dict[str, str] | None = None,
+    target_selector: object | None = None,
     limit: int = 3,
 ) -> tuple[dict | None, str | None, list[dict]]:
     """Resolve an event once, returning bounded server-side fuzzy candidates.
@@ -543,6 +557,7 @@ def resolve_owned_event_with_candidates(
     if source_type:
         query["source_type"] = source_type
     events = list(calendar_events_coll.find(query).sort("start_at", 1))
+    events = [event for event in events if _event_matches_target_selector(event, target_selector)]
     exact = [event for event in events if _event_matches_hint(event, hint)]
     if len(exact) == 1:
         return exact[0], "exact", []
@@ -550,8 +565,6 @@ def resolve_owned_event_with_candidates(
         return None, "ambiguous", exact[:limit]
 
     cleaned = _clean_event_hint(hint)
-    for term in _TEMPORAL_WORDS:
-        cleaned = cleaned.replace(term, " ")
     query_identity = re.sub(r"[\d:/\-\s]+", "", cleaned).strip().lower()
     has_temporal_constraint = bool(re.findall(r"(?:\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}/\d{1,2}\b|\b\d{1,2}:\d{2}\b)", _normalize_hint_text(hint)))
     if len(query_identity) < 2 and not has_temporal_constraint:
@@ -598,10 +611,12 @@ def resolve_owned_event(
     event_hint: str,
     *,
     temporal_references: dict[str, str] | None = None,
+    target_selector: object | None = None,
 ) -> tuple[dict | None, str | None]:
     """Resolve either a personal event or a shared date visible to this owner."""
     event, resolution, candidates = resolve_owned_event_with_candidates(
         user_id, event_hint, temporal_references=temporal_references,
+        target_selector=target_selector,
     )
     _RESOLUTION_CANDIDATES[(user_id, str(event_hint or ""))] = list(candidates)
     _RESOLUTION_KIND[(user_id, str(event_hint or ""))] = str(resolution or "")

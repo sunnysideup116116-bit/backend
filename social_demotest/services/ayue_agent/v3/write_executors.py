@@ -17,11 +17,6 @@ from services.assessment_session_service import start_assessment_session
 from services.ayue_agent.match_opportunity import (
     assess_match_opportunity, missing_basis_question,
 )
-from services.calendar_service import (
-    _parse_local_interval, as_utc, calendar_access_enabled, conflicts_for_viewer,
-    get_timezone, normalize_form, resolve_owned_event, resolve_owned_events_for_cancel,
-)
-
 TOOL_CALLS = db["agent_tool_calls"]
 
 
@@ -141,7 +136,7 @@ def _calendar_event_label(event: dict) -> str:
     return f"{start.month}/{start.day} {start:%H:%M}–{end:%H:%M} {title}"
 
 
-def _execute_calendar_mutation_plans_legacy(
+def _execute_calendar_mutation_plans(
     ctx: Any,
     plans_payload: list[dict[str, Any]],
     *,
@@ -306,7 +301,7 @@ def _execute_calendar_mutation_plans_legacy(
         except Exception as exc:
             if not completed:
                 remember_outcome("failed")
-                return False, "這次沒有成功變更行程，我沒有把它當作已完成。", type(exc).__name__
+                return False, "我這筆行程目前沒有成功變更，先沒有把它當作已完成。請直接告訴我想改成哪一天、幾點。", type(exc).__name__
             remember_outcome("partial")
             return True, (
                 "已處理：" + "、".join(completed) +
@@ -317,215 +312,26 @@ def _execute_calendar_mutation_plans_legacy(
     return True, "已處理：" + "、".join(completed) + "。", None
 
 
-def _execute_calendar_mutation_plans(
+def _calendar_execute(
     ctx: Any,
-    plans_payload: list[dict[str, Any]],
+    tool_name: str,
+    arguments: dict[str, Any],
+    payload: dict[str, Any] | None,
     *,
     confirmation_id: str,
 ) -> tuple[bool, str, str | None]:
-    """Normal V3 wrapper that records a bounded post-write verification state."""
-    from .calendar_commands import CalendarMutationPlan
-    from .calendar_references import remember_recent_mutation
-
-    try:
-        plans = [CalendarMutationPlan.model_validate(item) for item in plans_payload]
-    except Exception:
-        plans = []
-    result = _execute_calendar_mutation_plans_legacy(
-        ctx, plans_payload, confirmation_id=confirmation_id,
-    )
-    if not plans:
-        return result
-    ok, _reply, error_code = result
-    outcome = "success" if ok and error_code is None else "partial" if ok else "failed"
-    # The legacy implementation above already records the actual event IDs
-    # returned by the domain services for successful/partial writes (create
-    # has no event ID until execution).  Only add a fallback failure record
-    # when no operation could be recorded there.
-    if ok:
-        return result
-    try:
-        remember_recent_mutation(
-            ctx.user_id,
-            action=(plans[0].action if len(plans) == 1 else "batch"),
-            outcome=outcome,
-            operations=[{
-                "action": plan.action,
-                "event_id": plan.event_id,
-                "revision": plan.expected_revision,
-                "source_type": plan.source_type,
-                "other_id": plan.other_id,
-                "coordination_id": plan.coordination_id,
-                "expected_status": "cancelled" if plan.action == "cancel" else "confirmed",
-                "safe_label": plan.safe_label,
-            } for plan in plans],
-        )
-    except Exception:
-        pass
-    return result
-
-
-def _calendar_execute(ctx: Any, tool_name: str, arguments: dict[str, Any], payload: dict[str, Any] | None, *, confirmation_id: str) -> tuple[bool, str, str | None]:
-    from fastapi import HTTPException
-    from services.calendar_service import (
-        cancel_event, cancel_targets_are_current, create_personal_event,
-        update_personal_event,
-    )
-    from services.date_coordination_service import cancel_coordination_or_event, request_reschedule
-
+    """Execute only the typed ``calendar.submit_commands`` confirmation plan."""
+    if tool_name != "calendar.submit_commands":
+        return False, "這個行程確認已失效，請重新告訴我你想怎麼安排。", "calendar_legacy_tool_disabled"
     payload = payload or {}
-    if payload.get("calendar_plan_version") == 1:
-        return _execute_calendar_mutation_plans(
-            ctx,
-            list(payload.get("plans") or []),
-            confirmation_id=confirmation_id,
-        )
-    key = f"calendar-confirmation:{confirmation_id}"
-    try:
-        batch = payload.get("batch")
-        if isinstance(batch, list) and batch:
-            # Batch: one confirmation may carry multiple calendar writes
-            # (create/update/cancel mixed). Each item is {tool, arguments, data}.
-            labels: list[str] = []
-            failed = 0
-            for index, item in enumerate(batch):
-                item_tool = str(item.get("tool") or tool_name)
-                item_args = item.get("arguments") or {}
-                item_data = item.get("data") or {}
-                item_key = f"{key}:{index}"
-                try:
-                    if item_tool == "calendar.create_my_event":
-                        event = create_personal_event(ctx.user_id, item_args, agent_action_key=item_key)
-                        labels.append(_calendar_event_label(event))
-                        continue
-                    event_id = str(item_data.get("event_id") or "")
-                    revision = int(item_data.get("event_revision", 0) or 0)
-                    is_shared = item_data.get("event_source_type") == "date"
-                    other_id = str(item_data.get("event_other_id") or "")
-                    if item_tool == "calendar.update_my_event":
-                        if is_shared:
-                            coordination, event = request_reschedule(
-                                ctx.user_id, other_id, event_id,
-                                dict(item_data.get("proposed_form") or {}),
-                                expected_revision=revision, idempotency_key=item_key,
-                            )
-                            form = coordination.get("form") or {}
-                            proposed_label = (
-                                f"{str(form.get('date') or '')[5:].replace('-', '/')} "
-                                f"{form.get('start_time', '')}–{form.get('end_time', '')} "
-                                f"{form.get('activity') or '共同約會'}"
-                            ).strip()
-                            labels.append(f"改期：{proposed_label}")
-                            continue
-                        changes = {k: v for k, v in item_args.items() if k != "event_hint" and v is not None}
-                        event = update_personal_event(
-                            ctx.user_id, event_id, changes,
-                            expected_revision=revision, agent_action_key=item_key,
-                        )
-                        labels.append(_calendar_event_label(event))
-                        continue
-                    if item_tool == "calendar.cancel_my_event":
-                        if is_shared:
-                            coordination = cancel_coordination_or_event(
-                                ctx.user_id, other_id, str(item_data.get("coordination_id") or ""),
-                                expected_revision=revision, idempotency_key=item_key,
-                            )
-                            title = str((coordination.get("form") or {}).get("activity") or "共同約會")
-                            labels.append(f"取消共同約會「{title}」")
-                            continue
-                        event = cancel_event(
-                            ctx.user_id, event_id, personal_only=True,
-                            expected_revision=revision, agent_action_key=item_key,
-                        )
-                        labels.append(f"取消「{_calendar_event_label(event)}」")
-                        continue
-                    failed += 1
-                except Exception:
-                    failed += 1
-                    break
-            if not labels:
-                return False, "這些行程現在無法變更；我沒有確認到任何變更結果。", "calendar_write_failed"
-            reply = "已處理：" + "、".join(labels) + "。"
-            if failed:
-                reply += f"第 {len(labels) + 1} 筆沒有變更，後續已停止，請再查看後重試。"
-            return True, reply, "partial" if failed else None
-        if tool_name == "calendar.create_my_event":
-            event = create_personal_event(ctx.user_id, arguments, agent_action_key=key)
-            return True, f"已加入行程：{_calendar_event_label(event)}。", None
-        event_id = str(payload.get("event_id") or "")
-        revision = int(payload.get("event_revision", 0) or 0)
-        is_shared = payload.get("event_source_type") == "date"
-        other_id = str(payload.get("event_other_id") or "")
-        if tool_name == "calendar.update_my_event":
-            if is_shared:
-                coordination, event = request_reschedule(
-                    ctx.user_id, other_id, event_id,
-                    dict(payload.get("proposed_form") or {}),
-                    expected_revision=revision, idempotency_key=key,
-                )
-                form = coordination.get("form") or {}
-                proposed_label = (
-                    f"{str(form.get('date') or '')[5:].replace('-', '/')} "
-                    f"{form.get('start_time', '')}–{form.get('end_time', '')} "
-                    f"{form.get('activity') or '共同約會'}"
-                ).strip()
-                return True, f"已提出改期：{proposed_label}。對方已收到通知，確認後才會正式變更。", None
-            changes = {k: v for k, v in arguments.items() if k != "event_hint" and v is not None}
-            event = update_personal_event(
-                ctx.user_id, event_id, changes, expected_revision=revision, agent_action_key=key,
-            )
-            return True, f"已更新行程：{_calendar_event_label(event)}。", None
-        if tool_name == "calendar.cancel_my_event":
-            if is_shared:
-                coordination = cancel_coordination_or_event(
-                    ctx.user_id, other_id, str(payload.get("coordination_id") or ""),
-                    expected_revision=revision, idempotency_key=key,
-                )
-                title = str((coordination.get("form") or {}).get("activity") or "共同約會")
-                return True, f"已取消共同約會「{title}」，對方已收到通知，雙方行事曆也已同步。", None
-            event = cancel_event(
-                ctx.user_id, event_id, personal_only=True, expected_revision=revision, agent_action_key=key,
-            )
-            return True, f"已取消行程：{_calendar_event_label(event)}。", None
-        if tool_name == "calendar.cancel_my_events":
-            targets = list(payload.get("targets") or [])
-            if not cancel_targets_are_current(ctx.user_id, targets):
-                return False, "其中一筆行程剛剛有變動，我沒有刪除任何行程。請重新確認。", "stale_revision"
-            completed: list[str] = []
-            failed = 0
-            for index, target in enumerate(targets):
-                target_key = f"{key}:{index}"
-                try:
-                    if target.get("event_source_type") == "date":
-                        cancel_coordination_or_event(
-                            ctx.user_id, str(target.get("event_other_id") or ""),
-                            str(target.get("coordination_id") or ""),
-                            expected_revision=int(target.get("event_revision", 0) or 0),
-                            idempotency_key=target_key,
-                        )
-                    else:
-                        cancel_event(
-                            ctx.user_id, str(target.get("event_id") or ""),
-                            personal_only=True,
-                            expected_revision=int(target.get("event_revision", 0) or 0),
-                            agent_action_key=target_key,
-                        )
-                    completed.append(str(target.get("safe_label") or "這筆行程"))
-                except Exception:
-                    failed += 1
-            if not completed:
-                return False, "這些行程現在無法變更；我沒有確認到任何刪除結果。", "calendar_write_failed"
-            reply = f"已取消 {len(completed)} 筆行程：" + "、".join(f"「{label}」" for label in completed) + "。"
-            if failed:
-                reply += f"另有 {failed} 筆沒有刪除，請再查看後重試。"
-            return True, reply, "partial" if failed else None
-        return False, "這個行程確認已失效，請重新告訴我你想怎麼安排。", "unknown_calendar_action"
-    except HTTPException as exc:
-        if exc.status_code == 409:
-            return False, "這筆行程剛剛有變動，我沒有覆寫它。請告訴我最新想怎麼改。", "stale_revision"
-        return False, "這筆行程現在無法變更；你可以再告訴我想處理哪一筆嗎？", "calendar_write_failed"
-    except Exception as exc:
-        return False, "我這次沒有改動你的行程，請稍後再試。", type(exc).__name__
+    if payload.get("calendar_plan_version") != 1:
+        return False, "這次行程確認資料已失效，請重新告訴我想怎麼安排。", "calendar_plan_invalid"
+    plans = payload.get("plans")
+    if not isinstance(plans, list) or not plans:
+        return False, "這次沒有可執行的行程變更。", "calendar_plan_empty"
+    return _execute_calendar_mutation_plans(
+        ctx, plans, confirmation_id=confirmation_id,
+    )
 
 
 _WRITE_EXECUTORS = {
@@ -533,138 +339,6 @@ _WRITE_EXECUTORS = {
     "match.decide_active_proposal": lambda ctx, turn, run_id, index, args, cid, payload: _decide_active_proposal(ctx, turn, run_id, index, args, payload),
     "profile.start_assessment": lambda ctx, turn, run_id, index, args, cid, payload: _start_assessment(ctx, args, confirmation_id=cid),
 }
-
-
-# Compatibility-only direct Calendar executors.  The normal V3 Calendar Agent
-# surface is ``calendar.submit_commands``; these names remain solely for older
-# confirmation records and non-V3 callers and must not be added to the Agent
-# tool prompt as an alternative mutation path.
-_CALENDAR_WRITE_ACTIONS = {
-    "calendar.create_my_event", "calendar.update_my_event",
-    "calendar.cancel_my_event", "calendar.cancel_my_events",
-}
-
-
-def _calendar_pending_target(event: dict, user_id: str) -> dict[str, Any]:
-    return {
-        "event_id": str(event.get("event_id") or ""),
-        "event_revision": int(event.get("revision", 1)),
-        "event_source_type": str(event.get("source_type") or "personal"),
-        "event_other_id": (
-            next((p for p in (event.get("participants") or []) if p != user_id), None)
-            if event.get("source_type") == "date" else None
-        ),
-        "coordination_id": event.get("coordination_id"),
-        "safe_label": _calendar_event_label(event),
-    }
-
-
-def _calendar_preview_and_payload(ctx: Any, tool_name: str, arguments: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
-    from fastapi import HTTPException
-
-    if not calendar_access_enabled(ctx.user_id):
-        return None, "我目前不能存取你的行事曆；你可以先到日曆設定確認是否已授權。"
-    event: dict | None = None
-    targets: list[dict[str, Any]] = []
-    conflicts: list[dict] = []
-    proposed: dict | None = None
-    try:
-        if tool_name == "calendar.create_my_event":
-            form = normalize_form(arguments)
-            start_at, end_at, _ = _parse_local_interval(form)
-            arguments = {**arguments, **form}
-            conflicts = conflicts_for_viewer(ctx.user_id, [ctx.user_id], start_at, end_at)
-            preview = f"要新增 {form['date'][5:].replace('-', '/')} {form['start_time']}–{form['end_time']}「{form['title']}」嗎？"
-        elif tool_name == "calendar.cancel_my_events":
-            events, resolution = resolve_owned_events_for_cancel(
-                ctx.user_id,
-                mode=str(arguments.get("mode") or ""),
-                event_hints=list(arguments.get("event_hints") or []),
-            )
-            if resolution == "ambiguous":
-                return None, "有一筆行程對應到不只一個結果。你可以補上日期或完整名稱嗎？"
-            if resolution == "not_found":
-                return None, "我找不到其中一筆自己的行程。你可以補上日期或名稱嗎？"
-            if resolution == "too_many":
-                return None, "接下來的行程超過 10 筆；請先指定想取消哪些日期。"
-            if resolution or not events:
-                return None, "我還需要更明確的行程名稱或日期，才能一次取消多筆。"
-            targets = [_calendar_pending_target(item, ctx.user_id) for item in events]
-            labels = "、".join(f"「{target['safe_label']}」" for target in targets)
-            preview = f"要取消這 {len(targets)} 筆行程嗎：{labels}？"
-            if any(target["event_source_type"] == "date" for target in targets):
-                preview += " 其中共同約會會同步雙方行事曆並通知對方。"
-        else:
-            event, resolution = resolve_owned_event(ctx.user_id, arguments.get("event_hint", ""))
-            if resolution == "ambiguous":
-                return None, "我找到不只一筆符合的行程。你可以補上日期或完整名稱嗎？"
-            if not event:
-                return None, "我找不到這筆自己的行程。你可以補上日期或名稱嗎？"
-            is_shared = event.get("source_type") == "date"
-            if tool_name == "calendar.cancel_my_event":
-                targets = [_calendar_pending_target(event, ctx.user_id)]
-                preview = f"要取消「{_calendar_event_label(event)}」嗎？"
-                if is_shared:
-                    preview += " 這是共同約會，取消後會同步雙方行事曆並通知對方。"
-            else:
-                if is_shared and event.get("status") != "confirmed":
-                    return None, "這筆共同約會正在等待重新確認；你可以先取消目前改期，或直接取消整筆約會。"
-                zone = get_timezone(event.get("timezone") or "Asia/Taipei")
-                start = as_utc(event["start_at"]).astimezone(zone)
-                end = as_utc(event["end_at"]).astimezone(zone)
-                current = {
-                    "title": (event.get("activity") if is_shared else event.get("title") or event.get("activity")) or "行程",
-                    "date": start.date().isoformat(), "start_time": start.strftime("%H:%M"),
-                    "end_time": end.strftime("%H:%M"), "timezone": event.get("timezone") or "Asia/Taipei",
-                    "location": event.get("location") or "", "notes": event.get("notes") or "",
-                }
-                changes = {k: v for k, v in arguments.items() if k != "event_hint" and v is not None}
-                if not changes:
-                    return None, f"你想把「{_calendar_event_label(event)}」改成什麼呢？"
-                if is_shared:
-                    shared_changes = dict(changes)
-                    if "title" in shared_changes:
-                        shared_changes["activity"] = shared_changes.pop("title")
-                    proposed = normalize_form({
-                        **current, "activity": current["title"],
-                        "budget": event.get("budget") or "", **shared_changes,
-                    })
-                else:
-                    proposed = normalize_form({**current, **changes})
-                start_at, end_at, _ = _parse_local_interval(proposed)
-                conflicts = conflicts_for_viewer(
-                    ctx.user_id,
-                    list(event.get("participants") or [ctx.user_id]) if is_shared else [ctx.user_id],
-                    start_at, end_at, event.get("event_id"),
-                )
-                arguments = {"event_hint": arguments["event_hint"], **changes}
-                proposed_title = proposed["activity"] if is_shared else proposed["title"]
-                preview = f"要把「{_calendar_event_label(event)}」改成 {proposed['date'][5:].replace('-', '/')} {proposed['start_time']}–{proposed['end_time']}「{proposed_title}」嗎？"
-                if is_shared:
-                    preview += " 對方會收到改期通知，重新確認後才會正式變更。"
-    except HTTPException as exc:
-        return None, f"我還需要補齊行程資訊：{exc.detail}。"
-    if conflicts:
-        preview += f" 這會和你現有的 {len(conflicts)} 筆行程重疊；仍要這樣安排嗎？"
-    payload = {
-        "action": tool_name,
-        "arguments": arguments,
-        "data": {
-            "event_id": event.get("event_id") if event else None,
-            "event_revision": int(event.get("revision", 1)) if event else None,
-            "event_source_type": event.get("source_type") if event else None,
-            "event_other_id": (
-                next((p for p in (event.get("participants") or []) if p != ctx.user_id), None)
-                if event and event.get("source_type") == "date" else None
-            ),
-            "coordination_id": event.get("coordination_id") if event else None,
-            "targets": targets,
-            "proposed_form": (
-                proposed if event and tool_name == "calendar.update_my_event" and event.get("source_type") == "date" else None
-            ),
-        },
-    }
-    return payload, preview + " 回覆「確認」才會真的變更。"
 
 
 def prepare_write_confirmation(
@@ -676,8 +350,6 @@ def prepare_write_confirmation(
     blocked, ambiguous, missing fields).  The payload carries executor-only
     data (event IDs, revisions, targets) that never reach the planner.
     """
-    if tool_name in _CALENDAR_WRITE_ACTIONS:
-        return _calendar_preview_and_payload(ctx, tool_name, arguments)
     if tool_name == "match.start_search":
         assessment = assess_match_opportunity(ctx.user_profile or {}, ctx.user_id, explicit_search=True)
         if assessment.state == "not_ready":
@@ -731,4 +403,5 @@ def execute_write(
     executor = _WRITE_EXECUTORS.get(tool_name)
     if executor is None:
         return False, "我現在不能安全地處理這個操作。", "write_executor_not_registered"
-    return executor(ctx, turn, run_id, index, arguments, confirmation_id, payload)
+    cid = (payload or {}).get("_confirmation_id") or confirmation_id
+    return executor(ctx, turn, run_id, index, arguments, cid, payload)

@@ -25,6 +25,9 @@ class AyueProductIdentityTests(unittest.TestCase):
         self.assertIn(AYUE_VOICE, PUBLIC_AYUE_PERSONA)
         self.assertIn(AYUE_VOICE, PRIVATE_AYUE_PERSONA)
         self.assertNotEqual(PUBLIC_AYUE_PERSONA, PRIVATE_AYUE_PERSONA)
+        self.assertIn("看不到你和對方的雙人聊天室紀錄", PUBLIC_AYUE_PERSONA)
+        self.assertIn("可以讀取這個雙人聊天室允許的近期聊天紀錄", PRIVATE_AYUE_PERSONA)
+        self.assertIn("聊天建議", PRIVATE_AYUE_PERSONA)
         self.assertEqual(MEDIATOR_PERSONA, LEGACY_AYUE_PERSONA)
 
     def test_public_planner_and_synthesizer_receive_canonical_identity(self):
@@ -49,13 +52,12 @@ class AyueProductIdentityTests(unittest.TestCase):
     def test_capability_copy_is_product_facing_and_not_model_metadata(self):
         self.assertIn("阿月", PUBLIC_CAPABILITY_REPLY)
         self.assertIn("媒人朋友", PUBLIC_CAPABILITY_REPLY)
-        self.assertIn("先懂你", PUBLIC_CAPABILITY_REPLY)
-        self.assertIn("認識之後也會繼續陪你", PUBLIC_CAPABILITY_REPLY)
+        self.assertIn("陪你聊生活", PUBLIC_CAPABILITY_REPLY)
         self.assertNotIn("agent", PUBLIC_CAPABILITY_REPLY)
         self.assertNotIn("tool", PUBLIC_CAPABILITY_REPLY)
 
     def test_public_reply_policy_is_not_injected_into_private_persona(self):
-        self.assertIn("1–3 句", PUBLIC_REPLY_LENGTH)
+        self.assertIn("1–2 句", PUBLIC_REPLY_LENGTH)
         self.assertIn("不要套公式", PUBLIC_REPLY_TONE)
         self.assertNotIn(PUBLIC_REPLY_LENGTH, PRIVATE_AYUE_PERSONA)
         self.assertNotIn(PUBLIC_REPLY_TONE, PRIVATE_AYUE_PERSONA)

@@ -17,7 +17,9 @@
 }
 ```
 
-**公開 stream 允許的 NDJSON event 只有**：`run_started`、`plan_created`、`subagent_started`、`subagent_finished`、`tool_started`、`tool_finished`、`final`、`error`。`_sanitize_public_stream_event` 會把其他 event 丟棄；所有 event 都只外送 allowlisted 欄位（`tool_started` 只有 text/tool_name/step_id，`tool_finished` 只有 outcome/工具名/耗時），arguments、tool result 與 prompt 不會跨 HTTP 邊界外送（prompt_raw/content_raw 僅在 plan_created/subagent_finished 以截斷長度供除錯）。
+**公開 stream 允許的 NDJSON event 只有**：`run_started`、`tool_started`、`tool_finished`、`final`、`error`。`_sanitize_public_stream_event` 會把其他 event 丟棄；arguments、tool result、prompt 與 debug content 不會跨 HTTP 邊界外送。
+
+JSON 與 stream 的 final response 都保留 `reply`，並可附加 bounded `messages`（最多三則）。儲存仍是一回合一筆 assistant message；多氣泡只以 `presentation_messages` metadata 作為 UI projection。
 
 呼叫鏈（GitNexus trace 驗證）：
 
@@ -43,7 +45,7 @@ direct_chat (public_chat.py:895)
 
 ### 階段 1：Planner 拆解（LLM）
 
-`planner.py:plan_turn` 用單一 `decompose_tasks` function calling，模型輸出的 tool call arguments 就是 typed `Plan`。Planner **只輸出靜態子任務 DAG**：每個 `SubTask` 有 `id`、`agent`（calendar/places/match/relationship/profile/synthesizer）、`depends_on`、`task_brief`。
+`planner.py:plan_turn` 用單一 `decompose_tasks` function calling，模型輸出的 tool call arguments 就是 typed `Plan`。Planner **只輸出靜態子任務 DAG**：每個 `SubTask` 有 `id`、`agent`（calendar/places/web/match/relationship/profile/synthesizer）、`depends_on`、`task_brief`。
 
 `Plan` 的 DAG 驗證（`contracts.py`，純程式碼）：
 
@@ -52,6 +54,11 @@ direct_chat (public_chat.py:895)
 - Planner 另可輸出 `opportunity`（`signal=social_opening` + `evidence_span` + `confidence≥0.8`），Scheduler 會再驗證 evidence_span 是原句連續子字串。這是非動作性的短期溫和提議，不會建立 pending confirmation；明確的開始／重試配對請求必須產生 `match` task，走一般 confirmation path。
 
 Planner 無效（無 tool call、名字錯誤、schema 不符、逾時）→ **fail closed**：回「我現在沒辦法判斷這個請求要不要執行」，不執行任何工具。
+
+產品身份／入口問題使用 typed `mode="product_info"` 與最多三個
+`product_info_topics`，由 Scheduler 直接投影 versioned capability manifest；
+不使用自然語言 regex 重新路由，也不建立 domain task。Public 與 Private 是
+同一位阿月的不同 bounded surface，Private 訊息不自動回流 Public profile/memory。
 
 ### 階段 2：拓撲分層執行 sub-agents
 
@@ -88,7 +95,7 @@ Guard 通過後 Scheduler 再做三道 runtime 檢查：
 
 唯讀工具經 `tools.py:execute_tool` 執行：依 `executor_key` 分派到對應 facade（calendar/match/profile/relationship/web/places），facade 內用 domain service 讀 canonical 資料，輸出必須通過該工具的 `output_model` 驗證（`extra="forbid"`），失敗回 `invalid_tool_output`。
 
-一般寫入工具在此階段**不會執行**：Guard 回 `write_requires_confirmation`。Calendar Agent 的 `calendar.submit_commands` 由 Scheduler 先做 deterministic preflight（使用 authoritative clock、必要時只 resolve 一次、查衝突、組 preview），產生不暴露給 LLM 的 `CalendarMutationPlan`；其他 legacy write proposal 仍由 `prepare_write_confirmation` 相容處理。在 `v3_pending_confirmations` 插入 pending 紀錄（TTL 900 秒），把 `pending_confirmation` observation 交給 Synthesizer 向使用者確認。missing_fields、invalid_date、ambiguous、not_found、too_many、invalid_interval 不建立 confirmation，而是正常 clarification。
+一般寫入工具在此階段**不會執行**：Guard 回 `write_requires_confirmation`。Calendar Agent 的 `calendar.submit_commands` 由 Scheduler 先做 deterministic preflight（使用 authoritative clock、必要時只 resolve 一次、查衝突、組 preview），產生不暴露給 LLM 的 `CalendarMutationPlan`；舊的 direct Calendar proposal 不再註冊，若由過期 confirmation 送入則 fail closed。在 `v3_pending_confirmations` 插入 pending 紀錄（TTL 900 秒），把 `pending_confirmation` observation 交給 Synthesizer 向使用者確認。missing_fields、invalid_date、ambiguous、not_found、too_many、invalid_interval 不建立 confirmation，而是正常 clarification。
 
 ### 階段 5：Synthesizer（LLM）
 
@@ -124,7 +131,7 @@ Calendar Agent 提出 `calendar.submit_commands` typed command batch
 | `match.start_search` | `_start_search` | `match_action_service.start_match_search` → `enqueue_match_search` |
 | `match.decide_active_proposal` | `_decide_active_proposal` | `match_action_service.decide_active_proposal`（revision CAS） |
 | `profile.start_assessment` | `_start_assessment` | `assessment_session_service.start_assessment_session` |
-| `calendar.submit_commands`（legacy `calendar.*` 相容） | `_execute_calendar_mutation_plans`／`_calendar_execute` | `calendar_service` / `date_coordination_service` |
+| `calendar.submit_commands` | `_execute_calendar_mutation_plans`／`_calendar_execute` | `calendar_service` / `date_coordination_service` |
 
 冪等性：`_claim_once` 以 `idempotency_key`（`confirmation:{id}` 或 `{run_id}:{index}`）在 `agent_tool_calls` 做 `$setOnInsert` upsert，重放直接回「已處理過」；calendar 每筆另帶 `agent_action_key`。Stale（revision 不匹配）回報最新狀態且不覆寫終態（HTTPException 409 → `stale_revision`）。
 
@@ -136,6 +143,7 @@ Calendar Agent 提出 `calendar.submit_commands` typed command batch
 | --- | --- |
 | calendar | message、recent_messages、clock、recent_context、calendar_draft、calendar_recent_reference、prior_observations |
 | places | message、recent_messages、user_location、clock、prior_observations |
+| web | message、最近 4 則 bounded messages、user_location、clock、prior_observations |
 | match | message、recent_messages、active_proposal、latest_match_outcome、clock、prior_observations |
 | relationship | message、recent_messages、mentioned_contacts、mentioned_contact_overflow、clock、prior_observations |
 | profile | message、recent_messages、recent_context、relevant_memories、clock、prior_observations |
@@ -165,3 +173,14 @@ Calendar Agent 提出 `calendar.submit_commands` typed command batch
 
 
 > Current lifecycle override: Public requests no longer branch on rollout flags or fall back to a legacy runtime. Rollback is deployment/commit rollback.
+## Current Web Agent lifecycle
+
+When the Planner emits `agent="web"`, Scheduler runs the dedicated Web
+research loop. The loop returns each bounded `web.search`/`web.extract`
+observation to the Web Agent before the next decision, then emits one typed
+`web_research.v1` result for Synthesizer. It permits at most three decision
+rounds, three total calls, two initial searches, one refinement search, and one
+extract step over two URLs. Evidence is graded against the original answer
+target; adjacent-only or conflicting evidence cannot become an answered
+claim. Missing credentials, model failure, and no direct evidence have
+separate typed outcomes.
