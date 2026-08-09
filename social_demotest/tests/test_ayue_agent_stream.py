@@ -86,7 +86,7 @@ class AyueAgentStreamTests(unittest.TestCase):
         self.assertEqual(response["reply"], "我先陪你把這段聊完，剛剛回覆沒有成功，再試一次就好。")
         self.assertNotIn("銝", response["reply"])
 
-    def test_public_v2_profile_off_does_not_fall_back_to_legacy_observer(self):
+    def test_public_profile_off_does_not_enqueue_an_alternate_observer(self):
         tasks = MagicMock()
         with patch("routers.public_chat.profile_skills_mode_for_user", return_value="off"):
             mode = queue_profile_skills(
@@ -254,8 +254,17 @@ class AyueAgentStreamTests(unittest.TestCase):
         self.assertIn('event.key !== "Enter" || event.shiftKey', source)
         self.assertIn('mention_labels: outgoingMentions.map(mentionLabel)', source)
         self.assertIn("appendMessageText(div, text", source)
+        self.assertIn("function appendAssistantMarkdown(container, text)", source)
+        self.assertIn("function appendInlineMarkdown(container, text)", source)
+        self.assertIn("appendAssistantMarkdown(div, text)", source)
+        self.assertIn('document.createElement(token.startsWith("**") ? "strong" : "code")', source)
+        self.assertIn('container.classList.add("message-markdown")', source)
         self.assertIn('gmp-place-details-compact', source)
         self.assertIn('className = "place-card place-card-custom"', source)
+        self.assertNotIn('className = "place-card-reason"', source)
+        self.assertNotIn('label.textContent = "阿月說明"', source)
+        self.assertNotIn("card_description", source)
+        self.assertNotIn("appendPlaceCardDescription", source)
         self.assertIn('url.pathname !== "/export/embed.html"', source)
         self.assertIn('frame.loading = "lazy"', source)
         self.assertIn('appendPlaceCards(div', source)

@@ -24,6 +24,12 @@ from services.demo_cleanup_service import DemoCleanupError, clear_all_demo_state
 router = APIRouter(prefix="/api", tags=["System"])
 
 
+@router.get("/health")
+def service_health():
+    """Process readiness only; never probes user data or external services."""
+    return {"status": "ok", "service": "ayue"}
+
+
 def _is_loopback_debug_request(request: Request) -> bool:
     if not local_debug_enabled() or request.client is None:
         return False

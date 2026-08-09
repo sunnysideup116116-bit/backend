@@ -21,14 +21,14 @@
 
 JSON 與 stream 的 final response 都保留 `reply`，並可附加 bounded `messages`（最多三則）。儲存仍是一回合一筆 assistant message；多氣泡只以 `presentation_messages` metadata 作為 UI projection。
 
-呼叫鏈（GitNexus trace 驗證）：
+實際呼叫鏈：
 
 ```text
-direct_chat (public_chat.py:895)
-  → _complete_public_turn (public_chat.py:627)
+direct_chat (routers/public_chat.py)
+  → _complete_public_turn
       - 保存使用者訊息（唯一一次）
       - 組 AgentTurnContext（含 recent_history ≤12 則、user_profile、提及清單）
-  → run_public_agent_turn_v3 (services/ayue_agent/__init__.py → v3/scheduler.py:714)
+  → run_public_agent_turn_v3 (services/ayue_agent/__init__.py → v3/scheduler.py)
   → save_message(ai_assistant 回覆)（唯一一次）
   → 背景 queue_profile_skills（僅非 assessment 回合）
 ```
@@ -62,7 +62,7 @@ Planner 無效（無 tool call、名字錯誤、schema 不符、逾時）→ **f
 
 ### 階段 2：拓撲分層執行 sub-agents
 
-`_topological_layers` 依 `depends_on` 把 task 分成層；同層用 `ThreadPoolExecutor` 平行執行（`MAX_PARALLEL=5`，env `AYUE_SUBAGENT_MAX_PARALLEL`），有依賴的層依序執行。
+`_topological_layers` 依 `depends_on` 把 task 分成層；同層用 `ThreadPoolExecutor` 平行執行（`AYUE_SUBAGENT_MAX_PARALLEL` 預設且硬上限 2），有依賴的層依序執行。
 
 每個 task 由 `_run_sub_task` 執行：
 
@@ -172,7 +172,7 @@ Calendar Agent 提出 `calendar.submit_commands` typed command batch
 | effect 失敗（通知等） | transition 已提交，effect 失敗不重送 |
 
 
-> Current lifecycle override: Public requests no longer branch on rollout flags or fall back to a legacy runtime. Rollback is deployment/commit rollback.
+> Current lifecycle: Public requests always enter this Scheduler；rollback 只能透過 deployment／commit rollback。
 ## Current Web Agent lifecycle
 
 When the Planner emits `agent="web"`, Scheduler runs the dedicated Web

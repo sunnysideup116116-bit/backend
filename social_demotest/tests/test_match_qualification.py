@@ -14,10 +14,25 @@ from routers.match import (
     get_single_match_state,
     validated_distinctive_tags,
 )
-from services.match_reason_service import accepted_opening_for_viewer, valid_friend_intro_text
+from services.match_reason_service import (
+    MATCH_PROPOSAL_STYLE_IDS,
+    accepted_opening_for_viewer,
+    match_reason_style_id,
+    valid_friend_intro_text,
+)
 
 
 class MatchQualificationTests(unittest.TestCase):
+    def test_match_reason_style_is_stable_but_not_a_single_global_first_shot(self):
+        first = match_reason_style_id("owner", "candidate", context_revision="r1")
+        self.assertEqual(first, match_reason_style_id("owner", "candidate", context_revision="r1"))
+        styles = {
+            match_reason_style_id(f"owner-{index}", f"candidate-{index}", context_revision="r1")
+            for index in range(12)
+        }
+        self.assertGreaterEqual(len(styles), 2)
+        self.assertTrue(styles.issubset(set(MATCH_PROPOSAL_STYLE_IDS)))
+
     def test_v4_validator_accepts_all_approved_natural_opening_shapes(self):
         common = {
             "required_context": "晚上想看電影",

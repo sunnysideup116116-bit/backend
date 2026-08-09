@@ -164,6 +164,10 @@ def _complete_public_turn(
     ai_reply = "\n\n".join(reply_messages)
     sources = agent_result.sources[:5]
     place_cards = agent_result.place_cards[:8]
+    presentation_blocks = [
+        block.model_dump(mode="json", exclude_none=True)
+        for block in (agent_result.presentation_blocks or [])[:12]
+    ]
     metadata = {}
     run_id = str(agent_result.agent_run_id or "")
     if re.fullmatch(r"[a-f0-9]{32}", run_id):
@@ -172,6 +176,8 @@ def _complete_public_turn(
         metadata["sources"] = sources
     if place_cards:
         metadata["place_cards"] = place_cards
+    if presentation_blocks:
+        metadata["presentation_blocks"] = presentation_blocks
     if len(reply_messages) > 1:
         metadata["presentation_messages"] = reply_messages
     if metadata:
@@ -220,6 +226,7 @@ def _complete_public_turn(
         if agent_result.assessment_revision is not None else assessment_state["assessment_revision"],
         "sources": sources,
         "place_cards": place_cards,
+        "presentation_blocks": presentation_blocks,
         "llm_call_metrics": agent_result.llm_call_metrics or [],
     }
 

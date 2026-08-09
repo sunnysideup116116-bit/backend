@@ -48,7 +48,7 @@ from .maps_client import (
     resolve_place as resolve_osm_place,
 )
 from .google_places_client import (
-    GooglePlacesError, google_place_cards_enabled,
+    GooglePlacesError, google_place_cards_enabled, google_routes_enabled,
     measure_distance_matrix, resolve_place as resolve_google_place,
     search_nearby_places,
 )
@@ -473,7 +473,20 @@ def _mentioned_contact_summary(ctx: AgentTurnContext, other_ids: list[str]) -> T
 
 def _accepted_contact_list(ctx: AgentTurnContext) -> ToolResult:
     contacts, truncated = accepted_contact_summaries(ctx.user_id)
-    return ToolResult(ok=True, data={"contacts": contacts, "truncated": truncated})
+    total_count: int | None = len(contacts) if not truncated else None
+    if truncated:
+        try:
+            total_count = int(matches_coll.count_documents(verified_accepted_match_query(ctx.user_id)))
+        except Exception:
+            # A bounded/truncated projection still remains useful when the
+            # backing store cannot provide an exact count (for example in the
+            # in-memory test store).  Do not turn that into a DB/network error.
+            total_count = None
+    return ToolResult(ok=True, data={
+        "contacts": contacts,
+        "truncated": truncated,
+        "total_count": total_count,
+    })
 
 
 def _memory_profile(ctx: AgentTurnContext) -> ToolResult:
@@ -594,6 +607,26 @@ def _saved_location(ctx: AgentTurnContext) -> str:
     return str(safe_profile_location(ctx.user_profile).get("display_name") or "").strip()
 
 
+def _canonical_place_anchor(ctx: AgentTurnContext, anchor: str) -> str:
+    """Disambiguate a short district against the owner's saved city.
+
+    This is location normalization, not intent routing: a bare district that
+    exactly matches the saved profile district is expanded before geocoding so
+    names shared by multiple Taiwanese cities do not resolve elsewhere.
+    """
+    value = re.sub(r"\s+", "", str(anchor or "")).strip()
+    location = safe_profile_location(ctx.user_profile)
+    saved = str(location.get("display_name") or "").strip()
+    city = str(location.get("city") or "").strip()
+    district = str(location.get("district") or "").strip()
+    if not value or not saved or not district:
+        return value
+    district_root = district[:-1] if district.endswith(("區", "縣", "市")) else district
+    if value in {district, district_root, f"{city}{district}", f"{city}{district_root}"}:
+        return saved
+    return value
+
+
 def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResult:
     anchor = str(arguments.get("anchor") or "").strip()
     origin_kind = "explicit"
@@ -602,9 +635,10 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
         origin_kind = "saved_profile"
     if not anchor:
         return ToolResult(ok=False, error_code="location_required", user_message="你想從哪個地點開始找？")
+    anchor = _canonical_place_anchor(ctx, anchor)
     categories = [str(item) for item in (arguments.get("categories") or [])]
     cuisine = str(arguments.get("cuisine") or "").strip()
-    safe_limit = int(arguments.get("limit") or 8)
+    safe_limit = int(arguments.get("limit") or 3)
     data = None
     # Google is an optional presentation enhancement. Its failure must never
     # take away the existing OpenStreetMap place discovery capability.
@@ -614,12 +648,18 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
             google_places = search_nearby_places(
                 str(point.get("label") or anchor), float(point["lat"]), float(point["lon"]), categories,
                 limit=safe_limit, cuisine=cuisine,
+                radius_m=int(arguments.get("radius_m") or 1500),
             )
             data = {
                 "anchor_label": str(point.get("label") or anchor),
                 "distance_basis": "straight_line",
                 "attribution": "Google Maps",
                 "attribution_url": "https://www.google.com/maps",
+                "requested_categories": categories[:3],
+                "requested_cuisine": cuisine[:30],
+                "radius_m": int(arguments.get("radius_m") or 1500),
+                "requested_limit": safe_limit,
+                "ordering": str(arguments.get("ordering") or "distance"),
                 "places": google_places,
             }
         except (MapClientError, GooglePlacesError, KeyError, TypeError, ValueError):
@@ -632,7 +672,15 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
             )
         except MapClientError as exc:
             return ToolResult(ok=False, error_code=exc.code, user_message="")
-    return ToolResult(ok=True, data={**data, "origin_kind": origin_kind})
+    return ToolResult(ok=True, data={
+        **data,
+        "origin_kind": origin_kind,
+        "requested_categories": categories[:3],
+        "requested_cuisine": cuisine[:30],
+        "radius_m": int(arguments.get("radius_m") or 1500),
+        "requested_limit": safe_limit,
+        "ordering": str(arguments.get("ordering") or "distance"),
+    })
 
 
 def _places_distance(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResult:
@@ -647,7 +695,7 @@ def _places_distance(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolRe
     # Try Google Routes API for real driving distance; fall back to OSM haversine.
     # The fallback keeps the tool working without Google quota.
     data = None
-    if google_place_cards_enabled():
+    if google_routes_enabled():
         try:
             data = measure_distance_matrix(origin, destination)
         except Exception:

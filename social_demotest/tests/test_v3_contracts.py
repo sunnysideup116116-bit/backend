@@ -36,6 +36,17 @@ class V3ContractsTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Plan(mode="tasks", tasks=[task], direct_reply="嗨")
 
+    def test_itinerary_presentation_requires_places_and_is_additive(self):
+        places = SubTask(id="p1", agent="places", depends_on=[], task_brief="找一日遊候選")
+        synth = SubTask(id="s1", agent="synthesizer", depends_on=["p1"], task_brief="整理行程")
+        plan = Plan(mode="tasks", presentation_mode="itinerary", tasks=[places, synth])
+        self.assertEqual(plan.presentation_mode, "itinerary")
+        with self.assertRaises(ValidationError):
+            Plan(
+                mode="tasks", presentation_mode="itinerary",
+                tasks=[SubTask(id="s1", agent="synthesizer", depends_on=[], task_brief="回覆")],
+            )
+
     def test_subtask_requires_id_agent_depends_on_task_brief(self):
         with self.assertRaises(ValidationError):
             SubTask(id="", agent="calendar", depends_on=[], task_brief="x")

@@ -159,12 +159,15 @@ class V3PlannerTests(unittest.TestCase):
         self.assertNotIn("$ref", serialized)
         self.assertEqual(
             set(schema["properties"]),
-            {"mode", "tasks", "direct_reply", "direct_messages", "product_info_topics", "opportunity"},
+            {
+                "mode", "presentation_mode", "tasks", "direct_reply",
+                "direct_messages", "product_info_topics", "opportunity",
+            },
         )
         task_schema = schema["properties"]["tasks"]["items"]
         self.assertEqual(
             set(task_schema["properties"]),
-            {"id", "agent", "depends_on", "task_brief"},
+            {"id", "agent", "depends_on", "task_brief", "evidence_policy"},
         )
         self.assertEqual(
             set(task_schema["required"]),
@@ -181,6 +184,10 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIn("不要使用 `type`", _PLANNER_SYSTEM)
         self.assertIn('mode="direct_chat"', _PLANNER_SYSTEM)
         self.assertIn("direct_reply", _PLANNER_SYSTEM)
+        self.assertIn("t1=web", _PLANNER_SYSTEM)
+        self.assertIn("t2=places depends_on=[t1]", _PLANNER_SYSTEM)
+        self.assertIn("t3=web depends_on=[t1,t2]", _PLANNER_SYSTEM)
+        self.assertIn("terminal `t4=synthesizer depends_on=[t3]`", _PLANNER_SYSTEM)
         self.assertIn("不得回答行事曆", _PLANNER_SYSTEM)
         self.assertIn("絕對不可翻成中文", _PLANNER_SYSTEM)
         for topic in (

@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from services.ayue_agent.google_places_client import (
+    google_routes_enabled,
     resolve_place,
     search_nearby_places,
 )
@@ -27,6 +28,15 @@ class GooglePlacesCuisineTests(unittest.TestCase):
             "services.ayue_agent.google_places_client.google_place_cards_enabled",
             return_value=True,
         )
+
+    def test_routes_capability_does_not_require_browser_card_configuration(self):
+        import config
+
+        with patch.object(config, "AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED", True), \
+             patch.object(config, "GOOGLE_PLACES_SERVER_API_KEY", "server-test-key"), \
+             patch.object(config, "GOOGLE_MAPS_BROWSER_API_KEY", ""), \
+             patch.object(config, "AYUE_GOOGLE_PLACE_CARDS_ENABLED", False):
+            self.assertTrue(google_routes_enabled())
 
     def test_cuisine_is_folded_into_text_query(self):
         payload = {"places": [{
@@ -69,6 +79,50 @@ class GooglePlacesCuisineTests(unittest.TestCase):
         self.assertNotIn("\n", body["textQuery"])
         self.assertNotIn("\t", body["textQuery"])
         self.assertLessEqual(len(body["textQuery"]), 200)
+
+    def test_radius_is_a_hard_filter_not_only_a_google_bias(self):
+        payload = {"places": [
+            {
+                "id": "ChIJnear", "displayName": {"text": "近店"},
+                "formattedAddress": "高雄市鹽埕區",
+                "location": {"latitude": 22.6205, "longitude": 120.28},
+                "types": ["cafe"],
+                "googleMapsUri": "https://www.google.com/maps/place/near",
+            },
+            {
+                "id": "ChIJfar", "displayName": {"text": "遠店"},
+                "formattedAddress": "高雄市其他區",
+                "location": {"latitude": 22.64, "longitude": 120.28},
+                "types": ["cafe"],
+                "googleMapsUri": "https://www.google.com/maps/place/far",
+            },
+        ]}
+        with self._enabled(), \
+             patch("services.ayue_agent.google_places_client.requests.post",
+                   return_value=_FakeResponse(payload)) as post:
+            places = search_nearby_places(
+                "高雄市鹽埕區", 22.62, 120.28, ["cafe"],
+                limit=3, radius_m=500,
+            )
+        radius = post.call_args.kwargs["json"]["locationBias"]["circle"]["radius"]
+        self.assertEqual(radius, 500.0)
+        self.assertEqual([item["name"] for item in places], ["近店"])
+
+    def test_google_place_projection_rejects_non_google_map_links(self):
+        payload = {"places": [{
+            "id": "ChIJabc", "displayName": {"text": "可疑店家"},
+            "formattedAddress": "高雄市鹽埕區",
+            "location": {"latitude": 22.62, "longitude": 120.28},
+            "types": ["restaurant"],
+            "googleMapsUri": "https://example.com/not-a-google-map",
+        }]}
+        with self._enabled(), \
+             patch("services.ayue_agent.google_places_client.requests.post",
+                   return_value=_FakeResponse(payload)):
+            places = search_nearby_places(
+                "高雄市鹽埕區", 22.62, 120.28, ["restaurant"], limit=3,
+            )
+        self.assertEqual(places, [])
 
 
     def test_photos_are_taken_directly_from_text_search_response(self):

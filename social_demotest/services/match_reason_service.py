@@ -8,13 +8,14 @@ module to select exactly one reason for its authenticated viewer.
 from __future__ import annotations
 
 import re
+import hashlib
 from typing import Any
 
 from services.language_service import normalize_zh_tw
 
 
 V4_REASON_VERSION = "v4_friend_intro"
-FRIEND_COPY_VERSION = "v6_calibrated_identity_voice"
+FRIEND_COPY_VERSION = "v7_directional_style_rotation"
 LIVE_PROPOSAL_STATUSES = frozenset({"draft", "pending"})
 COUNTERPARTY_PLACEHOLDER = "{{counterparty}}"
 MATCH_PROPOSAL_FEW_SHOTS = (
@@ -23,6 +24,13 @@ MATCH_PROPOSAL_FEW_SHOTS = (
     "我這裡有一位感覺可以介紹給你。他最近〔近期情境〕，個性〔對方性格〕；照你的互動方式，可能滿容易和他進入狀況的。要不要讓我問問他？",
     "有個人的近況讓我想到你。他〔對方性格〕，最近又想〔近期活動〕；你的〔本人性格〕，至少和這個情境有一個具體話題。你想認識看看嗎？",
     "等等，我想到一位值得認識看看的人 👀 他〔對方性格〕，最近想〔近期活動〕；你們可能有具體話題可以聊，但不保證一定合拍。要不要讓阿月先問問？",
+)
+MATCH_PROPOSAL_STYLE_IDS = (
+    "warm_intro",
+    "scene_bridge",
+    "direct_intro",
+    "context_hook",
+    "playful_intro",
 )
 PRIVATE_OPENING_FEW_SHOTS = (
     "好消息，{{counterparty}}也點頭了！你可以先從〔對方近期情境〕聊起，問問他最期待哪一部分，應該很好接話。",
@@ -73,20 +81,53 @@ def public_personality_phrase(profile: dict) -> str:
     return short_public_text(traits.get("summary"), 32)
 
 
-def friend_intro_fallback(viewer: dict, other: dict, tier: str) -> dict:
+def match_reason_style_id(
+    viewer: dict | str,
+    other: dict | str,
+    *,
+    context_revision: str = "",
+) -> str:
+    """Pick one approved copy style deterministically for this direction.
+
+    The selector is intentionally hash-based rather than random: the same
+    proposal/viewer keeps its style across reads, while different pairs do
+    not all fall back to the first few-shot example.
+    """
+    viewer_id = str((viewer.get("user_id") if isinstance(viewer, dict) else viewer) or "")
+    other_id = str((other.get("user_id") if isinstance(other, dict) else other) or "")
+    revision = str(context_revision or "")
+    digest = hashlib.sha256(f"{viewer_id}|{other_id}|{revision}".encode("utf-8")).digest()
+    return MATCH_PROPOSAL_STYLE_IDS[int.from_bytes(digest[:4], "big") % len(MATCH_PROPOSAL_STYLE_IDS)]
+
+
+def friend_intro_fallback(
+    viewer: dict, other: dict, tier: str, *, style_id: str | None = None,
+) -> dict:
     """Build a complete deterministic invitation without truncating its ask."""
     other_context = short_public_text(other.get("current_context"), 56)
     viewer_trait = public_personality_phrase(viewer)
     other_trait = public_personality_phrase(other)
 
-    if other_context and other_trait:
-        first = f"欸，我想到一個你可能會想認識的人。對方{other_trait}，最近提到「{other_context}」。"
-    elif other_context:
-        first = f"欸，我想到一個你可能會想認識的人。對方最近提到「{other_context}」。"
-    elif other_trait:
-        first = f"我這裡有一位感覺可以介紹給你。對方{other_trait}，最近還沒有公開明確的活動規劃。"
+    style_id = style_id if style_id in MATCH_PROPOSAL_STYLE_IDS else match_reason_style_id(viewer, other)
+    if style_id == "scene_bridge":
+        opening = "我腦中突然有個畫面："
+    elif style_id == "direct_intro":
+        opening = "我這裡有一位感覺可以介紹給你。"
+    elif style_id == "context_hook":
+        opening = "有個人的近況讓我想到你。"
+    elif style_id == "playful_intro":
+        opening = "等等，我想到一位值得認識看看的人 👀"
     else:
-        first = "我這裡有一位感覺可以介紹給你，對方最近還沒有公開明確的活動規劃。"
+        opening = "欸，我想到一個你可能會想認識的人。"
+
+    if other_context and other_trait:
+        first = f"{opening}對方{other_trait}，最近提到「{other_context}」。"
+    elif other_context:
+        first = f"{opening}對方最近提到「{other_context}」。"
+    elif other_trait:
+        first = f"{opening}對方{other_trait}，最近還沒有公開明確的活動規劃。"
+    else:
+        first = f"{opening}對方最近還沒有公開明確的活動規劃。"
 
     if viewer_trait and other_trait:
         second = (
@@ -109,6 +150,7 @@ def friend_intro_fallback(viewer: dict, other: dict, tier: str) -> dict:
         second = "你們或許可以先交換最近想做的事；你會想先認識對方嗎？"
 
     return {
+        "style_id": style_id,
         "tier": tier,
         "viewer_text": f"{first}{second}",
         "scenario_bridge": other_context,
@@ -135,7 +177,7 @@ def friend_intro_fallback(viewer: dict, other: dict, tier: str) -> dict:
 
 def valid_friend_intro_text(
     value: Any, *, required_context: str = "", introduced_personality: str = "",
-    viewer_personality: str = "",
+    viewer_personality: str = "", role_bound: bool = False,
 ) -> str:
     """Validate provider prose against the public evidence supplied to it."""
     text = short_public_text(value, 220)
@@ -148,7 +190,7 @@ def valid_friend_intro_text(
     # template.  Keep the privacy guarantee by requiring a neutral person
     # reference, while allowing the phrasing itself to vary.
     neutral_intro = text[:72]
-    if not any(token in neutral_intro for token in (
+    if not role_bound and not any(token in neutral_intro for token in (
         "有位", "有一位", "有個", "一個人", "一位", "人選", "介紹給你", "想到一個",
     )):
         return ""
@@ -166,7 +208,7 @@ def valid_friend_intro_text(
     quoted = re.findall(r"「([^」]+)」", text)
     if any(not required_context or quote != required_context for quote in quoted):
         return ""
-    if not any(token in text for token in ("可能", "或許", "可以", "感覺")):
+    if not role_bound and not any(token in text for token in ("可能", "或許", "可以", "感覺")):
         return ""
     if not text.endswith(("？", "?")):
         return ""
@@ -246,9 +288,21 @@ def build_v4_snapshot_fallback(match_doc: dict) -> dict:
         tier = "exploratory"
 
     def entry(viewer: dict, other: dict) -> dict:
-        fallback = friend_intro_fallback(viewer, other, tier)
+        context_revision = str(
+            other.get("context_revision")
+            or other.get("profile_revision")
+            or other.get("updated_at")
+            or ""
+        )
+        style_id = (
+            "warm_intro"
+            if match_doc.get("reason_copy_version") != FRIEND_COPY_VERSION
+            else match_reason_style_id(viewer, other, context_revision=context_revision)
+        )
+        fallback = friend_intro_fallback(viewer, other, tier, style_id=style_id)
         return {
             "copy_version": FRIEND_COPY_VERSION,
+            "style_id": style_id,
             "viewer_id": str(viewer.get("user_id") or ""),
             "counterparty_id": str(other.get("user_id") or ""),
             "counterparty_context_snapshot": short_public_text(other.get("current_context"), 56),
@@ -273,11 +327,20 @@ def _safe_bound_v4_entry(entry: Any, user_id: str, other_id: str) -> str:
         return ""
     if str(entry.get("counterparty_id") or "") != other_id:
         return ""
+    text = valid_friend_intro_text(
+        entry.get("viewer_text"),
+        required_context=short_public_text(entry.get("counterparty_context_snapshot"), 56),
+        introduced_personality=short_public_text(entry.get("counterparty_public_personality"), 32),
+        viewer_personality=short_public_text(entry.get("viewer_public_personality"), 32),
+    )
+    if text:
+        return text
     return valid_friend_intro_text(
         entry.get("viewer_text"),
         required_context=short_public_text(entry.get("counterparty_context_snapshot"), 56),
         introduced_personality=short_public_text(entry.get("counterparty_public_personality"), 32),
         viewer_personality=short_public_text(entry.get("viewer_public_personality"), 32),
+        role_bound=True,
     )
 
 
@@ -337,6 +400,7 @@ def reason_for_viewer(match_doc: dict, user_id: str) -> str:
             viewer, other = (initiator, receiver) if user_id == from_user else (receiver, initiator)
             return friend_intro_fallback(
                 viewer, other, str(match_doc.get("recommendation_tier") or "exploratory"),
+                style_id="warm_intro",
             )["viewer_text"]
 
     directional = match_doc.get("directional_reason_v2") or {}

@@ -104,7 +104,8 @@ class _PlacesNearbyArguments(BaseModel):
     categories: list[Literal["restaurant", "cafe", "bar", "attraction", "park"]] = Field(min_length=1, max_length=3)
     cuisine: str = Field(default="", max_length=30)
     radius_m: int = Field(default=1500, ge=300, le=5000)
-    limit: int = Field(default=8, ge=1, le=10)
+    limit: int = Field(default=3, ge=1, le=8)
+    ordering: Literal["distance", "balanced"] = "distance"
     use_saved_location: bool = False
 
 
@@ -274,6 +275,7 @@ class _AcceptedContactListOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     contacts: list[_MentionedContactOutput] = Field(default_factory=list, max_length=8)
     truncated: bool = False
+    total_count: int | None = Field(default=None, ge=0)
 
 
 class _MemoryOutput(BaseModel):
@@ -341,6 +343,11 @@ class _PlacesNearbyOutput(BaseModel):
     distance_basis: Literal["straight_line"]
     attribution: str
     attribution_url: str
+    requested_categories: list[str] = Field(default_factory=list, max_length=3)
+    requested_cuisine: str = ""
+    radius_m: int = Field(default=1500, ge=300, le=5000)
+    requested_limit: int = Field(default=3, ge=1, le=8)
+    ordering: Literal["distance", "balanced"] = "distance"
     places: list[_PlaceOutput] = Field(default_factory=list)
 
 
@@ -461,7 +468,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "relationship.list_accepted_contacts": ToolSpec(
         "relationship.list_accepted_contacts", ToolRisk.READ, "accepted_contact_list",
-        "讀取本人已接受聯絡人的最小公開摘要；適用於詢問目前認識的人中誰適合某個活動或地點，不能用來推測對方行程。",
+        "讀取本人已接受聯絡人的最小公開摘要與總數；適用於詢問目前認識的人中誰適合某個活動或地點，不能用來推測對方行程，也不包含尚未接受的 proposal。",
         "我整理一下目前已建立聯絡的對象…",
         output_model=_AcceptedContactListOutput,
     ),
@@ -500,7 +507,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "places.measure_distance": ToolSpec(
         "places.measure_distance", ToolRisk.READ, "places_distance",
-        "估算兩個指定地點，或本人儲存地區到指定地點的直線距離；不提供車程或步行時間。",
+        "查詢兩個指定地點，或本人儲存地區到指定地點的距離；Google Routes 可用時回傳駕車距離與時間，否則回傳直線距離。不提供即時路況或步行時間。",
         "我估一下兩地的距離…",
         planner_arguments_model=_PlacesDistanceArguments,
         executor_arguments_model=_PlacesDistanceArguments,

@@ -135,13 +135,13 @@ class ChatRouterCharacterizationTests(unittest.TestCase):
         expected = {"reply": "嗨，想聊什麼？", "agent_version": "legacy"}
         endpoint, module = _route_module("POST", "/api/direct_chat/stream")
         with patch.object(module, "direct_chat", return_value=expected) as direct, \
-             patch.object(module, "_run_public_stream_turn") as public_v2:
+             patch.object(module, "_run_public_stream_turn") as public_stream:
             response = endpoint(req, BackgroundTasks())
             chunks = asyncio.run(_collect(response))
 
         self.assertEqual([json.loads(chunk) for chunk in chunks], [{"type": "final", "response": expected}])
         direct.assert_called_once()
-        public_v2.assert_not_called()
+        public_stream.assert_not_called()
 
     def test_private_stream_requires_an_accepted_match(self):
         req = MediatorPrivateRequest(user_id="owner", other_id="other", message="想問問")
@@ -156,7 +156,7 @@ class ChatRouterCharacterizationTests(unittest.TestCase):
         req = MediatorPrivateRequest(user_id="owner", other_id="other", message="想問問")
         expected = {
             "reply": "我幫你整理好了。", "pending_step": None,
-            "agent_run_id": "private-run", "agent_mode": "v3", "agent_version": "v3",
+            "agent_run_id": "private-run", "agent_mode": "v2", "agent_version": "v2",
             "conversation_intent": "advice",
         }
         endpoint, module = _route_module("POST", "/api/mediator/private/stream")
@@ -175,7 +175,7 @@ class ChatRouterCharacterizationTests(unittest.TestCase):
             ],
         )
 
-    def test_private_json_v2_saves_owner_once_then_delegates_without_legacy_fallthrough(self):
+    def test_private_json_v2_saves_owner_once_then_delegates_without_runtime_fallthrough(self):
         req = MediatorPrivateRequest(user_id="owner", other_id="other", message="想問問")
         match = {"_id": "match-1", "status": "accepted"}
         expected = {"reply": "我幫你整理好了。", "agent_version": "v2"}

@@ -95,6 +95,7 @@ class AyueAgentMentionTests(unittest.TestCase):
             ))
         self.assertTrue(result.ok)
         self.assertEqual(result.data["contacts"][0]["display_name"], "小安")
+        self.assertEqual(result.data["total_count"], 1)
         self.assertNotIn("calendar", str(result.data))
 
 

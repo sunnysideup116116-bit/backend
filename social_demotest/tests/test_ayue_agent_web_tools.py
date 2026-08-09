@@ -51,6 +51,16 @@ class AyueWebToolsTests(unittest.TestCase):
         }]}}])
         self.assertEqual(sources, [{"title": "官方活動", "url": "https://example.com/event"}])
 
+    def test_place_map_links_are_not_mislabeled_as_web_evidence(self):
+        sources = _public_sources([{
+            "tool": "places.search_nearby",
+            "result": {"places": [{
+                "name": "候選咖啡店",
+                "map_url": "https://www.google.com/maps/place/example",
+            }]},
+        }])
+        self.assertEqual(sources, [])
+
     def test_profile_location_is_coarse_and_safe(self):
         location = normalize_profile_location("高雄市", "鹽埕區")
         self.assertEqual(location["display_name"], "高雄市鹽埕區")

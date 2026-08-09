@@ -51,7 +51,7 @@ Neo4j 只在需要完整媒婆記憶功能時設定；沒有 Neo4j 時媒婆仍�
 | `social_demotest/services/` | Domain services：配對、行事曆、記憶、profile、媒人、悄悄話等 |
 | `social_demotest/services/ayue_agent/v3/` | 公開阿月 V3 runtime：scheduler、planner、guard、sub-agents、synthesizer、confirmation、write executors |
 | `social_demotest/services/ayue_agent/` | V3 之外的公開阿月元件：context builder、tool registry、tools facade、web/maps clients、proactive care、private runtimes |
-| `social_demotest/tests/` | 離線 deterministic tests（46 檔）+ fixtures |
+| `social_demotest/tests/` | 離線 deterministic contract／trajectory／state／privacy tests + fixtures |
 | `matchmaker_agent/` | 媒婆服務：`agent_api.py`（FastAPI adapters）、`matchmaker.py`（LLM 評估 agent） |
 | `docs/` | 設計與變更文件；本目錄 `docs/architecture/` 是架構導覽 |
 | `skills/` | 近期情境、記憶、性格探索的 versioned prompt policy |
@@ -85,9 +85,9 @@ Neo4j 只在需要完整媒婆記憶功能時設定；沒有 Neo4j 時媒婆仍�
 
 - 想了解 Python 各模組在做什麼 → `02-python-modules.md`
 - 想了解一回合的完整生命週期 → `03-v3-runtime-lifecycle.md`
-- 想了解 23 個工具契約與寫入確認 → `04-tool-registry.md`
+- 想了解 22 個現行工具契約與寫入確認 → `04-tool-registry.md`
 - 想了解媒婆與記憶 → `05-matchmaker-and-memory.md`
 - 想了解測試策略 → `06-testing.md`
 - 想了解 Guard 審核什麼 → `07-guard.md`
 - 想了解 Planner 怎麼拆 DAG → `08-planner.md`
-- 想了解某個 sub-agent 能做什麼、呼叫哪些 function → `subagent-calendar.md`、`subagent-match.md`、`subagent-places.md`、`subagent-relationship.md`、`subagent-profile.md`
+- 想了解某個 sub-agent 能做什麼、呼叫哪些 function → `subagent-calendar.md`、`subagent-match.md`、`subagent-places.md`、`subagent-web.md`、`subagent-relationship.md`、`subagent-profile.md`

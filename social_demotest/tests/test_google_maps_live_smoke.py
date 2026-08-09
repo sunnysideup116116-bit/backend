@@ -4,9 +4,8 @@ Requires real GOOGLE_PLACES_SERVER_API_KEY in .env. Temporarily overrides
 AYUE_GOOGLE_PLACE_CARDS_ENABLED to "on" in-process (does NOT modify .env).
 Run: python -m unittest tests.test_google_maps_live_smoke -v
 
-If this hits the network, it may consume a tiny amount of Google quota:
-  - 2x Text Search Pro ($32/1000, free 5,000)
-  - 1x Routes Compute Routes Essentials ($5/1000, free 10,000)
+If this hits the network, it consumes Google Text Search and Routes quota.
+Check the provider's current pricing before opting in.
 The photo test only verifies the URL is built from the Text Search response;
 it never loads the media bytes, so GetPhotoMediaRequest quota is not touched.
 """

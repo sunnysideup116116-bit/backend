@@ -41,6 +41,7 @@ MAX_WEB_LIMITATIONS = 3
 MAX_WEB_TOOL_QUERY_CHARS = 300
 MAX_WEB_QUERY_ANCHOR_CHARS = 220
 PLACE_CANDIDATE_REF_PATTERN = r"^place_candidate_[0-9a-f]{16}$"
+WEB_SOURCE_REF_PATTERN = r"^web_source_[0-9]{2}$"
 
 
 class WebEvidenceAssessmentV1(BaseModel):
@@ -57,6 +58,7 @@ class WebResearchFindingDraft(BaseModel):
     claim: str = Field(min_length=1, max_length=500)
     relation: Literal["direct", "adjacent_context"]
     subject_ref: str | None = Field(default=None, pattern=PLACE_CANDIDATE_REF_PATTERN)
+    source_refs: list[str] = Field(default_factory=list, max_length=MAX_WEB_SOURCES_PER_FINDING)
     source_urls: list[str] = Field(default_factory=list, max_length=MAX_WEB_SOURCES_PER_FINDING)
     source_types: list[WebSourceType] = Field(default_factory=list, max_length=MAX_WEB_SOURCES_PER_FINDING)
 
@@ -78,16 +80,32 @@ class WebResearchFindingV1(BaseModel):
     source_urls: list[str] = Field(min_length=1, max_length=MAX_WEB_SOURCES_PER_FINDING)
 
 
+class WebActivityV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=120)
+    date: str = Field(default="", max_length=20)
+    start_time: str = Field(default="", max_length=10)
+    end_time: str = Field(default="", max_length=10)
+    venue: str = Field(min_length=1, max_length=160)
+    district: str = Field(default="", max_length=80)
+    summary: str = Field(default="", max_length=300)
+    source_refs: list[str] = Field(default_factory=list, max_length=3)
+    source_urls: list[str] = Field(default_factory=list, max_length=3)
+
+
 class WebResearchResultV1(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal["web_research.v1"] = "web_research.v1"
     research_question: str = Field(min_length=1, max_length=6000)
     answer_target: str = Field(min_length=1, max_length=500)
+    evidence_policy: Literal["casual_discovery", "strict_verification"] = "casual_discovery"
     status: Literal["answered", "partial", "insufficient_evidence"]
     execution_status: Literal["completed", "degraded", "unavailable"]
     coverage: WebCoverage
     findings: list[WebResearchFindingV1] = Field(default_factory=list, max_length=MAX_WEB_FINDINGS)
+    primary_activity: WebActivityV1 | None = None
     sources: list[WebResearchSourceV1] = Field(default_factory=list, max_length=MAX_WEB_SOURCES)
     limitations: list[str] = Field(default_factory=list, max_length=MAX_WEB_LIMITATIONS)
     stop_reason: Literal[
@@ -156,6 +174,7 @@ def project_web_observations(observations: list[dict[str, Any]]) -> list[dict[st
     projected: list[dict[str, Any]] = []
     result_count = 0
     char_count = 0
+    source_number = 0
     for item in observations:
         if not isinstance(item, dict):
             continue
@@ -170,7 +189,9 @@ def project_web_observations(observations: list[dict[str, Any]]) -> list[dict[st
                 url = _safe_url((row or {}).get("url"))
                 if not url:
                     continue
+                source_number += 1
                 rows.append({
+                    "source_ref": f"web_source_{source_number:02d}",
                     "title": _clean((row or {}).get("title"), 140) or urlsplit(url).hostname,
                     "url": url,
                     "snippet": _clean((row or {}).get("snippet"), MAX_WEB_PROMPT_SNIPPET_CHARS),
@@ -192,7 +213,13 @@ def project_web_observations(observations: list[dict[str, Any]]) -> list[dict[st
                 if not url:
                     continue
                 content = str((page or {}).get("content") or "")[:MAX_WEB_EXTRACT_CHARS_PER_PAGE]
-                pages.append({"url": url, "content": content, "truncated": bool((page or {}).get("truncated"))})
+                source_number += 1
+                pages.append({
+                    "source_ref": f"web_source_{source_number:02d}",
+                    "url": url,
+                    "content": content,
+                    "truncated": bool((page or {}).get("truncated")),
+                })
                 char_count += len(content)
             if pages:
                 projected_item = {"tool": tool, "result": {"pages": pages}}
@@ -220,7 +247,12 @@ def observed_source_catalog(observations: list[dict[str, Any]]) -> dict[str, dic
             title = _clean((row or {}).get("title"), 200)
             if not title:
                 title = _clean(urlsplit(url).hostname, 200) or url
-            entry = catalog.setdefault(url, {"url": url, "title": title, "subject_refs": []})
+            entry = catalog.setdefault(url, {
+                "url": url, "title": title, "subject_refs": [], "source_refs": [],
+            })
+            source_ref = str((row or {}).get("source_ref") or "")
+            if re.fullmatch(WEB_SOURCE_REF_PATTERN, source_ref) and source_ref not in entry["source_refs"]:
+                entry["source_refs"].append(source_ref)
             subject_ref = item.get("subject_ref")
             if isinstance(subject_ref, str) and re.fullmatch(PLACE_CANDIDATE_REF_PATTERN, subject_ref):
                 if subject_ref not in entry["subject_refs"]:
@@ -246,6 +278,7 @@ def build_research_result(
     stop_reason: str,
     fallback_coverage: WebCoverage = "none",
     allowed_subject_refs: set[str] | None = None,
+    evidence_policy: Literal["casual_discovery", "strict_verification"] = "casual_discovery",
 ) -> WebResearchResultV1:
     """Create and structurally validate the final server-owned result."""
     assessment = getattr(decision, "assessment", None)
@@ -257,6 +290,38 @@ def build_research_result(
     catalog = observed_source_catalog(observations)
     sources_by_url: dict[str, WebResearchSourceV1] = {}
     findings: list[WebResearchFindingV1] = []
+    primary_activity: WebActivityV1 | None = None
+
+    raw_activity = getattr(decision, "activity", None)
+    if isinstance(raw_activity, WebActivityV1):
+        activity_urls: list[str] = []
+        for raw_url in list(raw_activity.source_urls or [])[:3]:
+            url = _safe_url(raw_url)
+            if url and url in catalog and url not in activity_urls:
+                activity_urls.append(url)
+        for raw_ref in list(raw_activity.source_refs or [])[:3]:
+            ref = str(raw_ref).strip()
+            if not re.fullmatch(WEB_SOURCE_REF_PATTERN, ref):
+                continue
+            for url, item in catalog.items():
+                if ref in (item.get("source_refs") or []) and url not in activity_urls:
+                    activity_urls.append(url)
+        if raw_activity.title and raw_activity.venue and activity_urls:
+            date = raw_activity.date if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_activity.date) else ""
+            start = raw_activity.start_time if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", raw_activity.start_time) else ""
+            end = raw_activity.end_time if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", raw_activity.end_time) else ""
+            primary_activity = WebActivityV1(
+                title=_clean(raw_activity.title, 120), date=date,
+                start_time=start, end_time=end,
+                venue=_clean(raw_activity.venue, 160),
+                district=_clean(raw_activity.district, 80),
+                summary=_clean(raw_activity.summary, 300),
+                source_refs=[
+                    ref for ref in raw_activity.source_refs[:3]
+                    if re.fullmatch(WEB_SOURCE_REF_PATTERN, str(ref))
+                ],
+                source_urls=activity_urls[:3],
+            )
 
     for draft in findings_draft[:MAX_WEB_FINDINGS]:
         subject_ref = getattr(draft, "subject_ref", None)
@@ -269,8 +334,17 @@ def build_research_result(
         if not claim:
             continue
         direct_urls: list[str] = []
+        draft_source_refs = [
+            str(value).strip() for value in (getattr(draft, "source_refs", []) or [])
+            if re.fullmatch(WEB_SOURCE_REF_PATTERN, str(value).strip())
+        ][:MAX_WEB_SOURCES_PER_FINDING]
+        resolved_urls = list(getattr(draft, "source_urls", []) or [])
+        if draft_source_refs:
+            for url, item in catalog.items():
+                if any(ref in (item.get("source_refs") or []) for ref in draft_source_refs):
+                    resolved_urls.append(url)
         source_types = list(getattr(draft, "source_types", []) or [])
-        for index, raw_url in enumerate(list(getattr(draft, "source_urls", []) or [])[:MAX_WEB_SOURCES_PER_FINDING]):
+        for index, raw_url in enumerate(resolved_urls[:MAX_WEB_SOURCES_PER_FINDING]):
             url = _safe_url(raw_url)
             if not url or url not in catalog or url in direct_urls:
                 continue
@@ -353,10 +427,12 @@ def build_research_result(
     return WebResearchResultV1(
         research_question=_clean(research_question, 6000),
         answer_target=_clean(answer_target, 500),
+        evidence_policy=evidence_policy,
         status=requested_status,
         execution_status=execution_status,
         coverage=coverage,
         findings=findings[:MAX_WEB_FINDINGS],
+        primary_activity=primary_activity,
         sources=list(sources_by_url.values())[:MAX_WEB_SOURCES],
         limitations=limitation_values[:MAX_WEB_LIMITATIONS],
         stop_reason=final_reason,

@@ -22,12 +22,14 @@
 
 **禁止模型提供的欄位**（`FORBIDDEN_ARG_FIELDS`）：`user_id`、`match_id`、`event_id`、`revision`、`expected_status`。
 
-## 2. 唯讀工具（16 個）
+## 2. 唯讀工具（18 個）
 
 | 工具 | executor_key | Planner 參數 | 回傳（output_model） | argument_source |
 | --- | --- | --- | --- | --- |
 | `system.get_current_time` | `current_time` | 無 | clock（台北時間＋相對日期） | NONE |
-| `calendar.list_my_events` | `calendar_events` | `start_date`/`end_date`（YYYY-MM-DD，可含過去；不填預設未來 90 天）、legacy `date`/`range_label` | events[]（date/start_time/end_time/activity/status）+ range | PLANNER_GROUNDED |
+| `calendar.list_my_events` | `calendar_events` | `start_date`/`end_date`（YYYY-MM-DD，可含過去；不填預設未來 90 天）、相容欄位 `date`/`range_label` | events[]（date/start_time/end_time/activity/status）+ range | PLANNER_GROUNDED |
+| `calendar.get_next_my_event` | `calendar_next_event` | 無 | 最近 90 天唯一下一筆有效行程或 not_found | NONE |
+| `calendar.verify_recent_mutation` | `calendar_mutation_verification` | 無 | 最近一次 calendar mutation 的 verified outcome | NONE |
 | `calendar.find_my_event` | `calendar_event_find` | `event_hint`、`date_hint`、`companion_hint`、`limit`(1–30) | found/not_found/ambiguous + candidates[]（含 companion 公開名稱） | PLANNER_GROUNDED |
 | `match.get_status` | `match_status` | 無 | 唯一配對狀態 snapshot（state/scope/chat_opened/revision 等） | NONE |
 | `match.get_counterparty_summary` | `counterparty_summary` | 無 | 目前有效或已接受配對的公開對象摘要（非 accepted 時匿名化） | NONE |
@@ -39,13 +41,13 @@
 | `memory.search_my_profile` | `memory_profile` | 無 | 本人記憶摘要 + 近期情境 + preferences(≤8) | NONE |
 | `web.search` | `web_search` | `query`(2–300)、`recency`、`use_saved_location` | results[]（title/url/snippet/published_date） | PLANNER_GROUNDED |
 | `web.extract` | `web_extract` | `urls`(1–2)、`query` | pages[]（url/content/truncated） | PLANNER_GROUNDED |
-| `places.search_nearby` | `places_nearby` | `anchor`、`categories`(1–3, 5 種)、`cuisine`、`radius_m`(300–5000)、`limit`(1–10)、`use_saved_location` | 地點卡 list（name/category/distance_m/map_url/place_id/photo_url 等） | PLANNER_GROUNDED |
+| `places.search_nearby` | `places_nearby` | `anchor`、`categories`(1–3, 5 種)、`cuisine`、`radius_m`(300–5000)、`limit`(1–8)、`ordering`、`use_saved_location` | 地點卡 list（name/category/distance_m/map_url/place_id/photo_url 等） | PLANNER_GROUNDED |
 | `places.measure_distance` | `places_distance` | `origin`、`destination`、`use_saved_origin` | 距離 + 耗時文字（reuse_success_within_turn） | PLANNER_GROUNDED |
 | `places.resolve_place` | `places_resolve` | `query`(2–160) | 單一地點卡（found + place + attribution） | PLANNER_GROUNDED |
 
 唯讀工具只能回傳完成問題所需的最小 typed projection；不傳 Mongo document、raw profile 或內部 ID。
 
-## 3. 寫入工具（7 個，全部需要確認）
+## 3. 寫入工具（4 個，全部需要確認）
 
 | 工具 | executor_key | Planner 參數 | 確認後執行路徑 |
 | --- | --- | --- | --- |
@@ -99,7 +101,7 @@ sub-agent LLM function calling 輸出 {tool_name, arguments}
 
 ## Current Calendar Agent mutation contract
 
-`calendar.submit_commands` is the registered typed intent entry point for the V3 Calendar Agent. Its `CalendarCommand` schema has no `user_id`, `event_id`, `revision`, `expected_revision`, or `coordination_id`. Scheduler preflight resolves targets once and creates the server-owned `CalendarMutationPlan`; plans never return to the model. `target_selector` is a typed hard filter for the old event and is never reused as the proposed new form. Missing fields, ambiguous, and not-found outcomes are normal clarification results. Direct legacy Calendar write tools are not registered; stale records fail closed.
+`calendar.submit_commands` is the registered typed intent entry point for the V3 Calendar Agent. Its `CalendarCommand` schema has no `user_id`, `event_id`, `revision`, `expected_revision`, or `coordination_id`. Scheduler preflight resolves targets once and creates the server-owned `CalendarMutationPlan`; plans never return to the model. `target_selector` is a typed hard filter for the old event and is never reused as the proposed new form. Missing fields, ambiguous, and not-found outcomes are normal clarification results. Removed direct Calendar write tools are not registered; stale confirmation records fail closed.
 
 `calendar.get_next_my_event` is a bounded read for “最近一筆／最近有啥行程”. Its output is a safe event projection; the executor stores the canonical event reference privately so a subsequent pronoun follow-up can use `target_reference="recent_event"` without another natural-language lookup.
 ## Current Web ownership (V3)

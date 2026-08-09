@@ -40,6 +40,27 @@ class AyueMapsToolsTests(unittest.TestCase):
         self.assertEqual(result.data["origin_kind"], "saved_profile")
         self.assertEqual(nearby.call_args.args[0], "高雄市鹽埕區")
 
+    def test_short_district_anchor_is_expanded_with_saved_city(self):
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="room", message="鹽埕附近餐廳",
+            user_profile={"profile_location": {"city": "高雄市", "district": "鹽埕區"}},
+        )
+        with patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=False), \
+             patch("services.ayue_agent.tools.nominatim_search", return_value={
+                 "label": "高雄市鹽埕區", "lat": 22.62, "lon": 120.28,
+             }), \
+             patch("services.ayue_agent.tools.nearby_places", return_value={
+                 "anchor_label": "高雄市鹽埕區", "distance_basis": "straight_line",
+                 "attribution": "© OpenStreetMap contributors",
+                 "attribution_url": "https://www.openstreetmap.org/copyright",
+                 "places": [],
+             }) as nearby:
+            result = execute_tool(ToolCall(name="places.search_nearby", arguments={
+                "anchor": "鹽埕", "categories": ["restaurant"],
+            }), ctx)
+        self.assertTrue(result.ok)
+        self.assertEqual(nearby.call_args.args[0], "高雄市鹽埕區")
+
     def test_nearby_forwards_cuisine_to_google_search(self):
         ctx = AgentTurnContext(
             user_id="owner", room_id="room", message="我想吃火鍋",
@@ -63,6 +84,7 @@ class AyueMapsToolsTests(unittest.TestCase):
             }), ctx)
         self.assertTrue(result.ok)
         self.assertEqual(google.call_args.kwargs["cuisine"], "火鍋")
+        self.assertEqual(google.call_args.kwargs["radius_m"], 1500)
 
     def test_nearby_osm_path_ignores_cuisine_without_google(self):
         ctx = AgentTurnContext(
@@ -98,7 +120,7 @@ class AyueMapsToolsTests(unittest.TestCase):
             "distance_basis": "driving",
             "attribution": "Google Maps", "attribution_url": "https://www.google.com/maps",
         }
-        with patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=True), \
+        with patch("services.ayue_agent.tools.google_routes_enabled", return_value=True), \
              patch("services.ayue_agent.tools.measure_distance_matrix", return_value=google_data):
             result = execute_tool(ToolCall(name="places.measure_distance", arguments={
                 "origin": "高雄車站", "destination": "駁二藝術特區", "use_saved_origin": False,
@@ -109,7 +131,7 @@ class AyueMapsToolsTests(unittest.TestCase):
         self.assertEqual(result.data["distance_basis"], "driving")
 
     def test_distance_falls_back_to_osm_haversine_when_google_returns_none(self):
-        with patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=True), \
+        with patch("services.ayue_agent.tools.google_routes_enabled", return_value=True), \
              patch("services.ayue_agent.tools.measure_distance_matrix", return_value=None), \
              patch("services.ayue_agent.tools.measure_distance", return_value={
                  "origin_label": "高雄車站", "destination_label": "駁二藝術特區",
@@ -125,7 +147,7 @@ class AyueMapsToolsTests(unittest.TestCase):
         osm_distance.assert_called_once()
 
     def test_distance_falls_back_to_osm_when_google_exception(self):
-        with patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=True), \
+        with patch("services.ayue_agent.tools.google_routes_enabled", return_value=True), \
              patch("services.ayue_agent.tools.measure_distance_matrix", side_effect=Exception("boom")), \
              patch("services.ayue_agent.tools.measure_distance", return_value={
                  "origin_label": "A地", "destination_label": "B地",
@@ -139,7 +161,7 @@ class AyueMapsToolsTests(unittest.TestCase):
         self.assertEqual(result.data["distance_basis"], "straight_line")
 
     def test_distance_uses_osm_when_google_disabled(self):
-        with patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=False), \
+        with patch("services.ayue_agent.tools.google_routes_enabled", return_value=False), \
              patch("services.ayue_agent.tools.measure_distance", return_value={
                  "origin_label": "A地", "destination_label": "B地",
                  "distance_m": 500, "distance_basis": "straight_line",
