@@ -26,9 +26,24 @@ class ChatLeafRouterTests(unittest.TestCase):
     def test_ayue_launcher_artwork_is_served_from_the_replaceable_asset_route(self):
         response = serve_frontend_image("pet.gif")
         self.assertEqual(response.media_type, "image/gif")
+        for filename in ("ayue-app-icon.png", "ayue-assessment.png", "ayue-match.png", "ayue-whisper.png"):
+            with self.subTest(filename=filename):
+                response = serve_frontend_image(filename)
+                self.assertEqual(response.media_type, "image/png")
         with self.assertRaises(HTTPException) as raised:
             serve_frontend_image("not-an-ayue-image.png")
         self.assertEqual(raised.exception.status_code, 404)
+
+    def test_frontend_uses_ayue_artwork_only_on_ayue_owned_surfaces(self):
+        source = (Path(__file__).resolve().parents[1] / "frontend.html").read_text(encoding="utf-8")
+        self.assertIn('/images/ayue-assessment.png', source)
+        self.assertIn('/images/ayue-app-icon.png', source)
+        self.assertIn('/images/ayue-whisper.png', source)
+        self.assertNotIn('toast-collapsed', source)
+        dismiss = source[source.index('function dismissMediatorNotification'):source.index('function showMemoryNotice')]
+        self.assertIn('toast.classList.add("hidden")', dismiss)
+        self.assertNotIn('classList.add("toast-collapsed")', dismiss)
+        self.assertIn('image.onerror = () =>', source)
 
     def test_frontend_private_launcher_uses_role_artwork_and_existing_panel_hooks(self):
         source = (Path(__file__).resolve().parents[1] / "frontend.html").read_text(encoding="utf-8")

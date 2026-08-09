@@ -114,7 +114,7 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
              patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
              patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
-                 handled=True, reply="嗨。", agent_run_id="run-save-once", agent_mode="v2",
+                 handled=True, reply="嗨。", agent_run_id="a" * 32, agent_mode="v2",
                  profile_write_allowed=False,
              )):
             response = _run_public_stream_turn(req, BackgroundTasks(), lambda _event: None)
@@ -124,7 +124,7 @@ class AyueAgentStreamTests(unittest.TestCase):
                 call("room", "owner", "@對方 你好", metadata={
                     "owner_raw_content": "你好", "mention_labels": ["對方"],
                 }),
-                call("room", "ai_assistant", "嗨。"),
+                call("room", "ai_assistant", "嗨。", metadata={"agent_run_id": "a" * 32}),
             ],
         )
         queue_profile.assert_called_once_with(
@@ -159,6 +159,36 @@ class AyueAgentStreamTests(unittest.TestCase):
         self.assertEqual(response["assessment_kind"], "big_five")
         self.assertEqual(response["assessment_revision"], 2)
 
+    def test_typed_assessment_cancel_is_saved_once_and_keeps_assessment_out_of_profile_extractor(self):
+        req = DirectChatRequest(
+            user_id="owner", contact_id="ai_assistant", message="client text",
+            assessment_action="cancel",
+        )
+        history_cursor = MagicMock()
+        history_cursor.sort.return_value.limit.return_value = []
+        with patch("routers.public_chat.generate_room_id", return_value="room"), \
+             patch("routers.public_chat.save_message", side_effect=[
+                 {"message_id": "owner-message"}, {"message_id": "assistant-message"},
+             ]) as save, \
+             patch("routers.public_chat.profiles_coll.update_one"), \
+             patch("routers.public_chat.profiles_coll.find_one", return_value={
+                 "agentic_assessment_session": {"status": "cancelled", "kind": "deep_profile", "revision": 4},
+             }), \
+             patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
+             patch("routers.public_chat.queue_profile_skills") as queue_profile, \
+             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
+                 handled=True, reply="這段探索已取消。", agent_run_id="assessment-cancel-run", agent_mode="v3",
+                 profile_write_allowed=False, profile_write_reason="assessment",
+                 assessment_state="cancelled", assessment_kind="deep_profile", assessment_revision=4,
+             )) as run:
+            response = _run_public_stream_turn(req, BackgroundTasks(), lambda _event: None)
+        self.assertEqual(response["assessment_state"], "cancelled")
+        self.assertEqual(response["assessment_kind"], "deep_profile")
+        self.assertEqual(save.call_args_list[0].args[2], "退出測驗")
+        self.assertEqual(save.call_count, 2)
+        self.assertEqual(run.call_args.args[0].assessment_action, "cancel")
+        queue_profile.assert_not_called()
+
     def test_profile_update_polling_has_no_visible_process_bubble(self):
         source = (
             Path(__file__).resolve().parents[1] / "frontend.html"
@@ -180,6 +210,8 @@ class AyueAgentStreamTests(unittest.TestCase):
         for text in ("先把你的近況整理好", "阿月正在翻翻名單", "看看你們是不是真的合拍", "把這次介紹整理得可愛一點"):
             self.assertIn(text, source)
         self.assertIn('kicker.textContent = "阿月努力牽線中 ✦"', source)
+        self.assertIn('iconImage.src = "/images/ayue-match.png"', source)
+        self.assertIn('icon.appendChild(iconImage)', source)
         self.assertIn('document.createTextNode("努力中")', source)
         self.assertIn('track.setAttribute("role", "progressbar")', source)
         self.assertIn('className = "match-search-process-bar"', source)
@@ -260,6 +292,27 @@ class AyueAgentStreamTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "services" / "ai_service.py"
         ).read_text(encoding="utf-8")
         self.assertIn("timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS", ai_source)
+
+    def test_public_assessment_exit_control_uses_typed_action_without_confirmation(self):
+        source = (Path(__file__).resolve().parents[1] / "frontend.html").read_text(encoding="utf-8")
+        self.assertIn('id="assessment-control-bar"', source)
+        self.assertIn('id="assessment-exit-button"', source)
+        self.assertIn('id="assessment-control-label"', source)
+        self.assertIn('assessment_action = assessmentAction', source)
+        self.assertIn('payload.assessment_action = assessmentAction', source)
+        self.assertIn('value = "退出測驗"', source)
+        self.assertIn('function updateAssessmentControls', source)
+        self.assertIn('if (!open)', source)
+        self.assertIn('"active", "awaiting_commit"', source)
+        self.assertIn('role="status"', source)
+        self.assertIn('font-bold text-white', source)
+        self.assertIn('bg-rose-500', source)
+        self.assertIn('id="assessment-control-state"', source)
+        self.assertIn('id="assessment-control-detail"', source)
+        self.assertIn('bg-gradient-to-r', source)
+        self.assertIn('回答會自動接續下一題', source)
+        self.assertIn('確認後才會更新原本資料', source)
+        self.assertNotIn("window.confirm(", source)
 
     def test_private_mediator_hides_paused_fun_features_and_uses_ayue_label(self):
         source = (

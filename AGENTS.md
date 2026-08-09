@@ -184,7 +184,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **ayue_for_demo-main** (3630 symbols, 8632 relationships, 288 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **Dating-App** (4516 symbols, 10568 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -208,10 +208,10 @@ This project is indexed by GitNexus as **ayue_for_demo-main** (3630 symbols, 863
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/ayue_for_demo-main/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/ayue_for_demo-main/clusters` | All functional areas |
-| `gitnexus://repo/ayue_for_demo-main/processes` | All execution flows |
-| `gitnexus://repo/ayue_for_demo-main/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/Dating-App/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/Dating-App/clusters` | All functional areas |
+| `gitnexus://repo/Dating-App/processes` | All execution flows |
+| `gitnexus://repo/Dating-App/process/{name}` | Step-by-step execution trace |
 
 ## CLI
 

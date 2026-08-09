@@ -127,6 +127,31 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual([task.agent for task in plan.tasks], ["synthesizer"])
         self.assertEqual(metrics.direct_chat_fallback_reason, "direct_chat_schema_invalid")
 
+    def test_paraphrased_product_info_topics_fall_back_to_safe_projection(self):
+        turn = self._turn("你跟這個 App 是做什麼的？")
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "decompose_tasks",
+                "arguments": {
+                    "mode": "product_info",
+                    "product_info_topics": [
+                        "這個交友 App 的用途與定位",
+                        "阿月（媒人）在 App 裡的角色",
+                    ],
+                },
+            }]),
+        ):
+            plan, metrics = plan_turn(turn)
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.mode, "product_info")
+        self.assertEqual(plan.tasks, [])
+        self.assertEqual(plan.product_info_topics, ["capabilities", "surface_scope"])
+        self.assertEqual(metrics.decision_mode, "product_info")
+        self.assertEqual(metrics.product_info_fallback_reason, "product_info_topics_invalid")
+        self.assertEqual(metrics.error, "")
+
     def test_planner_tool_schema_inlines_subtask_refs(self):
         schema = _decompose_tool_schema()["function"]["parameters"]
         serialized = json.dumps(schema, ensure_ascii=False)
@@ -134,7 +159,7 @@ class V3PlannerTests(unittest.TestCase):
         self.assertNotIn("$ref", serialized)
         self.assertEqual(
             set(schema["properties"]),
-            {"mode", "tasks", "direct_reply", "opportunity"},
+            {"mode", "tasks", "direct_reply", "direct_messages", "product_info_topics", "opportunity"},
         )
         task_schema = schema["properties"]["tasks"]["items"]
         self.assertEqual(
@@ -157,6 +182,60 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIn('mode="direct_chat"', _PLANNER_SYSTEM)
         self.assertIn("direct_reply", _PLANNER_SYSTEM)
         self.assertIn("不得回答行事曆", _PLANNER_SYSTEM)
+        self.assertIn("絕對不可翻成中文", _PLANNER_SYSTEM)
+        for topic in (
+            "capabilities", "same_identity", "surface_scope", "cross_surface_context",
+            "private_message_visibility", "where_to_ask", "matching_principles",
+            "relationship_chat_access",
+        ):
+            self.assertIn(f"`{topic}`", _PLANNER_SYSTEM)
+
+    def test_planner_policy_routes_inaccurate_personality_profile_to_basic_assessment(self):
+        self.assertIn("既有個性資料", _PLANNER_SYSTEM)
+        self.assertIn("profile.start_assessment(kind=basic)", _PLANNER_SYSTEM)
+        self.assertIn("不只是追問哪一段", _PLANNER_SYSTEM)
+        self.assertIn("即使沒有明說", _PLANNER_SYSTEM)
+        self.assertIn("另一個阿月是幹啥的", _PLANNER_SYSTEM)
+        self.assertIn("特定對方的實際聊天內容", _PLANNER_SYSTEM)
+        self.assertIn("relationship_chat_access", _PLANNER_SYSTEM)
+        self.assertIn("一般、不依賴特定聊天紀錄", _PLANNER_SYSTEM)
+
+    def test_specific_chat_advice_can_route_to_private_surface_product_info(self):
+        turn = self._turn("你看得到我跟小安剛才聊什麼嗎？我下一句要怎麼回？")
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "decompose_tasks",
+                "arguments": {
+                    "mode": "product_info",
+                    "product_info_topics": ["relationship_chat_access", "where_to_ask"],
+                },
+            }]),
+        ):
+            plan, _metrics = plan_turn(turn)
+
+        self.assertEqual(
+            plan.product_info_topics,
+            ["relationship_chat_access", "where_to_ask"],
+        )
+
+    def test_matching_principles_is_a_typed_product_info_topic(self):
+        turn = self._turn("你們到底是怎麼配對的？原理是什麼？")
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "decompose_tasks",
+                "arguments": {
+                    "mode": "product_info",
+                    "product_info_topics": ["matching_principles"],
+                },
+            }]),
+        ):
+            plan, metrics = plan_turn(turn)
+
+        self.assertEqual(plan.mode, "product_info")
+        self.assertEqual(plan.product_info_topics, ["matching_principles"])
+        self.assertEqual(metrics.decision_mode, "product_info")
 
     def test_planner_system_policy_has_bounded_social_opening_contract(self):
         self.assertIn('opportunity.signal="social_opening"', _PLANNER_SYSTEM)
@@ -223,6 +302,26 @@ class V3PlannerTests(unittest.TestCase):
         ):
             plan, _metrics = plan_turn(turn)
         self.assertIsNotNone(plan)
+        self.assertEqual([task.agent for task in plan.tasks], ["profile", "synthesizer"])
+
+    def test_inaccurate_existing_personality_profile_can_produce_basic_assessment_task(self):
+        turn = self._turn("我覺得我資料上的個性不是我欸")
+        expected = {
+            "tasks": [
+                {"id": "p1", "agent": "profile", "depends_on": [],
+                 "task_brief": "既有個性資料不符合本人，重新開始基本性格探索並呼叫 profile.start_assessment(kind=basic)"},
+                {"id": "s1", "agent": "synthesizer", "depends_on": ["p1"],
+                 "task_brief": "呈現重新測驗的確認預覽"},
+            ]
+        }
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[
+                {"name": "decompose_tasks", "arguments": expected},
+            ]),
+        ):
+            plan, _metrics = plan_turn(turn)
+
         self.assertEqual([task.agent for task in plan.tasks], ["profile", "synthesizer"])
 
     def test_no_tool_call_returns_none(self):

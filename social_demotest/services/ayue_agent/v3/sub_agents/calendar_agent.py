@@ -53,7 +53,6 @@ _SYSTEM = """你是公開阿月的行事曆子代理，負責提出本人行程�
 _READ_TOOLS = planner_tool_names(
     can_start_search=False,
     can_decide_active_proposal=False,
-    can_edit_calendar=False,
     can_read_mentioned_contacts=False,
     can_use_web=False,
     can_use_places=False,
@@ -66,6 +65,14 @@ _SAFETY_ADDENDUM = """Calendar schema and preflight own field names, enums, miss
 date normalization, permission checks, target resolution, revision/CAS and
 confirmation. Follow those typed contracts instead of recreating them in
 natural language."""
+
+_SAFETY_ADDENDUM += """
+For an update or cancel command, target_hint is the event identity clue.  An
+optional target_selector with date/start_time/end_time is a hard filter for
+the existing event and is distinct from mutation date/start_time/end_time,
+which are the proposed new values.  target_reference cannot be combined with
+target_hint or target_selector; a selector without target_hint is incomplete
+and must not bind an event."""
 
 _SAFETY_ADDENDUM += """
 若 context 明確提供 `calendar_recent_mutation`，且使用者是在確認上一筆行事曆寫入是否成功，請只提出唯讀的 `calendar.verify_recent_mutation`；不要再次提出 create/update/cancel。若使用者描述的是新的變更，才使用 `calendar.submit_commands`。
@@ -160,7 +167,7 @@ def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[CalendarA
                         # Schema validation never established an authoritative
                         # missing field.  Keep this neutral so Synthesizer
                         # cannot turn provider drift into a guessed field ask.
-                        "message": "這次行程指令格式無法驗證，請重新描述需求。",
+                        "message": "我剛剛沒把這筆行程整理成可確認的內容，還沒有動到你的日曆。請再用一句話說一次想新增、修改或取消什麼。",
                     })
                     continue
                 commands.extend(validated.commands)

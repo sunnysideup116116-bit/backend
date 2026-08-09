@@ -21,11 +21,11 @@ class V3GuardTests(unittest.TestCase):
         # ToolProposal's own validator should reject, but guard is a backstop.
         from pydantic import ValidationError
         with self.assertRaises(ValidationError):
-            ToolProposal(tool_name="calendar.cancel_my_event", arguments={"revision": 1})
+            ToolProposal(tool_name="calendar.submit_commands", arguments={"revision": 1})
 
     def test_rejects_schema_invalid_args(self):
         p = ToolProposal(
-            tool_name="calendar.create_my_event",
+            tool_name="calendar.submit_commands",
             arguments={"title": "約會"},  # missing date, start_time, end_time
         )
         d = guard_proposal(p, agent_name="calendar", seen_keys=set(), step_count=0, max_reads=3)
@@ -49,13 +49,8 @@ class V3GuardTests(unittest.TestCase):
 
     def test_write_tool_requires_confirmation(self):
         p = ToolProposal(
-            tool_name="calendar.create_my_event",
-            arguments={
-                "title": "電影之夜",
-                "date": "2026-08-09",
-                "start_time": "20:00",
-                "end_time": "22:00",
-            },
+            tool_name="calendar.submit_commands",
+            arguments={"commands": [{"action": "create", "title": "x", "date": "2026-08-09", "start_time": "20:00", "end_time": "22:00"}]},
         )
         d = guard_proposal(p, agent_name="calendar", seen_keys=set(), step_count=0, max_reads=3)
         self.assertFalse(d.ok)

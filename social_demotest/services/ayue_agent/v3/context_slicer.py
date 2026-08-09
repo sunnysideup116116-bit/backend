@@ -43,6 +43,33 @@ def slice_for_agent(
             "prior_observations": prior_observations,
         })
 
+    if agent_name == "web":
+        recent_messages: list[Any] = []
+        recent_chars = 0
+        for message in reversed(list(turn_ctx.recent_messages or [])):
+            text = str(message or "")
+            if not text:
+                continue
+            remaining = max(0, 2000 - recent_chars)
+            if not remaining:
+                break
+            clipped = text[:remaining]
+            recent_messages.append(clipped)
+            recent_chars += len(clipped)
+            if len(recent_messages) >= 4:
+                break
+        recent_messages.reverse()
+        return AgentContextSlice(agent="web", payload={
+            "message": turn_ctx.message,
+            "recent_messages": recent_messages,
+            # Location is only a coarse saved city/district projection.  The
+            # Web Agent may use it for explicitly local public research, but
+            # it never receives a precise address or live position.
+            "user_location": str(turn_ctx.user_location or "")[:80],
+            "clock": clock_dump,
+            "prior_observations": prior_observations[:4],
+        })
+
     if agent_name == "match":
         return AgentContextSlice(agent="match", payload={
             "message": turn_ctx.message,

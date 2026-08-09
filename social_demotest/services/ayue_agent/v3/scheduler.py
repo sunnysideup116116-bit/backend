@@ -23,7 +23,7 @@ from services.ayue_agent.tool_registry import (
     TOOL_REGISTRY, ToolArgumentSource, ToolRisk, executor_arguments_for_turn, tool_call_key,
 )
 from services.ayue_agent.tools import execute_tool
-from services.ayue_agent.web_tools import is_safe_public_url
+from services.ayue_agent.web_tools import is_safe_public_url, web_enabled
 from services.ayue_agent.match_opportunity import (
     accept_guidance_offer,
     active_guidance_offer,
@@ -31,7 +31,7 @@ from services.ayue_agent.match_opportunity import (
     claim_guidance_offer,
     decline_guidance_offer,
 )
-from services.ayue_agent.capabilities import is_capability_query
+from services.ayue_agent.capabilities import product_info_answer, product_info_projection
 from services.ayue_agent.product_identity import PUBLIC_PENDING_CANCEL_REPLY, PUBLIC_PLANNER_INVALID_REPLY
 from services.assessment_session_service import (
     active_assessment_session, advance_assessment_session,
@@ -65,7 +65,7 @@ from services.calendar_service import resolve_owned_event_with_candidates
 from .planner import plan_turn, PlannerMetrics, _synthesizer_only_plan
 from . import synthesizer
 from .synthesizer import SynthesizerMetrics
-from .public_reply import validate_public_reply
+from .public_reply import build_presentation, validate_public_reply
 from .sub_agents.base import SubAgentMetrics
 from .confirmation import ConfirmationManager
 from .sub_agents.calendar_agent import run as run_calendar
@@ -73,6 +73,19 @@ from .sub_agents.places_agent import run as run_places
 from .sub_agents.match_agent import run as run_match
 from .sub_agents.relationship_agent import run as run_relationship
 from .sub_agents.profile_agent import run as run_profile
+from .sub_agents import web_agent
+from .web_research import (
+    MAX_WEB_EXTRACT_CALLS,
+    MAX_WEB_EXTRACT_URLS,
+    MAX_WEB_INITIAL_SEARCH_QUERIES,
+    MAX_WEB_REFINED_SEARCH_QUERIES,
+    MAX_WEB_ROUNDS,
+    MAX_WEB_SEARCH_CALLS,
+    MAX_WEB_TOTAL_TOOL_CALLS,
+    WebResearchResultV1,
+    anchor_web_search_query,
+    build_research_result,
+)
 from .write_executors import execute_write, prepare_write_confirmation
 from .debug_trace import (
     append_event as append_debug_event,
@@ -124,8 +137,6 @@ def _direct_chat_block_reason(
         return "active_match_guidance"
     if getattr(turn, "mentioned_contact_overflow", False):
         return "mentioned_contact_overflow"
-    if is_capability_query(getattr(turn, "message", "")):
-        return "capability_query"
     if plan.opportunity is not None and plan.opportunity.signal != "none":
         return "opportunity"
     return None
@@ -221,6 +232,7 @@ def clear_demo_runtime_state() -> None:
 _SUB_AGENT_RUNNERS = {
     "calendar": run_calendar,
     "places": run_places,
+    "web": web_agent.run,
     "match": run_match,
     "relationship": run_relationship,
     "profile": run_profile,
@@ -354,7 +366,9 @@ def _public_sources(task_results: Any) -> list[dict[str, str]]:
                 ok = True
             if not ok:
                 continue
-            if tool_name == "web.search":
+            if data.get("schema_version") == "web_research.v1":
+                candidates = data.get("sources") or []
+            elif tool_name == "web.search":
                 candidates = data.get("results") or []
             elif tool_name == "web.extract":
                 candidates = data.get("pages") or []
@@ -578,66 +592,6 @@ def _web_extract_urls_allowed(turn_ctx: Any, results: list[Any], urls: list[str]
     return bool(urls) and all(str(url) in allowed for url in urls)
 
 
-def _calendar_command_legacy_shape(command: Any) -> tuple[str, dict[str, Any]]:
-    """Build the legacy action shape for compatibility only.
-
-    V3 Calendar Agent never emits this shape. It remains for older
-    confirmation records and compatibility callers.
-    """
-    action = str(getattr(command, "action", "") or "")
-    values = command.model_dump(exclude_none=True)
-    if action == "create":
-        tool_name = "calendar.create_my_event"
-        arguments = {key: values[key] for key in (
-            "title", "date", "start_time", "end_time", "timezone", "location", "notes",
-        ) if key in values}
-    elif action == "update":
-        tool_name = "calendar.update_my_event"
-        arguments = {key: values[key] for key in (
-            "target_hint", "title", "date", "start_time", "end_time", "timezone", "location", "notes",
-        ) if key in values}
-    elif action == "cancel":
-        tool_name = "calendar.cancel_my_event"
-        arguments = {"event_hint": values.get("target_hint", "")}
-    elif action == "cancel_selected":
-        tool_name = "calendar.cancel_my_events"
-        arguments = {"mode": "selected", "event_hints": list(values.get("target_hints") or [])}
-    else:
-        tool_name = "calendar.cancel_my_events"
-        arguments = {"mode": "all_upcoming", "event_hints": []}
-    return tool_name, arguments
-
-
-def _calendar_plan_legacy_data(plan: Any) -> dict[str, Any]:
-    data = plan.model_dump(exclude_none=True)
-    data["event_revision"] = data.pop("expected_revision", None)
-    data["event_source_type"] = data.pop("source_type", "personal")
-    data["proposed_form"] = data.get("form") or None
-    data["event_other_id"] = data.pop("other_id", None)
-    data["event_id"] = data.get("event_id")
-    data["safe_label"] = data.get("safe_label") or "這筆行程"
-    return data
-
-
-def _calendar_plan_legacy_arguments(plan: Any) -> dict[str, Any]:
-    """Build legacy compatibility arguments without target IDs."""
-    action = str(getattr(plan, "action", "") or "")
-    if action == "create":
-        return dict(getattr(plan, "form", {}) or {})
-    if action == "update":
-        return dict(getattr(plan, "changes", {}) or {})
-    return {}
-
-
-def _calendar_plan_legacy_tool(plan: Any) -> str:
-    """Return a legacy tool label for old confirmation projections only."""
-    return {
-        "create": "calendar.create_my_event",
-        "update": "calendar.update_my_event",
-        "cancel": "calendar.cancel_my_event",
-    }.get(str(getattr(plan, "action", "") or ""), "calendar.cancel_my_event")
-
-
 def _calendar_reference_for_command(
     user_id: str,
     command: Any,
@@ -661,6 +615,365 @@ def _calendar_reference_for_command(
     if reference_key.startswith("candidate_") and not candidate_reference_allowed(draft, reference_key):
         return None
     return get_reference(user_id, reference_key=reference_key)
+
+
+def _execute_web_proposal(
+    task: SubTask,
+    proposal: ToolProposal,
+    turn_ctx: Any,
+    *,
+    web_call_index: int,
+    seen_keys: set[tuple[str, str]],
+    guard_lock: threading.Lock,
+    prior_web_observations: list[dict[str, Any]],
+    on_progress: ProgressCallback | None,
+    run_id: str,
+    trace: dict[str, Any],
+    debug_enabled: bool,
+) -> tuple[SubTaskResult, bool]:
+    """Guard and execute one Web read; return whether the call used budget."""
+    with guard_lock:
+        decision = guard_proposal(
+            proposal,
+            agent_name="web",
+            seen_keys=seen_keys,
+            step_count=web_call_index,
+            max_reads=MAX_WEB_TOTAL_TOOL_CALLS,
+        )
+        trace["guard_results"].append(decision.code.value)
+    if debug_enabled:
+        append_debug_event(
+            run_id, "function_call", task_id=task.id, agent="web",
+            function=proposal.tool_name,
+            planner_arguments=proposal.arguments,
+            guard={"ok": decision.ok, "code": decision.code.value, "reason": decision.reason},
+        )
+    if not decision.ok:
+        return SubTaskResult(
+            task_id=task.id,
+            status=SubTaskStatus.FAILED,
+            tool_name=proposal.tool_name,
+            guard_code=decision.code,
+        ), False
+
+    if proposal.tool_name == "web.extract":
+        urls = [str(url) for url in (proposal.arguments.get("urls") or [])]
+        if not _web_extract_urls_allowed(turn_ctx, prior_web_observations, urls):
+            return SubTaskResult(
+                task_id=task.id,
+                status=SubTaskStatus.FAILED,
+                tool_name=proposal.tool_name,
+                error_code="web_extract_url_not_bound",
+            ), False
+
+    spec = TOOL_REGISTRY.get(proposal.tool_name)
+    if spec is None or proposal.tool_name not in {"web.search", "web.extract"}:
+        return SubTaskResult(
+            task_id=task.id,
+            status=SubTaskStatus.FAILED,
+            tool_name=proposal.tool_name,
+            error_code="tool_not_registered",
+        ), False
+    try:
+        safe_args = executor_arguments_for_turn(spec, [], proposal.arguments)
+    except Exception:
+        return SubTaskResult(
+            task_id=task.id,
+            status=SubTaskStatus.FAILED,
+            tool_name=proposal.tool_name,
+            error_code="executor_args_invalid",
+        ), False
+    with guard_lock:
+        key = tool_call_key(spec, safe_args)
+        if key in seen_keys:
+            return SubTaskResult(
+                task_id=task.id,
+                status=SubTaskStatus.FAILED,
+                tool_name=proposal.tool_name,
+                guard_code=GuardResultCode.DUPLICATE_CALL,
+            ), False
+        seen_keys.add(key)
+
+    step_id = f"{task.id}:web#{web_call_index}:{proposal.tool_name}"
+    _emit_progress(
+        on_progress, "tool_started", trace=trace, agent_run_id=run_id,
+        step_id=step_id, text=spec.progress_text, tool_name=proposal.tool_name,
+    )
+    if debug_enabled:
+        append_debug_event(
+            run_id, "tool_started", task_id=task.id, agent="web", step_id=step_id,
+            function=proposal.tool_name, planner_arguments=proposal.arguments,
+            executor_arguments=safe_args,
+        )
+    started = time.perf_counter()
+    try:
+        tool_result = execute_tool(
+            type("TC", (), {"name": proposal.tool_name, "arguments": safe_args})(),
+            turn_ctx._raw_ctx, clock=turn_ctx.clock,
+        )
+    except Exception:
+        duration_ms = round((time.perf_counter() - started) * 1000)
+        _emit_progress(
+            on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
+            step_id=step_id, outcome="error", tool_name=proposal.tool_name,
+            duration_ms=duration_ms,
+        )
+        trace["tool_results"].append({"tool": proposal.tool_name, "ok": False, "code": "tool_exception"})
+        return SubTaskResult(
+            task_id=task.id, status=SubTaskStatus.FAILED,
+            tool_name=proposal.tool_name, error_code="tool_exception",
+        ), True
+
+    duration_ms = round((time.perf_counter() - started) * 1000)
+    if not tool_result.ok:
+        _emit_progress(
+            on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
+            step_id=step_id, outcome="error", tool_name=proposal.tool_name,
+            duration_ms=duration_ms,
+        )
+        trace["tool_results"].append({
+            "tool": proposal.tool_name, "ok": False,
+            "code": tool_result.error_code,
+        })
+        return SubTaskResult(
+            task_id=task.id, status=SubTaskStatus.FAILED,
+            tool_name=proposal.tool_name, error_code=tool_result.error_code,
+        ), True
+
+    _emit_progress(
+        on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
+        step_id=step_id, outcome="ok", tool_name=proposal.tool_name,
+        duration_ms=duration_ms,
+    )
+    trace["tool_results"].append({"tool": proposal.tool_name, "ok": True, "code": None})
+    result = SubTaskResult(
+        task_id=task.id,
+        status=SubTaskStatus.OK,
+        tool_name=proposal.tool_name,
+        observation=tool_result.data,
+    )
+    if debug_enabled:
+        append_debug_event(
+            run_id, "tool_finished", task_id=task.id, agent="web", step_id=step_id,
+            function=proposal.tool_name, outcome="ok", duration_ms=duration_ms,
+            result=tool_result.data,
+        )
+    return result, True
+
+
+def _run_web_research(
+    task: SubTask,
+    turn_ctx: Any,
+    context_slice: AgentContextSlice,
+    *,
+    seen_keys: set[tuple[str, str]],
+    guard_lock: threading.Lock,
+    on_progress: ProgressCallback | None,
+    run_id: str,
+    trace: dict[str, Any],
+    debug_enabled: bool,
+) -> tuple[list[SubTaskResult], SubAgentMetrics]:
+    """Run the fixed three-round Web observation loop."""
+    aggregate = SubAgentMetrics()
+    if not web_enabled():
+        aggregate.error = "web_not_configured"
+        result = build_research_result(
+            research_question=turn_ctx.message,
+            answer_target=task.task_brief,
+            decision=None,
+            observations=[],
+            execution_status="unavailable",
+            stop_reason="tool_unavailable",
+        )
+        return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
+
+    observations: list[dict[str, Any]] = []
+    failures: list[str] = []
+    tool_calls_used = 0
+    search_calls_used = 0
+    extract_calls_used = 0
+    last_decision = None
+    stop_reason = "budget_exhausted"
+
+    for round_index in range(1, MAX_WEB_ROUNDS + 1):
+        decision, metrics = web_agent.decide(
+            context_slice,
+            task_brief=task.task_brief,
+            round_index=round_index,
+            observations=observations,
+            tool_calls_used=tool_calls_used,
+            search_calls_used=search_calls_used,
+            extract_calls_used=extract_calls_used,
+        )
+        aggregate.input_tokens += metrics.input_tokens
+        aggregate.output_tokens += metrics.output_tokens
+        aggregate.duration_ms += metrics.duration_ms
+        aggregate.tool_calls_raw.extend(metrics.tool_calls_raw or [])
+        aggregate.content_raw = metrics.content_raw
+        aggregate.prompt_raw = metrics.prompt_raw
+        aggregate.tools_raw = metrics.tools_raw
+        aggregate.input_payload = metrics.input_payload
+        if metrics.error:
+            aggregate.error = metrics.error
+        if decision is None:
+            stop_reason = "model_failure"
+            result = build_research_result(
+                research_question=turn_ctx.message,
+                answer_target=task.task_brief,
+                decision=None,
+                observations=observations,
+                execution_status="degraded" if observations else "unavailable",
+                stop_reason=stop_reason,
+            )
+            return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
+        last_decision = decision
+
+        if decision.assessment is not None and decision.assessment.target_alignment == "conflict":
+            stop_reason = "target_conflict"
+            result = build_research_result(
+                research_question=turn_ctx.message,
+                answer_target=task.task_brief,
+                decision=decision,
+                observations=observations,
+                execution_status="degraded",
+                stop_reason=stop_reason,
+            )
+            return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
+
+        if decision.action == "finish":
+            if round_index == 1 or decision.assessment is None:
+                aggregate.error = "web_finish_missing_evidence_assessment"
+                stop_reason = "model_failure"
+                result = build_research_result(
+                    research_question=turn_ctx.message,
+                    answer_target=task.task_brief,
+                    decision=None,
+                    observations=observations,
+                    execution_status="unavailable",
+                    stop_reason=stop_reason,
+                )
+            else:
+                stop_reason = "tool_failure" if failures and not observations else "evidence_sufficient"
+                result = build_research_result(
+                    research_question=turn_ctx.message,
+                    answer_target=task.task_brief,
+                    decision=decision,
+                    observations=observations,
+                    execution_status="degraded" if failures else "completed",
+                    stop_reason=stop_reason,
+                )
+            return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
+
+        if round_index == MAX_WEB_ROUNDS:
+            aggregate.error = "web_action_not_allowed_on_final_round"
+            stop_reason = "model_failure"
+            result = build_research_result(
+                research_question=turn_ctx.message,
+                answer_target=task.task_brief,
+                decision=None,
+                observations=observations,
+                execution_status="unavailable",
+                stop_reason=stop_reason,
+            )
+            return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
+
+        proposals: list[ToolProposal] = []
+        if decision.action == "search":
+            max_queries = MAX_WEB_INITIAL_SEARCH_QUERIES if round_index == 1 else MAX_WEB_REFINED_SEARCH_QUERIES
+            queries = [
+                anchor_web_search_query(task.task_brief, str(query))
+                for query in decision.queries
+                if str(query).strip()
+            ]
+            if not queries or len(queries) > max_queries:
+                failures.append("invalid_search_queries")
+                aggregate.error = "web_search_query_budget_invalid"
+                continue
+            if search_calls_used + len(queries) > MAX_WEB_SEARCH_CALLS:
+                failures.append("search_budget_exhausted")
+                continue
+            if tool_calls_used + len(queries) > MAX_WEB_TOTAL_TOOL_CALLS:
+                failures.append("tool_budget_exhausted")
+                continue
+            proposals = [ToolProposal(
+                tool_name="web.search",
+                arguments={
+                    "query": query,
+                    "recency": decision.recency,
+                    "use_saved_location": decision.use_saved_location,
+                },
+            ) for query in queries]
+        elif decision.action == "extract":
+            urls = [str(url).strip() for url in decision.urls if str(url).strip()]
+            if not urls or len(urls) > MAX_WEB_EXTRACT_URLS or extract_calls_used >= MAX_WEB_EXTRACT_CALLS:
+                failures.append("extract_budget_invalid")
+                continue
+            if tool_calls_used >= MAX_WEB_TOTAL_TOOL_CALLS:
+                failures.append("tool_budget_exhausted")
+                continue
+            proposals = [ToolProposal(
+                tool_name="web.extract",
+                arguments={"urls": urls, "query": decision.extract_query},
+            )]
+        else:
+            failures.append("unknown_web_action")
+            aggregate.error = "web_action_invalid"
+            continue
+
+        # Initial parallel searches are the only parallel Web tool phase.  The
+        # guard lock still protects duplicate keys and trace counters.
+        if len(proposals) > 1:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="ayue-web") as pool:
+                futures = {
+                    pool.submit(
+                        _execute_web_proposal,
+                        task, proposal, turn_ctx,
+                        web_call_index=tool_calls_used + index,
+                        seen_keys=seen_keys,
+                        guard_lock=guard_lock,
+                        prior_web_observations=observations,
+                        on_progress=on_progress,
+                        run_id=run_id,
+                        trace=trace,
+                        debug_enabled=debug_enabled,
+                    ): proposal
+                    for index, proposal in enumerate(proposals)
+                }
+                executed_results = [future.result() for future in futures]
+        else:
+            executed_results = [_execute_web_proposal(
+                task, proposals[0], turn_ctx,
+                web_call_index=tool_calls_used,
+                seen_keys=seen_keys,
+                guard_lock=guard_lock,
+                prior_web_observations=observations,
+                on_progress=on_progress,
+                run_id=run_id,
+                trace=trace,
+                debug_enabled=debug_enabled,
+            )]
+
+        for result_item, counted in executed_results:
+            if counted:
+                tool_calls_used += 1
+                if result_item.tool_name == "web.search":
+                    search_calls_used += 1
+                elif result_item.tool_name == "web.extract":
+                    extract_calls_used += 1
+            if result_item.status is SubTaskStatus.OK and result_item.observation:
+                observations.append(_observation_dict(task.id, result_item))
+            elif result_item.error_code:
+                failures.append(str(result_item.error_code))
+
+    result = build_research_result(
+        research_question=turn_ctx.message,
+        answer_target=task.task_brief,
+        decision=last_decision,
+        observations=observations,
+        execution_status="degraded" if failures else "completed",
+        stop_reason="budget_exhausted" if tool_calls_used >= MAX_WEB_TOTAL_TOOL_CALLS else "model_failure",
+    )
+    return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
 
 
 def _run_sub_task(
@@ -691,6 +1004,18 @@ def _run_sub_task(
             run_id, "subagent_started", task_id=task.id, agent=task.agent,
             task_brief=task.task_brief, depends_on=task.depends_on,
             input_payload=context_slice.payload, prior_observations=prior_observations,
+        )
+    if task.agent == "web":
+        return _run_web_research(
+            task,
+            turn_ctx,
+            context_slice,
+            seen_keys=seen_keys,
+            guard_lock=guard_lock,
+            on_progress=on_progress,
+            run_id=run_id,
+            trace=trace,
+            debug_enabled=debug_enabled,
         )
     sub_started = time.perf_counter()
     try:
@@ -1103,20 +1428,8 @@ def _run_sub_task(
                     "calendar_plan_version": 1,
                     "plans": plans,
                 }
-                if preflight.plans:
-                    payload.update(_calendar_plan_legacy_data(preflight.plans[0]))
-                if len(preflight.plans) > 1:
-                    payload["batch"] = [
-                        {
-                            "tool": _calendar_plan_legacy_tool(plan),
-                            "arguments": _calendar_plan_legacy_arguments(plan),
-                            "data": _calendar_plan_legacy_data(plan),
-                        }
-                        for plan in preflight.plans
-                    ]
                 # A typed Calendar batch is one logical confirmation even when
-                # it contains several ordered mutations.  The legacy global
-                # one-write budget applies to legacy proposals only.
+                # it contains several ordered mutations.
                 ConfirmationManager(_CONFIRMATIONS).create_confirmation(
                     user_id=turn_ctx.user_id,
                     agent_name=task.agent,
@@ -1189,7 +1502,17 @@ def run_public_agent_turn_v3(
         # deterministic branches both pass through it, so model drift to
         # Simplified Chinese cannot leak to the user.  Opaque URLs/code/JSON
         # fragments are protected by normalize_public_reply.
-        result = result.model_copy(update={"reply": normalize_public_reply(result.reply)})
+        normalized_reply = normalize_public_reply(result.reply)
+        messages = [str(item).strip() for item in (result.messages or []) if str(item).strip()]
+        if not messages and normalized_reply:
+            messages = [normalized_reply]
+        presentation = build_presentation(messages, result.presentation_class) if messages else None
+        if presentation is None and normalized_reply:
+            presentation = build_presentation([normalized_reply], "fallback")
+        if presentation is not None:
+            messages = presentation.messages
+            normalized_reply = "\n\n".join(messages)
+        result = result.model_copy(update={"reply": normalized_reply, "messages": messages})
         if debug_enabled:
             finish_debug_run(
                 run_id, status="completed",
@@ -1211,6 +1534,32 @@ def run_public_agent_turn_v3(
             assessment_kind=str(outcome.get("kind") or session.get("kind") or "") or None,
             assessment_revision=outcome.get("revision", int(session.get("revision", 0) or 0)),
         )
+
+    if ctx.assessment_action == "cancel":
+        session = awaiting_assessment_commit(ctx.user_profile) or active_assessment_session(ctx.user_profile)
+        if session:
+            session_id = str(session.get("session_id") or "")
+            kind = str(session.get("kind") or "")
+            expires_at = float(session.get("expires_at", 0) or 0)
+            if expires_at and expires_at <= time.time():
+                outcome = expire_assessment_session(ctx.user_id, session_id, kind)
+            else:
+                outcome = cancel_assessment_session(ctx.user_id, session_id, kind)
+            _print_separator("V3 RUN END")
+            return _finalize_debug(_assessment_result(outcome, session, run_id))
+        _print_separator("V3 RUN END")
+        return _finalize_debug(AgentResult(
+            handled=True,
+            reply="目前沒有正在進行的測驗。",
+            conversation_intent="assessment",
+            agent_run_id=run_id,
+            agent_mode="v3",
+            assessment_state=None,
+            assessment_kind=None,
+            assessment_revision=None,
+            profile_write_allowed=False,
+            profile_write_reason="assessment",
+        ))
 
     commit_session = awaiting_assessment_commit(ctx.user_profile)
     if commit_session:
@@ -1320,6 +1669,8 @@ def run_public_agent_turn_v3(
             return _finalize_debug(AgentResult(
                 handled=True,
                 reply=reply,
+                messages=synth_metrics.presentation_messages or [reply],
+                presentation_class=synth_metrics.presentation_class,
                 conversation_intent="match_confirmation",
                 agent_run_id=run_id,
                 agent_mode="v3",
@@ -1348,7 +1699,10 @@ def run_public_agent_turn_v3(
             for item in results if isinstance(item, dict)
         )
         return _finalize_debug(AgentResult(
-            handled=True, reply=reply, agent_run_id=run_id, agent_mode="v3",
+            handled=True, reply=reply,
+            messages=synth_metrics.presentation_messages or [reply],
+            presentation_class=synth_metrics.presentation_class,
+            agent_run_id=run_id, agent_mode="v3",
             calendar_state_changed=calendar_state_changed,
         ))
     if choice == "cancel":
@@ -1388,6 +1742,7 @@ def run_public_agent_turn_v3(
             },
             mode=planner_metrics.decision_mode or "tasks",
             direct_chat_fallback_reason=planner_metrics.direct_chat_fallback_reason or None,
+            product_info_fallback_reason=planner_metrics.product_info_fallback_reason or None,
         )
 
     if plan is None:
@@ -1399,23 +1754,82 @@ def run_public_agent_turn_v3(
             agent_run_id=run_id, agent_mode="v3", fallback_reason="planner_invalid",
         ))
 
+    if plan.mode == "product_info":
+        projection = product_info_projection(list(plan.product_info_topics))
+        synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{
+            "task_id": "product_info",
+            "status": "ok",
+            "tool": None,
+            "result": {"product_info": projection},
+            "error_code": None,
+            "skip_reason": None,
+        }])
+        reply, _card_decision, synth_metrics = synthesizer.synthesize(synth_slice)
+        _print_llm_metrics("synthesizer", synth_metrics)
+        total_input_tokens += synth_metrics.input_tokens
+        total_output_tokens += synth_metrics.output_tokens
+        messages = synth_metrics.presentation_messages or [reply]
+        presentation = build_presentation(messages, "product_info")
+        if presentation is None:
+            presentation = build_presentation(
+                product_info_answer(list(plan.product_info_topics)), "product_info",
+            )
+        safe_messages = presentation.messages if presentation else [PUBLIC_PLANNER_INVALID_REPLY]
+        reply = "\n\n".join(safe_messages)
+        trace["execution_mode"] = "product_info"
+        trace["plan"] = [{"mode": "product_info", "topics": list(plan.product_info_topics)}]
+        trace["result"] = {"handled": True, "conversation_intent": "product_info", "fallback_reason": None}
+        _persist_trace(run_id, ctx, trace)
+        return _finalize_debug(AgentResult(
+            handled=True,
+            reply=reply,
+            messages=safe_messages,
+            presentation_class="product_info",
+            conversation_intent="product_info",
+            agent_run_id=run_id,
+            agent_mode="v3",
+            llm_call_metrics=[{
+                "agent": "planner",
+                "input_tokens": planner_metrics.input_tokens,
+                "output_tokens": planner_metrics.output_tokens,
+                "duration_ms": planner_metrics.duration_ms,
+                "mode": "product_info",
+            }, {
+                "agent": "synthesizer",
+                "input_tokens": synth_metrics.input_tokens,
+                "output_tokens": synth_metrics.output_tokens,
+                "duration_ms": synth_metrics.duration_ms,
+                "mode": "product_info",
+            }],
+        ))
+
     if plan.mode == "direct_chat":
         direct_reason = _direct_chat_block_reason(plan, turn, pending_records, active_offer)
         direct_validation = None
+        direct_messages: list[str] = []
         if direct_reason is None:
-            direct_validation = validate_public_reply(
-                plan.direct_reply,
-                reject_internal_identifiers=True,
-                reject_structured_output=True,
-            )
-            if direct_validation.reply is None:
-                direct_reason = f"reply_{direct_validation.reason or 'invalid'}"
+            if plan.direct_messages:
+                presentation = build_presentation(plan.direct_messages, "conversation")
+                if presentation is None:
+                    direct_reason = "messages_invalid"
+                else:
+                    direct_messages = presentation.messages
+            else:
+                direct_validation = validate_public_reply(
+                    plan.direct_reply,
+                    reject_internal_identifiers=True,
+                    reject_structured_output=True,
+                )
+                if direct_validation.reply is None:
+                    direct_reason = f"reply_{direct_validation.reason or 'invalid'}"
+                else:
+                    direct_messages = [direct_validation.reply]
         if direct_reason is not None:
             planner_metrics.direct_chat_fallback_reason = direct_reason
             trace["direct_chat_fallback_reason"] = direct_reason
             plan = _synthesizer_only_plan()
         else:
-            reply = direct_validation.reply if direct_validation is not None else ""
+            reply = "\n\n".join(direct_messages)
             trace["execution_mode"] = "direct_chat"
             trace["llm_call_count"] = 1
             trace["total_input_tokens"] = total_input_tokens
@@ -1462,6 +1876,7 @@ def run_public_agent_turn_v3(
             return _finalize_debug(AgentResult(
                 handled=True,
                 reply=reply,
+                messages=[reply],
                 conversation_intent="casual_chat",
                 agent_run_id=run_id,
                 agent_mode="v3",
@@ -1525,6 +1940,7 @@ def run_public_agent_turn_v3(
             mode=planner_metrics.decision_mode or "tasks",
             execution_mode="dag",
             direct_chat_fallback_reason=planner_metrics.direct_chat_fallback_reason or None,
+            product_info_fallback_reason=planner_metrics.product_info_fallback_reason or None,
             planner_metrics={
                 "input_tokens": planner_metrics.input_tokens,
                 "output_tokens": planner_metrics.output_tokens,
@@ -1709,6 +2125,8 @@ def run_public_agent_turn_v3(
     result = AgentResult(
         handled=True,
         reply=reply,
+        messages=synth_metrics.presentation_messages or [reply],
+        presentation_class=synth_metrics.presentation_class,
         agent_run_id=run_id,
         agent_mode="v3",
         fallback_reason=synth_metrics.fallback_reason,

@@ -52,11 +52,7 @@
 | `match.start_search` | `start_search` | 無 | `_start_search` → `start_match_search`（入 job 佇列） |
 | `match.decide_active_proposal` | `decide_active_proposal` | `decision`(interested/declined) | `_decide_active_proposal` → revision CAS |
 | `profile.start_assessment` | `assessment_start` | `kind`(basic/deep) | `_start_assessment` → session 啟動 |
-| `calendar.create_my_event` | `calendar_create` | `title`、`date`、`start_time`、`end_time`、`timezone`(預設 Asia/Taipei)、`location`、`notes` | `_calendar_execute` → `create_personal_event` |
-| `calendar.update_my_event` | `calendar_update` | `event_hint` + 可改欄位 | `_calendar_execute` → 私人：`update_personal_event`；共同約會：`request_reschedule` |
-| `calendar.cancel_my_event` | `calendar_cancel` | `event_hint` | `_calendar_execute` → `cancel_event` / `cancel_coordination_or_event` |
-| `calendar.cancel_my_events` | `calendar_cancel` | `mode`(selected/all_upcoming) + `event_hints`(2–10) | `_calendar_execute`（batch）→ 逐筆取消，先驗證 `cancel_targets_are_current` |
-| `calendar.submit_commands` | `calendar_commands` | `commands`（1–10 個 authority-free `CalendarCommand`） | Scheduler deterministic preflight → server-owned `CalendarMutationPlan` → `_execute_calendar_mutation_plans`，依序執行、stop-on-failure |
+| `calendar.submit_commands` | `calendar_commands` | `commands`（1–10 個 authority-free `CalendarCommand`；`target_selector` 僅篩選既有 update/cancel 目標） | Scheduler deterministic preflight → server-owned `CalendarMutationPlan` → `_execute_calendar_mutation_plans`，依序執行、stop-on-failure |
 
 ## 4. 工具可見性（哪些 agent 看得到哪些工具）
 
@@ -64,7 +60,7 @@
 
 - `READ_ONLY_TOOLS`：預設公開的唯讀面（排除 web/places 三工具與 mention summary）。
 - `WEB_TOOLS` = `{web.search, web.extract}`；`PLACES_TOOLS` = `{places.search_nearby, places.measure_distance, places.resolve_place}`。
-- 只有 `places_agent` 同時有 web + places 工具。
+- `places_agent` 只看 `PLACES_TOOLS`；`web_agent` 只看 `WEB_TOOLS`。Web 的 research workflow 不放在 Tool Registry 或 Places Agent。
 - `relationship.get_mentioned_contact_summary` 只在 server 驗證過 accepted @ mention 的回合才可見（`planner_tool_names(can_read_mentioned_contacts=...)`）。
 - 明確配對請求（例如「再配對一次」）必須由 Planner 建立 `match` task；`opportunity.social_opening` 只產生短期溫和提議 observation，不建立 confirmation。
 
@@ -103,6 +99,17 @@ sub-agent LLM function calling 輸出 {tool_name, arguments}
 
 ## Current Calendar Agent mutation contract
 
-`calendar.submit_commands` is the registered typed intent entry point for the V3 Calendar Agent. Its `CalendarCommand` schema has no `user_id`, `event_id`, `revision`, `expected_revision`, or `coordination_id`. Scheduler preflight resolves targets once and creates the server-owned `CalendarMutationPlan`; plans never return to the model. Missing fields, ambiguous, and not-found outcomes are normal clarification results. Legacy calendar write tools remain only for compatibility.
+`calendar.submit_commands` is the registered typed intent entry point for the V3 Calendar Agent. Its `CalendarCommand` schema has no `user_id`, `event_id`, `revision`, `expected_revision`, or `coordination_id`. Scheduler preflight resolves targets once and creates the server-owned `CalendarMutationPlan`; plans never return to the model. `target_selector` is a typed hard filter for the old event and is never reused as the proposed new form. Missing fields, ambiguous, and not-found outcomes are normal clarification results. Direct legacy Calendar write tools are not registered; stale records fail closed.
 
 `calendar.get_next_my_event` is a bounded read for “最近一筆／最近有啥行程”. Its output is a safe event projection; the executor stores the canonical event reference privately so a subsequent pronoun follow-up can use `target_reference="recent_event"` without another natural-language lookup.
+## Current Web ownership (V3)
+
+`WEB_TOOLS` remains the typed capability set `{web.search, web.extract}`.
+These capabilities are owned by the dedicated Web Agent, not by Places. The
+Places Agent exposes only `PLACES_TOOLS`; location cards and distance remain
+its domain responsibility. Web research behavior (answer-target preservation,
+observation handoff, relevance assessment, query refinement, and explicit
+insufficient evidence) is implemented in
+`services/ayue_agent/v3/sub_agents/web_agent.py` and
+`services/ayue_agent/v3/web_research.py`, while the Scheduler enforces the
+three-round/three-call budget.

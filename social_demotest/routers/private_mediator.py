@@ -18,7 +18,7 @@ from services.ayue_agent.private_contracts import PrivateClientAction
 from services.ayue_agent.private_v2 import run_private_agent_turn_v2
 from services.ayue_agent.product_identity import PRIVATE_RUNTIME_FALLBACK_REPLY
 from services.chat_service import generate_room_id, save_message
-from services.profile_task_service import queue_profile_skills
+from services.profile_task_service import queue_profile_skills  # compatibility import; Private never invokes it
 from services.relationship_engagement_service import (
     consume_pending_probe_answer,
     find_accepted_match,
@@ -163,11 +163,6 @@ def mediator_private_chat(req: MediatorPrivateRequest, background_tasks: Backgro
 
     )
 
-    queue_profile_skills(
-        background_tasks, req.user_id, req.message, user_message.get("message_id"),
-        "relationship_private", str(match_doc["_id"]),
-    )
-
     user_doc = profiles_coll.find_one({"user_id": req.user_id}) or {}
     probe_reply = consume_pending_probe_answer(match_doc, user_doc, req.user_id, req.other_id, req.message)
     if probe_reply is not None:
@@ -201,7 +196,6 @@ def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: 
         try:
             room_id = generate_mediator_private_room_id(req.user_id, req.other_id)
             user_message = save_message(room_id, req.user_id, req.message)
-            queue_profile_skills(worker_tasks, req.user_id, req.message, user_message.get("message_id"), "relationship_private", str(match_doc["_id"]))
             emit({"type": "run_started", "agent_run_id": fallback_run_id})
             response = _run_private_v2_saved_turn(req, match_doc, room_id, emit, fallback_run_id)
             event_queue.put({"type": "final", "response": response})

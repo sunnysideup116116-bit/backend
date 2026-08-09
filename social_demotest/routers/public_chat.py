@@ -22,7 +22,9 @@ from models import DirectChatRequest
 from services.ai_service import generate_chat_completion
 from services.ayue_agent import run_public_agent_turn_v3
 from services.ayue_agent.contracts import AgentTurnContext
+from services.assessment_session_service import assessment_public_state
 from services.ayue_agent.proactive_care import record_proactive_activity
+from services.ayue_agent.onboarding import complete_public_ayue_onboarding
 from services.ayue_agent.product_identity import PUBLIC_RETRY_REPLY, PUBLIC_RUNTIME_ERROR_REPLY
 from services.ayue_agent.public_relationship_projection import (
     mentioned_contact_refs,
@@ -116,6 +118,13 @@ def _owner_profile_message(req: DirectChatRequest, mentioned_ids: list[str]) -> 
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
+def _public_request_message(req: DirectChatRequest) -> str:
+    """Canonicalize typed UI actions before saving or entering the agent."""
+    if req.assessment_action == "cancel":
+        return "退出測驗"
+    return str(req.message or "")
+
+
 def _complete_public_turn(
     req: DirectChatRequest,
     room_id: str,
@@ -132,7 +141,8 @@ def _complete_public_turn(
     agent_ctx = AgentTurnContext(
         user_id=req.user_id,
         room_id=room_id,
-        message=req.message,
+        message=_public_request_message(req),
+        assessment_action=req.assessment_action,
         message_id=user_message_id,
         mentioned_ids=requested_mentions,
         mention_overflow=mention_overflow,
@@ -142,14 +152,28 @@ def _complete_public_turn(
     agent_result = run_public_agent_turn_v3(
         agent_ctx, on_progress=on_progress, debug_enabled=debug_enabled,
     )
+    complete_public_ayue_onboarding(req.user_id)
+    latest_profile = profiles_coll.find_one(
+        {"user_id": req.user_id}, {"_id": 0, "agentic_assessment_session": 1},
+    ) or {}
+    assessment_state = assessment_public_state(latest_profile)
     ai_reply = agent_result.reply or PUBLIC_RETRY_REPLY
+    reply_messages = [str(item).strip() for item in (agent_result.messages or []) if str(item).strip()][:3]
+    if not reply_messages:
+        reply_messages = [ai_reply]
+    ai_reply = "\n\n".join(reply_messages)
     sources = agent_result.sources[:5]
     place_cards = agent_result.place_cards[:8]
     metadata = {}
+    run_id = str(agent_result.agent_run_id or "")
+    if re.fullmatch(r"[a-f0-9]{32}", run_id):
+        metadata["agent_run_id"] = run_id
     if sources:
         metadata["sources"] = sources
     if place_cards:
         metadata["place_cards"] = place_cards
+    if len(reply_messages) > 1:
+        metadata["presentation_messages"] = reply_messages
     if metadata:
         save_message(room_id, "ai_assistant", ai_reply, metadata=metadata)
     else:
@@ -174,6 +198,7 @@ def _complete_public_turn(
             profile_process_run_key = candidate_run_key
     return {
         "reply": ai_reply,
+        "messages": reply_messages,
         "is_locked": False,
         "conversation_intent": agent_result.conversation_intent,
         "calendar_state_changed": agent_result.calendar_state_changed,
@@ -187,9 +212,12 @@ def _complete_public_turn(
         "agent_version": "v3",
         "match_readiness_state": agent_result.match_readiness_state,
         "match_guidance_shown": agent_result.match_guidance_shown,
-        "assessment_state": agent_result.assessment_state,
-        "assessment_kind": agent_result.assessment_kind,
-        "assessment_revision": agent_result.assessment_revision,
+        "assessment_state": agent_result.assessment_state
+        if agent_result.assessment_state is not None else assessment_state["assessment_state"],
+        "assessment_kind": agent_result.assessment_kind
+        if agent_result.assessment_kind is not None else assessment_state["assessment_kind"],
+        "assessment_revision": agent_result.assessment_revision
+        if agent_result.assessment_revision is not None else assessment_state["assessment_revision"],
         "sources": sources,
         "place_cards": place_cards,
         "llm_call_metrics": agent_result.llm_call_metrics or [],
@@ -203,9 +231,10 @@ def _run_public_stream_turn(
     """Public-only stream path; mirrors the V3 branch of direct_chat exactly once."""
     room_id = generate_room_id(req.user_id, req.contact_id)
     requested_mentions, mention_overflow = _validated_requested_mentions(req)
-    display_message = req.message
+    request_message = _public_request_message(req)
+    display_message = request_message
     if requested_mentions and not req.mentions_inline:
-        display_message = f"{_mention_display_prefix(req.user_id, requested_mentions)} {req.message}".strip()
+        display_message = f"{_mention_display_prefix(req.user_id, requested_mentions)} {request_message}".strip()
     owner_raw_content = _owner_profile_message(req, requested_mentions)
     user_metadata = {}
     if display_message != owner_raw_content:
@@ -353,9 +382,10 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
     """Handle Public Ayue with V3, or preserve the existing pair-chat adapter."""
     room_id = generate_room_id(req.user_id, req.contact_id)
     requested_mentions, mention_overflow = _validated_requested_mentions(req)
-    display_message = req.message
+    request_message = _public_request_message(req)
+    display_message = request_message
     if req.contact_id == "ai_assistant" and requested_mentions and not req.mentions_inline:
-        display_message = f"{_mention_display_prefix(req.user_id, requested_mentions)} {req.message}".strip()
+        display_message = f"{_mention_display_prefix(req.user_id, requested_mentions)} {request_message}".strip()
     owner_raw_content = _owner_profile_message(req, requested_mentions)
     user_metadata = {}
     if display_message != owner_raw_content:

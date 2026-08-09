@@ -79,7 +79,7 @@ Domain sub-agent、schema、Guard、preflight、executor、profile/memory extrac
 | `services/ayue_agent/v3/confirmation.py` | 每位使用者單一、preview-bound confirmation 的 CAS 管理（`v3_pending_confirmations`） |
 | `services/ayue_agent/v3/write_executors.py` | 已確認寫入的唯一執行路徑（domain service + idempotency） |
 | `services/ayue_agent/v3/synthesizer.py` | 綜合所有 observation 產出最終回覆；地點卡以 typed tool 決定 |
-| `services/ayue_agent/v3/sub_agents/` | calendar / places / match / relationship / profile 五個 sub-agent |
+| `services/ayue_agent/v3/sub_agents/` | calendar / places / web / match / relationship / profile 六個 sub-agent |
 | `services/ayue_agent/context.py` | 每回合 privacy-safe context（`build_public_agent_turn_context`） |
 | `services/ayue_agent/contracts.py` | Provider-neutral contracts（`PublicAgentTurnContext`、`AgentResult` 等） |
 | `services/ayue_agent/router.py` | 僅保留 V3 共用的封閉協議與回覆清理（`confirmation_choice`、`_concise_public_reply`） |
@@ -247,7 +247,7 @@ tasks: [{id, agent, depends_on[], task_brief}]
 opportunity: {signal: none|social_opening, evidence_span, confidence} | null
 ```
 
-- `agent` 只能是 `calendar | places | match | relationship | profile | synthesizer`。
+- `agent` 只能是 `calendar | places | web | match | relationship | profile | synthesizer`。
 - 一個 plan 最多三個 domain tasks 加一個 synthesizer；簡單聊天只能產生 synthesizer。
 - 一定且只能有一個 synthesizer task 當終端，且必須依賴所有 terminal domain tasks；plan 不得有未知依賴、自我依賴或 cycle。
 - 使用者表達想有人陪、想認識人或獨自參加不舒服時，Planner 在 `opportunity` 標記 `social_opening`（需 confidence ≥ 0.8 且 evidence_span 為原句連續子字串）。
@@ -267,7 +267,7 @@ Guard 不審核語意、不猜意圖、不檢查參數「內容」的正確性�
 
 ### Sub-agents（LLM + function calling）
 
-calendar / places(+web) / match / relationship / profile 五個 sub-agent，各自以 function calling 提出 tool proposals。一次 LLM 呼叫可產出多個 tool call，Scheduler 逐一 guard 並執行；單一 call 失敗不丟棄其他 call。
+calendar / places / web / match / relationship / profile 六個 sub-agent，各自以 function calling 提出 tool proposals。Web 是獨立的 bounded research specialist；Places 只負責地點工具。一次 LLM 呼叫可產出多個 tool call，Scheduler 逐一 guard 並執行；單一 call 失敗不丟棄其他 call。
 
 ### Scheduler（純程式碼）
 
@@ -299,7 +299,7 @@ WRITE proposal 通過 Guard 後，Scheduler 呼叫 `prepare_write_confirmation`�
 
 - `match.start_search`：先 `assess_match_opportunity`；not_ready 回 missing-basis 問題，active_match_blocked 回「不重複開新搜尋」，ready 才建立 confirmation。
 - `calendar.submit_commands`：Calendar Agent 只提交不含 authority fields 的 `CalendarCommand` batch。Scheduler 使用同一回合的 authoritative clock 做 deterministic preflight；create/update/cancel 的目標若需要只解析一次，產生不暴露給 LLM 的 `CalendarMutationPlan`。missing_fields/invalid_date/ambiguous/not_found/too_many/invalid_interval/stale_revision/invalid_command 是正常 `needs_clarification` outcome，不建立 confirmation。ready 時同一 batch 共用一筆 confirmation，確認後依序執行，第一個真正 failure 後停止。
-- Typed command 只接受 canonical `action/title/target_reference/target_hint/target_hints`，以及明確持續時間的 `duration_minutes` 與既有區間平移的 `time_shift_minutes`；Scheduler 在嚴格驗證前僅為相容 provider 將 `type/summary/event_hint/event_hints` 映射到 canonical 欄位。最近一次唯一選取的行程與未完成 command 只保存 15 分鐘的 server-owned reference/draft projection；projection 不含 event_id/revision，且 reference stale 時不重新做自然語言辨識。
+- Typed command 只接受 canonical `action/title/target_reference/target_hint/target_selector/target_hints`，以及明確持續時間的 `duration_minutes` 與既有區間平移的 `time_shift_minutes`；`target_selector.date/start_time/end_time` 只篩選要修改或取消的既有行程，mutation 的 `date/start_time/end_time` 永遠是新值。Scheduler 在嚴格驗證前僅為相容 provider 將 `type/summary/event_hint/event_hints` 映射到 canonical 欄位。最近一次唯一選取的行程與未完成 command 只保存 15 分鐘的 server-owned reference/draft projection；projection 不含 event_id/revision，且 reference stale 時不重新做自然語言辨識。
 - `match.decide_active_proposal`：preflight 綁定當下 canonical proposal revision；確認執行時再次比對，stale 即拒絕。
 - `profile.start_assessment`：驗證 kind（basic→big_five、deep→deep_profile）。
 
@@ -321,11 +321,11 @@ Calendar target references are server-owned opaque tokens. `recent_event` must
 come from the current recent-event projection. `candidate_1..candidate_3` are
 accepted only when the same token is present in the active calendar draft
 projection; an unadvertised or stale token cannot load an authority-bearing
-reference. The legacy `calendar.create_my_event`, `calendar.update_my_event`,
-`calendar.cancel_my_event` and `calendar.cancel_my_events` registry paths remain
-for compatibility with older callers and confirmation records, but are not part
-of the normal V3 Calendar Agent surface; V3 mutations use
-`calendar.submit_commands`.
+reference. The former direct `calendar.create_my_event`,
+`calendar.update_my_event`, `calendar.cancel_my_event`, and
+`calendar.cancel_my_events` registry paths are removed. Old confirmation
+records fail closed with `calendar_legacy_tool_disabled` and never call a
+domain service; all V3 Calendar mutations use `calendar.submit_commands`.
 
 Current opportunity contract: an explicit match request (including retry/search wording such as 「再配對一次」) creates a `match` task and follows the normal confirmation path. An indirect `social_opening` is only a soft, expiring observation; it never creates a pending confirmation or claims that a search started. If the user accepts the soft offer, Scheduler converts that explicit confirmation into the normal `match.start_search` confirmation.
 
@@ -480,14 +480,17 @@ when they do not. Assessment session lifecycle and scoring remain owned by the
 runtime; the basic/deep assessment files are documentation, not runtime-loaded
 skills.
 
-Public V3 reply presentation has one ordinary envelope: 1–3 sentences, usually
-80–140 Chinese characters, with a hard maximum of 160. This range is a prompt
-target rather than a minimum-length validator; greetings, confirmations and
-single facts may be shorter. Grounded results may use the existing 240-character
-and five-sentence envelope only when required to preserve verified calendar,
-candidate or confirmation detail. Server-owned previews and verified mutation
-outcomes are not paraphrased or padded. Tone guidance is presentation-only and
-must not participate in Planner routing, Guard decisions or domain authority.
+Public V3 reply presentation is typed: ordinary conversation and social opening
+use one or two bubbles (160 characters per bubble), product information uses one
+or two bubbles (240-character envelope), and transactions, capability replies
+and fallbacks stay in one bubble. Greetings, confirmations and single facts may
+be shorter. Grounded results may use the 240-character envelope only when needed
+to preserve verified calendar, candidate or confirmation detail. Server-owned
+previews and verified mutation outcomes are not paraphrased or padded. The
+Synthesizer may use one `compose_public_reply` function call to produce bubbles
+and place-card decisions together; `reply` remains the compatibility projection.
+Tone guidance is presentation-only and must not participate in Planner routing,
+Guard decisions or domain authority.
 # Demo maintenance and match diagnostics
 
 The local Demo destructive tools are guarded by `DEMO_DESTRUCTIVE_TOOLS_ENABLED`.
@@ -564,3 +567,145 @@ remain owned by the existing shared services.
 Direct-chat runs record only Planner metrics and an allowlisted trace summary
 (`execution_mode`, `llm_call_count`, token totals and latency). Domain flows
 retain the existing Planner → sub-agent → Guard/tool → Synthesizer path.
+
+### Product identity, surfaces, onboarding and presentation (v1)
+
+Public Ayue and Private Ayue are the same Ayue identity with different bounded
+surfaces. Public owns the user's self context and new matching; Private is only
+for the current accepted relationship. Public cannot read the user's direct-room
+chat history with the other person. Private can read only the bounded recent
+history of its current direct room, so advice that depends on a specific
+conversation is redirected to that room's Private Ayue; generic advice that does
+not depend on a specific thread remains available in Public. Neither surface
+receives the other surface's raw/full chat history. Private receives only the
+bounded owner profile projection and relationship context allowed by its runtime. Private owner
+messages are not automatically queued into the Public profile/memory pipeline;
+confirmed domain effects (for example date coordination) continue through their
+existing confirmation services.
+
+Planner `Plan.mode` also has `product_info`. It carries up to three typed
+`product_info_topics` (`same_identity`, `surface_scope`,
+`cross_surface_context`, `private_message_visibility`, `where_to_ask`,
+`matching_principles`, `relationship_chat_access`, or `capabilities`) and never
+creates a domain task. The versioned capability manifest v5 explicitly records
+that Public cannot read a pair chat while Private can read bounded recent history
+from its current room.
+Questions about how matching candidates are narrowed and ranked use the typed
+`matching_principles` topic, so they receive matching truth rather than the
+generic identity/capability introduction. Scheduler projects only the selected
+topic facts from the versioned capability manifest into Synthesizer, which
+answers in fresh language for the current question. The full product document
+is not injected every turn, and no surface-query keyword router is used.
+If the Planner selects `product_info` but paraphrases or translates a topic
+identifier, the runtime discards that malformed payload and falls back to the
+read-only `capabilities` and `surface_scope` projection. It never converts the
+invalid payload into a domain task or tool call.
+
+Public replies may carry additive `messages` (up to three typed bubbles) while
+`reply` remains the newline-joined compatibility projection. The API stores one
+assistant record per turn and, when needed, stores `presentation_messages` in
+metadata; streaming still emits one `final` event. Transaction and fallback
+presentations remain one bubble, while only conversation/product-info surfaces
+may use two. Product onboarding is not a modal: an empty Public room receives
+three fixed onboarding bubbles from `GET /api/messages/ai_assistant`, and the
+version is completed idempotently via `/api/public-ayue/onboarding/complete` or
+on the first owner turn. Existing `onboarding_completed` remains a compatibility
+field and no historical messages are rewritten.
+
+While a Public chat assessment is `active` or `awaiting_commit`, the chat input
+surface exposes a typed `assessment_action="cancel"` exit control. The action is
+accepted only for `ai_assistant`, is handled before Planner, and uses the same
+CAS-protected assessment session cancellation service as the closed natural-
+language cancel protocol. It never enters Planner, profile extraction, or a
+second reset workflow; the response exposes only bounded assessment state.
+
+Semantic dissatisfaction with the owner's existing personality result (for
+example, saying the stored personality does not feel like them and asking to
+make it more accurate) routes through Planner to the existing
+`profile.start_assessment(kind=basic)` confirmation flow. This is an LLM
+semantic-routing policy, not a phrase list, substring classifier, or regex.
+
+Assessment confirmation execution carries the Confirmation Manager's opaque
+confirmation ID into every write executor. Assessment idempotency is therefore
+scoped to that confirmation instead of a process-wide fixed key; an old basic
+assessment can no longer make a new confirmed assessment look like a duplicate.
+Public Synthesizer has no message-keyword fallback for matching or product
+information. Deterministic wording is limited to pending confirmations,
+confirmed outcomes, cancellation, safety/error handling, and provider-failure
+fallbacks grounded in the selected typed product facts.
+
+## Web research specialist (native V3)
+
+Web is a distinct read-only specialist owned by
+`services/ayue_agent/v3/sub_agents/web_agent.py` and coordinated by
+`scheduler.py`. The Planner may route current, external, news, forum, or
+URL-grounded questions to `agent="web"`; Places owns location lookup and does
+not expose Web tools.
+
+`web.search` and `web.extract` remain typed Tool Registry capabilities, while
+research behavior stays in the Web Agent contract. The loop is strictly
+bounded to at most 3 decision rounds, 3 total web calls, 2 initial search
+queries, 1 refinement query, and 1 extract step over at most 2 URLs. Each
+observation is projected and returned to the Web Agent before its next
+decision; raw provider payloads never enter Planner, trace, or final
+composition.
+
+Before finishing, the Web Agent emits a typed evidence assessment
+(`aligned|conflict` plus `direct_sufficient|direct_partial|adjacent_only|none`).
+Direct evidence is required for an `answered` result. Adjacent or conflicting
+evidence produces `partial` or `insufficient_evidence` with explicit
+limitations; unavailable credentials and tool failures remain distinct
+execution outcomes. No open-ended ReAct loop, browser automation, or external
+framework is introduced.
+
+Every Web search query is deterministically anchored to the Planner-owned
+`task_brief` before tool execution, so a model-suggested adjacent query cannot
+drop the named entity, place, date range, or requested evidence class. The
+optional `recency` hint accepts only `none|day|week|month|year`; any other model
+value safely becomes `none`, while explicit dates remain part of the query.
+Internal decision functions are action-specific and round-specific: round 1
+exposes shallow `web_search_decision` / `web_extract_decision` schemas, round 2
+adds a flat `web_finish_decision` evidence contract, and round 3 exposes only
+finish. These are workflow decisions, not Tool Registry capabilities. Keeping
+them shallow prevents cloud-model schema errors and prevents the model from
+filling conclusion fields before it has observations.
+If a provider still emits more than one round-2 refined query, the parser keeps
+only the first query before validation; this enforces the fixed search budget
+without converting a safe overproduction into a whole-run model failure.
+Likewise, a provider's bounded string-only finish findings are normalized into
+the typed finding shape and overlong explanation text is truncated before
+strict validation; URLs and evidence coverage are never invented by this
+normalization.
+Provider-specific or localized source-type labels are conservatively normalized
+to `other`; this preserves the observed URL and claim without pretending the
+source is official, news, or social.
+Finish parsing is field-bounded instead of all-or-nothing for harmless provider
+drift: overproduced findings, limitations, URLs, and source types are truncated
+to their contract budgets; unknown prose fields are dropped; only unambiguous
+boolean spellings are repaired. This normalization never creates a claim or
+URL. If the finish decision is still invalid after successful Web calls, the
+result is `degraded/model_failure` and retains the observed safe source catalog
+instead of rewriting the whole run as unavailable with empty sources.
+
+`web_finish_decision` asks the model only for bounded semantic booleans
+(`evidence_conflicts_target`, `has_direct_evidence`,
+`direct_evidence_complete`) plus source-bound findings. Runtime derives
+`coverage` and final status from those values, so descriptive model prose
+cannot enter closed enum fields. No evidence is not treated as target conflict;
+only observed evidence that contradicts the answer target sets that flag.
+Findings without an observed safe URL cannot become direct supported claims.
+For ordinary, low-risk discovery such as events, restaurants, and itinerary
+ideas, evidence relevance is separate from source authority. A matching public
+organizer, venue, shop, ticketing, Instagram, Facebook, or Threads announcement
+can be direct evidence when it contains the requested activity/date/place
+details. A non-official source lowers confidence or adds a change-warning; it
+does not by itself turn target-matching evidence into adjacent background.
+Academic/high-stakes evidence thresholds are not applied to casual discovery.
+When an insufficient result still contains source-bound adjacent findings, the
+deterministic fallback may show those items explicitly as possibly relevant;
+it must keep the limitation and must not upgrade them to direct facts.
+
+Saved Public Ayue assistant messages include the opaque 32-hex `agent_run_id`
+in message metadata. This identifier contains no prompt, arguments, evidence,
+or domain authority, and lets localhost diagnostics correlate a visible reply
+with its exact ephemeral run while that run remains available.

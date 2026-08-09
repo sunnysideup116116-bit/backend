@@ -11,23 +11,22 @@
 能力：
 
 - **查詢**本人行事曆（列表／找單筆），判斷空檔、日期與忙碌時段。
-- **新增**私人行程（一次可新增多筆，同一回覆提出多個 `calendar.create_my_event` 呼叫）。
+- **新增**私人行程（一次可新增多筆，放在同一個 `calendar.submit_commands` batch）。
 - **修改**一筆行程（私人行程直接改；共同約會提出「改期」並通知對方重新確認）。
 - **取消**一筆或多筆行程（共同約會同步雙方行事曆並通知對方）。
 - 相對時間詞（這個月、本週、明天…）由 agent 依 clock 自行換算成具體 `YYYY-MM-DD`。
 
 **不負責**：不讀取對方行事曆；不猜測配對對象的行程。
 
-## 2. 可呼叫的工具（6 個）
+## 2. 可呼叫的工具（5 個）
 
 | 工具 | risk | 用途 |
 | --- | --- | --- |
 | `calendar.list_my_events` | READ | 列出指定區間的行程與忙碌時段 |
 | `calendar.find_my_event` | READ | 找單筆行程（含候選與共同約會對象公開名稱） |
-| `calendar.create_my_event` | WRITE | 新增私人行程（需確認） |
-| `calendar.update_my_event` | WRITE | 修改一筆行程（需確認） |
-| `calendar.cancel_my_event` | WRITE | 取消一筆行程（需確認） |
-| `calendar.cancel_my_events` | WRITE | 取消多筆行程（需確認） |
+| `calendar.get_next_my_event` | READ | 取得最近一筆安全 projection 並建立短期 recent reference |
+| `calendar.verify_recent_mutation` | READ | 驗證最近一次 typed mutation 的 canonical 結果 |
+| `calendar.submit_commands` | WRITE | 提交一至十筆 authority-free typed mutation commands（需確認） |
 
 ### 2.1 `calendar.list_my_events`（READ）
 
@@ -61,17 +60,13 @@ Planner 參數（`_CalendarFindArguments`）：
 
 回傳 `{status: found|not_found|ambiguous, ...}`：`ambiguous` 時帶 `candidates[]`（activity/date/start_time/end_time/location/notes/event_kind），由 agent 逐一比對；`not_found` 的查詢會交給 Synthesizer 優雅回覆（不會當成寫入失敗）。
 
-### 2.3 寫入工具（WRITE，先確認）
+### 2.3 Typed 寫入工具（WRITE，先確認）
 
 | 工具 | Planner 參數 | 說明 |
 | --- | --- | --- |
-| `calendar.create_my_event` | `title`(≤120, 必填)、`date`(YYYY-MM-DD)、`start_time`(HH:MM)、`end_time`(HH:MM)、`timezone`(預設 Asia/Taipei)、`location`(≤160)、`notes`(≤500) | 不填 `event_hint` |
-| `calendar.get_next_my_event` | 無 | 回傳最近一筆安全 projection，並建立短期 server-owned recent reference |
-| `calendar.update_my_event` | `event_hint` 或 `target_reference="recent_event"` + 可改欄位（title/date/start_time/end_time/timezone/location/notes） | 代名詞 follow-up 使用 recent reference，不重新組自然語言 hint |
-| `calendar.cancel_my_event` | `event_hint` 或 `target_reference="recent_event"` | 同上 |
-| `calendar.cancel_my_events` | `mode`(selected/all_upcoming) + `event_hints`(selected 需 2–10 筆) | all_upcoming 最多取消 10 筆未來行程 |
+| `calendar.submit_commands` | `commands`（1–10 個 `CalendarCommand`；`target_selector` 只篩選既有 update/cancel 目標） | mutation 的 date/time 欄位是新值；target reference 由 server projection 驗證 |
 
-**agent 規則**（來自 `_SYSTEM`）：寫入只提交 authority-free typed commands，不會直接執行，系統會先做 deterministic preflight 與 confirmation。修改／取消不先拆 read task，也不把 read observation 重組成 `event_hint`；需要查詢內容時才提出 read。一次訊息中的多個 mutation 可放在同一 command batch，確認後依序執行。
+**agent 規則**（來自 `_SYSTEM`）：寫入只提交 authority-free typed commands，不會直接執行，系統會先做 deterministic preflight 與 confirmation。修改／取消的 `target_hint` 必須是語意化的事件身份線索；日期/時間篩選使用 typed `target_selector`，不把 conversational wrapper 當身份。一次訊息中的多個 mutation 可放在同一 command batch，確認後依序執行。
 
 ## 3. 呼叫流程（背後怎麼運作）
 
@@ -115,7 +110,7 @@ Planner 參數（`_CalendarFindArguments`）：
 
 - **Preflight（`v3/calendar_commands.py:preflight_calendar_commands`）**：
   - `create`：以 authoritative clock 將「今天／明天／後天」正規化，再驗證欄位、時間區間與 `conflicts_for_viewer`。
-  - `update/cancel`：使用 typed recent reference 時直接 resolve canonical event；其他情況才以 `event_hint` 做唯一 resolver。`ambiguous`／`not_found`／缺少欄位／無法正規化日期都回傳 `needs_clarification`，不建立 confirmation。
+  - `update/cancel`：使用 typed recent reference 時直接 resolve canonical event；其他情況以 semantic `target_hint` 加上可選 `target_selector` 做唯一 resolver。`ambiguous`／`not_found`／缺少欄位／無法正規化日期都回傳 `needs_clarification`，不建立 confirmation。
   - `cancel_my_events`：保留 bounded selected/all_upcoming contract，產生多筆 server-owned plans。
   - ready 時只把不含 authority fields 的 preview 傳給使用者；canonical event ID/revision 留在 server-owned pending payload。
 - **執行（`_calendar_execute`）**：
@@ -155,7 +150,7 @@ t1 與 t2 平行執行：
 
 ## Current V3 mutation contract
 
-The current implementation uses `calendar.submit_commands` for Calendar Agent writes. The agent emits authority-free `CalendarCommand` values only. Scheduler preflight resolves each mutation target once and creates server-owned `CalendarMutationPlan` values containing canonical IDs and revisions; those plans never enter an LLM context. Missing fields, ambiguous targets, not-found targets, invalid provider command shapes, and stale recent references return normal clarification outcomes. A ready batch gets one confirmation and executes sequentially with stop-on-first-failure and no automatic rollback. The older `calendar.*` write payloads remain only as a compatibility path.
+The current implementation uses `calendar.submit_commands` for Calendar Agent writes. The agent emits authority-free `CalendarCommand` values only. Scheduler preflight resolves each mutation target once and creates server-owned `CalendarMutationPlan` values containing canonical IDs and revisions; those plans never enter an LLM context. Missing fields, ambiguous targets, not-found targets, invalid provider command shapes, and stale recent references return normal clarification outcomes. A ready batch gets one confirmation and executes sequentially with stop-on-first-failure and no automatic rollback. The former direct `calendar.*` write payloads are no longer registered; stale records fail closed without a domain write.
 
-The typed boundary accepts canonical `action/title/target_hint/target_hints`. A closed compatibility adapter maps common provider spellings (`type`, `summary`, `event_hint`, `event_hints`) before strict validation. A unique Calendar read records a 15-minute server-owned recent reference, while incomplete create/update commands record an authority-free 15-minute draft. Both are projected to the model without event IDs or revisions; a follow-up such as 「這筆刪掉」uses the reference directly and never re-runs natural-language resolution.
+The typed boundary accepts canonical `action/title/target_hint/target_selector/target_hints`. `target_selector` is a typed hard filter for the old event; mutation `date/start_time/end_time` remain the proposed new form. A closed compatibility adapter maps common provider spellings (`type`, `summary`, `event_hint`, `event_hints`) before strict validation. A unique Calendar read records a 15-minute server-owned recent reference, while incomplete create/update commands record an authority-free 15-minute draft. Both are projected to the model without event IDs or revisions; a follow-up such as 「這筆刪掉」uses the reference directly and never re-runs natural-language resolution.
 The runtime persists these short-lived records in the bounded Mongo collections by default (`AYUE_CALENDAR_STATE_MONGO=on`) and always keeps an in-process fallback for tests/offline demos. A unique `calendar.get_next_my_event` read is the preferred path for “最近一筆／最近有啥行程”; it records the same server-owned recent reference used by a follow-up “他／她／它／這筆” mutation.

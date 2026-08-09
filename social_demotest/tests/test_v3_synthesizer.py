@@ -108,7 +108,7 @@ class V3SynthesizerTests(unittest.TestCase):
         system_prompt = call.call_args.kwargs["system_prompt"]
         self.assertIn("general_conversation", system_prompt)
         self.assertIn("不得宣稱查過", system_prompt)
-        self.assertIn("1–3 句", system_prompt)
+        self.assertIn("1–2 句", system_prompt)
         self.assertIn("不要套公式", system_prompt)
         self.assertIn("240 字／5 句", system_prompt)
 
@@ -249,21 +249,18 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertEqual(metrics.fallback_reason, "provider_error")
         self.assertEqual(metrics.error_code, "synthesizer_provider_error")
 
-    def test_capability_query_is_deterministic_and_does_not_call_tools(self):
+    def test_capability_query_is_not_classified_by_synthesizer_regex(self):
         slc = self._slice([])
         slc.payload["message"] = "你可以幹嘛"
         with patch(
             "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="一般回覆"),
         ) as mock_call:
             reply, card_decision, metrics = synthesize(slc)
-        self.assertIn("媒人朋友", reply)
+        self.assertEqual(reply, "一般回覆")
         self.assertIsNone(card_decision)
-        self.assertEqual(metrics.reply_source, "capability")
-        self.assertFalse(metrics.used_llm)
-        self.assertEqual(metrics.tools_raw, [])
-        self.assertEqual(metrics.tool_calls_raw, [])
-        self.assertEqual(metrics.input_payload, slc.payload)
-        mock_call.assert_not_called()
+        self.assertEqual(metrics.reply_source, "llm")
+        mock_call.assert_called_once()
 
     def test_soft_match_opportunity_fallback_does_not_claim_search_started(self):
         slc = self._slice([{
@@ -278,16 +275,58 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIn("想試試看", reply)
         self.assertNotIn("已開始", reply)
 
-    def test_capability_query_normalizes_invisible_characters(self):
+    def test_surface_questions_are_typed_product_info_planner_inputs(self):
         slc = self._slice([])
         slc.payload["message"] = "那你可\u200b以幹嘛？"
         with patch(
             "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="一般回覆"),
         ) as mock_call:
             reply, _card_decision, metrics = synthesize(slc)
-        self.assertIn("媒人朋友", reply)
-        self.assertEqual(metrics.reply_source, "capability")
-        mock_call.assert_not_called()
+        self.assertEqual(reply, "一般回覆")
+        self.assertEqual(metrics.reply_source, "llm")
+        mock_call.assert_called_once()
+
+    def test_product_info_facts_are_composed_for_the_current_question(self):
+        slc = self._slice([{
+            "task_id": "product_info", "status": "ok", "tool": None,
+            "result": {"product_info": {
+                "manifest_version": "v4",
+                "topics": ["same_identity", "surface_scope"],
+                "facts": {
+                    "identity": {"same_ayue": True},
+                    "surface_scope": {
+                        "public": "owner_self_and_new_relationships",
+                        "private": "current_accepted_relationship",
+                    },
+                },
+            }},
+        }])
+        slc.payload["message"] = "另一個阿月是幹啥的？"
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="也是我，只是在雙人聊天室裡會專心處理你和那個人的互動。"),
+        ) as provider:
+            reply, _card_decision, metrics = synthesize(slc)
+
+        self.assertIn("也是我", reply)
+        self.assertEqual(metrics.presentation_class, "product_info")
+        prompt = provider.call_args.args[0]
+        self.assertIn("same_identity", prompt)
+        self.assertIn("另一個阿月是幹啥的", prompt)
+        self.assertIn("不要改回通用身份介紹", provider.call_args.kwargs["system_prompt"])
+
+    def test_general_provider_failure_does_not_keyword_route_to_matching_copy(self):
+        slc = self._slice([])
+        slc.payload["message"] = "我只是說朋友最近在聊配對，沒有要問 App"
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            side_effect=Exception("provider down"),
+        ):
+            reply, _card_decision, metrics = synthesize(slc)
+
+        self.assertEqual(metrics.reply_source, "general_fallback")
+        self.assertNotIn("我不會隨機配對", reply)
 
     def test_no_write_proposed_returns_graceful_not_found_reply(self):
         # 寫入任務因候選查詢 not_found 而沒有提出寫入時，fallback 必須

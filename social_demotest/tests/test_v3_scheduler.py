@@ -75,6 +75,37 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertEqual(trace["llm_call_count"], 1)
         synth.assert_not_called()
 
+    def test_matching_principles_product_info_answers_without_generic_identity_copy(self):
+        ctx = self._ctx("你們到底怎麼配對的？")
+        plan = Plan(mode="product_info", tasks=[], product_info_topics=["matching_principles"])
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
+                   return_value=self._direct_turn(ctx.message)), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.active_assessment_session", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.synthesizer.synthesize", return_value=(
+                 "不是抽籤。我會綜合你的近況與偏好，再讓媒合系統排序。",
+                 None,
+                 SynthesizerMetrics(
+                     input_tokens=20, output_tokens=18, duration_ms=40,
+                     used_llm=True, reply_source="llm",
+                     presentation_messages=["不是抽籤。我會綜合你的近況與偏好，再讓媒合系統排序。"],
+                     presentation_class="product_info",
+                 ),
+             )) as synth, \
+             patch("services.ayue_agent.v3.scheduler._persist_trace"):
+            result = run_public_agent_turn_v3(ctx)
+
+        self.assertIn("不是抽籤", result.reply)
+        self.assertIn("媒合系統排序", result.reply)
+        self.assertNotIn("我是阿月", result.reply)
+        self.assertEqual(result.conversation_intent, "product_info")
+        observation = synth.call_args.args[0].payload["observations"][0]
+        self.assertEqual(observation["result"]["product_info"]["topics"], ["matching_principles"])
+        self.assertIn("matching", observation["result"]["product_info"]["facts"])
+
     def test_direct_chat_is_blocked_by_calendar_draft_and_uses_synthesizer(self):
         ctx = self._ctx("早上九點")
         plan = Plan(mode="direct_chat", tasks=[], direct_reply="好的")
@@ -754,6 +785,7 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertNotIn("t1", [p["task_id"] for p in prior])
         self.assertNotIn("t3", [p["task_id"] for p in prior])
 
+    @unittest.skip("legacy direct Calendar proposal contract removed; typed command flow is covered below")
     def test_find_candidates_flow_into_dependent_calendar_write_task(self):
         """修改/取消行程兩階段：read task 的 find_my_event 候選必須進入
         write task 的 context slice（含 ambiguous 的 candidates 陣列）。"""
@@ -1136,6 +1168,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
         exec_write.assert_called_once()
         self.assertEqual(exec_write.call_args.kwargs["payload"]["_confirmation_id"], "c1")
 
+    @unittest.skip("legacy direct Calendar proposal contract removed; typed batch confirmation is covered above")
     def test_only_one_write_confirmation_created_per_subtask(self):
         # 同一 sub-task 提出兩個寫入工具時，calendar 寫入合併進同一 confirmation；
         # 非 calendar 寫入（match）仍一回合最多一筆。
@@ -1183,6 +1216,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
         self.assertFalse(confirmed[0]["result"].get("pending_confirmation"))
         self.assertEqual(confirmed[0]["result"].get("ignored"), "one_write_per_turn")
 
+    @unittest.skip("legacy direct Calendar proposal contract removed; typed batch confirmation is covered above")
     def test_two_create_proposals_keep_only_first_confirmation(self):
         # 同一 sub-task 提出兩筆 calendar.create_my_event → 一次 confirmation + batch 陣列；
         # 一次「確認」即新增兩筆（需求：一次確認變更多個行程）。
@@ -1436,6 +1470,97 @@ class V3SchedulerOpportunityTests(unittest.TestCase):
 
 
 class V3SchedulerAssessmentTests(unittest.TestCase):
+    def test_typed_assessment_cancel_cancels_active_without_planner(self):
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="room", message="退出測驗", assessment_action="cancel",
+        )
+        session = {
+            "session_id": "s1", "kind": "deep_profile", "status": "active",
+            "expires_at": 1e18, "revision": 4,
+        }
+        with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.active_assessment_session", return_value=session), \
+             patch("services.ayue_agent.v3.scheduler.cancel_assessment_session", return_value={
+                 "status": "cancelled", "session_state": "cancelled", "kind": "deep_profile",
+                 "revision": 5, "reply": "這段探索已取消。",
+             }) as cancel, \
+             patch("services.ayue_agent.v3.scheduler.plan_turn") as plan:
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
+            mock_build.return_value.user_profile = {}
+            result = run_public_agent_turn_v3(ctx)
+        self.assertEqual(result.assessment_state, "cancelled")
+        self.assertEqual(result.assessment_kind, "deep_profile")
+        cancel.assert_called_once_with("owner", "s1", "deep_profile")
+        plan.assert_not_called()
+
+    def test_typed_assessment_cancel_handles_awaiting_commit_without_planner(self):
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="room", message="退出測驗", assessment_action="cancel",
+        )
+        session = {
+            "session_id": "s1", "kind": "big_five", "status": "awaiting_commit",
+            "expires_at": 1e18, "revision": 3,
+        }
+        with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=session), \
+             patch("services.ayue_agent.v3.scheduler.active_assessment_session", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.cancel_assessment_session", return_value={
+                 "status": "cancelled", "session_state": "cancelled", "kind": "big_five",
+                 "revision": 4, "reply": "這段探索已取消。",
+             }) as cancel, \
+             patch("services.ayue_agent.v3.scheduler.plan_turn") as plan:
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
+            mock_build.return_value.user_profile = {}
+            result = run_public_agent_turn_v3(ctx)
+        self.assertEqual(result.assessment_state, "cancelled")
+        cancel.assert_called_once_with("owner", "s1", "big_five")
+        plan.assert_not_called()
+
+    def test_typed_assessment_cancel_without_session_is_deterministic(self):
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="room", message="退出測驗", assessment_action="cancel",
+        )
+        with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.active_assessment_session", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.plan_turn") as plan:
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
+            mock_build.return_value.user_profile = {}
+            result = run_public_agent_turn_v3(ctx)
+        self.assertEqual(result.reply, "目前沒有正在進行的測驗。")
+        self.assertIsNone(result.assessment_state)
+        plan.assert_not_called()
+
+    def test_typed_assessment_cancel_expires_stale_session_without_cancel_overwrite(self):
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="room", message="退出測驗", assessment_action="cancel",
+        )
+        session = {
+            "session_id": "s1", "kind": "big_five", "status": "active",
+            "expires_at": 1, "revision": 2,
+        }
+        with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.active_assessment_session", return_value=session), \
+             patch("services.ayue_agent.v3.scheduler.expire_assessment_session", return_value={
+                 "status": "expired", "session_state": "expired", "kind": "big_five",
+                 "revision": 3, "reply": "這段探索已過期。",
+             }) as expire, \
+             patch("services.ayue_agent.v3.scheduler.cancel_assessment_session") as cancel, \
+             patch("services.ayue_agent.v3.scheduler.plan_turn") as plan:
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
+            mock_build.return_value.user_profile = {}
+            result = run_public_agent_turn_v3(ctx)
+        self.assertEqual(result.assessment_state, "expired")
+        expire.assert_called_once_with("owner", "s1", "big_five")
+        cancel.assert_not_called()
+        plan.assert_not_called()
+
     def test_active_assessment_advances_without_planner(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="我喜歡戶外活動")
         with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \

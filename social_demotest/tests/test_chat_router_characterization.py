@@ -42,6 +42,7 @@ EXPECTED_ROUTES = {
     ("POST", "/api/demo/clear_all"): (None, ()),
     ("POST", "/api/direct_chat"): ("DirectChatRequest", ()),
     ("POST", "/api/direct_chat/stream"): ("DirectChatRequest", ()),
+    ("POST", "/api/public-ayue/onboarding/complete"): ("ClearRequest", ()),
     ("POST", "/api/mediator/private"): ("MediatorPrivateRequest", ()),
     ("POST", "/api/mediator/private/stream"): ("MediatorPrivateRequest", ()),
     ("POST", "/api/relationship/date/cancel"): ("CalendarActionRequest", ("other_id", "coordination_id")),
@@ -74,6 +75,7 @@ EXPECTED_EXTRACTED_ROUTE_MODULES = {
     ("GET", "/api/proactive_check"): "routers.proactive",
     ("POST", "/api/direct_chat"): "routers.public_chat",
     ("POST", "/api/direct_chat/stream"): "routers.public_chat",
+    ("POST", "/api/public-ayue/onboarding/complete"): "routers.chat_messages",
 }
 
 
@@ -90,6 +92,18 @@ def _route_module(method: str, path: str):
 
 
 class ChatRouterCharacterizationTests(unittest.TestCase):
+    def test_assessment_action_is_scoped_to_public_ayue(self):
+        request = DirectChatRequest(
+            user_id="owner", contact_id="ai_assistant", message="退出測驗",
+            assessment_action="cancel",
+        )
+        self.assertEqual(request.assessment_action, "cancel")
+        with self.assertRaises(ValueError):
+            DirectChatRequest(
+                user_id="owner", contact_id="other", message="退出測驗",
+                assessment_action="cancel",
+            )
+
     def test_router_keeps_the_current_chat_http_surface(self):
         actual = {
             (method, route.path): (
@@ -179,9 +193,7 @@ class ChatRouterCharacterizationTests(unittest.TestCase):
 
         self.assertEqual(response, expected)
         save.assert_called_once_with("private-room", "owner", "想問問")
-        queue_profile.assert_called_once_with(
-            tasks, "owner", "想問問", "owner-message", "relationship_private", "match-1",
-        )
+        queue_profile.assert_not_called()
         run_v2.assert_called_once_with(req, match, "private-room")
 
     def test_proactive_check_for_unknown_user_has_no_side_effects(self):

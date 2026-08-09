@@ -11,22 +11,19 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from services.ai_service import generate_chat_completion_with_tools
-from services.ayue_agent.capabilities import (
-    is_capability_query,
-    matching_truth_reply,
-    capability_answer,
-)
+from services.ayue_agent.capabilities import product_info_answer
 from services.ayue_agent.product_identity import (
     PUBLIC_AYUE_PERSONA,
     PUBLIC_REPLY_LENGTH,
     PUBLIC_REPLY_TONE,
     PUBLIC_RETRY_REPLY,
+    PUBLIC_VOICE_FEW_SHOTS,
 )
 from .contracts import AgentContextSlice
-from .public_reply import validate_public_reply
+from .public_reply import build_presentation, validate_public_reply
 
 
 @dataclass
@@ -44,7 +41,6 @@ class SynthesizerMetrics:
         "capability",
         "verified_observation",
         "llm",
-        "matching_truth",
         "observation_fallback",
         "general_fallback",
     ] | None = None
@@ -55,11 +51,27 @@ class SynthesizerMetrics:
         "unsupported_claim",
     ] | None = None
     error_code: str | None = None
+    presentation_messages: list[str] | None = None
+    presentation_class: Literal[
+        "conversation", "social_opportunity", "product_info", "transaction",
+        "capability", "fallback", "onboarding",
+    ] = "conversation"
 
 
 class _DecidePlaceCardsArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["show_all", "select", "none"]
+    indices: list[int] = []
+
+
+class _ComposePublicReplyArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    messages: list[str] = Field(max_length=3)
+    presentation_class: Literal[
+        "conversation", "social_opportunity", "product_info", "transaction",
+        "capability", "fallback", "onboarding",
+    ] = "conversation"
+    card_mode: Literal["show_all", "select", "none"] = "none"
     indices: list[int] = []
 
 
@@ -180,12 +192,13 @@ def _synthesizer_system_prompt(mode: str, has_cards: bool) -> str:
         "但不得宣稱查過 App、calendar、match、profile 或外部資料，也不得把 background memory 當成已驗證的目前狀態。"
     )
     cards_policy = (
-        "若 user payload 有 candidate_cards，使用 decide_place_cards 決定顯示 show_all、select 或 none；"
+        "若 user payload 有 candidate_cards，優先呼叫 compose_public_reply 同時產生 bounded bubbles 與卡片決定；"
+        "舊版 decide_place_cards 只作相容；"
         "不確定時使用 show_all。"
         if has_cards else
         "本回合沒有地點卡片，不要呼叫卡片決策工具。"
     )
-    return f"""{PUBLIC_AYUE_PERSONA}
+    prompt = f"""{PUBLIC_AYUE_PERSONA}
 
 你是公開阿月的 Synthesizer，負責把 current user message、bounded context 與 sub-agent observations 整合成簡短、自然、繁體中文回覆。
 
@@ -204,7 +217,20 @@ def _synthesizer_system_prompt(mode: str, has_cards: bool) -> str:
 - Calendar observation若有行程，要清楚告知活動與時間；Places card已顯示的店名、地址、距離不要重複列出。
 - match_opportunity_offer只是溫和提議，不代表搜尋已開始或已有 pending confirmation。
 - no_write_proposed/not_found_queries必須誠實說明找不到，不可假裝完成。
+- observation 若包含 product_info，只能使用其中所選 topic 的 facts 回答使用者當下真正問的問題。用自己的自然說法直接回答，不背誦 manifest、不列完整功能清單，也不要改回通用身份介紹；presentation_class 使用 product_info。
 {cards_policy}"""
+    prompt += """
+
+Web research grounding contract:
+- When an observation contains schema_version=web_research.v1, use its research_question and answer_target as the question authority.
+- status=answered is allowed only when coverage=direct_sufficient and a direct finding exists.
+- status=partial must retain its limitation; status=insufficient_evidence is a successful honest outcome, not permission to answer from adjacent_context.
+- execution_status=unavailable means the lookup could not be completed; do not claim that the public web has no evidence.
+- Keep source URLs attached to the claims they support. Never convert a news recap, statistic, profile, or other adjacent fact into a requested forum/community answer.
+"""
+    return prompt + "\n\n口吻參考（只學語氣，不把例句當成事實）：" + "；".join(
+        f"{question} → {reply}" for question, reply in PUBLIC_VOICE_FEW_SHOTS
+    )
 
 
 def _build_prompt(slice_payload: dict[str, Any], candidate_summaries: list[dict[str, str]]) -> str:
@@ -241,6 +267,21 @@ def _decide_cards_tool_schema() -> dict[str, Any]:
     }
 
 
+def _compose_public_reply_tool_schema() -> dict[str, Any]:
+    schema = _ComposePublicReplyArguments.model_json_schema()
+    schema.pop("title", None)
+    for prop in schema.get("properties", {}).values():
+        prop.pop("title", None)
+    return {
+        "type": "function",
+        "function": {
+            "name": "compose_public_reply",
+            "description": "以一到三個 bounded bubbles 產生公開回覆，並同回合決定地點卡片。",
+            "parameters": schema,
+        },
+    }
+
+
 def _parse_card_decision(result) -> dict[str, Any] | None:
     """Parse the decide_place_cards tool call into a typed decision dict."""
     if not result.tool_calls:
@@ -254,6 +295,26 @@ def _parse_card_decision(result) -> dict[str, Any] | None:
     except Exception:
         return None
     return {"mode": validated.mode, "indices": [int(i) for i in validated.indices]}
+
+
+def _parse_composed_reply(result) -> tuple[list[str], dict[str, Any] | None, str] | None:
+    if not result.tool_calls:
+        return None
+    tc = result.tool_calls[0]
+    if tc.get("name") != "compose_public_reply":
+        return None
+    try:
+        validated = _ComposePublicReplyArguments.model_validate(tc.get("arguments") or {})
+    except Exception:
+        return None
+    presentation = build_presentation(validated.messages, validated.presentation_class)
+    if presentation is None:
+        return None
+    card_decision = None if validated.card_mode == "none" else {
+        "mode": validated.card_mode,
+        "indices": [int(i) for i in validated.indices],
+    }
+    return presentation.messages, card_decision, validated.presentation_class
 
 
 def _observation_fallback(payload: dict[str, Any]) -> str:
@@ -355,6 +416,55 @@ def _observation_fallback(payload: dict[str, Any]) -> str:
     return PUBLIC_RETRY_REPLY
 
 
+def _product_info_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    for observation in payload.get("observations") or []:
+        if not isinstance(observation, dict):
+            continue
+        result = observation.get("result")
+        if not isinstance(result, dict):
+            continue
+        projection = result.get("product_info")
+        if isinstance(projection, dict) and isinstance(projection.get("facts"), dict):
+            return projection
+    return None
+
+
+def _web_research_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    for observation in payload.get("observations") or []:
+        if not isinstance(observation, dict):
+            continue
+        result = observation.get("result")
+        if isinstance(result, dict) and result.get("schema_version") == "web_research.v1":
+            return result
+    return None
+
+
+def _web_research_fallback(result: dict[str, Any]) -> str:
+    execution_status = str(result.get("execution_status") or "")
+    status = str(result.get("status") or "insufficient_evidence")
+    stop_reason = str(result.get("stop_reason") or "")
+    findings = [
+        str(item.get("claim") or "").strip()
+        for item in (result.get("findings") or [])
+        if isinstance(item, dict) and str(item.get("claim") or "").strip()
+    ]
+    sources = [item for item in (result.get("sources") or []) if isinstance(item, dict)]
+    limitations = [str(item).strip() for item in (result.get("limitations") or []) if str(item).strip()]
+    limitation = limitations[0] if limitations else "目前沒有足夠的直接公開證據。"
+    if execution_status == "unavailable":
+        return "我目前無法完成這次公開網路查詢，先不把相關背景資料當成答案。"
+    if execution_status == "degraded" and stop_reason == "model_failure" and sources:
+        return "我已找到一些相關公開來源，但最後整理步驟沒有完成；來源先保留下來，不把它誤說成完全沒查到。"
+    if status == "partial":
+        return f"我目前只找到部分直接相關的資料；{limitation}"
+    if status == "insufficient_evidence":
+        if findings:
+            summary = "；".join(findings[:2])
+            return f"我找到幾項可能相關資訊：{summary}。{limitation}"[:240]
+        return f"我查到的是相關背景，但還沒有找到能直接回答你原本問題的公開證據。{limitation}"
+    return "目前公開資料不足以安全整理成答案。"
+
+
 def _verified_observation_reply(payload: dict[str, Any]) -> str | None:
     """Return replies that must not be paraphrased by the Synthesizer.
 
@@ -424,15 +534,27 @@ def synthesize(
     metrics.input_payload = payload
     metrics.tools_raw = []
     metrics.tool_calls_raw = []
-    if is_capability_query(payload.get("message", "")):
-        metrics.reply_source = "capability"
-        return capability_answer(), None, metrics
     verified_reply = _verified_observation_reply(payload)
     if verified_reply:
         metrics.reply_source = "verified_observation"
+        metrics.presentation_messages = [verified_reply]
+        metrics.presentation_class = "transaction"
         return verified_reply, None, metrics
     candidate_summaries = _candidate_card_summaries(candidate_cards or [])
-    tools = [_decide_cards_tool_schema()] if candidate_summaries else []
+    product_info = _product_info_from_payload(payload)
+    web_research = _web_research_from_payload(payload)
+    if web_research is not None and (
+        web_research.get("status") == "insufficient_evidence"
+        or web_research.get("execution_status") == "unavailable"
+    ):
+        fallback = _web_research_fallback(web_research)
+        metrics.reply_source = "observation_fallback"
+        metrics.fallback_reason = "web_research_insufficient"
+        metrics.presentation_messages = [fallback]
+        metrics.presentation_class = "fallback"
+        return fallback, None, metrics
+    tools = ([_compose_public_reply_tool_schema(), _decide_cards_tool_schema()]
+             if candidate_summaries else [])
     metrics.tools_raw = tools
     try:
         prompt = _build_prompt(payload, candidate_summaries)
@@ -448,10 +570,17 @@ def synthesize(
         metrics.raw_content = str(result.content or "")
         metrics.tool_calls_raw = result.tool_calls or []
         metrics.used_llm = True
+        composed = _parse_composed_reply(result)
+        if composed is not None:
+            composed_messages, card_decision, presentation_class = composed
+            metrics.reply_source = "llm"
+            metrics.presentation_messages = composed_messages
+            metrics.presentation_class = presentation_class
+            return "\n\n".join(composed_messages), card_decision, metrics
         card_decision = _parse_card_decision(result)
         validation = validate_public_reply(
             str(result.content or ""),
-            preserve_details=(mode == "grounded_result"),
+            preserve_details=(mode == "grounded_result" or product_info is not None),
         )
         reply = validation.reply
         if reply is None:
@@ -461,15 +590,47 @@ def synthesize(
                 "internal_meta_reply": "internal_meta_reply",
             }.get(validation.reason or "", "internal_meta_reply")
         else:
-            metrics.reply_source = "llm"
-            return reply, card_decision, metrics
+            has_opportunity = any(
+                isinstance(item, dict)
+                and isinstance(item.get("result"), dict)
+                and item["result"].get("match_opportunity_offer")
+                for item in payload.get("observations") or []
+            )
+            presentation_class = "product_info" if product_info is not None else (
+                "social_opportunity" if has_opportunity else (
+                "transaction" if payload.get("observations") and len(reply) > 160 else "conversation"
+                )
+            )
+            presentation = build_presentation([reply], presentation_class)
+            if presentation is not None:
+                metrics.reply_source = "llm"
+                metrics.presentation_messages = presentation.messages
+                metrics.presentation_class = presentation.presentation_class
+                return "\n\n".join(presentation.messages), card_decision, metrics
+            metrics.fallback_reason = "empty_content"
     except Exception:
         metrics.fallback_reason = "provider_error"
         metrics.error_code = "synthesizer_provider_error"
-    # Deterministic fallback tied to the actual observations, not a canned line.
-    message = payload.get("message", "")
-    if any(word in message for word in ("配對", "媒合", "找對象", "找人", "交友")):
-        metrics.reply_source = "matching_truth"
-        return matching_truth_reply(), None, metrics
+    # Product facts normally go through the LLM.  Fixed prose is reserved for
+    # provider failure, where a truthful topic-specific answer is safer than a
+    # generic identity line.
+    if product_info is not None:
+        fallback_messages = product_info_answer(list(product_info.get("topics") or []))
+        presentation = build_presentation(fallback_messages, "product_info")
+        if presentation is not None:
+            metrics.reply_source = "observation_fallback"
+            metrics.presentation_messages = presentation.messages
+            metrics.presentation_class = "product_info"
+            return "\n\n".join(presentation.messages), None, metrics
+    if web_research is not None:
+        fallback = _web_research_fallback(web_research)
+        metrics.reply_source = "observation_fallback"
+        metrics.fallback_reason = "web_research_fallback"
+        metrics.presentation_messages = [fallback]
+        metrics.presentation_class = "fallback"
+        return fallback, None, metrics
     metrics.reply_source = "observation_fallback" if payload.get("observations") else "general_fallback"
-    return _observation_fallback(payload), None, metrics
+    fallback = _observation_fallback(payload)
+    metrics.presentation_messages = [fallback]
+    metrics.presentation_class = "fallback"
+    return fallback, None, metrics

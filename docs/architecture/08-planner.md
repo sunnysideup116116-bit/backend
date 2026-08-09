@@ -32,7 +32,7 @@ Planner 透過**單一 function calling** `decompose_tasks` 輸出，tool call �
 }
 ```
 
-- `agent` 只能是：`calendar | places | match | relationship | profile | synthesizer`。
+- `agent` 只能是：`calendar | places | web | match | relationship | profile | synthesizer`。
 - 每個 task 有 `id`、`agent`、`depends_on[]`、`task_brief`（給該 sub-agent 的簡短中文指示）。
 - `opportunity` 為選用：`signal`（`none`/`social_opening`）、`evidence_span`（原句連續子字串）、`confidence`（0.0–1.0）。
 
@@ -63,11 +63,11 @@ Planner 透過**單一 function calling** `decompose_tasks` 輸出，tool call �
 | `mentioned_contacts` | 本回合 server 驗證過的 @ 已接受聯絡人公開名稱 |
 | `pending_confirmations` | 該使用者目前有效的 pending confirmation 摘要 |
 
-Prompt 中列出六個 sub-agent 的用途描述（`_AGENT_DESCRIPTIONS`），並給 14 條拆解規則，重點包括：
+Prompt 中列出六個 domain sub-agent 加上 synthesizer 的用途描述（`_AGENT_DESCRIPTIONS`），並給拆解規則，重點包括：
 
 1. **平行原則**：可平行時 `depends_on=[]`；彼此不能互相依賴。
 2. **synthesizer 必為終端**：必須依賴所有需要彙整的 task。
-3. **agent 選擇**：行程→calendar；地點→places；配對→match；@ 對象/關係→relationship；偏好/近期情境或開始／重新開始 assessment→profile；不確定→只回 synthesizer。
+3. **agent 選擇**：行程→calendar；地點→places；最新／外部／新聞／文章／公開論壇或 URL→web；配對→match；@ 對象/關係→relationship；偏好/近期情境或開始／重新開始 assessment→profile；不確定→只回 synthesizer。Web 不負責地點卡片，且 task_brief 必須保留原始 proposition 與 evidence class。
 4. **新增行程**：單一 calendar task 即可，不必先查詢（task_brief 直接描述要新增的行程）。
 5. **修改/取消行程**：單一 calendar task 直接描述完整 mutation；由 Calendar Agent 產生 typed command，server preflight 唯一 resolve target。
 6. **Opportunity**：使用者表達想有人陪、想認識人或獨自參加不舒服時，在 `opportunity` 填 `social_opening` + 原句 `evidence_span` + `confidence ≥ 0.8`；單純旅行、寒暄或負面情緒一律 `none`。
@@ -93,6 +93,15 @@ Current contract corrections:
       - 例外（逾時等）           → (None, metrics)  → fail closed
   → 組 Plan（含 opportunity）→ 回傳
 ```
+
+### Web routing contract
+
+When the request asks for current/external information, news, articles,
+public forum or community discussion, or a supplied public URL, Planner emits
+one `web` task and a terminal synthesizer task. The `task_brief` must preserve
+the original proposition and evidence class (for example, forum discussion)
+and explicitly reject adjacent background facts as substitutes. Places is
+never a Web fallback.
 
 ## 5. Scheduler 如何使用 Plan
 

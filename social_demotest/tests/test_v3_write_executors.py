@@ -103,87 +103,39 @@ class V3WriteExecutorsTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(start.call_args.args[1], "big_five")
 
-    def test_calendar_create_batch_executes_all_with_indexed_keys(self):
+    def test_start_assessment_uses_confirmation_id_from_manager_payload(self):
         ctx = self._ctx()
-        turn = MagicMock()
-        created = []
-        def fake_create(user_id, args, *, agent_action_key=None):
-            created.append((args.get("title"), agent_action_key))
-            return {
-                "event_id": "e", "source_type": "personal", "title": args.get("title"),
-                "start_at": __import__("datetime").datetime(2026, 8, 20, 10, 0,
-                    tzinfo=__import__("datetime").timezone(__import__("datetime").timedelta(hours=8))),
-                "end_at": __import__("datetime").datetime(2026, 8, 20, 11, 0,
-                    tzinfo=__import__("datetime").timezone(__import__("datetime").timedelta(hours=8))),
-                "timezone": "Asia/Taipei", "revision": 1,
-            }
-        with patch("services.calendar_service.create_personal_event",
-                   side_effect=fake_create) as create:
+        with patch("services.ayue_agent.v3.write_executors.start_assessment_session",
+                   return_value={"status": "started", "reply": "第一題來囉"}) as start, \
+             patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.find_one_and_update",
+                   return_value=None) as claim, \
+             patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.update_one"):
             ok, reply, code = execute_write(
-                "calendar.create_my_event", {}, ctx, turn, "run1", 0,
-                confirmation_id="batch-c1",
-                payload={
-                    "batch": [
-                        {"tool": "calendar.create_my_event",
-                         "arguments": {"title": "牛排", "date": "2026-08-12", "start_time": "18:00", "end_time": "20:00"},
-                         "data": {}},
-                        {"tool": "calendar.create_my_event",
-                         "arguments": {"title": "看醫生", "date": "2026-08-09", "start_time": "08:30", "end_time": "12:05"},
-                         "data": {}},
-                    ],
-                },
+                "profile.start_assessment", {"kind": "basic"}, ctx, MagicMock(), "confirm-run", 0,
+                payload={"_confirmation_id": "assessment-confirmation-42"},
             )
-        self.assertTrue(ok)
-        self.assertIsNone(code)
-        self.assertEqual(create.call_count, 2)
-        self.assertEqual(created[0][1], "calendar-confirmation:batch-c1:0")
-        self.assertEqual(created[1][1], "calendar-confirmation:batch-c1:1")
-        self.assertIn("牛排", reply)
-        self.assertIn("看醫生", reply)
 
-    def test_calendar_mixed_batch_update_and_cancel(self):
-        ctx = self._ctx()
-        turn = MagicMock()
-        with patch("services.calendar_service.update_personal_event",
-                   return_value={
-                       "event_id": "e1", "source_type": "personal", "title": "看醫生",
-                       "start_at": __import__("datetime").datetime(2026, 8, 10, 0, 30,
-                           tzinfo=__import__("datetime").timezone.utc),
-                       "end_at": __import__("datetime").datetime(2026, 8, 10, 4, 5,
-                           tzinfo=__import__("datetime").timezone.utc),
-                       "timezone": "Asia/Taipei", "revision": 2,
-                   }) as update, \
-             patch("services.calendar_service.cancel_event",
-                   return_value={
-                       "event_id": "e2", "source_type": "personal", "title": "出國",
-                       "start_at": __import__("datetime").datetime(2026, 8, 20, 0, 0,
-                           tzinfo=__import__("datetime").timezone.utc),
-                       "end_at": __import__("datetime").datetime(2026, 8, 20, 1, 0,
-                           tzinfo=__import__("datetime").timezone.utc),
-                       "timezone": "Asia/Taipei", "revision": 3, "status": "cancelled",
-                   }) as cancel:
-            ok, reply, code = execute_write(
-                "calendar.update_my_event", {}, ctx, turn, "run1", 0,
-                confirmation_id="batch-mix",
-                payload={
-                    "batch": [
-                        {"tool": "calendar.update_my_event",
-                         "arguments": {"event_hint": "看醫生", "date": "2026-08-10"},
-                         "data": {"event_id": "e1", "event_revision": 1, "event_source_type": "personal"}},
-                        {"tool": "calendar.cancel_my_event",
-                         "arguments": {"event_hint": "出國"},
-                         "data": {"event_id": "e2", "event_revision": 2, "event_source_type": "personal"}},
-                    ],
-                },
-            )
         self.assertTrue(ok)
-        self.assertIsNone(code)
-        update.assert_called_once()
-        self.assertEqual(update.call_args.kwargs["agent_action_key"], "calendar-confirmation:batch-mix:0")
-        cancel.assert_called_once()
-        self.assertEqual(cancel.call_args.kwargs["agent_action_key"], "calendar-confirmation:batch-mix:1")
-        self.assertIn("看醫生", reply)
-        self.assertIn("出國", reply)
+        self.assertEqual(reply, "第一題來囉")
+        expected_key = "confirmation:assessment-confirmation-42:big_five"
+        self.assertEqual(claim.call_args.args[0]["idempotency_key"], expected_key)
+        self.assertEqual(start.call_args.kwargs["idempotency_key"], expected_key)
+
+    def test_calendar_legacy_tool_fails_closed_without_domain_write(self):
+        ctx = self._ctx()
+        with patch("services.calendar_service.create_personal_event") as create, \
+             patch("services.calendar_service.update_personal_event") as update, \
+             patch("services.calendar_service.cancel_event") as cancel:
+            ok, reply, code = execute_write(
+                "calendar.cancel_my_event", {"event_hint": "出國"}, ctx, MagicMock(), "run1", 0,
+                confirmation_id="legacy-c1",
+                payload={"batch": [{"tool": "calendar.cancel_my_event", "data": {}}]},
+            )
+        self.assertFalse(ok)
+        self.assertEqual(code, "calendar_legacy_tool_disabled")
+        create.assert_not_called()
+        update.assert_not_called()
+        cancel.assert_not_called()
 
     def test_unknown_write_tool_fails(self):
         ctx = self._ctx()
@@ -232,37 +184,6 @@ class V3WritePreflightTests(unittest.TestCase):
         )
         self.assertEqual(payload["data"]["proposal_revision"], 4)
         self.assertIn("小安", reply)
-
-    def test_calendar_create_preview(self):
-        ctx = self._ctx()
-        turn = MagicMock()
-        with patch("services.ayue_agent.v3.write_executors.calendar_access_enabled", return_value=True), \
-             patch("services.ayue_agent.v3.write_executors.normalize_form", return_value={
-                 "date": "2026-08-10", "start_time": "19:00", "end_time": "20:00", "title": "晚餐",
-             }), \
-             patch("services.ayue_agent.v3.write_executors._parse_local_interval",
-                   return_value=(MagicMock(), MagicMock(), None)), \
-             patch("services.ayue_agent.v3.write_executors.conflicts_for_viewer", return_value=[]):
-            payload, reply = prepare_write_confirmation(
-                "calendar.create_my_event",
-                {"title": "晚餐", "date": "2026-08-10", "start_time": "19:00", "end_time": "20:00"},
-                ctx, turn,
-            )
-        self.assertIsNotNone(payload)
-        self.assertIn("晚餐", reply)
-        self.assertIn("確認", reply)
-
-    def test_calendar_cancel_not_found_returns_error(self):
-        ctx = self._ctx()
-        turn = MagicMock()
-        with patch("services.ayue_agent.v3.write_executors.calendar_access_enabled", return_value=True), \
-             patch("services.ayue_agent.v3.write_executors.resolve_owned_event",
-                   return_value=(None, "not_found")):
-            payload, reply = prepare_write_confirmation(
-                "calendar.cancel_my_event", {"event_hint": "不存在的行程"}, ctx, turn,
-            )
-        self.assertIsNone(payload)
-        self.assertIn("找不到", reply)
 
     def test_assessment_unknown_kind_returns_error(self):
         ctx = self._ctx()
