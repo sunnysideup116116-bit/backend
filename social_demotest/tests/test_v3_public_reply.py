@@ -1,6 +1,6 @@
 import unittest
 
-from services.ayue_agent.v3.public_reply import validate_public_reply
+from services.ayue_agent.v3.public_reply import build_presentation, validate_public_reply
 
 
 class V3PublicReplyTests(unittest.TestCase):
@@ -65,6 +65,19 @@ class V3PublicReplyTests(unittest.TestCase):
         self.assertIsNotNone(result.reply)
         self.assertIn("grounded result", result.reply)
         self.assertGreater(len(result.reply), 160)
+
+    def test_grounded_recommendation_has_separate_bounded_envelope(self):
+        presentation = build_presentation(
+            ["先選 A；A 有目前可確認的營業資訊。", "B 可作替代，但公開資料尚未確認同一條件。"],
+            "grounded_recommendation",
+        )
+        self.assertIsNotNone(presentation)
+        self.assertEqual(presentation.presentation_class, "grounded_recommendation")
+        self.assertLessEqual(sum(len(item) for item in presentation.messages), 420)
+
+    def test_grounded_recommendation_rejects_overlong_total_envelope(self):
+        message = "候選資訊 " * 80
+        self.assertIsNone(build_presentation([message, message], "grounded_recommendation"))
 
 
 if __name__ == "__main__":

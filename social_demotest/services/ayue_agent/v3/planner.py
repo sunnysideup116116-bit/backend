@@ -143,6 +143,16 @@ _PLANNER_SYSTEM += """
 """
 
 
+_PLANNER_SYSTEM += """
+Places/Web collaboration contract:
+- Route Places only for nearby discovery, category, distance, address, map, or other typed place facts.
+- Route Places followed by Web when the user asks for current, dated, public, event, promotion, menu, opening, or other evidence that Places cannot provide.
+- For Places -> Web, emit t1=places, t2=web depends_on=[t1], and terminal t3=synthesizer depends_on=[t2]. The Web task brief must preserve the original unresolved criterion, date/location constraint, evidence class, and say it may research only candidates from t1.
+- Do not route every place request to Web. Do not use keyword or regex routing. Do not let Web invent new place candidates.
+- The Synthesizer may compare and curate only from verified observations; missing Web evidence is an explicit limitation, not permission to infer.
+"""
+
+
 def _planner_prompt(turn_ctx: PublicAgentTurnContext) -> str:
     """Build only the user/context message for the Planner."""
     payload = {

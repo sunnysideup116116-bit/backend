@@ -91,3 +91,11 @@ Synthesizer 另須覆蓋：capability/general chat 的 synthesizer-only path 不
 `test_v3_calendar_commands.py` covers the current typed Calendar mutation contract: authority-field rejection, missing-field clarification, unique/ambiguous/not-found preflight, personal/shared-date routing metadata, one confirmation, one-time resolution, sequential stop-on-failure, and stale cancellation batches.
 
 The regression suite also covers the `calendar.get_next_my_event` safe projection, pronoun follow-up via `target_reference="recent_event"`, soft match-opportunity observations (including explicit acceptance into normal confirmation), and stable match-search failure codes/stages for unavailable vector or matchmaker services.
+
+Places/Web regression coverage also includes dependency projection, ephemeral
+candidate-ref binding, wrong-place source rejection, query anchoring, partial
+evidence, Places-only versus Places->Web routing, and retrieval/display count
+separation. Presentation tests cover curated 2-3 card recommendations,
+broad browse, explicit five-card requests, partial A/C verification, text/card
+mismatch, simple short replies, and the bounded
+`grounded_recommendation` envelope.

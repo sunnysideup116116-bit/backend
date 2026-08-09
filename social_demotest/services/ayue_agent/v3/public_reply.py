@@ -37,7 +37,7 @@ class PublicReplyValidation:
 
 PresentationClass = Literal[
     "conversation", "social_opportunity", "product_info", "transaction",
-    "capability", "fallback", "onboarding",
+    "capability", "fallback", "onboarding", "grounded_recommendation",
 ]
 
 
@@ -58,6 +58,10 @@ class AyueReplyPresentation(BaseModel):
             "capability": (1, 1, 160),
             "fallback": (1, 1, 160),
             "onboarding": (3, 3, 240),
+            # A bounded editorial envelope for multi-candidate discovery.
+            # Keep this separate from transaction: length is not a domain
+            # state and must not change the presentation meaning.
+            "grounded_recommendation": (1, 2, 260),
         }
         low, high, max_chars = limits[self.presentation_class]
         if not low <= len(self.messages) <= high:
@@ -66,7 +70,10 @@ class AyueReplyPresentation(BaseModel):
         for message in self.messages:
             validation = validate_public_reply(
                 message,
-                preserve_details=self.presentation_class in {"product_info", "transaction", "onboarding"},
+                preserve_details=self.presentation_class in {
+                    "product_info", "transaction", "onboarding",
+                    "grounded_recommendation",
+                },
                 reject_internal_identifiers=True,
                 reject_structured_output=True,
             )
@@ -75,6 +82,11 @@ class AyueReplyPresentation(BaseModel):
             if validation.reply in normalized:
                 raise ValueError("duplicate presentation message")
             normalized.append(validation.reply)
+        if (
+            self.presentation_class == "grounded_recommendation"
+            and sum(len(message) for message in normalized) > 420
+        ):
+            raise ValueError("grounded recommendation envelope too long")
         self.messages = normalized
         return self
 

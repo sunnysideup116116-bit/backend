@@ -1035,6 +1035,15 @@ class V3SchedulerTests(unittest.TestCase):
     def test_card_decision_none_decision_returns_all(self):
         self.assertEqual(_apply_card_decision(self._cards(), None), self._cards())
 
+    def test_card_decision_missing_is_bounded_to_three_candidates(self):
+        cards = self._cards() + [{"name": "摨", "category": "park", "distance_label": "400 ?砍偕"}]
+        self.assertEqual(len(_apply_card_decision(cards, None)), 3)
+
+    def test_legacy_show_all_cannot_recreate_card_wall(self):
+        cards = self._cards() + [{"name": "extra", "category": "park", "distance_label": "400"}]
+        self.assertEqual(len(_apply_card_decision(cards, {"mode": "show_all", "indices": []})), 3)
+        self.assertEqual(len(_apply_card_decision(cards, {"mode": "show_all", "card_intent": "browse"})), 4)
+
     def test_card_decision_no_candidates_returns_empty(self):
         self.assertEqual(_apply_card_decision([], {"mode": "show_all"}), [])
 
@@ -1094,6 +1103,15 @@ class V3SchedulerTests(unittest.TestCase):
         cards = _public_place_cards(results)
         self.assertEqual(len(cards), 3)
         self.assertTrue(all(c["category"] == "restaurant" for c in cards))
+
+    def test_internal_place_candidates_have_ephemeral_refs_but_public_cards_do_not(self):
+        results = [self._place_result("restaurant", 1)]
+        internal = _public_place_cards(results, run_id="run-1", include_internal=True)
+        public = _public_place_cards(results)
+        self.assertRegex(internal[0]["candidate_ref"], r"^place_candidate_[0-9a-f]{16}$")
+        self.assertEqual(internal[0]["distance_m"], 100)
+        self.assertNotIn("candidate_ref", public[0])
+        self.assertNotIn("distance_m", public[0])
 
 
 class V3SchedulerWriteTests(unittest.TestCase):

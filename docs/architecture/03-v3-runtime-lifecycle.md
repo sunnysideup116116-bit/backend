@@ -184,3 +184,18 @@ extract step over two URLs. Evidence is graded against the original answer
 target; adjacent-only or conflicting evidence cannot become an answered
 claim. Missing credentials, model failure, and no direct evidence have
 separate typed outcomes.
+
+### Places -> Web candidate collaboration
+
+For current/public criteria that typed Places data cannot answer, the Planner
+may emit `places -> web -> synthesizer`. Scheduler projects at most five
+validated Places candidates into the Web slice with ephemeral
+`place_candidate_*` refs. Web search, extraction, findings, and final card
+selection retain the same ref; provider IDs and map internals never enter the
+Web prompt or public response. Synthesizer receives all non-skipped domain
+observations even when the terminal dependency is only the Web task.
+
+Retrieval count and display count are separate. Up to eight Places candidates
+may be retrieved, while a normal grounded recommendation selects two or three
+cards (maximum four unless the user explicitly requests more). Missing Web
+evidence preserves an explicit limitation and does not hide all Places cards.

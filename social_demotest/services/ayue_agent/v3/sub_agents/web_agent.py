@@ -24,6 +24,7 @@ from ..web_research import (
     WebEvidenceAssessmentV1,
     WebResearchFindingDraft,
     WebSourceType,
+    PLACE_CANDIDATE_REF_PATTERN,
     project_web_observations,
 )
 from .base import SubAgentMetrics
@@ -33,6 +34,8 @@ class WebSearchDecisionArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     queries: list[str] = Field(min_length=1, max_length=MAX_WEB_INITIAL_SEARCH_QUERIES)
+    subject_refs: list[str] = Field(default_factory=list, max_length=MAX_WEB_INITIAL_SEARCH_QUERIES)
+    research_focus: str = Field(default="", max_length=180)
     recency: Literal["none", "day", "week", "month", "year"] = "none"
     use_saved_location: bool = False
 
@@ -51,6 +54,7 @@ class WebExtractDecisionArguments(BaseModel):
 
     urls: list[str] = Field(min_length=1, max_length=MAX_WEB_EXTRACT_URLS)
     extract_query: str = Field(default="", max_length=300)
+    subject_ref: str | None = Field(default=None, pattern=PLACE_CANDIDATE_REF_PATTERN)
 
 
 class WebRefinedSearchDecisionArguments(WebSearchDecisionArguments):
@@ -62,10 +66,13 @@ class WebResearchDecision(BaseModel):
 
     action: Literal["search", "extract", "finish"]
     queries: list[str] = Field(default_factory=list, max_length=MAX_WEB_INITIAL_SEARCH_QUERIES)
+    subject_refs: list[str] = Field(default_factory=list, max_length=MAX_WEB_INITIAL_SEARCH_QUERIES)
+    research_focus: str = Field(default="", max_length=180)
     recency: Literal["none", "day", "week", "month", "year"] = "none"
     use_saved_location: bool = False
     urls: list[str] = Field(default_factory=list, max_length=MAX_WEB_EXTRACT_URLS)
     extract_query: str = Field(default="", max_length=300)
+    subject_ref: str | None = Field(default=None, pattern=PLACE_CANDIDATE_REF_PATTERN)
     assessment: WebEvidenceAssessmentV1 | None = None
     status: Literal["answered", "partial", "insufficient_evidence"] | None = None
     findings: list[WebResearchFindingDraft] = Field(default_factory=list, max_length=5)
@@ -86,6 +93,7 @@ class WebResearchFinishFindingArguments(BaseModel):
     finding: str = Field(min_length=1, max_length=500)
     evidence: str = Field(default="", max_length=500)
     direct: bool = False
+    subject_ref: str | None = Field(default=None, pattern=PLACE_CANDIDATE_REF_PATTERN)
     source_urls: list[str] = Field(default_factory=list, max_length=3)
     source_types: list[WebSourceType] = Field(default_factory=list, max_length=3)
 
@@ -234,6 +242,7 @@ def _normalize_finish_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
                 "finding": finding,
                 "evidence": str(raw_item.get("evidence") or "").strip()[:500],
                 "direct": _coerce_closed_bool(raw_item.get("direct", False)),
+                "subject_ref": raw_item.get("subject_ref"),
                 "source_urls": urls(raw_item.get("source_urls")),
                 "source_types": source_types(raw_item.get("source_types")),
             })
@@ -272,10 +281,26 @@ def decide(
     tool_calls_used: int,
     search_calls_used: int,
     extract_calls_used: int,
+    place_candidates: list[dict[str, Any]] | None = None,
 ) -> tuple[WebResearchDecision | None, SubAgentMetrics]:
     """Ask the model for one typed research decision after current observations."""
     metrics = SubAgentMetrics()
     projected = project_web_observations(observations)
+    safe_candidates = [
+        {
+            "candidate_ref": str(item.get("candidate_ref") or "")[:80],
+            "name": str(item.get("name") or "")[:80],
+            "category": str(item.get("category") or "")[:20],
+            "address_summary": str(item.get("address_summary") or "")[:160],
+            "distance_m": item.get("distance_m"),
+        }
+        for item in (place_candidates or [])[:5]
+        if isinstance(item, dict)
+    ]
+    place_refs = {
+        item["candidate_ref"] for item in safe_candidates
+        if item.get("candidate_ref")
+    }
     payload = {
         "research_question": context_slice.payload.get("message", ""),
         "answer_target": task_brief,
@@ -294,8 +319,11 @@ def decide(
         },
         "observations": projected,
     }
+    if safe_candidates:
+        payload["place_candidates"] = safe_candidates
     prompt = (
         "請只呼叫本輪允許的一個 function；不要輸出其他文字。\n"
+        + "When place_candidates are present, research only those candidate refs. Every search query must carry one subject_ref; never invent a new place. Preserve the unresolved criterion, date, and location.\\n"
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
     tools = _decision_tools(round_index)
@@ -328,9 +356,22 @@ def decide(
                     else WebRefinedSearchDecisionArguments
                 )
                 parsed = search_contract.model_validate(arguments)
+                if place_refs:
+                    if len(parsed.subject_refs) != len(parsed.queries) or not set(parsed.subject_refs).issubset(place_refs):
+                        metrics.error = "web_place_subject_binding_invalid"
+                        return None, metrics
+                elif parsed.subject_refs:
+                    metrics.error = "web_place_subject_binding_unexpected"
+                    return None, metrics
                 return WebResearchDecision(action="search", **parsed.model_dump()), metrics
             if call.get("name") == "web_extract_decision":
                 parsed = WebExtractDecisionArguments.model_validate(arguments)
+                if place_refs and parsed.subject_ref not in place_refs:
+                    metrics.error = "web_place_extract_subject_invalid"
+                    return None, metrics
+                if not place_refs and parsed.subject_ref is not None:
+                    metrics.error = "web_place_extract_subject_unexpected"
+                    return None, metrics
                 return WebResearchDecision(action="extract", **parsed.model_dump()), metrics
             if call.get("name") == "web_finish_decision":
                 arguments = _normalize_finish_arguments(arguments)
@@ -366,6 +407,7 @@ def decide(
                         ),
                         source_urls=item.source_urls or shared_urls,
                         source_types=item.source_types or shared_types,
+                        subject_ref=item.subject_ref,
                     ) for item in parsed.findings],
                     limitations=parsed.limitations,
                 ), metrics

@@ -709,3 +709,36 @@ Saved Public Ayue assistant messages include the opaque 32-hex `agent_run_id`
 in message metadata. This identifier contains no prompt, arguments, evidence,
 or domain authority, and lets localhost diagnostics correlate a visible reply
 with its exact ephemeral run while that run remains available.
+
+## Places and Web collaboration hardening
+
+Places remains the owner of nearby discovery and structured map cards. When a
+request contains a current or public criterion that Places cannot answer, the
+Planner may create `places -> web -> synthesizer`. The Web task receives at
+most five privacy-safe candidate summaries and server-owned current-turn
+`place_candidate_*` references. Web findings, source URLs, and Synthesizer
+card selection must retain that subject binding; name matching is forbidden.
+
+The Synthesizer keeps retrieval and presentation separate. Places may retrieve
+up to eight candidates, while a grounded recommendation normally selects two
+or three cards and never more than four unless the user explicitly requests a
+larger set. `grounded_recommendation` is a separate bounded presentation class
+(one or two bubbles, 260 characters per bubble, 420 characters total) and is
+not a transaction state. Current UI receives plain prose; Markdown rendering
+and source links remain separate structured UI work.
+
+## External pattern audit (design validation only)
+
+The following primary patterns were reviewed as concepts, not adopted as
+runtime dependencies:
+
+| Pattern | Useful principle for Ayue | Do not copy | V3 decision |
+| --- | --- | --- | --- |
+| OpenClaw | Keep typed web/search/browser capabilities separate from workflow instructions (`SKILL.md`). | Do not import its plugin/skill runtime or browser automation. | Keep `web.search`/`web.extract` in the Tool Registry; keep research policy in the Web Agent contract and Planner task brief. |
+| OpenAI Agents SDK | Model -> tool -> observation -> model is the correct sequential observation shape; tool output is returned before the next decision. | Do not migrate the harness or inherit an unbounded runner loop. | Existing Scheduler-owned bounded loop remains; observations are projected before the next Web decision. |
+| LangGraph Agentic RAG | Retrieve -> relevance grade -> query rewrite -> retrieve again -> generate directly addresses adjacent-result drift. | Do not add LangGraph or a general graph runtime. | Keep the lightweight typed evidence assessment, target-aligned query anchoring, and one bounded refinement round. |
+| Deep Research-style systems | Adapt/pivot only when evidence shows the current query is insufficient. | Do not build an open-ended research product, long-form report flow, or browser agent. | Keep Web at three decision rounds / three calls and finish with explicit partial or insufficient evidence. |
+
+These comparisons do not change Ayue's native V3 ownership model; they validate
+the Web capability/workflow split, observation loop, relevance check, query
+refinement, and explicit insufficient-evidence outcome.

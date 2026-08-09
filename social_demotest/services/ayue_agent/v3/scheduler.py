@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import re
 import threading
 import time
@@ -83,6 +84,7 @@ from .web_research import (
     MAX_WEB_SEARCH_CALLS,
     MAX_WEB_TOTAL_TOOL_CALLS,
     WebResearchResultV1,
+    anchor_place_search_query,
     anchor_web_search_query,
     build_research_result,
 )
@@ -399,7 +401,17 @@ def _public_sources(task_results: Any) -> list[dict[str, str]]:
     return sources
 
 
-def _public_place_cards(task_results: Any) -> list[dict[str, str]]:
+def _place_candidate_ref(run_id: str, unique_key: str) -> str:
+    digest = hashlib.sha256(f"{run_id}\0{unique_key}".encode("utf-8")).hexdigest()[:16]
+    return f"place_candidate_{digest}"
+
+
+def _public_place_cards(
+    task_results: Any,
+    *,
+    run_id: str | None = None,
+    include_internal: bool = False,
+) -> list[dict[str, Any]]:
     """Project verified places observations into bounded provider-neutral cards.
 
     V3-specific projection: collects cards from ALL places observations (no
@@ -409,7 +421,7 @@ def _public_place_cards(task_results: Any) -> list[dict[str, str]]:
     category fill the whole budget. Validation rules mirror the V2 projection
     (provider allowlist, place_id/map-url safety, category allowlist, dedup).
     """
-    cards_by_category: dict[str, list[dict[str, str]]] = {c: [] for c in _PLACE_CATEGORIES}
+    cards_by_category: dict[str, list[dict[str, Any]]] = {c: [] for c in _PLACE_CATEGORIES}
     seen: set[str] = set()
     for result in task_results:
         if isinstance(result, dict):
@@ -469,6 +481,12 @@ def _public_place_cards(task_results: Any) -> list[dict[str, str]]:
                 "attribution": attribution or ("Google Maps" if provider == "google" else "© OpenStreetMap contributors"),
                 "attribution_url": attribution_url,
             }
+            if include_internal:
+                card["candidate_ref"] = _place_candidate_ref(run_id or "preview", unique_key)
+                try:
+                    card["distance_m"] = max(0, int(item.get("distance_m")))
+                except (TypeError, ValueError):
+                    card["distance_m"] = None
             if provider == "google":
                 photo_url = str(item.get("photo_url") or "")
                 if photo_url:
@@ -486,7 +504,7 @@ def _public_place_cards(task_results: Any) -> list[dict[str, str]]:
             cards_by_category[category].append(card)
 
     # Round-robin across categories so a mixed request stays balanced.
-    balanced: list[dict[str, str]] = []
+    balanced: list[dict[str, Any]] = []
     active = [c for c in _PLACE_CATEGORIES if cards_by_category[c]]
     while active and len(balanced) < MAX_PLACE_CARDS:
         next_active: list[str] = []
@@ -501,25 +519,30 @@ def _public_place_cards(task_results: Any) -> list[dict[str, str]]:
 
 
 def _apply_card_decision(
-    candidate_cards: list[dict[str, str]], decision: dict[str, Any] | None,
-) -> list[dict[str, str]]:
+    candidate_cards: list[dict[str, Any]], decision: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
     """Apply the synthesizer's decide_place_cards decision to candidate cards.
 
-    - None / show_all / invalid → all candidates (fallback)
-    - select → indices filtered, deduped; empty result falls back to all
+    - show_all → all candidates; None / invalid → a bounded first-three fallback
+    - select → indices filtered, deduped; empty result uses the same fallback
     - none → no cards
     """
     if not candidate_cards:
         return []
     if decision is None:
-        return candidate_cards
+        return candidate_cards[:3]
     mode = decision.get("mode")
     if mode == "none":
         return []
+    if mode == "show_all":
+        # The legacy decision shape has no semantic browse intent. Keep its
+        # broad display bounded; only the active compose contract can opt into
+        # all retrieved cards explicitly with card_intent=browse.
+        return candidate_cards if decision.get("card_intent") == "browse" else candidate_cards[:3]
     if mode != "select":
-        return candidate_cards
+        return candidate_cards[:3]
     indices = decision.get("indices") or []
-    selected: list[dict[str, str]] = []
+    selected: list[dict[str, Any]] = []
     seen_ids: set[int] = set()
     for index in indices:
         try:
@@ -531,7 +554,7 @@ def _apply_card_decision(
         seen_ids.add(idx)
         selected.append(candidate_cards[idx])
     if not selected:
-        return candidate_cards
+        return candidate_cards[:3]
     return selected
 
 
@@ -775,6 +798,27 @@ def _run_web_research(
 ) -> tuple[list[SubTaskResult], SubAgentMetrics]:
     """Run the fixed three-round Web observation loop."""
     aggregate = SubAgentMetrics()
+    place_cards = _public_place_cards(
+        context_slice.payload.get("prior_observations") or [],
+        run_id=run_id,
+        include_internal=True,
+    )[:5]
+    place_candidates = [
+        {
+            "candidate_ref": item.get("candidate_ref"),
+            "name": item.get("name"),
+            "category": item.get("category"),
+            "address_summary": item.get("address_summary"),
+            "distance_m": item.get("distance_m"),
+        }
+        for item in place_cards
+    ]
+    candidate_by_ref = {
+        str(item.get("candidate_ref")): item
+        for item in place_candidates
+        if item.get("candidate_ref")
+    }
+    allowed_subject_refs = set(candidate_by_ref)
     if not web_enabled():
         aggregate.error = "web_not_configured"
         result = build_research_result(
@@ -784,6 +828,7 @@ def _run_web_research(
             observations=[],
             execution_status="unavailable",
             stop_reason="tool_unavailable",
+            allowed_subject_refs=allowed_subject_refs if place_candidates else None,
         )
         return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
 
@@ -804,6 +849,7 @@ def _run_web_research(
             tool_calls_used=tool_calls_used,
             search_calls_used=search_calls_used,
             extract_calls_used=extract_calls_used,
+            place_candidates=place_candidates,
         )
         aggregate.input_tokens += metrics.input_tokens
         aggregate.output_tokens += metrics.output_tokens
@@ -824,6 +870,7 @@ def _run_web_research(
                 observations=observations,
                 execution_status="degraded" if observations else "unavailable",
                 stop_reason=stop_reason,
+                allowed_subject_refs=allowed_subject_refs if place_candidates else None,
             )
             return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
         last_decision = decision
@@ -837,6 +884,7 @@ def _run_web_research(
                 observations=observations,
                 execution_status="degraded",
                 stop_reason=stop_reason,
+                allowed_subject_refs=allowed_subject_refs if place_candidates else None,
             )
             return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
 
@@ -851,6 +899,7 @@ def _run_web_research(
                     observations=observations,
                     execution_status="unavailable",
                     stop_reason=stop_reason,
+                    allowed_subject_refs=allowed_subject_refs if place_candidates else None,
                 )
             else:
                 stop_reason = "tool_failure" if failures and not observations else "evidence_sufficient"
@@ -861,6 +910,7 @@ def _run_web_research(
                     observations=observations,
                     execution_status="degraded" if failures else "completed",
                     stop_reason=stop_reason,
+                    allowed_subject_refs=allowed_subject_refs if place_candidates else None,
                 )
             return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
 
@@ -874,17 +924,32 @@ def _run_web_research(
                 observations=observations,
                 execution_status="unavailable",
                 stop_reason=stop_reason,
+                allowed_subject_refs=allowed_subject_refs if place_candidates else None,
             )
             return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
 
         proposals: list[ToolProposal] = []
+        proposal_subject_refs: dict[int, str | None] = {}
         if decision.action == "search":
             max_queries = MAX_WEB_INITIAL_SEARCH_QUERIES if round_index == 1 else MAX_WEB_REFINED_SEARCH_QUERIES
-            queries = [
-                anchor_web_search_query(task.task_brief, str(query))
-                for query in decision.queries
-                if str(query).strip()
-            ]
+            queries: list[str] = []
+            query_subject_refs: list[str | None] = []
+            for index, query in enumerate(decision.queries):
+                if not str(query).strip():
+                    continue
+                subject_ref = decision.subject_refs[index] if index < len(decision.subject_refs) else None
+                candidate = candidate_by_ref.get(subject_ref or "")
+                if candidate is not None:
+                    anchored = anchor_place_search_query(
+                        candidate_name=str(candidate.get("name") or ""),
+                        address_summary=str(candidate.get("address_summary") or ""),
+                        answer_target=task.task_brief,
+                        suggested_query=str(query),
+                    )
+                else:
+                    anchored = anchor_web_search_query(task.task_brief, str(query))
+                queries.append(anchored)
+                query_subject_refs.append(subject_ref)
             if not queries or len(queries) > max_queries:
                 failures.append("invalid_search_queries")
                 aggregate.error = "web_search_query_budget_invalid"
@@ -903,6 +968,8 @@ def _run_web_research(
                     "use_saved_location": decision.use_saved_location,
                 },
             ) for query in queries]
+            for proposal, subject_ref in zip(proposals, query_subject_refs):
+                proposal_subject_refs[id(proposal)] = subject_ref
         elif decision.action == "extract":
             urls = [str(url).strip() for url in decision.urls if str(url).strip()]
             if not urls or len(urls) > MAX_WEB_EXTRACT_URLS or extract_calls_used >= MAX_WEB_EXTRACT_CALLS:
@@ -915,6 +982,7 @@ def _run_web_research(
                 tool_name="web.extract",
                 arguments={"urls": urls, "query": decision.extract_query},
             )]
+            proposal_subject_refs[id(proposals[0])] = decision.subject_ref
         else:
             failures.append("unknown_web_action")
             aggregate.error = "web_action_invalid"
@@ -939,9 +1007,9 @@ def _run_web_research(
                     ): proposal
                     for index, proposal in enumerate(proposals)
                 }
-                executed_results = [future.result() for future in futures]
+                executed_results = [(future.result(), proposal) for future, proposal in futures.items()]
         else:
-            executed_results = [_execute_web_proposal(
+            executed_results = [(_execute_web_proposal(
                 task, proposals[0], turn_ctx,
                 web_call_index=tool_calls_used,
                 seen_keys=seen_keys,
@@ -951,9 +1019,9 @@ def _run_web_research(
                 run_id=run_id,
                 trace=trace,
                 debug_enabled=debug_enabled,
-            )]
+            ), proposals[0])]
 
-        for result_item, counted in executed_results:
+        for (result_item, counted), proposal in executed_results:
             if counted:
                 tool_calls_used += 1
                 if result_item.tool_name == "web.search":
@@ -961,7 +1029,11 @@ def _run_web_research(
                 elif result_item.tool_name == "web.extract":
                     extract_calls_used += 1
             if result_item.status is SubTaskStatus.OK and result_item.observation:
-                observations.append(_observation_dict(task.id, result_item))
+                observation = _observation_dict(task.id, result_item)
+                subject_ref = proposal_subject_refs.get(id(proposal))
+                if subject_ref:
+                    observation["subject_ref"] = subject_ref
+                observations.append(observation)
             elif result_item.error_code:
                 failures.append(str(result_item.error_code))
 
@@ -972,6 +1044,7 @@ def _run_web_research(
         observations=observations,
         execution_status="degraded" if failures else "completed",
         stop_reason="budget_exhausted" if tool_calls_used >= MAX_WEB_TOTAL_TOOL_CALLS else "model_failure",
+        allowed_subject_refs=allowed_subject_refs if place_candidates else None,
     )
     return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
 
@@ -2068,7 +2141,11 @@ def run_public_agent_turn_v3(
             if r.status is not SubTaskStatus.SKIPPED:
                 prior.append(_observation_dict(task_id, r))
     synth_slice = slice_for_agent("synthesizer", turn, prior_observations=prior)
-    candidate_cards = _public_place_cards([r for results in task_results.values() for r in results])
+    candidate_cards = _public_place_cards(
+        [r for results in task_results.values() for r in results],
+        run_id=run_id,
+        include_internal=True,
+    )
     _emit_progress(on_progress, "subagent_started", trace=trace, agent_run_id=run_id,
                     task_id="synth", agent="synthesizer")
     if debug_enabled:
@@ -2113,6 +2190,10 @@ def run_public_agent_turn_v3(
         )
 
     place_cards = _apply_card_decision(candidate_cards, card_decision)
+    place_cards = [
+        {key: value for key, value in card.items() if key not in {"candidate_ref", "distance_m"}}
+        for card in place_cards
+    ]
 
     run_total_ms = round((time.perf_counter() - run_total_started) * 1000)
 
