@@ -451,13 +451,6 @@ async def global_reflection_endpoint(req: GlobalReflectionRequest):
 
 # === Conversation-derived preference memory ===
 
-class MemoryObserveRequest(BaseModel):
-    user_id: str
-    text: str
-    surface: str = "global"
-    match_id: str | None = None
-    message_id: str | None = None
-
 class MemoryApplyRequest(BaseModel):
     user_id: str
     memories: list[dict] = []
@@ -560,69 +553,6 @@ async def apply_memory(req: MemoryApplyRequest):
     except Exception as exc:
         print(f"[MEMORY][9001 apply] graph_write_failed user={req.user_id} error={exc}")
         return {"memories": [], "status": "error", "error_code": type(exc).__name__}
-@app.post("/api/memory/observe")
-async def observe_memory(req: MemoryObserveRequest):
-    """Persist owner-scoped durable preferences; message_id makes retries idempotent."""
-    prompt = f"""
-請從使用者本人的第一人稱訊息中萃取可長期記憶的偏好或地雷。
-只輸出 JSON：
-{{"memories":[{{"key":"snake_case_key","label":"2-8字繁體中文標籤","stance":"like|dislike|require|avoid","category":"lifestyle|habit|personality|relationship|activity","confidence":0.0}}]}}
-規則：
-- 只保留 confidence >= 0.90 的明確、長期偏好。
-- 一般寒暄、單次行程、配對／邀請狀態、其他人資訊、帳號和敏感資訊不要記。
-- label 不要加「喜歡：」「討厭：」「近期情境：」等前綴。
-使用者訊息：{req.text}
-"""
-    try:
-        response = agent.client.chat.completions.create(model=agent.model, messages=[
-            {"role": "system", "content": "你是偏好記憶萃取器，只輸出 JSON，所有中文都使用繁體中文。"},
-            {"role": "user", "content": prompt}], temperature=0.0)
-        items = parse_json_object_from_text(response.choices[0].message.content or "").get("memories", [])
-    except Exception as exc:
-        print(f"[MEMORY][9001 observe] extraction_failed user={req.user_id} error={exc}")
-        return {"memories": []}
-
-    allowed_stances, clean, now = {"like", "dislike", "require", "avoid"}, [], time.time()
-    URI, AUTH, DATABASE = _neo4j_config()
-    try:
-        with GraphDatabase.driver(URI, auth=AUTH) as driver:
-            with driver.session(database=DATABASE) as session:
-                if req.message_id:
-                    observed = session.run("""
-                        MERGE (o:MemoryObservation {message_id:$message_id})
-                        ON CREATE SET o.owner_user_id=$user_id,o.created_at=$now
-                        RETURN o.created_at=$now AS created
-                    """, message_id=req.message_id, user_id=req.user_id, now=now).single()
-                    if not observed or not observed["created"]:
-                        return {"memories": [], "status": "duplicate"}
-                for item in items[:3]:
-                    key = str(item.get("key", "")).strip().lower().replace(" ", "_")
-                    label = re.sub(r"^(?:喜歡|討厭|不喜歡|偏好|近期情境)\s*[:：,，]?\s*", "", str(item.get("label", "")).strip())[:40]
-                    stance = item.get("stance")
-                    confidence = float(item.get("confidence", 0))
-                    if not key or not label or stance not in allowed_stances or confidence < 0.90:
-                        continue
-                    category = str(item.get("category", "lifestyle"))[:30]
-                    session.run("""
-                        MERGE (u:User {id:$user_id}) MERGE (t:Trait {key:$key})
-                        ON CREATE SET t.name=$label,t.category=$category
-                        ON MATCH SET t.category=coalesce(t.category,$category)
-                        MERGE (u)-[r:HAS_PREFERENCE]->(t)
-                        ON CREATE SET r.first_seen_at=$now,r.evidence_count=0
-                        SET r.stance=$stance,
-                            r.type=CASE WHEN $stance IN ['dislike','avoid'] THEN 'DISLIKES_TRAIT' ELSE 'LIKES_TRAIT' END,
-                            r.confidence=CASE WHEN coalesce(r.confidence,0)>$confidence THEN r.confidence ELSE $confidence END,
-                            r.evidence_count=coalesce(r.evidence_count,0)+1,r.last_seen_at=$now,
-                            r.active=true,r.source=$surface,r.display_label_zh_tw=$label
-                    """, user_id=req.user_id, key=key, label=label, category=category, stance=stance,
-                         confidence=confidence, now=now, surface=req.surface).consume()
-                    clean.append({"key": key, "label": label, "stance": stance, "category": category,
-                                  "confidence": confidence, "last_seen_at": now})
-        return {"memories": clean}
-    except Exception as exc:
-        print(f"[MEMORY][9001 observe] graph_write_failed user={req.user_id} error={exc}")
-        return {"memories": []}
-
 @app.get("/api/memory/{user_id}")
 async def list_memories(user_id: str, limit: int = 12):
     try:

@@ -3,8 +3,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from services.ayue_agent.v3 import planner, scheduler
-from services.ayue_agent.v3.contracts import AgentContextSlice, SubTask, SubTaskStatus, VALID_AGENTS
+from services.ayue_agent.v3 import guarded_execution, planner, scheduler, web_runtime
+from services.ayue_agent.v3.contracts import AgentContextSlice, SubTask, SubTaskResult, SubTaskStatus, ToolProposal, VALID_AGENTS
+from services.ayue_agent.v3.guarded_execution import GuardedReadExecutor
 from services.ayue_agent.v3.sub_agents import places_agent
 from services.ayue_agent.v3.sub_agents.base import SubAgentMetrics
 from services.ayue_agent.v3.sub_agents.web_agent import (
@@ -56,6 +57,31 @@ def _trace():
     return {"guard_results": [], "tool_results": [], "event_sequence": []}
 
 
+def _run_web(task, turn, context_slice, *, seen_keys=None, guard_lock=None,
+             on_progress=None, run_id="run", trace=None, debug_enabled=False):
+    services = GuardedReadExecutor(
+        task_id=task.id,
+        agent_name=task.agent,
+        turn_ctx=turn,
+        seen_keys=seen_keys if seen_keys is not None else set(),
+        guard_lock=guard_lock or threading.Lock(),
+        on_progress=on_progress,
+        run_id=run_id,
+        trace=trace or _trace(),
+        emit_progress=scheduler._emit_progress,
+        append_debug_event=scheduler.append_debug_event,
+        debug_enabled=debug_enabled,
+    )
+    structured, metrics = web_runtime.run(context_slice, task=task, services=services)
+    result = SubTaskResult(
+        task_id=task.id,
+        status=structured.status,
+        observation=structured.observation,
+        error_code=structured.error_code,
+    )
+    return [result], metrics
+
+
 class V3WebResearchTests(unittest.TestCase):
     def test_web_dependency_projection_keeps_bounded_activity_facts_only(self):
         projected = _project_dependency_observations([{
@@ -94,6 +120,86 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertNotIn("可輔以網路搜尋", places_agent._SYSTEM)
         self.assertIn("獨立 Web task", places_agent._SYSTEM)
         self.assertIn("web", planner._PLANNER_SYSTEM)
+
+    def test_guarded_web_adapter_executes_only_after_guard_and_executor_projection(self):
+        services = GuardedReadExecutor(
+            task_id="web-1",
+            agent_name="web",
+            turn_ctx=_turn(),
+            seen_keys=set(),
+            guard_lock=threading.Lock(),
+            on_progress=None,
+            run_id="run",
+            trace=_trace(),
+            emit_progress=scheduler._emit_progress,
+            append_debug_event=scheduler.append_debug_event,
+        )
+        proposal = ToolProposal(
+            tool_name="web.search",
+            arguments={"query": "public source", "recency": "none", "use_saved_location": False},
+        )
+        with patch.object(guarded_execution, "execute_tool", return_value=SimpleNamespace(
+            ok=True, data={"results": []}, error_code=None,
+        )) as execute_tool:
+            outcome = services.execute(
+                proposal,
+                allowed_tools=frozenset({"web.search", "web.extract"}),
+                step_count=0,
+                max_reads=3,
+                prior_observations=[],
+                call_index=0,
+            )
+        self.assertTrue(outcome.attempted)
+        self.assertEqual(outcome.result.status, SubTaskStatus.OK)
+        execute_tool.assert_called_once()
+        self.assertEqual(execute_tool.call_args.args[0].name, "web.search")
+        self.assertEqual(execute_tool.call_args.args[0].arguments["query"], "public source")
+
+    def test_guarded_web_adapter_keeps_extract_url_binding_before_execution(self):
+        services = GuardedReadExecutor(
+            task_id="web-1",
+            agent_name="web",
+            turn_ctx=_turn(),
+            seen_keys=set(),
+            guard_lock=threading.Lock(),
+            on_progress=None,
+            run_id="run",
+            trace=_trace(),
+            emit_progress=scheduler._emit_progress,
+            append_debug_event=scheduler.append_debug_event,
+        )
+        proposal = ToolProposal(
+            tool_name="web.extract",
+            arguments={"urls": ["https://not-observed.example/article"], "query": "details"},
+        )
+        with patch.object(guarded_execution, "execute_tool") as execute_tool:
+            outcome = services.execute(
+                proposal,
+                allowed_tools=frozenset({"web.search", "web.extract"}),
+                step_count=0,
+                max_reads=3,
+                prior_observations=[],
+                call_index=0,
+            )
+        self.assertFalse(outcome.attempted)
+        self.assertEqual(outcome.result.error_code, "web_extract_url_not_bound")
+        execute_tool.assert_not_called()
+
+    def test_scheduler_web_runner_is_domain_runtime_with_shared_services_contract(self):
+        self.assertIs(scheduler._SUB_AGENT_RUNNERS["web"], web_runtime.run)
+
+        received = {}
+
+        def runner(context_slice, *, task, services):
+            received["task"] = task
+            received["services"] = services
+            return ([], SubAgentMetrics())
+
+        task = SubTask(id="web-1", agent="web", depends_on=[], task_brief="research")
+        services = object()
+        scheduler._invoke_registered_runner(runner, _slice(), task, services)
+        self.assertIs(received["task"], task)
+        self.assertIs(received["services"], services)
 
     def test_invalid_optional_recency_falls_back_to_none(self):
         decision = WebResearchDecision(
@@ -454,13 +560,13 @@ class V3WebResearchTests(unittest.TestCase):
             executed_queries.append(tc.arguments["query"])
             return SimpleNamespace(ok=True, data=_search_result())
 
-        with patch.object(scheduler, "web_enabled", return_value=True), \
-             patch.object(scheduler.web_agent, "decide", side_effect=[
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", side_effect=[
                  (decisions[0], SubAgentMetrics(input_tokens=1)),
                  (decisions[1], SubAgentMetrics(input_tokens=1)),
              ]), \
-             patch.object(scheduler, "execute_tool", side_effect=fake_execute):
-            results, _metrics = scheduler._run_web_research(
+             patch.object(guarded_execution, "execute_tool", side_effect=fake_execute):
+            results, _metrics = _run_web(
                 SubTask(id="web1", agent="web", task_brief=target),
                 _turn(target), _slice(target), seen_keys=set(),
                 guard_lock=threading.Lock(), on_progress=None,
@@ -515,10 +621,10 @@ class V3WebResearchTests(unittest.TestCase):
             executed_queries.append(tc.arguments["query"])
             return SimpleNamespace(ok=True, data=_search_result())
 
-        with patch.object(scheduler, "web_enabled", return_value=True), \
-             patch.object(scheduler.web_agent, "decide", side_effect=fake_decide), \
-             patch.object(scheduler, "execute_tool", side_effect=fake_execute):
-            results, _metrics = scheduler._run_web_research(
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", side_effect=fake_decide), \
+             patch.object(guarded_execution, "execute_tool", side_effect=fake_execute):
+            results, _metrics = _run_web(
                 SubTask(id="web1", agent="web", task_brief=target),
                 _turn(target), slc, seen_keys=set(), guard_lock=threading.Lock(),
                 on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
@@ -564,14 +670,14 @@ class V3WebResearchTests(unittest.TestCase):
                 "content": "Direct public evidence.", "truncated": False,
             }]})
 
-        with patch.object(scheduler, "web_enabled", return_value=True), \
-             patch.object(scheduler.web_agent, "decide", side_effect=[
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", side_effect=[
                  (decisions[0], SubAgentMetrics(input_tokens=1)),
                  (decisions[1], SubAgentMetrics(input_tokens=1)),
                  (decisions[2], SubAgentMetrics(input_tokens=1)),
              ]), \
-             patch.object(scheduler, "execute_tool", side_effect=fake_execute):
-            results, metrics = scheduler._run_web_research(
+             patch.object(guarded_execution, "execute_tool", side_effect=fake_execute):
+            results, metrics = _run_web(
                 SubTask(id="web1", agent="web", task_brief="Find exact public evidence"),
                 _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
                 on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
@@ -597,15 +703,15 @@ class V3WebResearchTests(unittest.TestCase):
                 }],
             ),
         ]
-        with patch.object(scheduler, "web_enabled", return_value=True), \
-             patch.object(scheduler.web_agent, "decide", side_effect=[
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", side_effect=[
                  (decisions[0], SubAgentMetrics(input_tokens=1)),
                  (decisions[1], SubAgentMetrics(input_tokens=1)),
              ]), \
-             patch.object(scheduler, "execute_tool", return_value=SimpleNamespace(
+             patch.object(guarded_execution, "execute_tool", return_value=SimpleNamespace(
                  ok=True, data=_search_result(),
              )):
-            results, _metrics = scheduler._run_web_research(
+            results, _metrics = _run_web(
                 SubTask(id="web1", agent="web", task_brief="Find exact reactions"),
                 _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
                 on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
@@ -614,12 +720,12 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertEqual(results[0].observation["coverage"], "adjacent_only")
 
     def test_finish_before_observation_fails_closed(self):
-        with patch.object(scheduler, "web_enabled", return_value=True), \
-             patch.object(scheduler.web_agent, "decide", return_value=(
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", return_value=(
                  self._finish(), SubAgentMetrics(input_tokens=1),
              )), \
-             patch.object(scheduler, "execute_tool") as execute:
-            results, _metrics = scheduler._run_web_research(
+             patch.object(guarded_execution, "execute_tool") as execute:
+            results, _metrics = _run_web(
                 SubTask(id="web1", agent="web", task_brief="Find evidence"),
                 _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
                 on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
@@ -629,16 +735,16 @@ class V3WebResearchTests(unittest.TestCase):
 
     def test_parser_failure_after_successful_search_preserves_sources(self):
         decisions = [WebResearchDecision(action="search", queries=["direct query"]), None, None]
-        with patch.object(scheduler, "web_enabled", return_value=True), \
-             patch.object(scheduler.web_agent, "decide", side_effect=[
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", side_effect=[
                  (decisions[0], SubAgentMetrics(input_tokens=1)),
                  (None, SubAgentMetrics(input_tokens=1, error="web_decision_schema_invalid")),
                  (None, SubAgentMetrics(input_tokens=1, error="web_decision_schema_invalid")),
              ]), \
-             patch.object(scheduler, "execute_tool", return_value=SimpleNamespace(
+             patch.object(guarded_execution, "execute_tool", return_value=SimpleNamespace(
                  ok=True, data=_search_result(),
              )):
-            results, _metrics = scheduler._run_web_research(
+            results, _metrics = _run_web(
                 SubTask(id="web1", agent="web", task_brief="Find evidence"),
                 _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
                 on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
@@ -654,16 +760,16 @@ class V3WebResearchTests(unittest.TestCase):
             None,
             self._finish(),
         ]
-        with patch.object(scheduler, "web_enabled", return_value=True), \
-             patch.object(scheduler.web_agent, "decide", side_effect=[
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", side_effect=[
                  (decisions[0], SubAgentMetrics(input_tokens=1)),
                  (None, SubAgentMetrics(input_tokens=1, error="web_decision_provider_5xx")),
                  (decisions[2], SubAgentMetrics(input_tokens=1)),
              ]) as decide, \
-             patch.object(scheduler, "execute_tool", return_value=SimpleNamespace(
+             patch.object(guarded_execution, "execute_tool", return_value=SimpleNamespace(
                  ok=True, data=_search_result(),
              )) as execute:
-            results, _metrics = scheduler._run_web_research(
+            results, _metrics = _run_web(
                 SubTask(id="web1", agent="web", task_brief="Find evidence"),
                 _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
                 on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
@@ -673,9 +779,9 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertEqual(execute.call_count, 1)
 
     def test_web_unavailable_is_distinct_from_no_evidence(self):
-        with patch.object(scheduler, "web_enabled", return_value=False), \
-             patch.object(scheduler.web_agent, "decide") as decide:
-            results, _metrics = scheduler._run_web_research(
+        with patch.object(web_runtime, "web_enabled", return_value=False), \
+             patch.object(web_runtime.web_agent, "decide") as decide:
+            results, _metrics = _run_web(
                 SubTask(id="web1", agent="web", task_brief="Find evidence"),
                 _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
                 on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,

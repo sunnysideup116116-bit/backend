@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any
 
@@ -67,6 +68,165 @@ CAPABILITY_MANIFEST: dict[str, Any] = {
         "forbidden": ["物件", "配對物件", "候選物件"],
     },
 }
+
+
+# ProductInfo uses a small, server-owned knowledge base instead of treating the
+# manifest as a collection of ready-to-send FAQ answers.  Keep this index
+# deliberately small and typed: adding a section is a product-contract change,
+# not a model decision.  The values below are projections of facts already
+# enforced by the public runtime (matching confirmation, bounded surfaces and
+# assessment/calendar confirmation); unknown behaviour is intentionally absent.
+PRODUCT_KNOWLEDGE_VERSION = "product_info.v1"
+
+_PRODUCT_KNOWLEDGE_SECTIONS: dict[str, dict[str, Any]] = {
+    "capabilities.overview": {
+        "domain": "capabilities",
+        "facts": {
+            "capabilities": copy.deepcopy(CAPABILITY_MANIFEST["public_capabilities"]),
+        },
+    },
+    "identity.overview": {
+        "domain": "identity",
+        "facts": {
+            "role": CAPABILITY_MANIFEST["identity"]["role"],
+            "product_relation": CAPABILITY_MANIFEST["identity"]["product_relation"],
+            "same_ayue_across_surfaces": True,
+        },
+    },
+    "surfaces.public": {
+        "domain": "surfaces",
+        "facts": copy.deepcopy(CAPABILITY_MANIFEST["surfaces"]["public"]),
+    },
+    "surfaces.private": {
+        "domain": "surfaces",
+        "facts": copy.deepcopy(CAPABILITY_MANIFEST["surfaces"]["private"]),
+    },
+    "surfaces.context_boundary": {
+        "domain": "privacy",
+        "facts": copy.deepcopy(CAPABILITY_MANIFEST["surfaces"]["context_boundary"]),
+    },
+    "matching.overview": {
+        "domain": "matching",
+        "facts": {
+            "selection": CAPABILITY_MANIFEST["matching"]["selection"],
+            "may_return_no_suitable_candidate": CAPABILITY_MANIFEST["matching"]["may_return_no_suitable_candidate"],
+        },
+    },
+    "matching.selection": {
+        "domain": "matching",
+        "facts": {
+            "selection": CAPABILITY_MANIFEST["matching"]["selection"],
+            "signals": copy.deepcopy(CAPABILITY_MANIFEST["matching"]["signals"]),
+        },
+    },
+    "matching.profile_usage": {
+        "domain": "matching",
+        "facts": {
+            "uses_existing_profile_when_no_new_preferences": CAPABILITY_MANIFEST["matching"]["uses_existing_profile_when_no_new_preferences"],
+            "profile_is_a_matching_signal": True,
+        },
+    },
+    "matching.confirmation": {
+        "domain": "matching",
+        "facts": {
+            "requires_confirmation": CAPABILITY_MANIFEST["matching"]["requires_confirmation"],
+            "search_does_not_start_before_confirmation": True,
+        },
+    },
+    "matching.search_flow": {
+        "domain": "matching",
+        "facts": {
+            "requires_confirmation": CAPABILITY_MANIFEST["matching"]["requires_confirmation"],
+            "may_return_no_suitable_candidate": CAPABILITY_MANIFEST["matching"]["may_return_no_suitable_candidate"],
+        },
+    },
+    "matching.limitations": {
+        "domain": "matching",
+        "facts": {
+            "may_return_no_suitable_candidate": CAPABILITY_MANIFEST["matching"]["may_return_no_suitable_candidate"],
+            "not_random": CAPABILITY_MANIFEST["matching"]["selection"] == "ranked_not_random",
+        },
+    },
+    "calendar.confirmation": {
+        "domain": "calendar",
+        "facts": {
+            "writes_require_confirmation": True,
+            "confirmation_is_preview_bound": True,
+        },
+    },
+    "assessment.overview": {
+        "domain": "assessment",
+        "facts": {
+            "available_kinds": ["basic", "deep"],
+            "starts_only_after_confirmation": True,
+        },
+    },
+    "assessment.lifecycle": {
+        "domain": "assessment",
+        "facts": {
+            "supports_cancel": True,
+            "supports_commit": True,
+            "starts_only_after_confirmation": True,
+        },
+    },
+    "privacy.relationship": {
+        "domain": "privacy",
+        "facts": {
+            "public_pair_chat_history": CAPABILITY_MANIFEST["surfaces"]["context_boundary"]["public_pair_chat_history"],
+            "private_current_pair_chat_history": CAPABILITY_MANIFEST["surfaces"]["context_boundary"]["private_current_pair_chat_history"],
+            "private_messages_update_public_profile": CAPABILITY_MANIFEST["surfaces"]["context_boundary"]["private_messages_update_public_profile"],
+        },
+    },
+}
+
+
+def product_knowledge_catalog() -> list[dict[str, str]]:
+    """Return a compact, safe catalog for ProductInfo's internal selector."""
+    return [
+        {
+            "section_id": section_id,
+            "domain": str(section.get("domain") or ""),
+        }
+        for section_id, section in _PRODUCT_KNOWLEDGE_SECTIONS.items()
+    ]
+
+
+def get_product_knowledge(
+    sections: list[str] | tuple[str, ...] | None = None,
+    *,
+    max_sections: int = 6,
+) -> dict[str, Any]:
+    """Retrieve only allowlisted product facts for a ProductInfo sub-agent.
+
+    This is a pure read projection.  Invalid section IDs are reported rather
+    than guessed, so the Synthesizer can explain an ``insufficient`` result.
+    """
+    requested = list(dict.fromkeys(str(item).strip() for item in (sections or []) if str(item).strip()))
+    requested = requested[: max(0, min(int(max_sections), 8))]
+    unknown = [section_id for section_id in requested if section_id not in _PRODUCT_KNOWLEDGE_SECTIONS]
+    found: list[dict[str, Any]] = []
+    for section_id in requested:
+        section = _PRODUCT_KNOWLEDGE_SECTIONS.get(section_id)
+        if section is None:
+            continue
+        found.append({
+            "section_id": section_id,
+            "domain": section["domain"],
+            "facts": copy.deepcopy(section["facts"]),
+        })
+    if not requested:
+        coverage = "insufficient"
+    elif unknown or not found:
+        coverage = "insufficient"
+    else:
+        coverage = "sufficient"
+    return {
+        "schema_version": PRODUCT_KNOWLEDGE_VERSION,
+        "requested_sections": requested,
+        "knowledge_sections": found,
+        "unknown_sections": unknown,
+        "coverage": coverage,
+    }
 
 
 def public_manifest() -> dict[str, Any]:

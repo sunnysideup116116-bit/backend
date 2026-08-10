@@ -107,7 +107,7 @@ Saved owner message
 - `profile_memory_outbox` 只保存已驗證的 typed proposals 與 error code，不保存 raw chat。
 - 使用者在設定中 disable／restore／correct 後，必須同步更新 Mongo projection。
 
-目前仍有 `/api/memory/observe` 與 direct fallback 等相容路徑。後續重構目標應是讓 `profile_skills.py → /api/memory/apply` 成為唯一 extraction/write flow；不要再新增另一個自由文字 extractor。
+舊版 `/api/memory/observe`、主服務直接 Neo4j fallback 與自由文字 extractor 已移除；`profile_skills.py → /api/memory/apply` 是唯一 owner-memory extraction/write flow。不要再新增另一個自由文字 extractor。
 
 ### 2.3 雙人關係語意
 
@@ -133,9 +133,9 @@ Context Builder 只組合安全 projection，不負責重新萃取、修正或�
 
 ### 2.5 已知技術債（不要沿用成新架構）
 
-- Port 8000 `memory_service.py` 與 port 9001 memory endpoint 目前有重複 Cypher／fallback writer；應逐步收斂成一個 canonical Graph repository，而不是再增加第三條寫入路徑。
-- `/api/memory/observe` 仍可自行呼叫 LLM extraction；新版 owner-message pipeline 已由 `profile_skills.py` 負責。新功能只接 `/api/memory/apply` 的 validated proposals。
-- `memory_service._agent_graph_config()` 直接讀取 matchmaker `.env` 是部署耦合；未來改由 service configuration 或 port 9001 API 邊界提供，不能讓更多主服務模組直接讀另一服務的 secret file。
+- Port 8000 `memory_service.py` 不再直接連 Neo4j；owner-memory 寫入、讀取與 action 都經由 port 9001 的 canonical API。
+- 舊版 `/api/memory/observe` 與 `memory_service.py` 的 direct fallback 已刪除；新版 owner-message pipeline 只接受 `profile_skills.py` 產生的 validated proposals，再交給 `/api/memory/apply`。
+- port 9001 memory API unavailable 時只回 bounded error／retry outbox，不得改抓主服務的 Graph credentials 或重新啟動另一條 writer。
 - `/api/clear_graph` 是 destructive demo endpoint。正式環境必須停用或加上管理者授權與明確環境 guard；任何測試或 migration 不得呼叫它清正式 Graph。
 - `/api/chat_triples` 目前可把 bounded evidence message content 寫入 Neo4j。正式化 relationship graph 前，應改成 message reference／hash 與受控 evidence projection，並提供舊資料 migration。
 - `semantic_plan_service.py` 同時負責 metrics、LLM summary、Graph I/O 與 check-in effect，責任偏重。若重構，先以 contract/repository 分層，保持現有呼叫端相容。

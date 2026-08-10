@@ -73,13 +73,16 @@ Domain sub-agent、schema、Guard、preflight、executor、profile/memory extrac
 | `social_demotest/routers/relationship_quiz.py` | 已接受配對的默契小測驗 HTTP adapters |
 | `social_demotest/routers/public_chat.py` | Public `/api/direct_chat*` adapters；V3 orchestration |
 | `social_demotest/services/ayue_agent/v3/scheduler.py` | 公開 V3 唯一 orchestrator：confirmation 入口、DAG 執行、平行、trace |
+| `social_demotest/services/ayue_agent/v3/web_runtime.py` | Web domain bounded research loop：round、observation、tool budgets、finish 與 `web_research.v1` |
+| `social_demotest/services/ayue_agent/v3/guarded_execution.py` | Web Runtime 使用的最小 Guard／URL binding／executor argument／`execute_tool` adapter |
+| `social_demotest/services/ayue_agent/v3/place_projection.py` | Places observation 的 bounded public projection 與 Web candidate binding 共用 helper |
 | `services/ayue_agent/v3/planner.py` | 輕量 LLM：只拆靜態子任務 DAG（`decompose_tasks` function calling） |
 | `services/ayue_agent/v3/guard.py` | 中央 Guard：純程式碼驗證 schema、重複、步數、寫入 confirmation |
 | `services/ayue_agent/v3/context_slicer.py` | 依 sub-agent 角色切 privacy-safe context slice |
 | `services/ayue_agent/v3/confirmation.py` | 每位使用者單一、preview-bound confirmation 的 CAS 管理（`v3_pending_confirmations`） |
 | `services/ayue_agent/v3/write_executors.py` | 已確認寫入的唯一執行路徑（domain service + idempotency） |
 | `services/ayue_agent/v3/synthesizer.py` | 綜合所有 observation 產出最終回覆；地點卡以 typed tool 決定 |
-| `services/ayue_agent/v3/sub_agents/` | calendar / places / web / match / relationship / profile 六個 sub-agent |
+| `services/ayue_agent/v3/sub_agents/` | calendar / places / web / match / relationship / profile / product_info 七個 sub-agent |
 | `services/ayue_agent/context.py` | 每回合 privacy-safe context（`build_public_agent_turn_context`） |
 | `services/ayue_agent/contracts.py` | Provider-neutral contracts（`PublicAgentTurnContext`、`AgentResult` 等） |
 | `services/ayue_agent/router.py` | 僅保留 V3 共用的封閉協議與回覆清理（`confirmation_choice`、`_concise_public_reply`） |
@@ -108,6 +111,11 @@ Domain sub-agent、schema、Guard、preflight、executor、profile/memory extrac
 | `services/memory_service.py` | Owner-scoped durable memory domain facade、outbox 與 Mongo read projection |
 | `services/semantic_plan_service.py` | Accepted pair room 的 shared semantic plan；不是 Public owner memory |
 | `matchmaker_agent/` | Port 9001 候選排序、Neo4j 記憶與 feedback service |
+
+Owner durable memory 只走 `profile_skills.py` 的 typed extraction 與 port 9001
+`/api/memory/apply`；舊版 `/api/memory/observe`、主服務直接 Neo4j fallback
+與自由文字 observer 已移除。Graph unavailable 時維持 bounded error／retry，不能
+在 port 8000 重新建立第二條 writer。
 | `social_demotest/tests/` | Offline deterministic contract、trajectory、state、privacy tests |
 
 ## 3. Public chat request lifecycle
@@ -247,7 +255,7 @@ tasks: [{id, agent, depends_on[], task_brief}]
 opportunity: {signal: none|social_opening, evidence_span, confidence} | null
 ```
 
-- `agent` 只能是 `calendar | places | web | match | relationship | profile | synthesizer`。
+- `agent` 只能是 `calendar | places | web | match | relationship | profile | product_info | synthesizer`。
 - 一個 plan 最多三個 domain tasks 加一個 synthesizer；簡單聊天只能產生 synthesizer。
 - 一定且只能有一個 synthesizer task 當終端，且必須依賴所有 terminal domain tasks；plan 不得有未知依賴、自我依賴或 cycle。
 - 使用者表達想有人陪、想認識人或獨自參加不舒服時，Planner 在 `opportunity` 標記 `social_opening`（需 confidence ≥ 0.8 且 evidence_span 為原句連續子字串）。
@@ -267,7 +275,7 @@ Guard 不審核語意、不猜意圖、不檢查參數「內容」的正確性�
 
 ### Sub-agents（LLM + function calling）
 
-calendar / places / web / match / relationship / profile 六個 sub-agent，各自以 function calling 提出 tool proposals。Web 是獨立的 bounded research specialist；Places 只負責地點工具。一次 LLM 呼叫可產出多個 tool call，Scheduler 逐一 guard 並執行；單一 call 失敗不丟棄其他 call。
+calendar / places / web / match / relationship / profile 七個 domain sub-agent，各自以 function calling 提出 tool proposals。ProductInfo 是額外的 structured read-only specialist：它透過同一 runner registry 回傳 typed observation，不提出副作用 tool proposal。Web 是獨立的 bounded research specialist；Places 只負責地點工具。一般 proposal runner 由 Scheduler 逐一 guard 並執行；Web Runtime 則透過 `GuardedReadExecutor` 執行 Web proposals。單一 call 失敗不丟棄其他 call。
 
 ### Scheduler（純程式碼）
 
@@ -289,7 +297,7 @@ calendar / places / web / match / relationship / profile 六個 sub-agent，各�
 - **MENTIONED 工具需有 @ 對象**：無 @ 時該 call 標記 `FAILED/mentioned_required`，不執行、不崩潰 run。
 - **sub-task 例外不連坐**：任何未捕獲例外轉成 `FAILED`，run 永不因單一 sub-task 崩潰成整段 error。
 - **reuse within task**：只有 prior observation 已驗證同一個 query 所需的相同 fact/arguments 時，才重用完全相同或冗餘 read；不同 target、日期、欄位或問題仍需重新查詢。
-- **web.extract URL binding**：只能抽取本回合 web.search 結果或 owner 原句提供的公開 URL。
+- **web.extract URL binding**：Web Runtime 的 guarded adapter 只能抽取本回合 web.search 結果或 owner 原句提供的公開 URL。
 
 ## 6. Confirmation 與寫入執行
 
@@ -454,7 +462,7 @@ Google Routes 距離能力只依賴 `AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED` 與 se
 - `docs/architecture/01-project-overview.md`：服務與 runtime 邊界。
 - `docs/architecture/03-v3-runtime-lifecycle.md`：單回合的實際執行生命週期。
 - `docs/architecture/04-tool-registry.md`：22 個現行工具與 confirmation 契約。
-- `docs/architecture/subagent-*.md`：六個 domain sub-agent 的個別責任。
+- `docs/architecture/subagent-*.md`：各 domain sub-agent 的個別責任（含 ProductInfo structured retrieval）。
 - `MEMORY_CONTEXT_ENGINE_GUIDE.md`：durable memory、Graph 與 Context Engine 邊界。
 
 ## Current runtime baseline
@@ -601,23 +609,22 @@ messages are not automatically queued into the Public profile/memory pipeline;
 confirmed domain effects (for example date coordination) continue through their
 existing confirmation services.
 
-Planner `Plan.mode` also has `product_info`. It carries up to three typed
-`product_info_topics` (`same_identity`, `surface_scope`,
-`cross_surface_context`, `private_message_visibility`, `where_to_ask`,
-`matching_principles`, `relationship_chat_access`, or `capabilities`) and never
-creates a domain task. The versioned capability manifest v5 explicitly records
-that Public cannot read a pair chat while Private can read bounded recent history
-from its current room.
-Questions about how matching candidates are narrowed and ranked use the typed
-`matching_principles` topic, so they receive matching truth rather than the
-generic identity/capability introduction. Scheduler projects only the selected
-topic facts from the versioned capability manifest into Synthesizer, which
-answers in fresh language for the current question. The full product document
-is not injected every turn, and no surface-query keyword router is used.
-If the Planner selects `product_info` but paraphrases or translates a topic
-identifier, the runtime discards that malformed payload and falls back to the
-read-only `capabilities` and `surface_scope` projection. It never converts the
-invalid payload into a domain task or tool call.
+Product information is a first-class normal DAG task. The Planner only knows the
+`product_info` capability boundary (questions about Ayue/App capabilities,
+visible flows, limitations, privacy, matching, Calendar and assessment); it
+does not emit a ProductInfo topic taxonomy. A product question is represented
+as `SubTask(agent="product_info", task_brief=...)` and the terminal
+Synthesizer depends on it like any other domain task. ProductInfoAgent owns
+task understanding and retrieval, then returns a bounded
+`product_info.v1` observation containing `question_understanding`, typed
+`facts`, `knowledge_sections`, `coverage` and an explicit insufficient-knowledge
+code when the product contract has no authoritative answer. Its retrieval uses
+the server-owned allowlisted product knowledge sections only, is read-only and
+bounded to two internal rounds; it does not use RAG, embeddings, vector search,
+or Markdown documents. Scheduler dispatches the runner generically and never
+knows section names or retrieval strategy. Synthesizer remains the only layer
+that produces user-facing wording. A small contract shim normalizes retired
+task-free ProductInfo provider payloads into this DAG shape during rollout.
 
 Public replies may carry additive `messages` (up to three typed bubbles) while
 `reply` remains the newline-joined compatibility projection. The API stores one
@@ -654,14 +661,18 @@ fallbacks grounded in the selected typed product facts.
 
 ## Web research specialist (native V3)
 
-Web is a distinct read-only specialist owned by
-`services/ayue_agent/v3/sub_agents/web_agent.py` and coordinated by
-`scheduler.py`. The Planner may route current, external, news, forum, or
-URL-grounded questions to `agent="web"`; Places owns location lookup and does
-not expose Web tools.
+Web is a distinct read-only specialist whose decision contract lives in
+`services/ayue_agent/v3/sub_agents/web_agent.py` and whose bounded execution
+loop lives in `services/ayue_agent/v3/web_runtime.py`. Scheduler dispatches the
+registered runtime and collects its typed result; it does not own Web rounds or
+search/observe/refine/finish progression. The Planner may route current,
+external, news, forum, or URL-grounded questions to `agent="web"`; Places owns
+location lookup and does not expose Web tools.
 
-`web.search` and `web.extract` remain typed Tool Registry capabilities, while
-research behavior stays in the Web Agent contract. The loop is strictly
+`web.search` and `web.extract` remain typed Tool Registry capabilities. Web
+research behavior stays in the Web Runtime, while the Web Agent remains the
+decision contract. The runtime receives a minimal guarded execution adapter
+(`v3/guarded_execution.py`) and never calls Tavily directly. The loop is strictly
 bounded to at most 3 decision rounds, 3 total web calls, 2 initial search
 queries, 1 refinement query, and 1 extract step over at most 2 URLs. Each
 observation is projected and returned to the Web Agent before its next
@@ -727,8 +738,8 @@ execute a Web capability by itself and does not enlarge the three-round,
 three-tool-call research budget; a second invalid decision still fails closed
 as `model_failure`. Retryable provider timeout, rate-limit, and 5xx failures
 use stable trace-safe codes. If a Web observation already succeeded but a
-later decision call fails, Scheduler spends the remaining finish-only round to
-recover the evidence result; it never issues an extra search or opens an
+later decision call fails, Web Runtime spends the remaining finish-only round
+to recover the evidence result; it never issues an extra search or opens an
 unbounded loop.
 
 `web_finish_decision` asks the model only for bounded semantic booleans

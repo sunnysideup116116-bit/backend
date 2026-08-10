@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from services.ayue_agent.contracts import PublicAgentTurnContext
+from services.ayue_agent.capabilities import product_knowledge_catalog
 from .contracts import AgentContextSlice
 
 
@@ -98,6 +99,16 @@ def slice_for_agent(
             "relevant_memories": turn_ctx.relevant_memories,
             "clock": clock_dump,
             "prior_observations": prior_observations,
+        })
+
+    if agent_name == "product_info":
+        # ProductInfo only receives the user proposition and bounded prior
+        # observations declared by the DAG.  It must not see owner profile,
+        # calendar contents, relationship-private context, or raw documents.
+        return AgentContextSlice(agent="product_info", payload={
+            "message": str(turn_ctx.message or "")[:1200],
+            "recent_messages": list(turn_ctx.recent_messages or [])[-4:],
+            "product_knowledge_catalog": product_knowledge_catalog(),
         })
 
     if agent_name == "synthesizer":

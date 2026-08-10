@@ -1,8 +1,8 @@
 """Public V3 Web research specialist.
 
-This file owns the research workflow decision contract.  ``web.search`` and
-``web.extract`` remain ordinary Tool Registry capabilities and are executed
-by the Scheduler after the model has produced a typed decision.
+This file owns the Web decision contract only.  The bounded research workflow
+lives in ``v3.web_runtime``; ``web.search`` and ``web.extract`` are executed by
+its guarded execution adapter after the model has produced a typed decision.
 """
 
 from __future__ import annotations
@@ -643,17 +643,3 @@ def decide(
             metrics.rejected_calls.append(last_error)
     metrics.error = last_error
     return None, metrics
-
-
-def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[list, SubAgentMetrics]:
-    """Compatibility entry point; the Scheduler owns the sequential loop."""
-    decision, metrics = decide(
-        context_slice,
-        task_brief=task_brief,
-        round_index=1,
-        observations=[],
-        tool_calls_used=0,
-        search_calls_used=0,
-        extract_calls_used=0,
-    )
-    return ([decision] if decision is not None else []), metrics

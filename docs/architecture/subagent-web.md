@@ -1,6 +1,6 @@
 # Web Sub-agent
 
-> 現行 owner：`services/ayue_agent/v3/sub_agents/web_agent.py`、`v3/web_research.py` 與 Scheduler 的 bounded research loop。`web_tools.py` 只負責 Tavily adapter，不負責研究策略。
+> 現行 owner：`services/ayue_agent/v3/sub_agents/web_agent.py` 保存 Web decision contract；`v3/web_runtime.py` 保存 bounded research loop；`v3/guarded_execution.py` 提供最小 Guard→URL binding→executor arguments→`execute_tool` adapter。`web_tools.py` 只負責 Tavily adapter，不負責研究策略。
 
 ## 1. 責任邊界
 
@@ -24,9 +24,15 @@ Web task 的 `task_brief` 必須保留使用者真正要找的 proposition、地
 
 ## 3. Bounded observation loop
 
+Scheduler 只 dispatch `agent="web"` 的 registered runtime，並收集一個
+`StructuredAgentResult`。round、observation、search/extract counters、finish
+decision 與 `web_research.v1` assembly 全部由 `web_runtime.py` 管理；因此
+Scheduler 不需要知道 Web 是 loop-based 還是 single-shot。
+
 ```text
 Web Agent decision
-→ Scheduler 驗證 action／budget／URL
+→ Web Runtime 驗證 action／budget
+→ guarded execution adapter 驗證 Guard／URL／executor arguments
 → web.search 或 web.extract
 → typed observation 回到 Web Agent
 → finish 產生 web_research.v1

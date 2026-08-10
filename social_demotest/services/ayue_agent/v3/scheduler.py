@@ -4,16 +4,14 @@
 from __future__ import annotations
 
 import os
-import hashlib
+import inspect
 import re
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlencode, urlsplit
 
-import config
 from services.ayue_agent.contracts import AgentResult, AgentTurnContext, PresentationBlock
 from services.ayue_agent.context import build_public_agent_turn_context
 from services.ayue_agent.public_relationship_projection import validated_mentioned_contact_ids
@@ -24,7 +22,7 @@ from services.ayue_agent.tool_registry import (
     TOOL_REGISTRY, ToolArgumentSource, ToolRisk, executor_arguments_for_turn, tool_call_key,
 )
 from services.ayue_agent.tools import execute_tool
-from services.ayue_agent.web_tools import is_safe_public_url, web_enabled
+from services.ayue_agent.web_tools import is_safe_public_url
 from services.ayue_agent.match_opportunity import (
     accept_guidance_offer,
     active_guidance_offer,
@@ -32,7 +30,6 @@ from services.ayue_agent.match_opportunity import (
     claim_guidance_offer,
     decline_guidance_offer,
 )
-from services.ayue_agent.capabilities import product_info_answer, product_info_projection
 from services.ayue_agent.product_identity import PUBLIC_PENDING_CANCEL_REPLY, PUBLIC_PLANNER_INVALID_REPLY
 from services.assessment_session_service import (
     active_assessment_session, advance_assessment_session,
@@ -44,11 +41,12 @@ from database import db
 
 from .contracts import (
     AgentContextSlice, GuardDecision, GuardResultCode, Plan, SubTask,
-    SubTaskResult, SubTaskStatus, ToolProposal,
+    SubTaskResult, SubTaskStatus, ToolProposal, normalize_plan_for_execution,
 )
 from .context_slicer import slice_for_agent
 from .guard import guard_proposal
 from .guard import guard_calendar_commands
+from .guarded_execution import GuardedReadExecutor, web_extract_urls_allowed as _web_extract_urls_allowed
 from .calendar_commands import canonicalize_calendar_command, preflight_calendar_commands
 from .calendar_drafts import (
     candidate_reference_allowed, clear_draft, get_draft, merge_command, resolved_target_replaced, save_draft,
@@ -67,27 +65,20 @@ from .planner import plan_turn, PlannerMetrics, _synthesizer_only_plan
 from . import synthesizer
 from .synthesizer import SynthesizerMetrics
 from .public_reply import build_presentation, validate_public_reply
-from .sub_agents.base import SubAgentMetrics
+from .sub_agents.base import StructuredAgentResult, SubAgentMetrics
 from .confirmation import ConfirmationManager
 from .sub_agents.calendar_agent import run as run_calendar
 from .sub_agents.places_agent import run as run_places
 from .sub_agents.match_agent import run as run_match
 from .sub_agents.relationship_agent import run as run_relationship
 from .sub_agents.profile_agent import run as run_profile
-from .sub_agents import web_agent
-from .web_research import (
-    MAX_WEB_EXTRACT_CALLS,
-    MAX_WEB_EXTRACT_URLS,
-    MAX_WEB_INITIAL_SEARCH_QUERIES,
-    MAX_WEB_REFINED_SEARCH_QUERIES,
-    MAX_WEB_ROUNDS,
-    MAX_WEB_SEARCH_CALLS,
-    MAX_WEB_TOTAL_TOOL_CALLS,
-    WebResearchResultV1,
-    anchor_place_search_query,
-    anchor_web_search_query,
-    build_research_result,
+from .sub_agents.product_info_agent import run as run_product_info
+from .place_projection import (
+    MAX_PLACE_CARDS, MAX_PLACE_CARDS_PER_CATEGORY, _PLACE_CATEGORIES, _distance_label,
+    _google_embed_url, _osm_embed_url, _place_candidate_ref,
+    public_place_cards as _public_place_cards,
 )
+from . import web_runtime
 from .write_executors import execute_write, prepare_write_confirmation
 from .debug_trace import (
     append_event as append_debug_event,
@@ -231,13 +222,44 @@ def clear_demo_runtime_state() -> None:
         if callable(clear):
             clear()
 
+def _proposal_runner(run_fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Adapt proposal-based agents to the shared task runner signature."""
+    def invoke(context_slice: AgentContextSlice, *, task: SubTask, services: GuardedReadExecutor) -> Any:
+        return run_fn(context_slice, task_brief=task.task_brief)
+    return invoke
+
+
+def _invoke_registered_runner(
+    runner: Callable[..., Any],
+    context_slice: AgentContextSlice,
+    task: SubTask,
+    services: GuardedReadExecutor,
+) -> Any:
+    """Call the current runner contract while tolerating test-time old stubs."""
+    try:
+        signature_target = getattr(runner, "side_effect", None)
+        if not callable(signature_target):
+            signature_target = runner
+        parameters = inspect.signature(signature_target).parameters.values()
+        accepts_services = any(
+            parameter.name == "services" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+    except (TypeError, ValueError):
+        accepts_services = True
+    if accepts_services:
+        return runner(context_slice, task=task, services=services)
+    return runner(context_slice, task_brief=task.task_brief)
+
+
 _SUB_AGENT_RUNNERS = {
-    "calendar": run_calendar,
-    "places": run_places,
-    "web": web_agent.run,
-    "match": run_match,
-    "relationship": run_relationship,
-    "profile": run_profile,
+    "calendar": _proposal_runner(run_calendar),
+    "places": _proposal_runner(run_places),
+    "web": web_runtime.run,
+    "match": _proposal_runner(run_match),
+    "relationship": _proposal_runner(run_relationship),
+    "profile": _proposal_runner(run_profile),
+    "product_info": _proposal_runner(run_product_info),
 }
 
 
@@ -294,54 +316,29 @@ def _prior_observations_for(
     return prior
 
 
-_PLACE_CATEGORIES = ("restaurant", "cafe", "bar", "attraction", "park")
-MAX_PLACE_CARDS = 8
-MAX_PLACE_CARDS_PER_CATEGORY = 5
-
-
-def _osm_embed_url(map_url: str) -> str:
-    """Build a bounded OSM embed URL only from our typed public map link."""
-    try:
-        parsed = urlsplit(map_url)
-        if parsed.scheme != "https" or parsed.hostname != "www.openstreetmap.org":
-            return ""
-        query = parse_qs(parsed.query)
-        lat = float((query.get("mlat") or [""])[0])
-        lon = float((query.get("mlon") or [""])[0])
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-            return ""
-    except (TypeError, ValueError):
-        return ""
-    params = urlencode({
-        "bbox": f"{lon - .004:.6f},{lat - .003:.6f},{lon + .004:.6f},{lat + .003:.6f}",
-        "layer": "mapnik",
-        "marker": f"{lat:.6f},{lon:.6f}",
-    })
-    return f"https://www.openstreetmap.org/export/embed.html?{params}"
-
-
-def _google_embed_url(place_id: str) -> str:
-    """Build a Google Maps Embed URL for one validated Google Place ID."""
-    place_id = str(place_id or "")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{3,180}", place_id):
-        return ""
-    browser_key = str(getattr(config, "GOOGLE_MAPS_BROWSER_API_KEY", "") or "")
-    if not browser_key:
-        return ""
-    params = urlencode({"key": browser_key, "q": f"place_id:{place_id}"})
-    return f"https://www.google.com/maps/embed/v1/place?{params}"
-
-
-def _distance_label(value: Any) -> str:
-    try:
-        distance = max(0, int(value))
-    except (TypeError, ValueError):
-        return ""
-    if distance <= 0:
-        return ""
-    if distance < 1_000:
-        return f"約 {distance} 公尺"
-    return f"約 {distance / 1_000:.1f} 公里"
+def _calendar_reference_for_command(
+    user_id: str,
+    command: Any,
+    draft: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Load one server reference after validating its opaque draft token."""
+    if str(getattr(command, "action", "") or "") not in {"update", "cancel"}:
+        return None
+    if (
+        draft
+        and (draft.get("resolved_target") or {}).get("bound")
+        and str(getattr(command, "draft_mode", "") or "") == "continue"
+        and not getattr(command, "target_reference", None)
+    ):
+        reference = get_reference(user_id, reference_key=DRAFT_TARGET_REFERENCE_KEY)
+        if reference:
+            reference["_force"] = True
+            reference["_draft_bound"] = True
+            return reference
+    reference_key = str(getattr(command, "target_reference", "") or "recent_event")
+    if reference_key.startswith("candidate_") and not candidate_reference_allowed(draft, reference_key):
+        return None
+    return get_reference(user_id, reference_key=reference_key)
 
 
 def _public_sources(task_results: Any) -> list[dict[str, str]]:
@@ -392,123 +389,6 @@ def _public_sources(task_results: Any) -> list[dict[str, str]]:
                 if len(sources) == 5:
                     return sources
     return sources
-
-
-def _place_candidate_ref(run_id: str, unique_key: str) -> str:
-    digest = hashlib.sha256(f"{run_id}\0{unique_key}".encode("utf-8")).hexdigest()[:16]
-    return f"place_candidate_{digest}"
-
-
-def _public_place_cards(
-    task_results: Any,
-    *,
-    run_id: str | None = None,
-    include_internal: bool = False,
-) -> list[dict[str, Any]]:
-    """Project verified places observations into bounded provider-neutral cards.
-
-    V3-specific projection: collects cards from ALL places observations (no
-    early return), caps each category at MAX_PLACE_CARDS_PER_CATEGORY, then
-    round-robins across categories up to MAX_PLACE_CARDS total. This keeps a
-    mixed request (e.g. 牛排 + 冰) balanced instead of letting the first
-    category fill the whole budget. Validation rules mirror the V2 projection
-    (provider allowlist, place_id/map-url safety, category allowlist, dedup).
-    """
-    cards_by_category: dict[str, list[dict[str, Any]]] = {c: [] for c in _PLACE_CATEGORIES}
-    seen: set[str] = set()
-    for result in task_results:
-        if isinstance(result, dict):
-            status_ok = result.get("status", "ok") in {"ok", SubTaskStatus.OK, SubTaskStatus.OK.value}
-            tool_name = result.get("tool") or result.get("tool_name")
-            observation = result.get("result") or result.get("observation")
-        else:
-            status_ok = result.status is SubTaskStatus.OK
-            tool_name = result.tool_name
-            observation = result.observation
-        if not status_ok or not observation:
-            continue
-        if tool_name == "places.search_nearby":
-            places = (observation or {}).get("places") or []
-        elif tool_name == "places.resolve_place":
-            place = (observation or {}).get("place") or {}
-            places = [place] if place else []
-        else:
-            continue
-        attribution = re.sub(r"\s+", " ", str((observation or {}).get("attribution") or "")).strip()[:80]
-        attribution_url = str((observation or {}).get("attribution_url") or "")
-        if not is_safe_public_url(attribution_url):
-            attribution_url = ""
-        for item in places:
-            provider = str(item.get("provider") or "openstreetmap")
-            if provider not in {"openstreetmap", "google"}:
-                continue
-            place_id = str(item.get("place_id") or "").strip()
-            map_url = str(item.get("map_url") or "").strip()
-            if map_url and not is_safe_public_url(map_url):
-                map_url = ""
-            if provider == "google":
-                if not re.fullmatch(r"[A-Za-z0-9_-]{3,180}", place_id):
-                    continue
-                unique_key = f"google:{place_id}"
-            else:
-                if not map_url:
-                    continue
-                unique_key = f"openstreetmap:{map_url}"
-            if unique_key in seen:
-                continue
-            seen.add(unique_key)
-            category = str(item.get("category") or "attraction")
-            if category not in _PLACE_CATEGORIES:
-                category = "attraction"
-            if len(cards_by_category[category]) >= MAX_PLACE_CARDS_PER_CATEGORY:
-                continue
-            card = {
-                "provider": provider,
-                "place_id": place_id if provider == "google" else "",
-                "name": re.sub(r"\s+", " ", str(item.get("name") or "地點")).strip()[:80],
-                "category": category,
-                "address_summary": re.sub(r"\s+", " ", str(item.get("address_summary") or "")).strip()[:180],
-                "distance_label": _distance_label(item.get("distance_m")),
-                "map_url": map_url,
-                "embed_url": (_google_embed_url(place_id) if provider == "google" else _osm_embed_url(map_url)),
-                "attribution": attribution or ("Google Maps" if provider == "google" else "© OpenStreetMap contributors"),
-                "attribution_url": attribution_url,
-            }
-            if include_internal:
-                card["candidate_ref"] = _place_candidate_ref(run_id or "preview", unique_key)
-                try:
-                    card["distance_m"] = max(0, int(item.get("distance_m")))
-                except (TypeError, ValueError):
-                    card["distance_m"] = None
-            if provider == "google":
-                photo_url = str(item.get("photo_url") or "")
-                if photo_url:
-                    try:
-                        parsed_photo = urlsplit(photo_url)
-                        if (
-                            parsed_photo.scheme == "https"
-                            and parsed_photo.hostname.lower() == "places.googleapis.com"
-                            and parsed_photo.path.startswith("/v1/places/")
-                            and parsed_photo.path.endswith("/media")
-                        ):
-                            card["photo_url"] = photo_url
-                    except (TypeError, ValueError):
-                        pass
-            cards_by_category[category].append(card)
-
-    # Round-robin across categories so a mixed request stays balanced.
-    balanced: list[dict[str, Any]] = []
-    active = [c for c in _PLACE_CATEGORIES if cards_by_category[c]]
-    while active and len(balanced) < MAX_PLACE_CARDS:
-        next_active: list[str] = []
-        for category in active:
-            if len(balanced) >= MAX_PLACE_CARDS:
-                break
-            balanced.append(cards_by_category[category].pop(0))
-            if cards_by_category[category]:
-                next_active.append(category)
-        active = next_active
-    return balanced
 
 
 def _apply_card_decision(
@@ -670,481 +550,6 @@ def _has_reusable_success(spec: Any, arguments: dict[str, Any], results: list[Su
     return False
 
 
-def _web_extract_urls_allowed(turn_ctx: Any, results: list[Any], urls: list[str]) -> bool:
-    """Bind extraction to a search result or an URL the owner actually supplied."""
-    allowed: set[str] = set()
-    for r in results:
-        if isinstance(r, dict):
-            if r.get("tool") != "web.search":
-                continue
-            data = r.get("result") or {}
-        else:
-            if r.status is not SubTaskStatus.OK or r.tool_name != "web.search" or not r.observation:
-                continue
-            data = r.observation or {}
-        for item in (data.get("results") or []):
-            url = str((item or {}).get("url") or "")
-            if is_safe_public_url(url):
-                allowed.add(url)
-    for raw in re.findall(r"https?://[^\s<>\]\[\"']+", str(getattr(turn_ctx, "message", "") or "")):
-        url = raw.rstrip(".,，。!?！？:：;；)")
-        if is_safe_public_url(url):
-            allowed.add(url)
-    return bool(urls) and all(str(url) in allowed for url in urls)
-
-
-def _calendar_reference_for_command(
-    user_id: str,
-    command: Any,
-    draft: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    """Load one server reference after validating its opaque draft token."""
-    if str(getattr(command, "action", "") or "") not in {"update", "cancel"}:
-        return None
-    if (
-        draft
-        and (draft.get("resolved_target") or {}).get("bound")
-        and str(getattr(command, "draft_mode", "") or "") == "continue"
-        and not getattr(command, "target_reference", None)
-    ):
-        reference = get_reference(user_id, reference_key=DRAFT_TARGET_REFERENCE_KEY)
-        if reference:
-            reference["_force"] = True
-            reference["_draft_bound"] = True
-            return reference
-    reference_key = str(getattr(command, "target_reference", "") or "recent_event")
-    if reference_key.startswith("candidate_") and not candidate_reference_allowed(draft, reference_key):
-        return None
-    return get_reference(user_id, reference_key=reference_key)
-
-
-def _execute_web_proposal(
-    task: SubTask,
-    proposal: ToolProposal,
-    turn_ctx: Any,
-    *,
-    web_call_index: int,
-    seen_keys: set[tuple[str, str]],
-    guard_lock: threading.Lock,
-    prior_web_observations: list[dict[str, Any]],
-    on_progress: ProgressCallback | None,
-    run_id: str,
-    trace: dict[str, Any],
-    debug_enabled: bool,
-) -> tuple[SubTaskResult, bool]:
-    """Guard and execute one Web read; return whether the call used budget."""
-    with guard_lock:
-        decision = guard_proposal(
-            proposal,
-            agent_name="web",
-            seen_keys=seen_keys,
-            step_count=web_call_index,
-            max_reads=MAX_WEB_TOTAL_TOOL_CALLS,
-        )
-        trace["guard_results"].append(decision.code.value)
-    if debug_enabled:
-        append_debug_event(
-            run_id, "function_call", task_id=task.id, agent="web",
-            function=proposal.tool_name,
-            planner_arguments=proposal.arguments,
-            guard={"ok": decision.ok, "code": decision.code.value, "reason": decision.reason},
-        )
-    if not decision.ok:
-        return SubTaskResult(
-            task_id=task.id,
-            status=SubTaskStatus.FAILED,
-            tool_name=proposal.tool_name,
-            guard_code=decision.code,
-        ), False
-
-    if proposal.tool_name == "web.extract":
-        urls = [str(url) for url in (proposal.arguments.get("urls") or [])]
-        if not _web_extract_urls_allowed(turn_ctx, prior_web_observations, urls):
-            return SubTaskResult(
-                task_id=task.id,
-                status=SubTaskStatus.FAILED,
-                tool_name=proposal.tool_name,
-                error_code="web_extract_url_not_bound",
-            ), False
-
-    spec = TOOL_REGISTRY.get(proposal.tool_name)
-    if spec is None or proposal.tool_name not in {"web.search", "web.extract"}:
-        return SubTaskResult(
-            task_id=task.id,
-            status=SubTaskStatus.FAILED,
-            tool_name=proposal.tool_name,
-            error_code="tool_not_registered",
-        ), False
-    try:
-        safe_args = executor_arguments_for_turn(spec, [], proposal.arguments)
-    except Exception:
-        return SubTaskResult(
-            task_id=task.id,
-            status=SubTaskStatus.FAILED,
-            tool_name=proposal.tool_name,
-            error_code="executor_args_invalid",
-        ), False
-    with guard_lock:
-        key = tool_call_key(spec, safe_args)
-        if key in seen_keys:
-            return SubTaskResult(
-                task_id=task.id,
-                status=SubTaskStatus.FAILED,
-                tool_name=proposal.tool_name,
-                guard_code=GuardResultCode.DUPLICATE_CALL,
-            ), False
-        seen_keys.add(key)
-
-    step_id = f"{task.id}:web#{web_call_index}:{proposal.tool_name}"
-    _emit_progress(
-        on_progress, "tool_started", trace=trace, agent_run_id=run_id,
-        step_id=step_id, text=spec.progress_text, tool_name=proposal.tool_name,
-    )
-    if debug_enabled:
-        append_debug_event(
-            run_id, "tool_started", task_id=task.id, agent="web", step_id=step_id,
-            function=proposal.tool_name, planner_arguments=proposal.arguments,
-            executor_arguments=safe_args,
-        )
-    started = time.perf_counter()
-    try:
-        tool_result = execute_tool(
-            type("TC", (), {"name": proposal.tool_name, "arguments": safe_args})(),
-            turn_ctx._raw_ctx, clock=turn_ctx.clock,
-        )
-    except Exception:
-        duration_ms = round((time.perf_counter() - started) * 1000)
-        _emit_progress(
-            on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
-            step_id=step_id, outcome="error", tool_name=proposal.tool_name,
-            duration_ms=duration_ms,
-        )
-        trace["tool_results"].append({"tool": proposal.tool_name, "ok": False, "code": "tool_exception"})
-        return SubTaskResult(
-            task_id=task.id, status=SubTaskStatus.FAILED,
-            tool_name=proposal.tool_name, error_code="tool_exception",
-        ), True
-
-    duration_ms = round((time.perf_counter() - started) * 1000)
-    if not tool_result.ok:
-        _emit_progress(
-            on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
-            step_id=step_id, outcome="error", tool_name=proposal.tool_name,
-            duration_ms=duration_ms,
-        )
-        trace["tool_results"].append({
-            "tool": proposal.tool_name, "ok": False,
-            "code": tool_result.error_code,
-        })
-        return SubTaskResult(
-            task_id=task.id, status=SubTaskStatus.FAILED,
-            tool_name=proposal.tool_name, error_code=tool_result.error_code,
-        ), True
-
-    _emit_progress(
-        on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
-        step_id=step_id, outcome="ok", tool_name=proposal.tool_name,
-        duration_ms=duration_ms,
-    )
-    trace["tool_results"].append({"tool": proposal.tool_name, "ok": True, "code": None})
-    result = SubTaskResult(
-        task_id=task.id,
-        status=SubTaskStatus.OK,
-        tool_name=proposal.tool_name,
-        observation=tool_result.data,
-    )
-    if debug_enabled:
-        append_debug_event(
-            run_id, "tool_finished", task_id=task.id, agent="web", step_id=step_id,
-            function=proposal.tool_name, outcome="ok", duration_ms=duration_ms,
-            result=tool_result.data,
-        )
-    return result, True
-
-
-def _run_web_research(
-    task: SubTask,
-    turn_ctx: Any,
-    context_slice: AgentContextSlice,
-    *,
-    seen_keys: set[tuple[str, str]],
-    guard_lock: threading.Lock,
-    on_progress: ProgressCallback | None,
-    run_id: str,
-    trace: dict[str, Any],
-    debug_enabled: bool,
-) -> tuple[list[SubTaskResult], SubAgentMetrics]:
-    """Run the fixed three-round Web observation loop."""
-    aggregate = SubAgentMetrics()
-    evidence_policy = task.evidence_policy or "casual_discovery"
-    place_cards = _public_place_cards(
-        context_slice.payload.get("prior_observations") or [],
-        run_id=run_id,
-        include_internal=True,
-    )[:5]
-    place_candidates = [
-        {
-            "candidate_ref": item.get("candidate_ref"),
-            "name": item.get("name"),
-            "category": item.get("category"),
-            "address_summary": item.get("address_summary"),
-            "distance_m": item.get("distance_m"),
-        }
-        for item in place_cards
-    ]
-    candidate_by_ref = {
-        str(item.get("candidate_ref")): item
-        for item in place_candidates
-        if item.get("candidate_ref")
-    }
-    allowed_subject_refs = set(candidate_by_ref)
-    if not web_enabled():
-        aggregate.error = "web_not_configured"
-        result = build_research_result(
-            research_question=turn_ctx.message,
-            answer_target=task.task_brief,
-            decision=None,
-            observations=[],
-            execution_status="unavailable",
-            stop_reason="tool_unavailable",
-            allowed_subject_refs=allowed_subject_refs if place_candidates else None,
-            evidence_policy=evidence_policy,
-        )
-        return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
-
-    observations: list[dict[str, Any]] = []
-    failures: list[str] = []
-    tool_calls_used = 0
-    search_calls_used = 0
-    extract_calls_used = 0
-    last_decision = None
-    stop_reason = "budget_exhausted"
-
-    for round_index in range(1, MAX_WEB_ROUNDS + 1):
-        decision, metrics = web_agent.decide(
-            context_slice,
-            task_brief=task.task_brief,
-            round_index=round_index,
-            observations=observations,
-            tool_calls_used=tool_calls_used,
-            search_calls_used=search_calls_used,
-            extract_calls_used=extract_calls_used,
-            place_candidates=place_candidates,
-            evidence_policy=evidence_policy,
-        )
-        aggregate.input_tokens += metrics.input_tokens
-        aggregate.output_tokens += metrics.output_tokens
-        aggregate.duration_ms += metrics.duration_ms
-        aggregate.tool_calls_raw.extend(metrics.tool_calls_raw or [])
-        aggregate.rejected_calls.extend(metrics.rejected_calls or [])
-        aggregate.content_raw = metrics.content_raw
-        aggregate.prompt_raw = metrics.prompt_raw
-        aggregate.tools_raw = metrics.tools_raw
-        aggregate.input_payload = metrics.input_payload
-        if metrics.error:
-            aggregate.error = metrics.error
-        if decision is None:
-            # A failed decision after at least one successful Web observation
-            # can still be recovered by the bounded finish-only final round.
-            # Do not spend another Web capability call and do not turn a
-            # transient provider failure into a source-only answer too early.
-            if observations and round_index < MAX_WEB_ROUNDS:
-                continue
-            stop_reason = "model_failure"
-            result = build_research_result(
-                research_question=turn_ctx.message,
-                answer_target=task.task_brief,
-                decision=None,
-                observations=observations,
-                execution_status="degraded" if observations else "unavailable",
-                stop_reason=stop_reason,
-                allowed_subject_refs=allowed_subject_refs if place_candidates else None,
-                evidence_policy=evidence_policy,
-            )
-            return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
-        if aggregate.error and not metrics.error:
-            # The prior attempt is retained in rejected_calls for local
-            # diagnostics, but the recovered decision itself is healthy.
-            aggregate.error = ""
-        last_decision = decision
-
-        if decision.assessment is not None and decision.assessment.target_alignment == "conflict":
-            stop_reason = "target_conflict"
-            result = build_research_result(
-                research_question=turn_ctx.message,
-                answer_target=task.task_brief,
-                decision=decision,
-                observations=observations,
-                execution_status="degraded",
-                stop_reason=stop_reason,
-                allowed_subject_refs=allowed_subject_refs if place_candidates else None,
-                evidence_policy=evidence_policy,
-            )
-            return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
-
-        if decision.action == "finish":
-            if round_index == 1 or decision.assessment is None:
-                aggregate.error = "web_finish_missing_evidence_assessment"
-                stop_reason = "model_failure"
-                result = build_research_result(
-                    research_question=turn_ctx.message,
-                    answer_target=task.task_brief,
-                    decision=None,
-                    observations=observations,
-                    execution_status="unavailable",
-                    stop_reason=stop_reason,
-                    allowed_subject_refs=allowed_subject_refs if place_candidates else None,
-                    evidence_policy=evidence_policy,
-                )
-            else:
-                stop_reason = "tool_failure" if failures and not observations else "evidence_sufficient"
-                result = build_research_result(
-                    research_question=turn_ctx.message,
-                    answer_target=task.task_brief,
-                    decision=decision,
-                    observations=observations,
-                    execution_status="degraded" if failures else "completed",
-                    stop_reason=stop_reason,
-                    allowed_subject_refs=allowed_subject_refs if place_candidates else None,
-                    evidence_policy=evidence_policy,
-                )
-            return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
-
-        if round_index == MAX_WEB_ROUNDS:
-            aggregate.error = "web_action_not_allowed_on_final_round"
-            stop_reason = "model_failure"
-            result = build_research_result(
-                research_question=turn_ctx.message,
-                answer_target=task.task_brief,
-                decision=None,
-                observations=observations,
-                execution_status="unavailable",
-                stop_reason=stop_reason,
-                allowed_subject_refs=allowed_subject_refs if place_candidates else None,
-                evidence_policy=evidence_policy,
-            )
-            return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
-
-        proposals: list[ToolProposal] = []
-        proposal_subject_refs: dict[int, str | None] = {}
-        if decision.action == "search":
-            max_queries = MAX_WEB_INITIAL_SEARCH_QUERIES if round_index == 1 else MAX_WEB_REFINED_SEARCH_QUERIES
-            queries: list[str] = []
-            query_subject_refs: list[str | None] = []
-            for index, query in enumerate(decision.queries):
-                if not str(query).strip():
-                    continue
-                subject_ref = decision.subject_refs[index] if index < len(decision.subject_refs) else None
-                candidate = candidate_by_ref.get(subject_ref or "")
-                if candidate is not None:
-                    anchored = anchor_place_search_query(
-                        candidate_name=str(candidate.get("name") or ""),
-                        address_summary=str(candidate.get("address_summary") or ""),
-                        answer_target=task.task_brief,
-                        suggested_query=str(query),
-                    )
-                else:
-                    anchored = anchor_web_search_query(task.task_brief, str(query))
-                queries.append(anchored)
-                query_subject_refs.append(subject_ref)
-            if not queries or len(queries) > max_queries:
-                failures.append("invalid_search_queries")
-                aggregate.error = "web_search_query_budget_invalid"
-                continue
-            if search_calls_used + len(queries) > MAX_WEB_SEARCH_CALLS:
-                failures.append("search_budget_exhausted")
-                continue
-            if tool_calls_used + len(queries) > MAX_WEB_TOTAL_TOOL_CALLS:
-                failures.append("tool_budget_exhausted")
-                continue
-            proposals = [ToolProposal(
-                tool_name="web.search",
-                arguments={
-                    "query": query,
-                    "recency": decision.recency,
-                    "use_saved_location": decision.use_saved_location,
-                },
-            ) for query in queries]
-            for proposal, subject_ref in zip(proposals, query_subject_refs):
-                proposal_subject_refs[id(proposal)] = subject_ref
-        elif decision.action == "extract":
-            urls = [str(url).strip() for url in decision.urls if str(url).strip()]
-            if not urls or len(urls) > MAX_WEB_EXTRACT_URLS or extract_calls_used >= MAX_WEB_EXTRACT_CALLS:
-                failures.append("extract_budget_invalid")
-                continue
-            if tool_calls_used >= MAX_WEB_TOTAL_TOOL_CALLS:
-                failures.append("tool_budget_exhausted")
-                continue
-            proposals = [ToolProposal(
-                tool_name="web.extract",
-                arguments={"urls": urls, "query": decision.extract_query},
-            )]
-            proposal_subject_refs[id(proposals[0])] = decision.subject_ref
-        else:
-            failures.append("unknown_web_action")
-            aggregate.error = "web_action_invalid"
-            continue
-
-        # Initial parallel searches are the only parallel Web tool phase.  The
-        # guard lock still protects duplicate keys and trace counters.
-        if len(proposals) > 1:
-            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="ayue-web") as pool:
-                futures = {
-                    pool.submit(
-                        _execute_web_proposal,
-                        task, proposal, turn_ctx,
-                        web_call_index=tool_calls_used + index,
-                        seen_keys=seen_keys,
-                        guard_lock=guard_lock,
-                        prior_web_observations=observations,
-                        on_progress=on_progress,
-                        run_id=run_id,
-                        trace=trace,
-                        debug_enabled=debug_enabled,
-                    ): proposal
-                    for index, proposal in enumerate(proposals)
-                }
-                executed_results = [(future.result(), proposal) for future, proposal in futures.items()]
-        else:
-            executed_results = [(_execute_web_proposal(
-                task, proposals[0], turn_ctx,
-                web_call_index=tool_calls_used,
-                seen_keys=seen_keys,
-                guard_lock=guard_lock,
-                prior_web_observations=observations,
-                on_progress=on_progress,
-                run_id=run_id,
-                trace=trace,
-                debug_enabled=debug_enabled,
-            ), proposals[0])]
-
-        for (result_item, counted), proposal in executed_results:
-            if counted:
-                tool_calls_used += 1
-                if result_item.tool_name == "web.search":
-                    search_calls_used += 1
-                elif result_item.tool_name == "web.extract":
-                    extract_calls_used += 1
-            if result_item.status is SubTaskStatus.OK and result_item.observation:
-                observation = _observation_dict(task.id, result_item)
-                subject_ref = proposal_subject_refs.get(id(proposal))
-                if subject_ref:
-                    observation["subject_ref"] = subject_ref
-                observations.append(observation)
-            elif result_item.error_code:
-                failures.append(str(result_item.error_code))
-
-    result = build_research_result(
-        research_question=turn_ctx.message,
-        answer_target=task.task_brief,
-        decision=last_decision,
-        observations=observations,
-        execution_status="degraded" if failures else "completed",
-        stop_reason="budget_exhausted" if tool_calls_used >= MAX_WEB_TOTAL_TOOL_CALLS else "model_failure",
-        allowed_subject_refs=allowed_subject_refs if place_candidates else None,
-        evidence_policy=evidence_policy,
-    )
-    return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK, observation=result.model_dump(mode="json"))], aggregate
 
 
 def _run_sub_task(
@@ -1177,23 +582,67 @@ def _run_sub_task(
             task_brief=task.task_brief, depends_on=task.depends_on,
             input_payload=context_slice.payload, prior_observations=prior_observations,
         )
-    if task.agent == "web":
-        return _run_web_research(
-            task,
-            turn_ctx,
-            context_slice,
-            seen_keys=seen_keys,
-            guard_lock=guard_lock,
-            on_progress=on_progress,
-            run_id=run_id,
-            trace=trace,
-            debug_enabled=debug_enabled,
+
+    guarded_executor = GuardedReadExecutor(
+        task_id=task.id,
+        agent_name=task.agent,
+        turn_ctx=turn_ctx,
+        seen_keys=seen_keys,
+        guard_lock=guard_lock,
+        on_progress=on_progress,
+        run_id=run_id,
+        trace=trace,
+        emit_progress=_emit_progress,
+        append_debug_event=append_debug_event,
+        debug_enabled=debug_enabled,
+    )
+
+    # ProductInfo is a structured read-only specialist rather than a Tool
+    # Registry proposal, but it still needs a user-facing progress state.  Use
+    # the existing bounded public progress envelope so the UI does not sit on
+    # the generic spinner while ProductInfo prepares the Synthesizer input.
+    product_info_started: float | None = None
+    product_info_step_id = f"{task.id}:product_info"
+
+    def _finish_product_info_process(outcome: str) -> None:
+        if product_info_started is None:
+            return
+        duration_ms = round((time.perf_counter() - product_info_started) * 1000)
+        _emit_progress(
+            on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
+            step_id=product_info_step_id, outcome=outcome,
+            duration_ms=duration_ms, tool_name="product_info.process",
         )
+        if debug_enabled:
+            append_debug_event(
+                run_id, "tool_finished", task_id=task.id, agent=task.agent,
+                step_id=product_info_step_id, function="product_info.process",
+                outcome=outcome, duration_ms=duration_ms,
+            )
+
+    if task.agent == "product_info":
+        product_info_started = time.perf_counter()
+        _emit_progress(
+            on_progress, "tool_started", trace=trace, agent_run_id=run_id,
+            step_id=product_info_step_id,
+            text="我先整理一下產品資訊…",
+            tool_name="product_info.process",
+        )
+        if debug_enabled:
+            append_debug_event(
+                run_id, "tool_started", task_id=task.id, agent=task.agent,
+                step_id=product_info_step_id, function="product_info.process",
+                process="bounded_product_knowledge",
+            )
+
     sub_started = time.perf_counter()
     try:
-        proposals, agent_metrics = runner(context_slice, task_brief=task.task_brief)
+        proposals, agent_metrics = _invoke_registered_runner(
+            runner, context_slice, task, guarded_executor,
+        )
     except Exception as exc:
         agent_metrics = SubAgentMetrics(error=str(exc))
+        _finish_product_info_process("error")
         print(f"  [{task.id}] sub_agent EXCEPTION: {type(exc).__name__}")
         return [SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED, error_code="sub_agent_exception")], agent_metrics
 
@@ -1201,6 +650,22 @@ def _run_sub_task(
         _print_llm_metrics(f"{task.id}:{task.agent}", agent_metrics)
         if agent_metrics.error:
             print(f"  [{task.id}] error=sub_agent_failed")
+
+    # A structured read-only specialist may return a typed observation directly
+    # instead of tool proposals.  This is a generic runner contract; the
+    # Scheduler does not inspect the specialist or its retrieval internals.
+    if isinstance(proposals, StructuredAgentResult):
+        _finish_product_info_process(
+            "ok" if proposals.status is SubTaskStatus.OK else "error"
+        )
+        return [SubTaskResult(
+            task_id=task.id,
+            status=proposals.status,
+            observation=proposals.observation,
+            error_code=proposals.error_code,
+        )], agent_metrics
+
+    _finish_product_info_process("error" if agent_metrics and agent_metrics.error else "ok")
 
     calendar_commands = list(getattr(proposals, "commands", []) or [])
     calendar_command_errors = list(getattr(proposals, "command_errors", []) or [])
@@ -1392,6 +857,9 @@ def _run_sub_task(
                                               tool_name=proposal.tool_name,
                                               observation={"reused": True}))
                 continue
+        # Defensive fail-closed check for a malformed non-Web runner that
+        # proposes a Web extraction. Normal Web tasks never enter this legacy
+        # proposal path: Web Runtime uses GuardedReadExecutor directly.
         if proposal.tool_name == "web.extract":
             urls = [str(u) for u in (proposal.arguments.get("urls") or [])]
             if not _web_extract_urls_allowed(turn_ctx, results, urls):
@@ -1929,54 +1397,7 @@ def run_public_agent_turn_v3(
             agent_run_id=run_id, agent_mode="v3", fallback_reason="planner_invalid",
         ))
 
-    if plan.mode == "product_info":
-        projection = product_info_projection(list(plan.product_info_topics))
-        synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{
-            "task_id": "product_info",
-            "status": "ok",
-            "tool": None,
-            "result": {"product_info": projection},
-            "error_code": None,
-            "skip_reason": None,
-        }])
-        reply, _card_decision, synth_metrics = synthesizer.synthesize(synth_slice)
-        _print_llm_metrics("synthesizer", synth_metrics)
-        total_input_tokens += synth_metrics.input_tokens
-        total_output_tokens += synth_metrics.output_tokens
-        messages = synth_metrics.presentation_messages or [reply]
-        presentation = build_presentation(messages, "product_info")
-        if presentation is None:
-            presentation = build_presentation(
-                product_info_answer(list(plan.product_info_topics)), "product_info",
-            )
-        safe_messages = presentation.messages if presentation else [PUBLIC_PLANNER_INVALID_REPLY]
-        reply = "\n\n".join(safe_messages)
-        trace["execution_mode"] = "product_info"
-        trace["plan"] = [{"mode": "product_info", "topics": list(plan.product_info_topics)}]
-        trace["result"] = {"handled": True, "conversation_intent": "product_info", "fallback_reason": None}
-        _persist_trace(run_id, ctx, trace)
-        return _finalize_debug(AgentResult(
-            handled=True,
-            reply=reply,
-            messages=safe_messages,
-            presentation_class="product_info",
-            conversation_intent="product_info",
-            agent_run_id=run_id,
-            agent_mode="v3",
-            llm_call_metrics=[{
-                "agent": "planner",
-                "input_tokens": planner_metrics.input_tokens,
-                "output_tokens": planner_metrics.output_tokens,
-                "duration_ms": planner_metrics.duration_ms,
-                "mode": "product_info",
-            }, {
-                "agent": "synthesizer",
-                "input_tokens": synth_metrics.input_tokens,
-                "output_tokens": synth_metrics.output_tokens,
-                "duration_ms": synth_metrics.duration_ms,
-                "mode": "product_info",
-            }],
-        ))
+    plan = normalize_plan_for_execution(plan, turn.message)
 
     if plan.mode == "direct_chat":
         direct_reason = _direct_chat_block_reason(plan, turn, pending_records, active_offer)
@@ -2319,11 +1740,17 @@ def run_public_agent_turn_v3(
     print(f"  agents_used={[aid for aid, _ in all_agent_metrics]}")
     print(f"{'='*60}\n")
 
+    conversation_intent = (
+        "product_info"
+        if synth_metrics.presentation_class == "product_info"
+        else "casual_chat"
+    )
     result = AgentResult(
         handled=True,
         reply=reply,
         messages=presentation_messages,
         presentation_class=synth_metrics.presentation_class,
+        conversation_intent=conversation_intent,
         agent_run_id=run_id,
         agent_mode="v3",
         fallback_reason=synth_metrics.fallback_reason,

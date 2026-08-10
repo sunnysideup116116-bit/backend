@@ -222,14 +222,6 @@ def _safe_context_text(value: Any) -> str:
     return safe_recent_context(value, "")
 
 
-def memory_candidate_allowed(text: str) -> bool:
-    """Compatibility safety preflight; semantic eligibility belongs to the extractor."""
-    text = _clean(text, 800)
-    if not text or NO_STORE_RE.search(text) or ID_RE.search(text):
-        return False
-    return not PROTECTED_RE.search(text)
-
-
 def _confidence(value: Any) -> float:
     try:
         result = float(value or 0)

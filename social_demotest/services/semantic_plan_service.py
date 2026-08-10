@@ -3,16 +3,24 @@ import re
 import time
 import math
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from database import messages_coll, semantic_plans_coll
 from services.ai_service import generate_chat_completion
-from services.memory_service import _agent_graph_config
 
 
 ALLOWED_TRIPLE_PREDICATES = {
     "IS_A", "HAS", "LIKES", "DISLIKES", "WANTS", "FEELS", "KNOWS",
     "USES", "BELIEVES", "AGREES_WITH", "DISAGREES_WITH", "MENTIONED",
 }
+
+
+def _semantic_graph_config():
+    """Load the separate accepted-pair semantic-graph configuration."""
+    from dotenv import dotenv_values
+
+    env = dotenv_values(Path(__file__).resolve().parents[2] / "matchmaker_agent" / ".env")
+    return env.get("NEO4J_URI"), (env.get("NEO4J_USERNAME"), env.get("NEO4J_PASSWORD")), env.get("NEO4J_DATABASE", "neo4j")
 
 ALPHA_LAT = 0.15
 ALPHA_PAR = 0.15
@@ -233,7 +241,7 @@ def _write_triples_to_neo4j(room_id: str, triples: list[dict]):
         return
     try:
         from neo4j import GraphDatabase
-        uri, auth, database = _agent_graph_config()
+        uri, auth, database = _semantic_graph_config()
         with GraphDatabase.driver(uri, auth=auth) as driver:
             with driver.session(database=database) as session:
                 for triple in triples:
@@ -256,7 +264,7 @@ def _write_triples_to_neo4j(room_id: str, triples: list[dict]):
 def _read_triples_from_neo4j(room_id: str, limit: int = 20) -> list[dict]:
     try:
         from neo4j import GraphDatabase
-        uri, auth, database = _agent_graph_config()
+        uri, auth, database = _semantic_graph_config()
         with GraphDatabase.driver(uri, auth=auth) as driver:
             with driver.session(database=database) as session:
                 rows = session.run("""
