@@ -185,7 +185,7 @@ Calendar mutation 只使用 `calendar.submit_commands`。一至十筆 authority-
 
 ### Places
 
-只擁有 structured nearby search、distance 與 place cards。Search radius 對 OSM 與 Google 都是 hard bound；保存位置只允許粗粒度城市／行政區。
+只擁有 structured nearby search、hours、price、rating、walking、distance 與 provider-neutral place projection。Search radius 對 OSM 與 Google 都是 hard bound；保存位置只允許粗粒度城市／行政區。Places 可直接處理這些結構化地點事實；只有優惠、特殊菜單、活動、臨時歇業公告、社群貼文等無法由 Places 欄位建立的目前公開主張才由獨立 Web task 查證。Public place-card rendering 由 `AYUE_PUBLIC_PLACE_CARDS_ENABLED` 控制，目前 demo 預設關閉；關閉時 candidate refs、provider IDs、map URLs 與 Web grounding 仍只在 server-side runtime 內保留。
 
 ### Web
 
@@ -248,7 +248,7 @@ run_started | tool_started | tool_finished | final | error
 
 - Public UI 只顯示一個暫時 progress bubble；final/error/disconnect 時清除。
 - Progress、debug event、tool name 不存成聊天訊息。
-- `reply` 保留相容性；`messages` 最多三個；`place_cards`、`sources`、`presentation_blocks` 是 additive typed projection。
+- `reply` 保留相容性；`messages` 最多三個；`place_cards`、`sources`、`presentation_blocks` 是 additive typed projection。`AYUE_PUBLIC_PLACE_CARDS_ENABLED` 關閉時，Places/Web 仍回傳文字或 Markdown，但 public result 不產生 place cards 或 card presentation blocks。
 - Debug 只對 loopback/localhost 開放，使用 `agent_run_id` 關聯 ephemeral run。Public trace 只存 allowlisted metadata，不存 prompt、owner 原句、arguments/result、raw exception、ID 或 revision。
 
 ## 12. Testing baseline
@@ -287,10 +287,12 @@ run_started | tool_started | tool_finished | final | error
 ### Places optional typed enrichment
 
 Places ordinary searches keep the base Google field mask. The existing Places
-tool contracts may opt into bounded `rating`, `hours`, or `walking` enrichments;
-`resolve_place` supports only `rating` and `hours`, and the empty enrichment
+tool contracts may opt into bounded `rating`, `hours`, `price`, or `walking` enrichments;
+`resolve_place` supports `rating`, `hours`, and `price`, and the empty enrichment
 list is the default. Rating/count and current-opening-hours fields are fetched
-only when the Places task requires them. Walking candidate data is produced by
+only when the Places task requires them. Price requests fetch Google
+`priceLevel`/`priceRange` and omit missing or partial price data without inference.
+Walking candidate data is produced by
 one bounded Routes `computeRouteMatrix` call and is attached independently per
 destination; a failed matrix element does not fail the Places result.
 

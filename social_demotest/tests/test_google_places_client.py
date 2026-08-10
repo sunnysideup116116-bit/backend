@@ -133,6 +133,8 @@ class GooglePlacesCuisineTests(unittest.TestCase):
             "types": ["restaurant"], "googleMapsUri": "https://www.google.com/maps/place/base",
             "rating": 4.8, "userRatingCount": 800,
             "currentOpeningHours": {"openNow": True},
+            "priceLevel": "PRICE_LEVEL_MODERATE",
+            "priceRange": {"startPrice": {"currencyCode": "TWD", "units": "300"}},
         }]}
         with self._enabled(), \
              patch("services.ayue_agent.google_places_client.requests.post",
@@ -142,8 +144,62 @@ class GooglePlacesCuisineTests(unittest.TestCase):
         self.assertNotIn("places.rating", mask)
         self.assertNotIn("places.userRatingCount", mask)
         self.assertNotIn("places.currentOpeningHours", mask)
+        self.assertNotIn("places.priceLevel", mask)
+        self.assertNotIn("places.priceRange", mask)
         self.assertNotIn("rating", places[0])
         self.assertNotIn("opening_hours", places[0])
+        self.assertNotIn("price_level", places[0])
+        self.assertNotIn("price_range", places[0])
+
+    def test_price_enrichment_requests_mask_and_projects_price_fields(self):
+        payload = {"places": [{
+            "id": "ChIJprice", "displayName": {"text": "Price Place"},
+            "formattedAddress": "Address", "location": {"latitude": 22.62, "longitude": 120.28},
+            "types": ["restaurant"], "googleMapsUri": "https://www.google.com/maps/place/price",
+            "priceLevel": "PRICE_LEVEL_MODERATE",
+            "priceRange": {
+                "startPrice": {"currencyCode": "TWD", "units": "300", "nanos": 0},
+                "endPrice": {"currencyCode": "TWD", "units": "500", "nanos": 0},
+            },
+        }]}
+        with self._enabled(), \
+             patch("services.ayue_agent.google_places_client.requests.post",
+                   return_value=_FakeResponse(payload)) as post:
+            places = search_nearby_places(
+                "Anchor", 22.62, 120.28, ["restaurant"], limit=3,
+                enrichments=["price"],
+            )
+        mask = post.call_args.kwargs["headers"]["X-Goog-FieldMask"]
+        self.assertIn("places.priceLevel", mask)
+        self.assertIn("places.priceRange", mask)
+        self.assertEqual(places[0]["price_level"], "moderate")
+        self.assertEqual(places[0]["price_range"], {
+            "start_price": {"currency_code": "TWD", "units": 300, "nanos": 0},
+            "end_price": {"currency_code": "TWD", "units": 500, "nanos": 0},
+        })
+
+    def test_missing_or_partial_price_data_is_omitted_without_inference(self):
+        payload = {"places": [{
+            "id": "ChIJpartial", "displayName": {"text": "Partial Price Place"},
+            "formattedAddress": "Address", "location": {"latitude": 22.62, "longitude": 120.28},
+            "types": ["restaurant"], "googleMapsUri": "https://www.google.com/maps/place/partial",
+            "priceRange": {
+                "startPrice": {"currencyCode": "TWD", "units": "300"},
+                "endPrice": {"currencyCode": "TWD"},
+            },
+        }]}
+        with self._enabled(), \
+             patch("services.ayue_agent.google_places_client.requests.post",
+                   return_value=_FakeResponse(payload)):
+            places = search_nearby_places(
+                "Anchor", 22.62, 120.28, ["restaurant"], limit=3,
+                enrichments=["price"],
+            )
+        self.assertNotIn("price_level", places[0])
+        self.assertEqual(places[0]["price_range"], {
+            "start_price": {"currency_code": "TWD", "units": 300, "nanos": 0},
+        })
+        self.assertNotIn("end_price", places[0]["price_range"])
 
     def test_requested_enrichments_are_deduplicated_and_projected(self):
         payload = {"places": [{

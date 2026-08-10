@@ -17,15 +17,22 @@ import config
 
 _TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 # Field mask drives billing. Keep the ordinary projection bounded. The optional
-# rating/userRatingCount/currentOpeningHours fields are Enterprise-tier fields
+# rating/userRatingCount/currentOpeningHours/price fields are optional fields
 # and are appended only for an explicitly requested enrichment.
 _BASE_FIELD_MASK = (
     "places.id,places.displayName,places.formattedAddress,places.location,"
     "places.types,places.googleMapsUri,places.photos"
 )
 _FIELD_MASK = _BASE_FIELD_MASK
-_SUPPORTED_ENRICHMENTS = frozenset({"rating", "hours", "walking"})
-_PLACE_FIELD_ENRICHMENTS = frozenset({"rating", "hours"})
+_SUPPORTED_ENRICHMENTS = frozenset({"rating", "hours", "price", "walking"})
+_PLACE_FIELD_ENRICHMENTS = frozenset({"price", "rating", "hours"})
+_PRICE_LEVELS = {
+    "PRICE_LEVEL_FREE": "free",
+    "PRICE_LEVEL_INEXPENSIVE": "inexpensive",
+    "PRICE_LEVEL_MODERATE": "moderate",
+    "PRICE_LEVEL_EXPENSIVE": "expensive",
+    "PRICE_LEVEL_VERY_EXPENSIVE": "very_expensive",
+}
 _CATEGORY_QUERIES = {
     "restaurant": "restaurant",
     "cafe": "cafe",
@@ -87,6 +94,8 @@ def _places_field_mask(enrichments: tuple[str, ...]) -> str:
         fields.extend(("places.rating", "places.userRatingCount"))
     if "hours" in enrichments:
         fields.append("places.currentOpeningHours")
+    if "price" in enrichments:
+        fields.extend(("places.priceLevel", "places.priceRange"))
     return ",".join(fields)
 
 
@@ -130,6 +139,48 @@ def _opening_hours_projection(item: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _money_projection(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    currency_code = value.get("currencyCode")
+    if not isinstance(currency_code, str) or not re.fullmatch(r"[A-Z]{3}", currency_code):
+        return None
+    raw_units = value.get("units")
+    if isinstance(raw_units, bool) or not isinstance(raw_units, (int, str)):
+        return None
+    if isinstance(raw_units, str) and not re.fullmatch(r"-?\d+", raw_units):
+        return None
+    try:
+        units = int(raw_units)
+    except (TypeError, ValueError):
+        return None
+    if not -(2**63) <= units <= (2**63 - 1):
+        return None
+    if "nanos" not in value:
+        nanos = 0
+    else:
+        nanos = value.get("nanos")
+        if isinstance(nanos, bool) or not isinstance(nanos, int):
+            return None
+    if not -999_999_999 <= nanos <= 999_999_999:
+        return None
+    if (units > 0 and nanos < 0) or (units < 0 and nanos > 0):
+        return None
+    return {"currency_code": currency_code, "units": units, "nanos": nanos}
+
+
+def _price_range_projection(item: dict[str, Any]) -> dict[str, Any] | None:
+    raw = item.get("priceRange")
+    if not isinstance(raw, dict):
+        return None
+    projected: dict[str, Any] = {}
+    for source_key, output_key in (("startPrice", "start_price"), ("endPrice", "end_price")):
+        money = _money_projection(raw.get(source_key))
+        if money is not None:
+            projected[output_key] = money
+    return projected or None
+
+
 def _place_enrichment(item: dict[str, Any], enrichments: tuple[str, ...]) -> dict[str, Any]:
     extra: dict[str, Any] = {}
     if "rating" in enrichments:
@@ -143,6 +194,14 @@ def _place_enrichment(item: dict[str, Any], enrichments: tuple[str, ...]) -> dic
         hours = _opening_hours_projection(item)
         if hours is not None:
             extra["opening_hours"] = hours
+    if "price" in enrichments:
+        raw_price_level = item.get("priceLevel")
+        price_level = _PRICE_LEVELS.get(raw_price_level) if isinstance(raw_price_level, str) else None
+        if price_level is not None:
+            extra["price_level"] = price_level
+        price_range = _price_range_projection(item)
+        if price_range is not None:
+            extra["price_range"] = price_range
     return extra
 
 

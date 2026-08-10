@@ -26,8 +26,8 @@ class ToolArgumentSource(str, Enum):
     PLANNER_GROUNDED = "planner_grounded"
 
 
-PlaceEnrichment = Literal["rating", "hours", "walking"]
-PlaceDetailsEnrichment = Literal["rating", "hours"]
+PlaceEnrichment = Literal["rating", "hours", "price", "walking"]
+PlaceDetailsEnrichment = Literal["rating", "hours", "price"]
 
 
 class _NoArguments(BaseModel):
@@ -111,7 +111,7 @@ class _PlacesNearbyArguments(BaseModel):
     limit: int = Field(default=3, ge=1, le=8)
     ordering: Literal["distance", "balanced"] = "distance"
     use_saved_location: bool = False
-    enrichments: list[PlaceEnrichment] = Field(default_factory=list, max_length=3)
+    enrichments: list[PlaceEnrichment] = Field(default_factory=list, max_length=4)
 
     @field_validator("enrichments")
     @classmethod
@@ -130,7 +130,7 @@ class _PlacesDistanceArguments(BaseModel):
 class _PlacesResolveArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: str = Field(min_length=2, max_length=160)
-    enrichments: list[PlaceDetailsEnrichment] = Field(default_factory=list, max_length=2)
+    enrichments: list[PlaceDetailsEnrichment] = Field(default_factory=list, max_length=3)
 
     @field_validator("enrichments")
     @classmethod
@@ -347,6 +347,19 @@ class _PlaceOpeningHoursOutput(BaseModel):
     weekday_descriptions: list[str] = Field(default_factory=list, max_length=7)
 
 
+class _PlaceMoneyOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    currency_code: str = Field(min_length=3, max_length=3, pattern=r"^[A-Z]{3}$")
+    units: int
+    nanos: int = Field(default=0, ge=-999_999_999, le=999_999_999)
+
+
+class _PlacePriceRangeOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start_price: _PlaceMoneyOutput | None = None
+    end_price: _PlaceMoneyOutput | None = None
+
+
 class _PlaceOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
@@ -362,6 +375,8 @@ class _PlaceOutput(BaseModel):
     rating: float | None = Field(default=None, ge=0, le=5)
     user_rating_count: int | None = Field(default=None, ge=0)
     opening_hours: _PlaceOpeningHoursOutput | None = None
+    price_level: Literal["free", "inexpensive", "moderate", "expensive", "very_expensive"] | None = None
+    price_range: _PlacePriceRangeOutput | None = None
     walking_distance_m: int | None = Field(default=None, ge=0)
     walking_duration_seconds: int | None = Field(default=None, ge=0)
 

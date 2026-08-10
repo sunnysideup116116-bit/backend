@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext, ToolCall
+from services.ayue_agent.google_places_client import GooglePlacesError
 from services.ayue_agent.maps_client import MapClientError, build_overpass_nearby, haversine_m
 from services.ayue_agent.tools import execute_tool
 
@@ -155,6 +156,37 @@ class AyueMapsToolsTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(google.call_args.kwargs["enrichments"], ["hours", "rating"])
         self.assertEqual(result.data["places"][0]["rating"], 4.5)
+
+    def test_nearby_google_price_failure_falls_back_to_osm_without_price_fields(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="找價格")
+        osm_payload = {
+            "anchor_label": "City District", "distance_basis": "straight_line",
+            "attribution": "© OpenStreetMap contributors",
+            "attribution_url": "https://www.openstreetmap.org/copyright",
+            "places": [{
+                "name": "OSM Place", "category": "restaurant", "distance_m": 350,
+                "address_summary": "Address",
+                "map_url": "https://www.openstreetmap.org/?mlat=22.6&mlon=120.2",
+                "provider": "openstreetmap", "place_id": "",
+            }],
+        }
+        with patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.nominatim_search", return_value={
+                 "label": "City District", "lat": 22.62, "lon": 120.28,
+             }), \
+             patch("services.ayue_agent.tools.search_nearby_places",
+                   side_effect=GooglePlacesError("google_places_unavailable")) as google, \
+             patch("services.ayue_agent.tools.nearby_places", return_value=osm_payload) as nearby:
+            result = execute_tool(ToolCall(name="places.search_nearby", arguments={
+                "anchor": "City District", "categories": ["restaurant"],
+                "enrichments": ["price"],
+            }), ctx)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["places"][0]["provider"], "openstreetmap")
+        self.assertNotIn("price_level", result.data["places"][0])
+        self.assertNotIn("price_range", result.data["places"][0])
+        self.assertEqual(google.call_args.kwargs["enrichments"], ["price"])
+        self.assertEqual(nearby.call_args.args[0], "CityDistrict")
 
     def test_nearby_osm_path_ignores_cuisine_without_google(self):
         ctx = AgentTurnContext(

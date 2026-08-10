@@ -2,6 +2,7 @@
 import unittest
 from unittest.mock import patch
 
+import config
 from services.ayue_agent.v3.contracts import AgentContextSlice
 from services.ayue_agent.v3.synthesizer import (
     _build_prompt,
@@ -19,6 +20,18 @@ def _fc_result(content="", tool_calls=None):
 
 
 class V3SynthesizerTests(unittest.TestCase):
+    def setUp(self):
+        # Most of this file exercises the retained server-owned card/ref
+        # contract. Demo rendering behavior is covered explicitly with the
+        # switch disabled in focused tests below.
+        self._old_public_place_cards_enabled = getattr(
+            config, "AYUE_PUBLIC_PLACE_CARDS_ENABLED", False,
+        )
+        config.AYUE_PUBLIC_PLACE_CARDS_ENABLED = True
+
+    def tearDown(self):
+        config.AYUE_PUBLIC_PLACE_CARDS_ENABLED = self._old_public_place_cards_enabled
+
     def test_active_composer_schemas_expose_only_runtime_fields(self):
         ordinary_schema = _compose_public_reply_tool_schema()["function"]["parameters"]
         self.assertIn("messages", ordinary_schema["properties"])
@@ -145,7 +158,7 @@ class V3SynthesizerTests(unittest.TestCase):
         with patch(
             "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
             return_value=_fc_result(content="週六可以先去逛市集，之後再看現場狀況決定要不要找地方休息。"),
-        ):
+        ) as provider:
             reply, card_decision, metrics = synthesize(slc)
         self.assertIn("週六可以先去逛市集", reply)
         self.assertIn("看現場狀況決定", reply)
@@ -154,6 +167,74 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertNotIn("10:00", reply)
         self.assertNotIn("12:00", reply)
         self.assertNotIn("15:00", reply)
+        system_prompt = provider.call_args.kwargs["system_prompt"]
+        self.assertIn("ordinary compose contract", system_prompt)
+        self.assertIn("不需要固定段落、標題、時間軸或專用渲染資料", system_prompt)
+        self.assertNotIn("block-based exception", system_prompt)
+
+    def test_multi_candidate_reply_can_use_adaptive_markdown_without_cards(self):
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{"name": "A 店"}, {"name": "B 店"}]},
+        }])
+        cards = [
+            {"candidate_ref": "place_a", "name": "A 店", "category": "restaurant"},
+            {"candidate_ref": "place_b", "name": "B 店", "category": "cafe"},
+        ]
+        composed = _fc_result(tool_calls=[{
+            "name": "compose_public_reply",
+            "arguments": {
+                "messages": [
+                    "我會先這樣比較：\n\n- **A 店**：距離近，適合直接吃飯。\n- **B 店**：比較適合吃完後坐著聊。",
+                ],
+                "presentation_class": "grounded_recommendation",
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=composed,
+        ) as provider:
+            reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
+        self.assertIn("- **A 店**", reply)
+        self.assertIn("- **B 店**", reply)
+        self.assertIsNone(card_decision)
+        self.assertEqual(metrics.presentation_blocks, [])
+        self.assertIn("多個候選、比較、步驟或清楚分組", provider.call_args.kwargs["system_prompt"])
+
+    def test_disabled_cards_do_not_prompt_browse_or_curated_presentation(self):
+        prompt = _synthesizer_system_prompt(
+            "grounded_result", True, "default", place_cards_enabled=False,
+        )
+        self.assertIn("card_intent 固定使用 none", prompt)
+        self.assertNotIn("card_intent=browse", prompt)
+        self.assertNotIn("card_intent=curated", prompt)
+        self.assertIn("candidate refs", prompt)
+        disabled_schema = _compose_public_reply_tool_schema(place_cards_enabled=False)
+        self.assertEqual(
+            disabled_schema["function"]["parameters"]["properties"]["card_intent"]["enum"],
+            ["none"],
+        )
+
+    def test_disabled_place_fallback_also_has_no_cards(self):
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{"name": "候選店"}]},
+        }])
+        cards = [{"candidate_ref": "place_a", "name": "候選店", "category": "restaurant"}]
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            side_effect=RuntimeError("provider unavailable"),
+        ):
+            reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
+        self.assertIn("候選店", reply)
+        self.assertIsNone(card_decision)
+        self.assertEqual(metrics.presentation_blocks, [])
 
     def test_itinerary_card_intent_none_does_not_render_candidates(self):
         slc = self._slice([{

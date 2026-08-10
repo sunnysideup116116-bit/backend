@@ -104,7 +104,7 @@ Synthesizer 也會套用 `capabilities.py` 的用詞真相（不得宣稱「隨�
 
 ### 階段 6：結果與 Trace
 
-`AgentResult` 回傳（reply、sources、place_cards、llm_call_metrics、assessment 狀態等）；Final reply 必須與 Synthesizer 節點結果相同。Trace 只存 allowlisted metadata（plan 摘要、guard codes、tool result codes、event sequence、latency、Synthesizer fallback code），**不含 prompt、原句、arguments、tool result、ID、revision 或 raw exception**。
+`AgentResult` 回傳（reply、sources、place_cards、llm_call_metrics、assessment 狀態等）；Final reply 必須與 Synthesizer 節點結果相同。`AYUE_PUBLIC_PLACE_CARDS_ENABLED` 關閉時，Places/Web 的 `place_cards` 與 `presentation_blocks` 維持空集合，但 candidate/ref projection 仍可供 Web 與 Synthesizer 內部 grounding 使用。Trace 只存 allowlisted metadata（plan 摘要、guard codes、tool result codes、event sequence、latency、Synthesizer fallback code），**不含 prompt、原句、arguments、tool result、ID、revision 或 raw exception**。
 
 ## 3. 寫入確認流程（confirmation）
 

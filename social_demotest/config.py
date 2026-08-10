@@ -34,6 +34,9 @@ AYUE_MAPS_MONGO_CACHE = os.getenv("AYUE_MAPS_MONGO_CACHE", "off").strip().lower(
 GOOGLE_PLACES_SERVER_API_KEY = os.getenv("GOOGLE_PLACES_SERVER_API_KEY", "").strip()
 GOOGLE_MAPS_BROWSER_API_KEY = os.getenv("GOOGLE_MAPS_BROWSER_API_KEY", "").strip()
 AYUE_GOOGLE_PLACE_CARDS_ENABLED = os.getenv("AYUE_GOOGLE_PLACE_CARDS_ENABLED", "off").strip().lower() == "on"
+# Public place-card rendering is off for the current demo.  The server-side
+# candidate projection, refs, IDs, and map URLs remain available internally.
+AYUE_PUBLIC_PLACE_CARDS_ENABLED = os.getenv("AYUE_PUBLIC_PLACE_CARDS_ENABLED", "off").strip().lower() == "on"
 # Place Details Photos SKU bills the media bytes only (free 1,000/month).
 # The photos field itself rides along in Text Search Pro at no extra cost.
 AYUE_GOOGLE_PLACE_PHOTOS_ENABLED = os.getenv("AYUE_GOOGLE_PLACE_PHOTOS_ENABLED", "off").strip().lower() == "on"
