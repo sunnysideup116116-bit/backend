@@ -49,11 +49,13 @@ facts, and context-sensitive requests should prefer one or two relevant,
 authoritative extracts. Simple explicit lookups may finish from direct search
 evidence; extraction is not mechanically required for every query.
 
-The loop allows at most three tool-producing calls plus one finish-only
-decision. Existing search/extract budgets and initial parallel search remain
-unchanged; decision tools follow current observations and remaining budget.
+The research/tool phase allows at most three tool-producing calls. A separate
+bounded finish-only phase gets one final decision whenever observations exist;
+decision/model failures do not consume Web tool budget or remove that phase.
+Existing search/extract budgets and initial parallel search remain unchanged;
+finish-only exposes no search/extract capability.
 
-硬上限由 `web_research.py` 定義：最多 3 次 tool-producing call 加 1 次 finish-only decision、3 次總工具呼叫、3 次 search（首輪最多 2 個 query、refine 最多 1 個 query）、1 次 extract（最多 2 個 URL）。模型輸出格式錯誤時只重試一次 typed decision，不會增加工具額度。
+硬上限由 `web_research.py` 定義：最多 3 次 tool-producing call、3 次總工具呼叫、3 次 search（首輪最多 2 個 query、refine 最多 1 個 query）、1 次 extract（最多 2 個 URL），以及獨立 1 次 finish-only decision。模型輸出格式錯誤時只重試一次 typed decision，不會增加工具額度；研究階段失敗後仍保留 finish-only 機會。
 
 每次 search query 都由 server 綁回 Planner 的 `answer_target`。若 task 正在驗證 Places 候選，還會綁定 server-owned `place_candidate_*` reference；模型不能靠名稱猜測候選身分。
 

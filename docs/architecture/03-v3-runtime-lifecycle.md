@@ -181,10 +181,12 @@ When the Planner emits `agent="web"`, Scheduler dispatches the registered
 `v3/web_runtime.py` runner and collects one typed result. Web Runtime returns
 each bounded `web.search`/`web.extract` observation to the Web Agent before the
 next decision, then emits one typed `web_research.v1` result for Synthesizer.
-The runtime owns at most three tool-producing calls plus one finish-only
-decision. It keeps the existing two initial searches, one refinement search,
-and one extract step over two URLs; the finish decision does not consume tool
-budget.
+The runtime owns a research/tool phase with at most three tool-producing calls
+and a separate bounded finish-only phase. It keeps the existing two initial
+searches, one refinement search, and one extract step over two URLs. Decision or
+model failures do not consume tool budget; when observations exist, the
+finish-only phase still gets its final decision opportunity and cannot execute a
+new Web tool.
 Evidence is graded against the original answer target; adjacent-only or
 conflicting evidence cannot become an answered claim. Missing credentials,
 model failure, and no direct evidence have separate typed outcomes.

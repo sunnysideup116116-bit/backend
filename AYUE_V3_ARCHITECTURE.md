@@ -672,10 +672,12 @@ location lookup and does not expose Web tools.
 `web.search` and `web.extract` remain typed Tool Registry capabilities. Web
 research behavior stays in the Web Runtime, while the Web Agent remains the
 decision contract. The runtime receives a minimal guarded execution adapter
-(`v3/guarded_execution.py`) and never calls Tavily directly. The loop is
-strictly bounded to at most 3 tool-producing Web calls plus 1 finish-only
-decision. It keeps 2 initial search queries, 1 refinement query, and 1 extract
-step over at most 2 URLs. Each observation is projected and returned to the Web
+(`v3/guarded_execution.py`) and never calls Tavily directly. The research/tool
+phase remains strictly bounded to at most 3 tool-producing Web calls, while a
+separate bounded finish-only phase receives one final decision opportunity. It
+keeps 2 initial search queries, 1 refinement query, and 1 extract step over at
+most 2 URLs. Decision/model failures do not increment tool counters or remove
+the finish opportunity. Each observation is projected and returned to the Web
 Agent before its next decision; raw provider payloads never enter Planner,
 trace, or final composition.
 
@@ -742,14 +744,13 @@ result is `degraded/model_failure` and retains the observed safe source catalog
 instead of rewriting the whole run as unavailable with empty sources.
 
 A malformed or missing Web decision function call receives exactly one
-typed-decision retry with the same round tools and budgets. The retry does not
-execute a Web capability by itself and does not enlarge the three-round,
-three-tool-call research budget; a second invalid decision still fails closed
-as `model_failure`. Retryable provider timeout, rate-limit, and 5xx failures
-use stable trace-safe codes. If a Web observation already succeeded but a
-later decision call fails, Web Runtime spends the remaining finish-only round
-to recover the evidence result; it never issues an extra search or opens an
-unbounded loop.
+typed-decision retry with the same phase tools and budgets. The retry does not
+execute a Web capability by itself or increment the three-tool-call research
+budget. Research decisions have a separate finite cap; after that phase, one
+finish-only decision is attempted whenever observations exist, including after
+a late decision/model failure. Retryable provider timeout, rate-limit, and 5xx
+failures use stable trace-safe codes; the finish phase never issues an extra
+search or opens an unbounded loop.
 
 `web_finish_decision` asks the model only for bounded semantic booleans
 (`evidence_conflicts_target`, `has_direct_evidence`,
