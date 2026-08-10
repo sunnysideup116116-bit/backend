@@ -67,7 +67,7 @@ def _cleanup(now: float) -> None:
         _RUNS.popitem(last=False)
 
 
-def begin_run(run_id: str, user_id: str) -> None:
+def begin_run(run_id: str, user_id: str, *, surface: str = "public") -> None:
     if not local_debug_enabled():
         return
     now = time.time()
@@ -76,6 +76,7 @@ def begin_run(run_id: str, user_id: str) -> None:
         _RUNS[run_id] = {
             "run_id": run_id,
             "user_id": user_id,
+            "surface": surface if surface in {"public", "private"} else "public",
             "status": "running",
             "started_at": now,
             "updated_at": now,

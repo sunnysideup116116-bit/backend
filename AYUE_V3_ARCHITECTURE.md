@@ -829,3 +829,40 @@ validates each fragment against the correct person's snapshot and composes
 viewer direction. Invalid or older stored output uses the same selected-style
 fallback. Reprojection is read-only for live proposals; accepted/declined
 history is never rewritten.
+
+## Conversation compaction (shadow-first)
+
+Public Ayue conversation continuity is owned by
+`services/conversation_compaction_service.py`. It selects only the canonical
+`<user>_ai_assistant` room and keeps the newest 12 messages hot. V2 rolling
+compaction starts only when more than 30 uncompacted messages exist; each
+accepted revision merges the previous validated summary with the next bounded
+message batch. The six-field typed projection is stored in
+`conversation_compactions`; source messages are never deleted or replaced.
+Rejected candidates do not replace the last-good projection or advance its
+watermark. Accepted snapshots are retained for 30 days in
+`conversation_compaction_revisions`.
+
+`conversation_compaction_jobs` provides an owner-scoped lease and coalesces
+duplicate triggers, so one owner cannot run concurrent compaction workers.
+Failed candidates enter a five-minute retry cooldown, foreground fallback turns
+do not enqueue compaction, and the worker uses `AYUE_COMPACTION_MODEL` or the
+configured fast model with one provider attempt. Public and Private consumption
+are independent gates:
+`AYUE_PUBLIC_CONVERSATION_CONTINUITY` and
+`AYUE_PRIVATE_PUBLIC_CONTINUITY`, both off by default. Private receives only
+the four-field privacy projection and never receives Ayue commitments or
+recent decisions. Human-human rooms are outside this service.
+
+The local-only inspector shows the last-good revision, accepted/rejected runs,
+trigger policy, lease/job status, and cooldown through the loopback-protected
+`/api/debug/conversation-context/*` endpoints and
+`scripts/inspect_conversation_context.py`. Its manual Shadow trigger may bypass
+the automatic 30-message high watermark and a failed-job cooldown for rapid
+local testing. It still keeps the newest 12 messages hot and never bypasses an
+active owner lease.
+
+Roll out in this order: enable `AYUE_CONVERSATION_COMPACTION_MODE=shadow` with
+both consumers off, inspect pass rate and coverage, then enable Public, and
+only after that enable the Private four-field adapter. There is no message
+deletion or transcript rewrite step.

@@ -24,9 +24,21 @@ from services.profile_projection import (
     safe_recent_context,
 )
 from services.skill_loader import load_profile_skill
+from services.profile_processing_ledger import (
+    claim_profile_message as claim_ledger_message,
+    ensure_profile_processing_ledger_indexes,
+    finish_profile_message,
+)
 
 PROFILE_RUNS = db["profile_skill_runs"]
 NO_STORE_RE = re.compile(r"(?:不要記|別記|不用記|不必記)")
+
+
+def _completion_text(response: Any) -> str:
+    """Accept provider response objects and lightweight test doubles alike."""
+    return str(getattr(response, "content", response) or "")
+
+
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,50}$")
 TRAVEL_ACTIVITY_ALIASES = {"travel", "travelling", "traveling", "trip", "旅遊", "旅行", "出國玩"}
 RECENT_FIELD_NAMES = ("activity", "destination", "timing", "companion_intent", "temporal_status")
@@ -85,7 +97,7 @@ def _compose_recent_context_summary(fields: dict[str, Any]) -> str:
 最多 32 個中文字，不加引號、不加解釋，只輸出句子。
 欄位：{json.dumps(typed_fields, ensure_ascii=False)}"""
     try:
-        summary = _clean(generate_chat_completion(prompt, temperature=0.2).content, 48)
+        summary = _clean(_completion_text(generate_chat_completion(prompt, temperature=0.2)), 48)
     except Exception:
         return fallback
     if (
@@ -182,6 +194,7 @@ def ensure_profile_skill_indexes() -> None:
         PROFILE_RUNS.create_index([("user_id", 1), ("created_at", -1)])
     except Exception as exc:
         print(f"Profile skill index setup skipped: {exc}")
+    ensure_profile_processing_ledger_indexes()
 
 
 def _trace(user_id: str, mode: str, payload: dict[str, Any]) -> None:
@@ -206,7 +219,9 @@ def _claim_profile_message(user_id: str, message_id: str, mode: str) -> bool:
             }},
             upsert=True,
         )
-        return result.upserted_id is not None
+        if result.upserted_id is None:
+            return False
+        return claim_ledger_message(user_id, message_id, mode=mode)
     except DuplicateKeyError:
         return False
     except Exception as exc:
@@ -357,7 +372,7 @@ def _retry_recent_context_contract(
 目前有效的 typed episode（只能判斷是否延續，不是新 evidence）：{json.dumps(active_episode or {}, ensure_ascii=False)}
 本人原始訊息：{message}"""
     try:
-        data = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True).content)
+        data = json.loads(_completion_text(generate_chat_completion(prompt, temperature=0, json_output=True)))
         return ProfileExtractionDecision.model_validate(data).recent_context
     except Exception:
         return None
@@ -417,7 +432,7 @@ JSON schema：{{"recent_context":{{"action":"update|clear|none","confidence":0.0
 本人原始訊息：{message}
 """
     try:
-        data = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True).content)
+        data = json.loads(_completion_text(generate_chat_completion(prompt, temperature=0, json_output=True)))
         contract = ProfileExtractionDecision.model_validate(data)
     except Exception as exc:
         return {"recent_context": {**blank, "reason_code": f"model_{type(exc).__name__}"}, "memories": [], "memory_codes": [f"model_{type(exc).__name__}"], "policy_versions": {"recent-context": recent_skill["version"], "memory": memory_skill["version"]}, "contract": {}}
@@ -610,6 +625,10 @@ def process_profile_message(user_id: str, message: str, message_id: str | None, 
             memory_error = exc.error_code
         except Exception as exc:
             memory_error = type(exc).__name__
+    ledger_status = "applied" if recent_changed or saved_memories else "no_signal"
+    if memory_error:
+        ledger_status = "failed"
+    finish_profile_message(user_id, message_id, ledger_status, error_code=memory_error)
     _trace(user_id, mode, {"message_id": message_id, "surface": surface, "match_id": match_id,
                              "policy_versions": decision["policy_versions"],
                              "recent_context": {"reason_code": decision["recent_context"]["reason_code"], "changed": recent_changed,

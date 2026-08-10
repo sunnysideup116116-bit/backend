@@ -575,6 +575,7 @@ def _build_prompt(slice_payload: dict[str, Any], candidate_summaries: list[dict[
         "observations": observations,
         "recent_messages": slice_payload.get("recent_messages") or [],
         "background_memory": str(slice_payload.get("recent_context") or "").strip()[:300],
+        "conversation_continuity": slice_payload.get("conversation_continuity"),
         "user_location": slice_payload.get("user_location") or "",
         "clock": slice_payload.get("clock") or {},
         "candidate_cards": candidate_summaries,

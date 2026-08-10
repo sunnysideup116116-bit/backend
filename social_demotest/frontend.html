@@ -1351,6 +1351,7 @@
         let lastDebugTrace = [];
         let lastDebugRunId = null;
         let lastDebugRunStatus = null;
+        let lastConversationContextDebug = null;
         let debugTracePollTimer = null;
         let pendingMediatorNotification = null;
         let acceptedContacts = [];
@@ -5756,16 +5757,21 @@ if (metadata.event_type === "date_coordination_form") {
         }
 
         async function refreshAyueDebugTrace() {
-            if (!lastDebugRunId || !currentUserId) return;
+            if (!currentUserId) return;
             try {
-                const res = await fetch(
-                    `/api/debug/ayue-runs/${encodeURIComponent(lastDebugRunId)}?user_id=${encodeURIComponent(currentUserId)}`,
-                    {cache: "no-store"}
-                );
-                if (!res.ok) return;
-                const run = await res.json();
-                lastDebugTrace = Array.isArray(run.events) ? run.events : [];
-                lastDebugRunStatus = run.status || lastDebugRunStatus;
+                if (lastDebugRunId) {
+                    const res = await fetch(
+                        `/api/debug/ayue-runs/${encodeURIComponent(lastDebugRunId)}?user_id=${encodeURIComponent(currentUserId)}`,
+                        {cache: "no-store"}
+                    );
+                    if (res.ok) {
+                        const run = await res.json();
+                        lastDebugTrace = Array.isArray(run.events) ? run.events : [];
+                        lastDebugRunStatus = run.status || lastDebugRunStatus;
+                    }
+                }
+                const contextRes = await fetch(`/api/debug/conversation-context/users/${encodeURIComponent(currentUserId)}`, {cache: "no-store"});
+                if (contextRes.ok) lastConversationContextDebug = await contextRes.json();
                 const panel = document.getElementById("llm-metrics-panel");
                 if (panel && !panel.classList.contains("hidden")) renderLlmMetricsContent();
                 if (lastDebugRunStatus === "running") scheduleDebugTraceRefresh(700);
@@ -5774,10 +5780,89 @@ if (metadata.event_type === "date_coordination_form") {
             }
         }
 
+        function conversationShadowStatusMessage(payload, context = null) {
+            const status = String((payload || {}).status || "unknown");
+            if (status === "queued") return "已排入 Shadow 壓縮，正在背景執行。";
+            if (status === "coalesced") return "已有同一位使用者的壓縮工作，這次已合併。";
+            if (status === "below_threshold") return "尚未超過壓縮門檻，不需要執行。";
+            if (status === "cooldown") {
+                const retryAt = Number((((context || {}).job || {}).next_retry_at) || 0);
+                const seconds = Math.max(1, Math.ceil(retryAt - Date.now() / 1000));
+                return `上一次壓縮失敗，冷卻中，約 ${seconds} 秒後可重試。`;
+            }
+            if (status === "disabled") return "Shadow 壓縮目前未啟用。";
+            if (status === "rejected") return "這次壓縮請求被安全規則拒絕。";
+            return `Shadow 壓縮狀態：${status}`;
+        }
+
+        async function queueConversationShadowFromDebug(button = null) {
+            if (!currentUserId) return;
+            button = button || (window.event && window.event.currentTarget) || document.activeElement;
+            if (!button || button.tagName !== "BUTTON") button = null;
+            const originalText = button ? button.textContent : "";
+            if (button) {
+                button.disabled = true;
+                button.textContent = "排入中…";
+            }
+            try {
+                const response = await fetch(`/api/debug/conversation-context/users/${encodeURIComponent(currentUserId)}/shadow`, {method: "POST"});
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const payload = await response.json();
+                await refreshAyueDebugTrace();
+                showAppToast(conversationShadowStatusMessage(payload, lastConversationContextDebug));
+                if (payload.status === "queued" || payload.status === "coalesced") {
+                    for (let attempt = 0; attempt < 30; attempt += 1) {
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                        await refreshAyueDebugTrace();
+                        const job = (lastConversationContextDebug || {}).job || {};
+                        if (job.status === "completed") {
+                            showAppToast(job.result_code === "accepted"
+                                ? "Shadow 壓縮完成，新的 rolling summary 已保存。"
+                                : `Shadow 壓縮完成：${job.result_code || "completed"}`);
+                            break;
+                        }
+                        if (job.status === "failed") {
+                            const latest = ((lastConversationContextDebug || {}).latest_shadow_runs || [])[0] || {};
+                            const issues = Array.isArray(latest.issue_codes) && latest.issue_codes.length
+                                ? `（${latest.issue_codes.join(", ")}）` : "";
+                            showAppToast(`Shadow 壓縮未採用：${job.result_code || "failed"}${issues}`);
+                            break;
+                        }
+                    }
+                }
+            } catch (error) {
+                showAppToast(`Shadow 壓縮請求失敗：${error.message || "unknown error"}`);
+            } finally {
+                if (button && button.isConnected) {
+                    button.disabled = false;
+                    button.textContent = originalText;
+                }
+            }
+        }
+
         function renderLlmMetricsContent() {
             const content = document.getElementById("llm-metrics-content");
             if (!content) return;
             if (!lastDebugTrace || !lastDebugTrace.length) {
+                if (lastConversationContextDebug) {
+                    const context = lastConversationContextDebug;
+                    const record = context.record || {};
+                    const modes = context.modes || {};
+                    const evaluation = record.evaluation || {};
+                    const job = context.job || {};
+                    const policy = context.trigger_policy || {};
+                    content.innerHTML = '<div class="debug-detail-container border border-[#55e6d9]/40 p-3 bg-[#081c22] text-xs">' +
+                        '<b class="text-[#55e6d9]">Conversation Context / Memory</b>' +
+                        '<div class="grid grid-cols-2 gap-2 mt-2 text-[11px]">' +
+                        '<div>mode<br><b>' + escapeDebugHtml(String(modes.compaction || "off")) + '</b></div>' +
+                        '<div>evaluator<br><b>' + escapeDebugHtml(String(evaluation.status || "unavailable")) + '</b></div>' +
+                        '<div>revision<br><b>' + escapeDebugHtml(String(record.revision || 0)) + '</b></div>' +
+                        '<div>next batch<br><b>' + escapeDebugHtml(String((context.next_batch || {}).status || "unknown")) + '</b></div></div>' +
+                        '<div class="text-[10px] text-gray-400 mt-2">Public=' + escapeDebugHtml(String(modes.public_continuity || false)) + ' · Private=' + escapeDebugHtml(String(modes.private_continuity || false)) + ' · job=' + escapeDebugHtml(String(job.status || "idle")) + ' · high/keep=' + escapeDebugHtml(String(policy.high_watermark || "—")) + '/' + escapeDebugHtml(String(policy.keep_recent || "—")) + '</div>' +
+                        debugDetailButton("Summary", record.summary, "#55e6d9") + ' ' + debugDetailButton("Private projection", record.private_projection, "#fff1b8") + ' ' + debugDetailButton("Job", job, "#ffd166") + ' ' + debugDetailButton("Recent runs", context.latest_shadow_runs || [], "#8a72b8") +
+                        '<button type="button" onclick="queueConversationShadowFromDebug()" class="ml-2 px-2 py-1 border border-[#55e6d9]/50 rounded hover:bg-white/10">排入 Shadow Compaction</button></div>';
+                    return;
+                }
                 content.innerHTML = '<p class="text-sm text-gray-400">尚無執行數據。傳送訊息後再點擊查看。</p>';
                 return;
             }
@@ -5794,6 +5879,25 @@ if (metadata.event_type === "date_coordination_form") {
 
             // Legacy V2 rendering
             let html = "";
+            if (lastConversationContextDebug) {
+                const context = lastConversationContextDebug;
+                const record = context.record || {};
+                const modes = context.modes || {};
+                const evaluation = record.evaluation || {};
+                const job = context.job || {};
+                const policy = context.trigger_policy || {};
+                html += '<div class="debug-detail-container border border-[#55e6d9]/40 p-3 bg-[#081c22] text-xs mb-3">' +
+                    '<div class="flex items-center justify-between gap-2"><b class="text-[#55e6d9]">Conversation Context / Memory</b>' +
+                    '<button type="button" onclick="queueConversationShadowFromDebug()" class="px-2 py-1 border border-[#55e6d9]/50 rounded hover:bg-white/10">排入 Shadow Compaction</button></div>' +
+                    '<div class="grid grid-cols-4 gap-2 mt-2 text-[11px]">' +
+                    '<div>mode<br><b>' + escapeDebugHtml(String(modes.compaction || "off")) + '</b></div>' +
+                    '<div>revision<br><b>' + escapeDebugHtml(String(record.revision || 0)) + '</b></div>' +
+                    '<div>covered<br><b>' + escapeDebugHtml(String(record.covered_message_count || 0)) + '</b></div>' +
+                    '<div>evaluator<br><b>' + escapeDebugHtml(String(evaluation.status || "unavailable")) + '</b></div></div>' +
+                    '<div class="text-[10px] text-gray-400 mt-2">Public=' + escapeDebugHtml(String(modes.public_continuity || false)) + ' · Private=' + escapeDebugHtml(String(modes.private_continuity || false)) + ' · next=' + escapeDebugHtml(String((context.next_batch || {}).status || "unknown")) + ' · job=' + escapeDebugHtml(String(job.status || "idle")) + ' · high/keep=' + escapeDebugHtml(String(policy.high_watermark || "—")) + '/' + escapeDebugHtml(String(policy.keep_recent || "—")) + '</div>' +
+                    debugDetailButton("Summary", record.summary, "#55e6d9") + ' ' + debugDetailButton("Private projection", record.private_projection, "#fff1b8") + ' ' + debugDetailButton("Job", job, "#ffd166") + ' ' + debugDetailButton("Recent runs", context.latest_shadow_runs || [], "#8a72b8") +
+                    '</div>';
+            }
             let loopNum = 0;
             for (const evt of lastDebugTrace) {
                 if (evt.type === "run_started") {
@@ -6139,7 +6243,24 @@ if (metadata.event_type === "date_coordination_form") {
             const executionMode = directPlanEvent ? "direct_chat · Fast Path" :
                 (planEvent.mode === "tasks" ? "tasks · 正常 DAG" : (planEvent.mode || "—"));
 
-            let html = '<div class="border-2 border-[#8a72b8] p-3 bg-[#110a22] mb-3">' +
+            const context = lastConversationContextDebug || {};
+            const contextRecord = context.record || {};
+            const contextModes = context.modes || {};
+            const contextEvaluation = contextRecord.evaluation || {};
+            const contextJob = context.job || {};
+            const contextPolicy = context.trigger_policy || {};
+            const contextCard = '<div class="debug-detail-container border border-[#55e6d9]/40 p-3 bg-[#081c22] mb-3 text-xs">' +
+                '<div class="flex items-center justify-between gap-2"><b class="text-[#55e6d9]">Conversation Context / Memory</b>' +
+                '<button type="button" onclick="queueConversationShadowFromDebug()" class="px-2 py-1 border border-[#55e6d9]/50 rounded hover:bg-white/10">排入 Shadow Compaction</button></div>' +
+                '<div class="grid grid-cols-4 gap-2 mt-2 text-[11px]">' +
+                '<div>mode<br><b>' + escapeDebugHtml(contextModes.compaction || "off") + '</b></div>' +
+                '<div>revision<br><b>' + escapeDebugHtml(String(contextRecord.revision || 0)) + '</b></div>' +
+                '<div>covered<br><b>' + escapeDebugHtml(String(contextRecord.covered_message_count || 0)) + '</b></div>' +
+                '<div>evaluator<br><b>' + escapeDebugHtml(String(contextEvaluation.status || "unavailable")) + '</b></div></div>' +
+                '<div class="text-[10px] text-gray-400 mt-2">Public=' + escapeDebugHtml(String(contextModes.public_continuity || false)) + ' · Private=' + escapeDebugHtml(String(contextModes.private_continuity || false)) + ' · next=' + escapeDebugHtml(String((context.next_batch || {}).status || "unknown")) + ' · job=' + escapeDebugHtml(String(contextJob.status || "idle")) + ' · high/keep=' + escapeDebugHtml(String(contextPolicy.high_watermark || "—")) + '/' + escapeDebugHtml(String(contextPolicy.keep_recent || "—")) + '</div>' +
+                debugDetailButton("Summary", contextRecord.summary, "#55e6d9") + ' ' + debugDetailButton("Private projection", contextRecord.private_projection, "#fff1b8") + ' ' + debugDetailButton("Job", contextJob, "#ffd166") + ' ' + debugDetailButton("Recent runs", context.latest_shadow_runs || [], "#8a72b8") +
+                '</div>';
+            let html = contextCard + '<div class="border-2 border-[#8a72b8] p-3 bg-[#110a22] mb-3">' +
                 '<div class="flex items-center justify-between gap-2">' +
                 '<div class="text-[#ffd166] font-bold text-sm">V3 執行流程</div>' +
                 '<span class="text-[10px] px-2 py-0.5 border" style="color:' + statusColor + ';border-color:' + statusColor + '">' + statusText + '</span></div>' +
@@ -6268,7 +6389,9 @@ if (metadata.event_type === "date_coordination_form") {
         }
 
         function toggleDetail(btn) {
-            const existing = btn.closest(".border-2").querySelector(".detail-expanded");
+            const container = btn.closest(".debug-detail-container, .border-2");
+            if (!container) return;
+            const existing = container.querySelector(".detail-expanded");
             if (existing) {
                 existing.remove();
                 return;
@@ -6277,7 +6400,7 @@ if (metadata.event_type === "date_coordination_form") {
             const div = document.createElement("div");
             div.className = "detail-expanded mt-1 p-1 border border-[#8a72b8] bg-[#0a0618] text-[10px] text-[#fff1b8] overflow-x-auto whitespace-pre-wrap max-h-60 overflow-y-auto";
             div.textContent = text;
-            btn.closest(".border-2").appendChild(div);
+            container.appendChild(div);
         }
 
         async function loadModelSettings() {

@@ -14,6 +14,7 @@ from .contracts import AgentTurnContext, PublicAgentTurnContext, TurnClockV1
 from .capabilities import CAPABILITY_MANIFEST_VERSION
 from .public_relationship_projection import mentioned_contact_refs, validated_mentioned_contact_ids
 from .time_context import build_turn_clock
+from services.conversation_compaction_service import load_public_continuity
 
 
 INTERNAL_ID_RE = re.compile(r"(?:@?seed_user_[\w-]+|@?demo_user|@?user[_-]?\d+)", re.IGNORECASE)
@@ -172,11 +173,13 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
         if label:
             memories.append(label)
     mentioned_ids, validation_overflow = validated_mentioned_contact_ids(ctx.user_id, ctx.mentioned_ids)
+    continuity = load_public_continuity(ctx.user_id)
     return PublicAgentTurnContext(
         user_id=ctx.user_id, room_id=ctx.room_id, message=_clean_text(ctx.message, 1600),
         recent_messages=history, recent_context=safe_recent_context(profile.get("current_context"), ""),
         user_location=safe_profile_location(profile).get("display_name", ""),
         relevant_memories=memories, active_proposal=active_prompt,
+        conversation_continuity=continuity,
         latest_match_outcome=outcome, clock=turn_clock,
         calendar_draft=calendar_draft, calendar_recent_reference=calendar_recent_reference,
         calendar_recent_mutation=calendar_recent_mutation,
