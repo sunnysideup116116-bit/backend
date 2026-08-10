@@ -8,7 +8,8 @@ from unittest.mock import MagicMock, patch
 from services.ayue_agent.contracts import AgentTurnContext, AgentResult, PublicAgentTurnContext, TurnClockV1
 from services.ayue_agent.v3.calendar_commands import CalendarCommand
 from services.ayue_agent.v3.calendar_drafts import clear_draft, get_draft, public_projection
-from services.ayue_agent.v3.sub_agents.calendar_agent import CalendarAgentResult, run as run_calendar_agent
+from services.ayue_agent.v3.sub_agents.calendar_agent import CalendarAgentResult
+from services.ayue_agent.v3 import calendar_runtime
 from services.ayue_agent.v3.contracts import Plan, SubTask, SubTaskResult, SubTaskStatus, ToolProposal
 from services.ayue_agent.v3.planner import PlannerMetrics
 from services.ayue_agent.v3.confirmation import ConfirmationManager
@@ -223,7 +224,7 @@ class V3SchedulerTests(unittest.TestCase):
         ))
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
              patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
-             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": runner}), \
+             patch("services.ayue_agent.v3.calendar_runtime.run_calendar", side_effect=runner), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation") as create_confirmation, \
              patch("services.ayue_agent.v3.scheduler.execute_tool", return_value=MagicMock(
@@ -317,7 +318,7 @@ class V3SchedulerTests(unittest.TestCase):
              ]), \
              patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
              patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", side_effect=build_context), \
-             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": runner}), \
+             patch("services.ayue_agent.v3.calendar_runtime.run_calendar", side_effect=runner), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
              patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
@@ -391,7 +392,6 @@ class V3SchedulerTests(unittest.TestCase):
              ]), \
              patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
              patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", side_effect=build_context), \
-             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": run_calendar_agent}), \
              patch("services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools", side_effect=provider_results), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
@@ -458,7 +458,7 @@ class V3SchedulerTests(unittest.TestCase):
              ]), \
              patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
              patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", side_effect=build_context), \
-             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": runner}), \
+             patch("services.ayue_agent.v3.calendar_runtime.run_calendar", side_effect=runner), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
              patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
@@ -523,7 +523,7 @@ class V3SchedulerTests(unittest.TestCase):
              ]), \
              patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
              patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", side_effect=build_context), \
-             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {"calendar": runner}), \
+             patch("services.ayue_agent.v3.calendar_runtime.run_calendar", side_effect=runner), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
              patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
@@ -574,9 +574,8 @@ class V3SchedulerTests(unittest.TestCase):
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
              patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
              patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", side_effect=build_context), \
-             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
-                 "calendar": MagicMock(return_value=(CalendarAgentResult(commands=[command]), _sub_metrics())),
-             }), \
+             patch("services.ayue_agent.v3.calendar_runtime.run_calendar",
+                   return_value=(CalendarAgentResult(commands=[command]), _sub_metrics())), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
              patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
              patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
@@ -591,6 +590,145 @@ class V3SchedulerTests(unittest.TestCase):
         payload = create_confirmation.call_args.kwargs["payload"]
         self.assertEqual(payload["plans"][0]["form"]["date"], "2026-08-12")
         self.assertIsNone(get_draft("owner"))
+
+    def test_calendar_smoke_missing_end_time_reaches_clarification(self):
+        """The exact smoke phrase must preserve the old end-time clarification."""
+        clear_draft("owner")
+        self.addCleanup(clear_draft, "owner")
+        plan = Plan(tasks=[
+            SubTask(id="c1", agent="calendar", depends_on=[], task_brief="幫我新增明天下午三點看牙醫"),
+            SubTask(id="s1", agent="synthesizer", depends_on=["c1"], task_brief="彙整行事曆結果"),
+        ])
+        fixed_clock = TurnClockV1(
+            timezone="Asia/Taipei", utc_iso="2026-08-10T04:00:00+00:00",
+            local_iso="2026-08-10T12:00:00+08:00", local_date="2026-08-10",
+            local_time="12:00", weekday_zh_tw="星期一",
+            temporal_references={"明天": "2026-08-11"},
+        )
+
+        def build_context(raw_ctx, *, clock):
+            return PublicAgentTurnContext(
+                user_id=raw_ctx.user_id, room_id=raw_ctx.room_id,
+                message=raw_ctx.message,
+                calendar_draft=public_projection(get_draft(raw_ctx.user_id)),
+                clock=clock,
+            )
+
+        provider_result = ToolCallResult(content="", tool_calls=[{
+            "name": "calendar.submit_commands",
+            "arguments": {"commands": [{
+                "action": "create", "title": "看牙醫", "date": "明天",
+                "start_time": "15:00",
+            }]},
+        }])
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", side_effect=build_context), \
+             patch("services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools", return_value=provider_result), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
+             patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=(
+                 "請補上結束時間。", None, _synth_metrics(),
+             )) as synth:
+            result = run_public_agent_turn_v3(
+                self._ctx("幫我新增明天下午三點看牙醫"), debug_enabled=True,
+            )
+
+        self.assertTrue(result.handled)
+        create_confirmation.assert_not_called()
+        observation = synth.call_args.args[0].payload["observations"][0]
+        command_result = observation["result"]["calendar_command_result"]
+        self.assertEqual(command_result["status"], "needs_clarification")
+        self.assertEqual(command_result["clarification"]["missing_fields"], ["end_time"])
+        self.assertEqual((get_draft("owner") or {}).get("missing_fields"), ["end_time"])
+
+    def test_calendar_distinct_create_replaces_incomplete_create_draft(self):
+        """A new create must not inherit fields from an earlier create draft."""
+        clear_draft("owner")
+        self.addCleanup(clear_draft, "owner")
+        first_plan = Plan(tasks=[
+            SubTask(id="c1", agent="calendar", depends_on=[], task_brief="幫我新增明天下午三點看牙醫"),
+            SubTask(id="s1", agent="synthesizer", depends_on=["c1"], task_brief="彙整行事曆結果"),
+        ])
+        second_plan = Plan(tasks=[
+            SubTask(id="c2", agent="calendar", depends_on=[], task_brief="下禮拜三去駁二看展 幫我加到行事曆"),
+            SubTask(id="s2", agent="synthesizer", depends_on=["c2"], task_brief="彙整行事曆結果"),
+        ])
+        fixed_clock = TurnClockV1(
+            timezone="Asia/Taipei", utc_iso="2026-08-10T04:00:00+00:00",
+            local_iso="2026-08-10T12:00:00+08:00", local_date="2026-08-10",
+            local_time="12:00", weekday_zh_tw="星期一",
+            temporal_references={"明天": "2026-08-11", "下禮拜三": "2026-08-12"},
+        )
+
+        def build_context(raw_ctx, *, clock):
+            return PublicAgentTurnContext(
+                user_id=raw_ctx.user_id, room_id=raw_ctx.room_id,
+                message=raw_ctx.message,
+                calendar_draft=public_projection(get_draft(raw_ctx.user_id)),
+                clock=clock,
+            )
+
+        provider_results = [
+            ToolCallResult(content="", tool_calls=[{
+                "name": "calendar.submit_commands",
+                "arguments": {"commands": [{
+                    "action": "create", "title": "看牙醫", "date": "明天",
+                    "start_time": "15:00",
+                }]},
+            }]),
+            ToolCallResult(content="", tool_calls=[{
+                "name": "calendar.submit_commands",
+                "arguments": {"commands": [{
+                    "action": "create", "title": "去駁二看展", "date": "下禮拜三",
+                    # The provider copied the previous draft's time even
+                    # though the new user request contains no time.
+                    "start_time": "15:00",
+                    "draft_mode": "continue",
+                }]},
+            }]),
+        ]
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", side_effect=[
+                 (first_plan, _planner_metrics()), (second_plan, _planner_metrics()),
+             ]), \
+             patch("services.ayue_agent.v3.scheduler.build_turn_clock", return_value=fixed_clock), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", side_effect=build_context), \
+             patch("services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools", side_effect=provider_results), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation", return_value={"confirmation_id": "c"}) as create_confirmation, \
+             patch("services.ayue_agent.v3.calendar_commands.calendar_access_enabled", return_value=True), \
+             patch("services.ayue_agent.v3.calendar_commands.conflicts_for_viewer", return_value=[]), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=(
+                 "請補上時間。", None, _synth_metrics(),
+             )):
+            first_result = run_public_agent_turn_v3(
+                self._ctx("幫我新增明天下午三點看牙醫"), debug_enabled=True,
+            )
+            first_draft = get_draft("owner")
+            second_result = run_public_agent_turn_v3(
+                self._ctx("下禮拜三去駁二看展 幫我加到行事曆"), debug_enabled=True,
+            )
+            second_draft = get_draft("owner")
+
+        self.assertTrue(first_result.handled)
+        self.assertEqual((first_draft or {}).get("command", {}).get("title"), "看牙醫")
+        self.assertEqual((first_draft or {}).get("command", {}).get("start_time"), "15:00")
+        self.assertTrue(second_result.handled)
+        command = (second_draft or {}).get("command", {})
+        self.assertEqual(command.get("title"), "去駁二看展")
+        self.assertEqual(command.get("date"), "2026-08-12")
+        self.assertNotIn("start_time", command)
+        self.assertNotIn("end_time", command)
+        self.assertEqual((second_draft or {}).get("missing_fields"), ["start_time", "end_time"])
+        self.assertEqual((second_draft or {}).get("resolved_target"), None)
+        followup_projection = public_projection(second_draft)
+        self.assertEqual(
+            (followup_projection or {}).get("fields"),
+            {"title": "去駁二看展", "date": "2026-08-12"},
+        )
+        create_confirmation.assert_not_called()
 
     def test_failed_dependency_skips_dependent_task(self):
         ctx = self._ctx("幫我找餐廳並篩選")
@@ -632,9 +770,8 @@ class V3SchedulerTests(unittest.TestCase):
             return ([], _sub_metrics())  # write task: no proposal
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
              patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
-             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
-                 "calendar": MagicMock(side_effect=fake_runner),
-             }), \
+             patch("services.ayue_agent.v3.calendar_runtime.run_calendar",
+                   side_effect=fake_runner), \
              patch("services.ayue_agent.v3.scheduler.execute_tool",
                    return_value=MagicMock(ok=True, data={
                        "status": "not_found", "reason_code": "event_not_found",

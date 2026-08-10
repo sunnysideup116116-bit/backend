@@ -90,7 +90,7 @@ Planner 參數（`_CalendarFindArguments`）：
   calendar.list_my_events → _calendar_events → calendar_service.get_calendar_context
   calendar.find_my_event   → _calendar_find_event → calendar_service.find_owned_events
   │
-  ▼ calendar.submit_commands → deterministic preflight
+  ▼ calendar.submit_commands → Calendar Runtime deterministic preflight
   canonicalize relative date（使用 authoritative clock）→ resolve target（需要時只做一次）→ 組 server-owned CalendarMutationPlan
   → 寫入 v3_pending_confirmations（TTL 900s；同 sub-task 多筆 calendar 寫入合併 batch）
   │
@@ -143,14 +143,20 @@ t1 與 t2 平行執行：
 
 **使用者**：「那把電影改到 8/10 吧。」
 
-- Planner 只建立一個 calendar mutation task；Calendar Agent 直接提出含自然語言 target hint 的 typed command，Scheduler preflight 負責唯一 resolve。
+- Planner 只建立一個 calendar mutation task；Calendar Agent 直接提出含自然語言 target hint 的 typed command，Calendar Runtime preflight 負責唯一 resolve。
 - preflight resolve 成 canonical event 後建立 server-owned `CalendarMutationPlan`；canonical event ID/revision 不會回到 LLM，也不會再由 observation 重組 `event_hint`。
 - 阿月回：「要把『8/9 18:00–21:00 電影』改成 8/10 18:00–21:00「電影」嗎？回覆『確認』才會真的變更。」
 - 確認後 `update_personal_event` 執行，回「已更新行程：8/10 18:00–21:00 電影。」
 
 ## Current V3 mutation contract
 
-The current implementation uses `calendar.submit_commands` for Calendar Agent writes. The agent emits authority-free `CalendarCommand` values only. Scheduler preflight resolves each mutation target once and creates server-owned `CalendarMutationPlan` values containing canonical IDs and revisions; those plans never enter an LLM context. Missing fields, ambiguous targets, not-found targets, invalid provider command shapes, and stale recent references return normal clarification outcomes. A ready batch gets one confirmation and executes sequentially with stop-on-first-failure and no automatic rollback. The former direct `calendar.*` write payloads are no longer registered; stale records fail closed without a domain write.
+The current implementation uses `calendar.submit_commands` for Calendar Agent writes. The agent emits authority-free `CalendarCommand` values only. Calendar Runtime preflight resolves each mutation target once and creates server-owned `CalendarMutationPlan` values containing canonical IDs and revisions; those plans never enter an LLM context. Missing fields, ambiguous targets, not-found targets, invalid provider command shapes, and stale recent references return normal clarification outcomes. A ready batch gets one confirmation and executes sequentially with stop-on-first-failure and no automatic rollback. The former direct `calendar.*` write payloads are no longer registered; stale records fail closed without a domain write.
+
+Calendar Runtime is registered with the same `TaskRunnerResult` contract as the
+other V3 runtimes. It returns completed `SubTaskResult` observations only
+after deterministic command interpretation, draft/reference handling, and
+preflight. Scheduler receives only the typed projection and invokes the
+Calendar blocker/result hooks through the domain-neutral registration record.
 
 The typed boundary accepts canonical `action/title/target_hint/target_selector/target_hints`. `target_selector` is a typed hard filter for the old event; mutation `date/start_time/end_time` remain the proposed new form. A closed compatibility adapter maps common provider spellings (`type`, `summary`, `event_hint`, `event_hints`) before strict validation. A unique Calendar read records a 15-minute server-owned recent reference, while incomplete create/update commands record an authority-free 15-minute draft. Both are projected to the model without event IDs or revisions; a follow-up such as 「這筆刪掉」uses the reference directly and never re-runs natural-language resolution.
 The runtime persists these short-lived records in the bounded Mongo collections by default (`AYUE_CALENDAR_STATE_MONGO=on`) and always keeps an in-process fallback for tests/offline demos. A unique `calendar.get_next_my_event` read is the preferred path for “最近一筆／最近有啥行程”; it records the same server-owned recent reference used by a follow-up “他／她／它／這筆” mutation.

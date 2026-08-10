@@ -33,7 +33,7 @@ rg --files tests -g "test_*.py" | Sort-Object
 | `test_v3_sub_agents.py` | 各 sub-agent 可見工具與 proposal contract |
 | `test_v3_synthesizer.py`、`test_v3_public_reply.py`、`test_v3_product_surface.py` | grounded reply、presentation、product identity、place-card selection |
 | `test_v3_web_research.py` | bounded Web loop、證據分級、來源綁定、Places 協作與 itinerary |
-| `test_v3_calendar_commands.py`、`test_v3_calendar_verification.py` | typed Calendar mutation、preflight、clarification、recent mutation verification |
+| `test_v3_calendar_commands.py`、`test_v3_calendar_verification.py`、`test_v3_calendar_runtime.py` | typed Calendar mutation、preflight、clarification、recent mutation verification、runtime boundary and authority isolation |
 | `test_v3_confirmation.py`、`test_v3_write_executors.py` | pending CAS、batch、idempotency、stale 與 domain write path |
 | `test_v3_debug_trace.py`、`test_ayue_agent_stream.py` | trace／NDJSON allowlist 與隱私 |
 | `test_v3_trajectories.py` + `tests/fixtures/` | 匿名化真實失敗案例回放 |

@@ -16,6 +16,7 @@ from services.ayue_agent.v3.sub_agents.web_agent import (
 )
 from services.ayue_agent.v3.synthesizer import synthesize
 from services.ayue_agent.v3.web_research import (
+    MAX_WEB_PROMPT_SEARCH_RESULTS,
     WebEvidenceAssessmentV1,
     anchor_web_search_query,
     anchor_place_search_query,
@@ -72,13 +73,8 @@ def _run_web(task, turn, context_slice, *, seen_keys=None, guard_lock=None,
         append_debug_event=scheduler.append_debug_event,
         debug_enabled=debug_enabled,
     )
-    structured, metrics = web_runtime.run(context_slice, task=task, services=services)
-    result = SubTaskResult(
-        task_id=task.id,
-        status=structured.status,
-        observation=structured.observation,
-        error_code=structured.error_code,
-    )
+    runner_result, metrics = web_runtime.run(context_slice, task=task, services=services)
+    result = runner_result.completed_results[0]
     return [result], metrics
 
 
@@ -186,7 +182,7 @@ class V3WebResearchTests(unittest.TestCase):
         execute_tool.assert_not_called()
 
     def test_scheduler_web_runner_is_domain_runtime_with_shared_services_contract(self):
-        self.assertIs(scheduler._SUB_AGENT_RUNNERS["web"], web_runtime.run)
+        self.assertIs(scheduler._SUB_AGENT_RUNNERS["web"].runner, web_runtime.run)
 
         received = {}
 
@@ -247,6 +243,153 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertIn("has_direct_evidence", parameters["required"])
         self.assertNotIn("coverage", parameters["properties"])
         self.assertNotIn("status", parameters["properties"])
+
+    def test_finish_only_uses_phase_state_even_after_round_three(self):
+        source_url = "https://example.com/forum/post"
+        provider_result = SimpleNamespace(
+            input_tokens=1, output_tokens=1, duration_ms=1, content="",
+            tool_calls=[{"name": "web_finish_decision", "arguments": {
+                "evidence_conflicts_target": False,
+                "has_direct_evidence": True,
+                "direct_evidence_complete": True,
+                "findings": [{
+                    "finding": "The observed source directly supports the request.",
+                    "direct": True,
+                    "source_urls": [source_url],
+                }],
+            }}],
+        )
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            return_value=provider_result,
+        ):
+            decision, metrics = decide_web(
+                _slice(), task_brief="Find exact public evidence", round_index=7,
+                observations=[{"tool": "web.search", "result": _search_result(source_url)}],
+                tool_calls_used=3, search_calls_used=2, extract_calls_used=1,
+                finish_only=True,
+            )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, "finish")
+        self.assertEqual(
+            [tool["function"]["name"] for tool in metrics.tools_raw],
+            ["web_finish_decision"],
+        )
+        self.assertEqual(metrics.input_payload["phase"], "finish")
+        self.assertEqual(metrics.input_payload["available_actions"], ["finish"])
+        self.assertNotIn("第一輪只能", metrics.prompt_raw)
+        self.assertNotIn("第二輪看到", metrics.prompt_raw)
+        self.assertNotIn("第三輪只能", metrics.prompt_raw)
+        self.assertNotIn("先填 assessment", metrics.prompt_raw)
+        self.assertEqual(metrics.error, "")
+
+    def test_search_cap_does_not_drop_later_extract_observation(self):
+        def search_rows(start, count):
+            return [{
+                "title": f"Search result {index}",
+                "url": f"https://example.com/search-{index}",
+                "snippet": f"Search snippet {index}",
+            } for index in range(start, start + count)]
+
+        observations = [
+            {"tool": "web.search", "result": {"results": search_rows(1, 5)}},
+            {"tool": "web.search", "result": {"results": search_rows(6, 5)}},
+            {"tool": "web.extract", "result": {"pages": [{
+                "url": "https://example.com/search-1",
+                "content": "Later extracted evidence must remain visible.",
+                "truncated": False,
+            }]}},
+        ]
+
+        projected = project_web_observations(observations)
+        search_count = sum(
+            len(item["result"]["results"])
+            for item in projected if item["tool"] == "web.search"
+        )
+        extract_items = [item for item in projected if item["tool"] == "web.extract"]
+
+        self.assertEqual(search_count, MAX_WEB_PROMPT_SEARCH_RESULTS)
+        self.assertEqual(len(extract_items), 1)
+        self.assertIn(
+            "Later extracted evidence must remain visible.",
+            extract_items[0]["result"]["pages"][0]["content"],
+        )
+
+    def test_full_runtime_finish_receives_late_extract_content(self):
+        source_url = "https://example.com/target"
+        provider_results = [
+            SimpleNamespace(
+                input_tokens=1, output_tokens=1, duration_ms=1, content="",
+                tool_calls=[{"name": "web_search_decision", "arguments": {
+                    "queries": ["initial discovery"],
+                }}],
+            ),
+            SimpleNamespace(
+                input_tokens=1, output_tokens=1, duration_ms=1, content="",
+                tool_calls=[{"name": "web_search_decision", "arguments": {
+                    "queries": ["refined context"],
+                }}],
+            ),
+            SimpleNamespace(
+                input_tokens=1, output_tokens=1, duration_ms=1, content="",
+                tool_calls=[{"name": "web_extract_decision", "arguments": {
+                    "urls": [source_url],
+                    "extract_query": "direct details",
+                }}],
+            ),
+            SimpleNamespace(
+                input_tokens=1, output_tokens=1, duration_ms=1, content="",
+                tool_calls=[{"name": "web_finish_decision", "arguments": {
+                    "evidence_conflicts_target": False,
+                    "has_direct_evidence": True,
+                    "direct_evidence_complete": True,
+                    "findings": [{
+                        "finding": "The extracted page directly answers the request.",
+                        "direct": True,
+                        "source_urls": [source_url],
+                    }],
+                }}],
+            ),
+        ]
+
+        def fake_execute(tool_call, raw_ctx, *, clock):
+            if tool_call.name == "web.search":
+                return SimpleNamespace(ok=True, data={"results": [{
+                    "title": "Target source",
+                    "url": source_url,
+                    "snippet": "Search discovery result.",
+                }]})
+            return SimpleNamespace(ok=True, data={"pages": [{
+                "url": source_url,
+                "content": "Later extracted evidence must remain visible to the finalizer.",
+                "truncated": False,
+            }]})
+
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(
+                 web_runtime.web_agent,
+                 "generate_chat_completion_with_tools",
+                 side_effect=provider_results,
+             ) as provider, \
+             patch.object(guarded_execution, "execute_tool", side_effect=fake_execute) as execute:
+            results, _metrics = _run_web(
+                SubTask(id="web1", agent="web", task_brief="Find nuanced public evidence"),
+                _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
+                on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
+            )
+
+        self.assertEqual(execute.call_count, 3)
+        self.assertEqual(provider.call_count, 4)
+        self.assertEqual(results[0].observation["status"], "answered")
+        self.assertIn(
+            "Later extracted evidence must remain visible to the finalizer.",
+            provider.call_args_list[-1].args[0],
+        )
+        self.assertEqual(
+            provider.call_args_list[-1].args[1][0]["function"]["name"],
+            "web_finish_decision",
+        )
 
     def test_second_round_allows_only_one_refined_query(self):
         tools = _decision_tools(

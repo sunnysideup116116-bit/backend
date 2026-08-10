@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
 from services.ayue_agent.tool_registry import (
@@ -52,6 +52,9 @@ def web_extract_urls_allowed(turn_ctx: Any, results: Sequence[Any], urls: Sequen
 class GuardedExecutionOutcome:
     result: SubTaskResult
     attempted: bool
+    # Server-private tool metadata is intentionally kept outside the typed
+    # public observation. Calendar uses this to maintain opaque references.
+    private_data: dict[str, Any] | None = None
 
 
 @dataclass
@@ -73,6 +76,17 @@ class GuardedReadExecutor:
     emit_progress: ProgressEmitter
     append_debug_event: DebugEmitter
     debug_enabled: bool = False
+    step_prefix: str = "web"
+    execute_tool_fn: Callable[..., Any] | None = None
+    # Per-task runtime context supplied by Scheduler.  These fields keep the
+    # generic guarded adapter reusable for Calendar and other specialist
+    # runtimes without exposing domain authority to the LLM.
+    prior_observations: list[dict[str, Any]] = field(default_factory=list)
+    max_reads: int = 3
+    create_confirmation: Callable[..., Any] | None = None
+    print_llm_metrics: Callable[[str, Any], Any] | None = None
+    semantic_runner_override: Callable[..., Any] | None = None
+    runtime_state: dict[str, Any] = field(default_factory=dict)
 
     def execute(
         self,
@@ -176,7 +190,10 @@ class GuardedReadExecutor:
                 )
             self.seen_keys.add(key)
 
-        step_id = f"{self.task_id}:web#{call_index}:{proposal.tool_name}"
+        if self.step_prefix:
+            step_id = f"{self.task_id}:{self.step_prefix}#{call_index}:{proposal.tool_name}"
+        else:
+            step_id = f"{self.task_id}#{call_index}:{proposal.tool_name}"
         self.emit_progress(
             self.on_progress,
             "tool_started",
@@ -199,7 +216,8 @@ class GuardedReadExecutor:
             )
         started = time.perf_counter()
         try:
-            tool_result = execute_tool(
+            execute = self.execute_tool_fn or execute_tool
+            tool_result = execute(
                 type("TC", (), {"name": proposal.tool_name, "arguments": safe_args})(),
                 self.turn_ctx._raw_ctx,
                 clock=self.turn_ctx.clock,
@@ -283,5 +301,8 @@ class GuardedReadExecutor:
                 duration_ms=duration_ms,
                 result=tool_result.data,
             )
-        return GuardedExecutionOutcome(result=result, attempted=True)
-
+        return GuardedExecutionOutcome(
+            result=result,
+            attempted=True,
+            private_data=getattr(tool_result, "private_data", None),
+        )

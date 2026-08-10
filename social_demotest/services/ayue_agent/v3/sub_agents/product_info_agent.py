@@ -18,12 +18,14 @@ from services.ayue_agent.capabilities import (
     PRODUCT_KNOWLEDGE_VERSION,
     get_product_knowledge,
 )
-from ..contracts import AgentContextSlice
-from .base import StructuredAgentResult, SubAgentMetrics
+from ..contracts import AgentContextSlice, SubTaskResult, SubTaskStatus
+from ..runtime_registry import TaskRunnerResult
+from .base import SubAgentMetrics
 
 
 MAX_RETRIEVAL_ROUNDS = 2
 MAX_KNOWLEDGE_SECTIONS = 6
+_PRODUCT_INFO_STEP_TEXT = "我先整理一下產品資訊…"
 
 
 # This is an internal retrieval hint table, not the Planner's intent router.
@@ -184,11 +186,75 @@ def retrieve_product_info(task_brief: str) -> dict[str, Any]:
     }
 
 
-def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[StructuredAgentResult, SubAgentMetrics]:
+def before_run(task: Any, services: Any) -> None:
+    """Emit the historical bounded ProductInfo progress envelope."""
+    step_id = f"{task.id}:product_info"
+    services.runtime_state["product_info_started"] = time.perf_counter()
+    services.runtime_state["product_info_step_id"] = step_id
+    services.emit_progress(
+        services.on_progress,
+        "tool_started",
+        trace=services.trace,
+        agent_run_id=services.run_id,
+        step_id=step_id,
+        text=_PRODUCT_INFO_STEP_TEXT,
+        tool_name="product_info.process",
+    )
+    if services.debug_enabled:
+        services.append_debug_event(
+            services.run_id,
+            "tool_started",
+            task_id=task.id,
+            agent=task.agent,
+            step_id=step_id,
+            function="product_info.process",
+            process="bounded_product_knowledge",
+        )
+
+
+def after_run(task: Any, services: Any, result: TaskRunnerResult, _metrics: Any) -> None:
+    started = services.runtime_state.get("product_info_started")
+    if started is None:
+        return
+    duration_ms = round((time.perf_counter() - started) * 1000)
+    step_id = services.runtime_state.get("product_info_step_id") or f"{task.id}:product_info"
+    outcome = "ok"
+    if result.completed_results is not None:
+        outcome = "ok" if all(item.status is SubTaskStatus.OK for item in result.completed_results) else "error"
+    services.emit_progress(
+        services.on_progress,
+        "tool_finished",
+        trace=services.trace,
+        agent_run_id=services.run_id,
+        step_id=step_id,
+        outcome=outcome,
+        duration_ms=duration_ms,
+        tool_name="product_info.process",
+    )
+    if services.debug_enabled:
+        services.append_debug_event(
+            services.run_id,
+            "tool_finished",
+            task_id=task.id,
+            agent=task.agent,
+            step_id=step_id,
+            function="product_info.process",
+            outcome=outcome,
+            duration_ms=duration_ms,
+        )
+
+
+def run(
+    context_slice: AgentContextSlice,
+    *,
+    task: Any,
+    services: Any,
+) -> tuple[TaskRunnerResult, SubAgentMetrics]:
     """Return a structured observation; never return user-facing prose."""
+    del services
     started = time.perf_counter()
     metrics = SubAgentMetrics()
-    text = _brief_text(context_slice, task_brief)
+    text = _brief_text(context_slice, str(getattr(task, "task_brief", "") or ""))
     metrics.input_payload = {
         "message": str(context_slice.payload.get("message") or "")[:800],
         "task_brief": text,
@@ -199,4 +265,8 @@ def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[Structure
         ensure_ascii=False,
     )
     metrics.duration_ms = round((time.perf_counter() - started) * 1000)
-    return StructuredAgentResult(observation={"product_info": observation}), metrics
+    return TaskRunnerResult.from_completed([SubTaskResult(
+        task_id=str(getattr(task, "id", "product_info")),
+        status=SubTaskStatus.OK,
+        observation={"product_info": observation},
+    )]), metrics

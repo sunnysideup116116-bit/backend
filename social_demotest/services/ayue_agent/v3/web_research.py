@@ -191,6 +191,8 @@ def project_web_observations(observations: list[dict[str, Any]]) -> list[dict[st
         if tool == "web.search":
             rows: list[dict[str, Any]] = []
             for row in (data.get("results") or [])[:MAX_WEB_SEARCH_RESULTS_PER_CALL]:
+                if result_count >= MAX_WEB_PROMPT_SEARCH_RESULTS:
+                    break
                 url = _safe_url((row or {}).get("url"))
                 if not url:
                     continue
@@ -231,8 +233,6 @@ def project_web_observations(observations: list[dict[str, Any]]) -> list[dict[st
                 if subject_ref:
                     projected_item["subject_ref"] = subject_ref
                 projected.append(projected_item)
-        if result_count >= MAX_WEB_PROMPT_SEARCH_RESULTS:
-            break
         if char_count >= MAX_WEB_RESEARCH_CONTEXT_CHARS:
             break
     return projected

@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from services.ayue_agent.capabilities import get_product_knowledge
 from services.ayue_agent.contracts import PublicAgentTurnContext, TurnClockV1
-from services.ayue_agent.v3.contracts import Plan, SubTask
+from services.ayue_agent.v3.contracts import Plan, SubTask, SubTaskResult, SubTaskStatus
 from services.ayue_agent.v3.planner import _decompose_tool_schema, _PLANNER_SYSTEM
 from services.ayue_agent.v3.planner import plan_turn
 from services.ai_service import ToolCallResult
@@ -13,7 +13,7 @@ from services.ayue_agent.v3.sub_agents.product_info_agent import (
     MAX_RETRIEVAL_ROUNDS,
     retrieve_product_info,
 )
-from services.ayue_agent.v3.sub_agents.base import StructuredAgentResult
+from services.ayue_agent.v3.runtime_registry import TaskRunnerResult
 
 
 class ProductInfoAgentTests(unittest.TestCase):
@@ -143,10 +143,13 @@ class ProductInfoAgentTests(unittest.TestCase):
         source = inspect.getsource(scheduler.run_public_agent_turn_v3)
         self.assertNotIn('if plan.mode == "product_info"', source)
 
-    def test_structured_agent_result_is_not_a_finished_reply(self):
-        result = StructuredAgentResult(observation={"product_info": {"facts": {}}})
-        self.assertIsNone(result.error_code)
-        self.assertNotIn("reply", result.observation["product_info"])
+    def test_completed_runner_result_is_not_a_finished_reply(self):
+        result = TaskRunnerResult.from_completed([SubTaskResult(
+            task_id="product",
+            status=SubTaskStatus.OK,
+            observation={"product_info": {"facts": {}}},
+        )])
+        self.assertNotIn("reply", result.completed_results[0].observation["product_info"])
 
 
 if __name__ == "__main__":

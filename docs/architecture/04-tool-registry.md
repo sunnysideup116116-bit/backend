@@ -54,7 +54,7 @@
 | `match.start_search` | `start_search` | 無 | `_start_search` → `start_match_search`（入 job 佇列） |
 | `match.decide_active_proposal` | `decide_active_proposal` | `decision`(interested/declined) | `_decide_active_proposal` → revision CAS |
 | `profile.start_assessment` | `assessment_start` | `kind`(basic/deep) | `_start_assessment` → session 啟動 |
-| `calendar.submit_commands` | `calendar_commands` | `commands`（1–10 個 authority-free `CalendarCommand`；`target_selector` 僅篩選既有 update/cancel 目標） | Scheduler deterministic preflight → server-owned `CalendarMutationPlan` → `_execute_calendar_mutation_plans`，依序執行、stop-on-failure |
+| `calendar.submit_commands` | `calendar_commands` | `commands`（1–10 個 authority-free `CalendarCommand`；`target_selector` 僅篩選既有 update/cancel 目標） | Calendar Runtime deterministic preflight → server-owned `CalendarMutationPlan` → `_execute_calendar_mutation_plans`，依序執行、stop-on-failure |
 
 ## 4. 工具可見性（哪些 agent 看得到哪些工具）
 
@@ -101,7 +101,12 @@ sub-agent LLM function calling 輸出 {tool_name, arguments}
 
 ## Current Calendar Agent mutation contract
 
-`calendar.submit_commands` is the registered typed intent entry point for the V3 Calendar Agent. Its `CalendarCommand` schema has no `user_id`, `event_id`, `revision`, `expected_revision`, or `coordination_id`. Scheduler preflight resolves targets once and creates the server-owned `CalendarMutationPlan`; plans never return to the model. `target_selector` is a typed hard filter for the old event and is never reused as the proposed new form. Missing fields, ambiguous, and not-found outcomes are normal clarification results. Removed direct Calendar write tools are not registered; stale confirmation records fail closed.
+`calendar.submit_commands` is the registered typed intent entry point for the V3 Calendar Agent. Its `CalendarCommand` schema has no `user_id`, `event_id`, `revision`, `expected_revision`, or `coordination_id`. Calendar Runtime preflight resolves targets once and creates the server-owned `CalendarMutationPlan`; plans never return to the model. `target_selector` is a typed hard filter for the old event and is never reused as the proposed new form. Missing fields, ambiguous, and not-found outcomes are normal clarification results. Removed direct Calendar write tools are not registered; stale confirmation records fail closed.
+
+The runtime registry exposes Calendar through the same `TaskRunnerResult`
+contract as every other capability. Scheduler receives only completed typed
+observations from Calendar Runtime; command, draft, reference, preflight, and
+authority-bearing plan fields remain inside `calendar_runtime.py`.
 
 `calendar.get_next_my_event` is a bounded read for “最近一筆／最近有啥行程”. Its output is a safe event projection; the executor stores the canonical event reference privately so a subsequent pronoun follow-up can use `target_reference="recent_event"` without another natural-language lookup.
 ## Current Web ownership (V3)
