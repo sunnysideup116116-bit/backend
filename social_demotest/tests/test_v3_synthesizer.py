@@ -40,6 +40,29 @@ class V3SynthesizerTests(unittest.TestCase):
              "map_url": "https://maps.example.com/b", "place_id": "def"},
         ]
 
+    def _web_result(self, *, status="answered", execution_status="completed",
+                    findings=None, limitations=None, source_url="https://example.com/verified"):
+        return {
+            "schema_version": "web_research.v1",
+            "research_question": "What did the verified public source say?",
+            "answer_target": "verified public source answer",
+            "status": status,
+            "execution_status": execution_status,
+            "coverage": "direct_sufficient" if status == "answered" else "direct_partial",
+            "findings": findings if findings is not None else [{
+                "claim": "The verified source says the event starts at 19:00.",
+                "relation": "direct",
+                "source_urls": [source_url],
+            }],
+            "sources": [{
+                "url": source_url,
+                "title": "Verified source",
+                "source_type": "official",
+            }],
+            "limitations": limitations or [],
+            "stop_reason": "evidence_sufficient" if status == "answered" else "partial_coverage",
+        }
+
     def test_produces_reply_from_observations(self):
         slc = self._slice([
             {"task_id": "t1", "status": "ok", "tool": "calendar.list_my_events",
@@ -424,6 +447,84 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIn("全聯公開活動頁", reply)
         self.assertNotIn("不足以整理成可靠答案", reply)
         self.assertEqual(metrics.presentation_class, "grounded_recommendation")
+
+    def test_answered_web_only_result_reaches_synthesizer(self):
+        slc = self._slice([{
+            "task_id": "web1", "status": "ok", "tool": None,
+            "result": self._web_result(),
+        }])
+        slc.payload["recent_messages"] = [{"role": "user", "content": "unrelated private context"}]
+        slc.payload["recent_context"] = "unrelated private memory"
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="A natural answer from the verified source."),
+        ) as provider:
+            reply, card_decision, metrics = synthesize(slc)
+        provider.assert_called_once()
+        self.assertIsNone(card_decision)
+        self.assertEqual(metrics.reply_source, "llm")
+        self.assertIn("A natural answer", reply)
+        self.assertNotIn("查詢結果", reply)
+        self.assertNotIn("unrelated private", metrics.prompt_raw)
+
+    def test_partial_web_only_with_direct_finding_reaches_synthesizer_and_keeps_limitations(self):
+        limitation = "The source does not confirm availability after 20:00."
+        slc = self._slice([{
+            "task_id": "web1", "status": "ok", "tool": None,
+            "result": self._web_result(
+                status="partial",
+                findings=[{
+                    "claim": "The verified source confirms the listed start time.",
+                    "relation": "direct",
+                    "source_urls": ["https://example.com/verified"],
+                }],
+                limitations=[limitation],
+            ),
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content=f"The start time is confirmed. Limitation: {limitation}"),
+        ) as provider:
+            reply, _card_decision, metrics = synthesize(slc)
+        provider.assert_called_once()
+        self.assertEqual(metrics.reply_source, "llm")
+        self.assertIn(limitation, reply)
+
+    def test_web_only_model_cannot_invent_source_url_or_ref(self):
+        result = self._web_result()
+        result["primary_activity"] = {
+            "source_refs": ["web_source_01"],
+            "source_urls": [result["sources"][0]["url"]],
+        }
+        slc = self._slice([{
+            "task_id": "web1", "status": "ok", "tool": None, "result": result,
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(
+                content="The answer is supported by https://evil.example/not-observed and web_source_99.",
+            ),
+        ) as provider:
+            reply, _card_decision, metrics = synthesize(slc)
+        provider.assert_called_once()
+        self.assertEqual(metrics.reply_source, "observation_fallback")
+        self.assertEqual(metrics.fallback_reason, "unsupported_claim")
+        self.assertNotIn("evil.example", reply)
+        self.assertNotIn("web_source_99", reply)
+
+    def test_web_only_observed_source_url_remains_grounded(self):
+        result = self._web_result()
+        observed_url = result["sources"][0]["url"]
+        slc = self._slice([{
+            "task_id": "web1", "status": "ok", "tool": None, "result": result,
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content=f"The source is {observed_url}."),
+        ):
+            reply, _card_decision, metrics = synthesize(slc)
+        self.assertEqual(metrics.reply_source, "llm")
+        self.assertIn(observed_url, reply)
 
     def test_plain_places_use_deterministic_markdown_and_requested_limit(self):
         candidates = [

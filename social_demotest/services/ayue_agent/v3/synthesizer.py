@@ -88,6 +88,8 @@ class _ComposePresentationBlock(BaseModel):
 
 
 _TIME_PATTERN = r"^(?:[01]\d|2[0-3]):[0-5]\d$"
+_WEB_URL_RE = re.compile(r"https?://[^\s<>\"']+")
+_WEB_SOURCE_REF_RE = re.compile(r"\bweb_source_[A-Za-z0-9_-]+\b")
 
 
 class _ItineraryStop(BaseModel):
@@ -553,6 +555,9 @@ Editorial grounded recommendation contract:
 
 Web research grounding contract:
 - When an observation contains schema_version=web_research.v1, use its research_question and answer_target as the question authority.
+- For Web-only answered results, and partial results with direct findings, compose a natural answer from that typed result; do not require fixed headings or list formatting.
+- A partial result must retain its limitations. Do not turn a useful direct finding into a complete answer when the result says coverage is partial.
+- Source URLs and web_source_* refs are server-owned metadata. Never invent them; if a link or ref is mentioned, it must match the typed result exactly.
 - evidence_policy=casual_discovery is intended for everyday activities, restaurants, travel, events, promotions, sports, and shops: relevant public social/community/business sources may be summarized with a clear "可能變動／來源公告" caveat. Do not reject a useful directly relevant lead only because it is not an official site.
 - evidence_policy=strict_verification is reserved for explicit official/confirmed requests and medical, legal, financial, or security-risk claims; keep the stricter direct-evidence rule there.
 - status=answered is allowed only when coverage=direct_sufficient and a direct finding exists.
@@ -890,6 +895,57 @@ def _web_research_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None
         if isinstance(result, dict) and result.get("schema_version") == "web_research.v1":
             return result
     return None
+
+
+def _web_grounding_catalog(result: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """Collect the server-validated Web URLs/refs available to the model.
+
+    Source metadata is still assembled by Scheduler. This catalog is only a
+    presentation safety check: any URL or ``web_source_*`` token emitted by the
+    model must already exist in the typed ``web_research.v1`` result.
+    """
+    urls: set[str] = set()
+    refs: set[str] = set()
+
+    def collect(item: Any) -> None:
+        if not isinstance(item, dict):
+            return
+        for key in ("url",):
+            value = str(item.get(key) or "").strip()
+            if value:
+                urls.add(value)
+        for key in ("source_urls",):
+            values = item.get(key) or []
+            if isinstance(values, list):
+                urls.update(str(value).strip() for value in values if str(value).strip())
+        for key in ("source_ref",):
+            value = str(item.get(key) or "").strip()
+            if value:
+                refs.add(value)
+        for key in ("source_refs",):
+            values = item.get(key) or []
+            if isinstance(values, list):
+                refs.update(str(value).strip() for value in values if str(value).strip())
+
+    for item in result.get("sources") or []:
+        collect(item)
+    for item in result.get("findings") or []:
+        collect(item)
+    collect(result.get("primary_activity"))
+    return urls, refs
+
+
+def _web_reply_has_grounded_links(reply: str, result: dict[str, Any]) -> bool:
+    """Reject model-created Web links/refs while keeping server metadata authoritative."""
+    allowed_urls, allowed_refs = _web_grounding_catalog(result)
+    for raw_url in _WEB_URL_RE.findall(reply):
+        normalized = raw_url.rstrip(".,;:!?)]}，。！？；：")
+        if normalized not in allowed_urls:
+            return False
+    for source_ref in _WEB_SOURCE_REF_RE.findall(reply):
+        if source_ref not in allowed_refs:
+            return False
+    return True
 
 
 def _web_research_fallback(result: dict[str, Any]) -> str:
@@ -1285,6 +1341,20 @@ def synthesize(
     itinerary_mode = presentation_mode == "itinerary"
     product_info = _product_info_from_payload(payload)
     web_research = _web_research_from_payload(payload)
+    direct_finding_count = sum(
+        1 for item in (web_research or {}).get("findings", [])
+        if isinstance(item, dict) and item.get("relation") == "direct"
+    )
+    web_only_mode = bool(
+        not itinerary_mode and web_research is not None and not candidate_summaries
+    )
+    web_has_useful_findings = bool(
+        web_only_mode
+        and direct_finding_count
+        and web_research.get("status") in {"answered", "partial"}
+        and web_research.get("execution_status") in {"completed", "degraded"}
+        and web_research.get("stop_reason") not in {"model_failure", "tool_failure", "tool_unavailable"}
+    )
     if not itinerary_mode and web_research is None and _places_only_payload(payload):
         fallback, card_decision, fallback_blocks = _places_only_fallback(payload, candidate_summaries)
         presentation = build_presentation([fallback], "grounded_recommendation")
@@ -1321,7 +1391,7 @@ def synthesize(
         metrics.presentation_messages = presentation.messages if presentation else [fallback]
         metrics.presentation_class = "grounded_recommendation"
         return fallback, None, metrics
-    if not itinerary_mode and web_research is not None and not candidate_summaries and _web_only_payload(payload):
+    if web_only_mode and not web_has_useful_findings and _web_only_payload(payload):
         fallback = _web_research_fallback(web_research)
         presentation = build_presentation([fallback], "grounded_recommendation")
         metrics.reply_source = "observation_fallback"
@@ -1329,14 +1399,29 @@ def synthesize(
         metrics.presentation_messages = presentation.messages if presentation else [fallback]
         metrics.presentation_class = "grounded_recommendation"
         return fallback, None, metrics
-    direct_finding_count = sum(
-        1 for item in (web_research or {}).get("findings", [])
-        if isinstance(item, dict) and item.get("relation") == "direct"
-    )
     tools = [_compose_public_reply_tool_schema()] if itinerary_mode or candidate_summaries or direct_finding_count >= 2 else []
     metrics.tools_raw = tools
     try:
-        prompt = _build_prompt(payload, candidate_summaries)
+        prompt_payload = payload
+        if web_only_mode:
+            # Web-only composition is grounded solely in the typed research
+            # result; recent conversation and unrelated context cannot add
+            # claims to the answer.
+            prompt_payload = {
+                **payload,
+                "message": str(web_research.get("research_question") or payload.get("message") or ""),
+                "recent_messages": [],
+                "recent_context": "",
+                "user_location": "",
+                "clock": {},
+                "observations": [{
+                    "task_id": "web_research",
+                    "status": "ok",
+                    "tool": None,
+                    "result": web_research,
+                }],
+            }
+        prompt = _build_prompt(prompt_payload, candidate_summaries)
         mode = "grounded_result" if payload.get("observations") else "general_conversation"
         system_prompt = _synthesizer_system_prompt(mode, bool(candidate_summaries), presentation_mode)
         metrics.prompt_raw = f"SYSTEM:\n{system_prompt}\nUSER:\n{prompt}"
@@ -1361,11 +1446,19 @@ def synthesize(
         composed = _parse_composed_reply(result, candidate_summaries)
         if composed is not None:
             composed_messages, card_decision, presentation_class, presentation_blocks = composed
-            metrics.reply_source = "llm"
-            metrics.presentation_messages = composed_messages
-            metrics.presentation_blocks = presentation_blocks
-            metrics.presentation_class = presentation_class
-            return "\n\n".join(composed_messages), card_decision, metrics
+            if not web_only_mode or all(
+                _web_reply_has_grounded_links(message, web_research)
+                for message in (
+                    list(composed_messages)
+                    + [str(block.get("markdown") or "") for block in presentation_blocks]
+                )
+            ):
+                metrics.reply_source = "llm"
+                metrics.presentation_messages = composed_messages
+                metrics.presentation_blocks = presentation_blocks
+                metrics.presentation_class = presentation_class
+                return "\n\n".join(composed_messages), card_decision, metrics
+            metrics.fallback_reason = "unsupported_claim"
         card_decision = _parse_card_decision(result)
         validation = validate_public_reply(
             str(result.content or ""),
@@ -1380,6 +1473,8 @@ def synthesize(
                 "unsupported_claim": "unsupported_claim",
                 "internal_meta_reply": "internal_meta_reply",
             }.get(validation.reason or "", "internal_meta_reply")
+        elif web_only_mode and not _web_reply_has_grounded_links(reply, web_research):
+            metrics.fallback_reason = "unsupported_claim"
         else:
             has_opportunity = any(
                 isinstance(item, dict)
@@ -1453,7 +1548,7 @@ def synthesize(
         presentation = build_presentation([fallback], "grounded_recommendation")
         if presentation is not None:
             metrics.reply_source = "observation_fallback"
-            metrics.fallback_reason = "web_research_fallback"
+            metrics.fallback_reason = metrics.fallback_reason or "web_research_fallback"
             metrics.presentation_messages = presentation.messages
             metrics.presentation_blocks = fallback_blocks
             metrics.presentation_class = "grounded_recommendation"
@@ -1462,7 +1557,7 @@ def synthesize(
         fallback = _web_research_fallback(web_research)
         presentation = build_presentation([fallback], "grounded_recommendation")
         metrics.reply_source = "observation_fallback"
-        metrics.fallback_reason = "web_research_fallback"
+        metrics.fallback_reason = metrics.fallback_reason or "web_research_fallback"
         metrics.presentation_messages = presentation.messages if presentation else [fallback]
         metrics.presentation_class = "grounded_recommendation"
         return fallback, None, metrics
