@@ -61,6 +61,51 @@ class AyueMapsToolsTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(nearby.call_args.args[0], "高雄市鹽埕區")
 
+    def test_nearby_location_failure_keeps_safe_subject_without_provider_details(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="鹽埕埔站附近")
+        with patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=False), \
+             patch(
+                 "services.ayue_agent.tools.nearby_places",
+                 side_effect=MapClientError("location_not_found"),
+             ):
+            result = execute_tool(ToolCall(name="places.search_nearby", arguments={
+                "anchor": "鹽埕埔站", "categories": ["restaurant"],
+            }), ctx)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "location_not_found")
+        self.assertEqual(result.data, {
+            "failure": {
+                "code": "location_not_found",
+                "subject": "鹽埕埔站",
+                "message": "無法解析這個地點",
+            },
+        })
+        self.assertNotIn("ObjectId", str(result.data))
+        self.assertNotIn("Traceback", str(result.data))
+
+    def test_nearby_provider_failures_use_bounded_server_messages(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="附近")
+        for code, message in (
+            ("map_timeout", "地圖查詢逾時"),
+            ("map_unavailable", "地圖服務暫時無法使用"),
+        ):
+            with self.subTest(code=code), \
+                 patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=False), \
+                 patch(
+                     "services.ayue_agent.tools.nearby_places",
+                     side_effect=MapClientError(code),
+                 ):
+                result = execute_tool(ToolCall(name="places.search_nearby", arguments={
+                    "anchor": "鹽埕埔站", "categories": ["cafe"],
+                }), ctx)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.data["failure"], {
+                "code": code,
+                "subject": "鹽埕埔站",
+                "message": message,
+            })
+
     def test_nearby_forwards_cuisine_to_google_search(self):
         ctx = AgentTurnContext(
             user_id="owner", room_id="room", message="我想吃火鍋",
@@ -85,6 +130,31 @@ class AyueMapsToolsTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(google.call_args.kwargs["cuisine"], "火鍋")
         self.assertEqual(google.call_args.kwargs["radius_m"], 1500)
+
+    def test_nearby_forwards_only_requested_enrichments_to_google_search(self):
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="room", message="rating/open hours",
+            user_profile={"profile_location": {"city": "City", "district": "District"}},
+        )
+        payload = [{
+            "name": "Place", "category": "restaurant", "distance_m": 350,
+            "address_summary": "Address", "map_url": "https://www.google.com/maps/place/x",
+            "provider": "google", "place_id": "ChIJabc",
+            "rating": 4.5, "user_rating_count": 100,
+            "opening_hours": {"open_now": True, "weekday_descriptions": []},
+        }]
+        with patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.nominatim_search", return_value={
+                 "label": "City District", "lat": 22.62, "lon": 120.28,
+             }), \
+             patch("services.ayue_agent.tools.search_nearby_places", return_value=payload) as google:
+            result = execute_tool(ToolCall(name="places.search_nearby", arguments={
+                "anchor": "City District", "categories": ["restaurant"],
+                "enrichments": ["hours", "rating", "hours"],
+            }), ctx)
+        self.assertTrue(result.ok)
+        self.assertEqual(google.call_args.kwargs["enrichments"], ["hours", "rating"])
+        self.assertEqual(result.data["places"][0]["rating"], 4.5)
 
     def test_nearby_osm_path_ignores_cuisine_without_google(self):
         ctx = AgentTurnContext(
@@ -129,6 +199,24 @@ class AyueMapsToolsTests(unittest.TestCase):
         self.assertEqual(result.data["distance_m"], 4200)
         self.assertEqual(result.data["duration_text"], "約 15 分鐘")
         self.assertEqual(result.data["distance_basis"], "driving")
+
+    def test_distance_walk_is_opt_in_and_keeps_typed_walking_result(self):
+        google_data = {
+            "origin_label": "Origin", "destination_label": "Destination",
+            "distance_m": 900, "duration_text": "蝝?12 ??",
+            "duration_seconds": 720, "distance_basis": "walking",
+            "travel_mode": "WALK", "attribution": "Google Maps",
+            "attribution_url": "https://www.google.com/maps",
+        }
+        with patch("services.ayue_agent.tools.google_routes_enabled", return_value=True), \
+            patch("services.ayue_agent.tools.measure_distance_matrix", return_value=google_data) as route:
+            result = execute_tool(ToolCall(name="places.measure_distance", arguments={
+                "origin": "Origin", "destination": "Destination", "travel_mode": "WALK",
+            }), AgentTurnContext(user_id="owner", room_id="room", message="walk"))
+        self.assertTrue(result.ok)
+        self.assertEqual(route.call_args.kwargs["travel_mode"], "WALK")
+        self.assertEqual(result.data["distance_basis"], "walking")
+        self.assertEqual(result.data["duration_seconds"], 720)
 
     def test_distance_falls_back_to_osm_haversine_when_google_returns_none(self):
         with patch("services.ayue_agent.tools.google_routes_enabled", return_value=True), \

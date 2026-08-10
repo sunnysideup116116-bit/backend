@@ -122,3 +122,24 @@ insufficient evidence) is implemented in
 three-tool-call research budget followed by one bounded finish-only decision.
 Decision/model failures do not consume tool budget; the finish-only phase
 cannot execute `web.search` or `web.extract`.
+
+### Places Google enrichment contract
+
+`places.search_nearby` accepts optional `enrichments[]` values `rating`,
+`hours`, and `walking`; `places.resolve_place` accepts only `rating` and
+`hours`. The default is an empty list. The executor deduplicates values and
+rejects values outside the registered enum. Ordinary nearby searches remain
+on the base Google Places field mask.
+
+`rating` projects `rating` and `user_rating_count`. `hours` projects bounded
+`opening_hours` data from Google `currentOpeningHours` (`open_now`, next
+open/close timestamps, and up to seven weekday descriptions). `walking`
+projects per-candidate `walking_distance_m` and `walking_duration_seconds`
+from one bounded Routes `computeRouteMatrix` call. The local cap is eight
+destinations: one HTTP matrix request, billed by Google as up to eight
+origin-destination elements, with no one-route call per candidate.
+
+`places.measure_distance` keeps `travel_mode=DRIVE` as its default and accepts
+`WALK` for explicit single-destination requests. Temporary closures, special
+announcements, events, menus, promotions, and social-media updates remain Web
+verification concerns.

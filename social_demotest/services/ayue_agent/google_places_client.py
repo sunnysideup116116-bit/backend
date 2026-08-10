@@ -7,7 +7,7 @@ import math
 import re
 import threading
 import time
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import urlencode, urlsplit
 
 import requests
@@ -16,14 +16,16 @@ import config
 
 
 _TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
-# Field mask drives billing. Keep the projection bounded:
-#   places.photos is Pro (not Enterprise), so photo names ride along free.
-#   rating/userRatingCount/currentOpeningHours are higher-cost fields and must
-#   never be requested here.
-_FIELD_MASK = (
+# Field mask drives billing. Keep the ordinary projection bounded. The optional
+# rating/userRatingCount/currentOpeningHours fields are Enterprise-tier fields
+# and are appended only for an explicitly requested enrichment.
+_BASE_FIELD_MASK = (
     "places.id,places.displayName,places.formattedAddress,places.location,"
     "places.types,places.googleMapsUri,places.photos"
 )
+_FIELD_MASK = _BASE_FIELD_MASK
+_SUPPORTED_ENRICHMENTS = frozenset({"rating", "hours", "walking"})
+_PLACE_FIELD_ENRICHMENTS = frozenset({"rating", "hours"})
 _CATEGORY_QUERIES = {
     "restaurant": "restaurant",
     "cafe": "cafe",
@@ -65,6 +67,83 @@ def google_routes_enabled() -> bool:
 
 def _clean(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+def _normalize_enrichments(
+    enrichments: Iterable[str] | None,
+    *,
+    allowed: frozenset[str] = _SUPPORTED_ENRICHMENTS,
+) -> tuple[str, ...]:
+    values = [str(item or "").strip() for item in (enrichments or [])]
+    unsupported = {value for value in values if value not in allowed}
+    if unsupported:
+        raise GooglePlacesError("invalid_place_enrichment")
+    return tuple(sorted(set(values)))
+
+
+def _places_field_mask(enrichments: tuple[str, ...]) -> str:
+    fields = [_BASE_FIELD_MASK]
+    if "rating" in enrichments:
+        fields.extend(("places.rating", "places.userRatingCount"))
+    if "hours" in enrichments:
+        fields.append("places.currentOpeningHours")
+    return ",".join(fields)
+
+
+def _duration_seconds(value: Any) -> int | None:
+    if isinstance(value, str):
+        raw = value.strip()
+        try:
+            seconds = float(raw[:-1] if raw.endswith("s") else raw)
+        except ValueError:
+            return None
+    elif isinstance(value, dict):
+        try:
+            seconds = float(value.get("seconds") or 0)
+            seconds += float(value.get("nanos") or 0) / 1_000_000_000
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+    if seconds < 0:
+        return None
+    return int(round(seconds))
+
+
+def _opening_hours_projection(item: dict[str, Any]) -> dict[str, Any] | None:
+    raw = item.get("currentOpeningHours")
+    if not isinstance(raw, dict):
+        return None
+    open_now = raw.get("openNow")
+    if not isinstance(open_now, bool):
+        open_now = None
+    descriptions = raw.get("weekdayDescriptions") or []
+    if not isinstance(descriptions, list):
+        descriptions = []
+    return {
+        "open_now": open_now,
+        "next_open_time": _clean(raw.get("nextOpenTime"), 48) or None,
+        "next_close_time": _clean(raw.get("nextCloseTime"), 48) or None,
+        "weekday_descriptions": [
+            _clean(value, 160) for value in descriptions[:7] if _clean(value, 160)
+        ],
+    }
+
+
+def _place_enrichment(item: dict[str, Any], enrichments: tuple[str, ...]) -> dict[str, Any]:
+    extra: dict[str, Any] = {}
+    if "rating" in enrichments:
+        rating = item.get("rating")
+        if isinstance(rating, (int, float)) and not isinstance(rating, bool) and 0 <= rating <= 5:
+            extra["rating"] = float(rating)
+        count = item.get("userRatingCount")
+        if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            extra["user_rating_count"] = count
+    if "hours" in enrichments:
+        hours = _opening_hours_projection(item)
+        if hours is not None:
+            extra["opening_hours"] = hours
+    return extra
 
 
 def _safe_google_maps_url(value: Any) -> str:
@@ -156,10 +235,16 @@ def _photo_url(item: dict[str, Any]) -> str:
 def search_nearby_places(
     anchor_label: str, lat: float, lon: float, categories: list[str], *, limit: int,
     cuisine: str = "", radius_m: int = 1500,
+    enrichments: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve a bounded set of public places; no raw Google payload escapes."""
     if not google_place_cards_enabled():
         raise GooglePlacesError("google_places_disabled")
+    requested_enrichments = _normalize_enrichments(enrichments)
+    place_enrichments = tuple(
+        item for item in requested_enrichments if item in _PLACE_FIELD_ENRICHMENTS
+    )
+    walking_requested = "walking" in requested_enrichments
     requested = [item for item in categories if item in _CATEGORY_QUERIES][:3]
     if not requested:
         raise GooglePlacesError("invalid_place_category")
@@ -173,92 +258,112 @@ def search_nearby_places(
         "label": anchor_label.lower(), "lat": round(lat, 5), "lon": round(lon, 5),
         "categories": tuple(requested), "cuisine": cuisine_clean, "limit": safe_limit,
         "radius_m": safe_radius,
+        # Walking is a post-search Routes enrichment and must not force a
+        # second Places request when the base candidate pool is cached.
+        "enrichments": place_enrichments,
     })
     cached = _cache_get(cache_key)
     if cached is not None:
-        return list(cached)
-    body = {
-        "textQuery": f"{query} near {anchor_label}",
-        "locationBias": {
-            "circle": {
-                "center": {"latitude": lat, "longitude": lon},
-                "radius": float(safe_radius),
-            }
-        },
-        "maxResultCount": safe_limit,
-        "languageCode": "zh-TW",
-    }
-    try:
-        response = requests.post(
-            _TEXT_SEARCH_URL,
-            headers={
-                "X-Goog-Api-Key": str(config.GOOGLE_PLACES_SERVER_API_KEY),
-                "X-Goog-FieldMask": _FIELD_MASK,
-                "Content-Type": "application/json",
+        places = [dict(item) for item in cached]
+    else:
+        body = {
+            "textQuery": f"{query} near {anchor_label}",
+            "locationBias": {
+                "circle": {
+                    "center": {"latitude": lat, "longitude": lon},
+                    "radius": float(safe_radius),
+                }
             },
-            json=body,
-            timeout=(3, 12),
-        )
-    except requests.Timeout as exc:
-        raise GooglePlacesError("google_places_timeout") from exc
-    except requests.RequestException as exc:
-        raise GooglePlacesError("google_places_unavailable") from exc
-    if not response.ok:
-        if response.status_code in {401, 403}:
-            raise GooglePlacesError("google_places_access_denied")
-        if response.status_code == 429:
-            raise GooglePlacesError("google_places_rate_limited")
-        raise GooglePlacesError("google_places_unavailable")
-    try:
-        raw_places = response.json().get("places") or []
-    except ValueError as exc:
-        raise GooglePlacesError("google_places_invalid_response") from exc
-    places: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in raw_places[:10]:
-        place_id = _clean(item.get("id"), 180)
-        display = item.get("displayName") or {}
-        name = _clean(display.get("text") if isinstance(display, dict) else display, 80)
-        location = item.get("location") or {}
+            "maxResultCount": safe_limit,
+            "languageCode": "zh-TW",
+        }
         try:
-            item_lat, item_lon = float(location["latitude"]), float(location["longitude"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if not place_id or not name or place_id in seen:
-            continue
-        seen.add(place_id)
-        map_url = _safe_google_maps_url(item.get("googleMapsUri"))
-        if not map_url:
-            continue
-        distance_m = _distance_m(lat, lon, item_lat, item_lon)
-        # Text Search locationBias is not a hard restriction.  Enforce the
-        # planner-approved radius on the typed projection before any result can
-        # become a candidate card or Web research subject.
-        if distance_m > safe_radius:
-            continue
-        places.append({
-            "name": name,
-            "category": _category(item.get("types") or [], requested),
-            "distance_m": distance_m,
-            "address_summary": _clean(item.get("formattedAddress"), 120),
-            "map_url": map_url,
-            "provider": "google",
-            "place_id": place_id,
-            "photo_url": _photo_url(item),
-        })
-    places = sorted(places, key=lambda item: (item["distance_m"], item["name"]))[:safe_limit]
-    _cache_put(cache_key, list(places), TEXT_SEARCH_TTL_SECONDS)
+            response = requests.post(
+                _TEXT_SEARCH_URL,
+                headers={
+                    "X-Goog-Api-Key": str(config.GOOGLE_PLACES_SERVER_API_KEY),
+                    "X-Goog-FieldMask": _places_field_mask(place_enrichments),
+                    "Content-Type": "application/json",
+                },
+                json=body,
+                timeout=(3, 12),
+            )
+        except requests.Timeout as exc:
+            raise GooglePlacesError("google_places_timeout") from exc
+        except requests.RequestException as exc:
+            raise GooglePlacesError("google_places_unavailable") from exc
+        if not response.ok:
+            if response.status_code in {401, 403}:
+                raise GooglePlacesError("google_places_access_denied")
+            if response.status_code == 429:
+                raise GooglePlacesError("google_places_rate_limited")
+            raise GooglePlacesError("google_places_unavailable")
+        try:
+            raw_places = response.json().get("places") or []
+        except ValueError as exc:
+            raise GooglePlacesError("google_places_invalid_response") from exc
+        places = []
+        seen: set[str] = set()
+        for item in raw_places[:10]:
+            place_id = _clean(item.get("id"), 180)
+            display = item.get("displayName") or {}
+            name = _clean(display.get("text") if isinstance(display, dict) else display, 80)
+            location = item.get("location") or {}
+            try:
+                item_lat, item_lon = float(location["latitude"]), float(location["longitude"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not place_id or not name or place_id in seen:
+                continue
+            seen.add(place_id)
+            map_url = _safe_google_maps_url(item.get("googleMapsUri"))
+            if not map_url:
+                continue
+            distance_m = _distance_m(lat, lon, item_lat, item_lon)
+            # Text Search locationBias is not a hard restriction.  Enforce the
+            # planner-approved radius on the typed projection before any result can
+            # become a candidate card or Web research subject.
+            if distance_m > safe_radius:
+                continue
+            places.append({
+                "name": name,
+                "category": _category(item.get("types") or [], requested),
+                "distance_m": distance_m,
+                "address_summary": _clean(item.get("formattedAddress"), 120),
+                "map_url": map_url,
+                "provider": "google",
+                "place_id": place_id,
+                "photo_url": _photo_url(item),
+                **_place_enrichment(item, place_enrichments),
+            })
+        places = sorted(places, key=lambda item: (item["distance_m"], item["name"]))[:safe_limit]
+        # Cache the Places projection before adding walking fields so a later
+        # walking-only request can reuse this base/enriched candidate pool.
+        _cache_put(cache_key, [dict(item) for item in places], TEXT_SEARCH_TTL_SECONDS)
+    if walking_requested and places:
+        walking = measure_walking_matrix(lat, lon, places)
+        for place in places:
+            route = walking.get(str(place.get("place_id") or ""))
+            if route:
+                place.update(route)
     return places
 
 
-def resolve_place(query: str) -> dict[str, Any] | None:
+def resolve_place(
+    query: str, *, enrichments: Iterable[str] | None = None,
+) -> dict[str, Any] | None:
     """Resolve one explicit public place name into a live Google Place ID."""
     if not google_place_cards_enabled():
         raise GooglePlacesError("google_places_disabled")
+    place_enrichments = _normalize_enrichments(
+        enrichments, allowed=_PLACE_FIELD_ENRICHMENTS,
+    )
     cleaned = _clean(query, 160)
     if not cleaned:
         raise GooglePlacesError("location_required")
-    cache_key = _cache_key("g_resolve", {"query": cleaned.lower()})
+    cache_key = _cache_key(
+        "g_resolve", {"query": cleaned.lower(), "enrichments": place_enrichments},
+    )
     cached = _cache_get(cache_key)
     if cached is not None:
         return dict(cached) if cached else None
@@ -268,7 +373,7 @@ def resolve_place(query: str) -> dict[str, Any] | None:
             _TEXT_SEARCH_URL,
             headers={
                 "X-Goog-Api-Key": str(config.GOOGLE_PLACES_SERVER_API_KEY),
-                "X-Goog-FieldMask": _FIELD_MASK,
+                "X-Goog-FieldMask": _places_field_mask(place_enrichments),
                 "Content-Type": "application/json",
             },
             json=body,
@@ -305,39 +410,53 @@ def resolve_place(query: str) -> dict[str, Any] | None:
         "name": name, "category": category, "distance_m": 0,
         "address_summary": _clean(item.get("formattedAddress"), 120), "map_url": map_url,
         "provider": "google", "place_id": place_id, "photo_url": _photo_url(item),
+        **_place_enrichment(item, place_enrichments),
     }
     _cache_put(cache_key, place, TEXT_SEARCH_TTL_SECONDS)
     return place
 
 
 _ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
-_ROUTES_FIELD_MASK = "routes.distanceMeters,routes.duration,routes.routeLabels"
+_ROUTES_FIELD_MASK = "routes.distanceMeters,routes.duration"
+_ROUTE_MATRIX_URL = "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix"
+_ROUTE_MATRIX_FIELD_MASK = (
+    "originIndex,destinationIndex,status,condition,distanceMeters,duration"
+)
 _ROUTES_TTL_SECONDS = 3600
 
 
-def measure_distance_matrix(origin: str, destination: str) -> dict[str, Any] | None:
-    """Resolve a real driving distance and duration via Routes API Compute Routes.
+def measure_distance_matrix(
+    origin: str, destination: str, *, travel_mode: str = "DRIVE",
+) -> dict[str, Any] | None:
+    """Resolve one route via Routes API Compute Routes.
 
-    Returns {distance_m, duration_text, distance_basis: "driving"} or None on
-    failure. The caller falls back to OSM haversine when this returns None.
+    ``DRIVE`` preserves the existing behavior. ``WALK`` is supported for
+    explicit single-destination distance requests; nearby candidate pools use
+    ``measure_walking_matrix`` below so they do not issue one request per place.
     """
     if not google_routes_enabled():
+        return None
+    mode = str(travel_mode or "DRIVE").strip().upper()
+    if mode not in {"DRIVE", "WALK"}:
         return None
     origin_clean = _clean(origin, 160)
     dest_clean = _clean(destination, 160)
     if not origin_clean or not dest_clean:
         return None
-    cache_key = _cache_key("g_routes", {"o": origin_clean.lower(), "d": dest_clean.lower()})
+    cache_key = _cache_key(
+        "g_routes", {"o": origin_clean.lower(), "d": dest_clean.lower(), "mode": mode},
+    )
     cached = _cache_get(cache_key)
     if cached is not None:
         return dict(cached) if cached else None
-    body = {
+    body: dict[str, Any] = {
         "origin": {"address": origin_clean},
         "destination": {"address": dest_clean},
-        "travelMode": "DRIVE",
-        "routingPreference": "TRAFFIC_UNAWARE",
+        "travelMode": mode,
         "languageCode": "zh-TW",
     }
+    if mode == "DRIVE":
+        body["routingPreference"] = "TRAFFIC_UNAWARE"
     try:
         response = requests.post(
             _ROUTES_URL,
@@ -367,21 +486,7 @@ def measure_distance_matrix(origin: str, destination: str) -> dict[str, Any] | N
     except (TypeError, ValueError):
         return None
     duration_text = ""
-    duration = route.get("duration")
-    # Routes API v2 returns duration as a string like "888s" (protobuf Duration
-    # JSON form), NOT an object. Handle both shapes defensively.
-    seconds = 0
-    if isinstance(duration, str):
-        try:
-            seconds = int(duration.rstrip("s"))
-        except ValueError:
-            seconds = 0
-    elif isinstance(duration, dict):
-        seconds_str = str(duration.get("seconds") or "")
-        try:
-            seconds = int(seconds_str.rstrip("s")) if seconds_str else 0
-        except ValueError:
-            seconds = 0
+    seconds = _duration_seconds(route.get("duration")) or 0
     if seconds > 0:
         if seconds < 60:
             duration_text = f"約 {seconds} 秒"
@@ -394,9 +499,122 @@ def measure_distance_matrix(origin: str, destination: str) -> dict[str, Any] | N
         "destination_label": dest_clean,
         "distance_m": distance_m,
         "duration_text": duration_text,
-        "distance_basis": "driving",
+        "duration_seconds": seconds or None,
+        "distance_basis": "walking" if mode == "WALK" else "driving",
+        "travel_mode": mode,
         "attribution": "Google Maps",
         "attribution_url": "https://www.google.com/maps",
     }
     _cache_put(cache_key, result, _ROUTES_TTL_SECONDS)
+    return result
+
+
+def measure_walking_matrix(
+    origin_lat: float, origin_lon: float, places: list[dict[str, Any]],
+) -> dict[str, dict[str, int]]:
+    """Resolve WALK distance/duration for a bounded candidate pool.
+
+    Routes API REST returns one matrix element per origin/destination pair as
+    an unordered array. Each element is keyed by destinationIndex, and a bad
+    element is independent from the rest of the response. Only successful
+    elements are returned to the caller.
+    """
+    if not google_routes_enabled():
+        return {}
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    seen_ids: set[str] = set()
+    for place in places:
+        place_id = str(place.get("place_id") or "")
+        if not place_id or place_id in seen_ids:
+            continue
+        seen_ids.add(place_id)
+        candidates.append((place_id, place))
+        if len(candidates) >= 8:
+            break
+    if not candidates:
+        return {}
+    destination_ids = tuple(place_id for place_id, _place in candidates)
+    cache_key = _cache_key(
+        "g_route_matrix",
+        {
+            "mode": "WALK",
+            "origin": (round(float(origin_lat), 5), round(float(origin_lon), 5)),
+            "destinations": tuple(sorted(destination_ids)),
+        },
+    )
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return {str(key): dict(value) for key, value in (cached or {}).items()}
+    body = {
+        "origins": [{
+            "waypoint": {
+                "location": {
+                    "latLng": {"latitude": float(origin_lat), "longitude": float(origin_lon)},
+                },
+            },
+        }],
+        "destinations": [
+            {"waypoint": {"placeId": place_id}} for place_id in destination_ids
+        ],
+        "travelMode": "WALK",
+        "languageCode": "zh-TW",
+        "units": "METRIC",
+    }
+    try:
+        response = requests.post(
+            _ROUTE_MATRIX_URL,
+            headers={
+                "X-Goog-Api-Key": str(config.GOOGLE_PLACES_SERVER_API_KEY),
+                "X-Goog-FieldMask": _ROUTE_MATRIX_FIELD_MASK,
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=(3, 12),
+        )
+    except (requests.Timeout, requests.RequestException):
+        return {}
+    if not response.ok:
+        _cache_put(cache_key, {}, _ROUTES_TTL_SECONDS)
+        return {}
+    try:
+        payload = response.json()
+    except ValueError:
+        return {}
+    if isinstance(payload, list):
+        elements = payload
+    elif isinstance(payload, dict):
+        # The REST response is normally a JSON array. Keep a narrow defensive
+        # compatibility path for test doubles/proxies that wrap elements.
+        elements = payload.get("elements") or []
+    else:
+        elements = []
+    result: dict[str, dict[str, int]] = {}
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        try:
+            if int(element.get("originIndex")) != 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        status = element.get("status") or {}
+        if isinstance(status, dict) and status.get("code") not in {None, 0}:
+            continue
+        if element.get("condition") != "ROUTE_EXISTS":
+            continue
+        try:
+            destination_index = int(element.get("destinationIndex"))
+            distance_m = int(element.get("distanceMeters"))
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= destination_index < len(destination_ids)) or distance_m < 0:
+            continue
+        duration_seconds = _duration_seconds(element.get("duration"))
+        if duration_seconds is None:
+            continue
+        result[destination_ids[destination_index]] = {
+            "walking_distance_m": distance_m,
+            "walking_duration_seconds": duration_seconds,
+        }
+    _cache_put(cache_key, dict(result), _ROUTES_TTL_SECONDS)
     return result

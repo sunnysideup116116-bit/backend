@@ -306,6 +306,13 @@ def _observation_dict(task_id: str, result: "SubTaskResult") -> dict[str, Any]:
     }
 
 
+def _failure_observation_from_tool_result(tool_result: Any) -> dict[str, Any] | None:
+    """Pass through only the bounded failure projection supplied by a tool."""
+    data = getattr(tool_result, "data", None)
+    failure = data.get("failure") if isinstance(data, dict) else None
+    return {"failure": failure} if isinstance(failure, dict) else None
+
+
 def _prior_observations_for(
     task: "SubTask", task_results: dict[str, list["SubTaskResult"]],
 ) -> list[dict[str, Any]]:
@@ -376,26 +383,23 @@ def _public_sources(task_results: Any) -> list[dict[str, str]]:
 def _apply_card_decision(
     candidate_cards: list[dict[str, Any]], decision: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
-    """Apply the synthesizer's decide_place_cards decision to candidate cards.
+    """Apply an explicit Synthesizer card decision to candidate cards.
 
-    - show_all → all candidates; None / invalid → a bounded first-three fallback
-    - select → indices filtered, deduped; empty result uses the same fallback
+    - browse → all bounded candidates
+    - select → indices filtered and deduped
     - none → no cards
+
+    Missing or invalid decisions never turn an evidence pool into public cards.
     """
-    if not candidate_cards:
+    if not candidate_cards or not isinstance(decision, dict):
         return []
-    if decision is None:
-        return candidate_cards[:3]
     mode = decision.get("mode")
     if mode == "none":
         return []
     if mode == "show_all":
-        # The legacy decision shape has no semantic browse intent. Keep its
-        # broad display bounded; only the active compose contract can opt into
-        # all retrieved cards explicitly with card_intent=browse.
-        return candidate_cards if decision.get("card_intent") == "browse" else candidate_cards[:3]
+        return candidate_cards if decision.get("card_intent") == "browse" else []
     if mode != "select":
-        return candidate_cards[:3]
+        return []
     indices = decision.get("indices") or []
     selected: list[dict[str, Any]] = []
     seen_ids: set[int] = set()
@@ -409,7 +413,7 @@ def _apply_card_decision(
         seen_ids.add(idx)
         selected.append(candidate_cards[idx])
     if not selected:
-        return candidate_cards[:3]
+        return []
     return selected
 
 
@@ -438,12 +442,6 @@ def _resolve_presentation_blocks(
         except (TypeError, ValueError):
             continue
         markdown = str(raw.get("markdown") or "").strip()[:1400]
-        # Older composer payloads put the user-facing explanation in
-        # card_description. Keep that explanation as ordinary Markdown so
-        # the card remains only the map/place surface; never pass the legacy
-        # field to the UI card renderer.
-        if not markdown:
-            markdown = str(raw.get("card_description") or "").strip()[:1400]
         if message_index < 0 or message_index >= len(messages):
             continue
         card_indices: list[int] = []
@@ -463,29 +461,9 @@ def _resolve_presentation_blocks(
             markdown=markdown,
             place_card_indices=card_indices,
         ))
-    # A model may choose cards without emitting blocks (old fixtures) or omit
-    # one of its selected refs. Keep every rendered card paired with a bounded
-    # Markdown label instead of dumping all cards at the final bubble.
-    for index, card in enumerate(selected_cards):
-        if index in assigned:
-            continue
-        category_labels = {
-            "restaurant": "餐廳", "cafe": "咖啡廳", "bar": "酒吧",
-            "attraction": "景點", "park": "公園",
-        }
-        category = category_labels.get(str(card.get("category") or ""), "地點")
-        distance = str(card.get("distance_label") or "").strip()
-        suffix = "，".join(value for value in (category, distance) if value)
-        name = re.sub(r"\s+", " ", str(card.get("name") or "地點")).strip()[:80]
-        blocks.append(PresentationBlock(
-            message_index=min(index, len(messages) - 1, 2),
-            markdown=f"- **{name}**" + (f" — {suffix}" if suffix else ""),
-            place_card_indices=[index],
-        ))
-        card_block_messages.add(min(index, len(messages) - 1, 2))
-    # New card-only blocks must not hide the compatibility reply.  If the
-    # synthesizer omitted a standalone text block, keep its validated bubble
-    # before the cards.  Older markdown blocks take precedence unchanged.
+    # Card-only blocks come from the Synthesizer's server-owned projection.
+    # If it selected cards without a surrounding block, keep its authored
+    # public message before the cards without inventing a card label.
     for message_index in sorted(card_block_messages - text_block_messages):
         fallback_text = str(messages[message_index] or "").strip()[:1400]
         if not fallback_text:
@@ -818,7 +796,8 @@ def _run_sub_task(
                 )
             print(f"  [{task.id}#{index}] result=FAILED  error_code={tool_result.error_code}")
             results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED,
-                                          tool_name=proposal.tool_name, error_code=tool_result.error_code))
+                                          tool_name=proposal.tool_name, error_code=tool_result.error_code,
+                                          observation=_failure_observation_from_tool_result(tool_result)))
             continue
         _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
                         step_id=step_id, outcome="ok", tool_name=proposal.tool_name,
