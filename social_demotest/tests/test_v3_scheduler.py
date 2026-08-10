@@ -1179,9 +1179,12 @@ class V3SchedulerTests(unittest.TestCase):
             {"name": "店C", "category": "bar", "distance_label": "300 公尺"},
         ]
 
-    def test_card_decision_show_all_returns_all(self):
+    def test_card_decision_browse_returns_all(self):
         cards = self._cards()
-        self.assertEqual(_apply_card_decision(cards, {"mode": "show_all", "indices": []}), cards)
+        self.assertEqual(
+            _apply_card_decision(cards, {"mode": "show_all", "indices": [], "card_intent": "browse"}),
+            cards,
+        )
 
     def test_card_decision_none_returns_empty(self):
         self.assertEqual(_apply_card_decision(self._cards(), {"mode": "none", "indices": []}), [])
@@ -1190,24 +1193,24 @@ class V3SchedulerTests(unittest.TestCase):
         result = _apply_card_decision(self._cards(), {"mode": "select", "indices": [0, 2]})
         self.assertEqual([c["name"] for c in result], ["店A", "店C"])
 
-    def test_card_decision_select_out_of_range_falls_back_to_all(self):
+    def test_card_decision_select_out_of_range_returns_empty(self):
         result = _apply_card_decision(self._cards(), {"mode": "select", "indices": [99]})
-        self.assertEqual(len(result), 3)
+        self.assertEqual(result, [])
 
     def test_card_decision_select_dedupes_indices(self):
         result = _apply_card_decision(self._cards(), {"mode": "select", "indices": [1, 1, 1]})
         self.assertEqual([c["name"] for c in result], ["店B"])
 
-    def test_card_decision_none_decision_returns_all(self):
-        self.assertEqual(_apply_card_decision(self._cards(), None), self._cards())
+    def test_card_decision_none_decision_returns_empty(self):
+        self.assertEqual(_apply_card_decision(self._cards(), None), [])
 
-    def test_card_decision_missing_is_bounded_to_three_candidates(self):
+    def test_card_decision_missing_does_not_inject_candidates(self):
         cards = self._cards() + [{"name": "摨", "category": "park", "distance_label": "400 ?砍偕"}]
-        self.assertEqual(len(_apply_card_decision(cards, None)), 3)
+        self.assertEqual(_apply_card_decision(cards, None), [])
 
-    def test_legacy_show_all_cannot_recreate_card_wall(self):
+    def test_show_all_without_browse_intent_does_not_inject_candidates(self):
         cards = self._cards() + [{"name": "extra", "category": "park", "distance_label": "400"}]
-        self.assertEqual(len(_apply_card_decision(cards, {"mode": "show_all", "indices": []})), 3)
+        self.assertEqual(_apply_card_decision(cards, {"mode": "show_all", "indices": []}), [])
         self.assertEqual(len(_apply_card_decision(cards, {"mode": "show_all", "card_intent": "browse"})), 4)
 
     def test_card_decision_no_candidates_returns_empty(self):
@@ -1688,12 +1691,11 @@ class V3SchedulerAssessmentTests(unittest.TestCase):
 
 
 class V3SchedulerMetadataTests(unittest.TestCase):
-    def test_presentation_block_keeps_explanation_in_markdown_and_selected_index(self):
+    def test_presentation_block_keeps_selected_card_only(self):
         blocks = _resolve_presentation_blocks(
             [{
                 "message_index": 0,
                 "markdown": "",
-                "card_description": "這是距離較近的候選，可以優先比較。",
                 "candidate_refs": ["place_candidate_a"],
             }],
             [{
@@ -1706,10 +1708,9 @@ class V3SchedulerMetadataTests(unittest.TestCase):
         )
         card_block = next(block for block in blocks if block.place_card_indices)
         self.assertEqual(card_block.place_card_indices, [0])
-        self.assertEqual(card_block.markdown, "這是距離較近的候選，可以優先比較。")
-        self.assertIsNone(card_block.card_description)
+        self.assertEqual(card_block.markdown, "")
 
-    def test_presentation_block_missing_note_gets_safe_fallback(self):
+    def test_presentation_block_without_synth_projection_does_not_invent_label(self):
         blocks = _resolve_presentation_blocks(
             [],
             [{
@@ -1720,10 +1721,7 @@ class V3SchedulerMetadataTests(unittest.TestCase):
             }],
             ["附近有一個候選。"],
         )
-        card_block = next(block for block in blocks if block.place_card_indices)
-        self.assertIn("**店A**", card_block.markdown)
-        self.assertIn("餐廳", card_block.markdown)
-        self.assertIsNone(card_block.card_description)
+        self.assertEqual(blocks, [])
 
     def test_place_cards_are_separate_from_web_sources_and_metrics_populated(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="查一下附近餐廳")
@@ -1743,7 +1741,11 @@ class V3SchedulerMetadataTests(unittest.TestCase):
                        "places": [{"name": "店A", "map_url": "https://www.openstreetmap.org/?mlat=25&mlon=121#map=18/25/121"}],
                    }, error_code=None)), \
              patch("services.ayue_agent.v3.synthesizer.synthesize",
-                   return_value=("找到店A", None, _synth_metrics())):
+                   return_value=(
+                       "找到店A",
+                       {"mode": "select", "indices": [0], "card_intent": "explicit_set"},
+                       _synth_metrics(),
+                   )):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             result = run_public_agent_turn_v3(ctx)

@@ -189,16 +189,31 @@ public reply strings, not chat transcript objects. A narrow compatibility
 adapter may retain only bounded `role="assistant"` string content from an
 older provider shape; user/system/tool/unknown-role content is discarded.
 Schema drift is reported as `compose_schema_invalid`.
+The supported `presentation_class` enum is unchanged. At the Synthesizer
+boundary only, legacy `itinerary` is normalized to `grounded_recommendation`;
+any other unsupported value uses the existing safe `conversation` default so
+otherwise valid public messages are not discarded. This metadata compatibility
+does not relax candidate-ref relations, Web URL/source-ref binding, internal-ID
+filtering, or mutation-authority validation.
+`presentation_mode="itinerary"` is a Synthesizer prompt hint, not a rigid
+rendering schema. It uses the ordinary compose contract so the model may use
+natural prose/Markdown without a mandatory stop count or time window. Dates,
+times, and schedule details are included only when supported by the request or
+typed observations; the server does not invent default itinerary times.
 Qualitative atmosphere, quality, and date-suitability claims remain grounded
 by the Synthesizer evidence contract: affirmative claims need matching typed
 evidence, while an explicit limitation is valid when confirmation is not
 available. This is not a general natural-language claim parser.
 
-Web-only `web_research.v1` observations, including partial,
+Web-only `web_research.v1` observations, including answered, partial,
 insufficient-evidence, degraded, and unavailable outcomes, reach the
-Synthesizer first so typed findings and limitations can be expressed naturally.
-`_web_research_fallback` is reserved for provider, compose, grounding, or
-presentation validation degradation.
+Synthesizer first for natural-language composition. The typed result fixes the
+facts, status, limitations, URLs, and source refs; it does not prescribe
+headings, bullet counts, or sections such as 已確認／尚未確認. `_web_research_fallback`
+is reserved for provider, compose, grounding, or presentation validation
+degradation and returns only a minimal bounded claim/limitation reply.
+All Places/Web deterministic fallbacks likewise return short recovery text,
+without fixed headings, candidate dumps, or automatic place-card presentation.
 
 ProductInfo 固定輸出 `product_info.v1` observation；Web 固定輸出 `web_research.v1` observation。這些 `.v1` 是 payload schema，不代表舊 runtime。
 
