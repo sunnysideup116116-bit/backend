@@ -85,7 +85,7 @@ Planner 無效（無 tool call、名字錯誤、schema 不符、逾時）→ **f
 | 每個 sub-agent 的唯讀步數上限（`AYUE_SUBAGENT_MAX_READS`，預設 3） | `step_limit_exceeded` |
 | 寫入工具不得直接執行，必須建立 confirmation | `write_requires_confirmation` |
 
-Guard 通過後 Scheduler 再做三道 runtime 檢查：
+Guard 通過後各 runtime 再做三道 runtime 檢查：
 
 - `@` 系工具（`MENTIONED_RELATIONSHIP`/`MENTIONED_CONTACTS`）若本回合沒有 server 驗證過的 mention id → `mentioned_required` 失敗。
 - `reuse_success_within_turn`（如 `places.measure_distance`）：同 sub-task 內已有成功的相同結果時重用 observation，不再讀一次。
@@ -95,7 +95,7 @@ Guard 通過後 Scheduler 再做三道 runtime 檢查：
 
 唯讀工具經 `tools.py:execute_tool` 執行：依 `executor_key` 分派到對應 facade（calendar/match/profile/relationship/web/places），facade 內用 domain service 讀 canonical 資料，輸出必須通過該工具的 `output_model` 驗證（`extra="forbid"`），失敗回 `invalid_tool_output`。
 
-一般寫入工具在此階段**不會執行**：Guard 回 `write_requires_confirmation`。Calendar Agent 的 `calendar.submit_commands` 由 Scheduler 先做 deterministic preflight（使用 authoritative clock、必要時只 resolve 一次、查衝突、組 preview），產生不暴露給 LLM 的 `CalendarMutationPlan`；舊的 direct Calendar proposal 不再註冊，若由過期 confirmation 送入則 fail closed。在 `v3_pending_confirmations` 插入 pending 紀錄（TTL 900 秒），把 `pending_confirmation` observation 交給 Synthesizer 向使用者確認。missing_fields、invalid_date、ambiguous、not_found、too_many、invalid_interval 不建立 confirmation，而是正常 clarification。
+一般寫入工具在此階段**不會執行**：Guard 回 `write_requires_confirmation`。Calendar Agent 的 `calendar.submit_commands` 由 Calendar Runtime 先做 deterministic preflight（使用 authoritative clock、必要時只 resolve 一次、查衝突、組 preview），產生不暴露給 LLM 的 `CalendarMutationPlan`；舊的 direct Calendar proposal 不再註冊，若由過期 confirmation 送入則 fail closed。在 `v3_pending_confirmations` 插入 pending 紀錄（TTL 900 秒），把 `pending_confirmation` observation 交給 Synthesizer 向使用者確認。missing_fields、invalid_date、ambiguous、not_found、too_many、invalid_interval 不建立 confirmation，而是正常 clarification。
 
 ### 階段 5：Synthesizer（LLM）
 
@@ -114,7 +114,7 @@ Synthesizer 也會套用 `capabilities.py` 的用詞真相（不得宣稱「隨�
 ```text
 Calendar Agent 提出 `calendar.submit_commands` typed command batch
   → command guard（只驗 schema 與 authority-free contract）
-  → deterministic calendar preflight（resolve/衝突/preview；canonical target 只解析一次）
+  → Calendar Runtime: deterministic calendar preflight（resolve/衝突/preview；canonical target 只解析一次）
       → needs_clarification/denied: observation = calendar_command_result（Synthesizer 向使用者追問或說明權限）
       → 成功: 寫入 v3_pending_confirmations {status: pending, expires_at: +900s}
   → Synthesizer 回覆 preview + 「回覆『確認』才會真的變更」
@@ -176,6 +176,13 @@ Calendar Agent 提出 `calendar.submit_commands` typed command batch
 
 > Current lifecycle: Public requests always enter this Scheduler；rollback 只能透過 deployment／commit rollback。
 ## Current Web Agent lifecycle
+
+Every registered runtime uses the same internal `TaskRunnerResult` and
+`run(context_slice, *, task, services)` signature. Proposal runners return
+guarded proposals; Calendar, Web, and ProductInfo runtimes return completed
+`SubTaskResult` values. `RuntimeRegistration` carries optional direct-chat and
+confirmed-result projections, so Scheduler does not branch on domain result
+shapes.
 
 When the Planner emits `agent="web"`, Scheduler dispatches the registered
 `v3/web_runtime.py` runner and collects one typed result. Web Runtime returns

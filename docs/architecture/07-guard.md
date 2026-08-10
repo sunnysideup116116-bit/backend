@@ -11,7 +11,7 @@ Planner (LLM, 拆 DAG)
   → Sub-agent (LLM, 提出 tool proposals)
   → Central Guard (純程式碼, 逐 proposal 審核)   ← 本篇主角
   → runtime-specific guarded adapter 注入 executor 參數 → execute_tool
-  → Scheduler 的 Calendar/write path → prepare_write_confirmation
+  → Calendar Runtime 的 command/preflight path → prepare_write_confirmation
 ```
 
 **核心定位**：
@@ -30,7 +30,7 @@ Planner (LLM, 拆 DAG)
 | 2 | Schema 驗證 | arguments 通過該工具的 `planner_arguments_model`（`planner_arguments_allowed`） | `schema_invalid` |
 | 3 | 重複呼叫 | 同 sub-task 內沒有執行過相同 `tool + arguments`（`tool_call_key` 以 executor 參數的排序 JSON 計算） | `duplicate_call` |
 | 4 | 步數上限 | 該 agent 的唯讀呼叫次數 < `max_reads`（`AYUE_SUBAGENT_MAX_READS`，預設 3） | `step_limit_exceeded` |
-| 5 | 寫入確認 | READ 工具直接通過；**WRITE 工具一律拒絕**，改由 Scheduler 建立 confirmation | `write_requires_confirmation` |
+| 5 | 寫入確認 | READ 工具直接通過；**WRITE 工具一律拒絕**，改由 Scheduler 或 domain runtime 建立 confirmation | `write_requires_confirmation` |
 
 ### 額外的禁止欄位防線（Guard 之外、進入 Guard 之前）
 
@@ -49,8 +49,14 @@ Planner (LLM, 拆 DAG)
 
 ## 4. Guard 被拒絕之後（runtime 的處理）
 
-一般 proposal runner 仍由 `scheduler.py:_run_sub_task` 對每個 proposal 處理；Web
-則由 `v3/guarded_execution.py:GuardedReadExecutor` 在 Web Runtime 內處理：
+一般 proposal runner 仍由 `scheduler.py:_run_sub_task` 對每個 proposal 處理；Calendar
+由 `v3/calendar_runtime.py` 協調 command/preflight，Web 則由
+`v3/guarded_execution.py:GuardedReadExecutor` 在 Web Runtime 內處理：
+
+The registered runtime boundary uses one `TaskRunnerResult`: proposal results
+return to this central guard, while completed Calendar/Web/ProductInfo results
+already contain typed `SubTaskResult` observations. Scheduler does not inspect
+domain command or preflight fields.
 
 ```text
 decision = guard_proposal(proposal, agent_name=task.agent, seen_keys=..., step_count=..., max_reads=...)
@@ -69,8 +75,9 @@ if not decision.ok:
 
 ## 5. Guard 之外的 runtime 檢查（同樣純程式碼）
 
-Guard 通過後，runtime 還做三道確定性檢查（一般 runner 在 Scheduler，Web
-runner 在 `v3/guarded_execution.py`），也屬於「程式審核」範圍：
+Guard 通過後，runtime 還做三道確定性檢查（一般 runner 在 Scheduler，Calendar
+command/preflight 在 `v3/calendar_runtime.py`，Web runner 在
+`v3/guarded_execution.py`），也屬於「程式審核」範圍：
 
 | 檢查 | 時機 | 失敗行為 |
 | --- | --- | --- |

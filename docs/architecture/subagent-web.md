@@ -25,7 +25,7 @@ Web task 的 `task_brief` 必須保留使用者真正要找的 proposition、地
 ## 3. Bounded observation loop
 
 Scheduler 只 dispatch `agent="web"` 的 registered runtime，並收集一個
-`StructuredAgentResult`。round、observation、search/extract counters、finish
+`TaskRunnerResult` 的 completed projection。round、observation、search/extract counters、finish
 decision 與 `web_research.v1` assembly 全部由 `web_runtime.py` 管理；因此
 Scheduler 不需要知道 Web 是 loop-based 還是 single-shot。
 

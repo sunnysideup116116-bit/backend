@@ -73,6 +73,8 @@ Domain sub-agent、schema、Guard、preflight、executor、profile/memory extrac
 | `social_demotest/routers/relationship_quiz.py` | 已接受配對的默契小測驗 HTTP adapters |
 | `social_demotest/routers/public_chat.py` | Public `/api/direct_chat*` adapters；V3 orchestration |
 | `social_demotest/services/ayue_agent/v3/scheduler.py` | 公開 V3 唯一 orchestrator：confirmation 入口、DAG 執行、平行、trace |
+| `social_demotest/services/ayue_agent/v3/runtime_registry.py` | domain-neutral `TaskRunnerResult` 與 runtime registration contract |
+| `social_demotest/services/ayue_agent/v3/calendar_runtime.py` | Calendar-specific guarded reads、authority-free command handling、draft/reference state、preflight、confirmation preparation |
 | `social_demotest/services/ayue_agent/v3/web_runtime.py` | Web domain bounded research loop：round、observation、tool budgets、finish 與 `web_research.v1` |
 | `social_demotest/services/ayue_agent/v3/guarded_execution.py` | Web Runtime 使用的最小 Guard／URL binding／executor argument／`execute_tool` adapter |
 | `social_demotest/services/ayue_agent/v3/place_projection.py` | Places observation 的 bounded public projection 與 Web candidate binding 共用 helper |
@@ -277,6 +279,15 @@ Guard 不審核語意、不猜意圖、不檢查參數「內容」的正確性�
 
 calendar / places / web / match / relationship / profile 七個 domain sub-agent，各自以 function calling 提出 tool proposals。ProductInfo 是額外的 structured read-only specialist：它透過同一 runner registry 回傳 typed observation，不提出副作用 tool proposal。Web 是獨立的 bounded research specialist；Places 只負責地點工具。一般 proposal runner 由 Scheduler 逐一 guard 並執行；Web Runtime 則透過 `GuardedReadExecutor` 執行 Web proposals。單一 call 失敗不丟棄其他 call。
 
+All registered runtimes use one internal `TaskRunnerResult` and the uniform
+`run(context_slice, *, task, services)` signature. A result contains either
+guarded tool proposals or completed `SubTaskResult` values, never both.
+`RuntimeRegistration` owns optional direct-chat blocking and confirmed-result
+projection hooks, keeping Scheduler a domain-neutral DAG orchestrator.
+Calendar Runtime returns completed results after its server-owned
+command/draft/reference/preflight path; Scheduler never inspects Calendar
+command fields or authority-bearing plans.
+
 ### Scheduler（純程式碼）
 
 `run_public_agent_turn_v3` 是唯一 orchestrator：
@@ -303,11 +314,11 @@ calendar / places / web / match / relationship / profile 七個 domain sub-agent
 
 ### Preflight
 
-WRITE proposal 通過 Guard 後，Scheduler 呼叫 `prepare_write_confirmation`：
+WRITE proposal 通過 Guard 後，由 Scheduler 或 domain runtime 準備 confirmation：
 
 - `match.start_search`：先 `assess_match_opportunity`；not_ready 回 missing-basis 問題，active_match_blocked 回「不重複開新搜尋」，ready 才建立 confirmation。
-- `calendar.submit_commands`：Calendar Agent 只提交不含 authority fields 的 `CalendarCommand` batch。Scheduler 使用同一回合的 authoritative clock 做 deterministic preflight；create/update/cancel 的目標若需要只解析一次，產生不暴露給 LLM 的 `CalendarMutationPlan`。missing_fields/invalid_date/ambiguous/not_found/too_many/invalid_interval/stale_revision/invalid_command 是正常 `needs_clarification` outcome，不建立 confirmation。ready 時同一 batch 共用一筆 confirmation，確認後依序執行，第一個真正 failure 後停止。
-- Typed command 只接受 canonical `action/title/target_reference/target_hint/target_selector/target_hints`，以及明確持續時間的 `duration_minutes` 與既有區間平移的 `time_shift_minutes`；`target_selector.date/start_time/end_time` 只篩選要修改或取消的既有行程，mutation 的 `date/start_time/end_time` 永遠是新值。Scheduler 在嚴格驗證前僅為相容 provider 將 `type/summary/event_hint/event_hints` 映射到 canonical 欄位。最近一次唯一選取的行程與未完成 command 只保存 15 分鐘的 server-owned reference/draft projection；projection 不含 event_id/revision，且 reference stale 時不重新做自然語言辨識。
+- `calendar.submit_commands`：Calendar Agent 只提交不含 authority fields 的 `CalendarCommand` batch。Calendar Runtime 使用同一回合的 authoritative clock 做 deterministic preflight；create/update/cancel 的目標若需要只解析一次，產生不暴露給 LLM 的 `CalendarMutationPlan`。missing_fields/invalid_date/ambiguous/not_found/too_many/invalid_interval/stale_revision/invalid_command 是正常 `needs_clarification` outcome，不建立 confirmation。ready 時同一 batch 共用一筆 confirmation，確認後依序執行，第一個真正 failure 後停止。
+- Typed command 只接受 canonical `action/title/target_reference/target_hint/target_selector/target_hints`，以及明確持續時間的 `duration_minutes` 與既有區間平移的 `time_shift_minutes`；`target_selector.date/start_time/end_time` 只篩選要修改或取消的既有行程，mutation 的 `date/start_time/end_time` 永遠是新值。Calendar Runtime 在嚴格驗證前僅為相容 provider 將 `type/summary/event_hint/event_hints` 映射到 canonical 欄位。最近一次唯一選取的行程與未完成 command 只保存 15 分鐘的 server-owned reference/draft projection；projection 不含 event_id/revision，且 reference stale 時不重新做自然語言辨識。
 - `match.decide_active_proposal`：preflight 綁定當下 canonical proposal revision；確認執行時再次比對，stale 即拒絕。
 - `profile.start_assessment`：驗證 kind（basic→big_five、deep→deep_profile）。
 

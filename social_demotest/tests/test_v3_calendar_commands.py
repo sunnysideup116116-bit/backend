@@ -24,7 +24,8 @@ from services.ayue_agent.v3.sub_agents.calendar_agent import CalendarAgentResult
 from services.ayue_agent.v3.sub_agents.calendar_agent import run as run_calendar_agent
 from services.ayue_agent.v3.contracts import SubTask
 from services.ayue_agent.v3.contracts import AgentContextSlice
-from services.ayue_agent.v3.scheduler import _calendar_reference_for_command, _run_sub_task
+from services.ayue_agent.v3.calendar_runtime import _calendar_reference_for_command
+from services.ayue_agent.v3.scheduler import _run_sub_task
 from services.ayue_agent.v3.calendar_references import get_reference, remember_resolved_target
 from services.ayue_agent.v3.sub_agents.base import SubAgentMetrics
 from services.ai_service import ToolCallResult
@@ -475,7 +476,7 @@ class V3CalendarCommandTests(unittest.TestCase):
 
     def test_scheduler_does_not_load_unadvertised_candidate_reference(self):
         command = CalendarCommand(action="cancel", target_reference="candidate_1")
-        with patch("services.ayue_agent.v3.scheduler.get_reference") as get_reference:
+        with patch("services.ayue_agent.v3.calendar_runtime.get_reference") as get_reference:
             result = _calendar_reference_for_command("owner", command, None)
         self.assertIsNone(result)
         get_reference.assert_not_called()
@@ -484,7 +485,7 @@ class V3CalendarCommandTests(unittest.TestCase):
         command = CalendarCommand(action="cancel", target_reference="candidate_1")
         draft = {"candidates": [{"reference": "candidate_1", "label": "8/25 雞排約會"}]}
         with patch(
-            "services.ayue_agent.v3.scheduler.get_reference",
+            "services.ayue_agent.v3.calendar_runtime.get_reference",
             return_value={"event_id": "event-1", "revision": 4},
         ) as get_reference:
             result = _calendar_reference_for_command("owner", command, draft)
@@ -1133,10 +1134,10 @@ class V3CalendarCommandTests(unittest.TestCase):
         )
         preflight = CalendarPreflightResult(status="ready", plans=[plan], preview="修改雞排約會")
         with patch(
-            "services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS",
-            {"calendar": lambda _slice, task_brief: (CalendarAgentResult(commands=[command]), SubAgentMetrics())},
+            "services.ayue_agent.v3.calendar_runtime.run_calendar",
+            return_value=(CalendarAgentResult(commands=[command]), SubAgentMetrics()),
         ), patch(
-            "services.ayue_agent.v3.scheduler.preflight_calendar_commands",
+            "services.ayue_agent.v3.calendar_runtime.preflight_calendar_commands",
             return_value=preflight,
         ), patch(
             "services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation",

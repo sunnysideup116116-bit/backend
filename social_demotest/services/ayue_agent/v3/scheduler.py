@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import inspect
 import re
 import threading
 import time
@@ -45,34 +44,30 @@ from .contracts import (
 )
 from .context_slicer import slice_for_agent
 from .guard import guard_proposal
-from .guard import guard_calendar_commands
 from .guarded_execution import GuardedReadExecutor, web_extract_urls_allowed as _web_extract_urls_allowed
-from .calendar_commands import canonicalize_calendar_command, preflight_calendar_commands
-from .calendar_drafts import (
-    candidate_reference_allowed, clear_draft, get_draft, merge_command, resolved_target_replaced, save_draft,
-)
-from .calendar_references import (
-    DRAFT_TARGET_REFERENCE_KEY,
-    clear_reference,
-    get_reference,
-    remember_event,
-    remember_resolved_target,
-    remember_candidates,
-    public_projection,
-)
-from services.calendar_service import resolve_owned_event_with_candidates
 from .planner import plan_turn, PlannerMetrics, _synthesizer_only_plan
 from . import synthesizer
 from .synthesizer import SynthesizerMetrics
 from .public_reply import build_presentation, validate_public_reply
-from .sub_agents.base import StructuredAgentResult, SubAgentMetrics
+from .sub_agents.base import SubAgentMetrics
 from .confirmation import ConfirmationManager
-from .sub_agents.calendar_agent import run as run_calendar
+from . import calendar_runtime
+from .runtime_registry import (
+    RuntimeRegistration,
+    TaskRunnerResult,
+    normalize_runner_output,
+    proposal_runner,
+    registration_for,
+)
 from .sub_agents.places_agent import run as run_places
 from .sub_agents.match_agent import run as run_match
 from .sub_agents.relationship_agent import run as run_relationship
 from .sub_agents.profile_agent import run as run_profile
-from .sub_agents.product_info_agent import run as run_product_info
+from .sub_agents.product_info_agent import (
+    after_run as product_info_after_run,
+    before_run as product_info_before_run,
+    run as run_product_info,
+)
 from .place_projection import (
     MAX_PLACE_CARDS, MAX_PLACE_CARDS_PER_CATEGORY, _PLACE_CATEGORIES, _distance_label,
     _google_embed_url, _osm_embed_url, _place_candidate_ref,
@@ -118,10 +113,12 @@ def _direct_chat_block_reason(
         return "feature_disabled"
     if pending_records:
         return "pending_confirmation"
-    if getattr(turn, "calendar_draft", None):
-        return "calendar_draft"
-    if getattr(turn, "calendar_recent_mutation", None):
-        return "recent_calendar_mutation"
+    for registered in _iter_runtime_registrations():
+        if registered.direct_chat_blocker is None:
+            continue
+        reason = registered.direct_chat_blocker(turn)
+        if reason:
+            return reason
     if getattr(turn, "recent_context_draft", None):
         return "active_draft"
     if getattr(turn, "active_proposal", None):
@@ -133,6 +130,19 @@ def _direct_chat_block_reason(
     if plan.opportunity is not None and plan.opportunity.signal != "none":
         return "opportunity"
     return None
+
+
+def _iter_runtime_registrations() -> list[RuntimeRegistration]:
+    """Return the currently registered runtime records.
+
+    ``patch.dict`` with a raw callable remains useful for focused tests during
+    the staged migration; production values are always RuntimeRegistration.
+    """
+    return [
+        registration
+        for value in _SUB_AGENT_RUNNERS.values()
+        if (registration := registration_for(value)) is not None
+    ]
 
 _TEST_MODE = os.getenv("AYUE_TEST_MODE", "").strip().lower() in {"1", "true", "on"}
 if _TEST_MODE:
@@ -222,44 +232,41 @@ def clear_demo_runtime_state() -> None:
         if callable(clear):
             clear()
 
-def _proposal_runner(run_fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Adapt proposal-based agents to the shared task runner signature."""
-    def invoke(context_slice: AgentContextSlice, *, task: SubTask, services: GuardedReadExecutor) -> Any:
-        return run_fn(context_slice, task_brief=task.task_brief)
-    return invoke
-
-
 def _invoke_registered_runner(
-    runner: Callable[..., Any],
+    runner: RuntimeRegistration | Callable[..., Any],
     context_slice: AgentContextSlice,
     task: SubTask,
     services: GuardedReadExecutor,
 ) -> Any:
-    """Call the current runner contract while tolerating test-time old stubs."""
-    try:
-        signature_target = getattr(runner, "side_effect", None)
-        if not callable(signature_target):
-            signature_target = runner
-        parameters = inspect.signature(signature_target).parameters.values()
-        accepts_services = any(
-            parameter.name == "services" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters
-        )
-    except (TypeError, ValueError):
-        accepts_services = True
-    if accepts_services:
-        return runner(context_slice, task=task, services=services)
-    return runner(context_slice, task_brief=task.task_brief)
+    """Call one uniform registered runner; no signature inspection is needed."""
+    supplied_registration = isinstance(runner, RuntimeRegistration)
+    registration = registration_for(runner)
+    if registration is None:
+        raise TypeError("runner is not registered")
+    if supplied_registration and registration.legacy_signature:
+        # Compatibility for focused tests/provider doubles during the staged
+        # rollout.  Production registrations all use the uniform contract.
+        return registration.runner(context_slice, task_brief=task.task_brief)
+    return registration.runner(context_slice, task=task, services=services)
 
 
 _SUB_AGENT_RUNNERS = {
-    "calendar": _proposal_runner(run_calendar),
-    "places": _proposal_runner(run_places),
-    "web": web_runtime.run,
-    "match": _proposal_runner(run_match),
-    "relationship": _proposal_runner(run_relationship),
-    "profile": _proposal_runner(run_profile),
-    "product_info": _proposal_runner(run_product_info),
+    "calendar": RuntimeRegistration(
+        runner=calendar_runtime.run,
+        direct_chat_blocker=calendar_runtime.direct_chat_block_reason,
+        confirmed_result_projector=calendar_runtime.confirmed_result_projection,
+        step_prefix="",
+    ),
+    "places": RuntimeRegistration(runner=proposal_runner(run_places)),
+    "web": RuntimeRegistration(runner=web_runtime.run),
+    "match": RuntimeRegistration(runner=proposal_runner(run_match)),
+    "relationship": RuntimeRegistration(runner=proposal_runner(run_relationship)),
+    "profile": RuntimeRegistration(runner=proposal_runner(run_profile)),
+    "product_info": RuntimeRegistration(
+        runner=run_product_info,
+        before_run=product_info_before_run,
+        after_run=product_info_after_run,
+    ),
 }
 
 
@@ -314,31 +321,6 @@ def _prior_observations_for(
             if result.status is not SubTaskStatus.SKIPPED:
                 prior.append(_observation_dict(dep, result))
     return prior
-
-
-def _calendar_reference_for_command(
-    user_id: str,
-    command: Any,
-    draft: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    """Load one server reference after validating its opaque draft token."""
-    if str(getattr(command, "action", "") or "") not in {"update", "cancel"}:
-        return None
-    if (
-        draft
-        and (draft.get("resolved_target") or {}).get("bound")
-        and str(getattr(command, "draft_mode", "") or "") == "continue"
-        and not getattr(command, "target_reference", None)
-    ):
-        reference = get_reference(user_id, reference_key=DRAFT_TARGET_REFERENCE_KEY)
-        if reference:
-            reference["_force"] = True
-            reference["_draft_bound"] = True
-            return reference
-    reference_key = str(getattr(command, "target_reference", "") or "recent_event")
-    if reference_key.startswith("candidate_") and not candidate_reference_allowed(draft, reference_key):
-        return None
-    return get_reference(user_id, reference_key=reference_key)
 
 
 def _public_sources(task_results: Any) -> list[dict[str, str]]:
@@ -568,8 +550,8 @@ def _run_sub_task(
     never held around LLM or tool calls.
     """
     context_slice = slice_for_agent(task.agent, turn_ctx, prior_observations=prior_observations)
-    runner = _SUB_AGENT_RUNNERS.get(task.agent)
-    if runner is None:
+    registration = registration_for(_SUB_AGENT_RUNNERS.get(task.agent))
+    if registration is None:
         return [SubTaskResult(task_id=task.id, status=SubTaskStatus.SKIPPED,
                               skip_reason=f"no runner for agent {task.agent}")], None
 
@@ -595,54 +577,38 @@ def _run_sub_task(
         emit_progress=_emit_progress,
         append_debug_event=append_debug_event,
         debug_enabled=debug_enabled,
+        prior_observations=list(prior_observations),
+        max_reads=MAX_READS,
+        create_confirmation=lambda **kwargs: ConfirmationManager(
+            _CONFIRMATIONS
+        ).create_confirmation(**kwargs),
+        print_llm_metrics=_print_llm_metrics,
     )
+    guarded_executor.step_prefix = registration.step_prefix
+    # Keep the existing Scheduler test/provider seam while the guarded
+    # adapter remains the single execution boundary for every runtime.
+    guarded_executor.execute_tool_fn = execute_tool
+    if registration.before_run is not None:
+        registration.before_run(task, guarded_executor)
 
-    # ProductInfo is a structured read-only specialist rather than a Tool
-    # Registry proposal, but it still needs a user-facing progress state.  Use
-    # the existing bounded public progress envelope so the UI does not sit on
-    # the generic spinner while ProductInfo prepares the Synthesizer input.
-    product_info_started: float | None = None
-    product_info_step_id = f"{task.id}:product_info"
-
-    def _finish_product_info_process(outcome: str) -> None:
-        if product_info_started is None:
-            return
-        duration_ms = round((time.perf_counter() - product_info_started) * 1000)
-        _emit_progress(
-            on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
-            step_id=product_info_step_id, outcome=outcome,
-            duration_ms=duration_ms, tool_name="product_info.process",
-        )
-        if debug_enabled:
-            append_debug_event(
-                run_id, "tool_finished", task_id=task.id, agent=task.agent,
-                step_id=product_info_step_id, function="product_info.process",
-                outcome=outcome, duration_ms=duration_ms,
-            )
-
-    if task.agent == "product_info":
-        product_info_started = time.perf_counter()
-        _emit_progress(
-            on_progress, "tool_started", trace=trace, agent_run_id=run_id,
-            step_id=product_info_step_id,
-            text="我先整理一下產品資訊…",
-            tool_name="product_info.process",
-        )
-        if debug_enabled:
-            append_debug_event(
-                run_id, "tool_started", task_id=task.id, agent=task.agent,
-                step_id=product_info_step_id, function="product_info.process",
-                process="bounded_product_knowledge",
-            )
-
-    sub_started = time.perf_counter()
     try:
-        proposals, agent_metrics = _invoke_registered_runner(
-            runner, context_slice, task, guarded_executor,
+        raw_runner_output = _invoke_registered_runner(
+            registration, context_slice, task, guarded_executor,
         )
+        runner_result, agent_metrics = normalize_runner_output(raw_runner_output)
     except Exception as exc:
         agent_metrics = SubAgentMetrics(error=str(exc))
-        _finish_product_info_process("error")
+        if registration.after_run is not None:
+            registration.after_run(
+                task,
+                guarded_executor,
+                TaskRunnerResult.from_completed([SubTaskResult(
+                    task_id=task.id,
+                    status=SubTaskStatus.FAILED,
+                    error_code="sub_agent_exception",
+                )]),
+                agent_metrics,
+            )
         print(f"  [{task.id}] sub_agent EXCEPTION: {type(exc).__name__}")
         return [SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED, error_code="sub_agent_exception")], agent_metrics
 
@@ -651,119 +617,29 @@ def _run_sub_task(
         if agent_metrics.error:
             print(f"  [{task.id}] error=sub_agent_failed")
 
-    # A structured read-only specialist may return a typed observation directly
-    # instead of tool proposals.  This is a generic runner contract; the
-    # Scheduler does not inspect the specialist or its retrieval internals.
-    if isinstance(proposals, StructuredAgentResult):
-        _finish_product_info_process(
-            "ok" if proposals.status is SubTaskStatus.OK else "error"
+    if runner_result.completed_results is not None:
+        if registration.after_run is not None:
+            registration.after_run(task, guarded_executor, runner_result, agent_metrics)
+        return list(runner_result.completed_results), agent_metrics
+
+    proposals = list(runner_result.proposals or [])
+    if registration.after_run is not None:
+        registration.after_run(task, guarded_executor, runner_result, agent_metrics)
+
+    if not proposals:
+        error_code = (
+            "sub_agent_invalid_proposal"
+            if agent_metrics and agent_metrics.rejected_calls
+            else "sub_agent_no_proposal"
         )
+        print(f"  [{task.id}] result=FAILED  reason={error_code}")
         return [SubTaskResult(
             task_id=task.id,
-            status=proposals.status,
-            observation=proposals.observation,
-            error_code=proposals.error_code,
+            status=SubTaskStatus.FAILED,
+            error_code=error_code,
         )], agent_metrics
 
-    _finish_product_info_process("error" if agent_metrics and agent_metrics.error else "ok")
-
-    calendar_commands = list(getattr(proposals, "commands", []) or [])
-    calendar_command_errors = list(getattr(proposals, "command_errors", []) or [])
-    if not proposals and not calendar_commands:
-        if calendar_command_errors:
-            clarification = calendar_command_errors[0]
-            return [SubTaskResult(
-                task_id=task.id,
-                status=SubTaskStatus.OK,
-                tool_name="calendar.submit_commands",
-                observation={
-                    "calendar_command_result": {
-                        "status": "needs_clarification",
-                        "clarification": {
-                            "code": str(clarification.get("code") or "invalid_command"),
-                            "message": str(clarification.get("message") or "這次行程指令格式無法驗證，請重新描述需求。"),
-                            "command_index": 0,
-                            "missing_fields": [],
-                        },
-                    }
-                },
-            )], agent_metrics
-        # LEGACY-ONLY compatibility path: old read-tool trajectories may still
-        # return a bounded candidate projection, but normal V3 Calendar writes
-        # use submit_commands → preflight and must not chain read → LLM → write.
-        # 寫入任務在候選查詢後沒有提出任何寫入（例如 find 回 not_found、
-        # 或候選歧義無法唯一判斷）是「正確地不動作」，不是失敗。
-        # 把 prior 的 not_found 查詢帶給 synthesizer，讓它優雅回覆。
-        not_found_queries = [
-            str((obs.get("result") or {}).get("query") or "")
-            for obs in prior_observations
-            if obs.get("tool") == "calendar.find_my_event"
-            and (obs.get("result") or {}).get("status") == "not_found"
-            and str((obs.get("result") or {}).get("query") or "").strip()
-        ]
-        if not_found_queries:
-            suggestions: list[dict[str, Any]] = []
-            for query in not_found_queries[:3]:
-                try:
-                    event, resolution, candidates = resolve_owned_event_with_candidates(
-                        turn_ctx.user_id, query, limit=3,
-                    )
-                except Exception:
-                    event, resolution, candidates = None, "not_found", []
-                if not candidates and event is not None:
-                    candidates = [event]
-                if not candidates:
-                    continue
-                records = remember_candidates(turn_ctx.user_id, candidates)
-                projections = [public_projection(record) for record in records if public_projection(record)]
-                if projections:
-                    # Candidate suggestions are retrieval-only.  Do not arm a
-                    # fuzzy result as ``recent_event``: a later terse cancel
-                    # must still carry an explicit candidate choice before any
-                    # destructive plan can be built.
-                    suggestions.append({
-                        "query": query,
-                        "resolution": resolution,
-                        "candidates": projections,
-                    })
-            if suggestions:
-                print(f"  [{task.id}] result=OK (calendar candidate suggestions)")
-                return [SubTaskResult(
-                    task_id=task.id,
-                    status=SubTaskStatus.OK,
-                    tool_name="calendar.find_my_event",
-                    observation={"calendar_candidate_suggestions": suggestions},
-                )], agent_metrics
-            print(f"  [{task.id}] result=OK (no_write_proposed)")
-            return [SubTaskResult(task_id=task.id, status=SubTaskStatus.OK,
-                                  tool_name="calendar.find_my_event",
-                                  observation={
-                                      "no_write_proposed": True,
-                                      "not_found_queries": not_found_queries,
-                                  })], agent_metrics
-        error_code = "sub_agent_invalid_proposal" if agent_metrics and agent_metrics.rejected_calls else "sub_agent_no_proposal"
-        print(f"  [{task.id}] result=FAILED  reason={error_code}")
-        return [SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED, error_code=error_code)], agent_metrics
-
     results: list[SubTaskResult] = []
-    if calendar_command_errors:
-        clarification = calendar_command_errors[0]
-        results.append(SubTaskResult(
-            task_id=task.id,
-            status=SubTaskStatus.OK,
-            tool_name="calendar.submit_commands",
-            observation={
-                "calendar_command_result": {
-                    "status": "needs_clarification",
-                    "clarification": {
-                        "code": str(clarification.get("code") or "invalid_command"),
-                        "message": str(clarification.get("message") or "這次行程指令格式無法驗證，請重新描述需求。"),
-                        "command_index": 0,
-                        "missing_fields": [],
-                    },
-                }
-            },
-        ))
     for index, proposal in enumerate(proposals):
         print(f"  [{task.id}#{index}] proposal: tool={proposal.tool_name}")
 
@@ -954,143 +830,9 @@ def _run_sub_task(
                 function=proposal.tool_name, outcome="ok", duration_ms=tool_duration_ms,
                 result=tool_result.data,
             )
-        private_data = getattr(tool_result, "private_data", {}) or {}
-        reference_payload = private_data.get("calendar_event_reference") if isinstance(private_data, dict) else None
-        if proposal.tool_name.startswith("calendar.") and isinstance(reference_payload, dict):
-            event = reference_payload.get("event")
-            if isinstance(event, dict):
-                remember_event(
-                    turn_ctx.user_id,
-                    event,
-                    safe_label=str(reference_payload.get("safe_label") or ""),
-                )
-        if proposal.tool_name in {"calendar.find_my_event", "calendar.list_my_events"}:
-            if not reference_payload:
-                # A new ambiguous/not-found/list-of-many read must not leave a
-                # previous referent armed for a later 「這筆」 mutation.
-                clear_reference(turn_ctx.user_id)
         print(f"  [{task.id}#{index}] result=OK")
         results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.OK,
                                        tool_name=proposal.tool_name, observation=tool_result.data))
-
-    if calendar_commands:
-        print(f"  [{task.id}] typed calendar commands: {len(calendar_commands)}")
-        draft = get_draft(turn_ctx.user_id) if len(calendar_commands) == 1 else None
-        if draft is not None:
-            try:
-                if resolved_target_replaced(calendar_commands[0], draft):
-                    clear_draft(turn_ctx.user_id)
-                    draft = None
-                calendar_commands = [merge_command(calendar_commands[0], draft)]
-            except Exception:
-                # A stale/incompatible draft must not turn into an executor
-                # failure; the current typed command remains authoritative.
-                clear_draft(turn_ctx.user_id)
-        # Canonicalize before either guard/preflight or clarification
-        # persistence.  The same helper is also used by preflight for direct
-        # callers, so a relative date can never leak into the next turn's draft.
-        canonical_commands = []
-        for command in calendar_commands:
-            canonical_command, _date_error = canonicalize_calendar_command(turn_ctx, command)
-            canonical_commands.append(canonical_command)
-        calendar_commands = canonical_commands
-        recent_reference = None
-        if len(calendar_commands) == 1:
-            recent_reference = _calendar_reference_for_command(
-                turn_ctx.user_id, calendar_commands[0], draft,
-            )
-        reference_map = {}
-        if recent_reference and str(calendar_commands[0].action) in {"update", "cancel"}:
-            same_turn_selected = any(
-                obs.get("tool") == "calendar.find_my_event"
-                and (obs.get("result") or {}).get("status") == "found"
-                for obs in prior_observations
-            )
-            reference_map[0] = {
-                **recent_reference,
-                "_force": bool(recent_reference.get("_force") or same_turn_selected),
-            }
-        command_guard = guard_calendar_commands(calendar_commands)
-        trace["guard_results"].append(command_guard.code.value)
-        if debug_enabled:
-            append_debug_event(
-                run_id, "function_call", task_id=task.id, agent=task.agent,
-                call_index=len(results), call_id=f"{task.id}:calendar.submit_commands",
-                function="calendar.submit_commands",
-                planner_arguments={"commands": [command.model_dump(exclude_none=True) for command in calendar_commands]},
-                guard={"ok": command_guard.ok, "code": command_guard.code.value, "reason": command_guard.reason},
-            )
-        if not command_guard.ok:
-            results.append(SubTaskResult(
-                task_id=task.id, status=SubTaskStatus.FAILED,
-                tool_name="calendar.submit_commands", guard_code=command_guard.code,
-            ))
-        else:
-            preflight = preflight_calendar_commands(
-                turn_ctx,
-                calendar_commands,
-                recent_references=reference_map,
-            )
-            if preflight.status != "ready":
-                clarification = preflight.clarification
-                if (
-                    clarification is not None
-                    and clarification.code != "invalid_date"
-                    and len(calendar_commands) == 1
-                ):
-                    if preflight.resolved_target is not None:
-                        remember_resolved_target(
-                            turn_ctx.user_id,
-                            preflight.resolved_target,
-                        )
-                    save_draft(
-                        turn_ctx.user_id,
-                        calendar_commands[0],
-                        missing_fields=clarification.missing_fields,
-                        candidates=clarification.candidates,
-                        resolved_target=preflight.resolved_target,
-                    )
-                safe_result: dict[str, Any] = {
-                    "calendar_command_result": {
-                        "status": preflight.status,
-                        "denial_code": preflight.denial_code,
-                        "preview": preflight.preview,
-                    }
-                }
-                if preflight.clarification is not None:
-                    safe_result["calendar_command_result"]["clarification"] = preflight.clarification.model_dump()
-                print(f"  [{task.id}] result=OK (calendar {preflight.status})")
-                results.append(SubTaskResult(
-                    task_id=task.id, status=SubTaskStatus.OK,
-                    tool_name="calendar.submit_commands", observation=safe_result,
-                ))
-            else:
-                clear_draft(turn_ctx.user_id)
-                plans = [plan.model_dump(exclude_none=True) for plan in preflight.plans]
-                payload: dict[str, Any] = {
-                    "calendar_plan_version": 1,
-                    "plans": plans,
-                }
-                # A typed Calendar batch is one logical confirmation even when
-                # it contains several ordered mutations.
-                ConfirmationManager(_CONFIRMATIONS).create_confirmation(
-                    user_id=turn_ctx.user_id,
-                    agent_name=task.agent,
-                    tool_name="calendar.submit_commands",
-                    arguments={},
-                    payload=payload,
-                    origin_run_id=run_id,
-                    preview=preflight.preview or "",
-                )
-                results.append(SubTaskResult(
-                    task_id=task.id, status=SubTaskStatus.OK,
-                    tool_name="calendar.submit_commands",
-                    observation={
-                        "pending_confirmation": True,
-                        "tool_name": "calendar.submit_commands",
-                        "preview": preflight.preview or "",
-                    },
-                ))
 
     if any(r.status is SubTaskStatus.OK for r in results):
         print(f"  [{task.id}] result=OK ({len(results)} call(s))")
@@ -1337,16 +1079,19 @@ def run_public_agent_turn_v3(
         total_output_tokens += synth_metrics.output_tokens
         _print_separator("V3 RUN END")
         print(f"  total_tokens={total_input_tokens + total_output_tokens} (in={total_input_tokens} out={total_output_tokens})")
-        calendar_state_changed = any(
-            bool(item.get("ok")) and str(item.get("tool_name") or "").startswith("calendar.")
-            for item in results if isinstance(item, dict)
-        )
+        confirmed_updates: dict[str, Any] = {}
+        for registration in _iter_runtime_registrations():
+            if registration.confirmed_result_projector is None:
+                continue
+            projection = registration.confirmed_result_projector(results)
+            if isinstance(projection, dict):
+                confirmed_updates.update(projection)
         return _finalize_debug(AgentResult(
             handled=True, reply=reply,
             messages=synth_metrics.presentation_messages or [reply],
             presentation_class=synth_metrics.presentation_class,
             agent_run_id=run_id, agent_mode="v3",
-            calendar_state_changed=calendar_state_changed,
+            **confirmed_updates,
         ))
     if choice == "cancel":
         print("\n  [entry] confirmation=cancel → clearing pending confirmations")

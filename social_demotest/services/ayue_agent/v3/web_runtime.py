@@ -11,7 +11,8 @@ from .contracts import AgentContextSlice, SubTask, SubTaskResult, SubTaskStatus,
 from .guarded_execution import GuardedExecutionOutcome, GuardedReadExecutor
 from .place_projection import public_place_cards
 from .sub_agents import web_agent
-from .sub_agents.base import StructuredAgentResult, SubAgentMetrics
+from .runtime_registry import TaskRunnerResult
+from .sub_agents.base import SubAgentMetrics
 from .web_research import (
     MAX_WEB_EXTRACT_CALLS,
     MAX_WEB_EXTRACT_URLS,
@@ -39,11 +40,12 @@ def _observation_dict(result: SubTaskResult) -> dict[str, Any]:
     }
 
 
-def _structured_result(task: SubTask, result: WebResearchResultV1) -> StructuredAgentResult:
-    return StructuredAgentResult(
-        observation=result.model_dump(mode="json"),
+def _completed_result(task: SubTask, result: WebResearchResultV1) -> TaskRunnerResult:
+    return TaskRunnerResult.from_completed([SubTaskResult(
+        task_id=task.id,
         status=SubTaskStatus.OK,
-    )
+        observation=result.model_dump(mode="json"),
+    )])
 
 
 def run(
@@ -51,7 +53,7 @@ def run(
     *,
     task: SubTask,
     services: GuardedReadExecutor,
-) -> tuple[StructuredAgentResult, SubAgentMetrics]:
+) -> tuple[TaskRunnerResult, SubAgentMetrics]:
     """Run bounded research/tool work followed by one finish-only phase.
 
     Web owns all research state and policy. ``services`` is only the guarded
@@ -106,7 +108,7 @@ def run(
             allowed_subject_refs=allowed_subject_refs if place_candidates else None,
             evidence_policy=evidence_policy,
         )
-        return _structured_result(task, result), aggregate
+        return _completed_result(task, result), aggregate
 
     observations: list[dict[str, Any]] = []
     failures: list[str] = []
@@ -149,7 +151,7 @@ def run(
                 allowed_subject_refs=allowed_subject_refs if place_candidates else None,
                 evidence_policy=evidence_policy,
             )
-            return _structured_result(task, result), aggregate
+            return _completed_result(task, result), aggregate
         if aggregate.error and not metrics.error:
             aggregate.error = ""
         last_decision = decision
@@ -166,7 +168,7 @@ def run(
                 allowed_subject_refs=allowed_subject_refs if place_candidates else None,
                 evidence_policy=evidence_policy,
             )
-            return _structured_result(task, result), aggregate
+            return _completed_result(task, result), aggregate
 
         if decision.action == "finish":
             if not observations:
@@ -199,7 +201,7 @@ def run(
                     allowed_subject_refs=allowed_subject_refs if place_candidates else None,
                     evidence_policy=evidence_policy,
                 )
-            return _structured_result(task, result), aggregate
+            return _completed_result(task, result), aggregate
 
         proposals: list[ToolProposal] = []
         proposal_subject_refs: dict[int, str | None] = {}
@@ -344,7 +346,7 @@ def run(
                     allowed_subject_refs=allowed_subject_refs if place_candidates else None,
                     evidence_policy=evidence_policy,
                 )
-                return _structured_result(task, result), aggregate
+                return _completed_result(task, result), aggregate
             if finish_decision.action != "finish" or finish_decision.assessment is None:
                 finish_phase_failed = True
                 continue
@@ -359,7 +361,7 @@ def run(
                 allowed_subject_refs=allowed_subject_refs if place_candidates else None,
                 evidence_policy=evidence_policy,
             )
-            return _structured_result(task, result), aggregate
+            return _completed_result(task, result), aggregate
 
     result = build_research_result(
         research_question=context_slice.payload.get("message", ""),
@@ -375,4 +377,4 @@ def run(
         allowed_subject_refs=allowed_subject_refs if place_candidates else None,
         evidence_policy=evidence_policy,
     )
-    return _structured_result(task, result), aggregate
+    return _completed_result(task, result), aggregate

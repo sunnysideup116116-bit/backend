@@ -197,6 +197,26 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
     """Merge one same-domain continuation into the prior typed command."""
     if not record or str(getattr(command, "action", "")) != str((record.get("command") or {}).get("action")):
         return command
+    if _distinct_create_request(command, record):
+        # A new create with both a different activity and date is a fresh
+        # request.  The model's draft_mode is only guidance and must not make
+        # the previous create's time/location fields authoritative.
+        values = command.model_dump(exclude_none=True)
+        if str(values.get("draft_mode") or "none") == "continue":
+            prior = dict((record.get("command") or {}))
+            # A provider may echo fields from the visible draft while calling
+            # a new create a continuation.  Equal values are the only safe
+            # ones to identify as copied; a genuinely different new value is
+            # retained for the new request.
+            for key in (
+                "start_time", "end_time", "duration_minutes", "timezone",
+                "location", "notes",
+            ):
+                if key in values and key in prior and values[key] == prior[key]:
+                    values.pop(key, None)
+            from .calendar_commands import CalendarCommand
+            return CalendarCommand.model_validate(values)
+        return command
     mode = str(getattr(command, "draft_mode", "none") or "none")
     prior = dict(record.get("command") or {})
     values = command.model_dump(exclude_none=True)
@@ -300,8 +320,35 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
     return CalendarCommand.model_validate(values)
 
 
+def _distinct_create_request(command: Any, record: dict[str, Any] | None) -> bool:
+    """Identify a clearly new create instead of a missing-field continuation.
+
+    A same-title date change is still allowed as an explicit correction to an
+    existing draft.  Requiring both title and date to differ avoids treating
+    that correction as a new request while preventing a new activity/date
+    pair from inheriting fields from the old draft.
+    """
+    if str(getattr(command, "action", "")) != "create":
+        return False
+    prior_command = (record or {}).get("command") or {}
+    if str(prior_command.get("action") or "") != "create":
+        return False
+    values = command.model_dump(exclude_none=True) if hasattr(command, "model_dump") else dict(command or {})
+    incoming_title = str(values.get("title") or "").strip()
+    incoming_date = str(values.get("date") or "").strip()
+    prior_title = str(prior_command.get("title") or "").strip()
+    prior_date = str(prior_command.get("date") or "").strip()
+    return bool(
+        incoming_title and incoming_date and prior_title and prior_date
+        and incoming_title != prior_title
+        and incoming_date != prior_date
+    )
+
+
 def resolved_target_replaced(command: Any, record: dict[str, Any] | None) -> bool:
-    """Return whether an incoming command explicitly selects a new target."""
+    """Return whether an incoming command explicitly replaces the draft."""
+    if _distinct_create_request(command, record):
+        return True
     if not record or not (record.get("resolved_target") or {}).get("bound"):
         return False
     values = command.model_dump(exclude_none=True) if hasattr(command, "model_dump") else dict(command or {})
