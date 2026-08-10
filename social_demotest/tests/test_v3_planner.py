@@ -191,6 +191,14 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIn("normal `product_info` task", _PLANNER_SYSTEM)
         self.assertNotIn("product_info_topics", _PLANNER_SYSTEM)
 
+    def test_planner_policy_distinguishes_contact_aggregate_from_match_singleton(self):
+        self.assertIn("我現在總共配到誰了", _PLANNER_SYSTEM)
+        self.assertIn("我一共配到幾個人", _PLANNER_SYSTEM)
+        self.assertIn("建立 relationship task", _PLANNER_SYSTEM)
+        self.assertIn("這一筆配對目前什麼狀態", _PLANNER_SYSTEM)
+        self.assertIn("才建立 match task", _PLANNER_SYSTEM)
+        self.assertIn("不能推導 accepted contact 總數", _PLANNER_SYSTEM)
+
     @unittest.skip("legacy prompt fixture; profile routing is covered by the current planner contract")
     def test_planner_policy_routes_inaccurate_personality_profile_to_basic_assessment(self):
         self.assertIn("既有個性資料", _PLANNER_SYSTEM)

@@ -1,6 +1,6 @@
 # Sub-agent：relationship（關係子代理）
 
-> 本文說明使用者與阿月談「已認識的人／@ 對象／對方近況」時，背後怎麼運作：relationship sub-agent 能做什麼、呼叫哪些 function、@ 綁定如何驗證。
+> 本文說明使用者與阿月談「已建立聯絡的人／@ 對象」時，背後怎麼運作：relationship sub-agent 能做什麼、呼叫哪些 function、@ 綁定如何驗證。
 
 ## 1. 角色與能做什麼
 
@@ -10,11 +10,12 @@
 
 能力：
 
-- **列出**本人已接受聯絡人（最小公開清單）。
+- **列出與計數**本人已接受／已建立聯絡人（最小公開清單；若 `total_count` 有值可回答精確總數）。
+- **比較與推薦**現有已接受聯絡人；推薦範圍只限這份 bounded 清單能支持的對象。
 - **查詢 @ 對象**的公開摘要（本回合 server 驗證過的 accepted @ mention）。
 - **讀取**已接受配對的可驗證互動摘要（relationship evidence）。
 
-**不負責**：不讀對方私人資料或行事曆；不能用「目前認識的人」推測對方行程；`@` 不是每次自動讀資料——只有語意需要公開資料時才呼叫工具。
+**不負責**：不讀對方私人資料、行事曆或目前 availability；不能用公開 relationship projection 推測對方現在是否有空或正在做什麼；`@` 不是每次自動讀資料——只有語意需要公開資料時才呼叫工具。
 
 ## 2. 可呼叫的工具（3 個）
 
@@ -26,9 +27,14 @@
 
 ### 2.1 `relationship.list_accepted_contacts`（READ，無參數）
 
-回傳（`_AcceptedContactListOutput`）：`contacts[]`（≤8）＋`truncated`。每個 contact：`display_name`、`recent_context`、`initial_interest`、`personality_summary`、`safe_match_reason`、`verified_common_ground`、`distinctive_tags`。
+回傳（`_AcceptedContactListOutput`）：`contacts[]`（≤8）＋`truncated`＋可能存在的 `total_count`。每個 contact：`display_name`、`recent_context`、`initial_interest`、`personality_summary`、`safe_match_reason`、`verified_common_ground`、`distinctive_tags`。
 
-適用：「我認識的人裡誰適合看電影／誰在忙？」——只回最小公開投影，不能拿來推測對方行程。
+適用：「我已經配到哪些人？」、「這幾位已建立聯絡的人中誰適合看電影？」——只回最小公開投影，不能拿來推測對方目前是否有空。
+
+Bounded-list semantics：
+
+- `truncated=false` 時，清單代表目前可回傳的全部 accepted contacts，可在此範圍內比較或推薦。
+- `truncated=true` 時，`total_count` 有值即可回答精確總數；比較／推薦只能表述為「在目前返回的聯絡人中」，不能宣稱是所有 accepted contacts 中的最佳結果。若使用者要求全體最佳，應先說明範圍限制或請使用者縮小範圍。
 
 範例：
 
@@ -65,7 +71,7 @@ executor 注入 `other_id`（來自 @ 綁定）。回傳（`_RelationshipOutput`
 ## 3. 呼叫流程（背後怎麼運作）
 
 ```text
-使用者: 「@小安 最近在忙什麼？」
+使用者: 「@小安 我們有哪些已驗證的共同點？」
   │
   ▼ public_chat: 驗證 @ 綁定 → mentioned_contact_refs → 顯示訊息前置 @小安
   ▼ Planner → relationship task（depends_on: []）
@@ -93,7 +99,7 @@ relationship task → LLM 提 relationship.list_accepted_contacts
 
 ## 5. 端到端範例
 
-**使用者**：「@小安 和小美 誰比較常約我出去？」
+**使用者**：「@小安 和小美，誰和我的公開共同點比較多？」
 
 1. `@` 驗證：小安、小美必須都是 canonical accepted contact，否則被丟棄並提示。
 2. Planner：relationship task + synthesizer。

@@ -116,6 +116,15 @@ run(
 
 `before_run`／`after_run` hook 只能做 bounded progress/debug projection，不能執行 domain write 或改寫 runner result。`direct_chat_blocker` 與 `confirmed_result_projector` 也必須留在擁有該語意的 runtime registration 旁。
 
+Relationship proposal runner owns already-accepted／established contacts: their
+bounded list, exact count when `total_count` is available, comparison, and
+recommendation among existing contacts. A `truncated=true` list cannot support
+claiming that a recommendation is best among all accepted contacts. Match owns
+the singleton pending/live proposal status, counterparty summary, and
+start/retry/decision flow; an accepted contact is not an active proposal. A
+current Match observation never supplies aggregate accepted-contact count or
+roster authority.
+
 ## 6. Tool and Guard interface
 
 每個公開能力都必須先有 `ToolSpec`：

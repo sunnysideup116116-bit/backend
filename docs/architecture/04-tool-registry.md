@@ -31,13 +31,13 @@
 | `calendar.get_next_my_event` | `calendar_next_event` | 無 | 最近 90 天唯一下一筆有效行程或 not_found | NONE |
 | `calendar.verify_recent_mutation` | `calendar_mutation_verification` | 無 | 最近一次 calendar mutation 的 verified outcome | NONE |
 | `calendar.find_my_event` | `calendar_event_find` | `event_hint`、`date_hint`、`companion_hint`、`limit`(1–30) | found/not_found/ambiguous + candidates[]（含 companion 公開名稱） | PLANNER_GROUNDED |
-| `match.get_status` | `match_status` | 無 | 唯一配對狀態 snapshot（state/scope/chat_opened/revision 等） | NONE |
-| `match.get_counterparty_summary` | `counterparty_summary` | 無 | 目前有效或已接受配對的公開對象摘要（非 accepted 時匿名化） | NONE |
+| `match.get_status` | `match_status` | 無 | 唯一單一 proposal／配對狀態 snapshot（state/scope/chat_opened/revision 等）；不提供 accepted contacts aggregate | NONE |
+| `match.get_counterparty_summary` | `counterparty_summary` | 無 | 唯一目前有效或已接受配對的單一公開對象摘要（非 accepted 時匿名化）；不提供 accepted contacts aggregate、總數或整體比較 | NONE |
 | `profile.get_recent_context` | `recent_context` | 無 | 本人已保存近期情境 + revision | NONE |
 | `profile.get_self_summary` | `self_profile` | 無 | 本人 profile 投影（Big Five、deep profile、偏好、missing_sections） | NONE |
 | `relationship.get_verified_evidence` | `relationship_evidence` | 無（executor 注入 `other_id`） | 已接受配對的可驗證互動摘要 | MENTIONED_RELATIONSHIP |
 | `relationship.get_mentioned_contact_summary` | `mentioned_contact_summary` | 無（executor 注入 `other_ids` ≤3） | @ 對象的公開摘要 | MENTIONED_CONTACTS |
-| `relationship.list_accepted_contacts` | `accepted_contact_list` | 無 | 已接受聯絡人最小公開清單（≤8 + truncated） | NONE |
+| `relationship.list_accepted_contacts` | `accepted_contact_list` | 無 | 已接受／已建立聯絡人最小公開清單（≤8 + truncated；`total_count` 有值時可回答精確總數；truncated 時不得宣稱推薦涵蓋全部聯絡人） | NONE |
 | `memory.search_my_profile` | `memory_profile` | 無 | 本人記憶摘要 + 近期情境 + preferences(≤8) | NONE |
 | `web.search` | `web_search` | `query`(2–300)、`recency`、`use_saved_location` | results[]（title/url/snippet/published_date） | PLANNER_GROUNDED |
 | `web.extract` | `web_extract` | `urls`(1–2)、`query` | pages[]（url/content/truncated） | PLANNER_GROUNDED |

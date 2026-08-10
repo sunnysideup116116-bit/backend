@@ -10,19 +10,19 @@
 
 能力：
 
-- **查詢**本人的唯一正式配對狀態（成功、接受、回覆、進度）。
-- **讀取**目前有效或已接受配對的**公開**對象摘要（非 accepted 時自動匿名化：身份、共同點、摘要都不公開）。
+- **查詢**本人的唯一單一 proposal／配對狀態（成功、接受、回覆、進度）。
+- **讀取**目前有效或已接受配對的**單一公開**對象摘要（非 accepted 時自動匿名化：身份、共同點、摘要都不公開）。
 - **發起搜尋**（`match.start_search`，需確認）。
 - **對唯一可操作提案**表達有興趣或婉拒（`match.decide_active_proposal`，revision CAS）。
 
-**不負責**：不讀對方私人資料；不用聊天紀錄猜配對結果（一律讀 canonical observation）；不把「等待回覆」寫成近期情境。
+**不負責**：不讀對方私人資料；不用聊天紀錄猜配對結果（一律讀 canonical observation）；不列出或計算 accepted contacts aggregate，不把「等待回覆」寫成近期情境。
 
 ## 2. 可呼叫的工具（4 個）
 
 | 工具 | risk | 用途 |
 | --- | --- | --- |
 | `match.get_status` | READ | 讀唯一正式配對狀態 snapshot |
-| `match.get_counterparty_summary` | READ | 讀目前有效／已接受配對的公開對象摘要 |
+| `match.get_counterparty_summary` | READ | 讀目前有效／已接受配對的單一公開對象摘要；不回答 accepted contacts aggregate |
 | `match.start_search` | WRITE | 開始找新對象（先建立 confirmation） |
 | `match.decide_active_proposal` | WRITE | 對唯一可操作提案表達有興趣／婉拒（runtime 注入 revision） |
 
