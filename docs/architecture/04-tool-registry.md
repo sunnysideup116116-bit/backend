@@ -126,8 +126,8 @@ cannot execute `web.search` or `web.extract`.
 ### Places Google enrichment contract
 
 `places.search_nearby` accepts optional `enrichments[]` values `rating`,
-`hours`, and `walking`; `places.resolve_place` accepts only `rating` and
-`hours`. The default is an empty list. The executor deduplicates values and
+`hours`, `price`, and `walking`; `places.resolve_place` accepts `rating`,
+`hours`, and `price`. The default is an empty list. The executor deduplicates values and
 rejects values outside the registered enum. Ordinary nearby searches remain
 on the base Google Places field mask.
 
@@ -135,7 +135,9 @@ on the base Google Places field mask.
 `opening_hours` data from Google `currentOpeningHours` (`open_now`, next
 open/close timestamps, and up to seven weekday descriptions). `walking`
 projects per-candidate `walking_distance_m` and `walking_duration_seconds`
-from one bounded Routes `computeRouteMatrix` call. The local cap is eight
+from one bounded Routes `computeRouteMatrix` call. `price` projects the
+validated Google `priceLevel` and any independently valid `priceRange`
+endpoints; absent or partial price data is omitted rather than inferred. The local cap is eight
 destinations: one HTTP matrix request, billed by Google as up to eight
 origin-destination elements, with no one-route call per candidate.
 

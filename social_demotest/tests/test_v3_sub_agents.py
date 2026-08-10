@@ -7,7 +7,11 @@ from unittest.mock import patch
 from services.ayue_agent.contracts import PublicAgentTurnContext, TurnClockV1
 from services.ayue_agent.v3.contracts import AgentContextSlice, ToolProposal
 from services.ayue_agent.v3.sub_agents.calendar_agent import run as run_calendar
-from services.ayue_agent.v3.sub_agents.places_agent import run as run_places
+from services.ayue_agent.v3.sub_agents.places_agent import (
+    _SYSTEM as PLACES_SYSTEM,
+    _TOOLS as PLACES_AGENT_TOOLS,
+    run as run_places,
+)
 from services.ayue_agent.v3.sub_agents.match_agent import run as run_match
 from services.ayue_agent.v3.sub_agents.relationship_agent import (
     _SYSTEM as RELATIONSHIP_SYSTEM,
@@ -99,6 +103,41 @@ class V3SubAgentTests(unittest.TestCase):
             proposals, _metrics = run_places(slc, task_brief="找目前營業中的餐廳")
         self.assertEqual(len(proposals), 1)
         self.assertEqual(proposals[0].arguments["enrichments"], ["hours"])
+
+    def test_places_agent_selects_combined_structured_enrichments(self):
+        slc = _slice("places", {
+            "message": "找今晚有開且價位不要太高的咖啡廳",
+            "recent_messages": [],
+            "user_location": "City District",
+            "clock": _clock().model_dump(),
+            "prior_observations": [],
+        })
+        with patch(
+            "services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "places.search_nearby",
+                "arguments": {
+                    "anchor": "City District", "categories": ["cafe"],
+                    "enrichments": ["hours", "price", "hours"],
+                },
+            }]),
+        ):
+            proposals, _metrics = run_places(
+                slc, task_brief="找目前營業且價格較低的咖啡廳",
+            )
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].arguments["enrichments"], ["hours", "price"])
+
+    def test_places_agent_keeps_price_enrichment_opt_in_and_grounded(self):
+        self.assertIn("`price`", PLACES_SYSTEM)
+        self.assertIn("價格資料缺失或只有部分端點時不可推測", PLACES_SYSTEM)
+
+    def test_places_agent_uses_only_places_tools(self):
+        self.assertTrue(PLACES_AGENT_TOOLS)
+        self.assertTrue(all(name.startswith("places.") for name in PLACES_AGENT_TOOLS))
+        self.assertNotIn("web.search", PLACES_AGENT_TOOLS)
+        self.assertNotIn("web.extract", PLACES_AGENT_TOOLS)
+        self.assertIn("Places Agent 不呼叫 Web", PLACES_SYSTEM)
 
     def test_match_agent_produces_get_status_proposal(self):
         slc = _slice("match", {

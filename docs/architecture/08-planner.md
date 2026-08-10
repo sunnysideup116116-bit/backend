@@ -55,7 +55,7 @@ Planner 無 tool call、function name 錯誤、schema 不符或 provider timeout
 Planner 依完整語意選 agent；Python 不另建 keyword router：
 
 - 本人行程、空檔、增修取消 → `calendar`。
-- 附近地點、距離、地址、地圖卡 → `places`。
+- 附近地點、距離、地址、地圖卡，以及 Places 可投影的結構化地點事實（營業／目前開放、價位、評分、步行距離／時間）→ `places`。
 - 近期／外部資訊、活動、新聞、公開文章、論壇、社群或 URL → `web`。
 - 配對狀態、目前提案、開始搜尋或提案決策 → `match`。
 - 已接受聯絡人、`@` 對象與互動摘要 → `relationship`。
@@ -70,13 +70,14 @@ ProductInfo 是正常 domain task。Planner 只在 `task_brief` 保留使用者 
 ## 5. Web／Places／Itinerary DAG
 
 - 一般外部查詢：`web -> synthesizer`。
-- 地點候選需查目前條件：`places -> web -> synthesizer`。
+- Places 可直接建立的結構化條件（`hours`、`price`、`rating`、`walking`）：`places -> synthesizer`，即使使用者指定今晚／目前也不自動建立 Web task。
+- 只有 Places 無法建立的非結構化／目前公開主張（優惠、特殊菜單、活動、臨時歇業公告、社群貼文等）：`places -> web -> synthesizer`。
 - 未要求新活動的一般區域一日遊：`places -> synthesizer` + `presentation_mode="itinerary"`。
 - 找一個有直接證據的新活動並排整天：`web -> places -> web -> synthesizer` + itinerary。
 
 Web task 必須保留原始 answer target、地區／時間與證據需求，不能用相鄰背景資料取代答案。一般探索使用 `casual_discovery`；明確官方查證或醫療／法律／金融／安全風險問題使用 `strict_verification`。
 
-Places 不擁有 Web tools。需要 current/public criterion 時，Planner 以依賴關係建立獨立 Web task；Web 只能研究 server 投影的 bounded candidate refs，不能發明新 place candidate。
+Places 不擁有 Web tools。需要 Places 無法建立的非結構化／目前公開 criterion 時，Planner 以依賴關係建立獨立 Web task；Web 只能研究 server 投影的 bounded candidate refs，不能發明新 place candidate。
 
 ## 6. Scheduler 如何使用 Plan
 

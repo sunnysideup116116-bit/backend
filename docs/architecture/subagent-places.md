@@ -1,6 +1,6 @@
 # Sub-agent：places（地點子代理）
 
-> 現行 owner：`services/ayue_agent/v3/sub_agents/places_agent.py`。Places 只負責結構化地點候選、距離與地圖卡；即時／公開條件由獨立 Web task 處理。
+> 現行 owner：`services/ayue_agent/v3/sub_agents/places_agent.py`。Places 負責結構化地點候選、營業／目前開放、價位、評分、步行距離／時間、距離與地圖卡；只有 Places 無法建立的非結構化／目前公開條件才由獨立 Web task 處理。
 
 ## 1. 責任邊界
 
@@ -15,7 +15,7 @@ Places 不可以：
 
 - 推測精確住址、GPS 或即時位置。
 - 查對方位置或行事曆。
-- 聲稱候選符合營業時間、活動日期、菜單、優惠、評價或其他 current/public criterion。
+- 憑 Places 結構化欄位以外的資料，聲稱候選符合活動日期、特殊菜單、優惠、臨時歇業公告、社群貼文或其他 Places 無法建立的 current/public criterion。
 - 呼叫 `web.search`／`web.extract`。Web 是獨立 registered runtime。
 
 ## 2. 可呼叫的工具（3 個）
@@ -68,16 +68,17 @@ AYUE_GOOGLE_PLACE_CARDS_ENABLED=on 且 keys 可用
 
 ## 4. Places 與 Web collaboration interface
 
-需要 current/public criterion 時，Planner 建立獨立 DAG：
+需要 Places 無法建立的非結構化／目前公開 criterion 時，Planner 建立獨立 DAG：
 
 ```text
 places -> web -> synthesizer
 ```
 
-1. Places 只建立符合地點／類別／radius 的候選池，不聲稱已符合 current criterion。
-2. Scheduler 把最多五個 privacy-safe candidate summaries 投影成 `place_candidate_*` refs。
-3. Web 只能查證這些 refs；findings 必須保留 subject binding，不能靠名稱相似度換成別家店。
-4. Synthesizer 只對 direct-supported candidate 作 verified recommendation；證據不足時明確標示 unconfirmed candidates。
+1. 若條件可由 Places structured fields 建立，Places 直接回傳 typed enrichment，不建立 Web task。
+2. 若條件是 Places 無法建立的非結構化／目前公開主張，Places 只建立符合地點／類別／radius 的候選池，不聲稱已符合該 criterion。
+3. Scheduler 把最多五個 privacy-safe candidate summaries 投影成 `place_candidate_*` refs。
+4. Web 只能查證這些 refs；findings 必須保留 subject binding，不能靠名稱相似度換成別家店。
+5. Synthesizer 只對 direct-supported candidate 作 verified recommendation；證據不足時明確標示 unconfirmed candidates。
 
 「找一個新活動並排整天」使用：
 
@@ -95,7 +96,8 @@ Places 從 upstream typed `primary_activity.venue` 取 anchor，不從自由文�
 - `presentation_blocks` 是 Synthesizer 驗證 refs 後產生的 server-owned UI projection，不是模型 authored fragment。
 - Normal Places/Places+Web grounded success uses Synthesizer `compose_public_reply`; `requested_limit` describes the comparison pool, while `selected_candidate_refs` controls visible cards. Explicit final counts use `card_intent=explicit_set`; non-selected candidates remain internal unless the user asks to see all.
 - Deterministic Places/Web formatters are reserved for provider, compose, grounding, or presentation validation degradation and must not replace normal LLM composition.
-- Ordinary and itinerary composition do not accept model-authored `blocks` or require `card_mode`. `presentation_mode="itinerary"` is only a prompt hint; the model returns natural-language `messages`, `card_intent`, and server-owned candidate refs. The Synthesizer derives card presentation only from validated explicit selection, while the server owns card-only UI projections.
+- Ordinary and itinerary composition do not accept model-authored `blocks` or require `card_mode`. `presentation_mode="itinerary"` is only an editorial prompt hint; it uses the ordinary natural-language compose contract without fixed headings or a special rendering schema. The Synthesizer may retain server-owned candidate refs for internal grounding, while optional card-only UI projections remain server-owned.
+- `AYUE_PUBLIC_PLACE_CARDS_ENABLED` is off for the current demo. With the switch off, Places/Web replies are text/Markdown-only and Scheduler emits zero public cards/blocks; candidate projections, refs, provider IDs, map URLs, and Web subject bindings remain available internally.
 - Web-only `web_research.v1` results are LLM-first even when their typed status is partial, insufficient, degraded, or unavailable. The natural reply must preserve the typed limitation; deterministic Web formatting is only a post-composition degradation fallback.
 - Places 的常見 user-facing failure 可帶 bounded `failure` observation：`location_not_found`、`location_required`、map timeout/unavailable 等 code 使用 server-owned 固定 message；可公開的 `subject` 只取自已驗證的 executor argument。未知 failure 維持 error code，不傳 raw exception、provider detail 或 internal ID。
 
@@ -110,12 +112,16 @@ Places 從 upstream typed `primary_activity.venue` 取 anchor，不從自由文�
 ## 7. Optional Google enrichment
 
 Places uses an empty `enrichments` list by default. The model may request only
-`rating`, `hours`, or `walking` when the Places task needs that evidence; the
+`rating`, `hours`, `price`, or `walking` when the Places task needs that evidence; the
 executor deduplicates the list and the schema rejects unsupported values.
 `rating` fetches Google `rating` plus `userRatingCount`. `hours` fetches
 `currentOpeningHours` and exposes only `open_now`, next open/close timestamps,
-and bounded weekday descriptions. Ordinary recommendations must not request
-Enterprise-tier fields merely to make cards richer.
+and bounded weekday descriptions. `price` fetches Google `priceLevel` and
+`priceRange`, projecting only validated price level and available money range
+endpoints; missing or partial price data is never inferred. Ordinary
+recommendations must not request Enterprise-tier fields merely to make cards
+richer. If Google fails, the existing OSM fallback remains a base place
+projection and never fabricates price fields.
 
 Google current-open/current-opening-hours facts may be Places-owned. Temporary
 closures, special announcements, events, social-media updates, menus,

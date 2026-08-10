@@ -134,11 +134,13 @@ _PLANNER_SYSTEM += """
 
 _PLANNER_SYSTEM += """
 Places/Web collaboration contract:
-- Route Places only for nearby discovery, category, distance, address, map, or other typed place facts.
-- Route Places followed by Web when the user asks for current, dated, public, event, promotion, menu, opening, or other evidence that Places cannot provide.
+- Route Places for nearby discovery, category, distance, address, map, and structured place facts that Places can project: opening/currently open via `hours`, price/budget via `price`, rating via `rating`, and walking distance/time via `walking`.
+- Structured hours, price, rating, and walking requests stay `places -> synthesizer`, even when the user says tonight/current or combines multiple structured facts; do not add Web automatically.
+- Route Places followed by Web only when the user asks for an unstructured/current public claim that Places cannot establish, such as promotions, special menus, events, temporary-closure announcements, social posts, or other public updates.
 - For Places -> Web, emit t1=places, t2=web depends_on=[t1], and terminal t3=synthesizer depends_on=[t2]. The Web task brief must preserve the original unresolved criterion, date/location constraint, evidence class, and say it may research only candidates from t1.
 - In that chain, the Places task brief asks only for the location/category candidate pool and must not claim the candidates already satisfy the unresolved current/public criterion. The Web task owns that verification.
 - Do not route every place request to Web. Do not use keyword or regex routing. Do not let Web invent new place candidates.
+- Routing examples: `找中山大學附近今晚十點還有開的咖啡廳` -> Places(`hours`) -> Synthesizer; `找中山大學附近便宜一點的餐廳` -> Places(`price`) -> Synthesizer; `找中山大學附近今晚十點還有開、價位不要太高的咖啡廳` -> Places(`hours`+`price`) -> Synthesizer; `找中山大學附近最近有優惠的咖啡廳` -> Places -> Web -> Synthesizer.
 - The Synthesizer may compare and curate only from verified observations; missing Web evidence is an explicit limitation, not permission to infer.
 - For a general district day trip without a current/new activity criterion, emit `t1=places` and terminal `t2=synthesizer depends_on=[t1]`, with `presentation_mode="itinerary"`. `t1` searches a balanced pool of restaurants, cafes, and attractions in the requested district.
 - For a request that asks for one new public activity in a district and a full-day plan around it, emit exactly `t1=web`, `t2=places depends_on=[t1]`, `t3=web depends_on=[t1,t2]`, and terminal `t4=synthesizer depends_on=[t3]`, with `presentation_mode="itinerary"`. `t1` finds one direct-supported activity and preserves typed title/date/start/end/venue; `t2` uses that venue as its anchor to find a bounded pool of restaurants, cafes, and attractions; `t3` verifies the selected place candidates for the activity date. This is still at most three domain tasks. Do not route this request to Calendar unless the user explicitly asks to save the finished plan.

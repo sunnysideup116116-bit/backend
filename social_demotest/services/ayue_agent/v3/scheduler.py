@@ -48,7 +48,11 @@ from .guarded_execution import GuardedReadExecutor, web_extract_urls_allowed as 
 from .planner import plan_turn, PlannerMetrics, _synthesizer_only_plan
 from . import synthesizer
 from .synthesizer import SynthesizerMetrics
-from .public_reply import build_presentation, validate_public_reply
+from .public_reply import (
+    build_presentation,
+    public_place_cards_enabled,
+    validate_public_reply,
+)
 from .sub_agents.base import SubAgentMetrics
 from .confirmation import ConfirmationManager
 from . import calendar_runtime
@@ -1414,6 +1418,9 @@ def run_public_agent_turn_v3(
     _print_llm_metrics("synthesizer", synth_metrics)
     total_input_tokens += synth_metrics.input_tokens
     total_output_tokens += synth_metrics.output_tokens
+    public_cards_enabled = public_place_cards_enabled()
+    if not public_cards_enabled:
+        card_decision = None
     print(f"  [synthesizer] card_decision={card_decision}")
     synth_status = "degraded" if synth_metrics.fallback_reason else "ok"
     synth_error = synth_metrics.error_code or ""
@@ -1443,7 +1450,10 @@ def run_public_agent_turn_v3(
             results=[{"reply": reply, "card_decision": card_decision}],
         )
 
-    selected_place_cards = _apply_card_decision(candidate_cards, card_decision)
+    selected_place_cards = (
+        _apply_card_decision(candidate_cards, card_decision)
+        if public_cards_enabled else []
+    )
     presentation_messages = synth_metrics.presentation_messages or [reply]
     presentation_blocks = _resolve_presentation_blocks(
         synth_metrics.presentation_blocks,

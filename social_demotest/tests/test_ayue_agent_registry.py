@@ -174,15 +174,20 @@ class AyueAgentRegistryTests(unittest.TestCase):
         spec = TOOL_REGISTRY["places.search_nearby"]
         arguments = executor_arguments_for_turn(spec, [], {
             "categories": ["restaurant"],
-            "enrichments": ["hours", "rating", "hours"],
+            "enrichments": ["hours", "rating", "price", "hours"],
         })
-        self.assertEqual(arguments["enrichments"], ["hours", "rating"])
+        self.assertEqual(arguments["enrichments"], ["hours", "rating", "price"])
+        resolve_spec = TOOL_REGISTRY["places.resolve_place"]
+        resolve_arguments = executor_arguments_for_turn(resolve_spec, [], {
+            "query": "Place", "enrichments": ["price", "price"],
+        })
+        self.assertEqual(resolve_arguments["enrichments"], ["price"])
         with self.assertRaises(Exception):
             executor_arguments_for_turn(spec, [], {
                 "categories": ["restaurant"], "enrichments": ["reviews"],
             })
 
-    def test_places_output_accepts_optional_rating_hours_and_walking_fields(self):
+    def test_places_output_accepts_optional_rating_hours_price_and_walking_fields(self):
         spec = TOOL_REGISTRY["places.search_nearby"]
         spec.output_model.model_validate({
             "anchor_label": "Anchor", "origin_kind": "explicit",
@@ -197,6 +202,11 @@ class AyueAgentRegistryTests(unittest.TestCase):
                     "open_now": True, "next_open_time": None,
                     "next_close_time": "2026-08-11T21:00:00Z",
                     "weekday_descriptions": ["Mon: 09:00–21:00"],
+                },
+                "price_level": "moderate",
+                "price_range": {
+                    "start_price": {"currency_code": "TWD", "units": 300, "nanos": 0},
+                    "end_price": {"currency_code": "TWD", "units": 500, "nanos": 0},
                 },
                 "walking_distance_m": 500,
                 "walking_duration_seconds": 360,

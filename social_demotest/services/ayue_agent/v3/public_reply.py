@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+import config
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from services.ayue_agent.capabilities import (
@@ -39,6 +40,15 @@ PresentationClass = Literal[
     "conversation", "social_opportunity", "product_info", "transaction",
     "capability", "fallback", "onboarding", "grounded_recommendation",
 ]
+
+
+def public_place_cards_enabled() -> bool:
+    """Return whether the public UI may render place-card projections.
+
+    This presentation switch intentionally does not disable Places retrieval
+    or the server-owned candidate/ref projection used by Web and Synthesizer.
+    """
+    return bool(getattr(config, "AYUE_PUBLIC_PLACE_CARDS_ENABLED", False))
 
 
 class AyueReplyPresentation(BaseModel):

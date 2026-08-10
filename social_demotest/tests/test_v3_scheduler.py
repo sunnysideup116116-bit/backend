@@ -1723,7 +1723,7 @@ class V3SchedulerMetadataTests(unittest.TestCase):
         )
         self.assertEqual(blocks, [])
 
-    def test_place_cards_are_separate_from_web_sources_and_metrics_populated(self):
+    def test_disabled_place_cards_are_separate_from_web_sources_and_metrics_populated(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="查一下附近餐廳")
         plan = Plan(tasks=[
             SubTask(id="t1", agent="places", depends_on=[], task_brief="找餐廳"),
@@ -1731,6 +1731,7 @@ class V3SchedulerMetadataTests(unittest.TestCase):
         ])
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
              patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.public_place_cards_enabled", return_value=False), \
              patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
                  "places": MagicMock(return_value=(
                      [ToolProposal(tool_name="places.search_nearby",
@@ -1740,18 +1741,22 @@ class V3SchedulerMetadataTests(unittest.TestCase):
                    return_value=MagicMock(ok=True, data={
                        "places": [{"name": "店A", "map_url": "https://www.openstreetmap.org/?mlat=25&mlon=121#map=18/25/121"}],
                    }, error_code=None)), \
-             patch("services.ayue_agent.v3.synthesizer.synthesize",
-                   return_value=(
-                       "找到店A",
-                       {"mode": "select", "indices": [0], "card_intent": "explicit_set"},
-                       _synth_metrics(),
-                   )):
+              patch("services.ayue_agent.v3.synthesizer.synthesize",
+                    return_value=(
+                        "找到店A",
+                        {"mode": "select", "indices": [0], "card_intent": "explicit_set"},
+                        _synth_metrics(),
+                    )) as synth:
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             result = run_public_agent_turn_v3(ctx)
         self.assertEqual(result.sources, [])
-        self.assertTrue(result.place_cards)
-        self.assertEqual(result.place_cards[0]["name"], "店A")
+        self.assertEqual(result.place_cards, [])
+        self.assertEqual(result.presentation_blocks, [])
+        internal_cards = synth.call_args.kwargs["candidate_cards"]
+        self.assertEqual(len(internal_cards), 1)
+        self.assertTrue(internal_cards[0]["candidate_ref"].startswith("place_candidate_"))
+        self.assertIn("map_url", internal_cards[0])
         self.assertTrue(result.llm_call_metrics)
         self.assertIn("input_tokens", result.llm_call_metrics[0])
 

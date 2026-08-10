@@ -191,12 +191,14 @@ part of this ordinary schema. The server derives `card_mode` from
 `card_intent` and validated refs, then emits the card-only presentation
 projection from its own candidate catalog. A legacy top-level `blocks` field
 may be discarded for compatibility, but its nested shape is never used as an
-ordinary card binding. Itinerary composition remains the block-based
-exception. Selected refs are the only model-to-server binding for ordinary
-cards; map URLs and other card fields remain server-owned. `messages` are
-public reply strings, not chat transcript objects. A narrow compatibility
-adapter may retain only bounded `role="assistant"` string content from an
-older provider shape; user/system/tool/unknown-role content is discarded.
+ordinary card binding. Itinerary uses the same ordinary compose contract as
+other presentation modes; `presentation_mode="itinerary"` is only an editorial
+hint and does not require a block-based rendering schema. Selected refs are
+the only model-to-server binding for optional cards; map URLs and other card
+fields remain server-owned. `messages` are public reply strings, not chat
+transcript objects. A narrow compatibility adapter may retain only bounded
+`role="assistant"` string content from an older provider shape;
+user/system/tool/unknown-role content is discarded.
 Schema drift is reported as `compose_schema_invalid`.
 The supported `presentation_class` enum is unchanged. At the Synthesizer
 boundary only, legacy `itinerary` is normalized to `grounded_recommendation`;
@@ -214,6 +216,12 @@ by the Synthesizer evidence contract: affirmative claims need matching typed
 evidence, while an explicit limitation is valid when confirmation is not
 available. This is not a general natural-language claim parser.
 
+Synthesizer formatting is adaptive: multiple candidates, comparisons, steps,
+or clearly separated information groups may use lightweight Markdown such as
+bullets, numbering, short bold labels, or an occasional descriptive heading.
+Simple answers remain natural prose; no Places, Web, or itinerary heading set
+is mandatory.
+
 Web-only `web_research.v1` observations, including answered, partial,
 insufficient-evidence, degraded, and unavailable outcomes, reach the
 Synthesizer first for natural-language composition. The typed result fixes the
@@ -224,18 +232,28 @@ degradation and returns only a minimal bounded claim/limitation reply.
 All Places/Web deterministic fallbacks likewise return short recovery text,
 without fixed headings, candidate dumps, or automatic place-card presentation.
 
+Public place-card rendering is controlled by
+`AYUE_PUBLIC_PLACE_CARDS_ENABLED`, which is off for the current demo. When it
+is off, Scheduler returns zero `place_cards` and `presentation_blocks` for
+Places/Web replies, while the bounded candidate projection, candidate refs,
+provider IDs, map URLs, and Web grounding bindings remain available inside the
+server-side runtime.
+
 ProductInfo 固定輸出 `product_info.v1` observation；Web 固定輸出 `web_research.v1` observation。這些 `.v1` 是 payload schema，不代表舊 runtime。
 
 ## 9. Places typed enrichment interface
 
 Places tool arguments remain authority-free and optional: `enrichments=[]`
 defaults to no expensive Google fields; `search_nearby` supports `rating`,
-`hours`, and `walking`, while `resolve_place` supports `rating` and `hours`.
+`hours`, `price`, and `walking`, while `resolve_place` supports `rating`,
+`hours`, and `price`.
 The executor normalizes/deduplicates these enums before cache keys and provider
 calls. The typed place projection may include rating/count, bounded current
-opening-hours data, and per-candidate walking distance/duration. These fields
-remain in the bounded observation passed to the AI; the existing card
-projection/UI is unchanged.
+opening-hours data, validated price level/range endpoints, and per-candidate
+walking distance/duration. Missing or partial price data is omitted and never
+inferred. These fields remain in the bounded observation passed to the AI; the existing card
+projection/UI is unchanged. Google failure preserves the existing OSM fallback,
+which does not fabricate price fields.
 
 Nearby walking enrichment uses Routes `computeRouteMatrix` with one origin and
 the bounded place-ID destinations. Matrix elements are independently mapped by
@@ -244,6 +262,11 @@ walking fields. The local cap is eight destinations, so the request is one
 HTTP call and at most eight billed origin-destination elements. Single-distance
 `travel_mode` defaults to `DRIVE` and may be `WALK` without changing the
 existing default behavior.
+
+Planner keeps structured hours, price, rating, and walking requests in
+`places -> synthesizer`; only unstructured/current public claims that Places
+cannot establish use a separate `places -> web -> synthesizer` DAG. Places
+does not call Web itself.
 
 ## 10. 新增或修改 interface 的交付要求
 

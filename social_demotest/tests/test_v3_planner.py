@@ -191,6 +191,30 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIn("normal `product_info` task", _PLANNER_SYSTEM)
         self.assertNotIn("product_info_topics", _PLANNER_SYSTEM)
 
+    def test_planner_keeps_structured_place_facts_in_places(self):
+        self.assertIn(
+            "Structured hours, price, rating, and walking requests stay `places -> synthesizer`",
+            _PLANNER_SYSTEM,
+        )
+        self.assertIn("opening/currently open via `hours`", _PLANNER_SYSTEM)
+        self.assertIn("price/budget via `price`", _PLANNER_SYSTEM)
+        self.assertIn("rating via `rating`", _PLANNER_SYSTEM)
+        self.assertIn("walking distance/time via `walking`", _PLANNER_SYSTEM)
+        self.assertIn("do not add Web automatically", _PLANNER_SYSTEM)
+        self.assertIn("找中山大學附近今晚十點還有開的咖啡廳", _PLANNER_SYSTEM)
+        self.assertIn("找中山大學附近便宜一點的餐廳", _PLANNER_SYSTEM)
+        self.assertIn("找中山大學附近今晚十點還有開、價位不要太高的咖啡廳", _PLANNER_SYSTEM)
+
+    def test_planner_keeps_unstructured_public_place_claims_on_web(self):
+        for claim in (
+            "promotions", "special menus", "events",
+            "temporary-closure announcements", "social posts",
+        ):
+            self.assertIn(claim, _PLANNER_SYSTEM)
+        self.assertIn("找中山大學附近最近有優惠的咖啡廳", _PLANNER_SYSTEM)
+        self.assertIn("Places -> Web -> Synthesizer", _PLANNER_SYSTEM)
+        self.assertIn("Do not use keyword or regex routing", _PLANNER_SYSTEM)
+
     def test_planner_policy_distinguishes_contact_aggregate_from_match_singleton(self):
         self.assertIn("我現在總共配到誰了", _PLANNER_SYSTEM)
         self.assertIn("我一共配到幾個人", _PLANNER_SYSTEM)
