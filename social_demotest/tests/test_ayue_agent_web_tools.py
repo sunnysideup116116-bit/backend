@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext, ToolCall
 from services.ayue_agent.v3.scheduler import _public_sources, _web_extract_urls_allowed
 from services.ayue_agent.tools import execute_tool
-from services.ayue_agent.web_tools import is_safe_public_url, search_web
+from services.ayue_agent.web_tools import extract_web, is_safe_public_url, search_web
 from services.profile_location import normalize_profile_location, safe_profile_location
 
 
@@ -27,6 +27,33 @@ class AyueWebToolsTests(unittest.TestCase):
         self.assertEqual(len(data["results"]), 1)
         self.assertEqual(post.call_args.kwargs["json"]["query"], "駁二最近有什麼 高雄市鹽埕區")
         self.assertNotIn("test-key", str(data))
+
+    def test_search_uses_advanced_depth_without_answer_or_raw_content(self):
+        response = Mock(ok=True, status_code=200)
+        response.json.return_value = {"results": []}
+        with patch("services.ayue_agent.web_tools.config.TAVILY_API_KEY", "test-key", create=True), \
+             patch("services.ayue_agent.web_tools.requests.post", return_value=response) as post:
+            data, error = search_web("explicit lookup")
+        self.assertIsNone(error)
+        self.assertEqual(data, {"results": []})
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["search_depth"], "advanced")
+        self.assertFalse(payload["include_answer"])
+        self.assertFalse(payload["include_raw_content"])
+
+    def test_extract_projects_up_to_8000_chars_per_page(self):
+        response = Mock(ok=True, status_code=200)
+        response.json.return_value = {"results": [{
+            "url": "https://example.com/article",
+            "raw_content": "x" * 8_001,
+        }]}
+        with patch("services.ayue_agent.web_tools.config.TAVILY_API_KEY", "test-key", create=True), \
+             patch("services.ayue_agent.web_tools.requests.post", return_value=response):
+            data, error = extract_web(["https://example.com/article"])
+        self.assertIsNone(error)
+        page = data["pages"][0]
+        self.assertEqual(len(page["content"]), 8_000)
+        self.assertTrue(page["truncated"])
 
     def test_web_search_executor_uses_saved_location_only_when_requested(self):
         ctx = AgentTurnContext(
