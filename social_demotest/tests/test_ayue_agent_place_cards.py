@@ -99,6 +99,28 @@ class AyueAgentPlaceCardTests(unittest.TestCase):
         self.assertEqual(len(cards), 1)
         self.assertNotIn("photo_url", cards[0])
 
+    def test_enriched_observation_keeps_existing_card_shape(self):
+        cards = _public_place_cards([{"tool": "places.search_nearby", "result": {
+            "attribution": "Google Maps",
+            "attribution_url": "https://www.google.com/maps",
+            "places": [{
+                "provider": "google", "place_id": "ChIJenriched", "name": "Place",
+                "category": "restaurant", "distance_m": 250,
+                "map_url": "https://www.google.com/maps/place/x",
+                "rating": 4.5, "user_rating_count": 123,
+                "opening_hours": {"open_now": True, "weekday_descriptions": []},
+                "walking_distance_m": 300, "walking_duration_seconds": 240,
+            }],
+        }}])
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(set(cards[0]), {
+            "provider", "place_id", "name", "category", "address_summary",
+            "distance_label", "map_url", "embed_url", "attribution", "attribution_url",
+        })
+        self.assertNotIn("rating", cards[0])
+        self.assertNotIn("opening_hours", cards[0])
+        self.assertNotIn("walking_distance_m", cards[0])
+
     def test_google_embed_url_returns_empty_without_browser_key(self):
         # Force no browser key regardless of .env so this test is independent.
         import config

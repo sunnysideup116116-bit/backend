@@ -91,8 +91,13 @@ Places 從 upstream typed `primary_activity.venue` 取 anchor，不從自由文�
 
 - Retrieval 與 display 分開：可取最多八個候選；一般 grounded recommendation 顯示 2–3 張卡，除非使用者明確要求更多，否則最多 4 張。
 - `_strip_place_internals` 在 observation 進 Synthesizer 前移除 map/provider/photo internals。
-- `decide_place_cards` 只選 server 已有 candidate indices；模型不能製造卡片。
-- `presentation_blocks` 將 Markdown fragment 綁定至最多一張 place card；卡片擁有 map link，模型文字不提供可點擊 URL。
+- `selected_candidate_refs` 只綁定 server 已有 candidates；模型不能製造卡片、URL 或 map link。
+- `presentation_blocks` 是 Synthesizer 驗證 refs 後產生的 server-owned UI projection，不是模型 authored fragment。
+- Normal Places/Places+Web grounded success uses Synthesizer `compose_public_reply`; `requested_limit` describes the comparison pool, while `selected_candidate_refs` controls visible cards. Explicit final counts use `card_intent=explicit_set`; non-selected candidates remain internal unless the user asks to see all.
+- Deterministic Places/Web formatters are reserved for provider, compose, grounding, or presentation validation degradation and must not replace normal LLM composition.
+- Ordinary and itinerary composition do not accept model-authored `blocks` or require `card_mode`. `presentation_mode="itinerary"` is only a prompt hint; the model returns natural-language `messages`, `card_intent`, and server-owned candidate refs. The Synthesizer derives card presentation only from validated explicit selection, while the server owns card-only UI projections.
+- Web-only `web_research.v1` results are LLM-first even when their typed status is partial, insufficient, degraded, or unavailable. The natural reply must preserve the typed limitation; deterministic Web formatting is only a post-composition degradation fallback.
+- Places 的常見 user-facing failure 可帶 bounded `failure` observation：`location_not_found`、`location_required`、map timeout/unavailable 等 code 使用 server-owned 固定 message；可公開的 `subject` 只取自已驗證的 executor argument。未知 failure 維持 error code，不傳 raw exception、provider detail 或 internal ID。
 
 ## 6. 測試重點
 
@@ -101,3 +106,20 @@ Places 從 upstream typed `primary_activity.venue` 取 anchor，不從自由文�
 - Places Agent 看不到 `WEB_TOOLS`。
 - Places→Web subject refs 不可被模型改綁或新增。
 - Provider failure、超界 candidate、無法 resolve 與缺乏 Web evidence 都有 deterministic bounded fallback。
+
+## 7. Optional Google enrichment
+
+Places uses an empty `enrichments` list by default. The model may request only
+`rating`, `hours`, or `walking` when the Places task needs that evidence; the
+executor deduplicates the list and the schema rejects unsupported values.
+`rating` fetches Google `rating` plus `userRatingCount`. `hours` fetches
+`currentOpeningHours` and exposes only `open_now`, next open/close timestamps,
+and bounded weekday descriptions. Ordinary recommendations must not request
+Enterprise-tier fields merely to make cards richer.
+
+Google current-open/current-opening-hours facts may be Places-owned. Temporary
+closures, special announcements, events, social-media updates, menus,
+promotions, and other public claims requiring external verification remain
+Web-owned. `walking` uses one bounded Routes matrix for the candidate pool;
+individual matrix-element failures remove walking fields only from their own
+candidate.

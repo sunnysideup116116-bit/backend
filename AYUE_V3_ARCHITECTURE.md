@@ -118,6 +118,8 @@ run(context_slice, *, task, services)
 
 Synthesizer 只能使用本回合 verified observations。Map URL、source URL、place candidate ref、Web source ref 由 server-owned catalog 綁定；模型不能新增未觀察到的 reference。
 
+`compose_public_reply.presentation_class` 的正式 enum 不變。Synthesizer boundary 只對 provider drift 做窄幅相容：舊的 `itinerary` 正規化為 `grounded_recommendation`，其他未知值改用既有安全預設 `conversation`，避免丟棄其餘已通過驗證的自然文字。這項相容不放寬 candidate refs、Web URL/source refs、internal IDs 或 mutation authority 的驗證。
+
 ## 5. Context 與 privacy
 
 `services/ayue_agent/context.py` 是 Public Context 唯一 owner：
@@ -281,3 +283,18 @@ run_started | tool_started | tool_finished | final | error
 - `docs/architecture/subagent-*.md`：各 domain specialist 的現行行為。
 
 修改 runtime contract、tool list、state machine、stream/debug envelope 或 environment flag 時，必須同步更新本文件、interfaces 文件與對應 domain 文件。
+
+### Places optional typed enrichment
+
+Places ordinary searches keep the base Google field mask. The existing Places
+tool contracts may opt into bounded `rating`, `hours`, or `walking` enrichments;
+`resolve_place` supports only `rating` and `hours`, and the empty enrichment
+list is the default. Rating/count and current-opening-hours fields are fetched
+only when the Places task requires them. Walking candidate data is produced by
+one bounded Routes `computeRouteMatrix` call and is attached independently per
+destination; a failed matrix element does not fail the Places result.
+
+The existing `places.measure_distance` contract remains backward compatible
+with `DRIVE` as the default and accepts `WALK` for explicit requests. No
+Planner DAG, Scheduler, Web Runtime, Synthesizer presentation, or frontend card
+UI behavior changes as part of this enrichment surface.
