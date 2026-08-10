@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from enum import Enum
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
+
+from services.ayue_agent.v3.calendar_commands import CalendarCommandBatch
 
 
 class ToolRisk(str, Enum):
@@ -48,57 +50,32 @@ class _AssessmentStartArguments(BaseModel):
     kind: Literal["basic", "deep"]
 
 
-class _CalendarCreateArguments(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    title: str = Field(min_length=1, max_length=120)
-    date: str = Field(min_length=10, max_length=10)
-    start_time: str = Field(min_length=4, max_length=5)
-    end_time: str = Field(min_length=4, max_length=5)
-    timezone: str = "Asia/Taipei"
-    location: str = Field(default="", max_length=160)
-    notes: str = Field(default="", max_length=500)
-
-
-class _CalendarUpdateArguments(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    event_hint: str = Field(min_length=1, max_length=120)
-    title: str | None = Field(default=None, min_length=1, max_length=120)
-    date: str | None = Field(default=None, min_length=10, max_length=10)
-    start_time: str | None = Field(default=None, min_length=4, max_length=5)
-    end_time: str | None = Field(default=None, min_length=4, max_length=5)
-    timezone: str | None = None
-    location: str | None = Field(default=None, max_length=160)
-    notes: str | None = Field(default=None, max_length=500)
-
-
-class _CalendarCancelArguments(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    event_hint: str = Field(min_length=1, max_length=120)
-
-
-class _CalendarBatchCancelArguments(BaseModel):
-    """A bounded, public description of one or more calendar cancellations."""
-
-    model_config = ConfigDict(extra="forbid")
-    mode: Literal["selected", "all_upcoming"]
-    event_hints: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(
-        default_factory=list, max_length=10,
-    )
-
-    @model_validator(mode="after")
-    def validate_mode_payload(self) -> "_CalendarBatchCancelArguments":
-        if self.mode == "selected" and not 2 <= len(self.event_hints) <= 10:
-            raise ValueError("selected mode requires 2-10 event hints")
-        if self.mode == "all_upcoming" and self.event_hints:
-            raise ValueError("all_upcoming mode does not accept event hints")
-        return self
-
-
 class _CalendarFindArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     event_hint: str = Field(min_length=1, max_length=120)
     date_hint: str | None = Field(default=None, max_length=32)
     companion_hint: str | None = Field(default=None, max_length=30)
+    limit: int | None = Field(default=None, ge=1, le=30)
+
+
+class _CalendarListArguments(BaseModel):
+    """Date range filter for listing the owner's calendar.
+
+    Primary path: `start_date` / `end_date` (ISO YYYY-MM-DD, both optional).
+    The sub-agent resolves relative terms (這個月/本週/上週…) against the
+    turn clock and fills explicit dates. When both are omitted the range
+    defaults to the next 90 days.
+
+    Legacy fallback: `date` (single day) and `range_label`
+    (今天/明天/後天/本週/下週/本月/下個月) are still accepted and resolved
+    server-side through the turn clock.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    start_date: str | None = Field(default=None, min_length=10, max_length=10)
+    end_date: str | None = Field(default=None, min_length=10, max_length=10)
+    date: str | None = Field(default=None, min_length=10, max_length=10)
+    range_label: str | None = Field(default=None, max_length=32)
 
 
 class _WebSearchArguments(BaseModel):
@@ -115,13 +92,20 @@ class _WebExtractArguments(BaseModel):
 
 
 class _PlacesNearbyArguments(BaseModel):
-    """Human place names only; coordinates and arbitrary map queries are never planner input."""
+    """Human place names only; coordinates and arbitrary map queries are never planner input.
+
+    cuisine is a bounded free-text food-type hint (e.g. 火鍋、日式、素食). It is
+    only ever folded into the Google Places textQuery JSON body; it never
+    reaches the Overpass QL builder, which stays on the allowlisted categories.
+    """
 
     model_config = ConfigDict(extra="forbid")
     anchor: str = Field(default="", max_length=160)
     categories: list[Literal["restaurant", "cafe", "bar", "attraction", "park"]] = Field(min_length=1, max_length=3)
+    cuisine: str = Field(default="", max_length=30)
     radius_m: int = Field(default=1500, ge=300, le=5000)
-    limit: int = Field(default=8, ge=1, le=10)
+    limit: int = Field(default=3, ge=1, le=8)
+    ordering: Literal["distance", "balanced"] = "distance"
     use_saved_location: bool = False
 
 
@@ -144,6 +128,9 @@ class _CalendarEventOutput(BaseModel):
     end_time: str
     activity: str
     status: str
+    location: str = ""
+    notes: str = ""
+    event_kind: Literal["personal", "shared_date", ""] = ""
 
 
 class _CalendarOutput(BaseModel):
@@ -152,12 +139,21 @@ class _CalendarOutput(BaseModel):
     range: str
 
 
+class _CalendarNextOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["found", "not_found"]
+    event: _CalendarEventOutput | None = None
+
+
 class _CalendarEventCandidateOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     activity: str
     date: str
     start_time: str
     end_time: str
+    location: str = ""
+    notes: str = ""
+    event_kind: Literal["personal", "shared_date", ""] = ""
 
 
 class _CalendarFindOutput(BaseModel):
@@ -170,11 +166,30 @@ class _CalendarFindOutput(BaseModel):
     date: str = ""
     start_time: str = ""
     end_time: str = ""
+    location: str = ""
+    notes: str = ""
     event_kind: Literal["personal", "shared_date", ""] = ""
     companion_known: bool = False
     companion_display_name: str = "對方"
     companion_safe_summary: str = ""
-    candidates: list[_CalendarEventCandidateOutput] = Field(default_factory=list, max_length=3)
+    query: str = ""
+    candidates: list[_CalendarEventCandidateOutput] = Field(default_factory=list, max_length=10)
+
+
+class _CalendarMutationVerificationStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal[
+        "verified_success", "still_active", "failed", "partial",
+        "verification_failed", "not_available",
+    ]
+    action: str = ""
+    label: str = ""
+    outcome: str = ""
+
+
+class _CalendarMutationVerificationOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    calendar_mutation_verification: _CalendarMutationVerificationStatus
 
 
 class _MatchStatusOutput(BaseModel):
@@ -198,7 +213,6 @@ class _CounterpartySummaryOutput(BaseModel):
     recent_context: str = ""
     initial_interest: str = ""
     personality_summary: str = ""
-    location: str = ""
     distinctive_tags: list[str] = Field(default_factory=list)
     verified_common_ground: list[str] = Field(default_factory=list)
     recommendation_tier: Literal["grounded", "exploratory", ""] = ""
@@ -247,7 +261,6 @@ class _MentionedContactOutput(BaseModel):
     recent_context: str = ""
     initial_interest: str = ""
     personality_summary: str = ""
-    location: str = ""
     safe_match_reason: str = ""
     verified_common_ground: list[str] = Field(default_factory=list)
     distinctive_tags: list[str] = Field(default_factory=list)
@@ -262,6 +275,7 @@ class _AcceptedContactListOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     contacts: list[_MentionedContactOutput] = Field(default_factory=list, max_length=8)
     truncated: bool = False
+    total_count: int | None = Field(default=None, ge=0)
 
 
 class _MemoryOutput(BaseModel):
@@ -317,6 +331,9 @@ class _PlaceOutput(BaseModel):
     map_url: str
     provider: Literal["openstreetmap", "google"] = "openstreetmap"
     place_id: str = ""
+    # Optional photo from the Text Search response (places.photos is a Pro-tier
+    # field; the media bytes bill under Place Details Photos).
+    photo_url: str = ""
 
 
 class _PlacesNearbyOutput(BaseModel):
@@ -326,6 +343,11 @@ class _PlacesNearbyOutput(BaseModel):
     distance_basis: Literal["straight_line"]
     attribution: str
     attribution_url: str
+    requested_categories: list[str] = Field(default_factory=list, max_length=3)
+    requested_cuisine: str = ""
+    radius_m: int = Field(default=1500, ge=300, le=5000)
+    requested_limit: int = Field(default=3, ge=1, le=8)
+    ordering: Literal["distance", "balanced"] = "distance"
     places: list[_PlaceOutput] = Field(default_factory=list)
 
 
@@ -343,7 +365,8 @@ class _PlacesDistanceOutput(BaseModel):
     destination_label: str
     origin_kind: Literal["explicit", "saved_profile"]
     distance_m: int = Field(ge=0)
-    distance_basis: Literal["straight_line"]
+    distance_basis: Literal["straight_line", "driving"]
+    duration_text: str = ""
     attribution: str
     attribution_url: str
 
@@ -375,9 +398,24 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "calendar.list_my_events": ToolSpec(
         "calendar.list_my_events", ToolRisk.READ, "calendar_events",
-        "讀取本人的行事曆與忙碌時段，不讀取對方行事曆。",
+        "讀取本人的行事曆與忙碌時段，不讀取對方行事曆。建議用 start_date 與 end_date（YYYY-MM-DD）指定查詢區間，可包含今天之前與之後；不指定時預設未來 90 天。",
         "我看一下你的行事曆…",
+        planner_arguments_model=_CalendarListArguments,
+        executor_arguments_model=_CalendarListArguments,
         output_model=_CalendarOutput,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
+    ),
+    "calendar.get_next_my_event": ToolSpec(
+        "calendar.get_next_my_event", ToolRisk.READ, "calendar_next_event",
+        "讀取本人接下來 90 天內最近的一筆有效行程；適用於『最近一筆』『下一個行程』『最近有什麼行程』，會回傳唯一可供後續這筆／它／他／她指涉的行程。",
+        "我看一下你最近的一筆行程…",
+        output_model=_CalendarNextOutput,
+    ),
+    "calendar.verify_recent_mutation": ToolSpec(
+        "calendar.verify_recent_mutation", ToolRisk.READ, "calendar_mutation_verification",
+        "確認最近一次行事曆變更是否已套用；只適用於使用者追問剛才的新增、修改或取消結果，不會再次執行寫入。",
+        "驗證最近一次行事曆變更是否成功。",
+        output_model=_CalendarMutationVerificationOutput,
     ),
     "calendar.find_my_event": ToolSpec(
         "calendar.find_my_event", ToolRisk.READ, "calendar_event_find",
@@ -430,7 +468,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "relationship.list_accepted_contacts": ToolSpec(
         "relationship.list_accepted_contacts", ToolRisk.READ, "accepted_contact_list",
-        "讀取本人已接受聯絡人的最小公開摘要；適用於詢問目前認識的人中誰適合某個活動或地點，不能用來推測對方行程。",
+        "讀取本人已接受聯絡人的最小公開摘要與總數；適用於詢問目前認識的人中誰適合某個活動或地點，不能用來推測對方行程，也不包含尚未接受的 proposal。",
         "我整理一下目前已建立聯絡的對象…",
         output_model=_AcceptedContactListOutput,
     ),
@@ -469,7 +507,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "places.measure_distance": ToolSpec(
         "places.measure_distance", ToolRisk.READ, "places_distance",
-        "估算兩個指定地點，或本人儲存地區到指定地點的直線距離；不提供車程或步行時間。",
+        "查詢兩個指定地點，或本人儲存地區到指定地點的距離；Google Routes 可用時回傳駕車距離與時間，否則回傳直線距離。不提供即時路況或步行時間。",
         "我估一下兩地的距離…",
         planner_arguments_model=_PlacesDistanceArguments,
         executor_arguments_model=_PlacesDistanceArguments,
@@ -509,40 +547,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         executor_arguments_model=_AssessmentStartArguments,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
-    "calendar.create_my_event": ToolSpec(
-        "calendar.create_my_event", ToolRisk.WRITE, "calendar_create",
-        "新增本人的私人行程；必須先向使用者確認日期、時間與內容。",
-        "我確認一下要新增的行程…",
+    "calendar.submit_commands": ToolSpec(
+        "calendar.submit_commands", ToolRisk.WRITE, "calendar_commands",
+        "提交一個或多個行事曆 mutation command；欄位必須使用 canonical action、target_reference 或 target_hint，"
+        "不要使用 type 或 target；target_reference 只能是 server context 提供的 recent_event/candidate_1..candidate_3，"
+        "target_hint 只放自然語言行程 identity clue，不含操作詞；不含 event_id、revision 或其他 authority fields。",
+        "我整理一下要變更的行程…",
         requires_confirmation=True,
-        planner_arguments_model=_CalendarCreateArguments,
-        executor_arguments_model=_CalendarCreateArguments,
-        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
-    ),
-    "calendar.update_my_event": ToolSpec(
-        "calendar.update_my_event", ToolRisk.WRITE, "calendar_update",
-        "修改本人行事曆中的唯一一筆行程；私人行程直接修改，共同約會會提出改期並通知對方重新確認。",
-        "我確認一下要修改的行程…",
-        requires_confirmation=True,
-        planner_arguments_model=_CalendarUpdateArguments,
-        executor_arguments_model=_CalendarUpdateArguments,
-        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
-    ),
-    "calendar.cancel_my_event": ToolSpec(
-        "calendar.cancel_my_event", ToolRisk.WRITE, "calendar_cancel",
-        "取消本人行事曆中的唯一一筆行程；共同約會會同步取消並通知對方。",
-        "我確認一下要取消的行程…",
-        requires_confirmation=True,
-        planner_arguments_model=_CalendarCancelArguments,
-        executor_arguments_model=_CalendarCancelArguments,
-        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
-    ),
-    "calendar.cancel_my_events": ToolSpec(
-        "calendar.cancel_my_events", ToolRisk.WRITE, "calendar_cancel",
-        "取消多筆自己的行程；mode=selected 時提供 2–10 個行程描述，mode=all_upcoming 時取消最多 10 筆未來有效行程。必須先向使用者確認。",
-        "我確認一下要取消的行程…",
-        requires_confirmation=True,
-        planner_arguments_model=_CalendarBatchCancelArguments,
-        executor_arguments_model=_CalendarBatchCancelArguments,
+        planner_arguments_model=CalendarCommandBatch,
+        executor_arguments_model=CalendarCommandBatch,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
 }
@@ -607,7 +620,7 @@ def tool_call_key(spec: ToolSpec, arguments: dict[str, Any]) -> tuple[str, str]:
 
 
 def planner_tool_names(
-    *, can_start_search: bool, can_decide_active_proposal: bool, can_edit_calendar: bool = True,
+    *, can_start_search: bool, can_decide_active_proposal: bool,
     can_read_mentioned_contacts: bool = False, can_use_web: bool = False, can_use_places: bool = False,
     can_start_assessments: bool = True,
 ) -> frozenset[str]:
@@ -625,11 +638,6 @@ def planner_tool_names(
         names.add("match.start_search")
     if can_decide_active_proposal:
         names.add("match.decide_active_proposal")
-    if can_edit_calendar:
-        names.update({
-            "calendar.create_my_event", "calendar.update_my_event",
-            "calendar.cancel_my_event", "calendar.cancel_my_events",
-        })
     if can_start_assessments:
         names.update(ASSESSMENT_TOOLS)
     return frozenset(names)

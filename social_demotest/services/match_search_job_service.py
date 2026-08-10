@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+import logging
 from typing import Any, Callable
 
 from pymongo import ReturnDocument
@@ -20,8 +21,10 @@ JOB_TERMINAL_STATUSES = frozenset({"completed", "no_candidates", "failed", "canc
 JOB_STEPS = {
     "loading_profile": 15,
     "vector_search": 40,
-    "graph_check": 65,
-    "writing_reason": 85,
+    "candidate_qualification": 55,
+    "matchmaker_request": 65,
+    "matchmaker_response": 75,
+    "proposal_write": 85,
 }
 LEASE_SECONDS = 180
 POLL_SECONDS = 0.5
@@ -30,6 +33,29 @@ MatchPipeline = Callable[..., dict[str, Any]]
 _pipeline: MatchPipeline | None = None
 _worker_thread: threading.Thread | None = None
 _stop_event = threading.Event()
+LOGGER = logging.getLogger(__name__)
+
+
+class MatchSearchPipelineError(RuntimeError):
+    """Safe, stage-bound failure raised by the candidate pipeline."""
+
+    def __init__(self, code: str, stage: str) -> None:
+        self.code = str(code or "unexpected_pipeline_error")[:80]
+        self.stage = str(stage or "unknown")[:40]
+        super().__init__(self.code)
+
+
+_FAILURE_MESSAGES = {
+    "matchmaker_timeout": "配對服務暫時沒有回應，請稍後再試。",
+    "matchmaker_provider_error": "配對服務目前發生錯誤，請稍後再試。",
+    "proposal_write_failed": "配對結果已找到，但儲存結果時失敗，請稍後再試。",
+    "pipeline_unavailable": "配對服務目前還沒準備好，請稍後再試。",
+    "vector_search_unavailable": "我目前無法讀取候選資料，請稍後再試。",
+    "matchmaker_unavailable": "配對服務暫時連不上，請稍後再試。",
+    "matchmaker_http_error": "配對服務回應失敗，請稍後再試。",
+    "matchmaker_invalid_response": "配對服務回傳的結果不完整，請稍後再試。",
+    "unexpected_pipeline_error": "配對流程中途發生問題，請稍後再試。",
+}
 
 
 def register_match_search_pipeline(pipeline: MatchPipeline) -> None:
@@ -226,13 +252,21 @@ def _report_progress(job: dict[str, Any], step: str) -> bool:
     return _job_is_current(job)
 
 
-def _finish_job(job: dict[str, Any], status: str, *, error_code: str = "") -> bool:
+def _finish_job(
+    job: dict[str, Any], status: str, *, error_code: str = "", failure_stage: str = "",
+) -> bool:
     if status not in JOB_TERMINAL_STATUSES:
         status = "failed"
     now = time.time()
     result = MATCH_SEARCH_JOBS.update_one(
         {"_id": job.get("_id"), "status": "running", "active_user_id": job.get("user_id"), "lease_id": job.get("lease_id")},
-        {"$set": {"status": status, "updated_at": now, "completed_at": now, "error_code": error_code[:80]}, "$unset": {"active_user_id": "", "lease_id": "", "lease_until": ""}},
+        {"$set": {
+            "status": status,
+            "updated_at": now,
+            "completed_at": now,
+            "error_code": error_code[:80],
+            "failure_stage": failure_stage[:40],
+        }, "$unset": {"active_user_id": "", "lease_id": "", "lease_until": ""}},
     )
     if not getattr(result, "modified_count", 0):
         return False
@@ -240,7 +274,13 @@ def _finish_job(job: dict[str, Any], status: str, *, error_code: str = "") -> bo
         {"user_id": job.get("user_id"), "active_match_search_job_id": job.get("job_id")},
         {"$set": {
             "matchmaking_in_progress": False,
-            "match_search": _profile_search_projection(status, str(job.get("source") or "automatic"), progress_percent=100 if status == "completed" else 0, completed_at=now),
+            "match_search": _profile_search_projection(
+                status,
+                str(job.get("source") or "automatic"),
+                progress_percent=100 if status == "completed" else 0,
+                completed_at=now,
+                reason_code=error_code[:80] if status == "failed" else "",
+            ),
         }, "$unset": {"active_match_search_job_id": ""}},
     )
     return True
@@ -252,7 +292,11 @@ def run_one_match_search_job() -> bool:
     if not job:
         return False
     if _pipeline is None:
-        _finish_job(job, "failed", error_code="pipeline_unavailable")
+        if _finish_job(job, "failed", error_code="pipeline_unavailable", failure_stage="loading_profile"):
+            queue_mediator_event(
+                str(job.get("user_id") or ""), _FAILURE_MESSAGES["pipeline_unavailable"],
+                "match_search_failed", event_key=f"match-search-job:{job.get('job_id')}:failed",
+            )
         return True
     if not _report_progress(job, "loading_profile"):
         _finish_job(job, "stale", error_code="ownership_or_context_changed")
@@ -264,10 +308,22 @@ def run_one_match_search_job() -> bool:
             can_commit=lambda: _job_is_current(job),
             search_job_id=str(job.get("job_id") or ""),
         )
-    except Exception as exc:
-        if _finish_job(job, "failed", error_code=type(exc).__name__):
+    except MatchSearchPipelineError as exc:
+        if _finish_job(job, "failed", error_code=exc.code, failure_stage=exc.stage):
             queue_mediator_event(
-                str(job.get("user_id") or ""), "我剛剛找人的路上卡了一下，沒有假裝成功；晚點可以再叫我試一次。",
+                str(job.get("user_id") or ""),
+                _FAILURE_MESSAGES.get(exc.code, _FAILURE_MESSAGES["unexpected_pipeline_error"]),
+                "match_search_failed", event_key=f"match-search-job:{job.get('job_id')}:failed",
+            )
+        return True
+    except Exception as exc:
+        LOGGER.exception(
+            "match search pipeline failed stage=unknown error=%s job=%s",
+            type(exc).__name__, str(job.get("job_id") or "")[:80],
+        )
+        if _finish_job(job, "failed", error_code="unexpected_pipeline_error", failure_stage="unknown"):
+            queue_mediator_event(
+                str(job.get("user_id") or ""), _FAILURE_MESSAGES["unexpected_pipeline_error"],
                 "match_search_failed", event_key=f"match-search-job:{job.get('job_id')}:failed",
             )
         return True
@@ -311,7 +367,7 @@ def public_match_search_status(user_id: str) -> dict[str, Any]:
     """Public status projection: no job ID, lease, context revision, or errors."""
     job = MATCH_SEARCH_JOBS.find_one(
         {"user_id": user_id},
-        {"_id": 0, "status": 1, "step": 1, "progress_percent": 1, "updated_at": 1, "completed_at": 1},
+        {"_id": 0, "status": 1, "step": 1, "progress_percent": 1, "updated_at": 1, "completed_at": 1, "error_code": 1},
         sort=[("created_at", -1)],
     ) or {}
     status = str(job.get("status") or "idle")
@@ -324,10 +380,14 @@ def public_match_search_status(user_id: str) -> dict[str, Any]:
         percent = max(0, min(100, int(job.get("progress_percent", 0) or 0)))
     except (TypeError, ValueError):
         percent = 0
+    reason_code = str(job.get("error_code") or "") if status == "failed" else ""
+    if reason_code not in _FAILURE_MESSAGES:
+        reason_code = "unexpected_pipeline_error" if status == "failed" else ""
     return {
         "status": status, "step": step, "progress_percent": percent,
         "estimated_seconds_min": 60 if status in JOB_ACTIVE_STATUSES else None,
         "estimated_seconds_max": 180 if status in JOB_ACTIVE_STATUSES else None,
+        "reason_code": reason_code,
     }
 
 

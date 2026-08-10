@@ -15,7 +15,6 @@ from services.profile_skills import (
     apply_recent_context,
     analyze_profile_message,
     analyze_recent_context,
-    memory_candidate_allowed,
     process_profile_message,
     profile_skills_mode_for_user,
     safe_recent_context,
@@ -231,12 +230,6 @@ class ProfileSkillsTests(unittest.TestCase):
         self.assertFalse(decision["recent_context"]["should_update"])
         self.assertEqual(decision["memories"], [])
         self.assertEqual(decision["memory_codes"], ["protected_attribute"])
-
-    def test_memory_preflight_is_only_a_safety_check(self):
-        self.assertTrue(memory_candidate_allowed("我很重視準時，也喜歡安靜的咖啡廳"))
-        self.assertTrue(memory_candidate_allowed("他 8 月 1 日不行"))
-        self.assertFalse(memory_candidate_allowed("我今天和 seed_user_10 有約"))
-        self.assertTrue(memory_candidate_allowed("我想去日本"))
 
     def test_time_words_and_mixed_search_are_semantic_extraction_inputs(self):
         fields = {

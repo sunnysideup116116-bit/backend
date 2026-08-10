@@ -1,10 +1,10 @@
 # Dating-App Agent Rules
 
-本文件適用於 `Dating-App/` 下所有程式。任何接手本專案的 coding agent，在修改前必須先閱讀本文件與 [`AYUE_V2_ARCHITECTURE.md`](./AYUE_V2_ARCHITECTURE.md)。修改公開阿月／阿月悄悄話、Profile、Memory、Skill 或共用 projection 時，另須閱讀 [`AYUE_PUBLIC_PRIVATE_COLLABORATION_RULES.md`](./AYUE_PUBLIC_PRIVATE_COLLABORATION_RULES.md)；修改長期建議、Graph Memory 或 Context Engine 時，另須閱讀 [`MEMORY_CONTEXT_ENGINE_GUIDE.md`](./MEMORY_CONTEXT_ENGINE_GUIDE.md)。
+本文件適用於 `Dating-App/` 下所有程式。任何接手本專案的 coding agent，在修改前必須先閱讀本文件與 [`AYUE_V3_ARCHITECTURE.md`](./AYUE_V3_ARCHITECTURE.md)（內容為現行 V3 sub-agent 架構）。修改 runtime contract、sub-agent registration、Context slice、Tool/Guard 或 HTTP projection 時，另須閱讀 [`docs/architecture/09-runtime-interfaces.md`](./docs/architecture/09-runtime-interfaces.md)。修改長期建議、Graph Memory 或 Context Engine 時，另須閱讀 [`MEMORY_CONTEXT_ENGINE_GUIDE.md`](./MEMORY_CONTEXT_ENGINE_GUIDE.md)。
 
 ## 目標與範圍
 
-- 公開阿月已採 V2 單一 agent loop；後續功能必須在這個架構上擴充，不得再建立平行的關鍵字 router。
+- 公開阿月已採 V3 sub-agent 架構（Scheduler 編排、Planner 拆 DAG、Sub-agents 執行、Synthesizer 回覆）；後續功能必須在這個架構上擴充，不得再建立平行的關鍵字 router，也不得重建 V2 單一 loop。
 - `social_demotest` 是產品後端與前端；`matchmaker_agent` 是候選排序及 Neo4j 記憶服務。
 - 阿月悄悄話目前是獨立的 private runtime。除非任務明確要求，禁止把它與公開阿月合併，也禁止讓公開阿月任意 spawn private agent。
 - Neo4j、模型供應商及正式資料清理不因一般公開阿月功能而自動納入修改範圍。
@@ -12,26 +12,40 @@
 ## 修改前必做
 
 1. 先執行 `git status --short`，保留使用者既有修改；不得 reset、checkout 或覆蓋無關變更。
-2. 依 [`AYUE_V2_ARCHITECTURE.md`](./AYUE_V2_ARCHITECTURE.md) 找到該功能的 owner。不要因呼叫方便把 domain logic 搬回 router 或 runtime。
+2. 依 [`AYUE_V3_ARCHITECTURE.md`](./AYUE_V3_ARCHITECTURE.md) 找到該功能的 owner。不要因呼叫方便把 domain logic 搬回 router 或 runtime。
 3. 先找現有測試及 trajectory。修 bug 時必須先找出失敗層：Planner、Guard、Tool projection、Domain state、Composer、Profile extractor 或 UI。
 4. 只做任務需要的修改。不要格式化整份 `social_demotest/routers/chat.py` 或 `social_demotest/frontend.html`。
+
+## 文件與版本命名
+
+- `Public V3` 是目前唯一公開阿月架構；`Private V2` 是仍在使用、與 Public 隔離的悄悄話 runtime，不是 Public rollback 或 legacy fallback。
+- `public-v1`、`web_research.v1`、`product_info.v1`、`TurnClockV1` 等名稱是 typed payload/schema version，不代表 Public V1 runtime。不得因清理舊架構而刪除仍在使用的 versioned contract。
+- 不保留已淘汰 Public V1/V2 的完整 prompt、流程快照或 migration plan 當作現況文件。需要留下 compatibility 說明時，只能記錄接受的舊輸入、正規化位置與移除條件；新程式與新 fixture 不得繼續產生舊形狀。
+- 文件必須描述 owner 與 interface，不得只寫呼叫順序。修改 HTTP、Context、Planner、RuntimeRegistration、ToolSpec、Guard、confirmation、observation 或 stream contract 時，必須同步更新 `docs/architecture/09-runtime-interfaces.md` 與對應 domain 文件。
 
 ## 不可破壞的架構規則
 
 ### 1. 公開阿月只有一個 orchestrator
 
-- `social_demotest/services/ayue_agent/runtime.py` 是公開阿月 V2 的唯一 loop。
-- 正常流程固定為：`Context → Planner → Guard → Progress → Tool/Domain Action → Observation → Composer → Final`。
-- `AYUE_AGENT_V2_MODE=on` 時，失敗必須 fail closed；禁止自動掉回 legacy public routing。
-- `AYUE_AGENT_V2_MODE=off` 只作人工緊急 rollback。Legacy helper 必須留在 `legacy_*` 模組並以 lazy import 隔離。
+- `social_demotest/services/ayue_agent/v3/scheduler.py` 是公開阿月 V3 的唯一 orchestrator。
+- 正常流程固定為：`Context → Planner(DAG) → Sub-agents(Guard+Tool) → Synthesizer → Final`。
+- Public Ayue 永遠走 V3；失敗必須 fail closed，rollback 只能透過部署／commit rollback，不能在 request-level 切回 legacy。
 - 不得在 `routers/chat.py`、前端或另一個 service 再造第二套 public intent router。
+
+### 1.1 Scheduler 與 sub-agent runtime interface
+
+- Scheduler 只透過 `RuntimeRegistration` dispatch domain task。正式 runner 統一接受 `AgentContextSlice`、keyword-only `task: SubTask` 與 `services: GuardedReadExecutor`，並回傳 `(TaskRunnerResult, SubAgentMetrics | None)`。
+- `TaskRunnerResult` 必須恰好是 `proposals` 或 `completed_results`。一般 function-calling agent 回 proposal，交由 Scheduler 做中央 Guard 與執行；Calendar、Web、ProductInfo 這類擁有 bounded domain loop/typed assembly 的 specialist runtime 回 completed results。
+- `before_run`／`after_run` 只能做 bounded progress/debug projection，不得執行 domain write、改變 runner result 或建立第二條執行路徑。
+- Domain clarification、round/budget、reference resolution 與 typed result assembly 留在該 domain runtime；Scheduler 只做 DAG、共用預算、Guard、confirmation 協調與結果彙整。
+- `Plan.mode="product_info"`／`product_info_topics` 只屬 provider compatibility input；執行前必須正規化成 `product_info → synthesizer` DAG。新 Planner prompt、fixture 與文件不得產生 task-free ProductInfo mode。
 
 ### 2. LLM 做語意判斷，程式做安全與狀態判斷
 
-- Planner 輸出只能遵守 provider-neutral `AgentDecision`：`final | tool_call | confirmation`。
+- V3 Planner 只輸出靜態子任務 DAG（`decompose_tasks` function calling）；Sub-agents 各自以 function calling 提出 tool proposals。
 - 不得用大量中文詞彙 regex 取代 Planner 來判斷「使用者想做什麼」。
 - Deterministic Guard 只能驗證 schema、confidence、evidence span、工具權限、confirmation、唯一狀態、revision、idempotency 與執行額度。
-- 少量 deterministic parsing 只可用於封閉協議，例如明確的「確認／取消」、格式驗證、敏感資訊清理及 legacy rollback。
+- 少量 deterministic parsing 只可用於封閉協議，例如明確的「確認／取消」、格式驗證與敏感資訊清理；deployment／commit rollback 不屬於 request parsing。
 - 模型輸出無效、逾時、低信心或工具失敗時，不執行未確認的副作用，也不回 legacy。
 
 ### 3. Tool Registry 是能力的唯一入口
@@ -40,8 +54,8 @@
 - 每個工具必須定義：風險、planner argument schema、executor argument schema、output schema、executor key、progress text 及 confirmation requirement。
 - Planner 永遠不能提供或修改 `user_id`、match/proposal ID、event ID 或 revision。這些只能由 runtime/executor 根據登入者與 canonical state 注入。
 - 唯讀工具只能回傳完成問題所需的最小 typed projection，不得回傳 Mongo document、raw profile 或內部 ID。
-- 相同 `tool + normalized arguments` 在同一回合不得重跑；重用 observation 後交給 Composer。
-- 每回合最多三個唯讀步驟，最多一個副作用。
+- 相同 `tool + normalized executor arguments` 在同一 Public run 內不得重跑；可重用的成功 observation 由 runtime 投影後交給 Synthesizer。唯讀 budget 仍按 task id 計算。
+- 每個 sub-agent 最多三個唯讀步驟；每回合最多一筆待確認副作用（寫入一律先 confirmation）。Calendar mutation 的唯一公開 capability 是 `calendar.submit_commands`；同一 calendar task 內的一至十筆 authority-free commands 由 Calendar Runtime 合併成一筆 confirmation，一次確認後依序執行。
 - 外部 Web／地點工具必須有 timeout、bounded result、URL／輸入安全檢查與明確 failure code；不得把第三方 raw response 直接送入 Planner、trace 或回覆。
 
 ### 4. 副作用必須走 Domain Service
@@ -56,7 +70,7 @@
 ### 5. 所有寫入先確認
 
 - `match.start_search` 與 calendar create/update/cancel 必須先建立 pending confirmation，不能由第一次 Planner decision 直接執行。
-- Pending confirmation 由 Runtime 在 Planner 前處理，只接受封閉的確認／取消協議。
+- Pending confirmation 由 Scheduler 在 Planner 前處理，只接受封閉的確認／取消協議；確認後由 `v3/write_executors.py` 執行。
 - 一般問題不得被 pending action 汙染；使用者可先問日期、配對狀態或近期情境，再於有效期限內確認。
 - Confirmation 逾時、proposal revision 改變或狀態失效後，必須作廢。
 - 任何新副作用工具都要同時設計 confirmation、CAS/ownership、idempotency、stale behavior 與 concurrency tests。
@@ -69,6 +83,7 @@
 - 對象名稱只能使用可公開顯示名稱；沒有名稱時使用「對方」。
 - Calendar 可讀本人完整行程；對方資訊只能使用該產品流程明確允許的公開／busy-free projection。
 - Public stream event 與 trace 不得包含 arguments、tool result、prompt、raw exception、ID 或 revision。
+- 每個 sub-agent 只能收到 `context_slicer.py` 明確列出的 `AgentContextSlice`。新增 agent 必須新增獨立 slice 與 privacy test；不得把完整 `PublicAgentTurnContext` 或 raw `AgentTurnContext` 直接交給 agent。
 
 ### 7. Profile Pipeline 與聊天 Agent 分離
 
@@ -169,7 +184,8 @@
 - 至少覆蓋：planner sequence、guard、tool schema/output、trajectory、privacy、profile evidence、state/concurrency、stream 與 JSON compatibility。
 - Test harness 必須使用 stub config 或 local test database；自動測試不得連線或修改正式 MongoDB Atlas／Neo4j。
 - Python source 必須 compile；主服務與 matchmaker 必須能啟動，`GET /` 與 port 9001 health endpoint 必須為 200。
-- 修改 runtime contract、tool list、state machine、環境旗標或 App migration 步驟時，必須同步更新 `AYUE_V2_ARCHITECTURE.md`。
+- 修改 runtime contract、tool list、state machine、環境旗標或 App migration 步驟時，必須同步更新 `AYUE_V3_ARCHITECTURE.md`（V3 架構文件）。
+- 修改 runner interface、context slice、ToolSpec 三層 schema、observation、progress/debug envelope 或 compatibility adapter 時，必須新增 contract/privacy regression test，並同步更新 `docs/architecture/09-runtime-interfaces.md`。
 - 交付時列出修改檔案、測試指令／結果、未解決問題；不得把 `.env`、venv、log、cache 或真實 trace 一起交付。
 
 ## 禁止事項
@@ -177,7 +193,21 @@
 - 禁止因單一失敗案例累積更多自然語言 keyword regex。
 - 禁止模型自行提供 user/match/event ID 或 revision。
 - 禁止直接從 router、agent runtime 或 UI 寫入同一份 domain state。
-- 禁止 V2 失敗後自動呼叫 legacy。
+- 禁止 V3 失敗後自動呼叫 legacy。
 - 禁止把 progress 或 trace 變成隱私資料儲存區。
-- 禁止修改 `private_runtime.py`、清理正式資料或更換模型供應商，除非任務明確授權。
+- `private_runtime.py` 已刪除；Private Ayue 維持獨立 V2 runtime，由 `private_v2.py` 與 `private_calendar.py` 擁有。
 - 禁止刪除 migration、cleanup CLI、seed/demo data、rollback 或啟動腳本，除非先證明無 production、dynamic import、environment flag、test 或人工操作用途，並取得明確同意。
+
+## Current runtime ownership (2026 cleanup)
+
+- Public Ayue is unconditionally V3. `routers/public_chat.py` delegates
+  `ai_assistant` turns to `services/ayue_agent/v3/scheduler.py`; no Public V2
+  runtime, rollout flag, allowlist, or request-level legacy fallback exists.
+- Private Ayue remains a separate current V2 runtime owned by
+  `routers/private_mediator.py`, `services/ayue_agent/private_v2.py`, and
+  `services/ayue_agent/private_calendar.py`.
+- `runtime.py`, `legacy_match_routing.py`, and `private_runtime.py` are deleted.
+  Rollback is deployment/commit rollback, never re-enabling a second runtime.
+- Public and Private orchestrators must not import one another. Shared domain
+  services remain the authority for calendar, match, profile, memory, and
+  relationship state.

@@ -14,6 +14,7 @@ from routers.system import get_notifications
 from routers.match import get_match_status
 from routers.relationship_dates import cancel_date_coordination
 from routers.relationship_quiz import cancel_relationship_quiz
+from routers.frontend import serve_frontend_image
 
 
 class _Cursor(list):
@@ -22,6 +23,41 @@ class _Cursor(list):
 
 
 class ChatLeafRouterTests(unittest.TestCase):
+    def test_ayue_launcher_artwork_is_served_from_the_replaceable_asset_route(self):
+        response = serve_frontend_image("pet.gif")
+        self.assertEqual(response.media_type, "image/gif")
+        for filename in ("ayue-app-icon.png", "ayue-assessment.png", "ayue-match.png", "ayue-whisper.png"):
+            with self.subTest(filename=filename):
+                response = serve_frontend_image(filename)
+                self.assertEqual(response.media_type, "image/png")
+        with self.assertRaises(HTTPException) as raised:
+            serve_frontend_image("not-an-ayue-image.png")
+        self.assertEqual(raised.exception.status_code, 404)
+
+    def test_frontend_uses_ayue_artwork_only_on_ayue_owned_surfaces(self):
+        source = (Path(__file__).resolve().parents[1] / "frontend.html").read_text(encoding="utf-8")
+        self.assertIn('/images/ayue-assessment.png', source)
+        self.assertIn('/images/ayue-app-icon.png', source)
+        self.assertIn('/images/ayue-whisper.png', source)
+        self.assertNotIn('toast-collapsed', source)
+        dismiss = source[source.index('function dismissMediatorNotification'):source.index('function showMemoryNotice')]
+        self.assertIn('toast.classList.add("hidden")', dismiss)
+        self.assertNotIn('classList.add("toast-collapsed")', dismiss)
+        self.assertIn('image.onerror = () =>', source)
+
+    def test_frontend_private_launcher_uses_role_artwork_and_existing_panel_hooks(self):
+        source = (Path(__file__).resolve().parents[1] / "frontend.html").read_text(encoding="utf-8")
+        launcher = source[source.index('id="mediator-private-trigger"'):source.index('id="mediator-private-panel"')]
+        self.assertIn("data-ayue-avatar", launcher)
+        self.assertIn("openMediatorPrivatePanel()", launcher)
+        self.assertIn("mediator-launcher-control", launcher)
+        self.assertIn("aria-controls=\"mediator-private-panel\"", launcher)
+        self.assertNotIn("mediator-launcher-title", launcher)
+        self.assertNotIn("mediator-launcher-subtitle", launcher)
+        panel = source[source.index('id="mediator-private-panel"'):]
+        self.assertIn('id="mediator-private-title"', panel)
+        self.assertIn("私下聊聊你們的互動、怎麼回、怎麼約", panel)
+
     def test_big_five_onboarding_delegates_to_the_shared_session_service(self):
         outcome = {"status": "committed", "reply": "新的結果已套用。", "kind": "big_five"}
         profile = {"big_five": {"O": 7, "summary": "喜歡探索"}, "agentic_assessment_session": {
@@ -80,7 +116,7 @@ class ChatLeafRouterTests(unittest.TestCase):
             "established_dates": [],
         })
         save.assert_called_once_with(
-            "room", "ai_assistant", "哈囉，我是阿月。最近想做什麼、想去哪裡，儘管跟我說；我會邊聊邊幫你留意合適的人。",
+            "room", "ai_assistant", "嗨，我是阿月。先跟我聊聊你最近的事；需要時，我再陪你一起牽線。",
         )
 
     def test_date_cancel_remains_a_thin_domain_service_adapter(self):
@@ -95,7 +131,6 @@ class ChatLeafRouterTests(unittest.TestCase):
 
     def test_demo_reset_keeps_its_existing_scoped_cleanup(self):
         with patch("routers.demo.messages_coll.delete_many") as delete_messages, \
-             patch("routers.demo.calendar_events_coll.delete_many") as delete_calendar_events, \
              patch("routers.demo.matches_coll.update_many") as update_matches, \
              patch("routers.demo.profiles_coll.update_many") as update_profiles, \
              patch("builtins.print"):
@@ -103,7 +138,6 @@ class ChatLeafRouterTests(unittest.TestCase):
 
         self.assertEqual(response, {"status": "success", "message": "DB state reset"})
         delete_messages.assert_called_once_with({"room_id": {"$regex": "mediator_private"}})
-        delete_calendar_events.assert_called_once_with({})
         update_matches.assert_called_once_with({}, {"$unset": {"date_coordination": ""}})
         update_profiles.assert_called_once_with({}, {"$set": {"mediator_inbox": []}})
 

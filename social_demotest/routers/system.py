@@ -1,21 +1,59 @@
-﻿import random
+import random
 import requests
+import hmac
+import ipaddress
+import os
+import re
 import time
 import config
-from fastapi import APIRouter
-from models import ClearRequest, SettingsRequest, MediatorToneRequest, ProfileMemoryActionRequest, ProfileLocationRequest
+from fastapi import APIRouter, Header, HTTPException, Request
+from models import ClearRequest, SettingsRequest, MediatorToneRequest, ProfileMemoryActionRequest, ProfileLocationRequest, ModelSettingsRequest
 from database import db, profiles_coll, matches_coll, messages_coll
 from services.ai_service import get_embedding
 from services.profile_projection import safe_recent_context
 from services.language_service import normalize_model_text, normalize_zh_tw
 from services.ayue_agent.proactive_care import normalize_proactive_frequency, schedule_proactive_care
-from services.ayue_agent.runtime import agent_mode_for_user
+from services.ayue_agent.v3.scheduler import has_active_public_confirmation
+from services.ayue_agent.v3.debug_trace import get_run as get_debug_run, local_debug_enabled
 from services.ayue_agent.web_tools import web_enabled
 from services.profile_location import normalize_profile_location, safe_profile_location
 from services.ayue_agent.public_relationship_projection import anonymize_counterparty_payload
 from services.match_reason_service import V4_REASON_VERSION, reason_for_viewer
+from services.demo_cleanup_service import DemoCleanupError, clear_all_demo_state, graph_health
 
 router = APIRouter(prefix="/api", tags=["System"])
+
+
+@router.get("/health")
+def service_health():
+    """Process readiness only; never probes user data or external services."""
+    return {"status": "ok", "service": "ayue"}
+
+
+def _is_loopback_debug_request(request: Request) -> bool:
+    if not local_debug_enabled() or request.client is None:
+        return False
+    try:
+        client_is_loopback = ipaddress.ip_address(request.client.host).is_loopback
+    except ValueError:
+        client_is_loopback = request.client.host == "localhost"
+    hostname = (request.url.hostname or "").lower()
+    try:
+        host_is_loopback = hostname == "localhost" or ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        host_is_loopback = hostname == "localhost"
+    return client_is_loopback and host_is_loopback
+
+
+@router.get("/debug/ayue-runs/{run_id}")
+def local_ayue_debug_run(run_id: str, user_id: str, request: Request):
+    """Return one ephemeral raw V3 diagnostic only to a true loopback client."""
+    if not _is_loopback_debug_request(request) or not re.fullmatch(r"[a-f0-9]{32}", run_id):
+        raise HTTPException(status_code=404, detail="Debug trace unavailable")
+    run = get_debug_run(run_id, user_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Debug trace unavailable")
+    return run
 
 
 @router.get("/client-config")
@@ -173,27 +211,33 @@ def seed_data():
 @router.get("/demo/status")
 def get_demo_status(user_id: str):
     """Return a privacy-safe snapshot for the local Demo tools panel."""
-    profile = profiles_coll.find_one(
-        {"user_id": user_id},
-        {
-            "_id": 0,
-            "current_context": 1,
-            "profile_location": 1,
-            "match_search.status": 1,
-            "agentic_pending_confirmation": 1,
-        },
-    )
+    mongo_status = "available"
+    try:
+        profile = profiles_coll.find_one(
+            {"user_id": user_id},
+            {
+                "_id": 0,
+                "current_context": 1,
+                "profile_location": 1,
+                "match_search.status": 1,
+            },
+        )
+    except Exception:
+        profile = None
+        mongo_status = "unavailable"
     profile = profile or {}
     search = profile.get("match_search") or {}
     search_status = str(search.get("status") or "idle")[:40]
     return {
         "profile_exists": bool(profile),
-        "agent_version": "v2" if agent_mode_for_user(user_id) == "on" else "legacy",
+        "agent_version": "v3",
         "web_search_ready": web_enabled(),
         "location": safe_profile_location(profile),
         "recent_context": safe_recent_context(profile.get("current_context", ""), "尚無近期情境"),
         "match_search_status": search_status,
-        "has_pending_confirmation": bool(profile.get("agentic_pending_confirmation")),
+        "has_pending_confirmation": has_active_public_confirmation(user_id),
+        "graph_status": graph_health()["status"],
+        "mongo_status": mongo_status,
     }
 
 
@@ -248,19 +292,10 @@ def get_recent_context_status(user_id: str, run_key: str | None = None):
 
 @router.post("/clear")
 def clear_data(req: ClearRequest):
-    profiles_coll.delete_many({})
-    matches_coll.delete_many({})
-    messages_coll.delete_many({})
-    
-    # 嘗試通知 9001 埠口的 Agent 清空 Neo4j Graph
     try:
-        resp = requests.post("http://127.0.0.1:9001/api/clear_graph", timeout=10)
-        resp.raise_for_status()
-        print("🧠 已成功通知 Agent 清空 Neo4j Graph")
-    except Exception as e:
-        print(f"⚠️ 通知 Agent 清空 Neo4j Graph 失敗: {e}")
-        
-    return {"status": "success"}
+        return clear_all_demo_state()
+    except DemoCleanupError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
 
 @router.get("/notifications")
 def get_notifications(user_id: str):
@@ -345,6 +380,32 @@ def update_mediator_tone(req: MediatorToneRequest):
         update["probe_mode"] = req.probe_mode
     profiles_coll.update_one({"user_id": req.user_id}, {"$set": update}, upsert=True)
     return {"status": "success", "mediator_tone": tone, "probe_mode": update.get("probe_mode")}
+
+@router.post("/settings/model")
+def update_model_settings(
+    req: ModelSettingsRequest,
+    x_ayue_admin_token: str | None = Header(default=None),
+):
+    """Admin-only process-wide override for local evaluation."""
+    from services.ai_service import set_runtime_model_override, get_runtime_model_override
+    admin_token = os.getenv("AYUE_RUNTIME_MODEL_SETTINGS_TOKEN", "").strip()
+    if not admin_token or not x_ayue_admin_token or not hmac.compare_digest(admin_token, x_ayue_admin_token):
+        raise HTTPException(status_code=403, detail="Runtime model settings are disabled.")
+    allowed_models = {
+        value.strip()
+        for value in os.getenv("AYUE_ALLOWED_RUNTIME_MODELS", config.OLLAMA_CHAT_MODEL).split(",")
+        if value.strip()
+    }
+    if req.model is not None and req.model not in allowed_models:
+        raise HTTPException(status_code=400, detail="Model is not allowlisted.")
+    set_runtime_model_override(req.model, req.thinking_level)
+    return {"status": "success", **get_runtime_model_override()}
+
+@router.get("/settings/model")
+def get_model_settings():
+    """Return non-sensitive model state; mutation remains admin-only."""
+    from services.ai_service import get_runtime_model_override
+    return {**get_runtime_model_override(), "mutable": False}
 
 @router.post("/onboarding/complete")
 def complete_onboarding(req: ClearRequest):

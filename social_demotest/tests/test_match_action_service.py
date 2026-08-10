@@ -5,8 +5,8 @@ from fastapi import BackgroundTasks
 from models import MatchDecisionRequest
 from routers.match import _apply_match_decision
 from services import match_action_service
-from services.ayue_agent.contracts import AgentTurnContext, AgentTurnContextV2
-from services.ayue_agent.runtime import _decide_active_proposal
+from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext
+from services.ayue_agent.v3.write_executors import _decide_active_proposal
 
 
 class MatchActionServiceTests(unittest.TestCase):
@@ -174,16 +174,17 @@ class MatchActionServiceTests(unittest.TestCase):
             )
         self.assertEqual(result, {"status": "success", "new_status": "accepted"})
 
-    @patch("services.ayue_agent.runtime.decide_active_proposal")
+    @patch("services.ayue_agent.v3.write_executors.decide_active_proposal")
     def test_stale_agent_decision_answers_the_latest_terminal_state(self, decide):
         decide.return_value = {"status": "stale", "stale": True, "current_status": "accepted"}
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="有興趣")
-        turn = AgentTurnContextV2(
+        turn = PublicAgentTurnContext(
             user_id="owner", room_id="room", message="有興趣",
             active_proposal={"user_can_decide": True, "proposal_revision": 3},
         )
         ok, reply, code = _decide_active_proposal(
             ctx, turn, "run", 0, {"decision": "interested"},
+            {"proposal_revision": 3},
         )
         self.assertTrue(ok)
         self.assertEqual(code, "stale_revision")

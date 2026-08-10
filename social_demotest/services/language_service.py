@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import json
 
 try:  # OpenCC is optional during a rolling deploy; the fallback covers UI-critical terms.
     from opencc import OpenCC
@@ -22,7 +23,7 @@ _FALLBACK_S2T = str.maketrans({
     "关": "關", "发": "發", "现": "現", "处": "處", "资": "資", "讯": "訊",
     "实": "實", "际": "際", "还": "還", "没": "沒", "点": "點", "种": "種",
     "从": "從", "经": "經", "过": "過", "谈": "談", "题": "題", "问": "問",
-    "想": "想", "国": "國", "门": "門", "书": "書", "乐": "樂", "观": "觀",
+    "想": "想", "国": "國", "门": "門", "书": "書", "乐": "樂", "观": "觀", "简": "簡", "体": "體",
     "爱": "愛", "觉": "覺", "习": "習", "习": "習", "绪": "緒", "长": "長",
 })
 
@@ -49,3 +50,64 @@ def normalize_model_text(value):
     if isinstance(value, dict):
         return {key: normalize_model_text(item) for key, item in value.items()}
     return value
+
+
+_PUBLIC_REPLY_PROTECTED = re.compile(
+    r"```[\s\S]*?```|`[^`\n]+`|https?://[^\s<>]+|\{[^{}\n]*\}|\[[^\[\]\n]*\]",
+)
+
+
+def _normalize_public_reply_line(value: str) -> str:
+    """Normalize one visible reply line without destroying Markdown layout."""
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = _OPENCC.convert(text) if _OPENCC else text.translate(_FALLBACK_S2T)
+    return re.sub(r"[ \t\f\v]+", " ", text).strip()
+
+
+def normalize_public_reply(value: str | None, *, max_length: int | None = None) -> str:
+    """Normalize human-facing model text without rewriting opaque payloads.
+
+    Public V3 replies are prose, but they may contain a URL or a code/JSON
+    fragment that must remain byte-for-byte stable.  OpenCC owns the language
+    conversion; this boundary only protects those opaque fragments and never
+    touches tool arguments, IDs, revisions, or stored JSON.
+    """
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    stripped = text.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            json.loads(stripped)
+        except (TypeError, ValueError):
+            pass
+        else:
+            return text[:max_length].rstrip() if max_length else text
+
+    protected: list[str] = []
+
+    def hold(match: re.Match[str]) -> str:
+        protected.append(match.group(0))
+        return f"__AYUE_REPLY_PROTECTED_{len(protected) - 1}__"
+
+    matches = list(_PUBLIC_REPLY_PROTECTED.finditer(text))
+    if not matches:
+        normalized = "\n".join(
+            _normalize_public_reply_line(line) for line in text.split("\n")
+        )
+        normalized = re.sub(r"[ \t]*\n[ \t]*", "\n", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
+        return normalized[:max_length].rstrip() if max_length else normalized
+    output: list[str] = []
+    cursor = 0
+    for match in matches:
+        output.append(text[cursor:match.start()])
+        output.append(hold(match))
+        cursor = match.end()
+    output.append(text[cursor:])
+    normalized = "\n".join(
+        _normalize_public_reply_line(line) for line in "".join(output).split("\n")
+    )
+    normalized = re.sub(r"[ \t]*\n[ \t]*", "\n", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
+    for index, original in enumerate(protected):
+        normalized = normalized.replace(f"__AYUE_REPLY_PROTECTED_{index}__", original)
+    return normalized[:max_length].rstrip() if max_length else normalized

@@ -5,6 +5,8 @@ if os.getenv("AYUE_SKIP_DOTENV", "").strip().lower() not in {"1", "true", "on"}:
     load_dotenv(override=False)
 
 MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "profiling_db").strip() or "profiling_db"
+DEMO_DESTRUCTIVE_TOOLS_ENABLED = os.getenv("DEMO_DESTRUCTIVE_TOOLS_ENABLED", "off").strip().lower() in {"1", "true", "on"}
 GOOGLE_API_KEY = os.getenv("GOOGLE_AI_STUDIO_API_KEY") or os.getenv("GOOGLE_API_KEY")
 OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "deepseek-v4-flash:cloud")
 OLLAMA_FAST_CHAT_MODEL = os.getenv("OLLAMA_FAST_CHAT_MODEL")
@@ -12,6 +14,9 @@ if not OLLAMA_FAST_CHAT_MODEL:
     OLLAMA_FAST_CHAT_MODEL = "glm-4.7:cloud" if OLLAMA_CHAT_MODEL == "glm-5.2:cloud" else OLLAMA_CHAT_MODEL
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "https://ollama.com")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
+OLLAMA_REQUEST_TIMEOUT_SECONDS = max(
+    5.0, min(float(os.getenv("AYUE_OLLAMA_TIMEOUT_SECONDS", "30") or "30"), 120.0)
+)
 GOOGLE_EMBEDDING_MODEL = os.getenv("GOOGLE_EMBEDDING_MODEL", "models/gemini-embedding-2")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 TAVILY_PROJECT = os.getenv("TAVILY_PROJECT")
@@ -29,3 +34,8 @@ AYUE_MAPS_MONGO_CACHE = os.getenv("AYUE_MAPS_MONGO_CACHE", "off").strip().lower(
 GOOGLE_PLACES_SERVER_API_KEY = os.getenv("GOOGLE_PLACES_SERVER_API_KEY", "").strip()
 GOOGLE_MAPS_BROWSER_API_KEY = os.getenv("GOOGLE_MAPS_BROWSER_API_KEY", "").strip()
 AYUE_GOOGLE_PLACE_CARDS_ENABLED = os.getenv("AYUE_GOOGLE_PLACE_CARDS_ENABLED", "off").strip().lower() == "on"
+# Place Details Photos SKU bills the media bytes only (free 1,000/month).
+# The photos field itself rides along in Text Search Pro at no extra cost.
+AYUE_GOOGLE_PLACE_PHOTOS_ENABLED = os.getenv("AYUE_GOOGLE_PLACE_PHOTOS_ENABLED", "off").strip().lower() == "on"
+# Routes API Compute Routes Essentials for real driving distance/time.
+AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED = os.getenv("AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED", "on").strip().lower() == "on"

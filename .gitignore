@@ -35,3 +35,14 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
+
+# Agent / tooling working dirs (machine-local, not part of the product)
+.superpowers/
+.claude/
+
+# Test / coverage caches
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/

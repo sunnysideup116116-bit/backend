@@ -6,7 +6,6 @@ import re
 import time
 
 from database import profiles_coll
-from services.memory_service import observe_user_memory
 from services.profile_skills import process_profile_message, profile_skills_mode_for_user
 
 
@@ -69,14 +68,12 @@ def _run_profile_process(
 
 def queue_profile_skills(
     background_tasks, user_id: str, message: str, message_id: str | None,
-    surface: str, match_id: str | None = None, *, allow_legacy_fallback: bool = True,
-    mode_resolver=None, progress_token: str | None = None,
+    surface: str, match_id: str | None = None, *, mode_resolver=None,
+    progress_token: str | None = None,
 ) -> str:
     """Run profile writes from the saved owner message exactly once."""
     mode = (mode_resolver or profile_skills_mode_for_user)(user_id)
     if mode == "off":
-        if allow_legacy_fallback:
-            background_tasks.add_task(observe_user_memory, user_id, message, surface, match_id, message_id)
         return mode
     safe_token = _safe_progress_token(progress_token)
     if safe_token:

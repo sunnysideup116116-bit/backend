@@ -21,6 +21,7 @@ from database import messages_coll, profiles_coll
 from services.ai_service import generate_chat_completion
 from services.chat_service import generate_room_id
 from services.profile_projection import safe_recent_context
+from services.ayue_agent.product_identity import AYUE_MISSION_SHORT, AYUE_VOICE_SHORT
 
 
 class ProactiveCareDecision(BaseModel):
@@ -255,7 +256,10 @@ def generate_proactive_care_outcome(context: ProactiveCareContext) -> tuple[Proa
         # not a useful topic for a later care message.
         effective_context = context.model_copy(update={"latest_owner_message": ""})
     payload = effective_context.model_dump()
-    base_prompt = f"""你是阿月，正在主動關心一位使用者。阿月是說話者，使用者是收話者；絕對不可把阿月叫成「欸阿月」，也不可角色顛倒。
+    base_prompt = f"""{AYUE_MISSION_SHORT}
+{AYUE_VOICE_SHORT}
+
+你是阿月，正在主動關心一位使用者。阿月是說話者，使用者是收話者；絕對不可把阿月叫成「欸阿月」，也不可角色顛倒。
 只能根據安全 context 的 latest_owner_message 或 recent_context 關心使用者。不要讀取、提及或推銷配對、對方、行事曆、心理診斷或系統能力。若沒有具體可關心的內容，輸出空字串以外的 JSON 不可。
 訊息必須一到兩句、最多一個自然問題、繁體中文且不重複 previous_assistant_message。grounding_span 必須是所選 focus 的原文連續子字串。
 只輸出 JSON：{{"message":"...","focus":"latest_message|recent_context","grounding_span":"原文子字串","confidence":0.0}}
@@ -266,8 +270,11 @@ def generate_proactive_care_outcome(context: ProactiveCareContext) -> tuple[Proa
         if attempt:
             prompt += "\n前一次輸出未通過格式或安全驗證。請重新產生一次，嚴格使用原文 grounding_span，不要輸出解釋。"
         try:
+            provider_result = generate_chat_completion(
+                prompt, temperature=0.5 if attempt == 0 else 0, json_output=True,
+            )
             decision = _valid_decision(
-                generate_chat_completion(prompt, temperature=0.5 if attempt == 0 else 0, json_output=True),
+                getattr(provider_result, "content", provider_result),
                 effective_context,
             )
         except Exception:

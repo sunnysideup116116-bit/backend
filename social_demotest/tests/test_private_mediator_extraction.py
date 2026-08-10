@@ -6,9 +6,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PrivateMediatorExtractionTests(unittest.TestCase):
-    def test_private_runtimes_do_not_depend_on_chat_router_for_probe_writes(self):
+    def test_private_runtime_modules_do_not_depend_on_chat_router_for_probe_writes(self):
         for relative_path in (
-            "services/ayue_agent/private_runtime.py",
+            "services/ayue_agent/private_calendar.py",
             "services/ayue_agent/private_v2.py",
         ):
             source = (ROOT / relative_path).read_text(encoding="utf-8")

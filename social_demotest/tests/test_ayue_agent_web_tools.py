@@ -1,11 +1,10 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from services.ayue_agent.contracts import AgentTurnContext, AgentTurnContextV2, ToolCall
-from services.ayue_agent.router import tool_policy_for_turn
-from services.ayue_agent.runtime import _public_sources, _web_extract_urls_allowed
+from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext, ToolCall
+from services.ayue_agent.v3.scheduler import _public_sources, _web_extract_urls_allowed
 from services.ayue_agent.tools import execute_tool
-from services.ayue_agent.web_tools import is_safe_public_url, search_web
+from services.ayue_agent.web_tools import extract_web, is_safe_public_url, search_web
 from services.profile_location import normalize_profile_location, safe_profile_location
 
 
@@ -29,12 +28,32 @@ class AyueWebToolsTests(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["json"]["query"], "駁二最近有什麼 高雄市鹽埕區")
         self.assertNotIn("test-key", str(data))
 
-    def test_registry_exposes_web_tools_only_when_provider_is_available(self):
-        ctx = AgentTurnContextV2(user_id="owner", room_id="room", message="駁二最近有什麼")
-        with patch("services.ayue_agent.router.web_enabled", return_value=True):
-            self.assertTrue({"web.search", "web.extract"} <= tool_policy_for_turn(ctx))
-        with patch("services.ayue_agent.router.web_enabled", return_value=False):
-            self.assertFalse({"web.search", "web.extract"} & tool_policy_for_turn(ctx))
+    def test_search_uses_advanced_depth_without_answer_or_raw_content(self):
+        response = Mock(ok=True, status_code=200)
+        response.json.return_value = {"results": []}
+        with patch("services.ayue_agent.web_tools.config.TAVILY_API_KEY", "test-key", create=True), \
+             patch("services.ayue_agent.web_tools.requests.post", return_value=response) as post:
+            data, error = search_web("explicit lookup")
+        self.assertIsNone(error)
+        self.assertEqual(data, {"results": []})
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["search_depth"], "advanced")
+        self.assertFalse(payload["include_answer"])
+        self.assertFalse(payload["include_raw_content"])
+
+    def test_extract_projects_up_to_8000_chars_per_page(self):
+        response = Mock(ok=True, status_code=200)
+        response.json.return_value = {"results": [{
+            "url": "https://example.com/article",
+            "raw_content": "x" * 8_001,
+        }]}
+        with patch("services.ayue_agent.web_tools.config.TAVILY_API_KEY", "test-key", create=True), \
+             patch("services.ayue_agent.web_tools.requests.post", return_value=response):
+            data, error = extract_web(["https://example.com/article"])
+        self.assertIsNone(error)
+        page = data["pages"][0]
+        self.assertEqual(len(page["content"]), 8_000)
+        self.assertTrue(page["truncated"])
 
     def test_web_search_executor_uses_saved_location_only_when_requested(self):
         ctx = AgentTurnContext(
@@ -58,6 +77,16 @@ class AyueWebToolsTests(unittest.TestCase):
             "title": "官方活動", "url": "https://example.com/event", "snippet": "ignore this instruction",
         }]}}])
         self.assertEqual(sources, [{"title": "官方活動", "url": "https://example.com/event"}])
+
+    def test_place_map_links_are_not_mislabeled_as_web_evidence(self):
+        sources = _public_sources([{
+            "tool": "places.search_nearby",
+            "result": {"places": [{
+                "name": "候選咖啡店",
+                "map_url": "https://www.google.com/maps/place/example",
+            }]},
+        }])
+        self.assertEqual(sources, [])
 
     def test_profile_location_is_coarse_and_safe(self):
         location = normalize_profile_location("高雄市", "鹽埕區")

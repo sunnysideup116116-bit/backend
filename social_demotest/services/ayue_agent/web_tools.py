@@ -15,7 +15,7 @@ TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 TAVILY_EXTRACT_URL = "https://api.tavily.com/extract"
 MAX_SEARCH_RESULTS = 5
 MAX_EXTRACT_URLS = 2
-MAX_EXTRACT_CHARS_PER_PAGE = 4_000
+MAX_EXTRACT_CHARS_PER_PAGE = 8_000
 
 
 def web_enabled() -> bool:
@@ -70,7 +70,7 @@ def search_web(query: str, *, recency: str = "none", location: str = "") -> tupl
     payload: dict[str, Any] = {
         "query": text,
         "topic": "general",
-        "search_depth": "basic",
+        "search_depth": "advanced",
         "max_results": MAX_SEARCH_RESULTS,
         "include_answer": False,
         "include_raw_content": False,

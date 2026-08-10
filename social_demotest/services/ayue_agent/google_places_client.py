@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
+import re
+import threading
+import time
 from typing import Any
+from urllib.parse import urlencode, urlsplit
 
 import requests
 
@@ -11,9 +16,13 @@ import config
 
 
 _TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+# Field mask drives billing. Keep the projection bounded:
+#   places.photos is Pro (not Enterprise), so photo names ride along free.
+#   rating/userRatingCount/currentOpeningHours are higher-cost fields and must
+#   never be requested here.
 _FIELD_MASK = (
     "places.id,places.displayName,places.formattedAddress,places.location,"
-    "places.types,places.googleMapsUri"
+    "places.types,places.googleMapsUri,places.photos"
 )
 _CATEGORY_QUERIES = {
     "restaurant": "restaurant",
@@ -22,6 +31,14 @@ _CATEGORY_QUERIES = {
     "attraction": "tourist attraction",
     "park": "park",
 }
+
+# Process-local TTL cache. Google Places is billed per call, so caching the
+# typed projection (never the raw payload) keeps the planner-facing surface
+# identical while protecting quota.
+TEXT_SEARCH_TTL_SECONDS = 15 * 60
+
+_CACHE_LOCK = threading.Lock()
+_MEMORY_CACHE: dict[str, tuple[float, Any]] = {}
 
 
 class GooglePlacesError(Exception):
@@ -38,8 +55,51 @@ def google_place_cards_enabled() -> bool:
     )
 
 
+def google_routes_enabled() -> bool:
+    """Routes is server-to-server and does not depend on the browser map key."""
+    return bool(
+        getattr(config, "AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED", True)
+        and getattr(config, "GOOGLE_PLACES_SERVER_API_KEY", "")
+    )
+
+
 def _clean(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+def _safe_google_maps_url(value: Any) -> str:
+    url = _clean(value, 500)
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return ""
+    host = str(parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return ""
+    if host not in {"google.com", "www.google.com", "maps.google.com", "maps.app.goo.gl"}:
+        return ""
+    return url
+
+
+def _cache_key(prefix: str, payload: dict[str, Any]) -> str:
+    canonical = repr(sorted(payload.items())).encode("utf-8")
+    return f"{prefix}:{hashlib.sha256(canonical).hexdigest()}"
+
+
+def _cache_get(cache_key: str) -> Any | None:
+    now = time.time()
+    with _CACHE_LOCK:
+        cached = _MEMORY_CACHE.get(cache_key)
+        if cached and cached[0] > now:
+            return cached[1]
+        if cached:
+            _MEMORY_CACHE.pop(cache_key, None)
+    return None
+
+
+def _cache_put(cache_key: str, data: Any, ttl_seconds: int) -> None:
+    with _CACHE_LOCK:
+        _MEMORY_CACHE[cache_key] = (time.time() + ttl_seconds, data)
 
 
 def _distance_m(left_lat: float, left_lon: float, right_lat: float, right_lon: float) -> int:
@@ -60,8 +120,42 @@ def _category(types: list[Any], requested: list[str]) -> str:
     return requested[0]
 
 
+def _clean_cuisine(value: Any) -> str:
+    """Bound a free-text cuisine hint: strip control chars, collapse spaces, cap length."""
+    return " ".join(str(value or "").split())[:30]
+
+
+def _photo_url(item: dict[str, Any]) -> str:
+    """Build a media URL from the first photo of a Text Search place.
+
+    The photos field itself is Pro-tier (rides along with the existing mask at
+    no extra SKU), but loading the media bytes bills the Place Details Photos
+    SKU (GetPhotoMediaRequest). AYUE_GOOGLE_PLACE_PHOTOS_ENABLED must be on or
+    no photo_url is produced at all, so a default-off deployment never touches
+    the media endpoint.
+    """
+    if not getattr(config, "AYUE_GOOGLE_PLACE_PHOTOS_ENABLED", False):
+        return ""
+    photos = item.get("photos") or []
+    if not isinstance(photos, list) or not photos:
+        return ""
+    first = photos[0] if isinstance(photos[0], dict) else {}
+    name_attr = _clean(first.get("name"), 200)
+    if not name_attr or "/" not in name_attr:
+        return ""
+    # Media is loaded by the browser, so only the explicitly browser-visible,
+    # HTTP-referrer-restricted key may appear here.  The server key is reserved
+    # for server-to-server request headers and must never cross the boundary.
+    browser_key = str(getattr(config, "GOOGLE_MAPS_BROWSER_API_KEY", "") or "").strip()
+    if not browser_key:
+        return ""
+    query = urlencode({"maxWidthPx": 400, "key": browser_key})
+    return f"https://places.googleapis.com/v1/{name_attr}/media?{query}"
+
+
 def search_nearby_places(
     anchor_label: str, lat: float, lon: float, categories: list[str], *, limit: int,
+    cuisine: str = "", radius_m: int = 1500,
 ) -> list[dict[str, Any]]:
     """Resolve a bounded set of public places; no raw Google payload escapes."""
     if not google_place_cards_enabled():
@@ -70,10 +164,28 @@ def search_nearby_places(
     if not requested:
         raise GooglePlacesError("invalid_place_category")
     query = " or ".join(_CATEGORY_QUERIES[item] for item in requested)
+    cuisine_clean = _clean_cuisine(cuisine)
+    if cuisine_clean:
+        query = f"{cuisine_clean} {query}"
+    safe_limit = max(1, min(int(limit), 10))
+    safe_radius = max(300, min(int(radius_m), 5_000))
+    cache_key = _cache_key("g_nearby", {
+        "label": anchor_label.lower(), "lat": round(lat, 5), "lon": round(lon, 5),
+        "categories": tuple(requested), "cuisine": cuisine_clean, "limit": safe_limit,
+        "radius_m": safe_radius,
+    })
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return list(cached)
     body = {
         "textQuery": f"{query} near {anchor_label}",
-        "locationBias": {"circle": {"center": {"latitude": lat, "longitude": lon}, "radius": 5000.0}},
-        "maxResultCount": max(1, min(int(limit), 10)),
+        "locationBias": {
+            "circle": {
+                "center": {"latitude": lat, "longitude": lon},
+                "radius": float(safe_radius),
+            }
+        },
+        "maxResultCount": safe_limit,
         "languageCode": "zh-TW",
     }
     try:
@@ -115,28 +227,42 @@ def search_nearby_places(
         if not place_id or not name or place_id in seen:
             continue
         seen.add(place_id)
-        map_url = _clean(item.get("googleMapsUri"), 500)
-        if not map_url.startswith("https://"):
+        map_url = _safe_google_maps_url(item.get("googleMapsUri"))
+        if not map_url:
+            continue
+        distance_m = _distance_m(lat, lon, item_lat, item_lon)
+        # Text Search locationBias is not a hard restriction.  Enforce the
+        # planner-approved radius on the typed projection before any result can
+        # become a candidate card or Web research subject.
+        if distance_m > safe_radius:
             continue
         places.append({
             "name": name,
             "category": _category(item.get("types") or [], requested),
-            "distance_m": _distance_m(lat, lon, item_lat, item_lon),
+            "distance_m": distance_m,
             "address_summary": _clean(item.get("formattedAddress"), 120),
             "map_url": map_url,
             "provider": "google",
             "place_id": place_id,
+            "photo_url": _photo_url(item),
         })
-    return sorted(places, key=lambda item: (item["distance_m"], item["name"]))[:max(1, min(int(limit), 10))]
+    places = sorted(places, key=lambda item: (item["distance_m"], item["name"]))[:safe_limit]
+    _cache_put(cache_key, list(places), TEXT_SEARCH_TTL_SECONDS)
+    return places
 
 
 def resolve_place(query: str) -> dict[str, Any] | None:
     """Resolve one explicit public place name into a live Google Place ID."""
     if not google_place_cards_enabled():
         raise GooglePlacesError("google_places_disabled")
-    body = {"textQuery": _clean(query, 160), "maxResultCount": 1, "languageCode": "zh-TW"}
-    if not body["textQuery"]:
+    cleaned = _clean(query, 160)
+    if not cleaned:
         raise GooglePlacesError("location_required")
+    cache_key = _cache_key("g_resolve", {"query": cleaned.lower()})
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return dict(cached) if cached else None
+    body = {"textQuery": cleaned, "maxResultCount": 1, "languageCode": "zh-TW"}
     try:
         response = requests.post(
             _TEXT_SEARCH_URL,
@@ -163,18 +289,114 @@ def resolve_place(query: str) -> dict[str, Any] | None:
     except ValueError as exc:
         raise GooglePlacesError("google_places_invalid_response") from exc
     if not rows:
+        _cache_put(cache_key, None, TEXT_SEARCH_TTL_SECONDS)
         return None
     item = rows[0] or {}
     place_id = _clean(item.get("id"), 180)
     display = item.get("displayName") or {}
     name = _clean(display.get("text") if isinstance(display, dict) else display, 80)
-    map_url = _clean(item.get("googleMapsUri"), 500)
-    if not place_id or not name or not map_url.startswith("https://"):
+    map_url = _safe_google_maps_url(item.get("googleMapsUri"))
+    if not place_id or not name or not map_url:
+        _cache_put(cache_key, None, TEXT_SEARCH_TTL_SECONDS)
         return None
     types = [str(value) for value in (item.get("types") or [])]
     category = _category(types, ["restaurant", "cafe", "bar", "attraction", "park"])
-    return {
+    place = {
         "name": name, "category": category, "distance_m": 0,
         "address_summary": _clean(item.get("formattedAddress"), 120), "map_url": map_url,
-        "provider": "google", "place_id": place_id,
+        "provider": "google", "place_id": place_id, "photo_url": _photo_url(item),
     }
+    _cache_put(cache_key, place, TEXT_SEARCH_TTL_SECONDS)
+    return place
+
+
+_ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
+_ROUTES_FIELD_MASK = "routes.distanceMeters,routes.duration,routes.routeLabels"
+_ROUTES_TTL_SECONDS = 3600
+
+
+def measure_distance_matrix(origin: str, destination: str) -> dict[str, Any] | None:
+    """Resolve a real driving distance and duration via Routes API Compute Routes.
+
+    Returns {distance_m, duration_text, distance_basis: "driving"} or None on
+    failure. The caller falls back to OSM haversine when this returns None.
+    """
+    if not google_routes_enabled():
+        return None
+    origin_clean = _clean(origin, 160)
+    dest_clean = _clean(destination, 160)
+    if not origin_clean or not dest_clean:
+        return None
+    cache_key = _cache_key("g_routes", {"o": origin_clean.lower(), "d": dest_clean.lower()})
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return dict(cached) if cached else None
+    body = {
+        "origin": {"address": origin_clean},
+        "destination": {"address": dest_clean},
+        "travelMode": "DRIVE",
+        "routingPreference": "TRAFFIC_UNAWARE",
+        "languageCode": "zh-TW",
+    }
+    try:
+        response = requests.post(
+            _ROUTES_URL,
+            headers={
+                "X-Goog-Api-Key": str(config.GOOGLE_PLACES_SERVER_API_KEY),
+                "X-Goog-FieldMask": _ROUTES_FIELD_MASK,
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=(3, 12),
+        )
+    except (requests.Timeout, requests.RequestException):
+        return None
+    if not response.ok:
+        _cache_put(cache_key, None, _ROUTES_TTL_SECONDS)
+        return None
+    try:
+        routes = (response.json() or {}).get("routes") or []
+    except ValueError:
+        return None
+    if not routes:
+        _cache_put(cache_key, None, _ROUTES_TTL_SECONDS)
+        return None
+    route = routes[0] or {}
+    try:
+        distance_m = int(route.get("distanceMeters"))
+    except (TypeError, ValueError):
+        return None
+    duration_text = ""
+    duration = route.get("duration")
+    # Routes API v2 returns duration as a string like "888s" (protobuf Duration
+    # JSON form), NOT an object. Handle both shapes defensively.
+    seconds = 0
+    if isinstance(duration, str):
+        try:
+            seconds = int(duration.rstrip("s"))
+        except ValueError:
+            seconds = 0
+    elif isinstance(duration, dict):
+        seconds_str = str(duration.get("seconds") or "")
+        try:
+            seconds = int(seconds_str.rstrip("s")) if seconds_str else 0
+        except ValueError:
+            seconds = 0
+    if seconds > 0:
+        if seconds < 60:
+            duration_text = f"約 {seconds} 秒"
+        elif seconds < 3600:
+            duration_text = f"約 {seconds // 60} 分鐘"
+        else:
+            duration_text = f"約 {seconds // 3600} 小時 {(seconds % 3600) // 60} 分鐘"
+    result = {
+        "origin_label": origin_clean,
+        "destination_label": dest_clean,
+        "distance_m": distance_m,
+        "duration_text": duration_text,
+        "distance_basis": "driving",
+        "attribution": "Google Maps",
+        "attribution_url": "https://www.google.com/maps",
+    }
+    _cache_put(cache_key, result, _ROUTES_TTL_SECONDS)
+    return result
