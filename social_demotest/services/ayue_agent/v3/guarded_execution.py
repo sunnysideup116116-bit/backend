@@ -25,6 +25,13 @@ ProgressEmitter = Callable[..., Any]
 DebugEmitter = Callable[..., Any]
 
 
+def _failure_observation_from_tool_result(tool_result: Any) -> dict[str, Any] | None:
+    """Pass through only the bounded failure projection supplied by a tool."""
+    data = getattr(tool_result, "data", None)
+    failure = data.get("failure") if isinstance(data, dict) else None
+    return {"failure": failure} if isinstance(failure, dict) else None
+
+
 def web_extract_urls_allowed(turn_ctx: Any, results: Sequence[Any], urls: Sequence[str]) -> bool:
     """Bind extraction to a search result or an URL the owner supplied."""
     allowed: set[str] = set()
@@ -268,6 +275,7 @@ class GuardedReadExecutor:
                     status=SubTaskStatus.FAILED,
                     tool_name=proposal.tool_name,
                     error_code=tool_result.error_code,
+                    observation=_failure_observation_from_tool_result(tool_result),
                 ),
                 attempted=True,
             )

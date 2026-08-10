@@ -306,6 +306,13 @@ def _observation_dict(task_id: str, result: "SubTaskResult") -> dict[str, Any]:
     }
 
 
+def _failure_observation_from_tool_result(tool_result: Any) -> dict[str, Any] | None:
+    """Pass through only the bounded failure projection supplied by a tool."""
+    data = getattr(tool_result, "data", None)
+    failure = data.get("failure") if isinstance(data, dict) else None
+    return {"failure": failure} if isinstance(failure, dict) else None
+
+
 def _prior_observations_for(
     task: "SubTask", task_results: dict[str, list["SubTaskResult"]],
 ) -> list[dict[str, Any]]:
@@ -818,7 +825,8 @@ def _run_sub_task(
                 )
             print(f"  [{task.id}#{index}] result=FAILED  error_code={tool_result.error_code}")
             results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED,
-                                          tool_name=proposal.tool_name, error_code=tool_result.error_code))
+                                          tool_name=proposal.tool_name, error_code=tool_result.error_code,
+                                          observation=_failure_observation_from_tool_result(tool_result)))
             continue
         _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
                         step_id=step_id, outcome="ok", tool_name=proposal.tool_name,

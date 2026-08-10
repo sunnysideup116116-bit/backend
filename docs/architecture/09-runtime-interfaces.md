@@ -165,6 +165,15 @@ Calendar 的唯一公開 mutation capability 是 `calendar.submit_commands`。Ca
 
 Observation 不是 user-facing prose。Synthesizer 是一般 DAG 的唯一 final wording owner，且只能使用它實際收到的 verified observations。Web URL、place card 與 subject reference 由 server-owned catalog 綁定；模型不能創造新的 reference。
 
+Domain failure 可以在既有 `SubTaskResult` 形狀內帶 bounded `observation` projection，例如 `{"failure": {"code": "location_not_found", "subject": "...", "message": "..."}}`。這只適用於 domain 明確 allowlist 的 user-facing failure；`subject` 必須來自已驗證的 planner/executor arguments，`message` 必須是 server-owned 固定文字。不得放入 raw exception、stack trace、provider detail 或 internal ID。Scheduler 只傳遞這個 projection，不負責解讀 Places 或其他 domain 的 failure semantics。
+
+Grounded Places/Places+Web success observations normally go through the
+Synthesizer `compose_public_reply` contract. `candidate_cards` is a bounded
+server-owned evidence pool; `selected_candidate_refs` is the public
+presentation set. Deterministic domain formatters are post-composition
+degradation paths and must not run before normal composition or discard
+successful sibling-domain observations.
+
 ProductInfo 固定輸出 `product_info.v1` observation；Web 固定輸出 `web_research.v1` observation。這些 `.v1` 是 payload schema，不代表舊 runtime。
 
 ## 9. 新增或修改 interface 的交付要求

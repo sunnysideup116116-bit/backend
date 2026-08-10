@@ -210,3 +210,11 @@ Retrieval count and display count are separate. Up to eight Places candidates
 may be retrieved, while a normal grounded recommendation selects two or three
 cards (maximum four unless the user explicitly requests more). Missing Web
 evidence preserves an explicit limitation and does not hide all Places cards.
+
+For Places-only and Places+Web grounded recommendations, typed observations are
+the evidence input and Synthesizer is the normal natural-language composition
+owner. It calls `compose_public_reply` and resolves only server-owned candidate
+refs. Deterministic Places/Web formatters run only after provider, composition,
+grounding, or presentation validation failure. A Places `requested_limit` is
+candidate-pool cardinality, not the final public card count; an explicit final
+count is represented by `card_intent=explicit_set` and the selected refs.
