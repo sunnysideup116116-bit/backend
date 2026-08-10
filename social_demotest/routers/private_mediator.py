@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import queue
 import threading
 import time
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
 
 from database import matches_coll, messages_coll, profiles_coll
@@ -18,7 +17,6 @@ from models import MediatorPrivateRequest
 from services.ayue_agent.private_contracts import PrivateClientAction
 from services.ayue_agent.private_v2 import run_private_agent_turn_v2
 from services.ayue_agent.product_identity import PRIVATE_RUNTIME_FALLBACK_REPLY
-from services.ayue_agent.v3.debug_trace import local_debug_enabled
 from services.chat_service import generate_room_id, save_message
 from services.profile_task_service import queue_profile_skills  # compatibility import; Private never invokes it
 from services.relationship_engagement_service import (
@@ -30,21 +28,6 @@ from services.relationship_engagement_service import (
 )
 
 router = APIRouter()
-
-
-def _is_loopback_debug_request(request: Request | None) -> bool:
-    if request is None or not local_debug_enabled() or request.client is None:
-        return False
-    try:
-        client_ok = ipaddress.ip_address(request.client.host).is_loopback
-    except ValueError:
-        client_ok = request.client.host == "localhost"
-    host = (request.url.hostname or "").lower()
-    try:
-        host_ok = host == "localhost" or ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        host_ok = host == "localhost"
-    return client_ok and host_ok
 
 @router.get("/mediator/private/{other_id}")
 
@@ -128,12 +111,11 @@ def save_private_mediator_reply(room_id: str, reply: str, event_type="text", act
     )
 
 
-def _run_private_v2_saved_turn(req: MediatorPrivateRequest, match_doc: dict, room_id: str, on_progress=None, agent_run_id: str | None = None, *, debug_enabled: bool = False) -> dict:
+def _run_private_v2_saved_turn(req: MediatorPrivateRequest, match_doc: dict, room_id: str, on_progress=None, agent_run_id: str | None = None) -> dict:
     """Persist exactly one private V2 final after the owner message is saved."""
     result = run_private_agent_turn_v2(
         user_id=req.user_id, other_id=req.other_id, message=req.message,
         match_doc=match_doc, on_progress=on_progress, agent_run_id=agent_run_id,
-        debug_enabled=debug_enabled,
     )
     reply = result.reply or PRIVATE_RUNTIME_FALLBACK_REPLY
     handoff = result.handoff.model_dump() if getattr(result, "handoff", None) else None
@@ -157,7 +139,7 @@ def _run_private_v2_saved_turn(req: MediatorPrivateRequest, match_doc: dict, roo
 
 @router.post("/mediator/private")
 
-def mediator_private_chat(req: MediatorPrivateRequest, background_tasks: BackgroundTasks, request: Request = None):
+def mediator_private_chat(req: MediatorPrivateRequest, background_tasks: BackgroundTasks):
 
     match_doc = find_accepted_match(req.user_id, req.other_id)
 
@@ -189,13 +171,10 @@ def mediator_private_chat(req: MediatorPrivateRequest, background_tasks: Backgro
 
     # Current Private V2 owns every accepted-pair turn. It must not fall
     # through into the removed legacy keyword/free-form runtime.
-    debug_enabled = _is_loopback_debug_request(request)
-    if debug_enabled:
-        return _run_private_v2_saved_turn(req, match_doc, room_id, debug_enabled=True)
     return _run_private_v2_saved_turn(req, match_doc, room_id)
 
 @router.post("/mediator/private/stream")
-def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: BackgroundTasks, request: Request = None):
+def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: BackgroundTasks):
     """NDJSON stream for the current Private V2 runtime."""
     match_doc = find_accepted_match(req.user_id, req.other_id)
     if not match_doc:
@@ -218,11 +197,7 @@ def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: 
             room_id = generate_mediator_private_room_id(req.user_id, req.other_id)
             user_message = save_message(room_id, req.user_id, req.message)
             emit({"type": "run_started", "agent_run_id": fallback_run_id})
-            debug_enabled = _is_loopback_debug_request(request)
-            if debug_enabled:
-                response = _run_private_v2_saved_turn(req, match_doc, room_id, emit, fallback_run_id, debug_enabled=True)
-            else:
-                response = _run_private_v2_saved_turn(req, match_doc, room_id, emit, fallback_run_id)
+            response = _run_private_v2_saved_turn(req, match_doc, room_id, emit, fallback_run_id)
             event_queue.put({"type": "final", "response": response})
         except Exception:
             event_queue.put({"type": "error", "agent_run_id": fallback_run_id, "reply": PRIVATE_RUNTIME_FALLBACK_REPLY})

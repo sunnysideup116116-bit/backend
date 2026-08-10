@@ -6,7 +6,7 @@ import os
 import re
 import time
 import config
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from models import ClearRequest, SettingsRequest, MediatorToneRequest, ProfileMemoryActionRequest, ProfileLocationRequest, ModelSettingsRequest
 from database import db, profiles_coll, matches_coll, messages_coll
 from services.ai_service import get_embedding
@@ -20,11 +20,6 @@ from services.profile_location import normalize_profile_location, safe_profile_l
 from services.ayue_agent.public_relationship_projection import anonymize_counterparty_payload
 from services.match_reason_service import V4_REASON_VERSION, reason_for_viewer
 from services.demo_cleanup_service import DemoCleanupError, clear_all_demo_state, graph_health
-from services.conversation_compaction_service import (
-    inspect_compaction_metrics, inspect_conversation_context,
-    queue_conversation_compaction_shadow,
-)
-from services.profile_processing_ledger import coverage_status, ledger_counts
 
 router = APIRouter(prefix="/api", tags=["System"])
 
@@ -59,35 +54,6 @@ def local_ayue_debug_run(run_id: str, user_id: str, request: Request):
     if run is None:
         raise HTTPException(status_code=404, detail="Debug trace unavailable")
     return run
-
-
-def _require_local_context_debug(request: Request) -> None:
-    if not _is_loopback_debug_request(request):
-        raise HTTPException(status_code=404, detail="Debug trace unavailable")
-
-
-@router.get("/debug/conversation-context/users/{user_id}")
-def debug_conversation_context(user_id: str, request: Request):
-    _require_local_context_debug(request)
-    snapshot = inspect_conversation_context(user_id)
-    snapshot["profile_ledger"] = ledger_counts(user_id)
-    snapshot["coverage"] = coverage_status(user_id)
-    return snapshot
-
-
-@router.get("/debug/conversation-context/metrics")
-def debug_conversation_context_metrics(request: Request):
-    _require_local_context_debug(request)
-    return inspect_compaction_metrics()
-
-
-@router.post("/debug/conversation-context/users/{user_id}/shadow")
-def debug_queue_conversation_shadow(user_id: str, request: Request, background_tasks: BackgroundTasks):
-    _require_local_context_debug(request)
-    # This loopback-only manual control skips the automatic high watermark and
-    # a prior failure cooldown. It still keeps the newest hot window and
-    # coalesces an already queued/running owner job.
-    return queue_conversation_compaction_shadow(background_tasks, user_id, manual_debug=True)
 
 
 @router.get("/client-config")

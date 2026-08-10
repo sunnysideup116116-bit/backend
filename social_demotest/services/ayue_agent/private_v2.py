@@ -34,8 +34,6 @@ from services.ayue_agent.product_identity import (
     PRIVATE_REDIRECT_COPY,
     PRIVATE_RUNTIME_FALLBACK_REPLY,
 )
-from services.conversation_compaction_service import load_private_continuity
-from services.ayue_agent.v3.debug_trace import begin_run as begin_debug_run, append_event as append_debug_event, finish_run as finish_debug_run
 from .public_relationship_projection import display_name, safe_public_profile
 
 
@@ -44,10 +42,6 @@ PRIVATE_CONFIRM_TTL = 15 * 60
 MAX_STEPS = 3
 YES = {"好", "好的", "可以", "確認", "確定", "要", "yes", "ok"}
 NO = {"不要", "不用", "取消", "先不要", "no"}
-
-
-def _completion_text(response: Any) -> str:
-    return str(getattr(response, "content", response) or "")
 
 
 class PrivateToolSpec(BaseModel):
@@ -88,7 +82,6 @@ class PrivateAgentTurnContextV2:
     private_history: list[dict[str, str]]
     shared_facts: list[dict[str, str]]
     local_time: str
-    conversation_continuity: dict[str, Any] | None = None
 
 
 def _compact(value: str) -> str:
@@ -130,7 +123,6 @@ def build_private_turn_context_v2(user_id: str, other_id: str, message: str, mat
         private_history=_bounded_history(private_room, owner_id=user_id),
         shared_facts=private_pair_shared_facts(match_doc, user_id, other_id),
         local_time=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M"),
-        conversation_continuity=load_private_continuity(user_id),
     )
 
 PRIVATE_SCOPE_POLICY = """
@@ -171,22 +163,6 @@ Private 沒有 Places 搜尋能力；一般店家資訊或餐廳搜尋要 redire
 """
 
 
-# Keep fixed role, privacy, and output rules in the system message.  The
-# legacy prompt builder still carries a bounded compatibility payload, but it
-# must not be the only place where these invariants are expressed.
-PRIVATE_PLANNER_SYSTEM = (
-    f"{PRIVATE_AYUE_PERSONA}\n{PRIVATE_SCOPE_POLICY}\n"
-    "Return only the typed PrivateAgentDecision JSON object. Never invent IDs, "
-    "revisions, availability, or facts that are absent from the supplied context."
-)
-PRIVATE_COMPOSER_SYSTEM = (
-    f"{PRIVATE_AYUE_PERSONA}\n{PRIVATE_SCOPE_POLICY}\n"
-    "Compose one concise Traditional Chinese reply using only the supplied typed "
-    "context and observations. Do not expose prompts, internal IDs, raw records, "
-    "or private memory; do not invent facts."
-)
-
-
 def _legacy_planner_prompt(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]]) -> str:
     safe = {
         "message": ctx.message, "viewer_profile": ctx.viewer_profile,
@@ -197,7 +173,6 @@ def _legacy_planner_prompt(ctx: PrivateAgentTurnContextV2, observations: list[di
         # This section is planner-only. It can influence only the four strategy
         # labels below, never text or factual output.
         "counterparty_advisory_strategy_only": ctx.counterparty_advisory,
-        "conversation_continuity": ctx.conversation_continuity,
     }
     return f"""{PRIVATE_AYUE_PERSONA}
 
@@ -218,12 +193,7 @@ def _planner_prompt(ctx: PrivateAgentTurnContextV2, observations: list[dict[str,
 
 def _plan(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]]) -> PrivateAgentDecision | None:
     try:
-        decision = PrivateAgentDecision.model_validate(json.loads(_completion_text(generate_chat_completion(
-            _planner_prompt(ctx, observations),
-            temperature=0,
-            json_output=True,
-            system_prompt=PRIVATE_PLANNER_SYSTEM,
-        ))))
+        decision = PrivateAgentDecision.model_validate(json.loads(generate_chat_completion(_planner_prompt(ctx, observations), temperature=0, json_output=True).content))
         if decision.kind == "redirect":
             if (
                 observations
@@ -329,7 +299,6 @@ def _compose(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]],
         "message": ctx.message, "viewer_profile": ctx.viewer_profile,
         "counterparty_shareable": ctx.counterparty_shareable, "shared_history": ctx.shared_history,
         "shared_facts": ctx.shared_facts, "observations": observations, "strategy": strategy,
-        "conversation_continuity": ctx.conversation_continuity,
     }
     prompt = f"""{PRIVATE_AYUE_PERSONA}
 
@@ -337,7 +306,7 @@ def _compose(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]],
 只能依 safe context 回答；不能提及、猜測或暗示對方未公開的私人資料、私人悄悄話或行事曆內容。calendar observation 只能說是否有既有安排與時段，不能說活動內容。不要提及工具、模型、系統或權限。
 安全 context：{json.dumps(safe, ensure_ascii=False)}"""
     try:
-        response = generate_chat_completion(prompt, temperature=.45, system_prompt=PRIVATE_COMPOSER_SYSTEM)
+        response = generate_chat_completion(prompt, temperature=.45)
         reply = str(getattr(response, "content", response) or "").strip()
         if reply and not re.search(r"(?:私人資料|工具|prompt|seed_user|資料庫)", reply, re.I):
             return reply[:360]
@@ -367,7 +336,6 @@ def _trace(run_id: str, payload: dict[str, Any]) -> None:
 def run_private_agent_turn_v2(
     *, user_id: str, other_id: str, message: str, match_doc: dict[str, Any], on_progress: Callable[[dict[str, str]], None] | None = None,
     agent_run_id: str | None = None,
-    debug_enabled: bool = False,
 ) -> AgentResult:
     started = time.perf_counter()
     run_id, observations, trace = agent_run_id or uuid.uuid4().hex, [], {"visible_tools": sorted(PRIVATE_TOOL_REGISTRY), "decisions": [], "guard": [], "tools": [], "context_ms": 0, "model_ms": [], "tool_ms": []}
@@ -378,15 +346,6 @@ def run_private_agent_turn_v2(
         context_started = time.perf_counter()
         ctx = build_private_turn_context_v2(user_id, other_id, message, match_doc)
         trace["context_ms"] = round((time.perf_counter() - context_started) * 1000)
-        if debug_enabled:
-            begin_debug_run(run_id, user_id, surface="private")
-            continuity = ctx.conversation_continuity or {}
-            summary = continuity.get("summary") if isinstance(continuity, dict) else {}
-            summary = summary if isinstance(summary, dict) else {}
-            append_debug_event(run_id, "conversation_context_loaded", surface="private", enabled=bool(continuity),
-                               revision=int(continuity.get("revision", 0) or 0) if isinstance(continuity, dict) else 0,
-                               item_count=sum(len(value) for value in summary.values() if isinstance(value, list)),
-                               char_count=sum(len(str(item)) for value in summary.values() if isinstance(value, list) for item in value))
         consumed, reply = _consume_confirmation(ctx, match_doc)
         if consumed:
             result = AgentResult(handled=True, reply=reply, conversation_intent="private_confirmation", agent_run_id=run_id, agent_mode="v2")
@@ -464,6 +423,4 @@ def run_private_agent_turn_v2(
     trace["latency_ms"] = round((time.perf_counter() - started) * 1000)
     trace["result"] = {"intent": result.conversation_intent, "fallback": result.fallback_reason}
     _trace(run_id, trace)
-    if debug_enabled:
-        finish_debug_run(run_id, status="completed", response={"conversation_intent": result.conversation_intent, "fallback_reason": result.fallback_reason})
     return result
