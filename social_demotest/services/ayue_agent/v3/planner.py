@@ -174,7 +174,6 @@ def _planner_prompt(turn_ctx: PublicAgentTurnContext) -> str:
         "calendar_recent_reference": getattr(turn_ctx, "calendar_recent_reference", None),
         "calendar_recent_mutation": getattr(turn_ctx, "calendar_recent_mutation", None),
         "mentioned_contacts": turn_ctx.mentioned_contacts,
-        "conversation_continuity": turn_ctx.conversation_continuity,
     }
     return f"本回合 user request 與 routing context：{json.dumps(payload, ensure_ascii=False)}"
 

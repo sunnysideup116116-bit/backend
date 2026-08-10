@@ -37,7 +37,6 @@ from services.ayue_agent.v3.debug_trace import (
 from services.chat_service import generate_room_id, save_message
 from services.profile_skills import profile_skills_mode_for_user
 from services.profile_task_service import queue_profile_skills as _queue_profile_skills
-from services.conversation_compaction_service import queue_conversation_compaction_shadow
 from services.relationship_engagement_service import (
     find_accepted_match,
     mark_post_chat_activity,
@@ -185,13 +184,6 @@ def _complete_public_turn(
         save_message(room_id, "ai_assistant", ai_reply, metadata=metadata)
     else:
         save_message(room_id, "ai_assistant", ai_reply)
-    if (
-        background_tasks is not None and req.contact_id == "ai_assistant"
-        and not agent_result.fallback_reason
-    ):
-        # Selection is server-owned and always derives the canonical public
-        # room. Failed/degraded foreground turns never schedule model work.
-        queue_conversation_compaction_shadow(background_tasks, req.user_id, room_id)
     # Assessment answers are a separate, owner-scoped workflow. They must not
     # become recent-context or durable-memory evidence. Other saved public
     # messages still reach the isolated extractor.

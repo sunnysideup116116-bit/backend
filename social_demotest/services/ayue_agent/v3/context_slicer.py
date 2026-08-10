@@ -28,7 +28,6 @@ def slice_for_agent(
             "clock": clock_dump,
             # calendar agent may need recent_context to understand scheduling context
             "recent_context": turn_ctx.recent_context,
-            "conversation_continuity": turn_ctx.conversation_continuity,
             "calendar_draft": getattr(turn_ctx, "calendar_draft", None),
             "calendar_recent_reference": getattr(turn_ctx, "calendar_recent_reference", None),
             "calendar_recent_mutation": getattr(turn_ctx, "calendar_recent_mutation", None),
@@ -97,7 +96,6 @@ def slice_for_agent(
             "recent_messages": turn_ctx.recent_messages,
             "recent_context": turn_ctx.recent_context,
             "relevant_memories": turn_ctx.relevant_memories,
-            "conversation_continuity": turn_ctx.conversation_continuity,
             "clock": clock_dump,
             "prior_observations": prior_observations,
         })
@@ -107,7 +105,6 @@ def slice_for_agent(
             "message": turn_ctx.message,
             "recent_messages": turn_ctx.recent_messages,
             "recent_context": turn_ctx.recent_context,
-            "conversation_continuity": turn_ctx.conversation_continuity,
             "user_location": turn_ctx.user_location,
             "clock": clock_dump,
             "observations": prior_observations,
