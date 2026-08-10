@@ -3,8 +3,13 @@
 from fastapi import APIRouter
 
 from database import matches_coll, messages_coll, profiles_coll
+from models import ClearRequest
+from services.ayue_agent.onboarding import (
+    complete_public_ayue_onboarding, public_ayue_onboarding_state,
+)
+from services.assessment_session_service import assessment_public_state
 from services.ayue_agent.public_relationship_projection import mentioned_contact_refs
-from services.chat_service import generate_room_id, save_message
+from services.chat_service import generate_room_id
 from services.match_state_service import verified_accepted_match_query
 
 
@@ -18,13 +23,6 @@ def _find_accepted_match(user_id: str, other_id: str):
 @router.get("/messages/{contact_id}")
 def get_messages(contact_id: str, user_id: str):
     room_id = generate_room_id(user_id, contact_id)
-    if contact_id == "ai_assistant" and messages_coll.count_documents({"room_id": room_id}) == 0:
-        save_message(
-            room_id,
-            "ai_assistant",
-            "哈囉，我是阿月。最近想做什麼、想去哪裡，儘管跟我說；我會邊聊邊幫你留意合適的人。",
-        )
-
     messages = list(messages_coll.find({"room_id": room_id}, {"_id": 0}).sort("timestamp", 1))
     user_doc = profiles_coll.find_one({"user_id": user_id})
     active_proposal_id = (user_doc or {}).get("active_match_proposal_id")
@@ -35,12 +33,24 @@ def get_messages(contact_id: str, user_id: str):
         if match_doc:
             date_coordination = match_doc.get("date_coordination")
             established_dates = match_doc.get("established_dates", [])
-    return {
+    payload = {
         "messages": messages,
+        "public_ayue_onboarding": (
+            public_ayue_onboarding_state(user_id) if contact_id == "ai_assistant" else None
+        ),
         "active_match_proposal_id": active_proposal_id,
         "date_coordination": date_coordination,
         "established_dates": established_dates,
     }
+    if contact_id == "ai_assistant":
+        payload.update(assessment_public_state(user_doc or {}))
+    return payload
+
+
+@router.post("/public-ayue/onboarding/complete")
+def complete_public_ayue_onboarding_route(req: ClearRequest):
+    complete_public_ayue_onboarding(req.user_id)
+    return {"status": "ok", "version": 1}
 
 
 @router.get("/contacts")
@@ -52,7 +62,7 @@ def get_contacts(user_id: str):
         "id": "ai_assistant",
         "name": "阿月",
         "role": "system",
-        "context": "你的媒人助理，會邊聊天邊幫你留意合適的人。",
+        "context": "先懂你，再在合適時機陪你牽線的媒人朋友。",
         "is_locked": ai_locked,
     }]
     for match_doc in matches:

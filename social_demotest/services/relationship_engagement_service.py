@@ -95,7 +95,7 @@ def classify_feedback(message: str) -> str:
 使用者訊息：{message}
 
 '''
-        result = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True))
+        result = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True).content)
         sentiment = result.get("sentiment", "neutral")
         return sentiment if sentiment in {"positive", "negative", "neutral"} else "neutral"
     except Exception:
@@ -113,7 +113,7 @@ def feedback_share_consent(message: str) -> bool:
 使用者訊息：{message}
 
 '''
-        result = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True))
+        result = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True).content)
         return bool(result.get("consent")) and float(result.get("confidence", 0)) >= 0.6
     except Exception:
         return False
@@ -234,7 +234,7 @@ def summarize_relationship(match_id, room_id: str) -> None:
 
 '''
     try:
-        data = json.loads(generate_chat_completion(prompt, temperature=0.2, json_output=True))
+        data = json.loads(generate_chat_completion(prompt, temperature=0.2, json_output=True).content)
         data["last_summarized_count"] = count
         data["updated_at"] = time.time()
         matches_coll.update_one({"_id": match_id}, {"$set": {"relationship_memory": data}})

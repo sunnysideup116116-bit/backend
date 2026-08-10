@@ -1,10 +1,12 @@
 ﻿"""Bounded, local agent runtime for the public Ayue assistant."""
 
-
-def run_public_agent_turn(*args, **kwargs):
-    """Lazy import keeps pure router tests independent of MongoDB dependencies."""
-    from .runtime import run_public_agent_turn as _run_public_agent_turn
-    return _run_public_agent_turn(*args, **kwargs)
+from __future__ import annotations
 
 
-__all__ = ["run_public_agent_turn"]
+def run_public_agent_turn_v3(*args, **kwargs):
+    """Lazy import for the V3 sub-agent runtime."""
+    from .v3.scheduler import run_public_agent_turn_v3 as _run_v3
+    return _run_v3(*args, **kwargs)
+
+
+__all__ = ["run_public_agent_turn_v3"]

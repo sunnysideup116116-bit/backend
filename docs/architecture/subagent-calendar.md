@@ -1,0 +1,162 @@
+# Sub-agent：calendar（行事曆子代理）
+
+> 本文說明使用者與阿月談「行程」時，背後怎麼運作：calendar sub-agent 能做什麼、呼叫哪些 function、參數長什麼樣、寫入如何確認、以及端到端範例。
+
+## 1. 角色與能做什麼
+
+**系統角色**（`v3/sub_agents/calendar_agent.py` 的 `_SYSTEM`）：
+
+> 你是公開阿月的行事曆子代理：負責查看與管理本人行程。
+
+能力：
+
+- **查詢**本人行事曆（列表／找單筆），判斷空檔、日期與忙碌時段。
+- **新增**私人行程（一次可新增多筆，放在同一個 `calendar.submit_commands` batch）。
+- **修改**一筆行程（私人行程直接改；共同約會提出「改期」並通知對方重新確認）。
+- **取消**一筆或多筆行程（共同約會同步雙方行事曆並通知對方）。
+- 相對時間詞（這個月、本週、明天…）由 agent 依 clock 自行換算成具體 `YYYY-MM-DD`。
+
+**不負責**：不讀取對方行事曆；不猜測配對對象的行程。
+
+## 2. 可呼叫的工具（5 個）
+
+| 工具 | risk | 用途 |
+| --- | --- | --- |
+| `calendar.list_my_events` | READ | 列出指定區間的行程與忙碌時段 |
+| `calendar.find_my_event` | READ | 找單筆行程（含候選與共同約會對象公開名稱） |
+| `calendar.get_next_my_event` | READ | 取得最近一筆安全 projection 並建立短期 recent reference |
+| `calendar.verify_recent_mutation` | READ | 驗證最近一次 typed mutation 的 canonical 結果 |
+| `calendar.submit_commands` | WRITE | 提交一至十筆 authority-free typed mutation commands（需確認） |
+
+### 2.1 `calendar.list_my_events`（READ）
+
+Planner 參數（`_CalendarListArguments`）：
+
+| 欄位 | 型別 | 說明 |
+| --- | --- | --- |
+| `start_date` | str（YYYY-MM-DD） | 查詢起日，可含過去 |
+| `end_date` | str（YYYY-MM-DD） | 查詢迄日 |
+
+不填範圍時系統預設未來 90 天。回傳 `{events: [{date, start_time, end_time, activity, status}], range}`。
+
+`date`／`range_label` 只由 registry schema 暫時接受舊 provider payload；新 agent、fixture 與文件一律產生 `start_date`／`end_date`，相對日期以本回合 authoritative clock 轉成具體日期。
+
+範例（「這個月我有什麼行程？」）：
+
+```json
+{"tool_name": "calendar.list_my_events", "arguments": {"start_date": "2026-08-01", "end_date": "2026-08-31"}}
+```
+
+### 2.2 `calendar.find_my_event`（READ）
+
+Planner 參數（`_CalendarFindArguments`）：
+
+| 欄位 | 型別 | 說明 |
+| --- | --- | --- |
+| `event_hint` | str（必填, ≤120） | 描述「原本那筆行程」（活動名，可帶日期/時間） |
+| `date_hint` | str（≤32） | 日期輔助 |
+| `companion_hint` | str（≤30） | 已接受聯絡人公開名稱（縮小共同約會） |
+| `limit` | int（1–30, 預設 10） | 候選上限 |
+
+回傳 `{status: found|not_found|ambiguous, ...}`：`ambiguous` 時帶 `candidates[]`（activity/date/start_time/end_time/location/notes/event_kind），由 agent 逐一比對；`not_found` 的查詢會交給 Synthesizer 優雅回覆（不會當成寫入失敗）。
+
+### 2.3 Typed 寫入工具（WRITE，先確認）
+
+| 工具 | Planner 參數 | 說明 |
+| --- | --- | --- |
+| `calendar.submit_commands` | `commands`（1–10 個 `CalendarCommand`；`target_selector` 只篩選既有 update/cancel 目標） | mutation 的 date/time 欄位是新值；target reference 由 server projection 驗證 |
+
+**agent 規則**（來自 `_SYSTEM`）：寫入只提交 authority-free typed commands，不會直接執行，系統會先做 deterministic preflight 與 confirmation。修改／取消的 `target_hint` 必須是語意化的事件身份線索；日期/時間篩選使用 typed `target_selector`，不把 conversational wrapper 當身份。一次訊息中的多個 mutation 可放在同一 command batch，確認後依序執行。
+
+## 3. 呼叫流程（背後怎麼運作）
+
+```text
+使用者: 「把 8/25 的雞排約會改到 8/15，順便新增一筆 8/20 看牙醫」
+  │
+  ▼ Planner (decompose_tasks)
+  建立一個 calendar task，完整描述兩筆 mutation；Calendar Agent 產生 typed commands，server 再做唯一 preflight。
+  └─ t1「寫入任務」: 修改雞排約會並新增 8/20 看牙醫 (depends_on: [])
+  │
+  ▼ Scheduler → slice_for_agent("calendar", ...)
+  slice payload: message + recent_messages + clock + recent_context + prior_observations
+  │
+  ▼ calendar_runtime.run（registered specialist runtime）
+  Calendar Agent 做 bounded semantic decision；Runtime 管理 reads、draft/reference、typed commands 與 preflight
+  │
+  ▼ GuardedReadExecutor／command validation（純程式碼）
+  READ proposal 驗 registered/schema/duplicate/budget；WRITE command 驗 authority-free schema 並進 confirmation preflight
+  │
+  ▼ 唯讀工具（只有使用者真的詢問行程內容時）: executor_arguments_for_turn → tools.py:execute_tool
+  calendar.list_my_events → _calendar_events → calendar_service.get_calendar_context
+  calendar.find_my_event   → _calendar_find_event → calendar_service.find_owned_events
+  │
+  ▼ calendar.submit_commands → Calendar Runtime deterministic preflight
+  canonicalize relative date（使用 authoritative clock）→ resolve target（需要時只做一次）→ 組 server-owned CalendarMutationPlan
+  → 寫入 v3_pending_confirmations（TTL 900s；同 sub-task 多筆 calendar 寫入合併 batch）
+  │
+  ▼ Synthesizer 回覆使用者:
+  「要把『8/25 17:00–20:00 雞排約會』改成 8/15 17:00–20:00「雞排約會」嗎？…
+  要新增 8/20 09:00–10:00「看牙醫」嗎？回覆『確認』才會真的變更。」
+  │
+  ▼ 使用者回覆「確認」
+  ConfirmationManager.execute_confirmed（CAS pending→executing）
+  → execute_write → _calendar_execute（batch 逐筆, 每筆 agent_action_key 冪等）
+      ├─ update_my_event → update_personal_event（私人）或 request_reschedule（共同約會）
+      └─ create_my_event  → create_personal_event
+  → Synthesizer 產出「已處理：…」回覆
+```
+
+## 4. 寫入確認的細節
+
+- **Preflight（`v3/calendar_commands.py:preflight_calendar_commands`）**：
+  - `create`：以 authoritative clock 將「今天／明天／後天」正規化，再驗證欄位、時間區間與 `conflicts_for_viewer`。
+  - `update/cancel`：使用 typed recent reference 時直接 resolve canonical event；其他情況以 semantic `target_hint` 加上可選 `target_selector` 做唯一 resolver。`ambiguous`／`not_found`／缺少欄位／無法正規化日期都回傳 `needs_clarification`，不建立 confirmation。
+  - `cancel_my_events`：保留 bounded selected/all_upcoming contract，產生多筆 server-owned plans。
+  - ready 時只把不含 authority fields 的 preview 傳給使用者；canonical event ID/revision 留在 server-owned pending payload。
+- **執行（`_calendar_execute`）**：
+  - 私人行程：`create_personal_event` / `update_personal_event` / `cancel_event`（都帶 `expected_revision` 與 `agent_action_key`）。
+  - 共同約會（`source_type=date`）：`request_reschedule`（提出改期，對方確認後才變更）或 `cancel_coordination_or_event`（同步取消雙方）。
+  - 409（stale revision）→ 回「這筆行程剛剛有變動，我沒有覆寫它」；不覆寫終態。
+- **Batch 合併**：同 sub-task 內多筆 calendar 寫入共用一個 confirmation_id（`batch` 陣列），一次「確認」執行全部；`ConfirmationManager` 也會把其他 pending 的 calendar confirmation 併入同一 batch。非 calendar 寫入每回合最多一筆。
+
+## 5. 端到端範例
+
+**使用者**：「我這星期天想和小李吃晚餐，幫我看看我那天有沒有空，有的話找附近牛排。」
+
+**Planner** 拆 DAG（依 planner 規則）：
+
+```json
+{
+  "tasks": [
+    {"id": "t1", "agent": "calendar", "depends_on": [], "task_brief": "查詢這週日（8/9）本人行事曆是否有空檔"},
+    {"id": "t2", "agent": "places", "depends_on": [], "task_brief": "搜尋三民區附近的牛排餐廳"},
+    {"id": "t3", "agent": "synthesizer", "depends_on": ["t1", "t2"], "task_brief": "綜合行程衝突與餐廳推薦回覆"}
+  ]
+}
+```
+
+t1 與 t2 平行執行：
+
+- **t1 (calendar)**：LLM 輸出 `{"tool_name": "calendar.list_my_events", "arguments": {"start_date": "2026-08-09", "end_date": "2026-08-09"}}` → Guard 通過 → `execute_tool` 回傳當天行程（例如 18:00–21:00 電影）。
+- **t2 (places)**：見 `subagent-places.md`。
+- **t3 (synthesizer)**：拿到 calendar observation（8/9 晚有電影）＋ places observation（牛排店清單），回覆：「這星期天 8/9 你晚上 6 點有電影，晚餐可能比較趕；附近有三民區的岩炙炭燒牛排（約 726 公尺）… 要先幫你改行程或換一天嗎？」
+
+**使用者**：「那把電影改到 8/10 吧。」
+
+- Planner 只建立一個 calendar mutation task；Calendar Agent 直接提出含自然語言 target hint 的 typed command，Calendar Runtime preflight 負責唯一 resolve。
+- preflight resolve 成 canonical event 後建立 server-owned `CalendarMutationPlan`；canonical event ID/revision 不會回到 LLM，也不會再由 observation 重組 `event_hint`。
+- 阿月回：「要把『8/9 18:00–21:00 電影』改成 8/10 18:00–21:00「電影」嗎？回覆『確認』才會真的變更。」
+- 確認後 `update_personal_event` 執行，回「已更新行程：8/10 18:00–21:00 電影。」
+
+## Current V3 mutation contract
+
+The current implementation uses `calendar.submit_commands` for Calendar Agent writes. The agent emits authority-free `CalendarCommand` values only. Calendar Runtime preflight resolves each mutation target once and creates server-owned `CalendarMutationPlan` values containing canonical IDs and revisions; those plans never enter an LLM context. Missing fields, ambiguous targets, not-found targets, invalid provider command shapes, and stale recent references return normal clarification outcomes. A ready batch gets one confirmation and executes sequentially with stop-on-first-failure and no automatic rollback. The former direct `calendar.*` write payloads are no longer registered; stale records fail closed without a domain write.
+
+Calendar Runtime is registered with the same `TaskRunnerResult` contract as the
+other V3 runtimes. It returns completed `SubTaskResult` observations only
+after deterministic command interpretation, draft/reference handling, and
+preflight. Scheduler receives only the typed projection and invokes the
+Calendar blocker/result hooks through the domain-neutral registration record.
+
+The typed boundary accepts canonical `action/title/target_hint/target_selector/target_hints`. `target_selector` is a typed hard filter for the old event; mutation `date/start_time/end_time` remain the proposed new form. A closed compatibility adapter maps common provider spellings (`type`, `summary`, `event_hint`, `event_hints`) before strict validation. A unique Calendar read records a 15-minute server-owned recent reference, while incomplete create/update commands record an authority-free 15-minute draft. Both are projected to the model without event IDs or revisions; a follow-up such as 「這筆刪掉」uses the reference directly and never re-runs natural-language resolution.
+The runtime persists these short-lived records in the bounded Mongo collections by default (`AYUE_CALENDAR_STATE_MONGO=on`) and always keeps an in-process fallback for tests/offline demos. A unique `calendar.get_next_my_event` read is the preferred path for “最近一筆／最近有啥行程”; it records the same server-owned recent reference used by a follow-up “他／她／它／這筆” mutation.

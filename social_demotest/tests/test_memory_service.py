@@ -17,6 +17,16 @@ class MemoryServiceTests(unittest.TestCase):
         self.assertEqual(raised.exception.error_code, "Neo4jConnectionError")
         queue_retry.assert_called_once()
 
+    def test_missing_apply_endpoint_fails_closed_without_direct_graph_fallback(self):
+        response = Mock(status_code=404)
+        proposals = [{"key": "coffee", "label": "咖啡", "stance": "like", "category": "lifestyle", "confidence": 0.95}]
+        with patch("services.memory_service.requests.post", return_value=response), \
+             patch("services.memory_service._queue_memory_retry") as queue_retry:
+            with self.assertRaises(MemoryWriteError) as raised:
+                apply_profile_memory_proposals("demo_user", proposals, "global", "message-404")
+        self.assertEqual(raised.exception.error_code, "memory_apply_endpoint_not_found")
+        queue_retry.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
