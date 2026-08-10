@@ -113,5 +113,7 @@ its domain responsibility. Web research behavior (answer-target preservation,
 observation handoff, relevance assessment, query refinement, and explicit
 insufficient evidence) is implemented in
 `services/ayue_agent/v3/sub_agents/web_agent.py` and
-`services/ayue_agent/v3/web_research.py`, while the Scheduler enforces the
-three-round/three-call budget.
+`services/ayue_agent/v3/web_research.py`, while Web Runtime enforces the
+three-tool-call research budget followed by one bounded finish-only decision.
+Decision/model failures do not consume tool budget; the finish-only phase
+cannot execute `web.search` or `web.extract`.

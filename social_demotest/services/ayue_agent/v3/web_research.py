@@ -28,9 +28,12 @@ MAX_WEB_PARALLEL_SEARCHES = 2
 MAX_WEB_EXTRACT_CALLS = 1
 MAX_WEB_EXTRACT_URLS = 2
 MAX_WEB_TOTAL_TOOL_CALLS = 3
-# Tool-producing decisions are bounded by the Web tool budget, plus one final
-# finish-only decision that does not consume a Web tool call.
-MAX_WEB_DECISION_ITERATIONS = MAX_WEB_TOTAL_TOOL_CALLS + 1
+# Research decisions have their own finite cap. A separate finish-only phase
+# gets one bounded decision after this phase and never consumes Web tool budget.
+MAX_WEB_RESEARCH_DECISION_ITERATIONS = MAX_WEB_TOTAL_TOOL_CALLS + 1
+MAX_WEB_FINISH_DECISION_ATTEMPTS = 1
+# Compatibility alias for callers that used the old research-loop constant.
+MAX_WEB_DECISION_ITERATIONS = MAX_WEB_RESEARCH_DECISION_ITERATIONS
 MAX_WEB_SEARCH_RESULTS_PER_CALL = 5
 MAX_WEB_PROMPT_SEARCH_RESULTS = 8
 MAX_WEB_PROMPT_SNIPPET_CHARS = 600

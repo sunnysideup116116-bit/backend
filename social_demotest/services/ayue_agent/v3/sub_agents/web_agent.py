@@ -570,8 +570,14 @@ def decide(
     extract_calls_used: int,
     place_candidates: list[dict[str, Any]] | None = None,
     evidence_policy: Literal["casual_discovery", "strict_verification"] = "casual_discovery",
+    finish_only: bool = False,
 ) -> tuple[WebResearchDecision | None, SubAgentMetrics]:
-    """Ask the model for one typed research decision after current observations."""
+    """Ask for one typed research decision after current observations.
+
+    ``finish_only`` is used by Web Runtime's bounded finalization phase. It
+    exposes the existing finish contract without making search/extract
+    proposals or changing any tool counters.
+    """
     metrics = SubAgentMetrics()
     projected = project_web_observations(observations)
     safe_candidates = [
@@ -594,10 +600,16 @@ def decide(
     can_extract = remaining_tool_budget > 0 and extract_calls_used < MAX_WEB_EXTRACT_CALLS
     can_finish = bool(projected)
     initial_search = search_calls_used == 0
+    if finish_only:
+        can_search = False
+        can_extract = False
+        can_finish = bool(projected)
+        initial_search = False
     payload = {
         "research_question": context_slice.payload.get("message", ""),
         "answer_target": task_brief,
         "evidence_policy": evidence_policy,
+        "phase": "finish" if finish_only else "research",
         "round": round_index,
         "available_actions": [
             action for action, enabled in (

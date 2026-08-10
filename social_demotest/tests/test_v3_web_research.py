@@ -846,6 +846,7 @@ class V3WebResearchTests(unittest.TestCase):
                  (None, SubAgentMetrics(input_tokens=1, error="web_decision_schema_invalid")),
                  (None, SubAgentMetrics(input_tokens=1, error="web_decision_schema_invalid")),
                  (None, SubAgentMetrics(input_tokens=1, error="web_decision_schema_invalid")),
+                 (None, SubAgentMetrics(input_tokens=1, error="web_decision_schema_invalid")),
              ]), \
              patch.object(guarded_execution, "execute_tool", return_value=SimpleNamespace(
                  ok=True, data=_search_result(),
@@ -883,6 +884,45 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertEqual(results[0].observation["status"], "answered")
         self.assertEqual(decide.call_count, 3)
         self.assertEqual(execute.call_count, 1)
+
+    def test_failed_research_decision_cannot_consume_budget_or_remove_finish_phase(self):
+        decisions = [
+            (WebResearchDecision(action="search", queries=["initial discovery"]), SubAgentMetrics(input_tokens=1)),
+            (WebResearchDecision(action="search", queries=["refined context"]), SubAgentMetrics(input_tokens=1)),
+            (WebResearchDecision(
+                action="extract", urls=["https://example.com/forum/post"],
+                extract_query="relevant details",
+            ), SubAgentMetrics(input_tokens=1)),
+            (None, SubAgentMetrics(input_tokens=1, error="web_decision_provider_5xx")),
+            (self._finish(), SubAgentMetrics(input_tokens=1)),
+        ]
+
+        def fake_execute(tc, raw_ctx, *, clock):
+            if tc.name == "web.extract":
+                return SimpleNamespace(ok=True, data={"pages": [{
+                    "url": "https://example.com/forum/post",
+                    "content": "Direct public evidence.",
+                    "truncated": False,
+                }]})
+            return SimpleNamespace(ok=True, data=_search_result())
+
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", side_effect=decisions) as decide, \
+             patch.object(guarded_execution, "execute_tool", side_effect=fake_execute) as execute:
+            results, _metrics = _run_web(
+                SubTask(id="web1", agent="web", task_brief="Find evidence"),
+                _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
+                on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
+            )
+
+        self.assertEqual(results[0].observation["status"], "answered")
+        self.assertEqual(execute.call_count, 3)
+        self.assertEqual(decide.call_count, 5)
+        self.assertEqual(decide.call_args_list[3].kwargs["tool_calls_used"], 3)
+        self.assertEqual(decide.call_args_list[4].kwargs["tool_calls_used"], 3)
+        self.assertEqual(decide.call_args_list[4].kwargs["search_calls_used"], 2)
+        self.assertEqual(decide.call_args_list[4].kwargs["extract_calls_used"], 1)
+        self.assertTrue(decide.call_args_list[4].kwargs["finish_only"])
 
     def test_web_unavailable_is_distinct_from_no_evidence(self):
         with patch.object(web_runtime, "web_enabled", return_value=False), \

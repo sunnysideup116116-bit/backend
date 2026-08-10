@@ -17,7 +17,8 @@ from .web_research import (
     MAX_WEB_EXTRACT_URLS,
     MAX_WEB_INITIAL_SEARCH_QUERIES,
     MAX_WEB_REFINED_SEARCH_QUERIES,
-    MAX_WEB_DECISION_ITERATIONS,
+    MAX_WEB_FINISH_DECISION_ATTEMPTS,
+    MAX_WEB_RESEARCH_DECISION_ITERATIONS,
     MAX_WEB_SEARCH_CALLS,
     MAX_WEB_TOTAL_TOOL_CALLS,
     WebResearchResultV1,
@@ -51,12 +52,26 @@ def run(
     task: SubTask,
     services: GuardedReadExecutor,
 ) -> tuple[StructuredAgentResult, SubAgentMetrics]:
-    """Run the finite Web observation loop bounded primarily by tool calls.
+    """Run bounded research/tool work followed by one finish-only phase.
 
     Web owns all research state and policy. ``services`` is only the guarded
     execution boundary; this runtime never calls a provider adapter directly.
     """
     aggregate = SubAgentMetrics()
+
+    def accumulate_metrics(metrics: SubAgentMetrics) -> None:
+        aggregate.input_tokens += metrics.input_tokens
+        aggregate.output_tokens += metrics.output_tokens
+        aggregate.duration_ms += metrics.duration_ms
+        aggregate.tool_calls_raw.extend(metrics.tool_calls_raw or [])
+        aggregate.rejected_calls.extend(metrics.rejected_calls or [])
+        aggregate.content_raw = metrics.content_raw
+        aggregate.prompt_raw = metrics.prompt_raw
+        aggregate.tools_raw = metrics.tools_raw
+        aggregate.input_payload = metrics.input_payload
+        if metrics.error:
+            aggregate.error = metrics.error
+
     evidence_policy = task.evidence_policy or "casual_discovery"
     place_cards = public_place_cards(
         context_slice.payload.get("prior_observations") or [],
@@ -101,7 +116,7 @@ def run(
     last_decision = None
     stop_reason = "budget_exhausted"
 
-    for round_index in range(1, MAX_WEB_DECISION_ITERATIONS + 1):
+    for round_index in range(1, MAX_WEB_RESEARCH_DECISION_ITERATIONS + 1):
         decision, metrics = web_agent.decide(
             context_slice,
             task_brief=task.task_brief,
@@ -112,21 +127,17 @@ def run(
             extract_calls_used=extract_calls_used,
             place_candidates=place_candidates,
             evidence_policy=evidence_policy,
+            finish_only=False,
         )
-        aggregate.input_tokens += metrics.input_tokens
-        aggregate.output_tokens += metrics.output_tokens
-        aggregate.duration_ms += metrics.duration_ms
-        aggregate.tool_calls_raw.extend(metrics.tool_calls_raw or [])
-        aggregate.rejected_calls.extend(metrics.rejected_calls or [])
-        aggregate.content_raw = metrics.content_raw
-        aggregate.prompt_raw = metrics.prompt_raw
-        aggregate.tools_raw = metrics.tools_raw
-        aggregate.input_payload = metrics.input_payload
-        if metrics.error:
-            aggregate.error = metrics.error
+        accumulate_metrics(metrics)
         if decision is None:
-            if observations and round_index < MAX_WEB_DECISION_ITERATIONS:
+            if observations and round_index < MAX_WEB_RESEARCH_DECISION_ITERATIONS:
                 continue
+            if observations:
+                # A failed research decision does not consume tool budget. End
+                # the research phase and give the separate finish phase its
+                # guaranteed bounded opportunity.
+                break
             stop_reason = "model_failure"
             result = build_research_result(
                 research_question=context_slice.payload.get("message", ""),
@@ -158,7 +169,7 @@ def run(
             return _structured_result(task, result), aggregate
 
         if decision.action == "finish":
-            if not observations or decision.assessment is None:
+            if not observations:
                 aggregate.error = "web_finish_missing_evidence_assessment"
                 stop_reason = "model_failure"
                 result = build_research_result(
@@ -171,6 +182,11 @@ def run(
                     allowed_subject_refs=allowed_subject_refs if place_candidates else None,
                     evidence_policy=evidence_policy,
                 )
+            elif decision.assessment is None:
+                aggregate.error = "web_finish_missing_evidence_assessment"
+                # Preserve observations and retry through the finish-only
+                # phase; this failure consumes no Web tool budget.
+                break
             else:
                 stop_reason = "tool_failure" if failures and not observations else "evidence_sufficient"
                 result = build_research_result(
@@ -292,13 +308,70 @@ def run(
             elif result_item.error_code:
                 failures.append(str(result_item.error_code))
 
+    finish_phase_failed = not observations
+    if observations:
+        for finish_attempt_index in range(MAX_WEB_FINISH_DECISION_ATTEMPTS):
+            finish_decision, finish_metrics = web_agent.decide(
+                context_slice,
+                task_brief=task.task_brief,
+                round_index=MAX_WEB_RESEARCH_DECISION_ITERATIONS + finish_attempt_index + 1,
+                observations=observations,
+                tool_calls_used=tool_calls_used,
+                search_calls_used=search_calls_used,
+                extract_calls_used=extract_calls_used,
+                place_candidates=place_candidates,
+                evidence_policy=evidence_policy,
+                finish_only=True,
+            )
+            accumulate_metrics(finish_metrics)
+            if aggregate.error and not finish_metrics.error:
+                aggregate.error = ""
+            if finish_decision is None:
+                finish_phase_failed = True
+                continue
+            last_decision = finish_decision
+            if (
+                finish_decision.assessment is not None
+                and finish_decision.assessment.target_alignment == "conflict"
+            ):
+                result = build_research_result(
+                    research_question=context_slice.payload.get("message", ""),
+                    answer_target=task.task_brief,
+                    decision=finish_decision,
+                    observations=observations,
+                    execution_status="degraded",
+                    stop_reason="target_conflict",
+                    allowed_subject_refs=allowed_subject_refs if place_candidates else None,
+                    evidence_policy=evidence_policy,
+                )
+                return _structured_result(task, result), aggregate
+            if finish_decision.action != "finish" or finish_decision.assessment is None:
+                finish_phase_failed = True
+                continue
+            stop_reason = "tool_failure" if failures and not observations else "evidence_sufficient"
+            result = build_research_result(
+                research_question=context_slice.payload.get("message", ""),
+                answer_target=task.task_brief,
+                decision=finish_decision,
+                observations=observations,
+                execution_status="degraded" if failures else "completed",
+                stop_reason=stop_reason,
+                allowed_subject_refs=allowed_subject_refs if place_candidates else None,
+                evidence_policy=evidence_policy,
+            )
+            return _structured_result(task, result), aggregate
+
     result = build_research_result(
         research_question=context_slice.payload.get("message", ""),
         answer_target=task.task_brief,
         decision=last_decision,
         observations=observations,
         execution_status="degraded" if failures else "completed",
-        stop_reason="budget_exhausted" if tool_calls_used >= MAX_WEB_TOTAL_TOOL_CALLS else "model_failure",
+        stop_reason=(
+            "model_failure"
+            if finish_phase_failed or tool_calls_used < MAX_WEB_TOTAL_TOOL_CALLS
+            else "budget_exhausted"
+        ),
         allowed_subject_refs=allowed_subject_refs if place_candidates else None,
         evidence_policy=evidence_policy,
     )
