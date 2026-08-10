@@ -126,18 +126,12 @@ class PresentationBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     message_index: int = Field(ge=0, le=2)
-    # Empty markdown is allowed only when a card is bound. Older persisted
-    # blocks may still carry the deprecated card_description field.
+    # Empty markdown is allowed only when a card is bound.
     markdown: str = Field(default="", max_length=1400)
     place_card_indices: list[int] = Field(default_factory=list, max_length=1)
-    # Deprecated compatibility input. New responses must keep explanations in
-    # markdown and leave this field unset.
-    card_description: str | None = Field(default=None, min_length=1, max_length=180)
 
     @model_validator(mode="after")
     def validate_projection(self):
-        if self.card_description and not self.place_card_indices:
-            raise ValueError("card_description requires one place_card_indices entry")
         if not self.markdown and not self.place_card_indices:
             raise ValueError("presentation block needs markdown or a place card")
         return self
