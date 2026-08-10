@@ -165,7 +165,16 @@ def run_sub_agents(
                 metrics.rejected_calls.append("schema_invalid")
                 continue
             try:
-                proposals.append(ToolProposal(tool_name=tool_name, arguments=arguments))
+                # Keep proposals typed/canonical at the sub-agent boundary as
+                # well as at executor time. This matters for bounded list
+                # arguments such as Places enrichments, whose validators
+                # deduplicate values before any duplicate-call key is built.
+                normalized_arguments = spec.planner_arguments_model.model_validate(
+                    arguments,
+                ).model_dump(exclude_defaults=True)
+                proposals.append(ToolProposal(
+                    tool_name=tool_name, arguments=normalized_arguments,
+                ))
             except Exception:
                 metrics.rejected_calls.append("forbidden_or_invalid_arguments")
                 continue

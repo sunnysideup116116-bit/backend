@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from services.ayue_agent.v3.calendar_commands import CalendarCommandBatch
 
@@ -24,6 +24,10 @@ class ToolArgumentSource(str, Enum):
     MENTIONED_RELATIONSHIP = "mentioned_relationship"
     MENTIONED_CONTACTS = "mentioned_contacts"
     PLANNER_GROUNDED = "planner_grounded"
+
+
+PlaceEnrichment = Literal["rating", "hours", "walking"]
+PlaceDetailsEnrichment = Literal["rating", "hours"]
 
 
 class _NoArguments(BaseModel):
@@ -107,6 +111,12 @@ class _PlacesNearbyArguments(BaseModel):
     limit: int = Field(default=3, ge=1, le=8)
     ordering: Literal["distance", "balanced"] = "distance"
     use_saved_location: bool = False
+    enrichments: list[PlaceEnrichment] = Field(default_factory=list, max_length=3)
+
+    @field_validator("enrichments")
+    @classmethod
+    def _deduplicate_enrichments(cls, value: list[PlaceEnrichment]) -> list[PlaceEnrichment]:
+        return list(dict.fromkeys(value))
 
 
 class _PlacesDistanceArguments(BaseModel):
@@ -114,11 +124,18 @@ class _PlacesDistanceArguments(BaseModel):
     origin: str = Field(default="", max_length=160)
     destination: str = Field(min_length=2, max_length=160)
     use_saved_origin: bool = False
+    travel_mode: Literal["DRIVE", "WALK"] = "DRIVE"
 
 
 class _PlacesResolveArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: str = Field(min_length=2, max_length=160)
+    enrichments: list[PlaceDetailsEnrichment] = Field(default_factory=list, max_length=2)
+
+    @field_validator("enrichments")
+    @classmethod
+    def _deduplicate_enrichments(cls, value: list[PlaceDetailsEnrichment]) -> list[PlaceDetailsEnrichment]:
+        return list(dict.fromkeys(value))
 
 
 class _CalendarEventOutput(BaseModel):
@@ -322,6 +339,14 @@ class _WebExtractOutput(BaseModel):
     pages: list[_WebExtractPageOutput] = Field(default_factory=list)
 
 
+class _PlaceOpeningHoursOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    open_now: bool | None = None
+    next_open_time: str | None = None
+    next_close_time: str | None = None
+    weekday_descriptions: list[str] = Field(default_factory=list, max_length=7)
+
+
 class _PlaceOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
@@ -334,7 +359,11 @@ class _PlaceOutput(BaseModel):
     # Optional photo from the Text Search response (places.photos is a Pro-tier
     # field; the media bytes bill under Place Details Photos).
     photo_url: str = ""
-
+    rating: float | None = Field(default=None, ge=0, le=5)
+    user_rating_count: int | None = Field(default=None, ge=0)
+    opening_hours: _PlaceOpeningHoursOutput | None = None
+    walking_distance_m: int | None = Field(default=None, ge=0)
+    walking_duration_seconds: int | None = Field(default=None, ge=0)
 
 class _PlacesNearbyOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -365,8 +394,10 @@ class _PlacesDistanceOutput(BaseModel):
     destination_label: str
     origin_kind: Literal["explicit", "saved_profile"]
     distance_m: int = Field(ge=0)
-    distance_basis: Literal["straight_line", "driving"]
+    distance_basis: Literal["straight_line", "driving", "walking"]
     duration_text: str = ""
+    duration_seconds: int | None = Field(default=None, ge=0)
+    travel_mode: Literal["DRIVE", "WALK"] = "DRIVE"
     attribution: str
     attribution_url: str
 

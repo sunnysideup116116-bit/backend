@@ -202,7 +202,26 @@ presentation validation degradation.
 
 ProductInfo 固定輸出 `product_info.v1` observation；Web 固定輸出 `web_research.v1` observation。這些 `.v1` 是 payload schema，不代表舊 runtime。
 
-## 9. 新增或修改 interface 的交付要求
+## 9. Places typed enrichment interface
+
+Places tool arguments remain authority-free and optional: `enrichments=[]`
+defaults to no expensive Google fields; `search_nearby` supports `rating`,
+`hours`, and `walking`, while `resolve_place` supports `rating` and `hours`.
+The executor normalizes/deduplicates these enums before cache keys and provider
+calls. The typed place projection may include rating/count, bounded current
+opening-hours data, and per-candidate walking distance/duration. These fields
+remain in the bounded observation passed to the AI; the existing card
+projection/UI is unchanged.
+
+Nearby walking enrichment uses Routes `computeRouteMatrix` with one origin and
+the bounded place-ID destinations. Matrix elements are independently mapped by
+`destinationIndex`; an element error leaves only that candidate without
+walking fields. The local cap is eight destinations, so the request is one
+HTTP call and at most eight billed origin-destination elements. Single-distance
+`travel_mode` defaults to `DRIVE` and may be `WALK` without changing the
+existing default behavior.
+
+## 10. 新增或修改 interface 的交付要求
 
 1. 先確認 owner，避免把 domain policy搬回 Scheduler 或 router。
 2. 修改 typed contract，再修改 runtime/adapter；不要以 prompt 自由文字代替 schema。

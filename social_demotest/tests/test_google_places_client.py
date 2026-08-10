@@ -3,6 +3,8 @@ from unittest.mock import patch
 
 from services.ayue_agent.google_places_client import (
     google_routes_enabled,
+    measure_distance_matrix,
+    measure_walking_matrix,
     resolve_place,
     search_nearby_places,
 )
@@ -123,6 +125,127 @@ class GooglePlacesCuisineTests(unittest.TestCase):
                 "高雄市鹽埕區", 22.62, 120.28, ["restaurant"], limit=3,
             )
         self.assertEqual(places, [])
+
+    def test_normal_search_mask_does_not_request_expensive_enrichments(self):
+        payload = {"places": [{
+            "id": "ChIJbase", "displayName": {"text": "Base Place"},
+            "formattedAddress": "Address", "location": {"latitude": 22.62, "longitude": 120.28},
+            "types": ["restaurant"], "googleMapsUri": "https://www.google.com/maps/place/base",
+            "rating": 4.8, "userRatingCount": 800,
+            "currentOpeningHours": {"openNow": True},
+        }]}
+        with self._enabled(), \
+             patch("services.ayue_agent.google_places_client.requests.post",
+                   return_value=_FakeResponse(payload)) as post:
+            places = search_nearby_places("Anchor", 22.62, 120.28, ["restaurant"], limit=3)
+        mask = post.call_args.kwargs["headers"]["X-Goog-FieldMask"]
+        self.assertNotIn("places.rating", mask)
+        self.assertNotIn("places.userRatingCount", mask)
+        self.assertNotIn("places.currentOpeningHours", mask)
+        self.assertNotIn("rating", places[0])
+        self.assertNotIn("opening_hours", places[0])
+
+    def test_requested_enrichments_are_deduplicated_and_projected(self):
+        payload = {"places": [{
+            "id": "ChIJrich", "displayName": {"text": "Rich Place"},
+            "formattedAddress": "Address", "location": {"latitude": 22.62, "longitude": 120.28},
+            "types": ["restaurant"], "googleMapsUri": "https://www.google.com/maps/place/rich",
+            "rating": 4.5, "userRatingCount": 123,
+            "currentOpeningHours": {
+                "openNow": False,
+                "nextOpenTime": "2026-08-12T09:00:00Z",
+                "nextCloseTime": "",
+                "weekdayDescriptions": ["Mon: 09:00–18:00", "Tue: 09:00–18:00"],
+                "periods": [{"unbounded": "must not escape"}],
+            },
+        }]}
+        with self._enabled(), \
+             patch("services.ayue_agent.google_places_client.requests.post",
+                   return_value=_FakeResponse(payload)) as post:
+            places = search_nearby_places(
+                "Anchor", 22.62, 120.28, ["restaurant"], limit=3,
+                enrichments=["hours", "rating", "rating", "hours"],
+            )
+        mask = post.call_args.kwargs["headers"]["X-Goog-FieldMask"]
+        self.assertEqual(mask.count("places.rating"), 1)
+        self.assertEqual(mask.count("places.userRatingCount"), 1)
+        self.assertEqual(mask.count("places.currentOpeningHours"), 1)
+        self.assertEqual(places[0]["rating"], 4.5)
+        self.assertEqual(places[0]["user_rating_count"], 123)
+        self.assertEqual(places[0]["opening_hours"]["open_now"], False)
+        self.assertEqual(places[0]["opening_hours"]["weekday_descriptions"], [
+            "Mon: 09:00–18:00", "Tue: 09:00–18:00",
+        ])
+        self.assertNotIn("periods", places[0]["opening_hours"])
+
+    def test_walking_enrichment_uses_one_matrix_call_and_reuses_both_caches(self):
+        places_payload = {"places": [{
+            "id": "ChIJwalk", "displayName": {"text": "Walk Place"},
+            "formattedAddress": "Address", "location": {"latitude": 22.62, "longitude": 120.28},
+            "types": ["restaurant"], "googleMapsUri": "https://www.google.com/maps/place/walk",
+        }]}
+        matrix_payload = [{
+            "originIndex": 0, "destinationIndex": 0, "status": {},
+            "condition": "ROUTE_EXISTS", "distanceMeters": 700, "duration": "480s",
+        }]
+        with self._enabled(), \
+             patch("services.ayue_agent.google_places_client.google_routes_enabled", return_value=True), \
+             patch("services.ayue_agent.google_places_client.requests.post",
+                   side_effect=[_FakeResponse(places_payload), _FakeResponse(matrix_payload)]) as post:
+            first = search_nearby_places(
+                "Anchor", 22.62, 120.28, ["restaurant"], limit=3,
+                enrichments=["walking"],
+            )
+            second = search_nearby_places(
+                "Anchor", 22.62, 120.28, ["restaurant"], limit=3,
+                enrichments=["walking"],
+            )
+            base = search_nearby_places(
+                "Anchor", 22.62, 120.28, ["restaurant"], limit=3,
+            )
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(first[0]["walking_duration_seconds"], 480)
+        self.assertEqual(second[0]["walking_distance_m"], 700)
+        self.assertNotIn("walking_distance_m", base[0])
+
+    def test_walking_matrix_maps_elements_and_ignores_partial_failures(self):
+        payload = [
+            {
+                "originIndex": 0, "destinationIndex": 1, "status": {},
+                "condition": "ROUTE_EXISTS", "distanceMeters": 900, "duration": "600s",
+            },
+            {
+                "originIndex": 0, "destinationIndex": 0,
+                "status": {"code": 3, "message": "no route"},
+                "condition": "ROUTE_NOT_FOUND",
+            },
+        ]
+        places = [
+            {"place_id": "ChIJfailed"}, {"place_id": "ChIJwalk"},
+        ]
+        with patch("services.ayue_agent.google_places_client.google_routes_enabled", return_value=True), \
+             patch("services.ayue_agent.google_places_client.requests.post",
+                   return_value=_FakeResponse(payload)) as post:
+            result = measure_walking_matrix(22.62, 120.28, places)
+        self.assertEqual(result, {
+            "ChIJwalk": {"walking_distance_m": 900, "walking_duration_seconds": 600},
+        })
+        self.assertIn("distanceMatrix/v2:computeRouteMatrix", post.call_args.args[0])
+        self.assertEqual(post.call_args.kwargs["json"]["travelMode"], "WALK")
+        self.assertIn("originIndex", post.call_args.kwargs["headers"]["X-Goog-FieldMask"])
+        self.assertIn("status", post.call_args.kwargs["headers"]["X-Goog-FieldMask"])
+
+    def test_single_route_walk_uses_compute_routes_without_drive_preference(self):
+        payload = {"routes": [{"distanceMeters": 1200, "duration": "75.5s"}]}
+        with patch("services.ayue_agent.google_places_client.google_routes_enabled", return_value=True), \
+             patch("services.ayue_agent.google_places_client.requests.post",
+                   return_value=_FakeResponse(payload)) as post:
+            result = measure_distance_matrix("Origin", "Destination", travel_mode="WALK")
+        body = post.call_args.kwargs["json"]
+        self.assertEqual(body["travelMode"], "WALK")
+        self.assertNotIn("routingPreference", body)
+        self.assertEqual(result["distance_basis"], "walking")
+        self.assertEqual(result["duration_seconds"], 76)
 
 
     def test_photos_are_taken_directly_from_text_search_response(self):

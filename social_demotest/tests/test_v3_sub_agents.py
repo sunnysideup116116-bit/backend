@@ -68,6 +68,28 @@ class V3SubAgentTests(unittest.TestCase):
         self.assertEqual(len(proposals), 1)
         self.assertEqual(proposals[0].tool_name, "places.search_nearby")
 
+    def test_places_agent_accepts_bounded_enrichment_request(self):
+        slc = _slice("places", {
+            "message": "找現在有開的餐廳",
+            "recent_messages": [],
+            "user_location": "City District",
+            "clock": _clock().model_dump(),
+            "prior_observations": [],
+        })
+        with patch(
+            "services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "places.search_nearby",
+                "arguments": {
+                    "anchor": "City District", "categories": ["restaurant"],
+                    "enrichments": ["hours", "hours"],
+                },
+            }]),
+        ):
+            proposals, _metrics = run_places(slc, task_brief="找目前營業中的餐廳")
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].arguments["enrichments"], ["hours"])
+
     def test_match_agent_produces_get_status_proposal(self):
         slc = _slice("match", {
             "message": "我的配對進度如何？",
