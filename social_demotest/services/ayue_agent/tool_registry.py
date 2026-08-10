@@ -459,13 +459,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "match.get_status": ToolSpec(
         "match.get_status", ToolRisk.READ, "match_status",
-        "讀取本人唯一正式配對狀態；適用於配對成功、接受、回覆與目前進度。",
+        "讀取本人唯一正式配對狀態；只回答單一 proposal／配對的成功、接受、回覆與目前進度，不提供已接受聯絡人清單或總數。",
         "我看一下目前的配對進度…",
         output_model=_MatchStatusOutput,
     ),
     "match.get_counterparty_summary": ToolSpec(
         "match.get_counterparty_summary", ToolRisk.READ, "counterparty_summary",
-        "讀取唯一目前有效或已接受配對的公開對象摘要；適用於問對方是誰、共同點或聊天室是否已開啟。",
+        "讀取唯一目前有效或已接受配對的單一公開對象摘要；適用於問這一位對方是誰、共同點或聊天室是否已開啟，不提供 accepted contacts aggregate 清單、總數或整體比較。",
         "我確認一下這位對象的公開資訊…",
         output_model=_CounterpartySummaryOutput,
     ),
@@ -499,7 +499,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "relationship.list_accepted_contacts": ToolSpec(
         "relationship.list_accepted_contacts", ToolRisk.READ, "accepted_contact_list",
-        "讀取本人已接受聯絡人的最小公開摘要與總數；適用於詢問目前認識的人中誰適合某個活動或地點，不能用來推測對方行程，也不包含尚未接受的 proposal。",
+        "讀取本人已接受／已建立聯絡人的 bounded 最小公開摘要與總數；適用於詢問已經配到誰、配到幾個人、現有聯絡人中誰適合某個活動或地點，不能用來推測對方行程，也不包含尚未接受的 proposal。truncated=true 時只能在返回清單中比較，不能宣稱涵蓋全部聯絡人。",
         "我整理一下目前已建立聯絡的對象…",
         output_model=_AcceptedContactListOutput,
     ),

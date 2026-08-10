@@ -199,8 +199,8 @@ ProductInfo 是 first-class read-only DAG specialist。它最多兩輪、最多�
 
 ### Match / Relationship / Profile
 
-- Match 讀 canonical proposal/status，搜尋與決策走 confirmation/CAS。
-- Relationship 只讀 accepted relations 與 server 驗證 mentions 的 public projection。
+- Match 讀 canonical 的 singleton proposal/status／單一對象摘要，搜尋與決策走 confirmation/CAS；不擁有 accepted contacts aggregate 清單或總數。
+- Relationship 只讀 accepted relations 與 server 驗證 mentions 的 public projection；擁有已接受／已建立聯絡人的清單、總數、現有聯絡人比較與 bounded 範圍內的推薦。
 - Profile 讀本人資料與 assessment start；owner memory extraction 由獨立 `profile_skills.py` pipeline 擁有，不由聊天 agent 寫入。
 
 ## 9. Match state

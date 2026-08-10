@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from services.ayue_agent.v3.contracts import AgentContextSlice
 from services.ayue_agent.v3.synthesizer import (
+    _build_prompt,
     _compose_public_reply_tool_schema,
     _parse_composed_reply,
     _synthesizer_system_prompt,
@@ -981,6 +982,31 @@ class V3SynthesizerTests(unittest.TestCase):
         prompt = _synthesizer_system_prompt("grounded_result", True)
         self.assertIn("Affirmative atmosphere, quality, or date-suitability claims require matching typed Web findings or other typed evidence", prompt)
         self.assertIn("state that it is unverified", prompt)
+
+    def test_current_match_is_not_aggregate_contact_count_authority(self):
+        prompt = _build_prompt({
+            "message": "我一共配到幾個人？",
+            "observations": [{
+                "task_id": "m1", "status": "ok", "tool": "match.get_counterparty_summary",
+                "result": {"display_name": "小哲", "match_state": "accepted"},
+            }],
+        }, [])
+        self.assertIn('"accepted_contact_aggregate": "unavailable"', prompt)
+        self.assertIn('"current_match_observation": "singleton_only"', prompt)
+        self.assertIn('"count_authority": "unavailable"', prompt)
+        system = _synthesizer_system_prompt("grounded_result", False)
+        self.assertIn("不得從 `counterparty`、`display_name` 或 current match 推導", system)
+
+    def test_accepted_contact_list_is_aggregate_count_authority(self):
+        prompt = _build_prompt({
+            "message": "我一共配到幾個人？",
+            "observations": [{
+                "task_id": "r1", "status": "ok", "tool": "relationship.list_accepted_contacts",
+                "result": {"contacts": [{"display_name": "小哲"}], "truncated": False, "total_count": 1},
+            }],
+        }, [])
+        self.assertIn('"accepted_contact_aggregate": "available"', prompt)
+        self.assertIn('"count_authority": "relationship.list_accepted_contacts.total_count_only"', prompt)
 
     def test_unavailable_place_web_lookup_uses_fallback_after_invalid_composition(self):
         candidates = [{

@@ -86,8 +86,8 @@ Agent routing catalog：
 - `calendar`：查詢本人行程、建立／修改／取消行程與共同日期協調。
 - `places`：搜尋附近地點、餐廳、景點與距離。
 - `web`：查詢最新／目前公開資訊、新聞、文章、公開論壇或社群討論、使用者提供的公開 URL，以及需要 search → inspect → refine 的 bounded research；Web 不負責地點卡片。
-- `match`：查詢配對狀態、候選摘要，或處理明確的開始／重新搜尋要求。
-- `relationship`：查詢已驗證的 accepted relationship 與 mentioned contact projection。
+- `match`：查詢唯一一筆目前 proposal／配對狀態或單一對象摘要，或處理明確的開始／重新搜尋要求；不負責已接受聯絡人的清單、總數、比較或整體推薦。
+- `relationship`：查詢已驗證的 accepted relationship 與 mentioned contact projection；擁有已接受／已建立聯絡人的 aggregate 清單、總數、比較與既有對象推薦。
 - `profile`：讀取本人 profile／近期情境，或路由 assessment start/restart。
 - `synthesizer`：只根據本回合 observations 與 bounded context 產生最終回覆。
 
@@ -110,8 +110,9 @@ Agent routing catalog：
 - 同回合多個 Calendar mutation 保留使用者描述順序與完整 task_brief。
 - 若 `calendar_draft` 存在，且本回合看起來是在補 `missing_fields`、修正該 draft，或選擇其 candidates，必須路由一個 calendar task；只負責路由，不合併 draft，也不自行計算日期。
 - explicit match start/retry/search 才建立 match task；孤單或負面情緒本身不是搜尋。
-- 詢問「我認識哪些人」、「目前聯絡人中適合約誰」或「這個活動適合約誰」時，建立 relationship task，要求讀取 accepted contacts；不要因為存在 active proposal 就改派 match task。
-- 只有詢問 pending proposal 的接受狀態、目前配對進度、等待誰決定或明確開始／重新搜尋時，才建立 match task。accepted contact 的公開名稱優先用於 Synthesizer 回覆；pending proposal 沒有公開名稱時才使用「對方」。
+- aggregate contact 問題（例如「我現在總共配到誰了」、「我一共配到幾個人」、「我有哪些已建立聯絡的對象」、「現有聯絡人中誰適合這個活動」）建立 relationship task，要求讀取 accepted contacts；不得因為「配到」或存在 active proposal 就改派成 match task。
+- singleton match 問題（例如「這一筆配對目前什麼狀態」、「他接受了嗎」、「目前在等誰」、「這位對象是誰」）才建立 match task；明確開始／重新搜尋也建立 match task。accepted contact 的公開名稱優先用於 Synthesizer 回覆；pending proposal 沒有公開名稱時才使用「對方」。
+- `match.get_status` 與 `match.get_counterparty_summary` 的 observation 只能回答單一 proposal／對象／狀態，不能推導 accepted contact 總數或整體清單；aggregate 問題若沒有成功的 `relationship.list_accepted_contacts` observation，不得由 current match 猜數量。
 - 使用者明確開始或重新開始 assessment 時建立 profile task，不由 synthesizer 自行出題。若使用者表示既有個性資料、性格結果或個性描述不符合本人，即使沒有明說「重做」，也視為想校正成更符合自己的版本：建立 profile task，要求 `profile.start_assessment(kind=basic)`；不只是追問哪一段不像，也不要由 Planner 或 Synthesizer自行修改 profile。這項判斷由模型理解整句語意，不使用關鍵字或 regex 路由。
 - Assessment function-call 範例：說「我覺得我資料上的個性不是我欸」→ 建立 `profile` task，task_brief 明確要求 `profile.start_assessment(kind=basic)`，再建立依賴它的 terminal `synthesizer` task；真正開始前仍由既有 confirmation 流程確認。
 - `opportunity.signal="social_opening"` 只用於使用者間接表達想找人一起參與某個活動、但尚未明確要求開始搜尋的情境；`evidence_span` 必須是本回合使用者訊息中的連續原文，`confidence` 必須至少 0.8。明確要求開始／重新配對時建立 match task，不只填 opportunity；單純旅行、寒暄、孤單或負面情緒填 `signal="none"`。

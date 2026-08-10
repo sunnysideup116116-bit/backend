@@ -9,7 +9,10 @@ from services.ayue_agent.v3.contracts import AgentContextSlice, ToolProposal
 from services.ayue_agent.v3.sub_agents.calendar_agent import run as run_calendar
 from services.ayue_agent.v3.sub_agents.places_agent import run as run_places
 from services.ayue_agent.v3.sub_agents.match_agent import run as run_match
-from services.ayue_agent.v3.sub_agents.relationship_agent import run as run_relationship
+from services.ayue_agent.v3.sub_agents.relationship_agent import (
+    _SYSTEM as RELATIONSHIP_SYSTEM,
+    run as run_relationship,
+)
 from services.ayue_agent.v3.sub_agents.profile_agent import run as run_profile
 from services.ai_service import ToolCallResult
 
@@ -31,6 +34,13 @@ def _fc_result(content="", tool_calls=None):
 
 
 class V3SubAgentTests(unittest.TestCase):
+    def test_relationship_contract_owns_accepted_contacts_and_bounded_recommendations(self):
+        self.assertIn("已經配到／已經聯絡哪些人", RELATIONSHIP_SYSTEM)
+        self.assertIn("total_count", RELATIONSHIP_SYSTEM)
+        self.assertIn("truncated=true", RELATIONSHIP_SYSTEM)
+        self.assertIn("不能聲稱某人是所有已接受聯絡人中的最佳人選", RELATIONSHIP_SYSTEM)
+        self.assertNotIn("誰在忙", RELATIONSHIP_SYSTEM)
+
     def test_calendar_agent_produces_list_events_proposal(self):
         slc = _slice("calendar", {
             "message": "我這週有哪些行程？",
