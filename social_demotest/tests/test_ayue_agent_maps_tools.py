@@ -61,6 +61,51 @@ class AyueMapsToolsTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(nearby.call_args.args[0], "高雄市鹽埕區")
 
+    def test_nearby_location_failure_keeps_safe_subject_without_provider_details(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="鹽埕埔站附近")
+        with patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=False), \
+             patch(
+                 "services.ayue_agent.tools.nearby_places",
+                 side_effect=MapClientError("location_not_found"),
+             ):
+            result = execute_tool(ToolCall(name="places.search_nearby", arguments={
+                "anchor": "鹽埕埔站", "categories": ["restaurant"],
+            }), ctx)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "location_not_found")
+        self.assertEqual(result.data, {
+            "failure": {
+                "code": "location_not_found",
+                "subject": "鹽埕埔站",
+                "message": "無法解析這個地點",
+            },
+        })
+        self.assertNotIn("ObjectId", str(result.data))
+        self.assertNotIn("Traceback", str(result.data))
+
+    def test_nearby_provider_failures_use_bounded_server_messages(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="附近")
+        for code, message in (
+            ("map_timeout", "地圖查詢逾時"),
+            ("map_unavailable", "地圖服務暫時無法使用"),
+        ):
+            with self.subTest(code=code), \
+                 patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=False), \
+                 patch(
+                     "services.ayue_agent.tools.nearby_places",
+                     side_effect=MapClientError(code),
+                 ):
+                result = execute_tool(ToolCall(name="places.search_nearby", arguments={
+                    "anchor": "鹽埕埔站", "categories": ["cafe"],
+                }), ctx)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.data["failure"], {
+                "code": code,
+                "subject": "鹽埕埔站",
+                "message": message,
+            })
+
     def test_nearby_forwards_cuisine_to_google_search(self):
         ctx = AgentTurnContext(
             user_id="owner", room_id="room", message="我想吃火鍋",

@@ -247,6 +247,59 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertEqual(execute_tool.call_args.args[0].name, "calendar.verify_recent_mutation")
         create_confirmation.assert_not_called()
 
+    def test_places_failure_observation_reaches_synthesizer_with_safe_context(self):
+        ctx = self._ctx("鹽埕埔站附近的餐廳")
+        plan = Plan(tasks=[
+            SubTask(id="places1", agent="places", depends_on=[], task_brief="搜尋鹽埕埔站附近餐廳"),
+            SubTask(id="synth", agent="synthesizer", depends_on=["places1"], task_brief="整理結果"),
+        ])
+        seen_observations = {}
+        failure_data = {
+            "failure": {
+                "code": "location_not_found",
+                "subject": "鹽埕埔站",
+                "message": "無法解析這個地點",
+            },
+        }
+
+        def fake_synth(slice_payload, candidate_cards=None):
+            seen_observations["items"] = slice_payload.payload.get("observations", [])
+            return ("目前無法解析鹽埕埔站", None, _synth_metrics())
+
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
+                 "places": MagicMock(return_value=(
+                     _proposal("places.search_nearby", {
+                         "anchor": "鹽埕埔站", "categories": ["restaurant"],
+                     }),
+                     _sub_metrics(),
+                 )),
+             }), \
+             patch(
+                 "services.ayue_agent.v3.scheduler.execute_tool",
+                 return_value=MagicMock(
+                     ok=False,
+                     data=failure_data,
+                     error_code="location_not_found",
+                 ),
+             ), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", side_effect=fake_synth):
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
+            mock_build.return_value._mentioned_ids = []
+            result = run_public_agent_turn_v3(ctx)
+
+        self.assertTrue(result.handled)
+        observation = next(item for item in seen_observations["items"] if item["task_id"] == "places1")
+        self.assertEqual(observation["status"], "failed")
+        self.assertEqual(observation["tool"], "places.search_nearby")
+        self.assertEqual(observation["error_code"], "location_not_found")
+        self.assertEqual(observation["result"], failure_data)
+        self.assertIn("鹽埕埔站", str(observation["result"]))
+        self.assertNotIn("ObjectId", str(observation["result"]))
+        self.assertNotIn("Traceback", str(observation["result"]))
+
     def test_failed_sub_agent_skipped_and_synthesizer_handles_gap(self):
         ctx = self._ctx("你好嗎")
         plan = Plan(tasks=[

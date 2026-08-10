@@ -627,6 +627,63 @@ def _canonical_place_anchor(ctx: AgentTurnContext, anchor: str) -> str:
     return value
 
 
+_PLACE_FAILURE_MESSAGES = {
+    "location_not_found": "\u7121\u6cd5\u89e3\u6790\u9019\u500b\u5730\u9ede",
+    "location_required": "\u8acb\u63d0\u4f9b\u4e00\u500b\u5730\u9ede",
+    "map_timeout": "\u5730\u5716\u67e5\u8a62\u903e\u6642",
+    "google_places_timeout": "\u5730\u5716\u67e5\u8a62\u903e\u6642",
+    "map_unavailable": "\u5730\u5716\u670d\u52d9\u66ab\u6642\u7121\u6cd5\u4f7f\u7528",
+    "google_places_unavailable": "\u5730\u5716\u670d\u52d9\u66ab\u6642\u7121\u6cd5\u4f7f\u7528",
+    "map_invalid_response": "\u5730\u5716\u670d\u52d9\u66ab\u6642\u7121\u6cd5\u4f7f\u7528",
+    "google_places_invalid_response": "\u5730\u5716\u670d\u52d9\u66ab\u6642\u7121\u6cd5\u4f7f\u7528",
+    "map_rate_limited": "\u5730\u5716\u670d\u52d9\u76ee\u524d\u8f03\u5fd9\uff0c\u8acb\u7a0d\u5f8c\u518d\u8a66",
+    "google_places_rate_limited": "\u5730\u5716\u670d\u52d9\u76ee\u524d\u8f03\u5fd9\uff0c\u8acb\u7a0d\u5f8c\u518d\u8a66",
+    "map_access_denied": "\u76ee\u524d\u7121\u6cd5\u4f7f\u7528\u5730\u5716\u670d\u52d9",
+    "google_places_access_denied": "\u76ee\u524d\u7121\u6cd5\u4f7f\u7528\u5730\u5716\u670d\u52d9",
+    "maps_disabled": "\u5730\u5716\u67e5\u8a62\u76ee\u524d\u672a\u555f\u7528",
+    "google_places_disabled": "\u5730\u5716\u67e5\u8a62\u76ee\u524d\u672a\u555f\u7528",
+}
+_PLACE_FAILURE_SUBJECT_FIELDS = {
+    "places.search_nearby": "anchor",
+    "places.resolve_place": "query",
+    "places.measure_distance": "destination",
+}
+_PLACE_INTERNAL_SUBJECT_RE = re.compile(
+    r"(?:objectid|place_candidate_|seed_user_|demo_user|user[_-]?\d+|[0-9a-f]{24}|"
+    r"[0-9a-f]{8}-[0-9a-f-]{27,})",
+    re.IGNORECASE,
+)
+
+
+def _safe_place_failure_subject(tool_name: str, arguments: dict[str, Any]) -> str:
+    field = _PLACE_FAILURE_SUBJECT_FIELDS.get(tool_name)
+    if not field:
+        return ""
+    subject = re.sub(r"\s+", " ", str(arguments.get(field) or "")).strip()[:80]
+    if not subject or contains_internal_identifier(subject) or _PLACE_INTERNAL_SUBJECT_RE.search(subject):
+        return ""
+    return subject
+
+
+def _place_failure_observation(
+    tool_name: str, arguments: dict[str, Any], error_code: str | None,
+) -> dict[str, Any] | None:
+    if tool_name not in {
+        "places.search_nearby", "places.measure_distance", "places.resolve_place",
+    }:
+        return None
+    code = str(error_code or "")
+    message = _PLACE_FAILURE_MESSAGES.get(code)
+    if not message:
+        return None
+    failure: dict[str, Any] = {"code": code}
+    subject = _safe_place_failure_subject(tool_name, arguments)
+    if subject:
+        failure["subject"] = subject
+    failure["message"] = message
+    return {"failure": failure}
+
+
 def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResult:
     anchor = str(arguments.get("anchor") or "").strip()
     origin_kind = "explicit"
@@ -765,6 +822,10 @@ def execute_tool(
     executor = executors.get(spec.executor_key)
     if executor is not None:
         result = executor()
+        if not result.ok:
+            failure = _place_failure_observation(call.name, arguments, result.error_code)
+            if failure is not None:
+                return result.model_copy(update={"data": failure})
         if result.ok:
             try:
                 spec.output_model.model_validate(result.data)

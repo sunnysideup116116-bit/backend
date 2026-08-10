@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from services.ai_service import generate_chat_completion_with_tools
+from services.ai_service import ToolCallResult, generate_chat_completion_with_tools
 from services.ayue_agent.capabilities import product_info_answer
 from services.ayue_agent.product_identity import (
     PUBLIC_AYUE_PERSONA,
@@ -543,10 +543,14 @@ Editorial grounded recommendation contract:
 - Do not repeat full addresses, provider names, map URLs, or every distance; cards already carry structured fields.
 - Do discuss candidate names and recommendation reasons when observations support them.
 - card_intent=browse means show_all for broad browsing; card_intent=curated selects 1-4 refs (normally 2-3); explicit_set honors the requested set up to 8.
+- Treat candidate_cards as the full evidence pool, not the public presentation set. `requested_limit` is the Places search cardinality and is not a final card-count instruction.
+- If the original request gives an exact final recommendation count (for example, "最後挑 2 家" or "給我 3 家看看"), use card_intent=explicit_set and select exactly that many available refs. Do not expose the remaining pool.
+- Use card_intent=browse only when the user asks to see the full candidate set; otherwise keep non-selected candidates internal to the comparison.
 - selected_candidate_refs must be the cards that the prose uses. recommended_candidate_refs must be a subset of selected refs, and selected refs must be a subset of discussed refs.
 - Use candidate_ref values exactly as supplied. Never invent refs, URLs, map links, or unsupported atmosphere/quality claims.
+- When cards are shown, top-level messages should summarize the conclusion and comparison reasons rather than reproduce a full candidate list. Use candidate_refs-only blocks for selected cards unless a short, supported card-specific note is necessary; never create a block for a non-selected ref.
 - Web／Places 回覆可使用安全 Markdown 子集：`###` 小標題、項目清單、編號與 `**粗體**`；不要輸出表格、HTML、程式碼區塊或自由來源連結，來源由 UI 的 typed metadata 顯示。
-- 若有地點卡片，優先在 `blocks` 逐段提供回覆：每個地點使用一個 block，在 `markdown` 保留店名與給使用者的說明，並在同一 block 的 `candidate_refs` 放一個對應候選。不要輸出 `card_description`；地圖連結由 server-owned card 提供。沒有卡片的總結使用空的 `candidate_refs` block。一般 `markdown` 必須是安全 Markdown，不要放 HTML 或來源 URL。
+- If cards are shown, use one `candidate_refs`-only block per selected card by default; keep the conclusion and comparison reasons in the top-level messages. Add Markdown to a selected-card block only for a short supported note, and never list non-selected candidates there. Do not output `card_description`; map links come from server-owned cards.
 - Do not make casual chat, calendar confirmation, or simple Places answers longer just because this class exists.
 - When a relationship.list_accepted_contacts observation answers who the user can invite, use the contact's
   verified display_name (when present) and call that person a contact/person. Do not substitute the vague label
@@ -1034,19 +1038,48 @@ def _web_research_fallback(result: dict[str, Any]) -> str:
 
 
 def _places_only_payload(payload: dict[str, Any]) -> bool:
-    """Use a deterministic map presentation when Places is the only domain."""
+    """Identify a Places-only result for the post-LLM degradation path."""
     observations = [
         item for item in (payload.get("observations") or [])
-        if isinstance(item, dict) and item.get("tool")
+        if isinstance(item, dict)
+        and item.get("status") == "ok"
+        and item.get("tool")
     ]
-    return bool(observations) and any(
-        isinstance(item.get("result"), dict)
-        and "requested_limit" in item["result"]
-        for item in observations
-    ) and all(
+    return bool(observations) and all(
         item.get("tool") in {"places.search_nearby", "places.resolve_place"}
         for item in observations
     )
+
+
+def _successful_observation_domains(payload: dict[str, Any]) -> set[str]:
+    """Return domains represented by successful, typed observations only."""
+    domains: set[str] = set()
+    for observation in payload.get("observations") or []:
+        if not isinstance(observation, dict) or observation.get("status") != "ok":
+            continue
+        result = observation.get("result")
+        tool = str(observation.get("tool") or "")
+        if isinstance(result, dict) and result.get("schema_version") == "web_research.v1":
+            domains.add("web")
+        elif tool in {"places.search_nearby", "places.resolve_place"}:
+            domains.add("places")
+        elif tool.startswith("web."):
+            domains.add("web")
+        elif tool:
+            domains.add(tool.split(".", 1)[0])
+        elif isinstance(result, dict) and isinstance(result.get("product_info"), dict):
+            domains.add("product_info")
+        elif result is not None:
+            # Tool-less completed observations are still domain evidence even
+            # when a future typed specialist does not expose a tool name here.
+            domains.add("other")
+    return domains
+
+
+def _places_and_web_only_payload(payload: dict[str, Any]) -> bool:
+    """Allow deterministic place/Web fallback only without sibling domains."""
+    domains = _successful_observation_domains(payload)
+    return bool(domains) and domains <= {"places", "web"}
 
 
 def _web_only_payload(payload: dict[str, Any]) -> bool:
@@ -1346,7 +1379,10 @@ def synthesize(
         if isinstance(item, dict) and item.get("relation") == "direct"
     )
     web_only_mode = bool(
-        not itinerary_mode and web_research is not None and not candidate_summaries
+        not itinerary_mode
+        and web_research is not None
+        and not candidate_summaries
+        and _web_only_payload(payload)
     )
     web_has_useful_findings = bool(
         web_only_mode
@@ -1355,35 +1391,10 @@ def synthesize(
         and web_research.get("execution_status") in {"completed", "degraded"}
         and web_research.get("stop_reason") not in {"model_failure", "tool_failure", "tool_unavailable"}
     )
-    if not itinerary_mode and web_research is None and _places_only_payload(payload):
-        fallback, card_decision, fallback_blocks = _places_only_fallback(payload, candidate_summaries)
-        presentation = build_presentation([fallback], "grounded_recommendation")
-        if presentation is not None:
-            metrics.reply_source = "observation_fallback"
-            metrics.fallback_reason = "places_deterministic_presentation"
-            metrics.presentation_messages = presentation.messages
-            metrics.presentation_blocks = fallback_blocks
-            metrics.presentation_class = "grounded_recommendation"
-            return fallback, card_decision, metrics
-    if not itinerary_mode and web_research is not None and candidate_summaries and (
-        web_research.get("status") in {"answered", "partial", "insufficient_evidence"}
-        or web_research.get("execution_status") == "unavailable"
-    ):
-        fallback, card_decision, fallback_blocks = _place_research_fallback(
-            web_research, candidate_summaries,
-        )
-        presentation = build_presentation([fallback], "grounded_recommendation")
-        if presentation is not None:
-            metrics.reply_source = "observation_fallback"
-            metrics.fallback_reason = "web_research_insufficient"
-            metrics.presentation_messages = presentation.messages
-            metrics.presentation_blocks = fallback_blocks
-            metrics.presentation_class = "grounded_recommendation"
-            return fallback, card_decision, metrics
     if not itinerary_mode and web_research is not None and not candidate_summaries and (
         web_research.get("status") == "insufficient_evidence"
         or web_research.get("execution_status") == "unavailable"
-    ):
+    ) and _web_only_payload(payload):
         fallback = _web_research_fallback(web_research)
         presentation = build_presentation([fallback], "grounded_recommendation")
         metrics.reply_source = "observation_fallback"
@@ -1391,7 +1402,7 @@ def synthesize(
         metrics.presentation_messages = presentation.messages if presentation else [fallback]
         metrics.presentation_class = "grounded_recommendation"
         return fallback, None, metrics
-    if web_only_mode and not web_has_useful_findings and _web_only_payload(payload):
+    if web_only_mode and not web_has_useful_findings:
         fallback = _web_research_fallback(web_research)
         presentation = build_presentation([fallback], "grounded_recommendation")
         metrics.reply_source = "observation_fallback"
@@ -1428,6 +1439,8 @@ def synthesize(
         result = generate_chat_completion_with_tools(
             prompt, tools, temperature=0.65, system_prompt=system_prompt,
         )
+        if not isinstance(result, ToolCallResult):
+            raise RuntimeError("synthesizer_invalid_provider_result")
         metrics.input_tokens = result.input_tokens
         metrics.output_tokens = result.output_tokens
         metrics.duration_ms = result.duration_ms
@@ -1444,6 +1457,15 @@ def synthesize(
                 metrics.presentation_class = "grounded_recommendation"
                 return "\n\n".join(composed_messages), card_decision, metrics
         composed = _parse_composed_reply(result, candidate_summaries)
+        composition_required = itinerary_mode or (
+            bool(candidate_summaries)
+            and any(
+                isinstance(item, dict)
+                and item.get("tool") in {"places.search_nearby", "places.resolve_place"}
+                for item in payload.get("observations") or []
+            )
+        )
+        composition_failed = False
         if composed is not None:
             composed_messages, card_decision, presentation_class, presentation_blocks = composed
             if not web_only_mode or all(
@@ -1458,49 +1480,58 @@ def synthesize(
                 metrics.presentation_blocks = presentation_blocks
                 metrics.presentation_class = presentation_class
                 return "\n\n".join(composed_messages), card_decision, metrics
+            composition_failed = True
             metrics.fallback_reason = "unsupported_claim"
-        card_decision = _parse_card_decision(result)
-        validation = validate_public_reply(
-            str(result.content or ""),
-            preserve_details=(mode == "grounded_result" or product_info is not None),
-            max_chars=2_400 if (web_research is not None or candidate_summaries) else None,
-            max_sentences=18 if (web_research is not None or candidate_summaries) else None,
-        )
-        reply = validation.reply
-        if reply is None:
-            metrics.fallback_reason = {
-                "empty_reply": "empty_content",
-                "unsupported_claim": "unsupported_claim",
-                "internal_meta_reply": "internal_meta_reply",
-            }.get(validation.reason or "", "internal_meta_reply")
-        elif web_only_mode and not _web_reply_has_grounded_links(reply, web_research):
-            metrics.fallback_reason = "unsupported_claim"
-        else:
-            has_opportunity = any(
-                isinstance(item, dict)
-                and isinstance(item.get("result"), dict)
-                and item["result"].get("match_opportunity_offer")
-                for item in payload.get("observations") or []
+        elif composition_required:
+            # With place candidates, a plain content response cannot safely
+            # establish the selected server-owned cards. Treat missing or
+            # invalid compose output as a degradation and use the bounded
+            # observation fallback below.
+            composition_failed = True
+            metrics.fallback_reason = "unsupported_claim" if result.tool_calls else "empty_content"
+        if not composition_failed:
+            card_decision = _parse_card_decision(result)
+            validation = validate_public_reply(
+                str(result.content or ""),
+                preserve_details=(mode == "grounded_result" or product_info is not None),
+                max_chars=2_400 if (web_research is not None or candidate_summaries) else None,
+                max_sentences=18 if (web_research is not None or candidate_summaries) else None,
             )
-            has_place_observation = any(
-                isinstance(item, dict)
-                and item.get("tool") in {"places.search_nearby", "places.resolve_place"}
-                for item in payload.get("observations") or []
-            )
-            presentation_class = "product_info" if product_info is not None else (
-                "social_opportunity" if has_opportunity else (
-                "grounded_recommendation"
-                if web_research is not None or (candidate_summaries and has_place_observation)
-                else "transaction" if payload.get("observations") and len(reply) > 160 else "conversation"
+            reply = validation.reply
+            if reply is None:
+                metrics.fallback_reason = {
+                    "empty_reply": "empty_content",
+                    "unsupported_claim": "unsupported_claim",
+                    "internal_meta_reply": "internal_meta_reply",
+                }.get(validation.reason or "", "internal_meta_reply")
+            elif web_only_mode and not _web_reply_has_grounded_links(reply, web_research):
+                metrics.fallback_reason = "unsupported_claim"
+            else:
+                has_opportunity = any(
+                    isinstance(item, dict)
+                    and isinstance(item.get("result"), dict)
+                    and item["result"].get("match_opportunity_offer")
+                    for item in payload.get("observations") or []
                 )
-            )
-            presentation = build_presentation([reply], presentation_class)
-            if presentation is not None:
-                metrics.reply_source = "llm"
-                metrics.presentation_messages = presentation.messages
-                metrics.presentation_class = presentation.presentation_class
-                return "\n\n".join(presentation.messages), card_decision, metrics
-            metrics.fallback_reason = "empty_content"
+                has_place_observation = any(
+                    isinstance(item, dict)
+                    and item.get("tool") in {"places.search_nearby", "places.resolve_place"}
+                    for item in payload.get("observations") or []
+                )
+                presentation_class = "product_info" if product_info is not None else (
+                    "social_opportunity" if has_opportunity else (
+                    "grounded_recommendation"
+                    if web_research is not None or (candidate_summaries and has_place_observation)
+                    else "transaction" if payload.get("observations") and len(reply) > 160 else "conversation"
+                    )
+                )
+                presentation = build_presentation([reply], presentation_class)
+                if presentation is not None:
+                    metrics.reply_source = "llm"
+                    metrics.presentation_messages = presentation.messages
+                    metrics.presentation_class = presentation.presentation_class
+                    return "\n\n".join(presentation.messages), card_decision, metrics
+                metrics.fallback_reason = "empty_content"
     except Exception:
         metrics.fallback_reason = "provider_error"
         metrics.error_code = "synthesizer_provider_error"
@@ -1541,7 +1572,21 @@ def synthesize(
             metrics.presentation_messages = presentation.messages
             metrics.presentation_class = "product_info"
             return "\n\n".join(presentation.messages), None, metrics
-    if web_research is not None and candidate_summaries:
+    if not itinerary_mode and _places_only_payload(payload):
+        fallback, card_decision, fallback_blocks = _places_only_fallback(payload, candidate_summaries)
+        presentation = build_presentation([fallback], "grounded_recommendation")
+        if presentation is not None:
+            metrics.reply_source = "observation_fallback"
+            metrics.fallback_reason = metrics.fallback_reason or "places_deterministic_presentation"
+            metrics.presentation_messages = presentation.messages
+            metrics.presentation_blocks = fallback_blocks
+            metrics.presentation_class = "grounded_recommendation"
+            return fallback, card_decision, metrics
+    if (
+        web_research is not None
+        and candidate_summaries
+        and _places_and_web_only_payload(payload)
+    ):
         fallback, card_decision, fallback_blocks = _place_research_fallback(
             web_research, candidate_summaries,
         )
@@ -1553,7 +1598,7 @@ def synthesize(
             metrics.presentation_blocks = fallback_blocks
             metrics.presentation_class = "grounded_recommendation"
             return fallback, card_decision, metrics
-    if web_research is not None:
+    if web_research is not None and _web_only_payload(payload):
         fallback = _web_research_fallback(web_research)
         presentation = build_presentation([fallback], "grounded_recommendation")
         metrics.reply_source = "observation_fallback"

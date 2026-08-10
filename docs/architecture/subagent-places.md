@@ -93,6 +93,9 @@ Places 從 upstream typed `primary_activity.venue` 取 anchor，不從自由文�
 - `_strip_place_internals` 在 observation 進 Synthesizer 前移除 map/provider/photo internals。
 - `decide_place_cards` 只選 server 已有 candidate indices；模型不能製造卡片。
 - `presentation_blocks` 將 Markdown fragment 綁定至最多一張 place card；卡片擁有 map link，模型文字不提供可點擊 URL。
+- Normal Places/Places+Web grounded success uses Synthesizer `compose_public_reply`; `requested_limit` describes the comparison pool, while `selected_candidate_refs` controls visible cards. Explicit final counts use `card_intent=explicit_set`; non-selected candidates remain internal unless the user asks to see all.
+- Deterministic Places/Web formatters are reserved for provider, compose, grounding, or presentation validation degradation and must not replace normal LLM composition.
+- Places 的常見 user-facing failure 可帶 bounded `failure` observation：`location_not_found`、`location_required`、map timeout/unavailable 等 code 使用 server-owned 固定 message；可公開的 `subject` 只取自已驗證的 executor argument。未知 failure 維持 error code，不傳 raw exception、provider detail 或 internal ID。
 
 ## 6. 測試重點
 
