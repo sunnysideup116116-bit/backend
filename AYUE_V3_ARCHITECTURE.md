@@ -697,6 +697,14 @@ limitations; unavailable credentials and tool failures remain distinct
 execution outcomes. No open-ended ReAct loop, browser automation, or external
 framework is introduced.
 
+For Web-only presentation, `answered` results and `partial` results with useful
+direct findings normally go through Synthesizer composition, which may use
+natural prose or light Markdown. `insufficient_evidence`, unavailable results,
+partial results without useful findings, and provider/model/safety failures
+retain the deterministic Web fallback. Synthesizer grounding is limited to the
+typed `web_research.v1` result; source URLs and `web_source_*` references remain
+server-owned and unobserved links/references are rejected.
+
 Every Web search query is deterministically anchored to the Planner-owned
 `task_brief` before tool execution, so a model-suggested adjacent query cannot
 drop the named entity, place, date range, or requested evidence class. The

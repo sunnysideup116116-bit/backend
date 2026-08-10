@@ -101,6 +101,8 @@ Guard 通過後 Scheduler 再做三道 runtime 檢查：
 
 `synthesizer.py:synthesize` 收集所有非 SKIPPED 的 observation，經 `_strip_place_internals`（移除 map_url/place_id/photo_url 等內部欄位）後組成 prompt；server-owned confirmation reply、typed calendar clarification、capability answer 與 assessment domain reply 先 deterministic 直出，不再交給 LLM 改寫；其他結果才由模型產出回覆。若候選地點卡存在，模型需以 `decide_place_cards` tool call 決定 `show_all/select/none`；沒有候選卡片時 `tools=[]`、`tool_calls=[]` 是正常結果。Scheduler 把卡片決策套用回 server-side 投影，作為 `place_cards` 回傳。
 
+Web-only 的 `web_research.v1` 若為 `answered`，或為含有 useful direct findings 的 `partial`，會進入同一個 Synthesizer composition path，允許自然 prose 或輕量 Markdown；不再固定輸出 deterministic headings。`insufficient_evidence`、`unavailable`、沒有 useful findings，以及 provider/model/safety failure 仍使用 deterministic Web fallback。Synthesizer 只收到該 typed Web result 作為 Web-only grounding；source URLs 與 `web_source_*` refs 由 server-owned metadata 提供，模型不得新增未觀察到的連結或 reference。
+
 Synthesizer 也會套用 `capabilities.py` 的用詞真相（不得宣稱「隨機配對」）與 `_concise_public_reply` 清理。`SynthesizerMetrics.reply_source` 區分 `capability`、`verified_observation`、`llm` 與 fallback；provider error、空內容或被拒絕的模型內容會標成 `degraded`，不得顯示為成功。
 
 ### 階段 6：結果與 Trace
