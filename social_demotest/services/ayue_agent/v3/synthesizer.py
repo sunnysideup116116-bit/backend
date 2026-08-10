@@ -51,6 +51,7 @@ class SynthesizerMetrics:
         "empty_content",
         "internal_meta_reply",
         "unsupported_claim",
+        "compose_schema_invalid",
         "web_research_fallback",
         "web_research_insufficient",
         "web_casual_sources",
@@ -126,18 +127,23 @@ class _ItineraryArguments(BaseModel):
         return self
 
 
-class _ComposePublicReplyArguments(BaseModel):
+class _ComposePublicReplyCoreArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     messages: list[str] = Field(max_length=3)
     presentation_class: Literal[
         "conversation", "social_opportunity", "product_info", "transaction",
         "capability", "fallback", "onboarding", "grounded_recommendation",
     ] = "conversation"
-    card_mode: Literal["show_all", "select", "none"] = "none"
     card_intent: Literal["browse", "curated", "explicit_set", "none"] = "none"
     selected_candidate_refs: list[str] = Field(default_factory=list, max_length=8)
     recommended_candidate_refs: list[str] = Field(default_factory=list, max_length=8)
     discussed_candidate_refs: list[str] = Field(default_factory=list, max_length=8)
+
+
+class _ComposePublicReplyArguments(_ComposePublicReplyCoreArguments):
+    """Full compose contract retained for itinerary presentation."""
+
+    card_mode: Literal["show_all", "select", "none"] = "none"
     blocks: list[_ComposePresentationBlock] = Field(default_factory=list, max_length=12)
     itinerary: _ItineraryArguments | None = None
     # Compatibility input for old local fixtures. Active prompts use refs.
@@ -548,9 +554,11 @@ Editorial grounded recommendation contract:
 - Use card_intent=browse only when the user asks to see the full candidate set; otherwise keep non-selected candidates internal to the comparison.
 - selected_candidate_refs must be the cards that the prose uses. recommended_candidate_refs must be a subset of selected refs, and selected refs must be a subset of discussed refs.
 - Use candidate_ref values exactly as supplied. Never invent refs, URLs, map links, or unsupported atmosphere/quality claims.
-- When cards are shown, top-level messages should summarize the conclusion and comparison reasons rather than reproduce a full candidate list. Use candidate_refs-only blocks for selected cards unless a short, supported card-specific note is necessary; never create a block for a non-selected ref.
+- Affirmative atmosphere, quality, or date-suitability claims require matching typed Web findings or other typed evidence. If the observations do not support one, state that it is unverified or that there is not enough information to confirm it; do not turn a limitation into a confirmation.
+- For ordinary Places/Web recommendations, top-level messages should summarize the conclusion and comparison reasons rather than reproduce a full candidate list. Return selected_candidate_refs; the server renders the cards. Use blocks only for itinerary presentation.
 - Web／Places 回覆可使用安全 Markdown 子集：`###` 小標題、項目清單、編號與 `**粗體**`；不要輸出表格、HTML、程式碼區塊或自由來源連結，來源由 UI 的 typed metadata 顯示。
-- If cards are shown, use one `candidate_refs`-only block per selected card by default; keep the conclusion and comparison reasons in the top-level messages. Add Markdown to a selected-card block only for a short supported note, and never list non-selected candidates there. Do not output `card_description`; map links come from server-owned cards.
+- Ordinary Places/Web composition has no model-authored blocks or card_mode; card_intent and selected_candidate_refs are sufficient. Itinerary is the only block-based exception, and map links always come from server-owned cards.
+- In ordinary composition, `messages` is exactly `list[str]`: each string is public reply text, not a chat message object. Never return `{role, content}` objects or user/system/tool transcript content. The server derives card_mode from card_intent and validated selected refs.
 - Do not make casual chat, calendar confirmation, or simple Places answers longer just because this class exists.
 - When a relationship.list_accepted_contacts observation answers who the user can invite, use the contact's
   verified display_name (when present) and call that person a contact/person. Do not substitute the vague label
@@ -609,22 +617,29 @@ def _decide_cards_tool_schema() -> dict[str, Any]:
     }
 
 
-def _compose_public_reply_tool_schema() -> dict[str, Any]:
-    schema = inline_json_schema_refs(_ComposePublicReplyArguments.model_json_schema())
+def _compose_public_reply_tool_schema(*, itinerary: bool = False) -> dict[str, Any]:
+    model = _ComposePublicReplyArguments if itinerary else _ComposePublicReplyCoreArguments
+    schema = inline_json_schema_refs(model.model_json_schema())
     schema.pop("title", None)
     for prop in schema.get("properties", {}).values():
         prop.pop("title", None)
-    # Keep the deprecated parser-only field out of the active function-call
-    # contract. Old fixtures can still be read by _parse_composed_reply, but a
-    # current model cannot choose to put explanations inside a place card.
-    block_item = ((schema.get("properties") or {}).get("blocks") or {}).get("items")
-    if isinstance(block_item, dict):
-        (block_item.get("properties") or {}).pop("card_description", None)
+    if itinerary:
+        # Keep the deprecated parser-only field out of the active function-call
+        # contract. Old fixtures can still be read by the itinerary parser, but
+        # a current model cannot choose to put explanations inside a place card.
+        block_item = ((schema.get("properties") or {}).get("blocks") or {}).get("items")
+        if isinstance(block_item, dict):
+            (block_item.get("properties") or {}).pop("card_description", None)
     return {
         "type": "function",
         "function": {
             "name": "compose_public_reply",
-            "description": "以一到三個 bounded bubbles 產生公開回覆；行程模式必須同時提供有序時段與地點卡片引用。",
+            "description": (
+                "Ordinary Places/Web messages must be a list[str] of public reply strings. "
+                "Do not return chat-message objects such as {role, content}, or user/system/tool "
+                "transcript content. Ordinary composition does not use blocks or card_mode; "
+                "itinerary is the only block-based exception."
+            ),
             "parameters": schema,
         },
     }
@@ -645,19 +660,130 @@ def _parse_card_decision(result) -> dict[str, Any] | None:
     return {"mode": validated.mode, "indices": [int(i) for i in validated.indices]}
 
 
+_ORDINARY_COMPOSE_FIELDS = frozenset({
+    "messages", "presentation_class", "card_intent",
+    "selected_candidate_refs", "recommended_candidate_refs",
+    "discussed_candidate_refs",
+})
+_ORDINARY_COMPOSE_COMPAT_FIELDS = _ORDINARY_COMPOSE_FIELDS | {
+    "blocks", "card_mode", "indices",
+}
+
+
+def _normalize_ordinary_messages(value: Any) -> list[str] | None:
+    """Keep ordinary composition as public ``list[str]`` across provider drift."""
+    if not isinstance(value, list):
+        return None
+    messages: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            messages.append(item)
+            continue
+        if not isinstance(item, dict):
+            return None
+        if item.get("role") != "assistant":
+            continue
+        content = item.get("content")
+        if isinstance(content, str) and 0 < len(content) <= 2400:
+            messages.append(content)
+    return messages
+
+
+def _parse_ordinary_compose_arguments(raw_arguments: Any) -> tuple[_ComposePublicReplyCoreArguments, dict[str, Any]] | None:
+    """Validate the ordinary contract without parsing presentation blocks."""
+    if not isinstance(raw_arguments, dict):
+        return None
+    if set(raw_arguments) - _ORDINARY_COMPOSE_COMPAT_FIELDS:
+        return None
+    ordinary_arguments = {
+        key: raw_arguments[key]
+        for key in _ORDINARY_COMPOSE_FIELDS
+        if key in raw_arguments
+    }
+    normalized_messages = _normalize_ordinary_messages(ordinary_arguments.get("messages"))
+    if normalized_messages is None:
+        return None
+    ordinary_arguments["messages"] = normalized_messages
+    try:
+        validated = _ComposePublicReplyCoreArguments.model_validate(ordinary_arguments)
+    except Exception:
+        return None
+    return validated, raw_arguments
+
+
+def _place_claims_are_conservative(
+    messages: list[str], candidate_summaries: list[dict[str, Any]],
+    web_research: dict[str, Any] | None = None,
+) -> bool:
+    """Keep candidate-specific qualitative prose tied to typed evidence."""
+    if not candidate_summaries:
+        return True
+    candidate_refs = {
+        str(item.get("candidate_ref") or "")
+        for item in candidate_summaries
+        if str(item.get("candidate_ref") or "")
+    }
+    typed_subjects = {
+        str(item.get("subject_ref") or "")
+        for item in (web_research or {}).get("findings", [])
+        if isinstance(item, dict)
+        and str(item.get("subject_ref") or "") in candidate_refs
+        and str(item.get("claim") or "").strip()
+        and item.get("relation") == "direct"
+    }
+    if typed_subjects:
+        return True
+    limitations = {
+        str(item).strip()
+        for item in (web_research or {}).get("limitations", [])
+        if str(item).strip()
+    }
+    candidate_names = {
+        str(item.get("name") or "").strip()
+        for item in candidate_summaries
+        if str(item.get("name") or "").strip()
+    }
+    for message in messages:
+        text = str(message or "").strip()
+        if not text or any(limit and limit in text for limit in limitations):
+            continue
+        if ("這家很" in text or "這間很" in text) and (
+            len(candidate_summaries) == 1
+            or any(name and name in text for name in candidate_names)
+        ):
+            return False
+    return True
+
+
+def _ordinary_compose_failure_reason(
+    result: Any,
+    candidate_summaries: list[dict[str, Any]],
+) -> Literal["compose_schema_invalid", "unsupported_claim"]:
+    """Classify ordinary compose rejection before falling back."""
+    if not result.tool_calls:
+        return "compose_schema_invalid"
+    call = result.tool_calls[0]
+    if not isinstance(call, dict) or call.get("name") != "compose_public_reply":
+        return "compose_schema_invalid"
+    if _parse_ordinary_compose_arguments(call.get("arguments") or {}) is None:
+        return "compose_schema_invalid"
+    return "unsupported_claim"
+
+
 def _parse_composed_reply(
     result,
     candidate_summaries: list[dict[str, Any]] | None = None,
+    web_research: dict[str, Any] | None = None,
 ) -> tuple[list[str], dict[str, Any] | None, str, list[dict[str, Any]]] | None:
     if not result.tool_calls:
         return None
     tc = result.tool_calls[0]
     if tc.get("name") != "compose_public_reply":
         return None
-    try:
-        validated = _ComposePublicReplyArguments.model_validate(tc.get("arguments") or {})
-    except Exception:
+    parsed_arguments = _parse_ordinary_compose_arguments(tc.get("arguments") or {})
+    if parsed_arguments is None:
         return None
+    validated, raw_arguments = parsed_arguments
     presentation = build_presentation(validated.messages, validated.presentation_class)
     if presentation is None:
         return None
@@ -672,12 +798,13 @@ def _parse_composed_reply(
     recommended_refs = list(validated.recommended_candidate_refs)
     # Older local fixtures used indices. Keep parsing them while active model
     # output is required to use server-owned refs.
-    if validated.indices and ref_to_index:
+    indices = raw_arguments.get("indices") or []
+    if indices and ref_to_index:
         return None
-    if not selected_refs and validated.indices and summaries:
+    if not selected_refs and indices and summaries:
         selected_refs = [
             str(summaries[index].get("candidate_ref"))
-            for index in validated.indices
+            for index in indices
             if 0 <= int(index) < len(summaries) and summaries[int(index)].get("candidate_ref")
         ]
         discussed_refs = discussed_refs or list(selected_refs)
@@ -696,66 +823,48 @@ def _parse_composed_reply(
         return None
     if not set(recommended_refs).issubset(selected_refs):
         return None
+    if selected_refs and not discussed_refs:
+        discussed_refs = list(selected_refs)
     if not set(selected_refs).issubset(discussed_refs):
         return None
 
     intent = validated.card_intent
-    if intent == "none" and validated.card_mode != "none":
-        intent = "curated"
     if intent == "browse":
-        if validated.card_mode != "show_all" or selected_refs or recommended_refs:
+        if selected_refs or recommended_refs:
             return None
+        card_mode = "show_all"
     elif intent == "curated":
-        if validated.card_mode != "select" or not 1 <= len(selected_refs) <= 4:
+        if not 1 <= len(selected_refs) <= 4:
             return None
+        card_mode = "select"
     elif intent == "explicit_set":
-        if validated.card_mode != "select" or not 1 <= len(selected_refs) <= 8:
+        if not 1 <= len(selected_refs) <= 8:
             return None
-    elif (
-        validated.card_mode != "none"
-        or validated.indices
-        or selected_refs
-        or recommended_refs
-        or discussed_refs
-    ):
+        card_mode = "select"
+    elif selected_refs or recommended_refs or discussed_refs or indices:
+        return None
+    else:
+        card_mode = "none"
+
+    if not _place_claims_are_conservative(presentation.messages, summaries, web_research):
         return None
 
-    presentation_blocks: list[dict[str, Any]] = []
-    assigned_refs: set[str] = set()
-    for block in validated.blocks:
-        if block.message_index >= len(presentation.messages):
-            return None
-        block_refs = list(block.candidate_refs)
-        if len(set(block_refs)) != len(block_refs):
-            return None
-        if not set(block_refs).issubset(selected_refs):
-            return None
-        if assigned_refs.intersection(block_refs):
-            return None
-        # Accept the legacy field only as a bounded safety-checked input. It
-        # is intentionally not copied to the presentation projection: the
-        # explanation belongs in markdown and the card owns the map link.
-        if block.card_description is not None and _normalize_card_description(block.card_description) is None:
-            return None
-        markdown = str(block.markdown or "").strip()
-        normalized_markdown = ""
-        if markdown:
-            block_presentation = build_presentation([markdown], validated.presentation_class)
-            if block_presentation is None:
-                return None
-            normalized_markdown = block_presentation.messages[0]
-        if not normalized_markdown and not block_refs:
-            return None
-        assigned_refs.update(block_refs)
-        block_projection = {
-            "message_index": block.message_index,
-            "markdown": normalized_markdown,
-            "candidate_refs": block_refs,
-        }
-        presentation_blocks.append(block_projection)
+    # Ordinary cards are rendered from server-owned refs. These are internal
+    # UI projections, not model-authored presentation blocks.
+    visible_refs = selected_refs
+    if card_mode == "show_all":
+        visible_refs = [
+            str(item.get("candidate_ref"))
+            for item in summaries
+            if str(item.get("candidate_ref") or "")
+        ]
+    presentation_blocks = [
+        {"message_index": 0, "markdown": "", "candidate_refs": [ref]}
+        for ref in visible_refs
+    ]
 
-    card_decision = None if validated.card_mode == "none" else {
-        "mode": validated.card_mode,
+    card_decision = None if card_mode == "none" else {
+        "mode": card_mode,
         "indices": [ref_to_index[ref] for ref in selected_refs],
         "card_intent": intent,
         "selected_candidate_refs": selected_refs,
@@ -832,6 +941,7 @@ def _observation_fallback(payload: dict[str, Any]) -> str:
                 names = "、".join(f"「{q}」" for q in queries)
                 return f"我找不到{names}這幾筆行程，可以再確認一下名稱或日期嗎？"
     calendar_lines = []
+    calendar_empty_ranges: list[str] = []
     place_lines: list[str] = []
     for obs in observations:
         tool = obs.get("tool") or ""
@@ -840,6 +950,8 @@ def _observation_fallback(payload: dict[str, Any]) -> str:
             events = result.get("events") or []
             if result.get("found") and result.get("event"):
                 events = [result["event"]]
+            if isinstance(result.get("events"), list) and not result.get("events"):
+                calendar_empty_ranges.append(str(result.get("range") or "查詢範圍").strip())
             for event in events:
                 title = str(event.get("title") or event.get("activity") or "").strip()
                 date = str(event.get("date") or "").strip()
@@ -871,6 +983,9 @@ def _observation_fallback(payload: dict[str, Any]) -> str:
     parts = []
     if calendar_lines:
         parts.append("你有" + "、".join(calendar_lines) + "的行程")
+    if calendar_empty_ranges:
+        ranges = "、".join(dict.fromkeys(calendar_empty_ranges))
+        parts.append(f"查詢的{ranges}目前沒有行程。")
     if place_lines:
         parts.append("### 附近地點\n\n" + "\n".join(place_lines) + "\n\n地址與地圖連結整理在下方卡片。")
     if parts:
@@ -1039,16 +1154,7 @@ def _web_research_fallback(result: dict[str, Any]) -> str:
 
 def _places_only_payload(payload: dict[str, Any]) -> bool:
     """Identify a Places-only result for the post-LLM degradation path."""
-    observations = [
-        item for item in (payload.get("observations") or [])
-        if isinstance(item, dict)
-        and item.get("status") == "ok"
-        and item.get("tool")
-    ]
-    return bool(observations) and all(
-        item.get("tool") in {"places.search_nearby", "places.resolve_place"}
-        for item in observations
-    )
+    return _successful_observation_domains(payload) == {"places"}
 
 
 def _successful_observation_domains(payload: dict[str, Any]) -> set[str]:
@@ -1083,7 +1189,7 @@ def _places_and_web_only_payload(payload: dict[str, Any]) -> bool:
 
 
 def _web_only_payload(payload: dict[str, Any]) -> bool:
-    """Keep Web-only replies deterministic and independent of composition LLM."""
+    """Identify a Web-only typed result for the LLM-first composition path."""
     observations = [
         item for item in (payload.get("observations") or [])
         if isinstance(item, dict) and item.get("result")
@@ -1384,33 +1490,9 @@ def synthesize(
         and not candidate_summaries
         and _web_only_payload(payload)
     )
-    web_has_useful_findings = bool(
-        web_only_mode
-        and direct_finding_count
-        and web_research.get("status") in {"answered", "partial"}
-        and web_research.get("execution_status") in {"completed", "degraded"}
-        and web_research.get("stop_reason") not in {"model_failure", "tool_failure", "tool_unavailable"}
-    )
-    if not itinerary_mode and web_research is not None and not candidate_summaries and (
-        web_research.get("status") == "insufficient_evidence"
-        or web_research.get("execution_status") == "unavailable"
-    ) and _web_only_payload(payload):
-        fallback = _web_research_fallback(web_research)
-        presentation = build_presentation([fallback], "grounded_recommendation")
-        metrics.reply_source = "observation_fallback"
-        metrics.fallback_reason = "web_research_insufficient"
-        metrics.presentation_messages = presentation.messages if presentation else [fallback]
-        metrics.presentation_class = "grounded_recommendation"
-        return fallback, None, metrics
-    if web_only_mode and not web_has_useful_findings:
-        fallback = _web_research_fallback(web_research)
-        presentation = build_presentation([fallback], "grounded_recommendation")
-        metrics.reply_source = "observation_fallback"
-        metrics.fallback_reason = "web_deterministic_presentation"
-        metrics.presentation_messages = presentation.messages if presentation else [fallback]
-        metrics.presentation_class = "grounded_recommendation"
-        return fallback, None, metrics
-    tools = [_compose_public_reply_tool_schema()] if itinerary_mode or candidate_summaries or direct_finding_count >= 2 else []
+    tools = [
+        _compose_public_reply_tool_schema(itinerary=itinerary_mode)
+    ] if itinerary_mode or candidate_summaries or direct_finding_count >= 2 else []
     metrics.tools_raw = tools
     try:
         prompt_payload = payload
@@ -1456,7 +1538,7 @@ def synthesize(
                 metrics.presentation_blocks = presentation_blocks
                 metrics.presentation_class = "grounded_recommendation"
                 return "\n\n".join(composed_messages), card_decision, metrics
-        composed = _parse_composed_reply(result, candidate_summaries)
+        composed = _parse_composed_reply(result, candidate_summaries, web_research)
         composition_required = itinerary_mode or (
             bool(candidate_summaries)
             and any(
@@ -1488,7 +1570,10 @@ def synthesize(
             # invalid compose output as a degradation and use the bounded
             # observation fallback below.
             composition_failed = True
-            metrics.fallback_reason = "unsupported_claim" if result.tool_calls else "empty_content"
+            metrics.fallback_reason = (
+                _ordinary_compose_failure_reason(result, candidate_summaries)
+                if result.tool_calls else "empty_content"
+            )
         if not composition_failed:
             card_decision = _parse_card_decision(result)
             validation = validate_public_reply(

@@ -17,8 +17,12 @@ def _fc_result(content="", tool_calls=None):
 
 class V3SynthesizerTests(unittest.TestCase):
     def test_active_composer_schema_keeps_card_description_parser_only(self):
-        schema = _compose_public_reply_tool_schema()["function"]["parameters"]
-        block_item = schema["properties"]["blocks"]["items"]
+        ordinary_schema = _compose_public_reply_tool_schema()["function"]["parameters"]
+        self.assertNotIn("blocks", ordinary_schema["properties"])
+        self.assertNotIn("card_mode", ordinary_schema["properties"])
+
+        itinerary_schema = _compose_public_reply_tool_schema(itinerary=True)["function"]["parameters"]
+        block_item = itinerary_schema["properties"]["blocks"]["items"]
         self.assertNotIn("card_description", block_item["properties"])
 
     def _slice(self, observations, presentation_mode="default"):
@@ -346,28 +350,48 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertEqual(parsed[3][0]["markdown"], "")
         self.assertNotIn("card_description", parsed[3][0])
 
-    def test_composed_reply_rejects_card_description_with_url(self):
+    def test_malformed_legacy_ordinary_block_is_ignored(self):
         result = _fc_result(tool_calls=[{
             "name": "compose_public_reply",
             "arguments": {
                 "messages": ["先看這家。"],
                 "presentation_class": "grounded_recommendation",
-                "card_mode": "select",
                 "card_intent": "curated",
                 "selected_candidate_refs": ["place_candidate_0123456789abcdef"],
                 "recommended_candidate_refs": ["place_candidate_0123456789abcdef"],
                 "discussed_candidate_refs": ["place_candidate_0123456789abcdef"],
                 "blocks": [{
-                    "message_index": 0,
+                    "type": "candidate_refs",
                     "card_description": "請看 https://example.com 的營業資訊。",
                     "candidate_refs": ["place_candidate_0123456789abcdef"],
                 }],
             },
         }])
-        self.assertIsNone(_parse_composed_reply(result, [{
+        parsed = _parse_composed_reply(result, [{
             "candidate_ref": "place_candidate_0123456789abcdef",
             "name": "A", "category": "cafe",
-        }]))
+        }])
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed[1]["mode"], "select")
+        self.assertEqual(parsed[3], [{
+            "message_index": 0,
+            "markdown": "",
+            "candidate_refs": ["place_candidate_0123456789abcdef"],
+        }])
+        self.assertNotIn("https://example.com", str(parsed[3]))
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{"name": "A"}]},
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=result,
+        ):
+            _reply, _card_decision, metrics = synthesize(slc, candidate_cards=[{
+                "candidate_ref": "place_candidate_0123456789abcdef",
+                "name": "A", "category": "cafe",
+            }])
+        self.assertEqual(metrics.reply_source, "llm")
 
     def test_composed_reply_rejects_recommendation_hidden_from_cards(self):
         result = _fc_result(tool_calls=[{
@@ -490,6 +514,36 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertEqual(metrics.reply_source, "llm")
         self.assertIn(limitation, reply)
 
+    def test_web_only_typed_non_answered_statuses_are_llm_first(self):
+        cases = [
+            ("partial", "completed"),
+            ("insufficient_evidence", "completed"),
+            ("partial", "degraded"),
+            ("insufficient_evidence", "unavailable"),
+        ]
+        for status, execution_status in cases:
+            with self.subTest(status=status, execution_status=execution_status):
+                slc = self._slice([{
+                    "task_id": "web1", "status": "ok", "tool": None,
+                    "result": self._web_result(
+                        status=status,
+                        execution_status=execution_status,
+                        findings=[] if status == "insufficient_evidence" else None,
+                        limitations=[f"limitation:{status}:{execution_status}"],
+                    ),
+                }])
+                with patch(
+                    "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+                    return_value=_fc_result(
+                        content=f"Natural Web answer for {status}/{execution_status}.",
+                    ),
+                ) as provider:
+                    reply, _card_decision, metrics = synthesize(slc)
+                provider.assert_called_once()
+                self.assertEqual(metrics.reply_source, "llm")
+                self.assertTrue(metrics.used_llm)
+                self.assertIn("Natural Web answer", reply)
+
     def test_web_only_model_cannot_invent_source_url_or_ref(self):
         result = self._web_result()
         result["primary_activity"] = {
@@ -525,6 +579,30 @@ class V3SynthesizerTests(unittest.TestCase):
             reply, _card_decision, metrics = synthesize(slc)
         self.assertEqual(metrics.reply_source, "llm")
         self.assertIn(observed_url, reply)
+
+    def test_calendar_empty_result_survives_places_provider_fallback(self):
+        candidates = [{
+            "candidate_ref": "place_a", "name": "Cafe A", "category": "cafe",
+        }]
+        slc = self._slice([
+            {
+                "task_id": "calendar1", "status": "ok", "tool": "calendar.list_my_events",
+                "result": {"events": [], "range": "2026-08-15"},
+            },
+            {
+                "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+                "result": {"places": [{"name": "Cafe A"}]},
+            },
+        ])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            side_effect=RuntimeError("provider unavailable"),
+        ):
+            reply, _card_decision, metrics = synthesize(slc, candidate_cards=candidates)
+        self.assertEqual(metrics.reply_source, "observation_fallback")
+        self.assertIn("2026-08-15", reply)
+        self.assertIn("目前沒有行程", reply)
+        self.assertIn("Cafe A", reply)
 
     def test_plain_places_invalid_provider_output_uses_deterministic_fallback(self):
         candidates = [
@@ -640,6 +718,104 @@ class V3SynthesizerTests(unittest.TestCase):
             [["place_a"], ["place_b"]],
         )
         self.assertTrue(all(not block["markdown"] for block in metrics.presentation_blocks))
+
+    def test_live_ordinary_compose_shape_derives_select_and_renders_two_cards(self):
+        candidates = [
+            {"candidate_ref": "place_a", "name": "Cafe A", "category": "cafe"},
+            {"candidate_ref": "place_b", "name": "Cafe B", "category": "cafe"},
+            {"candidate_ref": "place_c", "name": "Cafe C", "category": "cafe"},
+        ]
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"requested_limit": 3, "places": [{"name": item["name"]} for item in candidates]},
+        }])
+        slc.payload["message"] = "找 3 家咖啡廳，最後挑最近的 2 家"
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "compose_public_reply",
+                "arguments": {
+                    "messages": [
+                        {"role": "user", "content": "找 3 家咖啡廳，最後挑最近的 2 家"},
+                        {"role": "assistant", "content": "我會選 Cafe A 和 Cafe B。"},
+                    ],
+                    "presentation_class": "grounded_recommendation",
+                    "card_intent": "explicit_set",
+                    "selected_candidate_refs": ["place_a", "place_b"],
+                },
+            }]),
+        ) as provider:
+            reply, card_decision, metrics = synthesize(slc, candidate_cards=candidates)
+
+        provider.assert_called_once()
+        self.assertEqual(metrics.reply_source, "llm")
+        self.assertTrue(metrics.used_llm)
+        self.assertIn("Cafe A", reply)
+        self.assertIn("Cafe B", reply)
+        self.assertEqual(card_decision["mode"], "select")
+        self.assertEqual(card_decision["selected_candidate_refs"], ["place_a", "place_b"])
+        self.assertEqual(card_decision["indices"], [0, 1])
+        self.assertEqual(
+            [block["candidate_refs"] for block in metrics.presentation_blocks],
+            [["place_a"], ["place_b"]],
+        )
+        self.assertEqual(len(metrics.presentation_blocks), 2)
+        self.assertTrue(all(not block["markdown"] for block in metrics.presentation_blocks))
+
+    def test_ordinary_role_content_drift_never_exposes_non_assistant_transcript(self):
+        candidates = [
+            {"candidate_ref": "place_a", "name": "Cafe A", "category": "cafe"},
+            {"candidate_ref": "place_b", "name": "Cafe B", "category": "cafe"},
+        ]
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{"name": "Cafe A"}, {"name": "Cafe B"}]},
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "compose_public_reply",
+                "arguments": {
+                    "messages": [
+                        {"role": "system", "content": "internal system text"},
+                        {"role": "user", "content": "private user text"},
+                        {"role": "assistant", "content": "我會選 Cafe A 和 Cafe B。"},
+                        {"role": "tool", "content": "raw tool result"},
+                    ],
+                    "presentation_class": "grounded_recommendation",
+                    "card_intent": "explicit_set",
+                    "selected_candidate_refs": ["place_a", "place_b"],
+                },
+            }]),
+        ):
+            reply, card_decision, metrics = synthesize(slc, candidate_cards=candidates)
+        self.assertEqual(metrics.reply_source, "llm")
+        self.assertEqual(metrics.presentation_messages, ["我會選 Cafe A 和 Cafe B。"])
+        self.assertNotIn("private user text", reply)
+        self.assertNotIn("raw tool result", reply)
+        self.assertEqual(card_decision["selected_candidate_refs"], ["place_a", "place_b"])
+
+    def test_schema_invalid_ordinary_compose_has_distinct_fallback_reason(self):
+        candidates = [{"candidate_ref": "place_a", "name": "Cafe A", "category": "cafe"}]
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{"name": "Cafe A"}]},
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "compose_public_reply",
+                "arguments": {
+                    "messages": "not-a-list",
+                    "presentation_class": "grounded_recommendation",
+                    "card_intent": "explicit_set",
+                    "selected_candidate_refs": ["place_a"],
+                },
+            }]),
+        ):
+            _reply, _card_decision, metrics = synthesize(slc, candidate_cards=candidates)
+        self.assertEqual(metrics.reply_source, "observation_fallback")
+        self.assertEqual(metrics.fallback_reason, "compose_schema_invalid")
 
     def test_explicit_final_count_one_selects_one_card(self):
         candidates = [
@@ -770,6 +946,59 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertEqual(metrics.reply_source, "observation_fallback")
         self.assertEqual(metrics.fallback_reason, "unsupported_claim")
         self.assertNotIn("place_invented", str(card_decision))
+        self.assertIn("Cafe A", reply)
+
+    def test_unverified_place_limitation_is_accepted_as_grounded_composition(self):
+        candidates = [{
+            "candidate_ref": "place_a", "name": "Cafe A", "category": "cafe",
+        }]
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{"name": "Cafe A", "category": "cafe"}]},
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "compose_public_reply",
+                "arguments": {
+                    "messages": ["目前沒有足夠資料確認是否適合約會。"],
+                    "presentation_class": "grounded_recommendation",
+                    "card_intent": "explicit_set",
+                    "selected_candidate_refs": ["place_a"],
+                },
+            }]),
+        ):
+            reply, _card_decision, metrics = synthesize(slc, candidate_cards=candidates)
+        self.assertEqual(metrics.reply_source, "llm")
+        self.assertIn("目前沒有足夠資料確認是否適合約會", reply)
+
+    def test_unsupported_place_quality_claim_uses_safe_fallback(self):
+        candidates = [{
+            "candidate_ref": "place_a", "name": "Cafe A", "category": "cafe",
+            "distance_label": "100 公尺",
+        }]
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{"name": "Cafe A", "category": "cafe"}]},
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "compose_public_reply",
+                "arguments": {
+                    "messages": ["Cafe A，這家很安靜，很適合約會。"],
+                    "presentation_class": "grounded_recommendation",
+                    "card_intent": "explicit_set",
+                    "selected_candidate_refs": ["place_a"],
+                },
+            }]),
+        ) as provider:
+            reply, _card_decision, metrics = synthesize(slc, candidate_cards=candidates)
+        provider.assert_called_once()
+        self.assertEqual(metrics.reply_source, "observation_fallback")
+        self.assertEqual(metrics.fallback_reason, "unsupported_claim")
+        self.assertNotIn("氣氛好", reply)
+        self.assertNotIn("適合約會", reply)
         self.assertIn("Cafe A", reply)
 
     def test_unavailable_place_web_lookup_uses_fallback_after_invalid_composition(self):
