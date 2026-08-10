@@ -91,7 +91,6 @@ class AyueAgentStreamTests(unittest.TestCase):
         with patch("routers.public_chat.profile_skills_mode_for_user", return_value="off"):
             mode = queue_profile_skills(
                 tasks, "owner", "我想去爬山", "message-1", "global",
-                allow_legacy_fallback=False,
             )
         self.assertEqual(mode, "off")
         tasks.add_task.assert_not_called()
@@ -128,7 +127,7 @@ class AyueAgentStreamTests(unittest.TestCase):
             ],
         )
         queue_profile.assert_called_once_with(
-            ANY, "owner", "你好", "owner-message", "global", allow_legacy_fallback=False,
+            ANY, "owner", "你好", "owner-message", "global",
             progress_token=ANY,
         )
         self.assertEqual(response["reply"], "嗨。")

@@ -14,7 +14,7 @@ from services.ayue_agent.tool_registry import (
     planner_arguments_allowed,
     planner_arguments_schema,
 )
-from ..contracts import AgentContextSlice, ToolProposal
+from ..contracts import AgentContextSlice, SubTaskStatus, ToolProposal
 
 
 @dataclass
@@ -33,6 +33,22 @@ class SubAgentMetrics:
     # contains codes only; raw arguments remain in the existing loopback-only
     # debug payload and never enter public trace.
     rejected_calls: list[str] = field(default_factory=list)
+
+
+@dataclass
+class StructuredAgentResult:
+    """A typed observation returned by a read-only structured sub-agent.
+
+    Most V3 agents return tool proposals for the Scheduler to guard and
+    execute.  Some bounded specialists (for example ProductInfo) own their
+    deterministic read projection and therefore return an observation directly.
+    The Scheduler handles this result through the same runner registry without
+    knowing the specialist's internal implementation.
+    """
+
+    observation: dict[str, Any] | None = None
+    status: SubTaskStatus = SubTaskStatus.OK
+    error_code: str | None = None
 
 
 def _build_tools(tool_names: Iterable[str]) -> list[dict]:

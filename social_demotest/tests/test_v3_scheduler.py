@@ -679,6 +679,40 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertTrue(len(tool_started_events) >= 1)
         self.assertIn("text", tool_started_events[0])
 
+    def test_product_info_progress_events_are_user_visible(self):
+        ctx = self._ctx("所以一定會配到剛好要跟我做同一件事的人嗎")
+        plan = Plan(tasks=[
+            SubTask(id="t1", agent="product_info", depends_on=[], task_brief=ctx.message),
+            SubTask(id="t2", agent="synthesizer", depends_on=["t1"], task_brief="彙整"),
+        ])
+        events: list[dict] = []
+
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
+                   return_value=self._direct_turn(ctx.message)), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.active_assessment_session", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=None), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize",
+                   return_value=("不一定。", None, _synth_metrics())):
+            run_public_agent_turn_v3(ctx, on_progress=events.append)
+
+        product_started = [
+            event for event in events
+            if event.get("type") == "tool_started"
+            and event.get("tool_name") == "product_info.process"
+        ]
+        product_finished = [
+            event for event in events
+            if event.get("type") == "tool_finished"
+            and event.get("tool_name") == "product_info.process"
+        ]
+        self.assertEqual(len(product_started), 1)
+        self.assertEqual(product_started[0]["text"], "我先整理一下產品資訊…")
+        self.assertEqual(len(product_finished), 1)
+        self.assertEqual(product_finished[0]["outcome"], "ok")
+
     def test_progress_events_not_emitted_for_planner_failure(self):
         ctx = self._ctx("壞掉")
         events: list[dict] = []

@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 FORBIDDEN_ARG_FIELDS = frozenset({"user_id", "match_id", "event_id", "revision", "expected_status"})
 
 VALID_AGENTS = frozenset({
-    "calendar", "places", "web", "match", "relationship", "profile", "synthesizer",
+    "calendar", "places", "web", "match", "relationship", "profile", "product_info", "synthesizer",
 })
 
 
@@ -43,7 +43,7 @@ class SubTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
-    agent: Literal["calendar", "places", "web", "match", "relationship", "profile", "synthesizer"]
+    agent: Literal["calendar", "places", "web", "match", "relationship", "profile", "product_info", "synthesizer"]
     depends_on: list[str] = Field(default_factory=list, max_length=3)
     task_brief: str = Field(min_length=1, max_length=500)
     evidence_policy: Literal["casual_discovery", "strict_verification"] | None = None
@@ -76,11 +76,9 @@ class Plan(BaseModel):
         description="Only for direct_chat; a short plain-text reply with no App/domain claims",
     )
     direct_messages: list[str] = Field(default_factory=list, max_length=3)
-    product_info_topics: list[Literal[
-        "capabilities", "same_identity", "surface_scope", "cross_surface_context",
-        "private_message_visibility", "where_to_ask", "matching_principles",
-        "relationship_chat_access",
-    ]] = Field(default_factory=list, max_length=3)
+    # Deprecated provider-compatibility field.  New plans route a normal
+    # ``product_info`` SubTask and do not expose a section/topic taxonomy.
+    product_info_topics: list[str] = Field(default_factory=list, max_length=3)
     opportunity: OpportunitySignal | None = None
 
     @field_validator("direct_reply")
@@ -170,10 +168,31 @@ class Plan(BaseModel):
         return self
 
 
+def normalize_plan_for_execution(plan: Plan, fallback_task_brief: str = "") -> Plan:
+    """Normalize the retired task-free ProductInfo envelope into a DAG.
+
+    This compatibility shim is intentionally outside the Scheduler's dispatch
+    logic.  New Planner payloads already contain a normal ``product_info`` task;
+    this only keeps old provider trajectories executable while deployments
+    roll forward.
+    """
+    if plan.mode != "product_info" or plan.tasks:
+        return plan
+    brief = " ".join(str(item).strip() for item in plan.product_info_topics if str(item).strip())
+    brief = (brief or str(fallback_task_brief or "產品功能問題")).strip()[:500]
+    return Plan(
+        mode="tasks",
+        tasks=[
+            SubTask(id="product_info", agent="product_info", depends_on=[], task_brief=brief),
+            SubTask(id="synthesizer", agent="synthesizer", depends_on=["product_info"], task_brief="整合已驗證的產品資訊觀察"),
+        ],
+    )
+
+
 class AgentContextSlice(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    agent: Literal["calendar", "places", "web", "match", "relationship", "profile", "synthesizer"]
+    agent: Literal["calendar", "places", "web", "match", "relationship", "profile", "product_info", "synthesizer"]
     payload: dict[str, Any] = Field(default_factory=dict)
 
 

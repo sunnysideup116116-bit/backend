@@ -51,13 +51,11 @@ MATCH_READINESS_THRESHOLD = 75
 
 def queue_profile_skills(
     background_tasks, user_id: str, message: str, message_id: str | None,
-    surface: str, match_id: str | None = None, *, allow_legacy_fallback: bool = True,
-    progress_token: str | None = None,
+    surface: str, match_id: str | None = None, *, progress_token: str | None = None,
 ) -> str:
     """Compatibility facade for public-chat callers and their test seam."""
     return _queue_profile_skills(
         background_tasks, user_id, message, message_id, surface, match_id,
-        allow_legacy_fallback=allow_legacy_fallback,
         mode_resolver=profile_skills_mode_for_user,
         progress_token=progress_token,
     )
@@ -197,7 +195,6 @@ def _complete_public_turn(
         owner_profile_message = _owner_profile_message(req, requested_mentions)
         profile_skill_mode = queue_profile_skills(
             background_tasks, req.user_id, owner_profile_message, user_message_id, "global",
-            allow_legacy_fallback=False,
             progress_token=candidate_run_key,
         )
         if profile_skill_mode in {"on", "shadow"}:

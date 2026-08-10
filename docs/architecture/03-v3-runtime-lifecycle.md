@@ -89,7 +89,7 @@ Guard 通過後 Scheduler 再做三道 runtime 檢查：
 
 - `@` 系工具（`MENTIONED_RELATIONSHIP`/`MENTIONED_CONTACTS`）若本回合沒有 server 驗證過的 mention id → `mentioned_required` 失敗。
 - `reuse_success_within_turn`（如 `places.measure_distance`）：同 sub-task 內已有成功的相同結果時重用 observation，不再讀一次。
-- `web.extract` 的 URL 必須是「本回合搜尋結果或使用者提供」的受信任 URL（`_web_extract_urls_allowed`）。
+- `web.extract` 的 URL 必須是「本回合搜尋結果或使用者提供」的受信任 URL；Web Runtime 透過 `v3/guarded_execution.py:web_extract_urls_allowed` 綁定。
 
 ### 階段 4：Typed Tool 執行
 
@@ -175,15 +175,15 @@ Calendar Agent 提出 `calendar.submit_commands` typed command batch
 > Current lifecycle: Public requests always enter this Scheduler；rollback 只能透過 deployment／commit rollback。
 ## Current Web Agent lifecycle
 
-When the Planner emits `agent="web"`, Scheduler runs the dedicated Web
-research loop. The loop returns each bounded `web.search`/`web.extract`
-observation to the Web Agent before the next decision, then emits one typed
-`web_research.v1` result for Synthesizer. It permits at most three decision
-rounds, three total calls, two initial searches, one refinement search, and one
-extract step over two URLs. Evidence is graded against the original answer
-target; adjacent-only or conflicting evidence cannot become an answered
-claim. Missing credentials, model failure, and no direct evidence have
-separate typed outcomes.
+When the Planner emits `agent="web"`, Scheduler dispatches the registered
+`v3/web_runtime.py` runner and collects one typed result. Web Runtime returns
+each bounded `web.search`/`web.extract` observation to the Web Agent before the
+next decision, then emits one typed `web_research.v1` result for Synthesizer.
+The runtime owns the at-most-three decision rounds, three total calls, two
+initial searches, one refinement search, and one extract step over two URLs.
+Evidence is graded against the original answer target; adjacent-only or
+conflicting evidence cannot become an answered claim. Missing credentials,
+model failure, and no direct evidence have separate typed outcomes.
 
 ### Places -> Web candidate collaboration
 

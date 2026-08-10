@@ -9,8 +9,7 @@ class ProfileTaskServiceTests(unittest.TestCase):
     def test_enabled_pipeline_schedules_only_typed_profile_extractor(self):
         tasks = MagicMock()
         with patch.object(profile_tasks, "profile_skills_mode_for_user", return_value="on"), \
-             patch.object(profile_tasks, "process_profile_message") as process, \
-             patch.object(profile_tasks, "observe_user_memory") as legacy:
+             patch.object(profile_tasks, "process_profile_message") as process:
             mode = profile_tasks.queue_profile_skills(
                 tasks, "owner", "我最近想去爬山", "message-1", "global",
             )
@@ -19,13 +18,11 @@ class ProfileTaskServiceTests(unittest.TestCase):
         tasks.add_task.assert_called_once_with(
             process, "owner", "我最近想去爬山", "message-1", "global", None,
         )
-        legacy.assert_not_called()
 
-    def test_disabled_pipeline_respects_v2_no_legacy_fallback(self):
+    def test_disabled_pipeline_does_not_schedule_legacy_observer(self):
         tasks = MagicMock()
         mode = profile_tasks.queue_profile_skills(
             tasks, "owner", "我最近想去爬山", "message-1", "global",
-            allow_legacy_fallback=False,
             mode_resolver=lambda _user_id: "off",
         )
 

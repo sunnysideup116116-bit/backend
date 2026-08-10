@@ -521,7 +521,7 @@ def _synthesizer_system_prompt(mode: str, has_cards: bool, presentation_mode: st
 - Calendar observation若有行程，要清楚告知活動與時間；Places card的完整地址、map URL、provider與每個距離不必機械重複，但可根據 verified observations 討論候選名稱、理由與取捨。
 - match_opportunity_offer只是溫和提議，不代表搜尋已開始或已有 pending confirmation。
 - no_write_proposed/not_found_queries必須誠實說明找不到，不可假裝完成。
-- observation 若包含 product_info，只能使用其中所選 topic 的 facts 回答使用者當下真正問的問題。用自己的自然說法直接回答，不背誦 manifest、不列完整功能清單，也不要改回通用身份介紹；presentation_class 使用 product_info。
+- observation 若包含 product_info，只能使用其中 `knowledge_sections` 與 section-keyed `facts` 回答使用者當下真正問的問題。若 `coverage` 是 `insufficient` 或有 `failure_code`，要誠實說明目前沒有足夠的產品依據，不得補猜。用自己的自然說法直接回答，不背誦 manifest、不列完整功能清單，也不要改回通用身份介紹；presentation_class 使用 product_info。
 {cards_policy}"""
     if presentation_mode == "itinerary":
         prompt += """
@@ -1421,11 +1421,25 @@ def synthesize(
                 metrics.presentation_blocks = fallback_blocks
                 metrics.presentation_class = "grounded_recommendation"
                 return fallback_reply, card_decision, metrics
-    # Product facts normally go through the LLM.  Fixed prose is reserved for
-    # provider failure, where a truthful topic-specific answer is safer than a
-    # generic identity line.
+    # Product facts normally go through the LLM. Fixed prose is reserved for
+    # provider failure. Unknown product knowledge must remain an explicit
+    # limitation instead of falling back to an unrelated capability answer.
     if product_info is not None:
-        fallback_messages = product_info_answer(list(product_info.get("topics") or []))
+        if product_info.get("coverage") == "insufficient":
+            fallback_messages = [
+                "\u9019\u984c\u76ee\u524d\u6c92\u6709\u8db3\u5920\u7684\u7522\u54c1\u4f9d\u64da\uff0c\u6211\u4e0d\u60f3\u5148\u731c\u4e00\u500b\u7b54\u6848\u3002",
+            ]
+        else:
+            topics = list(product_info.get("topics") or [])
+            if not topics:
+                section_ids = set(product_info.get("knowledge_sections") or [])
+                if any(str(item).startswith("matching.") for item in section_ids):
+                    topics = ["matching_principles"]
+                elif any(str(item).startswith("surfaces.") for item in section_ids):
+                    topics = ["surface_scope"]
+                else:
+                    topics = ["capabilities"]
+            fallback_messages = product_info_answer(topics)
         presentation = build_presentation(fallback_messages, "product_info")
         if presentation is not None:
             metrics.reply_source = "observation_fallback"
