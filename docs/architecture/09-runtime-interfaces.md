@@ -174,6 +174,32 @@ presentation set. Deterministic domain formatters are post-composition
 degradation paths and must not run before normal composition or discard
 successful sibling-domain observations.
 
+For ordinary Places/Places+Web recommendations, the active compose contract
+contains only `messages: list[str]`, `presentation_class`, `card_intent`,
+`selected_candidate_refs`, `recommended_candidate_refs`, and
+`discussed_candidate_refs`. Model-authored `blocks` and `card_mode` are not
+part of this ordinary schema. The server derives `card_mode` from
+`card_intent` and validated refs, then emits the card-only presentation
+projection from its own candidate catalog. A legacy top-level `blocks` field
+may be discarded for compatibility, but its nested shape is never used as an
+ordinary card binding. Itinerary composition remains the block-based
+exception. Selected refs are the only model-to-server binding for ordinary
+cards; map URLs and other card fields remain server-owned. `messages` are
+public reply strings, not chat transcript objects. A narrow compatibility
+adapter may retain only bounded `role="assistant"` string content from an
+older provider shape; user/system/tool/unknown-role content is discarded.
+Schema drift is reported as `compose_schema_invalid`.
+Qualitative atmosphere, quality, and date-suitability claims remain grounded
+by the Synthesizer evidence contract: affirmative claims need matching typed
+evidence, while an explicit limitation is valid when confirmation is not
+available. This is not a general natural-language claim parser.
+
+Web-only `web_research.v1` observations, including partial,
+insufficient-evidence, degraded, and unavailable outcomes, reach the
+Synthesizer first so typed findings and limitations can be expressed naturally.
+`_web_research_fallback` is reserved for provider, compose, grounding, or
+presentation validation degradation.
+
 ProductInfo 固定輸出 `product_info.v1` observation；Web 固定輸出 `web_research.v1` observation。這些 `.v1` 是 payload schema，不代表舊 runtime。
 
 ## 9. 新增或修改 interface 的交付要求
