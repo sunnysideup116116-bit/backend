@@ -106,3 +106,20 @@ Places 從 upstream typed `primary_activity.venue` 取 anchor，不從自由文�
 - Places Agent 看不到 `WEB_TOOLS`。
 - Places→Web subject refs 不可被模型改綁或新增。
 - Provider failure、超界 candidate、無法 resolve 與缺乏 Web evidence 都有 deterministic bounded fallback。
+
+## 7. Optional Google enrichment
+
+Places uses an empty `enrichments` list by default. The model may request only
+`rating`, `hours`, or `walking` when the Places task needs that evidence; the
+executor deduplicates the list and the schema rejects unsupported values.
+`rating` fetches Google `rating` plus `userRatingCount`. `hours` fetches
+`currentOpeningHours` and exposes only `open_now`, next open/close timestamps,
+and bounded weekday descriptions. Ordinary recommendations must not request
+Enterprise-tier fields merely to make cards richer.
+
+Google current-open/current-opening-hours facts may be Places-owned. Temporary
+closures, special announcements, events, social-media updates, menus,
+promotions, and other public claims requiring external verification remain
+Web-owned. `walking` uses one bounded Routes matrix for the candidate pool;
+individual matrix-element failures remove walking fields only from their own
+candidate.

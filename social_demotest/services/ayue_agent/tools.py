@@ -706,6 +706,7 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
                 str(point.get("label") or anchor), float(point["lat"]), float(point["lon"]), categories,
                 limit=safe_limit, cuisine=cuisine,
                 radius_m=int(arguments.get("radius_m") or 1500),
+                enrichments=arguments.get("enrichments") or [],
             )
             data = {
                 "anchor_label": str(point.get("label") or anchor),
@@ -749,12 +750,14 @@ def _places_distance(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolRe
     if not origin:
         return ToolResult(ok=False, error_code="location_required", user_message="你想從哪裡出發？")
     destination = str(arguments.get("destination") or "")
-    # Try Google Routes API for real driving distance; fall back to OSM haversine.
-    # The fallback keeps the tool working without Google quota.
+    travel_mode = str(arguments.get("travel_mode") or "DRIVE").upper()
+    # Try Google Routes API for the requested mode; fall back to OSM haversine.
+    # DRIVE remains the existing default. WALK fallback is explicitly labeled
+    # straight-line and never fabricates a walking duration.
     data = None
     if google_routes_enabled():
         try:
-            data = measure_distance_matrix(origin, destination)
+            data = measure_distance_matrix(origin, destination, travel_mode=travel_mode)
         except Exception:
             data = None
     if data is None:
@@ -762,6 +765,8 @@ def _places_distance(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolRe
             data = measure_distance(origin, destination)
         except MapClientError as exc:
             return ToolResult(ok=False, error_code=exc.code, user_message="")
+        if travel_mode == "WALK":
+            data = {**data, "travel_mode": "WALK", "duration_seconds": None}
     return ToolResult(ok=True, data={**data, "origin_kind": origin_kind})
 
 
@@ -770,7 +775,7 @@ def _places_resolve(arguments: dict[str, Any]) -> ToolResult:
     place = None
     if google_place_cards_enabled():
         try:
-            place = resolve_google_place(query)
+            place = resolve_google_place(query, enrichments=arguments.get("enrichments") or [])
         except GooglePlacesError:
             place = None
     if place is None:
@@ -778,9 +783,8 @@ def _places_resolve(arguments: dict[str, Any]) -> ToolResult:
             place = resolve_osm_place(query)
         except MapClientError as exc:
             return ToolResult(ok=False, error_code=exc.code, user_message="")
-    # Google resolve already carries photo_url from the Text Search response
-    # (places.photos is a Pro-tier field). No extra Place Details request is
-    # made: rating / opening hours are Enterprise-tier and intentionally absent.
+    # Google resolve carries optional enrichments directly from the same
+    # bounded Text Search call; no per-place Details request is added.
     provider = str((place or {}).get("provider") or "openstreetmap")
     return ToolResult(ok=True, data={
         "found": bool(place), "place": place,

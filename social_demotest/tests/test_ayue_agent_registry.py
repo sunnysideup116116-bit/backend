@@ -170,6 +170,50 @@ class AyueAgentRegistryTests(unittest.TestCase):
         self.assertEqual(result.data["event"]["activity"], "睡覺")
         self.assertEqual(result.private_data["calendar_event_reference"]["event"]["event_id"], "e-next")
 
+    def test_places_enrichments_are_bounded_and_deduplicated(self):
+        spec = TOOL_REGISTRY["places.search_nearby"]
+        arguments = executor_arguments_for_turn(spec, [], {
+            "categories": ["restaurant"],
+            "enrichments": ["hours", "rating", "hours"],
+        })
+        self.assertEqual(arguments["enrichments"], ["hours", "rating"])
+        with self.assertRaises(Exception):
+            executor_arguments_for_turn(spec, [], {
+                "categories": ["restaurant"], "enrichments": ["reviews"],
+            })
+
+    def test_places_output_accepts_optional_rating_hours_and_walking_fields(self):
+        spec = TOOL_REGISTRY["places.search_nearby"]
+        spec.output_model.model_validate({
+            "anchor_label": "Anchor", "origin_kind": "explicit",
+            "distance_basis": "straight_line", "attribution": "Google Maps",
+            "attribution_url": "https://www.google.com/maps",
+            "places": [{
+                "name": "Place", "category": "restaurant", "distance_m": 100,
+                "map_url": "https://www.google.com/maps/place/x",
+                "provider": "google", "place_id": "ChIJabc",
+                "rating": 4.2, "user_rating_count": 42,
+                "opening_hours": {
+                    "open_now": True, "next_open_time": None,
+                    "next_close_time": "2026-08-11T21:00:00Z",
+                    "weekday_descriptions": ["Mon: 09:00–21:00"],
+                },
+                "walking_distance_m": 500,
+                "walking_duration_seconds": 360,
+            }],
+        })
+
+    def test_distance_tool_defaults_to_drive_and_accepts_walk(self):
+        spec = TOOL_REGISTRY["places.measure_distance"]
+        self.assertEqual(
+            executor_arguments_for_turn(spec, [], {"destination": "Destination"})["travel_mode"],
+            "DRIVE",
+        )
+        self.assertEqual(
+            executor_arguments_for_turn(spec, [], {"destination": "Destination", "travel_mode": "WALK"})["travel_mode"],
+            "WALK",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

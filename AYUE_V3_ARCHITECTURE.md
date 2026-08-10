@@ -281,3 +281,18 @@ run_started | tool_started | tool_finished | final | error
 - `docs/architecture/subagent-*.md`：各 domain specialist 的現行行為。
 
 修改 runtime contract、tool list、state machine、stream/debug envelope 或 environment flag 時，必須同步更新本文件、interfaces 文件與對應 domain 文件。
+
+### Places optional typed enrichment
+
+Places ordinary searches keep the base Google field mask. The existing Places
+tool contracts may opt into bounded `rating`, `hours`, or `walking` enrichments;
+`resolve_place` supports only `rating` and `hours`, and the empty enrichment
+list is the default. Rating/count and current-opening-hours fields are fetched
+only when the Places task requires them. Walking candidate data is produced by
+one bounded Routes `computeRouteMatrix` call and is attached independently per
+destination; a failed matrix element does not fail the Places result.
+
+The existing `places.measure_distance` contract remains backward compatible
+with `DRIVE` as the default and accepts `WALK` for explicit requests. No
+Planner DAG, Scheduler, Web Runtime, Synthesizer presentation, or frontend card
+UI behavior changes as part of this enrichment surface.
