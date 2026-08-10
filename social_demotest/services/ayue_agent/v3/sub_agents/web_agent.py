@@ -17,11 +17,14 @@ from services.ai_service import generate_chat_completion_with_tools
 from ..contracts import AgentContextSlice
 from ..schema_utils import inline_json_schema_refs
 from ..web_research import (
+    MAX_WEB_EXTRACT_CALLS,
     MAX_WEB_EXTRACT_URLS,
     MAX_WEB_INITIAL_SEARCH_QUERIES,
     MAX_WEB_PROMPT_SEARCH_RESULTS,
     MAX_WEB_RESEARCH_CONTEXT_CHARS,
     MAX_WEB_REFINED_SEARCH_QUERIES,
+    MAX_WEB_SEARCH_CALLS,
+    MAX_WEB_TOTAL_TOOL_CALLS,
     WebEvidenceAssessmentV1,
     WebActivityV1,
     WebResearchFindingDraft,
@@ -206,7 +209,7 @@ _SYSTEM = """你是 Public Ayue V3 的 Web Research Agent。
 - 除非使用者明確要求論壇／社群意見，不要自行加入「論壇」「討論」等 evidence class。
 - recency 只能使用 none、day、week、month、year；明確日期應寫進 query，不可把年份填入 recency。
 - direct evidence 才能支持 answered；相鄰人物、事件、統計或新聞背景不能取代使用者要求的論壇／社群／特定命題。
-- 在 `casual_discovery` 中，若 Search result 的標題與摘要已直接回答簡單生活問題（例如「X 是什麼」、「最近有哪些活動」），摘要本身就是 direct evidence，不必為了形式再呼叫 Extract；只有需要精確日期、時間、規格或摘要不足時才 Extract。
+- Search result 主要用於 source discovery；簡單且明確的 lookup 可以直接完成，涉及比較、推薦、評論、細節或頁面脈絡時，應優先擷取最相關且具權威性的 1–2 個來源。
 - 在 `strict_verification` 中，Search 摘要不足以支撐完整答案，仍須保留 direct completeness 門檻。
 - direct 是「內容直接對上問題」，不是「必須來自官網或新聞稿」。主辦方、店家、場館的 Instagram／Facebook／Threads 公告、活動頁、售票頁，只要包含所需活動名稱、日期或地點，都可算 direct evidence。
 - 來源權威性與內容相關性分開判斷。一般活動探索、餐廳或行程推薦可使用直接的公開社群公告並標示可能變動；不要用論文或高風險事實的門檻拒絕回答。
@@ -217,6 +220,19 @@ _SYSTEM = """你是 Public Ayue V3 的 Web Research Agent。
 - 如果 context 提供 dependency_observations，必須保留其中已驗證的日期、地點與活動條件；不要把它們改成另一個問題，也不要要求上游重新搜尋。
 - 不要輸出任何 user_id、match_id、event_id、revision 或其他 authority field。
 """
+
+
+_RESEARCH_POLICY = """Research policy (this supersedes older casual-discovery wording):
+- web.search is primarily source discovery, not a complete answer by itself.
+- For comparisons, recommendations, reviews, nuanced factual questions, or any
+  request where page context/details matter, prefer extracting the most relevant
+  one or two sources before finishing.
+- Choose extract sources by relevance and authority, not search rank alone.
+- A simple explicit and unambiguous lookup may finish from direct search evidence.
+- Do not force extraction mechanically when the search evidence already answers
+  a simple lookup, and never invent evidence, source URLs, or source refs.
+"""
+_SYSTEM = _SYSTEM + "\n\n" + _RESEARCH_POLICY
 
 
 def _function_schema(contract: type[BaseModel], name: str, description: str) -> dict:
@@ -234,17 +250,25 @@ def _function_schema(contract: type[BaseModel], name: str, description: str) -> 
     }
 
 
-def _decision_tools(round_index: int, *, has_place_candidates: bool = False) -> list[dict]:
+def _decision_tools(
+    *,
+    has_place_candidates: bool = False,
+    can_search: bool = True,
+    can_extract: bool = True,
+    can_finish: bool = False,
+    initial_search: bool = True,
+) -> list[dict]:
+    """Expose the existing decision contracts from bounded runtime state."""
     tools: list[dict] = []
-    if round_index < 3:
+    if can_search:
         if has_place_candidates:
             search_contract = (
-                PlaceWebSearchDecisionArguments if round_index == 1
+                PlaceWebSearchDecisionArguments if initial_search
                 else PlaceWebRefinedSearchDecisionArguments
             )
         else:
             search_contract = (
-                WebSearchDecisionArguments if round_index == 1
+                WebSearchDecisionArguments if initial_search
                 else WebRefinedSearchDecisionArguments
             )
         tools.append(_function_schema(
@@ -252,12 +276,13 @@ def _decision_tools(round_index: int, *, has_place_candidates: bool = False) -> 
             "web_search_decision",
             "提出一或兩個保留具體研究目標的公開網路搜尋詞。",
         ))
+    if can_extract:
         tools.append(_function_schema(
             WebExtractDecisionArguments,
             "web_extract_decision",
             "從 owner URL 或本回合搜尋結果選擇最多兩個 URL 擷取。",
         ))
-    if round_index > 1:
+    if can_finish:
         tools.append(_function_schema(
             WebResearchFinishDecisionArguments,
             "web_finish_decision",
@@ -391,7 +416,7 @@ def _normalize_finish_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 def _parse_decision_call(
     call: dict[str, Any],
     *,
-    round_index: int,
+    initial_search: bool,
     place_refs: set[str],
     observed_source_refs: set[str] | None = None,
 ) -> tuple[WebResearchDecision | None, str]:
@@ -416,19 +441,19 @@ def _parse_decision_call(
                 raw_subject_refs = arguments.get("subject_refs")
                 if not isinstance(raw_subject_refs, list):
                     return None, "web_place_subject_binding_invalid"
-            if round_index > 1 and isinstance(arguments.get("queries"), list):
+            if not initial_search and isinstance(arguments.get("queries"), list):
                 arguments = {
                     **arguments,
                     "queries": arguments["queries"][:MAX_WEB_REFINED_SEARCH_QUERIES],
                 }
             if place_refs:
                 search_contract = (
-                    PlaceWebSearchDecisionArguments if round_index == 1
+                    PlaceWebSearchDecisionArguments if initial_search
                     else PlaceWebRefinedSearchDecisionArguments
                 )
             else:
                 search_contract = (
-                    WebSearchDecisionArguments if round_index == 1
+                    WebSearchDecisionArguments if initial_search
                     else WebRefinedSearchDecisionArguments
                 )
             parsed = search_contract.model_validate(arguments)
@@ -564,11 +589,23 @@ def decide(
         item["candidate_ref"] for item in safe_candidates
         if item.get("candidate_ref")
     }
+    remaining_tool_budget = max(0, MAX_WEB_TOTAL_TOOL_CALLS - tool_calls_used)
+    can_search = remaining_tool_budget > 0 and search_calls_used < MAX_WEB_SEARCH_CALLS
+    can_extract = remaining_tool_budget > 0 and extract_calls_used < MAX_WEB_EXTRACT_CALLS
+    can_finish = bool(projected)
+    initial_search = search_calls_used == 0
     payload = {
         "research_question": context_slice.payload.get("message", ""),
         "answer_target": task_brief,
         "evidence_policy": evidence_policy,
         "round": round_index,
+        "available_actions": [
+            action for action, enabled in (
+                ("search", can_search),
+                ("extract", can_extract),
+                ("finish", can_finish),
+            ) if enabled
+        ],
         "budgets": {
             "tool_calls_used": tool_calls_used,
             "search_calls_used": search_calls_used,
@@ -591,10 +628,18 @@ def decide(
         "請只呼叫本輪允許的一個 function；不要輸出其他文字。\n"
         "單一主體與單一問題預設只產生一個 search query；只有兩個不同主體或兩種明確不同 evidence class 才使用兩個 query。\n"
         + "When place_candidates are present, research only those candidate refs. Every search query must carry one subject_ref; never invent a new place. Preserve the unresolved criterion, date, and location.\n"
-        + ("一般探索可使用相關的公開社群、社區或商家公告；只要與問題直接相關，就先整理成可用資訊並標示可能變動，不要因為不是官網就直接判定不足。\n" if evidence_policy == "casual_discovery" else "這是嚴格查證；只有直接且足以回答問題的證據才能標成 answered，否則清楚列出尚缺證據。\n")
+        + ("Follow the research quality policy: search for sources first, and extract relevant context for nuanced requests.\n" if evidence_policy == "casual_discovery" else "這是嚴格查證；只有直接且足以回答問題的證據才能標成 answered，否則清楚列出尚缺證據。\n")
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        + "\n\n"
+        + _RESEARCH_POLICY
     )
-    tools = _decision_tools(round_index, has_place_candidates=bool(place_candidates))
+    tools = _decision_tools(
+        has_place_candidates=bool(place_candidates),
+        can_search=can_search,
+        can_extract=can_extract,
+        can_finish=can_finish,
+        initial_search=initial_search,
+    )
     metrics.tools_raw = tools
     metrics.input_payload = payload
     last_error = "web_decision_missing_function_call"
@@ -628,7 +673,7 @@ def decide(
             last_error = "web_decision_missing_function_call"
         else:
             decision, last_error = _parse_decision_call(
-                result.tool_calls[0], round_index=round_index, place_refs=place_refs,
+                result.tool_calls[0], initial_search=initial_search, place_refs=place_refs,
                 observed_source_refs={
                     str(row.get("source_ref"))
                     for item in projected

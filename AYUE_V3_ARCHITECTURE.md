@@ -672,12 +672,12 @@ location lookup and does not expose Web tools.
 `web.search` and `web.extract` remain typed Tool Registry capabilities. Web
 research behavior stays in the Web Runtime, while the Web Agent remains the
 decision contract. The runtime receives a minimal guarded execution adapter
-(`v3/guarded_execution.py`) and never calls Tavily directly. The loop is strictly
-bounded to at most 3 decision rounds, 3 total web calls, 2 initial search
-queries, 1 refinement query, and 1 extract step over at most 2 URLs. Each
-observation is projected and returned to the Web Agent before its next
-decision; raw provider payloads never enter Planner, trace, or final
-composition.
+(`v3/guarded_execution.py`) and never calls Tavily directly. The loop is
+strictly bounded to at most 3 tool-producing Web calls plus 1 finish-only
+decision. It keeps 2 initial search queries, 1 refinement query, and 1 extract
+step over at most 2 URLs. Each observation is projected and returned to the Web
+Agent before its next decision; raw provider payloads never enter Planner,
+trace, or final composition.
 
 Before finishing, the Web Agent emits a typed evidence assessment
 (`aligned|conflict` plus `direct_sufficient|direct_partial|adjacent_only|none`).
@@ -687,9 +687,10 @@ activities, restaurants, travel, events, promotions, sports, and shops, or
 medical/legal/financial/security-risk claims. Casual mode may use relevant
 public social, community, venue, or business announcements with a visible
 change-warning; strict mode keeps the direct-evidence threshold.
-For simple casual questions, a directly relevant bounded Search result may be
-used without forcing an Extract call. Extract remains available for exact
-details, full schedules, or strict confirmation requests.
+Search is primarily source discovery. Comparisons, recommendations, reviews,
+nuanced factual questions, and requests where page context matters should
+prefer one or two relevant, authoritative extracts. Simple explicit lookups
+may finish from direct search evidence; extraction is not mechanically forced.
 Direct evidence is required for an `answered` result. Adjacent or conflicting
 evidence produces `partial` or `insufficient_evidence` with explicit
 limitations; unavailable credentials and tool failures remain distinct
@@ -701,12 +702,12 @@ Every Web search query is deterministically anchored to the Planner-owned
 drop the named entity, place, date range, or requested evidence class. The
 optional `recency` hint accepts only `none|day|week|month|year`; any other model
 value safely becomes `none`, while explicit dates remain part of the query.
-Internal decision functions are action-specific and round-specific: round 1
-exposes shallow `web_search_decision` / `web_extract_decision` schemas, round 2
-adds a flat `web_finish_decision` evidence contract, and round 3 exposes only
-finish. These are workflow decisions, not Tool Registry capabilities. Keeping
-them shallow prevents cloud-model schema errors and prevents the model from
-filling conclusion fields before it has observations.
+Internal decision functions remain shallow workflow contracts, not Tool
+Registry capabilities. Their availability follows current observations and
+remaining budgets: search/extract can continue while tool budget remains,
+finish becomes available after observations, and budget exhaustion exposes
+finish only. This allows search/refine/extract/finish without an unbounded
+ReAct loop.
 If a provider still emits more than one round-2 refined query, the parser keeps
 only the first query before validation; this enforces the fixed search budget
 without converting a safe overproduction into a whole-run model failure.

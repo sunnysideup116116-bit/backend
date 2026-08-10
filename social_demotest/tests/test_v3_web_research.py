@@ -208,7 +208,7 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertEqual(decision.recency, "none")
 
     def test_first_round_schema_excludes_conclusion_fields(self):
-        tools = _decision_tools(1)
+        tools = _decision_tools(initial_search=True, can_finish=False)
         self.assertEqual(
             [tool["function"]["name"] for tool in tools],
             ["web_search_decision", "web_extract_decision"],
@@ -220,7 +220,7 @@ class V3WebResearchTests(unittest.TestCase):
 
     def test_ordinary_search_schema_does_not_expose_place_subject_refs(self):
         search = next(
-            tool for tool in _decision_tools(1)
+            tool for tool in _decision_tools(initial_search=True, can_finish=False)
             if tool["function"]["name"] == "web_search_decision"
         )
         self.assertNotIn(
@@ -228,7 +228,9 @@ class V3WebResearchTests(unittest.TestCase):
             search["function"]["parameters"]["properties"],
         )
         place_search = next(
-            tool for tool in _decision_tools(1, has_place_candidates=True)
+            tool for tool in _decision_tools(
+                initial_search=True, can_finish=False, has_place_candidates=True,
+            )
             if tool["function"]["name"] == "web_search_decision"
         )
         self.assertIn(
@@ -237,7 +239,9 @@ class V3WebResearchTests(unittest.TestCase):
         )
 
     def test_final_round_schema_requires_finish(self):
-        tools = _decision_tools(3)
+        tools = _decision_tools(
+            can_search=False, can_extract=False, can_finish=True, initial_search=False,
+        )
         self.assertEqual([tool["function"]["name"] for tool in tools], ["web_finish_decision"])
         parameters = tools[0]["function"]["parameters"]
         self.assertIn("has_direct_evidence", parameters["required"])
@@ -245,7 +249,9 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertNotIn("status", parameters["properties"])
 
     def test_second_round_allows_only_one_refined_query(self):
-        tools = _decision_tools(2)
+        tools = _decision_tools(
+            can_search=True, can_extract=True, can_finish=True, initial_search=False,
+        )
         search = next(tool for tool in tools if tool["function"]["name"] == "web_search_decision")
         queries = search["function"]["parameters"]["properties"]["queries"]
         self.assertEqual(queries["maxItems"], 1)
@@ -653,6 +659,105 @@ class V3WebResearchTests(unittest.TestCase):
             }],
         )
 
+    def test_search_refined_search_extract_finish_uses_three_tools_then_finish(self):
+        decisions = [
+            (WebResearchDecision(action="search", queries=["initial discovery"]), SubAgentMetrics(input_tokens=1)),
+            (WebResearchDecision(action="search", queries=["refined context"]), SubAgentMetrics(input_tokens=1)),
+            (WebResearchDecision(
+                action="extract", urls=["https://example.com/forum/post"],
+                extract_query="relevant details",
+            ), SubAgentMetrics(input_tokens=1)),
+            (self._finish(), SubAgentMetrics(input_tokens=1)),
+        ]
+        calls = []
+
+        def fake_execute(tc, raw_ctx, *, clock):
+            calls.append(tc.name)
+            if tc.name == "web.search":
+                return SimpleNamespace(ok=True, data=_search_result())
+            return SimpleNamespace(ok=True, data={"pages": [{
+                "url": "https://example.com/forum/post",
+                "content": "Direct public evidence.", "truncated": False,
+            }]})
+
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", side_effect=decisions) as decide, \
+             patch.object(guarded_execution, "execute_tool", side_effect=fake_execute):
+            results, _metrics = _run_web(
+                SubTask(id="web1", agent="web", task_brief="Find nuanced public evidence"),
+                _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
+                on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
+            )
+
+        self.assertEqual(calls, ["web.search", "web.search", "web.extract"])
+        self.assertEqual(decide.call_count, 4)
+        self.assertEqual(decide.call_args_list[-1].kwargs["tool_calls_used"], 3)
+        self.assertEqual(results[0].observation["status"], "answered")
+
+    def test_simple_lookup_can_finish_after_search_without_extract(self):
+        decisions = [
+            (WebResearchDecision(action="search", queries=["explicit lookup"]), SubAgentMetrics(input_tokens=1)),
+            (self._finish(), SubAgentMetrics(input_tokens=1)),
+        ]
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", side_effect=decisions) as decide, \
+             patch.object(guarded_execution, "execute_tool", return_value=SimpleNamespace(
+                 ok=True, data=_search_result(),
+             )) as execute:
+            results, _metrics = _run_web(
+                SubTask(id="web1", agent="web", task_brief="Find one explicit fact"),
+                _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
+                on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
+            )
+
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(decide.call_count, 2)
+        self.assertEqual(results[0].observation["status"], "answered")
+
+    def test_initial_parallel_search_still_respects_total_tool_budget(self):
+        decisions = [
+            (WebResearchDecision(action="search", queries=["first", "second"]), SubAgentMetrics(input_tokens=1)),
+            (WebResearchDecision(action="search", queries=["refined"]), SubAgentMetrics(input_tokens=1)),
+            (self._finish(), SubAgentMetrics(input_tokens=1)),
+        ]
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", side_effect=decisions) as decide, \
+             patch.object(guarded_execution, "execute_tool", return_value=SimpleNamespace(
+                 ok=True, data=_search_result(),
+             )) as execute:
+            results, _metrics = _run_web(
+                SubTask(id="web1", agent="web", task_brief="Compare public sources"),
+                _turn(), _slice(), seen_keys=set(), guard_lock=threading.Lock(),
+                on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
+            )
+
+        self.assertEqual(execute.call_count, 3)
+        self.assertEqual(decide.call_args_list[-1].kwargs["tool_calls_used"], 3)
+        self.assertEqual(results[0].observation["status"], "answered")
+
+    def test_nuanced_policy_exposes_extract_and_prefers_page_context(self):
+        provider_result = SimpleNamespace(
+            input_tokens=1, output_tokens=1, duration_ms=1, content="",
+            tool_calls=[{"name": "web_extract_decision", "arguments": {
+                "urls": ["https://example.com/forum/post"],
+                "extract_query": "comparison details",
+            }}],
+        )
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            return_value=provider_result,
+        ):
+            decision, metrics = decide_web(
+                _slice("Compare and recommend the best option with details"),
+                task_brief="Compare and recommend the best option with details",
+                round_index=2,
+                observations=[{"tool": "web.search", "result": _search_result()}],
+                tool_calls_used=1, search_calls_used=1, extract_calls_used=0,
+            )
+        self.assertEqual(decision.action, "extract")
+        self.assertIn("source discovery", metrics.prompt_raw)
+        self.assertIn("relevance and authority", metrics.prompt_raw)
+
     def test_web_agent_keeps_search_observation_before_extract(self):
         decisions = [
             WebResearchDecision(action="search", queries=["exact public question"]),
@@ -740,6 +845,7 @@ class V3WebResearchTests(unittest.TestCase):
                  (decisions[0], SubAgentMetrics(input_tokens=1)),
                  (None, SubAgentMetrics(input_tokens=1, error="web_decision_schema_invalid")),
                  (None, SubAgentMetrics(input_tokens=1, error="web_decision_schema_invalid")),
+                 (None, SubAgentMetrics(input_tokens=1, error="web_decision_schema_invalid")),
              ]), \
              patch.object(guarded_execution, "execute_tool", return_value=SimpleNamespace(
                  ok=True, data=_search_result(),
@@ -799,6 +905,16 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertLessEqual(len(rows[0]["snippet"]), 600)
         self.assertEqual(rows[0]["source_ref"], "web_source_01")
+
+    def test_extract_projection_keeps_8000_chars_per_page(self):
+        observations = [{"tool": "web.extract", "result": {"pages": [{
+            "url": "https://example.com/article",
+            "content": "x" * 8_001,
+            "truncated": True,
+        }]}}]
+        pages = project_web_observations(observations)[0]["result"]["pages"]
+        self.assertEqual(len(pages[0]["content"]), 8_000)
+        self.assertTrue(pages[0]["truncated"])
 
     def test_source_ref_resolves_only_against_current_observation_catalog(self):
         observations = [{"tool": "web.search", "result": _search_result()}]

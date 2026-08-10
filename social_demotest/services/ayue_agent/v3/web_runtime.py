@@ -17,7 +17,7 @@ from .web_research import (
     MAX_WEB_EXTRACT_URLS,
     MAX_WEB_INITIAL_SEARCH_QUERIES,
     MAX_WEB_REFINED_SEARCH_QUERIES,
-    MAX_WEB_ROUNDS,
+    MAX_WEB_DECISION_ITERATIONS,
     MAX_WEB_SEARCH_CALLS,
     MAX_WEB_TOTAL_TOOL_CALLS,
     WebResearchResultV1,
@@ -51,7 +51,7 @@ def run(
     task: SubTask,
     services: GuardedReadExecutor,
 ) -> tuple[StructuredAgentResult, SubAgentMetrics]:
-    """Run the fixed three-round Web observation loop.
+    """Run the finite Web observation loop bounded primarily by tool calls.
 
     Web owns all research state and policy. ``services`` is only the guarded
     execution boundary; this runtime never calls a provider adapter directly.
@@ -101,7 +101,7 @@ def run(
     last_decision = None
     stop_reason = "budget_exhausted"
 
-    for round_index in range(1, MAX_WEB_ROUNDS + 1):
+    for round_index in range(1, MAX_WEB_DECISION_ITERATIONS + 1):
         decision, metrics = web_agent.decide(
             context_slice,
             task_brief=task.task_brief,
@@ -125,7 +125,7 @@ def run(
         if metrics.error:
             aggregate.error = metrics.error
         if decision is None:
-            if observations and round_index < MAX_WEB_ROUNDS:
+            if observations and round_index < MAX_WEB_DECISION_ITERATIONS:
                 continue
             stop_reason = "model_failure"
             result = build_research_result(
@@ -158,7 +158,7 @@ def run(
             return _structured_result(task, result), aggregate
 
         if decision.action == "finish":
-            if round_index == 1 or decision.assessment is None:
+            if not observations or decision.assessment is None:
                 aggregate.error = "web_finish_missing_evidence_assessment"
                 stop_reason = "model_failure"
                 result = build_research_result(
@@ -185,24 +185,10 @@ def run(
                 )
             return _structured_result(task, result), aggregate
 
-        if round_index == MAX_WEB_ROUNDS:
-            aggregate.error = "web_action_not_allowed_on_final_round"
-            result = build_research_result(
-                research_question=context_slice.payload.get("message", ""),
-                answer_target=task.task_brief,
-                decision=None,
-                observations=observations,
-                execution_status="unavailable",
-                stop_reason="model_failure",
-                allowed_subject_refs=allowed_subject_refs if place_candidates else None,
-                evidence_policy=evidence_policy,
-            )
-            return _structured_result(task, result), aggregate
-
         proposals: list[ToolProposal] = []
         proposal_subject_refs: dict[int, str | None] = {}
         if decision.action == "search":
-            max_queries = MAX_WEB_INITIAL_SEARCH_QUERIES if round_index == 1 else MAX_WEB_REFINED_SEARCH_QUERIES
+            max_queries = MAX_WEB_INITIAL_SEARCH_QUERIES if search_calls_used == 0 else MAX_WEB_REFINED_SEARCH_QUERIES
             queries: list[str] = []
             query_subject_refs: list[str | None] = []
             for index, query in enumerate(decision.queries):
