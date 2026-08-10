@@ -28,11 +28,12 @@ rg --files tests -g "test_*.py" | Sort-Object
 | `test_v3_contracts.py` | `Plan` modes、DAG、evidence policy、forbidden authority fields |
 | `test_v3_planner.py` | `decompose_tasks` function calling、direct chat／product info、Web／Places／itinerary routing、fail closed |
 | `test_v3_guard.py` | registry、schema、duplicate、每 task read budget、write confirmation |
-| `test_v3_context_slicer.py` | 六個 domain sub-agent 與 Synthesizer 的 privacy-safe slice |
+| `test_v3_context_slicer.py` | Calendar/Places/Web/Match/Relationship/Profile/ProductInfo 與 Synthesizer 的 privacy-safe slice |
 | `test_v3_scheduler.py` | 拓撲層、最大並發 2、dependency skip、confirmation、assessment、fail closed |
 | `test_v3_sub_agents.py` | 各 sub-agent 可見工具與 proposal contract |
 | `test_v3_synthesizer.py`、`test_v3_public_reply.py`、`test_v3_product_surface.py` | grounded reply、presentation、product identity、place-card selection |
 | `test_v3_web_research.py` | bounded Web loop、證據分級、來源綁定、Places 協作與 itinerary |
+| `test_v3_product_info_agent.py` | ProductInfo first-class runtime、bounded retrieval、`product_info.v1` observation、progress/debug hooks |
 | `test_v3_calendar_commands.py`、`test_v3_calendar_verification.py`、`test_v3_calendar_runtime.py` | typed Calendar mutation、preflight、clarification、recent mutation verification、runtime boundary and authority isolation |
 | `test_v3_confirmation.py`、`test_v3_write_executors.py` | pending CAS、batch、idempotency、stale 與 domain write path |
 | `test_v3_debug_trace.py`、`test_ayue_agent_stream.py` | trace／NDJSON allowlist 與隱私 |
@@ -58,6 +59,7 @@ rg --files tests -g "test_*.py" | Sort-Object
 - Public V3 與 Private V2 的 runtime／context 隔離。
 - `POST /api/direct_chat` JSON 相容性與 public NDJSON event allowlist。
 - Web／Places 的來源綁定、卡片 projection、partial evidence 與 itinerary presentation。
+- `RuntimeRegistration` runner signature、`TaskRunnerResult` 互斥結果形狀，以及 compatibility input 只在 boundary 正規化。
 
 新增 fallback、result code 或 trace 欄位時，必須同步更新 allowlist 與 privacy test。修真實失敗案例時，先把案例匿名化加入 trajectory fixture，再修 contract、projection 或 prompt；不要新增自然語言 keyword router。
 
@@ -66,5 +68,5 @@ rg --files tests -g "test_*.py" | Sort-Object
 - 相關 deterministic tests 通過，並記錄完整 suite 是否有既有環境型失敗。
 - Python compile 通過。
 - 主服務 `GET /`、`GET /api/health` 與 matchmaker `/health` 回 200。
-- 修改 runtime contract、tool list、state machine 或環境旗標時，同步更新 `AYUE_V3_ARCHITECTURE.md` 與對應 `docs/architecture/` 文件。
+- 修改 runtime contract、tool list、state machine 或環境旗標時，同步更新 `AYUE_V3_ARCHITECTURE.md`、`09-runtime-interfaces.md` 與對應 domain 文件。
 - 不交付 `.env`、venv、log、cache、真實 trace 或 provider raw payload。

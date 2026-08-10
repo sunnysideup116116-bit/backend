@@ -46,6 +46,26 @@ Pydantic request/response models（例如 `DirectChatRequest`）。
 
 注意：`public_chat.py` 是唯一能呼叫 `run_public_agent_turn_v3` 的 HTTP 層；`chat.py` 不再包含自由文字 router，V3 失敗不會掉回 legacy public routing。
 
+### Public V3 runtime（`services/ayue_agent/v3/`）
+
+| 檔案 | 責任 |
+| --- | --- |
+| `scheduler.py` | Public 唯一 orchestrator：特殊入口、Planner、DAG、registration dispatch、共用 Guard/confirmation、Synthesizer、trace |
+| `contracts.py` | `Plan`、`SubTask`、`ToolProposal`、`SubTaskResult` 與 Guard codes；保留 task-free ProductInfo 舊 envelope 的 compatibility input |
+| `planner.py` | `decompose_tasks` function calling；只產生 `tasks` DAG 或 bounded `direct_chat` |
+| `runtime_registry.py` | `RuntimeRegistration`、`TaskRunnerResult` 與 proposal-runner adapter；定義 Scheduler/sub-agent interface |
+| `guarded_execution.py` | Specialist runtime 共用的 Guard→executor args→typed tool adapter；含 Web extract URL binding |
+| `calendar_runtime.py` | Calendar clarification、draft/reference、read loop、authority-free commands、preflight 與 confirmation preparation |
+| `web_runtime.py` | Web research/finish phases、tool budgets、observation projection 與 `web_research.v1` assembly |
+| `guard.py` | 純程式碼的 registry/schema/duplicate/read-budget/write-confirmation 驗證 |
+| `context_slicer.py` | 依 agent 建立最小 `AgentContextSlice`；ProductInfo 不會收到 owner/private state |
+| `confirmation.py` | Preview-bound pending confirmation 的 TTL/CAS 管理 |
+| `write_executors.py` | 已確認寫入的唯一執行入口；轉交 canonical domain services |
+| `synthesizer.py` | 依 verified observations 組 user-facing reply/messages/cards/sources |
+| `sub_agents/product_info_agent.py` | First-class read-only ProductInfo runtime；bounded knowledge retrieval 與 `product_info.v1` observation |
+
+Runner、Tool 與 observation interface 詳見 `09-runtime-interfaces.md`。
+
 ## 3. Domain 層（`services/`）
 
 ### 配對與關係
@@ -125,7 +145,7 @@ V3 runtime 見 `03-v3-runtime-lifecycle.md`；此處列非 V3 檔案：
 
 ## 5. 修改指南（owner 對照）
 
-- 改公開阿月行為 → 先看 `ayue_agent/v3/` 對應層，不要直接改 `public_chat.py` 的 domain logic。
+- 改公開阿月行為 → 先看 `ayue_agent/v3/` 對應 owner；Scheduler 只負責 orchestration，domain loop/clarification 留在 registration 對應 runtime，不要直接改 `public_chat.py` 的 domain logic。
 - 改工具 → 改 `tool_registry.py` + `tools.py`（唯讀）或 `write_executors.py` + domain service（寫入），並更新 Planner prompt。
 - 改配對狀態 → `match_decision_service.py` / `match_action_service.py`。
 - 改行事曆 → `calendar_service.py` / `date_coordination_service.py`。

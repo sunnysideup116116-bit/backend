@@ -16,7 +16,6 @@
 | `/api/match` | POST | 候選排序：`{target_user, candidates, target_deep_profile}` → `{outcome: selected\|no_suitable_candidate, matches: [1 筆]}` |
 | `/api/feedback` | POST | 婉拒／接受後的反思：LLM 產生 graph reflection → 寫入 `HAS_PREFERENCE` relationships |
 | `/api/global_reflection` | POST | 從一對（from_big_five→to_big_five）歸納全域法則 `GlobalRule`（相似度合併，weight 遞增） |
-| `/api/memory/observe` | POST | 從本人第一人稱訊息萃取長期偏好（confidence ≥0.90），message_id 冪等 |
 | `/api/memory/apply` | POST | 寫入已驗證的 memory proposals（不重新萃取），message_id 冪等 |
 | `/api/memory/{user_id}` | GET | 讀某使用者 active 偏好（owner-scoped） |
 | `/api/memory/action` | POST | disable／restore／correct 一筆偏好 |
@@ -39,11 +38,11 @@
 ```
 (:User {id}) -[HAS_PREFERENCE {stance, type, confidence, active, evidence_count, source}]-> (:Trait {key, name, category})
 (:Agent {name:"System"}) -[LEARNED_RULE {weight}]-> (:GlobalRule {content, category})
-(:MemoryObservation {message_id})   ← message_id 冪等（每則訊息最多萃取一次）
+(:MemoryObservation {message_id})   ← message_id 冪等（每則 owner 訊息最多套用一次）
 (:ChatEntity {key}) -[IS_A|HAS|LIKES|...]-> (:ChatEntity {key})   ← 雙人聊天 triples
 ```
 
-- 偏好必須 **owner-scoped**：`MEMORY_OBSERVATION.message_id` 唯一約束保證同一訊息不會重複寫入。
+- 偏好必須 **owner-scoped**：`MemoryObservation.message_id` 唯一約束保證同一訊息不會重複套用。
 - `stance` ∈ {like, dislike, require, avoid}；`type` 由 stance 推導（LIKES_TRAIT/DISLIKES_TRAIT）。
 - 敏感內容（種族、宗教、性傾向、疾病等）在寫入前被正則擋掉（`agent_api.py` 的 `protected`）。
 - **系統產生的長期建議是 recommendation，不是使用者事實**：禁止寫成 `HAS_PREFERENCE`（需獨立 versioned contract + TTL + dismissed state，見 `MEMORY_CONTEXT_ENGINE_GUIDE.md`）。
@@ -61,10 +60,12 @@
 
 ### 3.2 Durable memory facade（`memory_service.py`）
 
-- `apply_profile_memory_proposals`：validated durable-memory write facade（主路徑走媒婆 `/api/memory/apply`，Neo4j 直接連線為 fallback；兩條路都做 message_id 冪等）。
+- `apply_profile_memory_proposals`：validated durable-memory write facade，只走媒婆 `/api/memory/apply`。主服務不直接連 Neo4j；9001 不可用、endpoint 缺失或回應無效時，寫入 bounded `profile_memory_outbox` 待重試並明確回 `MemoryWriteError`。
 - `get_user_graph_memories`：讀回 active 偏好並投影成 `profile_memory_preview`（Mongo read projection，**不是第二個 source of truth**）。
-- `observe_user_memory` / `apply_memory_action`：observe 與 disable/restore/correct 操作。
+- `apply_memory_action`：透過 `/api/memory/action` 執行 disable／restore／correct，再同步 read projection。
 - `_sync_memory_projection`：把圖記憶壓縮成 ≤12 筆的 Mongo 投影與摘要。
+
+已移除的 `/api/memory/observe` 與自由文字 memory extractor 不得恢復。唯一 extraction owner 是 `profile_skills.py`；媒婆只接受已通過 subject、confidence 與原句 evidence 驗證的 typed proposals。
 
 ### 3.3 Context Engine 邊界（現況）
 

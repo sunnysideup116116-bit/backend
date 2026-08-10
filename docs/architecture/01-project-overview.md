@@ -37,7 +37,7 @@ Context Builder
 
 - 主服務在配對搜尋 job 中呼叫 `POST http://127.0.0.1:9001/api/match` 取得候選人推薦（見 `routers/match.py` 的 candidate pipeline 與 `match_search_job_service.py`）。
 - 配對婉拒後，主服務呼叫 `POST /api/feedback` 回饋給媒婆學習（見 `match_action_service.py:apply_transition_effects`）。
-- 主服務的 `memory_service.py` 呼叫媒婆的 `/api/memory/observe`、`/api/memory/apply`、`/api/memory/{user_id}` 等端點，把已驗證的偏好寫進 Neo4j 或讀回投影。
+- 主服務的 `profile_skills.py` 只從已保存的 owner 原始訊息提出 validated memory proposals；`memory_service.py` 再呼叫媒婆的 `/api/memory/apply` 與 `/api/memory/{user_id}`，把已驗證偏好寫入 Neo4j 或讀回 bounded projection。媒婆不再從 raw chat message 自行萃取偏好。
 
 Neo4j 只在需要完整媒婆記憶功能時設定；沒有 Neo4j 時媒婆仍可依 profile 資料排序（graph memory 讀取失敗時回傳「無法讀取圖譜記憶」，不會中斷配對）。
 
@@ -49,7 +49,7 @@ Neo4j 只在需要完整媒婆記憶功能時設定；沒有 Neo4j 時媒婆仍�
 | `social_demotest/frontend.html` | 現行 Web UI（單檔 HTML + JS），消費 NDJSON stream 與卡片 API |
 | `social_demotest/routers/` | HTTP adapters：`chat.py` 是 `/api` aggregate，leaf routers 各管一類端點 |
 | `social_demotest/services/` | Domain services：配對、行事曆、記憶、profile、媒人、悄悄話等 |
-| `social_demotest/services/ayue_agent/v3/` | 公開阿月 V3 runtime：scheduler、planner、guard、sub-agents、synthesizer、confirmation、write executors |
+| `social_demotest/services/ayue_agent/v3/` | 公開阿月 V3 runtime：scheduler、planner、runtime registry、domain runtimes、guard、sub-agents、synthesizer、confirmation、write executors |
 | `social_demotest/services/ayue_agent/` | V3 之外的公開阿月元件：context builder、tool registry、tools facade、web/maps clients、proactive care、private runtimes |
 | `social_demotest/tests/` | 離線 deterministic contract／trajectory／state／privacy tests + fixtures |
 | `matchmaker_agent/` | 媒婆服務：`agent_api.py`（FastAPI adapters）、`matchmaker.py`（LLM 評估 agent） |
@@ -75,7 +75,7 @@ Neo4j 只在需要完整媒婆記憶功能時設定；沒有 Neo4j 時媒婆仍�
 
 1. 使用者送出訊息 → `POST /api/direct_chat`（JSON）或 `/api/direct_chat/stream`（NDJSON）。
 2. `routers/public_chat.py` 保存使用者訊息、組 `AgentTurnContext`，呼叫 `run_public_agent_turn_v3`。
-3. Scheduler 依序處理：assessment session → confirmation → Planner（拆 DAG）→ 拓撲分層平行執行 sub-agents → Guard → 工具執行 → Synthesizer 產出最終回覆。
+3. Scheduler 依序處理：assessment session → confirmation → Planner（拆 DAG）→ 依 `RuntimeRegistration` 拓撲分層執行 sub-agents → proposal 經 Guard/工具執行，specialist runtime 回 completed typed result → Synthesizer 產出最終回覆。
 4. 回覆保存為唯一一筆 assistant message；assessment 回答不會進 profile 記憶 pipeline。
 5. 背景：`profile_skills.py` 以保存的 owner 原始訊息做近期情境／記憶 extraction；`proactive_scheduler.py` 依使用者的「AI 關心頻率」定期產生主動關心。
 
@@ -90,4 +90,5 @@ Neo4j 只在需要完整媒婆記憶功能時設定；沒有 Neo4j 時媒婆仍�
 - 想了解測試策略 → `06-testing.md`
 - 想了解 Guard 審核什麼 → `07-guard.md`
 - 想了解 Planner 怎麼拆 DAG → `08-planner.md`
-- 想了解某個 sub-agent 能做什麼、呼叫哪些 function → `subagent-calendar.md`、`subagent-match.md`、`subagent-places.md`、`subagent-web.md`、`subagent-relationship.md`、`subagent-profile.md`
+- 想了解各層可交換的 interface → `09-runtime-interfaces.md`
+- 想了解某個 sub-agent 能做什麼、呼叫哪些 function → `subagent-calendar.md`、`subagent-match.md`、`subagent-places.md`、`subagent-web.md`、`subagent-relationship.md`、`subagent-profile.md`、`subagent-product-info.md`
