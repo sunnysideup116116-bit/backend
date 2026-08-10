@@ -36,10 +36,10 @@ Planner 參數（`_CalendarListArguments`）：
 | --- | --- | --- |
 | `start_date` | str（YYYY-MM-DD） | 查詢起日，可含過去 |
 | `end_date` | str（YYYY-MM-DD） | 查詢迄日 |
-| `date` | str（YYYY-MM-DD） | Legacy：單日 |
-| `range_label` | str | Legacy：今天/本週/本月… |
 
 不填範圍時系統預設未來 90 天。回傳 `{events: [{date, start_time, end_time, activity, status}], range}`。
+
+`date`／`range_label` 只由 registry schema 暫時接受舊 provider payload；新 agent、fixture 與文件一律產生 `start_date`／`end_date`，相對日期以本回合 authoritative clock 轉成具體日期。
 
 範例（「這個月我有什麼行程？」）：
 
@@ -80,11 +80,11 @@ Planner 參數（`_CalendarFindArguments`）：
   ▼ Scheduler → slice_for_agent("calendar", ...)
   slice payload: message + recent_messages + clock + recent_context + prior_observations
   │
-  ▼ calendar_agent.run → base.run_sub_agents
-  LLM function calling (temperature=0)，一次可能輸出多個 tool calls
+  ▼ calendar_runtime.run（registered specialist runtime）
+  Calendar Agent 做 bounded semantic decision；Runtime 管理 reads、draft/reference、typed commands 與 preflight
   │
-  ▼ Guard（純程式碼）
-  每個 proposal 驗證: registered / schema / duplicate / 步數上限 / write→confirmation
+  ▼ GuardedReadExecutor／command validation（純程式碼）
+  READ proposal 驗 registered/schema/duplicate/budget；WRITE command 驗 authority-free schema 並進 confirmation preflight
   │
   ▼ 唯讀工具（只有使用者真的詢問行程內容時）: executor_arguments_for_turn → tools.py:execute_tool
   calendar.list_my_events → _calendar_events → calendar_service.get_calendar_context

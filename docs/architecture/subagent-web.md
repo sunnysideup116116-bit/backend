@@ -55,9 +55,18 @@ decision/model failures do not consume Web tool budget or remove that phase.
 Existing search/extract budgets and initial parallel search remain unchanged;
 finish-only exposes no search/extract capability.
 
+Action legality only follows runtime-owned state：
+
+- `phase="research"`：Web Agent 必須從 `available_actions` 恰選一個 action。
+- `phase="finish"`：只能呼叫 `web_finish_decision`。
+- `round_index` 只供診斷與上下文使用，不是 workflow authority；即使 finish 的 index 大於 3，仍依 `phase` 正常解析。
+- `assessment` 只屬於 finish decision；search/extract decision 不先填 assessment。
+
 硬上限由 `web_research.py` 定義：最多 3 次 tool-producing call、3 次總工具呼叫、3 次 search（首輪最多 2 個 query、refine 最多 1 個 query）、1 次 extract（最多 2 個 URL），以及獨立 1 次 finish-only decision。模型輸出格式錯誤時只重試一次 typed decision，不會增加工具額度；研究階段失敗後仍保留 finish-only 機會。
 
 每次 search query 都由 server 綁回 Planner 的 `answer_target`。若 task 正在驗證 Places 候選，還會綁定 server-owned `place_candidate_*` reference；模型不能靠名稱猜測候選身分。
+
+`project_web_observations()` 對 search rows、per-page extract 與總 research context 分別設限。達到 `MAX_WEB_PROMPT_SEARCH_RESULTS` 只停止加入更多 search rows，不會停止掃描後續 observations；因此 `search -> refined search -> extract -> finish` 的 late extract 仍會進 finalizer。不得以提高 search cap 取代此行為。
 
 ## 4. 輸出契約
 
@@ -90,4 +99,4 @@ Web task 最終只輸出 `web_research.v1`：
 
 ## 7. 測試
 
-`test_v3_web_research.py` 覆蓋 observation loop、query anchoring、evidence grading、來源綁定、budget、partial／unavailable fallback，以及 Web／Places／itinerary trajectory。`test_ayue_agent_web_tools.py` 覆蓋 Tavily adapter、URL 安全與 bounded projection。
+`test_v3_web_research.py` 覆蓋 phase/available-actions、finish-only、late extract projection、完整 search→refine→extract→finish trajectory、query anchoring、evidence grading、來源綁定、budget、partial／unavailable fallback，以及 Web／Places／itinerary trajectory。`test_ayue_agent_web_tools.py` 覆蓋 Tavily adapter、URL 安全與 bounded projection。

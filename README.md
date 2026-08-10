@@ -35,12 +35,14 @@ Context Builder
 | [06-testing.md](./docs/architecture/06-testing.md) | 測試指令、分類與必覆蓋面向 |
 | [07-guard.md](./docs/architecture/07-guard.md) | Central Guard：審核什麼、GuardResultCode 全表、被拒絕後的處理 |
 | [08-planner.md](./docs/architecture/08-planner.md) | Planner：decompose_tasks 契約、拆解規則、fail closed、與 sub-agents 分工 |
+| [09-runtime-interfaces.md](./docs/architecture/09-runtime-interfaces.md) | HTTP、Context、Planner、RuntimeRegistration、Tool/Guard、Observation 與寫入介面 |
 | [subagent-calendar.md](./docs/architecture/subagent-calendar.md) | 行事曆子代理：能做什麼、呼叫哪些 function、端到端範例 |
 | [subagent-match.md](./docs/architecture/subagent-match.md) | 配對子代理：狀態查詢、搜尋 job、提案 CAS、主動牽線 |
 | [subagent-places.md](./docs/architecture/subagent-places.md) | 地點子代理：附近地點、距離、地點卡、OSM/Google provider |
 | [subagent-web.md](./docs/architecture/subagent-web.md) | Web 子代理：Tavily 查詢、證據等級、活動探索與 Places 串接 |
 | [subagent-relationship.md](./docs/architecture/subagent-relationship.md) | 關係子代理：@ 驗證、已接受聯絡人、可驗證互動摘要 |
 | [subagent-profile.md](./docs/architecture/subagent-profile.md) | 個人檔案子代理：self summary、記憶、性格探索 session |
+| [subagent-product-info.md](./docs/architecture/subagent-product-info.md) | 產品資訊子代理：bounded knowledge retrieval、`product_info.v1` observation 與 progress/debug |
 
 其他規範文件：
 
@@ -48,6 +50,8 @@ Context Builder
 - [AGENTS.md](./AGENTS.md)：後續 coding agent 必須遵守的邊界與擴充規則
 - [MEMORY_CONTEXT_ENGINE_GUIDE.md](./MEMORY_CONTEXT_ENGINE_GUIDE.md)：長期建議、Neo4j Graph Memory 與 Context Engine 的資料邊界、Hermes Agent 參考方式和實作順序
 - [docs/architecture/](./docs/architecture/)：以現行程式為準的架構與 sub-agent 文件；已完成的 migration／Phase 計畫不保留為現況文件
+
+版本名稱約定：`Public V3` 是目前公開阿月架構；`Private V2` 是仍在使用且隔離的悄悄話 runtime。`public-v1`、`web_research.v1`、`product_info.v1` 等名稱是 typed payload 的 schema version，不代表舊 Public runtime。已移除的 Public V1/V2 文件與 prompt 範例不再保留；需要理解層與層之間的 contract 時，以 [09-runtime-interfaces.md](./docs/architecture/09-runtime-interfaces.md) 為入口。
 
 ## 專案結構
 
@@ -146,6 +150,7 @@ Set-Location .\social_demotest
 ## 開發原則
 
 - Public V3 只有 `services/ayue_agent/v3/scheduler.py` 一個 orchestrator。
+- Scheduler 只透過 `RuntimeRegistration`／`TaskRunnerResult` dispatch sub-agent；domain loop、clarification 與 typed assembly 留在擁有它的 runtime。
 - LLM 做語意判斷；Guard 只做安全、schema、狀態與權限驗證。
 - 新能力必須先進 typed tool registry；寫入必須走 canonical domain service。
 - 模型不得提供 user、proposal、match、event ID 或 revision。
@@ -155,4 +160,4 @@ Set-Location .\social_demotest
 - 多輪地點推薦由 Public V3 直接依當回合 bounded context 判斷；條件已足夠或使用者把選擇交給阿月時，必須直接查詢，不能重複追問料理類型。
 
 
-> Current runtime: Public Ayue is always V3. Private Ayue remains a separate current V2 runtime; Public/Private rollout flags are no longer supported.
+> Current runtime: Public Ayue is always V3. Private Ayue remains a separate current V2 runtime; it is not a Public fallback. Public/Private rollout flags are no longer supported.

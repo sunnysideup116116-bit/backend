@@ -1,863 +1,283 @@
-# 公開阿月 V3 架構與 App 遷移指南
+# 公開阿月 V3：現行架構
 
-本文件描述目前 `Dating-App` 的實際架構。程式碼是最終真相；任何改動若影響本文所述 contract，必須在同一個變更中更新本文。
+> 本文件只描述目前程式，不保存已完成的 Public V1/V2 migration 計畫或舊 prompt 快照。層與層之間的精確 typed interface 請見 [`docs/architecture/09-runtime-interfaces.md`](./docs/architecture/09-runtime-interfaces.md)；各 domain 行為請見 `docs/architecture/subagent-*.md`。
 
-## 1. 系統定位
+## 1. Current baseline
 
-公開阿月 V3 是目前唯一的正式 public runtime。它由五種角色協作：**Planner**（LLM）只做任務拆解、**Sub-agents**（LLM）提出工具呼叫、**Central Guard**（純程式碼）審核每個提案、**Scheduler**（純程式碼）編排執行與確認、**Synthesizer**（LLM）彙整成最終回覆。用「一句話」來說明這條流程：
+- Public Ayue 永遠走 V3 sub-agent runtime；唯一 orchestrator 是 `social_demotest/services/ayue_agent/v3/scheduler.py`。
+- Public 失敗時 fail closed。Rollback 只能透過 deployment／commit rollback，不存在 request-level legacy fallback、rollout allowlist 或第二套 public router。
+- Private Ayue 是仍在使用、與 Public 隔離的 current V2 runtime，由 `routers/private_mediator.py`、`services/ayue_agent/private_v2.py` 與 `private_calendar.py` 擁有。
+- `public-v1`、`web_research.v1`、`product_info.v1`、`TurnClockV1` 等名稱是 typed payload/schema version，不是 Public V1 runtime。
+- `runtime.py`、`legacy_match_routing.py`、`private_runtime.py` 與舊 Public 單一-loop prompt 文件均已移除；不得恢復。
 
-```text
-你問阿月一句話
-  │
-  ▼
-① 排程器（程式）先檢查：你是不是正在做性格測驗？或是在等阿月「確認」？
-   ├─ 是 → 直接處理（測驗/確認），不往下走
-   └─ 否 → 繼續
-  │
-  ▼
-② 規劃師（AI）把這句話拆成「工作清單」，例如「查行事曆」+「找餐廳」+「綜合回答」
-  │
-  ▼
-③ 執行員（AI，每項工作各一位）決定要呼叫哪個工具、填入什麼條件
-  │
-  ▼
-④ 守門員（程式）檢查每個工具呼叫：工具存在嗎？格式對嗎？重複嗎？會改資料嗎？
-   ├─ 會改資料 → 不執行，先問你「要確認嗎？」
-   └─ 只是查資料 → 通過
-  │
-  ▼
-⑤ 工具執行：查資料 → 拿到結果（observation）
-  │
-  ▼
-⑥ 彙整師（AI）把全部結果整理成一段人話回覆你
-  │
-  ▼
-你看到回覆
-```
+## 2. 系統定位
 
-重點：**AI 負責「聽懂」和「說話」，程式負責「安全」**。AI 永遠不能直接改資料——所有修改都要先經過守門員 + 你本人確認。
-
-單回合的完整執行流程（含特殊入口、平行執行與 fail closed 路徑）見 §3.1；各角色的詳細職責見 `docs/architecture/`：Planner（`08-planner.md`）、Guard（`07-guard.md`）、生命週期（`03-v3-runtime-lifecycle.md`）。
-
-它不是關鍵字 chatbot，也不是讓模型直接操作資料庫。公開阿月是本交友 App 內協助使用者認識人、牽線的 AI 媒人，不是另一位使用者，也不把目前 App 當成外部服務。LLM 負責語意規劃與自然回答；Scheduler、Guard、typed tools 與 domain services 負責權限、狀態和副作用安全。
-
-## 產品身份與語氣 single source of truth
-
-所有會產生使用者可見自然語言的 Public、Private、assessment 與 proactive-care
-prompt，身份與語氣片段統一由
-`social_demotest/services/ayue_agent/product_identity.py` 提供。公開阿月的定位是
-「關於我」：先理解使用者，再在合適時機陪他牽線；悄悄話是同一位阿月在
-「我和目前這個人」關係中的 bounded surface。兩者可以共用 persona core 與 voice，
-但不能共用 context、權限、history 或 domain state。這個 contract 只負責產品文案，
-不取代 Planner routing、Guard、confirmation、privacy 或 domain service。
-
-Domain sub-agent、schema、Guard、preflight、executor、profile/memory extractor
-不得注入 persona 文案；它們只處理自己的 typed responsibility。若相容性 prompt
-仍需使用 `MEDIATOR_PERSONA`，它也必須由同一個 contract 組合，避免重新建立第二套身份文字。
-
-公開阿月與阿月悄悄話都是 sibling runtimes，不是 parent/subagent 關係。悄悄話使用獨立的 context、registry、trace 與隱私 namespace；公開阿月不能任意把 history 或 prompt 交給它。
-
-## 2. Repository 結構與責任
-
-| 路徑 | 責任 |
-| --- | --- |
-| `social_demotest/main.py` | FastAPI app、routers 與 index 初始化 |
-| `social_demotest/frontend.html` | 現行 Web UI、NDJSON progress、match/calendar cards |
-| `social_demotest/routers/chat.py` | Chat aggregate router；統一 `/api` prefix 與 `Chat` OpenAPI tag |
-| `social_demotest/routers/chat_onboarding.py` | Big Five／deep profile onboarding HTTP adapters |
-| `social_demotest/routers/chat_messages.py` | 聊天紀錄與聯絡人清單 HTTP adapters |
-| `social_demotest/routers/relationship_dates.py` | 共同約會 domain service 的 thin HTTP adapters |
-| `social_demotest/routers/demo.py` | Demo-only reset endpoint |
-| `social_demotest/routers/proactive.py` | 主動關心／mediator polling 的 thin HTTP adapter |
-| `social_demotest/routers/private_mediator.py` | 悄悄話 JSON／NDJSON HTTP adapters 與既有 private orchestration |
-| `social_demotest/routers/relationship_quiz.py` | 已接受配對的默契小測驗 HTTP adapters |
-| `social_demotest/routers/public_chat.py` | Public `/api/direct_chat*` adapters；V3 orchestration |
-| `social_demotest/services/ayue_agent/v3/scheduler.py` | 公開 V3 唯一 orchestrator：confirmation 入口、DAG 執行、平行、trace |
-| `social_demotest/services/ayue_agent/v3/runtime_registry.py` | domain-neutral `TaskRunnerResult` 與 runtime registration contract |
-| `social_demotest/services/ayue_agent/v3/calendar_runtime.py` | Calendar-specific guarded reads、authority-free command handling、draft/reference state、preflight、confirmation preparation |
-| `social_demotest/services/ayue_agent/v3/web_runtime.py` | Web domain bounded research loop：round、observation、tool budgets、finish 與 `web_research.v1` |
-| `social_demotest/services/ayue_agent/v3/guarded_execution.py` | Web Runtime 使用的最小 Guard／URL binding／executor argument／`execute_tool` adapter |
-| `social_demotest/services/ayue_agent/v3/place_projection.py` | Places observation 的 bounded public projection 與 Web candidate binding 共用 helper |
-| `services/ayue_agent/v3/planner.py` | 輕量 LLM：只拆靜態子任務 DAG（`decompose_tasks` function calling） |
-| `services/ayue_agent/v3/guard.py` | 中央 Guard：純程式碼驗證 schema、重複、步數、寫入 confirmation |
-| `services/ayue_agent/v3/context_slicer.py` | 依 sub-agent 角色切 privacy-safe context slice |
-| `services/ayue_agent/v3/confirmation.py` | 每位使用者單一、preview-bound confirmation 的 CAS 管理（`v3_pending_confirmations`） |
-| `services/ayue_agent/v3/write_executors.py` | 已確認寫入的唯一執行路徑（domain service + idempotency） |
-| `services/ayue_agent/v3/synthesizer.py` | 綜合所有 observation 產出最終回覆；地點卡以 typed tool 決定 |
-| `services/ayue_agent/v3/sub_agents/` | calendar / places / web / match / relationship / profile / product_info 七個 sub-agent |
-| `services/ayue_agent/context.py` | 每回合 privacy-safe context（`build_public_agent_turn_context`） |
-| `services/ayue_agent/contracts.py` | Provider-neutral contracts（`PublicAgentTurnContext`、`AgentResult` 等） |
-| `services/ayue_agent/router.py` | 僅保留 V3 共用的封閉協議與回覆清理（`confirmation_choice`、`_concise_public_reply`） |
-| `services/ayue_agent/tool_registry.py` | ToolSpec、risk、schemas、progress、argument ownership |
-| `services/ayue_agent/tools.py` | 唯讀 tool facade 與安全 projection |
-| `services/ayue_agent/web_tools.py` | Tavily external-web adapter、URL safety 與 bounded projection |
-| `services/ayue_agent/maps_client.py` | OpenStreetMap／Overpass 附近地點與距離 adapter、TTL cache(fallback provider) |
-| `services/ayue_agent/google_places_client.py` | Google Places v1 / Routes API adapter、TTL cache(主要 provider) |
-| `services/ayue_agent/capabilities.py` | 對使用者一致的產品能力與用詞真相 |
-| `services/ayue_agent/proactive_scheduler.py` | Server-side 主動關心排程、claim 與重試 |
-| `services/ayue_agent/match_opportunity.py` | 配對機會評估（profile basis、active-match block、guidance fingerprint） |
-| `services/relationship_engagement_service.py` | Probe、feedback、關係摘要與 post-chat engagement state |
-| `services/proactive_delivery_service.py` | Polling 時 mediator event／care delivery 的 claim 與投遞流程 |
-| `services/profile_task_service.py` | 已保存 owner 訊息的 profile extraction 排程 facade |
-| `services/assessment_session_service.py` | 公開阿月聊天室內基本性格／深層探索的 owner-scoped、短期 session lifecycle |
-| `services/mediator_context_service.py` | Private Ayue 使用的 bounded viewer／counterparty／shared context projection |
-| `services/relationship_quiz_service.py` | 默契小測驗 lifecycle、答案驗證與完成結果 projection |
-| `services/ayue_agent/private_v2.py` | 悄悄話的獨立 context、registry 與 composer |
-| `services/match_state_service.py` | Canonical match read model |
-| `services/match_action_service.py` | Agent/API 共用的 match action facade 與 transition effects |
-| `services/match_decision_service.py` | Atomic match CAS transition |
-| `services/calendar_service.py` | 本人行事曆 CRUD 與存取控制 |
-| `services/date_coordination_service.py` | 共同約會、改期、取消與雙方同步 |
-| `services/profile_skills.py` | 非同步 owner-only profile extraction pipeline |
-| `services/profile_contracts.py` | Typed recent-context／memory extraction contract |
-| `services/memory_service.py` | Owner-scoped durable memory domain facade、outbox 與 Mongo read projection |
-| `services/semantic_plan_service.py` | Accepted pair room 的 shared semantic plan；不是 Public owner memory |
-| `matchmaker_agent/` | Port 9001 候選排序、Neo4j 記憶與 feedback service |
-
-Owner durable memory 只走 `profile_skills.py` 的 typed extraction 與 port 9001
-`/api/memory/apply`；舊版 `/api/memory/observe`、主服務直接 Neo4j fallback
-與自由文字 observer 已移除。Graph unavailable 時維持 bounded error／retry，不能
-在 port 8000 重新建立第二條 writer。
-| `social_demotest/tests/` | Offline deterministic contract、trajectory、state、privacy tests |
-
-## 3. Public chat request lifecycle
-
-### 3.1 單回合完整執行流程
-
-一次對話的完整旅程，分四段說明：
-
-**第一段：開場檢查（程式在做，AI 還沒出場）**
+公開阿月是交友 App 內協助使用者認識人、牽線與整理行動的 AI 媒人，不是另一位使用者，也不是外部服務。產品身份與語氣的程式真相位於 `services/ayue_agent/product_identity.py` 與 `capabilities.py`。
 
 ```text
-使用者送出訊息
-  │
-  ▼
-排程器問：「現在有沒有特殊狀態？」
-  ├─ 性格測驗已做完、等你說「確認/取消」→ 只接受這兩個答案
-  ├─ 性格測驗進行中 → 你說的每個字都當測驗答案
-  ├─ 你在回覆上一句的「確認」→ 執行之前說好要改的事（改行程/找對象…）
-  ├─ 你在回覆「取消」→ 把之前說好要改的事全部取消
-  └─ 都不是 → 進入第二段
+HTTP adapter
+  -> Context Builder
+  -> Planner（靜態 DAG）
+  -> Runtime registrations / Sub-agents
+       -> Central Guard
+       -> Typed tools / domain services
+  -> Verified observations
+  -> Synthesizer
+  -> AgentResult / Final
 ```
 
-**第二段：規劃（AI 把一句話拆成工作清單）**
+核心分工：
+
+- LLM：理解語意、拆任務、提出 authority-free tool proposal、根據 observation 組回覆。
+- 程式：ownership、schema、budget、URL/mention binding、confirmation、CAS、idempotency、privacy projection 與 trace allowlist。
+- Domain service：canonical read/write truth；Router、Scheduler、Agent 與 UI 不重複實作同一狀態轉移。
+
+## 3. Repository owners
+
+| Owner | 路徑 | 責任 |
+| --- | --- | --- |
+| Public HTTP | `social_demotest/routers/public_chat.py` | JSON/NDJSON adapter、訊息唯一保存、mention 驗證、呼叫 V3 |
+| Context | `services/ayue_agent/context.py` | 建立唯一 prompt-safe `PublicAgentTurnContext` |
+| Planner | `services/ayue_agent/v3/planner.py` | `decompose_tasks` function calling，輸出 direct chat 或靜態 DAG |
+| Contracts | `services/ayue_agent/v3/contracts.py` | `Plan`、`SubTask`、`ToolProposal`、`SubTaskResult` |
+| Orchestrator | `services/ayue_agent/v3/scheduler.py` | 特殊入口、DAG、registration dispatch、共用 budgets、confirmation、trace、final |
+| Runtime interface | `services/ayue_agent/v3/runtime_registry.py` | `RuntimeRegistration`、`TaskRunnerResult` |
+| Guard adapter | `services/ayue_agent/v3/guarded_execution.py` | Guard→executor args→typed tool；Web URL binding |
+| Calendar runtime | `services/ayue_agent/v3/calendar_runtime.py` | clarification、draft/reference、reads、commands、preflight、confirmation preparation |
+| Web runtime | `services/ayue_agent/v3/web_runtime.py` | bounded research/finish phases 與 `web_research.v1` assembly |
+| ProductInfo | `services/ayue_agent/v3/sub_agents/product_info_agent.py` | bounded allowlisted product knowledge 與 `product_info.v1` observation |
+| Guard | `services/ayue_agent/v3/guard.py` | 純程式碼 registry/schema/duplicate/budget/write-confirmation validation |
+| Tool registry | `services/ayue_agent/tool_registry.py` | ToolSpec、三層 schema、risk、argument source、progress |
+| Tool reads | `services/ayue_agent/tools.py` | 唯讀 capability facade 與 typed output projection |
+| Confirmed writes | `services/ayue_agent/v3/write_executors.py` | 已確認寫入的唯一執行入口 |
+| Synthesizer | `services/ayue_agent/v3/synthesizer.py` | 根據 verified observations 產出 user-facing response |
+| Public debug | `services/ayue_agent/v3/debug_trace.py` | localhost-only ephemeral debug events |
+
+## 4. Public request lifecycle
+
+### 4.1 HTTP input
+
+Public UI 使用 `POST /api/direct_chat/stream`；`POST /api/direct_chat` 保留 JSON contract。`routers/public_chat.py`：
+
+1. 驗證 public contact 與最多三個 accepted mentions。
+2. 保存 owner message 一次。
+3. 組 `AgentTurnContext`，呼叫 `run_public_agent_turn_v3()`。
+4. 保存 final assistant message 一次。
+5. 非 assessment owner message 才背景排入 profile extraction。
+
+### 4.2 Planner 前的特殊入口
+
+Scheduler 先處理：
+
+- assessment commit／active session；
+- typed `assessment_action="cancel"`；
+- pending confirmation 的封閉「確認／取消」協議；
+- 逾期、stale 或已被其他 worker claim 的 confirmation。
+
+這些狀態不進 Planner，避免一般對話重新解讀 authority-bearing action。
+
+### 4.3 Planner
+
+Planner 只呼叫 `decompose_tasks`：
+
+- `mode="direct_chat"`：不需要 App/domain/private/external truth 的 bounded conversational reply。
+- `mode="tasks"`：1–4 個 `SubTask`，最多三個 domain tasks，恰好一個 terminal synthesizer。
+
+Agent allowlist：
 
 ```text
-規劃師（AI）讀你整句話，拆成一張工作清單，例如：
-「這週日想吃牛排，順便看那天有沒有空」
-  → 工作1: 查行事曆（週日有沒有行程）
-  → 工作2: 找附近牛排店
-  → 工作3: 綜合回答（清單最後一定有一項「綜合回答」）
-
-拆不出來／AI 出錯 → 直接回「我現在沒辦法判斷這個請求」，
-                      什麼工具都不會執行（fail closed，寧可保守也不亂做）
+calendar | places | web | match | relationship | profile | product_info | synthesizer
 ```
 
-**第三段：執行（各工作並行，先過守門員）**
+`task_brief` 保存目標與限制，不是 tool arguments。只有 Web 可帶 `evidence_policy=casual_discovery|strict_verification`。
+
+舊 provider 可能送出 task-free `mode="product_info"`／`product_info_topics`；compatibility boundary 只把它正規化成 `product_info -> synthesizer` DAG。新 Planner、fixture 與文件不得產生舊 envelope。
+
+### 4.4 DAG execution
+
+Scheduler 依 dependency 做 topological layers；同層最多平行 2 個 task。每個 domain task：
+
+1. `context_slicer.py` 產生最小 `AgentContextSlice`。
+2. 透過 `RuntimeRegistration` 呼叫統一 runner。
+3. Runner 回 `TaskRunnerResult.proposals` 或 `completed_results`，兩者恰好一種。
+4. Proposal 逐筆走 Central Guard 與 typed tool；completed result 由 owning specialist runtime 完成 bounded interpretation/assembly，Scheduler 不重做 domain 判斷。
+5. 依賴沒有成功 observation 的下游 task 標記 `SKIPPED/dependency_failed`。
+
+正式 runner interface：
+
+```python
+run(context_slice, *, task, services)
+    -> tuple[TaskRunnerResult, SubAgentMetrics | None]
+```
+
+目前 completed specialist runtimes 是 Calendar、Web、ProductInfo；Places、Match、Relationship、Profile 使用 proposal runner。
+
+### 4.5 Final composition
+
+一般 DAG 的 user-facing wording 只由 Synthesizer 產生。例外只限 server-owned deterministic outputs：confirmation、confirmed result、typed clarification、assessment lifecycle、安全/錯誤 fallback。
+
+Synthesizer 只能使用本回合 verified observations。Map URL、source URL、place candidate ref、Web source ref 由 server-owned catalog 綁定；模型不能新增未觀察到的 reference。
+
+## 5. Context 與 privacy
+
+`services/ayue_agent/context.py` 是 Public Context 唯一 owner：
+
+- recent messages ≤12；總字元 ≤6,000；relevant memories ≤8。
+- 不輸出 raw Mongo/Neo4j document、`seed_user_*`、未公開 ID、對方私人記憶或對方行事曆。
+- 只有已接受關係且 server 驗證的 public display projection 能進 context。
+- Calendar、Web、ProductInfo 等 agent 只收到 `context_slicer.py` 明列欄位。
+- ProductInfo 不收到 owner profile/calendar/relationship private state。
+
+Public 與 Private 不交換完整 prompt/history。Private 只讀其 current accepted room 允許的 bounded relationship context；Private owner messages不自動進 Public profile/memory pipeline。
+
+## 6. Tool Registry、Guard 與 budgets
+
+所有公開 capability 必須先註冊 `ToolSpec`：
 
 ```text
-每項工作派一位執行員（AI）：
-  └─ 執行員決定「要呼叫哪個工具、條件是什麼」
-      └─ 守門員（程式）逐個檢查：
-           ├─ 工具存在？格式對？沒重複呼叫？次數沒超限？
-           ├─ 只是查資料 → 通過，執行工具，拿到結果
-           └─ 要改資料 → 一律不執行，改成「先問你確認」
-                          （守門員連「改資料」的念頭都不放行）
-平行規則：彼此沒關係的工作同時跑（最多 5 個）；有依賴的（先查行程才能改行程）就排隊等
+name / risk / executor_key / description / progress_text
+planner_arguments_model / executor_arguments_model / output_model
+argument_source / confirmation / reuse policy
 ```
 
-**第四段：彙整與收尾（AI 說人話，程式存紀錄）**
+模型永遠不能提供 `user_id`、match/proposal/event ID、revision 或 expected status。
+
+Guard 檢查：
+
+- registered tool；
+- planner schema；
+- shared Public-run duplicate key；
+- per-task read budget（預設 3）；
+- WRITE 一律回 `write_requires_confirmation`。
+
+同一 `tool + normalized executor arguments` 在同一 Public run 不重跑。每回合最多建立一筆 pending side effect。
+
+目前 22 個 capabilities：18 READ、4 WRITE。完整表見 [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)。
+
+## 7. Confirmation 與 writes
 
 ```text
-彙整師（AI）拿到所有工作結果（例如：週日晚有電影、附近有 3 家牛排）
-  → 整理成一段回覆，有地點時附上地點卡
-
-最後程式做的收尾：
-  - 回覆存進聊天紀錄（只存一次）
-  - 背景悄悄分析你的訊息 → 更新你的近期情境/記憶（跟回覆無關，不影響回答）
-  - 全程只記錄「做了什麼」的安全摘要，不記錄你講了什麼內容（隱私）
+WRITE proposal / Calendar command batch
+  -> schema + domain preflight
+  -> pending confirmation（TTL 900s，preview-bound）
+  -> owner 確認
+  -> ConfirmationManager CAS pending -> executing
+  -> write_executors
+  -> canonical domain service（CAS + idempotency）
 ```
 
-### JSON endpoint
+目前 WRITE capabilities：
 
-`POST /api/direct_chat` 保持 V1 相容，request 使用 `DirectChatRequest`：
+- `match.start_search`
+- `match.decide_active_proposal`
+- `profile.start_assessment`
+- `calendar.submit_commands`
 
-```json
-{
-  "user_id": "owner",
-  "contact_id": "ai_assistant",
-  "message": "他回覆了沒？",
-  "chat_type": "direct",
-  "mentioned_other_id": null,
-  "mentioned_other_ids": []
-}
-```
+Calendar mutation 只使用 `calendar.submit_commands`。一至十筆 authority-free commands 可形成一筆 confirmation；Calendar Runtime resolve canonical target 一次，建立不進 LLM 的 `CalendarMutationPlan`。舊 create/update/cancel tool names 不再註冊，stale confirmation fail closed。
 
-V3 response 保留既有欄位，並可包含：
+## 8. Domain specialists
 
-```json
-{
-  "reply": "有，對方已經接受了，聊天室也開啟了。",
-  "is_locked": false,
-  "conversation_intent": "match_status",
-  "context_changed": false,
-  "context_confirmation_needed": false,
-  "agent_version": "v3",
-  "agent_mode": "v3",
-  "agent_run_id": "..."
-}
-```
+### Calendar
 
-### Streaming endpoint
+擁有本人的行程 reads、typed mutation commands、15 分鐘 draft/recent-reference、deterministic preflight 與 post-mutation verification。不可讀對方行事曆。共同約會的 mutation 仍由 `date_coordination_service.py` 處理雙方同步與通知。
 
-公開阿月 UI 使用 `POST /api/direct_chat/stream`，request body 與 JSON endpoint 相同，response 為 `application/x-ndjson`：
+### Places
+
+只擁有 structured nearby search、distance 與 place cards。Search radius 對 OSM 與 Google 都是 hard bound；保存位置只允許粗粒度城市／行政區。
+
+### Web
+
+Web Runtime 擁有 research/finish phases，research 最多三個 tool calls、extract 最多一次；finish-only phase 不消耗 Web tool budget。Web Agent 只依 `phase`／`available_actions` 行動，`round_index` 僅供診斷。
+
+Search rows 有獨立 projection cap；達到 search cap 不會停止掃描後續 observations，因此 late extract 仍可進 finalization。URL 必須綁定本回合搜尋結果或 owner 原句提供的安全公開 URL。
+
+### ProductInfo
+
+ProductInfo 是 first-class read-only DAG specialist。它最多兩輪、最多六個 allowlisted knowledge sections，輸出 `product_info.v1` observation；section hints 只屬其內部 retrieval，不是 Planner taxonomy 或全域 keyword router。Progress 使用 `product_info.process` 虛擬步驟；它不是 Tool Registry capability，也不消耗 Web/tool budget。
+
+### Match / Relationship / Profile
+
+- Match 讀 canonical proposal/status，搜尋與決策走 confirmation/CAS。
+- Relationship 只讀 accepted relations 與 server 驗證 mentions 的 public projection。
+- Profile 讀本人資料與 assessment start；owner memory extraction 由獨立 `profile_skills.py` pipeline 擁有，不由聊天 agent 寫入。
+
+## 9. Match state
+
+Canonical lifecycle：
 
 ```text
-{"type":"run_started","agent_run_id":"..."}
-{"type":"tool_started","agent_run_id":"...","text":"我看一下你的行事曆…"}
-{"type":"tool_finished","agent_run_id":"...","outcome":"ok","duration_ms":42}
-{"type":"final","response":{"reply":"...","agent_version":"v3","agent_run_id":"..."}}
+draft -> pending -> accepted
+             \-> declined
+draft/pending -> expired
 ```
 
-公開介面只允許 `run_started`、`tool_started`、`tool_finished`、`final`、`error` 五種事件，絕不傳 plan、sub-agent 身分、task brief、tool 名稱、arguments/result、prompt、內部 ID、revision 或 raw exception。Web UI 在 progress 持續 250 ms 後才顯示單一暫時泡泡，新進度覆蓋該泡泡；final、error 或斷線時移除。
+- 只有 live `draft/pending` 阻擋新的 active proposal。
+- `accepted` 是已建立聯絡關係，不是 active proposal。
+- `match_decision_service.py` 擁有 status+revision CAS；stale 回最新狀態，不覆寫終態。
+- `match_action_service.py` 只在 transition 成功後執行通知、聊天室、feedback 等 effects；effect 失敗不讓已提交 transition 被重送。
 
-本機 demo 的「執行流程」不重用公開 stream。只有 `AYUE_LOCAL_DEBUG_TRACE=on`，且 client address 與 request host 都是 loopback 時，才可透過 `/api/debug/ayue-runs/{run_id}` 讀取該使用者本輪的暫存診斷。診斷資料只保存在 process memory，最多 16 輪、每輪 96 個 bounded events、30 分鐘 TTL，secret/token/API-key 欄位自動遮蔽，不寫入 Mongo trace。它可呈現 Planner、DAG layers、各 sub-agent input slice、prompt、available function schemas、function calls、Guard、executor arguments、typed result 與 Synthesizer。
+## 10. Profile、Memory 與 Context Engine
 
-Streaming worker 擁有本次 run 的 background tasks。瀏覽器斷線只停止傳送事件，已開始的操作仍由 idempotency 保護並完成。Owner message 只保存一次，progress 不保存，final assistant reply 只保存一次。
-
-Ollama client 必須有 bounded HTTP timeout（`AYUE_OLLAMA_TIMEOUT_SECONDS`，預設 30 秒）；provider 卡住時 Planner/Sub-agent/Synthesizer 必須回到既有 fail-closed/fallback 路徑。Web UI 另以 120 秒 AbortController 作最後一道串流上限，任何結束路徑都清除 progress bubble。
-
-## 4. 每回合 Context
-
-`build_public_agent_turn_context()` 每回合重新建立 `PublicAgentTurnContext`：
-
-- 本次 owner 原始訊息，清理後最多 1,600 字元。
-- 最近 12 則對話，總長最多 6,000 字元。
-- 本人近期情境。
-- 本人手動保存的粗略所在地（城市／行政區）；不含地址或座標。
-- 最多 8 筆本人相關記憶。
-- 唯一可操作 proposal 的安全狀態與 server-side revision。
-- Scheduler 管理的有效 pending confirmation，以及 context builder 投影的 calendar draft 或 recent-context draft；不再保存 action／place-search draft。
-- 每回合建立一次的 Asia/Taipei authoritative clock 與相對日期解析。
-- Public capability manifest。
-- 本回合經 server 驗證的 @ 已接受聯絡人公開名稱；其內部 ID 僅保留 executor-side。超過三位時只告知 Planner 需要縮小範圍。
-
-刻意排除：Mongo `_id`／document、`seed_user_*`、對方私人記憶、對方行事曆內容、無關舊媒合及完整原始 profile。
-
-只有唯一 live proposal 時才進 context；若舊資料出現多筆 live proposal，fail closed，不讓模型任選一筆。舊 decline outcome 不會預載到每次聊天，避免一般「為什麼」被誤解成舊婉拒追問。
-
-## 5. Planner、Guard、Sub-agents 與 Scheduler
-
-### Planner（輕量 LLM）
-
-只拆任務產靜態子任務 DAG，不填 args、不審核、不回覆。透過 `decompose_tasks` function calling 輸出 `Plan`：
+Owner message pipeline：
 
 ```text
-tasks: [{id, agent, depends_on[], task_brief}]
-opportunity: {signal: none|social_opening, evidence_span, confidence} | null
+saved owner message
+  -> profile_skills.py typed extraction + contiguous evidence span
+  -> memory_service.apply_profile_memory_proposals
+  -> matchmaker /api/memory/apply
+  -> Neo4j owner-scoped durable memory
+  -> Mongo profile_memory_preview（read projection only）
 ```
 
-- `agent` 只能是 `calendar | places | web | match | relationship | profile | product_info | synthesizer`。
-- 一個 plan 最多三個 domain tasks 加一個 synthesizer；簡單聊天只能產生 synthesizer。
-- 一定且只能有一個 synthesizer task 當終端，且必須依賴所有 terminal domain tasks；plan 不得有未知依賴、自我依賴或 cycle。
-- 使用者表達想有人陪、想認識人或獨自參加不舒服時，Planner 在 `opportunity` 標記 `social_opening`（需 confidence ≥ 0.8 且 evidence_span 為原句連續子字串）。
+- assistant reply、conversation history、tool result、match state 或對方資料不能成為 profile write source。
+- 已移除 `/api/memory/observe` 與主服務 direct Neo4j fallback；9001 failure 進 bounded outbox，不能改抓 raw data。
+- `semantic_plans`／room chat triples 是雙人關係 context，不自動轉成任一方 durable preference。
+- 未來 Context Engine 只能輸出 bounded versioned typed bundle，先做 owner/room/accepted-relation hard isolation，再做 ranking/budget/dedup。
 
-### Central Guard（純程式碼）
+完整規則見 [`MEMORY_CONTEXT_ENGINE_GUIDE.md`](./MEMORY_CONTEXT_ENGINE_GUIDE.md)。
 
-驗證每個 sub-agent 的 tool proposal，依序檢查（第一個失敗即回傳對應 `GuardResultCode`）：
+## 11. HTTP、UI、progress 與 debug
 
-1. **工具註冊**：名稱存在於 `TOOL_REGISTRY`，否則 `tool_not_registered`。
-2. **Schema 驗證**：arguments 符合該工具的 planner arguments model（`planner_arguments_allowed`），否則 `schema_invalid`。
-3. **Forbidden fields 防線**：`FORBIDDEN_ARG_FIELDS = {user_id, match_id, event_id, revision, expected_status}` 由 `ToolProposal` 的 Pydantic validator 在提案建立時先攔截，Guard 的 schema 檢查是第二道防線（`forbidden_arg_field`）。
-4. **Duplicate call**：同一回合內 `tool + normalized args` 重複 → `duplicate_call`；平行 task 也共用同一份去重狀態。
-5. **每個 sub-task 唯讀步數上限**：`AYUE_SUBAGENT_MAX_READS`（預設且硬上限 3）以 task id 個別計數；同回合不同 sub-task 不會互相吃掉 read 額度，單一 task 超限 → `step_limit_exceeded`。
-6. **WRITE 工具一律回 `WRITE_REQUIRES_CONFIRMATION`**，由 Scheduler 建立 confirmation；READ 工具通過。
+Public NDJSON 對外 event allowlist：
 
-Guard 不審核語意、不猜意圖、不檢查參數「內容」的正確性（那由 tool facade 與 domain service 負責）。詳細設計見 `docs/architecture/07-guard.md`。
+```text
+run_started | tool_started | tool_finished | final | error
+```
 
-### Sub-agents（LLM + function calling）
+- Public UI 只顯示一個暫時 progress bubble；final/error/disconnect 時清除。
+- Progress、debug event、tool name 不存成聊天訊息。
+- `reply` 保留相容性；`messages` 最多三個；`place_cards`、`sources`、`presentation_blocks` 是 additive typed projection。
+- Debug 只對 loopback/localhost 開放，使用 `agent_run_id` 關聯 ephemeral run。Public trace 只存 allowlisted metadata，不存 prompt、owner 原句、arguments/result、raw exception、ID 或 revision。
 
-calendar / places / web / match / relationship / profile 七個 domain sub-agent，各自以 function calling 提出 tool proposals。ProductInfo 是額外的 structured read-only specialist：它透過同一 runner registry 回傳 typed observation，不提出副作用 tool proposal。Web 是獨立的 bounded research specialist；Places 只負責地點工具。一般 proposal runner 由 Scheduler 逐一 guard 並執行；Web Runtime 則透過 `GuardedReadExecutor` 執行 Web proposals。單一 call 失敗不丟棄其他 call。
+## 12. Testing baseline
 
-All registered runtimes use one internal `TaskRunnerResult` and the uniform
-`run(context_slice, *, task, services)` signature. A result contains either
-guarded tool proposals or completed `SubTaskResult` values, never both.
-`RuntimeRegistration` owns optional direct-chat blocking and confirmed-result
-projection hooks, keeping Scheduler a domain-neutral DAG orchestrator.
-Calendar Runtime returns completed results after its server-owned
-command/draft/reference/preflight path; Scheduler never inspects Calendar
-command fields or authority-bearing plans.
+所有行為修改必須有 deterministic test；自動測試不得連線或修改正式 MongoDB Atlas、Neo4j、Tavily 或 Google API。
 
-### Scheduler（純程式碼）
+最低覆蓋：
 
-`run_public_agent_turn_v3` 是唯一 orchestrator：
+- Planner function schema、DAG、routing 與 fail closed。
+- `RuntimeRegistration`／`TaskRunnerResult` contract。
+- Context slices 與 Public/Private privacy isolation。
+- Guard codes、tool schema/output、duplicate、budgets。
+- Confirmation、CAS、idempotency、stale、concurrency。
+- Web research/finish、late extract projection、URL/source/subject binding。
+- Calendar command/preflight/draft/reference/verification。
+- ProductInfo retrieval/observation/progress/debug。
+- JSON/NDJSON compatibility、trace/event allowlists。
 
-1. **Assessment 接管**：`awaiting_commit`／active assessment session 存在時，直接處理（commit/cancel/advance），不進 Planner。
-2. **Confirmation 入口**：一般副作用只接受封閉的「確認／取消」；`profile.start_assessment` 的 pending confirmation 另外接受「開始／開始吧／開始啊／開始阿」，且只會匹配 assessment confirmation，不會誤確認 calendar 或其他 action。確認只執行使用者最後看到、與 preview/request fingerprint 綁定的最新一筆 pending confirmation。建立新 confirmation 時會作廢同一使用者較舊的 pending action。每回合最多建立一筆待確認副作用；Calendar Agent 可把有順序的多個 typed commands 放入同一個 server-owned plan，仍只需一次確認。
-3. **Planner**：拆 DAG。
-4. **Opportunity 處理**：`social_opening` 且 profile ready → 建立 guidance confirmation；not_ready → 回 missing-basis 問題。
-5. **DAG 執行**：`_topological_layers` 分層，同層平行（`ThreadPoolExecutor`，`AYUE_SUBAGENT_MAX_PARALLEL` 預設且硬上限 2）。prior observation 只給 `depends_on` 宣告的依賴。
-6. **Synthesizer**：彙整所有 observation 產出最終回覆；地點卡只有在存在候選卡片時才以 `decide_place_cards` typed tool 決定顯示。Capability/general chat 沒有 tool call 是合法結果。
+標準指令見 [`docs/architecture/06-testing.md`](./docs/architecture/06-testing.md)。
 
-### 執行規則
+## 13. Current documentation index
 
-- **同層並行**：`depends_on=[]` 的任務同層執行，無執行順序保證。
-- **prior observation 只給依賴**：同層無依賴任務之間互不可見；synthesizer 例外（彙整所有）。
-- **多 tool calls 全數執行**：單一 call 失敗不使整個 task 標記失敗；只要至少一個 call 成功，task 即為 ok，依賴 task 也以「至少一筆 OK」判定可繼續。
-- **duplicate 與額度以整回合為範圍**：平行任務共用去重狀態與一筆 pending confirmation；每個 sub-task 個別最多三個唯讀步驟；Calendar Agent 的一個 command batch 可包含最多 10 個有序 mutation plans。
-- **MENTIONED 工具需有 @ 對象**：無 @ 時該 call 標記 `FAILED/mentioned_required`，不執行、不崩潰 run。
-- **sub-task 例外不連坐**：任何未捕獲例外轉成 `FAILED`，run 永不因單一 sub-task 崩潰成整段 error。
-- **reuse within task**：只有 prior observation 已驗證同一個 query 所需的相同 fact/arguments 時，才重用完全相同或冗餘 read；不同 target、日期、欄位或問題仍需重新查詢。
-- **web.extract URL binding**：Web Runtime 的 guarded adapter 只能抽取本回合 web.search 結果或 owner 原句提供的公開 URL。
+- [`docs/architecture/01-project-overview.md`](./docs/architecture/01-project-overview.md)：onboarding 與服務邊界。
+- [`docs/architecture/02-python-modules.md`](./docs/architecture/02-python-modules.md)：模組 owner map。
+- [`docs/architecture/03-v3-runtime-lifecycle.md`](./docs/architecture/03-v3-runtime-lifecycle.md)：單回合 lifecycle。
+- [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)：22 個 ToolSpec。
+- [`docs/architecture/05-matchmaker-and-memory.md`](./docs/architecture/05-matchmaker-and-memory.md)：9001、Neo4j 與 profile memory pipeline。
+- [`docs/architecture/06-testing.md`](./docs/architecture/06-testing.md)：測試策略。
+- [`docs/architecture/07-guard.md`](./docs/architecture/07-guard.md)：Central Guard。
+- [`docs/architecture/08-planner.md`](./docs/architecture/08-planner.md)：Planner DAG contract。
+- [`docs/architecture/09-runtime-interfaces.md`](./docs/architecture/09-runtime-interfaces.md)：HTTP、Context、Planner、runner、Tool/Guard、write 與 observation interfaces。
+- `docs/architecture/subagent-*.md`：各 domain specialist 的現行行為。
 
-## 6. Confirmation 與寫入執行
-
-### Preflight
-
-WRITE proposal 通過 Guard 後，由 Scheduler 或 domain runtime 準備 confirmation：
-
-- `match.start_search`：先 `assess_match_opportunity`；not_ready 回 missing-basis 問題，active_match_blocked 回「不重複開新搜尋」，ready 才建立 confirmation。
-- `calendar.submit_commands`：Calendar Agent 只提交不含 authority fields 的 `CalendarCommand` batch。Calendar Runtime 使用同一回合的 authoritative clock 做 deterministic preflight；create/update/cancel 的目標若需要只解析一次，產生不暴露給 LLM 的 `CalendarMutationPlan`。missing_fields/invalid_date/ambiguous/not_found/too_many/invalid_interval/stale_revision/invalid_command 是正常 `needs_clarification` outcome，不建立 confirmation。ready 時同一 batch 共用一筆 confirmation，確認後依序執行，第一個真正 failure 後停止。
-- Typed command 只接受 canonical `action/title/target_reference/target_hint/target_selector/target_hints`，以及明確持續時間的 `duration_minutes` 與既有區間平移的 `time_shift_minutes`；`target_selector.date/start_time/end_time` 只篩選要修改或取消的既有行程，mutation 的 `date/start_time/end_time` 永遠是新值。Calendar Runtime 在嚴格驗證前僅為相容 provider 將 `type/summary/event_hint/event_hints` 映射到 canonical 欄位。最近一次唯一選取的行程與未完成 command 只保存 15 分鐘的 server-owned reference/draft projection；projection 不含 event_id/revision，且 reference stale 時不重新做自然語言辨識。
-- `match.decide_active_proposal`：preflight 綁定當下 canonical proposal revision；確認執行時再次比對，stale 即拒絕。
-- `profile.start_assessment`：驗證 kind（basic→big_five、deep→deep_profile）。
-
-Pending payload 只保存 executor-safe 資料（event_id、revision、targets、proposed_form 等），Planner 永遠看不到。
-
-### 執行
-
-確認後 `ConfirmationManager.execute_confirmed` 先驗證 preview/request fingerprint，再以 CAS（pending→executing）claim 唯一一筆綁定 action，接著呼叫 `write_executors.execute_write`：
-
-- `match.start_search` → `match_action_service.start_match_search`（idempotency key `confirmation:<id>`）
-- `match.decide_active_proposal` → `decide_active_proposal`（revision CAS + stale response）
-- `profile.start_assessment` → `assessment_session_service.start_assessment_session`
-- `calendar.submit_commands` → `_execute_calendar_mutation_plans` → calendar/date coordination service（每個 plan 使用 confirmation-indexed idempotency key；順序執行、stop-on-failure、無 automatic rollback）
-- `calendar.find_my_event` 只用於使用者真的詢問行程內容；mutation 不先做 read task，也不把 read projection 重新組成 `event_hint`。preflight 的 resolver 會先對 active owner events 做 bounded exact/fuzzy retrieval：唯一 exact 可進 confirmation，fuzzy 或多筆候選只能回 server-owned candidate clarification，低相似度才要求一個 discriminating clue。preflight 的 resolver 回傳 canonical event 後，executor 只使用 server-owned event_id/revision。缺少欄位、歧義與找不到目標回正常 clarification，不是 generic agent failure。
-- `duration_minutes` 由 server 依 canonical start time 推導 end time；同時提供的 explicit end time 必須與推導值一致，否則回 `invalid_interval` clarification，不自行猜測。
-- `time_shift_minutes` 僅適用既有行程 update；LLM 只提出 signed semantic offset，server 依已解析事件的 canonical interval 做權威平移，並拒絕與 date/start_time/end_time/duration_minutes 混用。若 update 先解析出唯一事件但仍需追問，draft 只保存安全 label，event_id/revision 留在 server-owned `draft_target` reference，後續 selector-free clarification 直接沿用該 reference，直到 TTL 或 stale revision。
-
-Calendar target references are server-owned opaque tokens. `recent_event` must
-come from the current recent-event projection. `candidate_1..candidate_3` are
-accepted only when the same token is present in the active calendar draft
-projection; an unadvertised or stale token cannot load an authority-bearing
-reference. The former direct `calendar.create_my_event`,
-`calendar.update_my_event`, `calendar.cancel_my_event`, and
-`calendar.cancel_my_events` registry paths are removed. Old confirmation
-records fail closed with `calendar_legacy_tool_disabled` and never call a
-domain service; all V3 Calendar mutations use `calendar.submit_commands`.
-
-Current opportunity contract: an explicit match request (including retry/search wording such as 「再配對一次」) creates a `match` task and follows the normal confirmation path. An indirect `social_opening` is only a soft, expiring observation; it never creates a pending confirmation or claims that a search started. If the user accepts the soft offer, Scheduler converts that explicit confirmation into the normal `match.start_search` confirmation.
-
-寫入一律走 domain service；Scheduler 只協調，不直接寫 MongoDB。
-
-## 7. Match opportunity 與主動牽線
-
-- Planner 在拆解時標記 `social_opening`（想有人陪、想認識人、獨自參加不舒服）。
-- Scheduler 驗證 confidence ≥ 0.8 且 evidence_span 為原句子字串後，評估 profile basis：
-  - `ready` → 產生短期 `match_opportunity_offer` observation，溫和詢問是否想找人；不建立 confirmation、不宣稱已開始搜尋。
-  - `not_ready` → 不啟動配對，也不把這個背景機會當 runtime failure；讓 Synthesizer 依目前訊息自然回覆。
-  - `active_match_blocked` → 不重複開新搜尋
-- 明確「開始找人」的請求走同一條 preflight 路徑（`explicit_search=True`）。
-
-## 8. Assessment sessions
-
-基本性格與深層探索由 `services/assessment_session_service.py` 唯一管理。V3 Scheduler 在 Planner 前接管：
-
-- `awaiting_commit`：回覆「確認」→ commit（revision CAS）；「取消」→ 保留原資料。
-- active session：直接以本次 owner 訊息 advance；「先不做了／退出測驗／結束測驗」→ cancel。
-- 逾時 → expire，原資料不變。
-- Assessment 訊息不進近期情境或 durable memory extractor；`AgentResult` 帶 `assessment_state/kind/revision` 安全 metadata。
-
-## 9. Trace 與資料安全
-
-V3 agent trace 保存於 `agent_runs`（`agent_version: "v3"`），只允許：
-
-- plan 摘要（task id/agent/depends_on）
-- guard result codes
-- tool name/ok/error code
-- event sequence、latency、final intent/fallback code
-
-Trace 不保存完整 prompt、owner message、observations、tool arguments/results、對方資料或 raw exception。Synthesizer 的 `reply_source`、`fallback_reason` 與 allowlisted `error_code` 只能記錄在本機 debug 或 allowlisted result metadata；`tool_calls=[]` 代表本回合沒有需要的工具，不代表執行失敗。新增欄位時必須先加入 allowlist 並補 privacy test。
-
-## 10. Runtime flags
-
-| Flag | 用途 |
-| --- | --- |
-| （無 Public runtime flag） | Public Ayue 永遠走 V3；rollback 透過部署／commit rollback，不在 request-level fallback |
-| `AYUE_V3_SIMPLE_CHAT_FAST_PATH=on\|off` | 允許 Planner 對無 domain/tool/workflow 的 direct-chat 回覆跳過 Synthesizer；預設 off，通過 provider semantic eval 後再開啟 |
-| `AYUE_SUBAGENT_MAX_READS` | 每個 sub-task 的唯讀上限，預設且硬上限 3；同回合不同 task 各自計數 |
-| `AYUE_SUBAGENT_MAX_PARALLEL` | 同層 sub-agent 最大並發數，預設且硬上限 2 |
-| `AYUE_OLLAMA_TIMEOUT_SECONDS` | 單次 Ollama HTTP 呼叫 timeout，預設 30 秒，限制 5–120 秒 |
-| `AYUE_LOCAL_DEBUG_TRACE` | 本機 demo-only 詳細執行 trace；預設 off，且 endpoint 仍要求 client/host 都是 loopback |
-| `AYUE_RUNTIME_MODEL_SETTINGS_TOKEN` | 啟用 runtime model settings 管理 API 的 server-side admin token；未設定時不可修改 |
-| `AYUE_ALLOWED_RUNTIME_MODELS` | 管理 API 可切換的 model allowlist；未設定時只允許目前設定值 |
-| `AYUE_DEFAULT_TIMEZONE` | 預設 `Asia/Taipei` |
-| `AYUE_CALENDAR_STATE_MONGO` | Calendar recent reference/draft 是否持久化到 Mongo；預設 `on`（仍有 process-memory fallback，TTL 15 分鐘） |
-| `AYUE_PROFILE_SKILLS_MODE=on\|shadow\|off` | Profile extractor 寫入、shadow 觀察或停用（`shadow` 只記錄不寫入） |
-| `AYUE_PROFILE_SKILLS_USER_ALLOWLIST` | Profile rollout allowlist |
-| （無 Private rollout flag） | Private Ayue 維持獨立 current V2 runtime，與 Public V3 分開 |
-| `AYUE_MAPS_ENABLED` | 是否提供 OpenStreetMap／Overpass 地點工具(fallback provider) |
-| `AYUE_MAPS_MONGO_CACHE` | 是否將地點工具 cache 寫入 Mongo；預設 `off` |
-| `AYUE_GOOGLE_PLACE_CARDS_ENABLED` | 啟用 Google Places 為主要地點 provider；需同時設定下列兩把 key |
-| `GOOGLE_PLACES_SERVER_API_KEY` | 後端 Places API New Text Search + Routes API key；僅限這些 API |
-| `GOOGLE_MAPS_BROWSER_API_KEY` | 前端 Maps JavaScript / Maps Embed API key；必須限制 HTTP referrer；Embed 無限免費 |
-| `AYUE_GOOGLE_PLACE_PHOTOS_ENABLED` | 選用 photo-media request；預設 `off`，需先確認 quota 與成本 |
-| `AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED` | Routes API Compute Routes Essentials；預設 `on`；`off` 時只回 OSM haversine 直線距離 |
-
-Google Routes 距離能力只依賴 `AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED` 與 server API key；不依賴 browser key，也不與 Google 地點卡片的顯示開關綁定。
-
-> 成本邊界：本專案不要求 rating / userRatingCount / currentOpeningHours，place card 不顯示評分、評論數或營業狀態。啟用 Google 能力前應重新核對 provider 的即時計價與 quota。
-
-基礎服務另需 `MONGO_URI`、LLM/Ollama、Google embedding；設定 `TAVILY_API_KEY` 後才開啟 Web Search／Extract。地點工具的 provider 優先序為 Google Places(主要)→ OSM Nominatim/Overpass(fallback)。port 9001 matchmaker 需要 `LLM_*` 與 Neo4j 設定。可提交的欄位範例見 `social_demotest/.env.example` 與 `matchmaker_agent/.env.example`；包含真實密鑰的 `.env` 不得提交或交付。
-
-## 11. App 遷移指南
-
-### Backend contract
-
-1. 先部署本版本 backend 與 Mongo indexes，保留既有 `/api/direct_chat` JSON endpoint。
-   `GET /api/health` 是 Public App 的 process-readiness endpoint，只回傳
-   `{"status":"ok","service":"ayue"}`，不得探測或洩漏使用者、Mongo、
-   Neo4j 或模型資料。Windows launcher 以此 typed identity 判斷 8000，
-   預設允許 90 秒冷啟動。
-2. Public V3 無需 allowlist 或 runtime flag；以部署版本作為 rollout／rollback 邊界。
-3. 不可在 App 自己重建 intent classification。App 只送原始訊息與必要 mention，語意由 V3 Planner 處理。
-4. 不可在 V3 timeout/error 時由 App 再呼叫 legacy endpoint；這會造成訊息及副作用重複。
-
-### Public Ayue chat UI
-
-1. 只有 `contact_id == "ai_assistant"` 改用 `/api/direct_chat/stream`。
-2. 逐行解析 NDJSON，忽略未知 event；不要假設一個 network chunk 就是一個完整 JSON event。
-3. `tool_started.text` 顯示為單一暫時狀態；不要顯示技術 tool name。
-4. `tool_finished` 只更新狀態，不新增永久訊息。
-5. `final.response` 按原本 JSON response 處理並顯示正式回答。
-6. `error`、斷線或沒有 final 時清除暫時泡泡，提示安全重試；不要自動重送可能含副作用的 request。
-7. 防止同一使用者在 public run 尚未結束前重複送出。
-
-### Match cards
-
-1. 顯示 API 回傳的 `stage` 與 `proposal_revision`，不要只看舊 `status` 文案推測按鈕。
-2. 接受／婉拒／取消呼叫 `POST /api/match/decision` 並攜帶 `expected_status` 與 `expected_revision`。
-3. HTTP 409 代表 stale state；App 重新讀 `/api/match/status` 或 `/api/match/state` 後更新卡片，不重送舊 decision。
-4. Accepted match 轉為 contact/chat；歷史 proposal card 保留但不可操作。
-
-### Profile 與 Calendar
-
-- App 不直接產生或提交 `current_context` 摘要；只送 owner 原始聊天訊息，profile pipeline 非同步更新。
-- UI 顯示 profile 更新時應讀 server projection，不把 assistant reply 當 evidence。
-- 所在地透過 `PATCH /api/profile/location` 手動更新，只保存城市與行政區。
-- Calendar CRUD 與共同約會沿用 server revision/state；不要在 client 端只修改畫面。
-
-### Rollback
-
-緊急 rollback 由部署環境回復上一個已驗證的 deployment artifact。Rollback 是人工操作，不是 request-level fallback；App 不需要也不應知道 Planner 是否失敗。
-
-## 12. 驗收基線
-
-每次改動至少驗證：
-
-- 一般聊天自然回答，不因沒有工具而拒答。
-- 配對結果、目前日期、本人行事曆與近期情境都經正確 read tool。
-- 地點推薦在搜尋條件已足夠時先讀取 places tool；「隨意推薦」不得重複追問料理類型。
-- 明確找人先 confirmation，確認後只搜尋一次。
-- Planner duplicate、壞 JSON、timeout、低信心不造成重複工具或 legacy fallback。
-- Proposal stale revision、重複 request、雙方並發不覆寫終態。
-- Profile evidence 可追溯、只來自 owner message，且摘要為繁體中文。
-- Stream progress 不進聊天紀錄，事件不洩漏 arguments/results/ID。
-- JSON direct chat、其他聯絡人及 private chat 不因 Public V3 改動而破壞。
-- Test harness 不連正式 Atlas/Neo4j；完整 deterministic tests、Python compile、兩個服務健康檢查通過。
-
-新增真實失敗案例時，優先將它匿名化後加入 V3 trajectory 測試，再修對應 contract、projection 或 prompt；不要先增加一句特例 regex。
-
-## 13. 現行文件索引
-
-- `docs/architecture/01-project-overview.md`：服務與 runtime 邊界。
-- `docs/architecture/03-v3-runtime-lifecycle.md`：單回合的實際執行生命週期。
-- `docs/architecture/04-tool-registry.md`：22 個現行工具與 confirmation 契約。
-- `docs/architecture/subagent-*.md`：各 domain sub-agent 的個別責任（含 ProductInfo structured retrieval）。
-- `MEMORY_CONTEXT_ENGINE_GUIDE.md`：durable memory、Graph 與 Context Engine 邊界。
-
-## Current runtime baseline
-
-Public requests always use `v3/scheduler.py`; runtime mode flags and
-request-level fallback do not exist. Private Ayue remains an independent V2
-runtime using `private_v2.py` and `private_calendar.py`. Rollback is performed
-by reverting the deployment or commit, not by enabling another request path.
-### Calendar clarification and fuzzy target contract
-
-Calendar target lookup keeps exact matching as the compatibility path and may
-return a bounded fuzzy suggestion for an owner-visible typo. Explicit date and
-time constraints remain hard filters; ambiguous or close candidates become a
-typed clarification with opaque `candidate_1..candidate_3` references. Only
-safe labels reach the model. The Synthesizer may phrase missing-field and
-candidate clarifications, but must not claim a mutation happened or replace a
-server outcome with a fixed field list. A read miss may produce the same
-bounded candidate suggestion, never a generic agent failure.
-
-### Prompt role and context boundary
-
-The AI provider receives a separate `system` message for role, hard semantic
-policy and tool-selection behavior, and a `user` message for the current task
-and bounded context data. Existing single-user API callers may keep the compatibility
-path. Planner receives only routing context; domain-specific memory, location
-and observations are sliced for the responsible sub-agent. Synthesizer uses a
-grounded-result mode when observations exist and a general-conversation mode
-when they do not. Assessment session lifecycle and scoring remain owned by the
-runtime; the basic/deep assessment files are documentation, not runtime-loaded
-skills.
-
-Public V3 reply presentation is typed: ordinary conversation and social opening
-use one or two bubbles (160 characters per bubble), product information uses one
-or two bubbles (240-character envelope), and transactions, capability replies
-and fallbacks stay in one bubble. Greetings, confirmations and single facts may
-be shorter. Verified calendar and confirmation detail keep the 240-character
-envelope. Web／Places synthesis uses the separate `grounded_recommendation`
-envelope (up to three bubbles, 1,400 characters per bubble and 3,600 characters
-total), so multi-source or multi-candidate answers are not truncated to the
-ordinary chat limit. Server-owned
-previews and verified mutation outcomes are not paraphrased or padded. The
-Synthesizer may use one `compose_public_reply` function call to produce bubbles
-and place-card decisions together; `reply` remains the compatibility projection.
-Tone guidance is presentation-only and must not participate in Planner routing,
-Guard decisions or domain authority.
-
-For a day-trip or activity-plus-day request, Planner may set the additive
-`Plan.presentation_mode="itinerary"`. This remains the same V3 DAG: Places
-supplies server-owned candidate cards and an optional Web task supplies a typed
-`primary_activity`; Synthesizer then calls `compose_public_reply` with a
-bounded itinerary contract (3--7 ordered, non-overlapping stops). If no date
-was requested, the rendered Markdown explicitly says it is an undated
-suggestion and does not claim volatile opening hours. Place card references
-remain server-owned, and the field defaults to `default` for compatibility.
-# Demo maintenance and match diagnostics
-
-The local Demo destructive tools are guarded by `DEMO_DESTRUCTIVE_TOOLS_ENABLED`.
-Full reset clears Neo4j first, then all non-system collections in the configured
-Mongo database and V3 process-local fallback state; it is not a distributed
-transaction. A failed subsystem must be surfaced as a typed partial failure.
-
-Match search progress separates candidate qualification, matchmaker request,
-matchmaker response, and proposal write. Public status exposes only allowlisted
-error codes and failure stages; raw provider output, prompts, Graph content,
-and exception messages remain server-side only.
-
-If Mongo initialization or DNS fails, the HTTP service starts in a fail-closed
-degraded mode. Demo status reports `mongo_status=unavailable`, destructive
-cleanup returns `mongo_unavailable`, and no local fallback database is touched.
-
-### Calendar post-mutation verification
-
-After a confirmed V3 Calendar mutation, the runtime stores one short-lived,
-server-owned verification summary (`calendar_references` key
-`recent_mutation`). It keeps authority fields only on the server and projects
-safe labels/outcome to the next turn. A semantic follow-up that asks whether
-the previous write succeeded routes to the read-only
-`calendar.verify_recent_mutation` tool. That tool rechecks canonical Calendar
-or date-coordination state and cannot submit another mutation. The summary
-expires with the existing 15-minute bounded reference TTL; an unrelated or
-clearly new request follows the normal Planner path. `calendar_state_changed`
-in the public response is only a frontend cache-invalidation hint and is not a
-domain-state authority.
-
-### Simple-chat direct reply fast path
-
-For a genuinely conversational turn that needs no domain task, tool,
-verified App state, write, confirmation, assessment, or opportunity workflow,
-the Planner may return a typed `Plan(mode="direct_chat", tasks=[],
-direct_reply=...)`. Scheduler validates bounded runtime state and public
-reply presentation before returning it; it never treats the Planner's mode as
-authority to answer Calendar, Match, Profile, Relationship, Places, memory or
-external facts. Any pending workflow, active draft, recent Calendar mutation,
-active match state, social opening, invalid reply, or uncertain output falls
-back to the normal Synthesizer path. The fallback is controlled by
-`AYUE_V3_SIMPLE_CHAT_FAST_PATH`, which defaults to off until provider-backed
-semantic evaluation has recorded zero false-direct routing.
-
-General social or date advice that needs no private relationship state remains
-valid Public conversation (for example, an opinion about a first-date venue);
-it must not be redirected to Private. Public copy should first address the
-user's concrete situation, then offer a grounded reaction or next step, without
-turning ordinary life topics into a matching pitch.
-
-### Private Ayue scope and typed public handoff
-
-Private Ayue remains a separate, bounded V2 runtime. It does not mirror the
-Public V3 DAG or create a global surface router. The Private Planner owns
-semantic scope understanding: it decides whether the user's primary goal
-serves the current accepted pair relationship. Python does not classify scope
-with keywords, regular expressions, substring matching, or phrase lists.
-
-The Planner may return `final`, `tool_call`, `confirmation`, or `redirect`.
-`redirect` is valid only with `intent=out_of_scope` and
-`redirect_target=public_ayue`. Runtime validation rejects tool names,
-arguments, confirmation, and side effects on a redirect. The handoff is
-server-owned and carries only the original user message; the frontend switches
-to `ai_assistant`, prefills the contenteditable room input, and waits for an
-explicit user submit. It never auto-sends.
-
-Private has one narrow viewer Calendar read,
-`private.calendar.get_viewer_availability`, for relationship/date-planning
-goals. It returns busy/free intervals only. Personal Calendar CRUD, general
-Places lookup, Match search, Profile edits, and unrelated external information
-redirect to Public. Calendar/date authority and all user-memory extraction
-remain owned by the existing shared services.
-
-Direct-chat runs record only Planner metrics and an allowlisted trace summary
-(`execution_mode`, `llm_call_count`, token totals and latency). Domain flows
-retain the existing Planner → sub-agent → Guard/tool → Synthesizer path.
-
-### Product identity, surfaces, onboarding and presentation (v1)
-
-Public Ayue and Private Ayue are the same Ayue identity with different bounded
-surfaces. Public owns the user's self context and new matching; Private is only
-for the current accepted relationship. Public cannot read the user's direct-room
-chat history with the other person. Private can read only the bounded recent
-history of its current direct room, so advice that depends on a specific
-conversation is redirected to that room's Private Ayue; generic advice that does
-not depend on a specific thread remains available in Public. Neither surface
-receives the other surface's raw/full chat history. Private receives only the
-bounded owner profile projection and relationship context allowed by its runtime. Private owner
-messages are not automatically queued into the Public profile/memory pipeline;
-confirmed domain effects (for example date coordination) continue through their
-existing confirmation services.
-
-Product information is a first-class normal DAG task. The Planner only knows the
-`product_info` capability boundary (questions about Ayue/App capabilities,
-visible flows, limitations, privacy, matching, Calendar and assessment); it
-does not emit a ProductInfo topic taxonomy. A product question is represented
-as `SubTask(agent="product_info", task_brief=...)` and the terminal
-Synthesizer depends on it like any other domain task. ProductInfoAgent owns
-task understanding and retrieval, then returns a bounded
-`product_info.v1` observation containing `question_understanding`, typed
-`facts`, `knowledge_sections`, `coverage` and an explicit insufficient-knowledge
-code when the product contract has no authoritative answer. Its retrieval uses
-the server-owned allowlisted product knowledge sections only, is read-only and
-bounded to two internal rounds; it does not use RAG, embeddings, vector search,
-or Markdown documents. Scheduler dispatches the runner generically and never
-knows section names or retrieval strategy. Synthesizer remains the only layer
-that produces user-facing wording. A small contract shim normalizes retired
-task-free ProductInfo provider payloads into this DAG shape during rollout.
-
-Public replies may carry additive `messages` (up to three typed bubbles) while
-`reply` remains the newline-joined compatibility projection. The API stores one
-assistant record per turn and, when needed, stores `presentation_messages` in
-metadata; streaming still emits one `final` event. Transaction and fallback
-presentations remain one bubble, while only conversation/product-info surfaces
-may use two. Product onboarding is not a modal: an empty Public room receives
-three fixed onboarding bubbles from `GET /api/messages/ai_assistant`, and the
-version is completed idempotently via `/api/public-ayue/onboarding/complete` or
-on the first owner turn. Existing `onboarding_completed` remains a compatibility
-field and no historical messages are rewritten.
-
-While a Public chat assessment is `active` or `awaiting_commit`, the chat input
-surface exposes a typed `assessment_action="cancel"` exit control. The action is
-accepted only for `ai_assistant`, is handled before Planner, and uses the same
-CAS-protected assessment session cancellation service as the closed natural-
-language cancel protocol. It never enters Planner, profile extraction, or a
-second reset workflow; the response exposes only bounded assessment state.
-
-Semantic dissatisfaction with the owner's existing personality result (for
-example, saying the stored personality does not feel like them and asking to
-make it more accurate) routes through Planner to the existing
-`profile.start_assessment(kind=basic)` confirmation flow. This is an LLM
-semantic-routing policy, not a phrase list, substring classifier, or regex.
-
-Assessment confirmation execution carries the Confirmation Manager's opaque
-confirmation ID into every write executor. Assessment idempotency is therefore
-scoped to that confirmation instead of a process-wide fixed key; an old basic
-assessment can no longer make a new confirmed assessment look like a duplicate.
-Public Synthesizer has no message-keyword fallback for matching or product
-information. Deterministic wording is limited to pending confirmations,
-confirmed outcomes, cancellation, safety/error handling, and provider-failure
-fallbacks grounded in the selected typed product facts.
-
-## Web research specialist (native V3)
-
-Web is a distinct read-only specialist whose decision contract lives in
-`services/ayue_agent/v3/sub_agents/web_agent.py` and whose bounded execution
-loop lives in `services/ayue_agent/v3/web_runtime.py`. Scheduler dispatches the
-registered runtime and collects its typed result; it does not own Web rounds or
-search/observe/refine/finish progression. The Planner may route current,
-external, news, forum, or URL-grounded questions to `agent="web"`; Places owns
-location lookup and does not expose Web tools.
-
-`web.search` and `web.extract` remain typed Tool Registry capabilities. Web
-research behavior stays in the Web Runtime, while the Web Agent remains the
-decision contract. The runtime receives a minimal guarded execution adapter
-(`v3/guarded_execution.py`) and never calls Tavily directly. The research/tool
-phase remains strictly bounded to at most 3 tool-producing Web calls, while a
-separate bounded finish-only phase receives one final decision opportunity. It
-keeps 2 initial search queries, 1 refinement query, and 1 extract step over at
-most 2 URLs. Decision/model failures do not increment tool counters or remove
-the finish opportunity. Each observation is projected and returned to the Web
-Agent before its next decision; raw provider payloads never enter Planner,
-trace, or final composition.
-
-Before finishing, the Web Agent emits a typed evidence assessment
-(`aligned|conflict` plus `direct_sufficient|direct_partial|adjacent_only|none`).
-Each Web task also carries `evidence_policy`: `casual_discovery` for ordinary
-activities, restaurants, travel, events, promotions, sports, and shops, or
-`strict_verification` for explicit official/confirmed requests and
-medical/legal/financial/security-risk claims. Casual mode may use relevant
-public social, community, venue, or business announcements with a visible
-change-warning; strict mode keeps the direct-evidence threshold.
-Search is primarily source discovery. Comparisons, recommendations, reviews,
-nuanced factual questions, and requests where page context matters should
-prefer one or two relevant, authoritative extracts. Simple explicit lookups
-may finish from direct search evidence; extraction is not mechanically forced.
-Direct evidence is required for an `answered` result. Adjacent or conflicting
-evidence produces `partial` or `insufficient_evidence` with explicit
-limitations; unavailable credentials and tool failures remain distinct
-execution outcomes. No open-ended ReAct loop, browser automation, or external
-framework is introduced.
-
-For Web-only presentation, `answered` results and `partial` results with useful
-direct findings normally go through Synthesizer composition, which may use
-natural prose or light Markdown. `insufficient_evidence`, unavailable results,
-partial results without useful findings, and provider/model/safety failures
-retain the deterministic Web fallback. Synthesizer grounding is limited to the
-typed `web_research.v1` result; source URLs and `web_source_*` references remain
-server-owned and unobserved links/references are rejected.
-
-Every Web search query is deterministically anchored to the Planner-owned
-`task_brief` before tool execution, so a model-suggested adjacent query cannot
-drop the named entity, place, date range, or requested evidence class. The
-optional `recency` hint accepts only `none|day|week|month|year`; any other model
-value safely becomes `none`, while explicit dates remain part of the query.
-Internal decision functions remain shallow workflow contracts, not Tool
-Registry capabilities. Their availability follows current observations and
-remaining budgets: search/extract can continue while tool budget remains,
-finish becomes available after observations, and budget exhaustion exposes
-finish only. This allows search/refine/extract/finish without an unbounded
-ReAct loop.
-If a provider still emits more than one round-2 refined query, the parser keeps
-only the first query before validation; this enforces the fixed search budget
-without converting a safe overproduction into a whole-run model failure.
-Likewise, a provider's bounded string-only finish findings are normalized into
-the typed finding shape and overlong explanation text is truncated before
-strict validation; URLs and evidence coverage are never invented by this
-normalization.
-Ordinary Web searches use a schema that does not expose Places-only
-`subject_refs`; the stricter subject-bound search schema is enabled only when
-the current task actually has server-owned place candidates. This prevents a
-normal entity search from being misclassified as a candidate verification run.
-Observed Web rows receive short per-run `web_source_01`-style references for
-finish findings. The server resolves those references back to URLs from the
-current observation catalog; unobserved model references are discarded.
-Provider-specific or localized source-type labels are conservatively normalized
-to `other`; this preserves the observed URL and claim without pretending the
-source is official, news, or social.
-Finish parsing is field-bounded instead of all-or-nothing for harmless provider
-drift: overproduced findings, limitations, URLs, and source types are truncated
-to their contract budgets; unknown prose fields are dropped; only unambiguous
-boolean spellings are repaired. This normalization never creates a claim or
-URL. If the finish decision is still invalid after successful Web calls, the
-result is `degraded/model_failure` and retains the observed safe source catalog
-instead of rewriting the whole run as unavailable with empty sources.
-
-A malformed or missing Web decision function call receives exactly one
-typed-decision retry with the same phase tools and budgets. The retry does not
-execute a Web capability by itself or increment the three-tool-call research
-budget. Research decisions have a separate finite cap; after that phase, one
-finish-only decision is attempted whenever observations exist, including after
-a late decision/model failure. Retryable provider timeout, rate-limit, and 5xx
-failures use stable trace-safe codes; the finish phase never issues an extra
-search or opens an unbounded loop.
-
-`web_finish_decision` asks the model only for bounded semantic booleans
-(`evidence_conflicts_target`, `has_direct_evidence`,
-`direct_evidence_complete`) plus source-bound findings. Runtime derives
-`coverage` and final status from those values, so descriptive model prose
-cannot enter closed enum fields. No evidence is not treated as target conflict;
-only observed evidence that contradicts the answer target sets that flag.
-Each finding's own `direct` value is also enforced. One direct finding cannot
-upgrade another explicitly adjacent finding merely because the round-level
-`has_direct_evidence` flag is true.
-Findings without an observed safe URL cannot become direct supported claims.
-For ordinary, low-risk discovery such as events, restaurants, and itinerary
-ideas, evidence relevance is separate from source authority. A matching public
-organizer, venue, shop, ticketing, Instagram, Facebook, or Threads announcement
-can be direct evidence when it contains the requested activity/date/place
-details. A non-official source lowers confidence or adds a change-warning; it
-does not by itself turn target-matching evidence into adjacent background.
-Academic/high-stakes evidence thresholds are not applied to casual discovery.
-When an insufficient result still contains source-bound adjacent findings, the
-deterministic fallback may show those items explicitly as possibly relevant;
-it must keep the limitation and must not upgrade them to direct facts.
-
-Saved Public Ayue assistant messages include the opaque 32-hex `agent_run_id`
-in message metadata. This identifier contains no prompt, arguments, evidence,
-or domain authority, and lets localhost diagnostics correlate a visible reply
-with its exact ephemeral run while that run remains available.
-
-## Places and Web collaboration hardening
-
-Places remains the owner of nearby discovery and structured map cards. When a
-request contains a current or public criterion that Places cannot answer, the
-Planner may create `places -> web -> synthesizer`. The Web task receives at
-most five privacy-safe candidate summaries and server-owned current-turn
-`place_candidate_*` references. Web findings, source URLs, and Synthesizer
-card selection must retain that subject binding; name matching is forbidden.
-For a new public activity plus a full-day plan, the Planner may instead create
-`web -> places -> web -> synthesizer`: the first Web task finds one
-direct-supported activity, Places uses its typed venue observation as the
-anchor, and the second Web task verifies only the bounded place candidates.
-The second Web decision also receives a bounded projection of upstream Web
-findings so activity date/location constraints are not lost between tasks.
-
-The Synthesizer keeps retrieval and presentation separate. Places may retrieve
-up to eight candidates, while a grounded recommendation normally selects two
-or three cards and never more than four unless the user explicitly requests a
-larger set. `grounded_recommendation` is a separate bounded presentation class
-(up to three bubbles, 1,400 characters per bubble, 3,600 characters total) and is
-not a transaction state. Web／Places prose may use the UI's safe Markdown subset
-(`###` headings, lists, numbering, bold and inline code). The UI builds DOM
-nodes without accepting model HTML or model-provided source links; typed source
-metadata remains the only clickable citation surface.
-When cards are shown, the optional `presentation_blocks` projection groups a
-Markdown fragment with at most one server-resolved `place_card_index`. The
-Markdown fragment keeps the user-facing place explanation and the card owns
-the map link; new responses do not emit `card_description`. The deprecated
-optional field remains accepted only for historical compatibility and is not
-rendered by the UI.
-`messages`, `reply`, `place_cards`, and `sources` remain backward-compatible projections, while
-source links and the final reminder stay in the last bubble.
-
-The requested Places radius is a hard server-side bound for both OpenStreetMap
-and Google candidates. Google Text Search location bias is not treated as
-enforcement; candidates outside the approved radius are removed before card
-projection or Web subject binding. Map URLs remain on typed place cards and
-are not published in the Web evidence/source section, because a map entity
-does not prove a current criterion such as opening hours.
-
-When candidate discovery succeeds but Web is unavailable or returns
-insufficient evidence, the Synthesizer does not spend another model call trying
-to manufacture a recommendation. It returns a Markdown candidate summary plus
-a natural limitation, keeps at most three nearby cards explicitly labelled as
-unconfirmed candidates, and never presents them as verified recommendations.
-Adjacent findings may be shown only under an explicit unconfirmed heading. If
-direct source-bound findings exist but composition fails, fallback card
-selection follows only those finding subject refs. For Web-only results,
-deterministic fallback must
-retain validated direct findings; an `answered` result may never collapse into
-a generic insufficient-information sentence merely because final composition
-failed.
-
-The public-reply language boundary converts model text to Traditional Chinese
-per line, retaining Markdown newlines and blank-line structure. The frontend
-renders only headings, lists, numbering, bold, and inline code through DOM
-nodes; it never inserts model HTML. This keeps Web/Places results readable
-without allowing formatting to become an injection surface.
-
-### Directional match-copy projection
-
-Match explanations are generated and stored per viewer/counterparty direction.
-`match_reason_style_id` deterministically selects one of five approved few-shot
-styles from the pair IDs and creation-context revision; the selected style is
-stored internally with the proposal, while public cards expose only one
-viewer-bound reason. V7 provider calls return separate
-`other_sentence`/`viewer_bridge_sentence`/`ask_sentence` fragments. The server
-validates each fragment against the correct person's snapshot and composes
-`viewer_text`, so a counterparty's recent context cannot be swapped into the
-viewer direction. Invalid or older stored output uses the same selected-style
-fallback. Reprojection is read-only for live proposals; accepted/declined
-history is never rewritten.
+修改 runtime contract、tool list、state machine、stream/debug envelope 或 environment flag 時，必須同步更新本文件、interfaces 文件與對應 domain 文件。

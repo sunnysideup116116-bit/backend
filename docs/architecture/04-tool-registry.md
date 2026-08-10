@@ -27,7 +27,7 @@
 | 工具 | executor_key | Planner 參數 | 回傳（output_model） | argument_source |
 | --- | --- | --- | --- | --- |
 | `system.get_current_time` | `current_time` | 無 | clock（台北時間＋相對日期） | NONE |
-| `calendar.list_my_events` | `calendar_events` | `start_date`/`end_date`（YYYY-MM-DD，可含過去；不填預設未來 90 天）、相容欄位 `date`/`range_label` | events[]（date/start_time/end_time/activity/status）+ range | PLANNER_GROUNDED |
+| `calendar.list_my_events` | `calendar_events` | `start_date`/`end_date`（YYYY-MM-DD，可含過去；不填預設未來 90 天）；`date`/`range_label` 僅為舊 provider compatibility input | events[]（date/start_time/end_time/activity/status）+ range | PLANNER_GROUNDED |
 | `calendar.get_next_my_event` | `calendar_next_event` | 無 | 最近 90 天唯一下一筆有效行程或 not_found | NONE |
 | `calendar.verify_recent_mutation` | `calendar_mutation_verification` | 無 | 最近一次 calendar mutation 的 verified outcome | NONE |
 | `calendar.find_my_event` | `calendar_event_find` | `event_hint`、`date_hint`、`companion_hint`、`limit`(1–30) | found/not_found/ambiguous + candidates[]（含 companion 公開名稱） | PLANNER_GROUNDED |
@@ -69,7 +69,7 @@
 ## 5. 執行與驗證流程
 
 ```text
-sub-agent LLM function calling 輸出 {tool_name, arguments}
+proposal runner 或 specialist runtime 產生 {tool_name, arguments}
   → base.py: _repair_categories（僅 places.search_nearby）
   → planner_arguments_allowed(spec, args)（planner schema 驗證）
   → ToolProposal（攔截 FORBIDDEN_ARG_FIELDS）
@@ -78,7 +78,7 @@ sub-agent LLM function calling 輸出 {tool_name, arguments}
   → 寫入: prepare_write_confirmation（preflight）→ pending → 確認後 execute_write
 ```
 
-相同 `tool + normalized arguments` 在同一 sub-task 內不得重跑：`tool_call_key(spec, safe_args)`（executor 參數的排序 JSON）在 lock 內檢查並加入 `seen_keys`。每個 sub-agent 最多三個唯讀步驟；每回合最多一筆待確認副作用（calendar 例外：同 sub-task 多筆可合併進同一 confirmation 的 `batch` 欄位）。
+相同 `tool + normalized executor arguments` 在同一 Public run 內不得重跑：`tool_call_key(spec, safe_args)`（executor 參數的排序 JSON）在 lock 內檢查並加入 shared `seen_keys`。唯讀上限依 task id 計算，每個 task 最多三步；每回合最多一筆待確認副作用。Calendar 的一至十筆 commands 是同一個 `calendar.submit_commands` proposal 與同一筆 confirmation，不是額外 write-budget 例外。
 
 ## 6. 新增工具檢查清單
 
@@ -97,7 +97,7 @@ sub-agent LLM function calling 輸出 {tool_name, arguments}
 4. `write_executors.py` 註冊執行器（preflight + execute）。
 5. 加入重複請求、stale revision、雙方並發、終態不可覆寫與 effect failure tests。
 
-修改 runtime contract、tool list 或 state machine 時，必須同步更新 `AYUE_V3_ARCHITECTURE.md` 與本文件。
+修改 runtime contract、tool list 或 state machine 時，必須同步更新 `AYUE_V3_ARCHITECTURE.md`、`09-runtime-interfaces.md` 與本文件。
 
 ## Current Calendar Agent mutation contract
 

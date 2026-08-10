@@ -45,7 +45,7 @@ direct_chat (routers/public_chat.py)
 
 ### 階段 1：Planner 拆解（LLM）
 
-`planner.py:plan_turn` 用單一 `decompose_tasks` function calling，模型輸出的 tool call arguments 就是 typed `Plan`。Planner **只輸出靜態子任務 DAG**：每個 `SubTask` 有 `id`、`agent`（calendar/places/web/match/relationship/profile/synthesizer）、`depends_on`、`task_brief`。
+`planner.py:plan_turn` 用單一 `decompose_tasks` function calling，模型輸出的 tool call arguments 就是 typed `Plan`。Planner 正常輸出 bounded `direct_chat`，或一張靜態子任務 DAG：每個 `SubTask` 有 `id`、`agent`（calendar/places/web/match/relationship/profile/product_info/synthesizer）、`depends_on`、`task_brief`；只有 Web 可再帶 `evidence_policy`。
 
 `Plan` 的 DAG 驗證（`contracts.py`，純程式碼）：
 
@@ -55,21 +55,18 @@ direct_chat (routers/public_chat.py)
 
 Planner 無效（無 tool call、名字錯誤、schema 不符、逾時）→ **fail closed**：回「我現在沒辦法判斷這個請求要不要執行」，不執行任何工具。
 
-產品身份／入口問題使用 typed `mode="product_info"` 與最多三個
-`product_info_topics`，由 Scheduler 直接投影 versioned capability manifest；
-不使用自然語言 regex 重新路由，也不建立 domain task。Public 與 Private 是
-同一位阿月的不同 bounded surface，Private 訊息不自動回流 Public profile/memory。
+產品身份／入口問題建立正常的 `product_info -> synthesizer` DAG。ProductInfoAgent 自己理解 `task_brief`、最多做兩輪 allowlisted knowledge retrieval，回傳 `product_info.v1` observation；Scheduler 不知道 section taxonomy，也不直接組產品答案。`mode="product_info"`／`product_info_topics` 只在 contract boundary 接受舊 provider payload，執行前立即正規化成 DAG，新 Planner 不會產生它。Public 與 Private 是同一位阿月的不同 bounded surface，Private 訊息不自動回流 Public profile/memory。
 
 ### 階段 2：拓撲分層執行 sub-agents
 
 `_topological_layers` 依 `depends_on` 把 task 分成層；同層用 `ThreadPoolExecutor` 平行執行（`AYUE_SUBAGENT_MAX_PARALLEL` 預設且硬上限 2），有依賴的層依序執行。
 
-每個 task 由 `_run_sub_task` 執行：
+每個 task 由 `_run_sub_task` 執行，Scheduler 只透過 `RuntimeRegistration` 呼叫統一 runner interface：
 
 1. `slice_for_agent(task.agent, turn, prior_observations)` 切出該 agent 的 privacy-safe context slice（見下方 §4）。
-2. 呼叫該 sub-agent（如 `sub_agents/calendar_agent.py`），內部是 `base.py:run_sub_agents`：組 tools（依 registry schema）、組 prompt、`generate_chat_completion_with_tools(temperature=0)`。
-3. 解析**所有** tool calls 成 `ToolProposal`（模型一次回覆多個呼叫時全部保留，一個失敗不丟棄其他）；`places.search_nearby` 的 categories 會先做 deterministic repair。
-4. 每個 proposal 依序：Guard → 注入 executor 參數 → 去重檢查 → 執行工具。
+2. Runner 回 `TaskRunnerResult`，且恰好是兩種形狀之一：一般 function-calling agent 回 `proposals`；Calendar、Web、ProductInfo 等 specialist runtime 回 `completed_results`。
+3. Proposal runner 解析**所有** tool calls 成 `ToolProposal`（模型一次回覆多個呼叫時全部保留，一個失敗不丟棄其他）；`places.search_nearby` 的 categories 會先做 deterministic repair。
+4. 每個 proposal 依序：Guard → 注入 executor 參數 → 去重檢查 → 執行工具。Completed specialist result 已由 owning runtime 完成 bounded interpretation/typed assembly，Scheduler 不再重新解讀 domain state。
 
 依賴失敗的 task 會被標記 `SKIPPED (dependency_failed)`，不會執行。
 
@@ -149,6 +146,7 @@ Calendar Agent 提出 `calendar.submit_commands` typed command batch
 | match | message、recent_messages、active_proposal、latest_match_outcome、clock、prior_observations |
 | relationship | message、recent_messages、mentioned_contacts、mentioned_contact_overflow、clock、prior_observations |
 | profile | message、recent_messages、recent_context、relevant_memories、clock、prior_observations |
+| product_info | bounded message、最近 4 則訊息、server-owned product knowledge catalog；不含 profile/calendar/relationship private state |
 | synthesizer | message、recent_messages、recent_context、user_location、clock、observations |
 
 `PublicAgentTurnContext`（`context.py:build_public_agent_turn_context` 組建）的總體限制：最近 12 則訊息、合計 6000 字元；近期記憶最多 8 筆；prompt 不含 `seed_user_*`、Mongo document、未公開 ID、對方私人記憶或行事曆內容。

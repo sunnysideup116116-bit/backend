@@ -28,7 +28,7 @@ Planner (LLM, 拆 DAG)
 | --- | --- | --- | --- |
 | 1 | 工具註冊 | tool 名稱存在於 `TOOL_REGISTRY` | `tool_not_registered` |
 | 2 | Schema 驗證 | arguments 通過該工具的 `planner_arguments_model`（`planner_arguments_allowed`） | `schema_invalid` |
-| 3 | 重複呼叫 | 同 sub-task 內沒有執行過相同 `tool + arguments`（`tool_call_key` 以 executor 參數的排序 JSON 計算） | `duplicate_call` |
+| 3 | 重複呼叫 | 同一 Public run 的 shared `seen_keys` 內沒有相同 `tool + normalized arguments`（執行前再以 executor arguments lock re-check） | `duplicate_call` |
 | 4 | 步數上限 | 該 agent 的唯讀呼叫次數 < `max_reads`（`AYUE_SUBAGENT_MAX_READS`，預設 3） | `step_limit_exceeded` |
 | 5 | 寫入確認 | READ 工具直接通過；**WRITE 工具一律拒絕**，改由 Scheduler 或 domain runtime 建立 confirmation | `write_requires_confirmation` |
 
@@ -45,7 +45,7 @@ Planner (LLM, 拆 DAG)
 | arguments 的「內容正確性」 | 例如日期合不合理、地點存不存在——那由 tool facade 與 domain service 判斷 |
 | ID/revision 的實際值 | Guard 只確保模型**沒有**提供；值的注入與 CAS 是 Scheduler／executor 的事 |
 | 隱私投影 | context slice（`context_slicer.py`）在 Guard 之前已切好，工具輸出驗證在 Guard 之後由 `output_model` 做 |
-| 平行去重跨 task | duplicate 範圍是「同 sub-task」；平行任務之間不互相去重（`scheduler._run_one` 每個 task 各自 `task_seen`） |
+| Domain semantic equivalence | Guard 只比較 `tool_call_key`，不猜兩句自然語言是否等價；shared `seen_keys` 會跨同一 Public run 的 tasks 阻擋完全相同 key |
 
 ## 4. Guard 被拒絕之後（runtime 的處理）
 
