@@ -1662,6 +1662,15 @@ def run_public_agent_turn_v3(
             run_id, "run_started", agent_run_id=run_id,
             clock=clock.model_dump(mode="json"),
         )
+        continuity = turn.conversation_continuity or {}
+        summary = continuity.get("summary") if isinstance(continuity, dict) else {}
+        summary = summary if isinstance(summary, dict) else {}
+        append_debug_event(
+            run_id, "conversation_context_loaded", surface="public",
+            enabled=bool(continuity), revision=int(continuity.get("revision", 0) or 0) if isinstance(continuity, dict) else 0,
+            item_count=sum(len(value) for value in summary.values() if isinstance(value, list)),
+            char_count=sum(len(str(item)) for value in summary.values() if isinstance(value, list) for item in value),
+        )
     _emit_progress(on_progress, "run_started", trace=trace, agent_run_id=run_id)
 
     _print_separator("V3 RUN START")

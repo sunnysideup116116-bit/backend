@@ -109,6 +109,7 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.save_message", side_effect=[
                  {"message_id": "owner-message"}, {"message_id": "assistant-message"},
              ]) as save_message, \
+             patch("routers.public_chat.queue_conversation_compaction_shadow") as queue_compaction, \
              patch("routers.public_chat.queue_profile_skills", return_value="on") as queue_profile, \
              patch("routers.public_chat.profiles_coll.update_one"), \
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
@@ -134,6 +135,27 @@ class AyueAgentStreamTests(unittest.TestCase):
         self.assertEqual(response["reply"], "嗨。")
         self.assertTrue(response["profile_update_pending"])
         self.assertRegex(response["profile_process_run_key"], r"^[0-9a-f]{32}$")
+        queue_compaction.assert_called_once_with(ANY, "owner", "room")
+
+    def test_public_fallback_turn_does_not_enqueue_compaction(self):
+        req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="hello")
+        history_cursor = MagicMock()
+        history_cursor.sort.return_value.limit.return_value = []
+        with patch("routers.public_chat.generate_room_id", return_value="room"), \
+             patch("routers.public_chat.save_message", side_effect=[
+                 {"message_id": "owner-message"}, {"message_id": "assistant-message"},
+             ]), \
+             patch("routers.public_chat.queue_conversation_compaction_shadow") as queue_compaction, \
+             patch("routers.public_chat.queue_profile_skills", return_value="off"), \
+             patch("routers.public_chat.profiles_coll.update_one"), \
+             patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
+             patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
+             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
+                 handled=True, reply="retry", agent_run_id="b" * 32, agent_mode="v3",
+                 fallback_reason="planner_invalid",
+             )):
+            _run_public_stream_turn(req, BackgroundTasks(), lambda _event: None)
+        queue_compaction.assert_not_called()
 
     def test_assessment_answer_does_not_enter_profile_extractor_and_returns_state(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="我偏好先規劃好")

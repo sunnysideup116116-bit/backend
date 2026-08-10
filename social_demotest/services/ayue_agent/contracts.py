@@ -82,6 +82,9 @@ class PublicAgentTurnContext(BaseModel):
     recent_context: str = ""
     user_location: str = ""
     relevant_memories: list[str] = Field(default_factory=list)
+    # Optional validated continuity projection. It is absent while the rollout
+    # gate is off and never contains raw transcript or canonical IDs.
+    conversation_continuity: dict[str, Any] | None = None
     active_proposal: dict[str, Any] | None = None
     latest_match_outcome: dict[str, Any] | None = None
     calendar_draft: dict[str, Any] | None = None

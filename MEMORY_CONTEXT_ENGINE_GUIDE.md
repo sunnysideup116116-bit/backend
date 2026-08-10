@@ -339,3 +339,39 @@ successful write or as a generic pipeline crash. The local Demo Graph reset is
 explicitly guarded and returns no raw Graph data. Full Demo reset clears Graph,
 Mongo app collections, and process-local fallback state in a fixed order; it
 does not promise cross-store rollback.
+
+## Public conversation continuity implementation
+
+The existing owner-only profile extractor remains the long-term-memory source
+of truth. `profile_processing_ledger` adds message-id idempotency, leases,
+retry limits, and bounded coverage metrics; a conversation summary is never
+used as memory evidence. `conversation_compactions` is the last-good rolling
+read projection. Each accepted revision merges the previous validated summary
+with a bounded new message batch. A rejected candidate neither overwrites the
+summary nor advances the covered-message watermark. Accepted immutable
+snapshots are retained for 30 days in `conversation_compaction_revisions`.
+
+Compaction runs only when `AYUE_CONVERSATION_COMPACTION_MODE=shadow`. A
+summary is injected only after deterministic validation and an independent
+public/private gate is enabled. The private adapter receives only
+`active_topics`, `owner_goals`, `known_continuity`, and
+`unresolved_questions`.
+
+The trigger uses high/low watermarks: start above 30 uncompacted messages and
+retain the newest 12 raw messages. `conversation_compaction_jobs` enforces one
+owner-scoped worker lease and coalesces duplicate triggers. Failed candidates
+have a five-minute retry cooldown, and foreground fallback turns do not enqueue
+new compaction model work. `AYUE_COMPACTION_MODEL` can select a dedicated model;
+otherwise the configured fast chat model is used.
+
+The loopback-only manual Shadow trigger may skip the automatic 30-message high
+watermark and failed-job cooldown for local iteration. It still retains the
+newest 12 messages and does not bypass the owner-scoped lease, privacy
+selection, evaluation, or last-good write policy. Automatic triggers continue
+to enforce both the high watermark and cooldown.
+
+Use `python scripts/inspect_conversation_context.py --user-id <id>` for a
+bounded local snapshot, including job/cooldown and accepted status;
+`--metrics-only` reports aggregate pass-rate and active-job monitoring,
+and `--trigger-shadow` to enqueue the normal threshold-based batch. The
+inspector is loopback-only and unavailable unless `AYUE_LOCAL_DEBUG_TRACE=on`.
