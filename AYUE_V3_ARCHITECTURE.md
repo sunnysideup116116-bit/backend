@@ -45,6 +45,7 @@ HTTP adapter
 | Guard adapter | `services/ayue_agent/v3/guarded_execution.py` | Guard→executor args→typed tool；Web URL binding |
 | Calendar runtime | `services/ayue_agent/v3/calendar_runtime.py` | clarification、draft/reference、reads、commands、preflight、confirmation preparation |
 | Web runtime | `services/ayue_agent/v3/web_runtime.py` | bounded research/finish phases 與 `web_research.v1` assembly |
+| Relationship runtime | `services/ayue_agent/v3/relationship_runtime.py` | 一般 read proposal 與 date-card write-intent 的受限 dispatch |
 | ProductInfo | `services/ayue_agent/v3/sub_agents/product_info_agent.py` | bounded allowlisted product knowledge 與 `product_info.v1` observation |
 | Guard | `services/ayue_agent/v3/guard.py` | 純程式碼 registry/schema/duplicate/budget/write-confirmation validation |
 | Tool registry | `services/ayue_agent/tool_registry.py` | ToolSpec、三層 schema、risk、argument source、progress |
@@ -81,7 +82,8 @@ Scheduler 先處理：
 Planner 只呼叫 `decompose_tasks`：
 
 - `mode="direct_chat"`：不需要 App/domain/private/external truth 的 bounded conversational reply。
-- `mode="tasks"`：1–4 個 `SubTask`，最多三個 domain tasks，恰好一個 terminal synthesizer。
+- `mode="tasks"`：1–5 個 `SubTask`，最多四個 domain tasks，恰好一個 terminal synthesizer。
+- `write_intent` 是 provider-required typed decision：一般請求為 `none`；約會邀請卡為 `relationship.date_invitation.v1`，且 canonical contract 只接受 `relationship -> synthesizer`，不接受 Match 或其他 precheck。
 
 Agent allowlist：
 
@@ -89,19 +91,27 @@ Agent allowlist：
 calendar | places | web | match | relationship | profile | product_info | synthesizer
 ```
 
-`task_brief` 保存目標與限制，不是 tool arguments。只有 Web 可帶 `evidence_policy=casual_discovery|strict_verification`。
+`task_brief` 保存目標與限制，不是 tool arguments。只有 Web 可帶 `evidence_policy=casual_discovery|strict_verification`；Calendar availability task 可帶 `outcome_contract=calendar.availability.v1`，下游可用 bounded `run_if` control edge 等待結果而不接收 Calendar observation。
+
+Planner 只有在下游會消費上游 typed observation、candidate ref 或其他明確 contract 時才建立 `depends_on`；獨立請求放在同一層平行執行，不為了排列順序製造依賴。需要等待但不傳遞資料時使用 bounded `run_if` control edge。
+
+Planner 使用 compact prompt projection：保留最近 4 則且最多 2,000 字元的歷史，移除已在 `message` 中重複的最新 user message；clock 只投影本地日期／時間、時區、星期與實際出現的相對日期 reference。缺少的 optional state 不送入 prompt，active proposal 不包含 revision。這只縮短 Planner input，不改 PublicAgentTurnContext 的全域 12 則／6,000 字元 budget 或其他 specialist slice。
+
+目前 compact-v3 prompt 將「具體日期＋從既有聯絡人挑一位＋新活動＋附近晚餐」明定為 `calendar`、平行 gated 的 `relationship`／`web`、依賴 Web activity venue 的 `places`，以及 terminal `synthesizer`。任一子需求需要 domain state 或 external truth 時，整回合不得使用 direct chat 或 provider-authored synth-only plan。Planner schema 失敗最多重試一次，並只附加欄位級 allowlisted 修正提示；無效／空 DAG 不靜默降級成 Synthesizer-only。
 
 舊 provider 可能送出 task-free `mode="product_info"`／`product_info_topics`；compatibility boundary 只把它正規化成 `product_info -> synthesizer` DAG。新 Planner、fixture 與文件不得產生舊 envelope。
 
+Provider compatibility normalization 只處理已列入 allowlist 的編碼漂移：known agent 上錯置但值合法的 `evidence_policy`／Calendar `outcome_contract`、精確空 placeholder，以及 Relationship 將 `relationship.date_invitation.v1` 放錯到 `outcome_contract` 的單一 relocation case。Unknown agent、非空無效值、graph／DAG invariant 與衝突 intent 仍 retry once 後 fail closed；repair code 只進 localhost ephemeral debug。Compact-v3 system prompt ≤6,000 字元、provider schema ≤3,500 字元、合計 ≤9,500 字元。
+
 ### 4.4 DAG execution
 
-Scheduler 依 dependency 做 topological layers；同層最多平行 2 個 task。每個 domain task：
+Scheduler 依 data dependency 與 `run_if` control edge 做 topological layers；同層最多平行 2 個 task。每個 domain task：
 
 1. `context_slicer.py` 產生最小 `AgentContextSlice`。
 2. 透過 `RuntimeRegistration` 呼叫統一 runner。
 3. Runner 回 `TaskRunnerResult.proposals` 或 `completed_results`，兩者恰好一種。
 4. Proposal 逐筆走 Central Guard 與 typed tool；completed result 由 owning specialist runtime 完成 bounded interpretation/assembly，Scheduler 不重做 domain 判斷。
-5. 依賴沒有成功 observation 的下游 task 標記 `SKIPPED/dependency_failed`。
+5. 依賴沒有成功 observation 的下游 task 標記 `SKIPPED/dependency_failed`；`run_if` 不符合或來源無法產生 outcome 時標記 `condition_not_met`／`condition_unavailable`，不啟動 runner。
 
 正式 runner interface：
 
@@ -110,13 +120,17 @@ run(context_slice, *, task, services)
     -> tuple[TaskRunnerResult, SubAgentMetrics | None]
 ```
 
-目前 completed specialist runtimes 是 Calendar、Web、ProductInfo；Places、Match、Relationship、Profile 使用 proposal runner。
+Calendar、Web、ProductInfo 回 completed results；Places、Match、Profile 使用 proposal runner。Relationship 透過自己的 runtime 依已驗證 `write_intent` 切換一般 READ 或 date-card WRITE proposal surface，兩者仍交由 Scheduler 中央 Guard。
 
 ### 4.5 Final composition
 
 一般 DAG 的 user-facing wording 只由 Synthesizer 產生。例外只限 server-owned deterministic outputs：confirmation、confirmed result、typed clarification、assessment lifecycle、安全/錯誤 fallback。
 
 Synthesizer 只能使用本回合 verified observations。Map URL、source URL、place candidate ref、Web source ref 由 server-owned catalog 綁定；模型不能新增未觀察到的 reference。
+
+格式提示依資訊量自適應：多候選、比較、步驟或清楚分組可用輕量 Markdown；簡單答案維持自然 prose，不要求 Places/Web/itinerary 固定標題。`presentation_mode="itinerary"` 只是 editorial hint，仍使用 ordinary compose contract。Server-owned mutation verification／pending preview 只有在 exclusive transaction 時 bypass Synthesizer；混合回合先組合其他 observations，再附加鎖定回覆，避免安全回覆丟失同回合結果。
+
+LLM routing 使用兩級模型：Planner 與 Places／Match／Relationship／Profile proposal runner 要求 `OLLAMA_FAST_CHAT_MODEL`（未設定時回退 main）；Calendar、Web、Synthesizer 使用 main；ProductInfo bounded path 不呼叫 LLM。Planner 對 function-call protocol failure 最多 retry 一次；provider error 不重試，兩次仍失敗時 fail closed。`llm_call_count` 由每個 owner 真實累計，Scheduler 以 metrics 加總，不以 agent 節點數猜測；retry/failure attempt details 只存在 localhost ephemeral debug。
 
 `compose_public_reply.presentation_class` 的正式 enum 不變。Synthesizer boundary 只對 provider drift 做窄幅相容：舊的 `itinerary` 正規化為 `grounded_recommendation`，其他未知值改用既有安全預設 `conversation`，避免丟棄其餘已通過驗證的自然文字。這項相容不放寬 candidate refs、Web URL/source refs、internal IDs 或 mutation authority 的驗證。
 
@@ -131,6 +145,8 @@ Synthesizer 只能使用本回合 verified observations。Map URL、source URL�
 - ProductInfo 不收到 owner profile/calendar/relationship private state。
 
 Public 與 Private 不交換完整 prompt/history。Private 只讀其 current accepted room 允許的 bounded relationship context；Private owner messages不自動進 Public profile/memory pipeline。
+
+Private V2 透過自己的 `PrivateAgentTurnContextV2` adapter 呼叫 `get_relationship_semantic_context(match_doc, pair_room)`，不使用 Public Context Builder。Planner 只取得 relationship role、macro summary、theme、action plan、dynamic bounds 與最多 20 筆 room-scoped triples；final composer 只取得 role、macro summary 與同一份 bounded triples。Raw semantic-plan document、未列入 projection 的 strategy 欄位與 Neo4j raw payload 不得進 prompt。Neo4j 讀取不可用時只可使用該 room 已保存的 bounded triples 或空集合，不得讀取其他 room 或 owner durable memory。
 
 ## 6. Tool Registry、Guard 與 budgets
 
@@ -149,12 +165,12 @@ Guard 檢查：
 - registered tool；
 - planner schema；
 - shared Public-run duplicate key；
-- per-task read budget（預設 3）；
+- per-task read budget（預設 3），以及每回合最多 9 次實際唯讀執行；
 - WRITE 一律回 `write_requires_confirmation`。
 
 同一 `tool + normalized executor arguments` 在同一 Public run 不重跑。每回合最多建立一筆 pending side effect。
 
-目前 22 個 capabilities：18 READ、4 WRITE。完整表見 [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)。
+目前 23 個 capabilities：18 READ、5 WRITE。完整表見 [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)。
 
 ## 7. Confirmation 與 writes
 
@@ -170,6 +186,7 @@ WRITE proposal / Calendar command batch
 
 目前 WRITE capabilities：
 
+- `relationship.start_date_coordination`
 - `match.start_search`
 - `match.decide_active_proposal`
 - `profile.start_assessment`
@@ -177,21 +194,27 @@ WRITE proposal / Calendar command batch
 
 Calendar mutation 只使用 `calendar.submit_commands`。一至十筆 authority-free commands 可形成一筆 confirmation；Calendar Runtime resolve canonical target 一次，建立不進 LLM 的 `CalendarMutationPlan`。舊 create/update/cancel tool names 不再註冊，stale confirmation fail closed。
 
+`relationship.start_date_coordination` 只在 validated `write_intent="relationship.date_invitation.v1"` 的精確 `relationship -> synthesizer` DAG 可見。Relationship Runtime 接受 mention、連續原句 name evidence 或同 owner 15 分鐘 recent-contact reference，僅在唯一 accepted contact 可解析時建立一筆確認；確認後透過 `date_coordination_service.create_invite` 建立空白卡片，日期、地點與活動由雙方之後填寫。Target ID、revision 與 resolution metadata 不進 prompt、trace 或 public events。
+
 ## 8. Domain specialists
 
 ### Calendar
 
 擁有本人的行程 reads、typed mutation commands、15 分鐘 draft/recent-reference、deterministic preflight 與 post-mutation verification。不可讀對方行事曆。共同約會的 mutation 仍由 `date_coordination_service.py` 處理雙方同步與通知。
 
+具體日期的個人外出建議可建立 `calendar.availability.v1` 唯讀 precheck；成功時只由 Calendar Runtime 產生 `calendar.no_scheduled_events` 或 `calendar.has_scheduled_events` allowlisted outcome。Scheduler 只評估 `run_if`，不解析 events，也不把控制 edge 的行程內容傳給其他 domain。availability task 僅允許一次 `calendar.list_my_events`，失敗不偽造 availability outcome。
+
 ### Places
 
-只擁有 structured nearby search、hours、price、rating、walking、distance 與 provider-neutral place projection。Search radius 對 OSM 與 Google 都是 hard bound；保存位置只允許粗粒度城市／行政區。Places 可直接處理這些結構化地點事實；只有優惠、特殊菜單、活動、臨時歇業公告、社群貼文等無法由 Places 欄位建立的目前公開主張才由獨立 Web task 查證。Public place-card rendering 由 `AYUE_PUBLIC_PLACE_CARDS_ENABLED` 控制，目前 demo 預設關閉；關閉時 candidate refs、provider IDs、map URLs 與 Web grounding 仍只在 server-side runtime 內保留。
+只擁有 structured nearby search、hours、price、rating、walking、distance 與 provider-neutral place projection。Search radius 對 OSM 與 Google 都是 hard bound；保存位置只允許粗粒度城市／行政區。`search_nearby` 可選 `rating|hours|price|walking` enrichment，`resolve_place` 可選前三者；預設不要求昂貴欄位，缺少或 partial price 不推測。Walking 以一筆 bounded Routes matrix 呼叫處理最多八個 destination，單一 element 失敗不拖垮其他候選；`measure_distance` 預設 `DRIVE`，明確要求時可用 `WALK`。只有優惠、特殊菜單、活動、臨時歇業公告、社群貼文等 Places 欄位無法建立的目前公開主張才由獨立 Web task 查證。Public place-card rendering 由 `AYUE_PUBLIC_PLACE_CARDS_ENABLED` 控制，目前 demo 預設關閉；關閉時 candidate refs、provider IDs、map URLs 與 Web grounding 仍只在 server-side runtime 內保留。
 
 ### Web
 
 Web Runtime 擁有 research/finish phases，research 最多三個 tool calls、extract 最多一次；finish-only phase 不消耗 Web tool budget。Web Agent 只依 `phase`／`available_actions` 行動，`round_index` 僅供診斷。
 
 Search rows 有獨立 projection cap；達到 search cap 不會停止掃描後續 observations，因此 late extract 仍可進 finalization。URL 必須綁定本回合搜尋結果或 owner 原句提供的安全公開 URL。
+
+`AYUE_V3_WEB_PLACE_BOOTSTRAP_FAST_PATH` 開啟且 task 為 `casual_discovery`、已有 Places candidates 時，runtime 可先經 Guard 對最多兩個 server-anchored candidates 搜尋，再進既有 bounded loop；strict verification、無候選與 Web disabled 不受影響。
 
 ### ProductInfo
 
@@ -201,6 +224,8 @@ ProductInfo 是 first-class read-only DAG specialist。它最多兩輪、最多�
 
 - Match 讀 canonical 的 singleton proposal/status／單一對象摘要，搜尋與決策走 confirmation/CAS；不擁有 accepted contacts aggregate 清單或總數。
 - Relationship 只讀 accepted relations 與 server 驗證 mentions 的 public projection；擁有已接受／已建立聯絡人的清單、總數、現有聯絡人比較與 bounded 範圍內的推薦。
+- Relationship 的唯一寫入面是建立空白約會邀請卡。它需要 Planner 的 typed write intent、最多兩次 function-call protocol attempt、唯一 accepted target 與一次 confirmation；一般 Relationship task 仍只看三個 READ functions。
+- Planner 依資料形狀分流這兩個 owner：「目前配到哪些人／總共幾位／現在有配到誰」仍是 Relationship aggregate；只有這一輪唯一 proposal 的搜尋、進度、狀態或決策才是 Match。Scheduler 不以中文 keyword／regex 重寫 route。
 - Profile 讀本人資料與 assessment start；owner memory extraction 由獨立 `profile_skills.py` pipeline 擁有，不由聊天 agent 寫入。
 
 ## 9. Match state
@@ -234,6 +259,7 @@ saved owner message
 - assistant reply、conversation history、tool result、match state 或對方資料不能成為 profile write source。
 - 已移除 `/api/memory/observe` 與主服務 direct Neo4j fallback；9001 failure 進 bounded outbox，不能改抓 raw data。
 - `semantic_plans`／room chat triples 是雙人關係 context，不自動轉成任一方 durable preference。
+- Relationship semantic updater 以尚未處理的 pair-room 訊息內容長度作 bounded budget proxy；累積未達 600 字元單位時不更新，不能只因短訊息數量多就觸發。更新後的 shared projection 才能由 Private V2 adapter 消費。
 - 未來 Context Engine 只能輸出 bounded versioned typed bundle，先做 owner/room/accepted-relation hard isolation，再做 ranking/budget/dedup。
 
 完整規則見 [`MEMORY_CONTEXT_ENGINE_GUIDE.md`](./MEMORY_CONTEXT_ENGINE_GUIDE.md)。
@@ -249,7 +275,7 @@ run_started | tool_started | tool_finished | final | error
 - Public UI 只顯示一個暫時 progress bubble；final/error/disconnect 時清除。
 - Progress、debug event、tool name 不存成聊天訊息。
 - `reply` 保留相容性；`messages` 最多三個；`place_cards`、`sources`、`presentation_blocks` 是 additive typed projection。`AYUE_PUBLIC_PLACE_CARDS_ENABLED` 關閉時，Places/Web 仍回傳文字或 Markdown，但 public result 不產生 place cards 或 card presentation blocks。
-- Debug 只對 loopback/localhost 開放，使用 `agent_run_id` 關聯 ephemeral run。Public trace 只存 allowlisted metadata，不存 prompt、owner 原句、arguments/result、raw exception、ID 或 revision。
+- Debug 只對 loopback/localhost 開放，使用 `agent_run_id` 關聯 ephemeral run。Execution debug 顯示各 owner 的 model/tier/call count、整回合 total、Planner retry/failure code 與 bounded attempts；Public trace 只存 allowlisted metadata，不存 prompt、owner 原句、arguments/result、raw exception、ID 或 revision。
 
 ## 12. Testing baseline
 
@@ -274,7 +300,7 @@ run_started | tool_started | tool_finished | final | error
 - [`docs/architecture/01-project-overview.md`](./docs/architecture/01-project-overview.md)：onboarding 與服務邊界。
 - [`docs/architecture/02-python-modules.md`](./docs/architecture/02-python-modules.md)：模組 owner map。
 - [`docs/architecture/03-v3-runtime-lifecycle.md`](./docs/architecture/03-v3-runtime-lifecycle.md)：單回合 lifecycle。
-- [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)：22 個 ToolSpec。
+- [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)：23 個 ToolSpec。
 - [`docs/architecture/05-matchmaker-and-memory.md`](./docs/architecture/05-matchmaker-and-memory.md)：9001、Neo4j 與 profile memory pipeline。
 - [`docs/architecture/06-testing.md`](./docs/architecture/06-testing.md)：測試策略。
 - [`docs/architecture/07-guard.md`](./docs/architecture/07-guard.md)：Central Guard。
@@ -283,20 +309,3 @@ run_started | tool_started | tool_finished | final | error
 - `docs/architecture/subagent-*.md`：各 domain specialist 的現行行為。
 
 修改 runtime contract、tool list、state machine、stream/debug envelope 或 environment flag 時，必須同步更新本文件、interfaces 文件與對應 domain 文件。
-
-### Places optional typed enrichment
-
-Places ordinary searches keep the base Google field mask. The existing Places
-tool contracts may opt into bounded `rating`, `hours`, `price`, or `walking` enrichments;
-`resolve_place` supports `rating`, `hours`, and `price`, and the empty enrichment
-list is the default. Rating/count and current-opening-hours fields are fetched
-only when the Places task requires them. Price requests fetch Google
-`priceLevel`/`priceRange` and omit missing or partial price data without inference.
-Walking candidate data is produced by
-one bounded Routes `computeRouteMatrix` call and is attached independently per
-destination; a failed matrix element does not fail the Places result.
-
-The existing `places.measure_distance` contract remains backward compatible
-with `DRIVE` as the default and accepts `WALK` for explicit requests. No
-Planner DAG, Scheduler, Web Runtime, Synthesizer presentation, or frontend card
-UI behavior changes as part of this enrichment surface.

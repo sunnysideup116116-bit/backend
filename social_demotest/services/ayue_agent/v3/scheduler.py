@@ -37,9 +37,10 @@ from services.assessment_session_service import (
     commit_assessment_session, expire_assessment_session,
 )
 from database import db
+from services.ai_service import get_effective_chat_model
 
 from .contracts import (
-    AgentContextSlice, GuardDecision, GuardResultCode, Plan, SubTask,
+    DATE_INVITATION_WRITE_INTENT, AgentContextSlice, GuardDecision, GuardResultCode, Plan, SubTask,
     SubTaskResult, SubTaskStatus, ToolProposal, normalize_plan_for_execution,
 )
 from .context_slicer import slice_for_agent
@@ -65,7 +66,6 @@ from .runtime_registry import (
 )
 from .sub_agents.places_agent import run as run_places
 from .sub_agents.match_agent import run as run_match
-from .sub_agents.relationship_agent import run as run_relationship
 from .sub_agents.profile_agent import run as run_profile
 from .sub_agents.product_info_agent import (
     after_run as product_info_after_run,
@@ -78,6 +78,7 @@ from .place_projection import (
     public_place_cards as _public_place_cards,
 )
 from . import web_runtime
+from . import relationship_runtime
 from .write_executors import execute_write, prepare_write_confirmation
 from .debug_trace import (
     append_event as append_debug_event,
@@ -89,6 +90,10 @@ from .debug_trace import (
 ProgressCallback = Callable[[dict[str, Any]], Any]
 MAX_READS = max(1, min(int(os.getenv("AYUE_SUBAGENT_MAX_READS", "3") or "3"), 3))
 MAX_PARALLEL = max(1, min(int(os.getenv("AYUE_SUBAGENT_MAX_PARALLEL", "2") or "2"), 2))
+# Four bounded domain tasks may now follow a Calendar precheck.  Preserve the
+# old worst-case ceiling of three reads per domain task while making the
+# ceiling explicit across the whole Public run.
+MAX_TOTAL_READS = 9
 _ASSESSMENT_START_CONFIRMATIONS = frozenset({"開始", "開始吧", "開始啊", "開始阿"})
 
 
@@ -210,11 +215,32 @@ def _print_separator(title: str) -> None:
     print(f"{'='*60}")
 
 
+def _metric_call_count(metrics: Any) -> int:
+    """Use measured provider calls, with compatibility for old test metrics."""
+    count = int(getattr(metrics, "llm_call_count", 0) or 0)
+    if count == 0 and bool(getattr(metrics, "used_llm", False)):
+        return 1
+    return count
+
+
+def _metric_model_name(metrics: Any) -> str:
+    tier = str(getattr(metrics, "requested_model_tier", "main") or "main")
+    if tier == "none":
+        return "none (deterministic)"
+    return get_effective_chat_model(requested_model_tier=tier)
+
+
 def _print_llm_metrics(label: str, metrics: Any) -> None:
     inp = getattr(metrics, "input_tokens", 0)
     out = getattr(metrics, "output_tokens", 0)
     dur = getattr(metrics, "duration_ms", 0)
-    print(f"  [{label}] input_tokens={inp}  output_tokens={out}  duration={dur}ms")
+    tier = str(getattr(metrics, "requested_model_tier", "main") or "main")
+    model = _metric_model_name(metrics)
+    calls = _metric_call_count(metrics)
+    print(
+        f"  [{label}] model={model}  tier={tier}  llm_calls={calls}"
+        f"  input_tokens={inp}  output_tokens={out}  duration={dur}ms"
+    )
     total = inp + out
     print(f"  [{label}] total_tokens={total}")
 
@@ -264,7 +290,7 @@ _SUB_AGENT_RUNNERS = {
     "places": RuntimeRegistration(runner=proposal_runner(run_places)),
     "web": RuntimeRegistration(runner=web_runtime.run),
     "match": RuntimeRegistration(runner=proposal_runner(run_match)),
-    "relationship": RuntimeRegistration(runner=proposal_runner(run_relationship)),
+    "relationship": RuntimeRegistration(runner=relationship_runtime.run),
     "profile": RuntimeRegistration(runner=proposal_runner(run_profile)),
     "product_info": RuntimeRegistration(
         runner=run_product_info,
@@ -288,7 +314,12 @@ def _topological_layers(plan: Plan) -> list[list[SubTask]]:
     layers: list[list[SubTask]] = []
     remaining = list(plan.tasks)
     while remaining:
-        ready = [t for t in remaining if all(dep in done for dep in t.depends_on)]
+        ready = [
+            t for t in remaining
+            if set(t.depends_on)
+            | ({t.run_if.source_task_id} if t.run_if is not None else set())
+            <= done
+        ]
         if not ready:
             break
         layers.append(ready)
@@ -307,7 +338,99 @@ def _observation_dict(task_id: str, result: "SubTaskResult") -> dict[str, Any]:
         "result": result.observation,
         "error_code": result.error_code,
         "skip_reason": result.skip_reason,
+        "outcome_codes": list(result.outcome_codes),
     }
+
+
+def _server_owned_date_coordination_reply(
+    task_results: dict[str, list[SubTaskResult]],
+) -> str | None:
+    """Keep a date-card preview authoritative over model composition."""
+    for results in task_results.values():
+        for result in results:
+            if result.status is not SubTaskStatus.OK:
+                continue
+            if result.tool_name != "relationship.start_date_coordination":
+                continue
+            observation = result.observation or {}
+            if observation.get("pending_confirmation"):
+                preview = str(observation.get("preview") or "").strip()
+                if preview:
+                    return preview
+    return None
+
+
+def _server_owned_date_coordination_failure_reply(
+    task_results: dict[str, list[SubTaskResult]],
+    *,
+    write_intent: str,
+) -> str | None:
+    """Return the fixed, bounded failure copy for the typed write runtime."""
+    if write_intent != DATE_INVITATION_WRITE_INTENT:
+        return None
+    for results in task_results.values():
+        for result in results:
+            failure = result.observation.get("failure") if isinstance(result.observation, dict) else None
+            if (
+                result.error_code == relationship_runtime.DATE_INVITATION_PROTOCOL_FAILURE_CODE
+                and isinstance(failure, dict)
+                and failure.get("code") == relationship_runtime.DATE_INVITATION_PROTOCOL_FAILURE_CODE
+            ):
+                return relationship_runtime.DATE_INVITATION_PROTOCOL_FAILURE_REPLY
+    return None
+
+
+def _server_owned_confirmed_date_reply(results: list[dict[str, Any]]) -> str | None:
+    """Keep the canonical write result from being rewritten into a claim."""
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        if result.get("tool_name") != "relationship.start_date_coordination":
+            continue
+        if not result.get("ok"):
+            continue
+        reply = str((result.get("data") or {}).get("reply") or "").strip()
+        if reply:
+            return reply
+    return None
+
+
+def _condition_skip_reason(
+    task: SubTask, task_results: dict[str, list[SubTaskResult]],
+) -> str | None:
+    """Evaluate a typed control edge after ordinary dependency checks.
+
+    Domain payloads are intentionally opaque here.  The Scheduler only reads
+    server-owned outcome codes from ``SubTaskResult`` and never inspects
+    Calendar event fields.
+    """
+    condition = task.run_if
+    if condition is None:
+        return None
+    source_results = task_results.get(condition.source_task_id, [])
+    if not source_results:
+        return "condition_unavailable"
+    if condition.required_outcome == "task.finished":
+        if any(result.status in {SubTaskStatus.OK, SubTaskStatus.FAILED} for result in source_results):
+            return None
+        return "condition_unavailable"
+
+    if any(result.status in {SubTaskStatus.SKIPPED, SubTaskStatus.FAILED} for result in source_results):
+        return "condition_unavailable"
+    successful = [result for result in source_results if result.status is SubTaskStatus.OK]
+    if len(successful) != 1:
+        return "condition_unavailable"
+    codes = {
+        code
+        for result in successful
+        for code in result.outcome_codes
+    }
+    required = condition.required_outcome
+    if required in codes and len(codes) == 1:
+        return None
+    if codes & {"calendar.no_scheduled_events", "calendar.has_scheduled_events"}:
+        return "condition_not_met"
+    return "condition_unavailable"
 
 
 def _failure_observation_from_tool_result(tool_result: Any) -> dict[str, Any] | None:
@@ -519,6 +642,8 @@ def _has_reusable_success(spec: Any, arguments: dict[str, Any], results: list[Su
 def _run_sub_task(
     task: SubTask, turn_ctx: Any, prior_observations: list[dict[str, Any]],
     *, seen_keys: set[tuple[str, str]], step_counts: dict[str, int],
+    read_budget_state: dict[str, int] | None = None,
+    planner_write_intent: str = "none",
     guard_lock: threading.Lock,
     on_progress: ProgressCallback | None, run_id: str, trace: dict[str, Any],
     debug_enabled: bool = False,
@@ -531,6 +656,8 @@ def _run_sub_task(
     read budget is counted per task id. Shared state is guarded by guard_lock,
     never held around LLM or tool calls.
     """
+    if read_budget_state is None:
+        read_budget_state = {"count": 0}
     context_slice = slice_for_agent(task.agent, turn_ctx, prior_observations=prior_observations)
     registration = registration_for(_SUB_AGENT_RUNNERS.get(task.agent))
     if registration is None:
@@ -561,11 +688,14 @@ def _run_sub_task(
         debug_enabled=debug_enabled,
         prior_observations=list(prior_observations),
         max_reads=MAX_READS,
+        global_read_count=read_budget_state,
+        global_max_reads=MAX_TOTAL_READS,
         create_confirmation=lambda **kwargs: ConfirmationManager(
             _CONFIRMATIONS
         ).create_confirmation(**kwargs),
         print_llm_metrics=_print_llm_metrics,
     )
+    guarded_executor.runtime_state["planner_write_intent"] = planner_write_intent
     guarded_executor.step_prefix = registration.step_prefix
     # Keep the existing Scheduler test/provider seam while the guarded
     # adapter remains the single execution boundary for every runtime.
@@ -602,13 +732,37 @@ def _run_sub_task(
     if runner_result.completed_results is not None:
         if registration.after_run is not None:
             registration.after_run(task, guarded_executor, runner_result, agent_metrics)
-        return list(runner_result.completed_results), agent_metrics
+        completed = list(runner_result.completed_results)
+        # Outcome codes are a server-owned control channel.  Only the
+        # Calendar availability runtime may populate them; a malformed or
+        # future specialist result cannot smuggle a branch signal into the
+        # Scheduler.
+        if task.outcome_contract != "calendar.availability.v1":
+            for item in completed:
+                item.outcome_codes = []
+        return completed, agent_metrics
 
     proposals = list(runner_result.proposals or [])
     if registration.after_run is not None:
         registration.after_run(task, guarded_executor, runner_result, agent_metrics)
 
     if not proposals:
+        if (
+            task.agent == "relationship"
+            and planner_write_intent == DATE_INVITATION_WRITE_INTENT
+        ):
+            failure_code = relationship_runtime.DATE_INVITATION_PROTOCOL_FAILURE_CODE
+            return [SubTaskResult(
+                task_id=task.id,
+                status=SubTaskStatus.FAILED,
+                error_code=failure_code,
+                observation={
+                    "failure": {
+                        "code": failure_code,
+                        "message": relationship_runtime.DATE_INVITATION_PROTOCOL_FAILURE_REPLY,
+                    },
+                },
+            )], agent_metrics
         error_code = (
             "sub_agent_invalid_proposal"
             if agent_metrics and agent_metrics.rejected_calls
@@ -752,9 +906,18 @@ def _run_sub_task(
                                               tool_name=proposal.tool_name,
                                               guard_code=GuardResultCode.STEP_LIMIT_EXCEEDED))
                 continue
+            if spec.risk is ToolRisk.READ and read_budget_state.get("count", 0) >= MAX_TOTAL_READS:
+                print(f"  [{task.id}#{index}] guard: Public run read budget exhausted")
+                trace["guard_results"].append(GuardResultCode.STEP_LIMIT_EXCEEDED.value)
+                results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED,
+                                              tool_name=proposal.tool_name,
+                                              guard_code=GuardResultCode.STEP_LIMIT_EXCEEDED,
+                                              error_code="public_read_budget_exhausted"))
+                continue
             seen_keys.add(key)
             if spec.risk is ToolRisk.READ:
                 step_counts[read_key] = step_counts.get(read_key, 0) + 1
+                read_budget_state["count"] = read_budget_state.get("count", 0) + 1
         step_id = f"{task.id}#{index}:{proposal.tool_name}"
         _emit_progress(on_progress, "tool_started", trace=trace, agent_run_id=run_id,
                         step_id=step_id, text=spec.progress_text,
@@ -803,6 +966,17 @@ def _run_sub_task(
                                           tool_name=proposal.tool_name, error_code=tool_result.error_code,
                                           observation=_failure_observation_from_tool_result(tool_result)))
             continue
+        private_data = tool_result.private_data or {}
+        relationship_reference = (
+            private_data.get("relationship_contact_reference")
+            if isinstance(private_data, dict) else None
+        )
+        if isinstance(relationship_reference, dict):
+            other_id = str(relationship_reference.get("other_id") or "")
+            safe_label = str(relationship_reference.get("safe_label") or "")
+            if other_id and safe_label:
+                from .relationship_references import remember_contact
+                remember_contact(turn_ctx.user_id, other_id, safe_label)
         _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
                         step_id=step_id, outcome="ok", tool_name=proposal.tool_name,
                         duration_ms=tool_duration_ms)
@@ -888,6 +1062,8 @@ def run_public_agent_turn_v3(
                     "reply": result.reply or "",
                     "fallback_reason": result.fallback_reason,
                     "agent_mode": result.agent_mode,
+                    "llm_call_count": int(trace.get("llm_call_count", 0) or 0),
+                    "llm_call_metrics": result.llm_call_metrics or [],
                 },
             )
         return result
@@ -1057,6 +1233,13 @@ def run_public_agent_turn_v3(
         )
         synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{"task_id":"confirm","status":"ok","tool":None,"result":results,"error_code":None,"skip_reason":None}])
         reply, _card_decision, synth_metrics = synthesizer.synthesize(synth_slice)
+        server_reply = _server_owned_confirmed_date_reply(results)
+        if server_reply:
+            reply = server_reply
+            synth_metrics.reply_source = "verified_observation"
+            synth_metrics.presentation_messages = [server_reply]
+            synth_metrics.presentation_blocks = None
+            synth_metrics.presentation_class = "transaction"
         _print_llm_metrics("synthesizer", synth_metrics)
         total_input_tokens += synth_metrics.input_tokens
         total_output_tokens += synth_metrics.output_tokens
@@ -1096,6 +1279,11 @@ def run_public_agent_turn_v3(
     total_output_tokens += planner_metrics.output_tokens
     if planner_metrics.error:
         print("  [planner] error=planner_failed")
+    if planner_metrics.failure_code:
+        print(
+            f"  [planner] failure_code={planner_metrics.failure_code}"
+            f" retry_count={planner_metrics.retry_count}"
+        )
 
     if debug_enabled:
         append_debug_event(
@@ -1105,21 +1293,38 @@ def run_public_agent_turn_v3(
             available_functions=planner_metrics.tools_raw or [],
             function_calls=planner_metrics.tool_calls_raw or [],
             content_raw=planner_metrics.raw_content,
+            prompt_version=planner_metrics.prompt_version,
             error=planner_metrics.error,
+            retry_count=planner_metrics.retry_count,
+            retry_reason=planner_metrics.retry_reason,
+            failure_code=planner_metrics.failure_code,
+            attempts=planner_metrics.attempts,
             metrics={
                 "input_tokens": planner_metrics.input_tokens,
                 "output_tokens": planner_metrics.output_tokens,
                 "duration_ms": planner_metrics.duration_ms,
+                "llm_call_count": _metric_call_count(planner_metrics),
+                "requested_model_tier": planner_metrics.requested_model_tier,
+                "model_name": _metric_model_name(planner_metrics),
+                "prompt_version": planner_metrics.prompt_version,
+                "retry_count": planner_metrics.retry_count,
+                "retry_reason": planner_metrics.retry_reason,
+                "failure_code": planner_metrics.failure_code,
             },
-            mode=planner_metrics.decision_mode or "tasks",
+            mode=planner_metrics.decision_mode,
             direct_chat_fallback_reason=planner_metrics.direct_chat_fallback_reason or None,
             product_info_fallback_reason=planner_metrics.product_info_fallback_reason or None,
         )
 
     if plan is None:
+        trace["llm_call_count"] = _metric_call_count(planner_metrics)
+        trace["total_input_tokens"] = total_input_tokens
+        trace["total_output_tokens"] = total_output_tokens
+        trace["latency_ms"] = round((time.perf_counter() - run_total_started) * 1000)
         print("\n  [planner] result=FAILED → fail closed")
         _print_separator("V3 RUN END")
         print(f"  total_tokens={total_input_tokens + total_output_tokens} (in={total_input_tokens} out={total_output_tokens})")
+        print(f"  [llm] total_calls={_metric_call_count(planner_metrics)}")
         return _finalize_debug(AgentResult(
             handled=True, reply=PUBLIC_PLANNER_INVALID_REPLY,
             agent_run_id=run_id, agent_mode="v3", fallback_reason="planner_invalid",
@@ -1155,7 +1360,7 @@ def run_public_agent_turn_v3(
         else:
             reply = "\n\n".join(direct_messages)
             trace["execution_mode"] = "direct_chat"
-            trace["llm_call_count"] = 1
+            trace["llm_call_count"] = _metric_call_count(planner_metrics)
             trace["total_input_tokens"] = total_input_tokens
             trace["total_output_tokens"] = total_output_tokens
             trace["latency_ms"] = round((time.perf_counter() - run_total_started) * 1000)
@@ -1171,7 +1376,13 @@ def run_public_agent_turn_v3(
                     "input_tokens": planner_metrics.input_tokens,
                     "output_tokens": planner_metrics.output_tokens,
                     "duration_ms": planner_metrics.duration_ms,
-                    "mode": "direct_chat",
+                    "call_count": _metric_call_count(planner_metrics),
+                    "requested_model_tier": planner_metrics.requested_model_tier,
+                    "model_name": _metric_model_name(planner_metrics),
+                    "retry_count": planner_metrics.retry_count,
+                    "retry_reason": planner_metrics.retry_reason,
+                    "failure_code": planner_metrics.failure_code,
+                     "mode": "direct_chat",
                 },
             )
             if debug_enabled:
@@ -1182,6 +1393,12 @@ def run_public_agent_turn_v3(
                         "input_tokens": planner_metrics.input_tokens,
                         "output_tokens": planner_metrics.output_tokens,
                         "duration_ms": planner_metrics.duration_ms,
+                        "call_count": _metric_call_count(planner_metrics),
+                        "requested_model_tier": planner_metrics.requested_model_tier,
+                        "model_name": _metric_model_name(planner_metrics),
+                        "retry_count": planner_metrics.retry_count,
+                        "retry_reason": planner_metrics.retry_reason,
+                        "failure_code": planner_metrics.failure_code,
                     },
                     prompt_raw=planner_metrics.prompt_raw,
                     content_raw=planner_metrics.raw_content,
@@ -1194,6 +1411,7 @@ def run_public_agent_turn_v3(
                 )
             _print_separator("DIRECT CHAT")
             print(f"  [direct_chat] reply={reply!r}")
+            print(f"  [llm] total_calls={_metric_call_count(planner_metrics)}")
             _print_separator("V3 RUN END")
             print(f"  total_tokens={total_input_tokens + total_output_tokens} (in={total_input_tokens} out={total_output_tokens})")
             _persist_trace(run_id, ctx, trace)
@@ -1209,6 +1427,9 @@ def run_public_agent_turn_v3(
                     "input_tokens": planner_metrics.input_tokens,
                     "output_tokens": planner_metrics.output_tokens,
                     "duration_ms": planner_metrics.duration_ms,
+                    "call_count": _metric_call_count(planner_metrics),
+                    "requested_model_tier": planner_metrics.requested_model_tier,
+                    "model_name": _metric_model_name(planner_metrics),
                     "mode": "direct_chat",
                 }],
             ))
@@ -1250,9 +1471,17 @@ def run_public_agent_turn_v3(
         "depends_on": t.depends_on,
         "task_brief": t.task_brief,
         **({"evidence_policy": t.evidence_policy} if t.agent == "web" else {}),
+        **({"outcome_contract": t.outcome_contract} if t.outcome_contract else {}),
+        **({"run_if": t.run_if.model_dump()} if t.run_if else {}),
     } for t in plan.tasks]
     trace["plan"] = [
-        {"id": t.id, "agent": t.agent, "depends_on": t.depends_on}
+        {
+            "id": t.id,
+            "agent": t.agent,
+            "depends_on": t.depends_on,
+            **({"outcome_contract": t.outcome_contract} if t.outcome_contract else {}),
+            **({"run_if": t.run_if.model_dump()} if t.run_if else {}),
+        }
         for t in plan.tasks
     ]
     for t in plan.tasks:
@@ -1263,6 +1492,12 @@ def run_public_agent_turn_v3(
                         "input_tokens": planner_metrics.input_tokens,
                         "output_tokens": planner_metrics.output_tokens,
                         "duration_ms": planner_metrics.duration_ms,
+                    "call_count": _metric_call_count(planner_metrics),
+                    "requested_model_tier": planner_metrics.requested_model_tier,
+                    "model_name": _metric_model_name(planner_metrics),
+                    "retry_count": planner_metrics.retry_count,
+                    "retry_reason": planner_metrics.retry_reason,
+                    "failure_code": planner_metrics.failure_code,
                     })
     if debug_enabled:
         append_debug_event(
@@ -1275,6 +1510,12 @@ def run_public_agent_turn_v3(
                 "input_tokens": planner_metrics.input_tokens,
                 "output_tokens": planner_metrics.output_tokens,
                 "duration_ms": planner_metrics.duration_ms,
+                "call_count": _metric_call_count(planner_metrics),
+                "requested_model_tier": planner_metrics.requested_model_tier,
+                "model_name": _metric_model_name(planner_metrics),
+                "retry_count": planner_metrics.retry_count,
+                "retry_reason": planner_metrics.retry_reason,
+                "failure_code": planner_metrics.failure_code,
             },
             prompt_raw=planner_metrics.prompt_raw,
             content_raw=planner_metrics.raw_content,
@@ -1284,6 +1525,7 @@ def run_public_agent_turn_v3(
 
     guard_lock = threading.Lock()
     step_counts: dict[str, int] = {}
+    read_budget_state: dict[str, int] = {"count": 0}
     seen_keys: set[tuple[str, str]] = set()
     task_results: dict[str, list[SubTaskResult]] = {}
 
@@ -1309,10 +1551,23 @@ def run_public_agent_turn_v3(
                                 input_tokens=0, output_tokens=0, duration_ms=0,
                                 tool_name=None)
                 return task, result, None
+            condition_skip = _condition_skip_reason(task, task_results)
+            if condition_skip is not None:
+                result = [SubTaskResult(task_id=task.id, status=SubTaskStatus.SKIPPED,
+                                        skip_reason=condition_skip)]
+                print(f"\n  [{task.id}] SKIPPED ({condition_skip})")
+                _emit_progress(on_progress, "subagent_finished", trace=trace, agent_run_id=run_id,
+                                task_id=task.id, agent=task.agent,
+                                status="skipped", error=condition_skip,
+                                input_tokens=0, output_tokens=0, duration_ms=0,
+                                tool_name=None)
+                return task, result, None
             prior = _prior_observations_for(task, task_results)
             try:
                 result, agent_metrics = _run_sub_task(task, turn, prior, seen_keys=seen_keys,
-                                        step_counts=step_counts, guard_lock=guard_lock,
+                                        step_counts=step_counts, read_budget_state=read_budget_state,
+                                        planner_write_intent=plan.write_intent,
+                                        guard_lock=guard_lock,
                                         on_progress=on_progress, run_id=run_id, trace=trace,
                                         debug_enabled=debug_enabled)
             except Exception as exc:
@@ -1331,7 +1586,10 @@ def run_public_agent_turn_v3(
                                 input_tokens=agent_metrics.input_tokens,
                                 output_tokens=agent_metrics.output_tokens,
                                 duration_ms=agent_metrics.duration_ms,
-                                tool_name=result[0].tool_name)
+                                tool_name=result[0].tool_name,
+                                llm_call_count=_metric_call_count(agent_metrics),
+                                requested_model_tier=agent_metrics.requested_model_tier,
+                                model_name=_metric_model_name(agent_metrics))
                 if debug_enabled:
                     append_debug_event(
                         run_id, "subagent_finished", task_id=task.id, agent=task.agent,
@@ -1345,6 +1603,9 @@ def run_public_agent_turn_v3(
                         available_functions=agent_metrics.tools_raw,
                         tool_calls_raw=agent_metrics.tool_calls_raw,
                         content_raw=agent_metrics.content_raw,
+                        llm_call_count=_metric_call_count(agent_metrics),
+                        requested_model_tier=agent_metrics.requested_model_tier,
+                        model_name=_metric_model_name(agent_metrics),
                         proposal_parse_error=agent_metrics.error,
                         rejected_calls=agent_metrics.rejected_calls,
                         results=[item.model_dump(mode="json") for item in result],
@@ -1414,6 +1675,22 @@ def run_public_agent_turn_v3(
             input_payload=synth_slice.payload, candidate_cards=candidate_cards,
         )
     reply, card_decision, synth_metrics = synthesizer.synthesize(synth_slice, candidate_cards=candidate_cards)
+    server_reply = _server_owned_date_coordination_reply(task_results)
+    server_failure_reply = _server_owned_date_coordination_failure_reply(
+        task_results, write_intent=plan.write_intent,
+    )
+    if server_reply:
+        reply = server_reply
+        synth_metrics.reply_source = "verified_observation"
+        synth_metrics.presentation_messages = [server_reply]
+        synth_metrics.presentation_blocks = None
+        synth_metrics.presentation_class = "transaction"
+    elif server_failure_reply:
+        reply = server_failure_reply
+        synth_metrics.reply_source = "verified_observation"
+        synth_metrics.presentation_messages = [server_failure_reply]
+        synth_metrics.presentation_blocks = None
+        synth_metrics.presentation_class = "fallback"
     reply = normalize_public_reply(reply)
     _print_llm_metrics("synthesizer", synth_metrics)
     total_input_tokens += synth_metrics.input_tokens
@@ -1447,6 +1724,9 @@ def run_public_agent_turn_v3(
             fallback_reason=synth_metrics.fallback_reason,
             error_code=synth_metrics.error_code,
             used_llm=synth_metrics.used_llm,
+            llm_call_count=_metric_call_count(synth_metrics),
+            requested_model_tier=synth_metrics.requested_model_tier,
+            model_name=_metric_model_name(synth_metrics),
             results=[{"reply": reply, "card_decision": card_decision}],
         )
 
@@ -1471,6 +1751,12 @@ def run_public_agent_turn_v3(
     _print_separator("V3 RUN END")
     print(f"  total_tokens={total_input_tokens + total_output_tokens}  (input={total_input_tokens}  output={total_output_tokens})")
     print(f"  total_duration={run_total_ms}ms")
+    total_llm_calls = (
+        _metric_call_count(planner_metrics)
+        + sum(_metric_call_count(metrics) for _agent_id, metrics in all_agent_metrics)
+        + _metric_call_count(synth_metrics)
+    )
+    print(f"  [llm] total_calls={total_llm_calls}")
     print(f"  agents_used={[aid for aid, _ in all_agent_metrics]}")
     print(f"{'='*60}\n")
 
@@ -1495,11 +1781,15 @@ def run_public_agent_turn_v3(
     if presentation_blocks:
         result.presentation_blocks = presentation_blocks
     result.sources = _public_sources(task_results)
+    synth_call_count = _metric_call_count(synth_metrics)
     result.llm_call_metrics = [{
         "agent": "planner",
         "input_tokens": planner_metrics.input_tokens,
         "output_tokens": planner_metrics.output_tokens,
         "duration_ms": planner_metrics.duration_ms,
+        "call_count": _metric_call_count(planner_metrics),
+        "requested_model_tier": planner_metrics.requested_model_tier,
+        "model_name": _metric_model_name(planner_metrics),
         "mode": "tasks",
     }] + [
         {
@@ -1507,18 +1797,28 @@ def run_public_agent_turn_v3(
             "input_tokens": m.input_tokens,
             "output_tokens": m.output_tokens,
             "duration_ms": m.duration_ms,
+            "call_count": _metric_call_count(m),
+            "requested_model_tier": m.requested_model_tier,
+            "model_name": _metric_model_name(m),
         }
         for agent_id, m in all_agent_metrics
     ]
-    if synth_metrics.used_llm:
+    if synth_call_count:
         result.llm_call_metrics.append({
             "agent": "synthesizer",
             "input_tokens": synth_metrics.input_tokens,
             "output_tokens": synth_metrics.output_tokens,
             "duration_ms": synth_metrics.duration_ms,
+            "call_count": synth_call_count,
+            "requested_model_tier": synth_metrics.requested_model_tier,
+            "model_name": _metric_model_name(synth_metrics),
         })
     trace["latency_ms"] = run_total_ms
-    trace["llm_call_count"] = 1 + len(all_agent_metrics) + (1 if synth_metrics.used_llm else 0)
+    trace["llm_call_count"] = (
+        _metric_call_count(planner_metrics)
+        + sum(_metric_call_count(metrics) for _agent_id, metrics in all_agent_metrics)
+        + synth_call_count
+    )
     trace["total_input_tokens"] = total_input_tokens
     trace["total_output_tokens"] = total_output_tokens
     trace["result"] = {

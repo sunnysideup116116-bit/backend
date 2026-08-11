@@ -45,7 +45,7 @@ direct_chat (routers/public_chat.py)
 
 ### 階段 1：Planner 拆解（LLM）
 
-`planner.py:plan_turn` 用單一 `decompose_tasks` function calling，模型輸出的 tool call arguments 就是 typed `Plan`。Planner 正常輸出 bounded `direct_chat`，或一張靜態子任務 DAG：每個 `SubTask` 有 `id`、`agent`（calendar/places/web/match/relationship/profile/product_info/synthesizer）、`depends_on`、`task_brief`；只有 Web 可再帶 `evidence_policy`。
+`planner.py:plan_turn` 使用 `decompose_tasks` function calling；若 provider 沒有送出該 call、名稱錯誤或 tasks arguments 不符合 schema，最多進行一次 protocol retry。兩次仍失敗時維持 fail closed，不建立或執行任何 task。成功時模型輸出的 tool call arguments 就是 typed `Plan`。Planner 正常輸出 bounded `direct_chat`，或一張靜態子任務 DAG：每個 `SubTask` 有 `id`、`agent`（calendar/places/web/match/relationship/profile/product_info/synthesizer）、`depends_on`、`task_brief`；只有 Web 可再帶 `evidence_policy`，Calendar availability task 可帶 `outcome_contract` 與下游 `run_if` control edge。
 
 `Plan` 的 DAG 驗證（`contracts.py`，純程式碼）：
 
@@ -59,7 +59,7 @@ Planner 無效（無 tool call、名字錯誤、schema 不符、逾時）→ **f
 
 ### 階段 2：拓撲分層執行 sub-agents
 
-`_topological_layers` 依 `depends_on` 把 task 分成層；同層用 `ThreadPoolExecutor` 平行執行（`AYUE_SUBAGENT_MAX_PARALLEL` 預設且硬上限 2），有依賴的層依序執行。
+`_topological_layers` 依 `depends_on` 與 `run_if` control edge 把 task 分成層；同層用 `ThreadPoolExecutor` 平行執行（`AYUE_SUBAGENT_MAX_PARALLEL` 預設且硬上限 2），有依賴的層依序執行。Scheduler 先檢查技術 dependency，再 exact-match typed outcome；條件未滿足時在啟動 runner 前標記 `SKIPPED/condition_not_met` 或 `condition_unavailable`。
 
 每個 task 由 `_run_sub_task` 執行，Scheduler 只透過 `RuntimeRegistration` 呼叫統一 runner interface：
 
@@ -102,9 +102,15 @@ Web-only 的 `web_research.v1` 不論是 `answered`、`partial`、`insufficient_
 
 Synthesizer 也會套用 `capabilities.py` 的用詞真相（不得宣稱「隨機配對」）與 `_concise_public_reply` 清理。`SynthesizerMetrics.reply_source` 區分 `capability`、`verified_observation`、`llm` 與 fallback；provider error、空內容或被拒絕的模型內容會標成 `degraded`，不得顯示為成功。
 
+Synthesizer 的格式提示是自適應的：多個候選、比較、步驟或清楚分組時可使用輕量 Markdown；簡單答案維持自然 prose，不要求 Places、Web 或 itinerary 的固定標題。`presentation_mode="itinerary"` 只是 editorial hint，仍使用 ordinary compose contract。
+
+Server-owned mutation verification 與 pending confirmation preview 只有在回合沒有其他 observation 時才直接 bypass Synthesizer。混合回合會把鎖定回覆從 prompt 中分離，讓其他 observation 先正常組合，再附加鎖定回覆；未知 list item 仍保留，避免安全回覆造成其他任務結果遺失。
+
 ### 階段 6：結果與 Trace
 
 `AgentResult` 回傳（reply、sources、place_cards、llm_call_metrics、assessment 狀態等）；Final reply 必須與 Synthesizer 節點結果相同。`AYUE_PUBLIC_PLACE_CARDS_ENABLED` 關閉時，Places/Web 的 `place_cards` 與 `presentation_blocks` 維持空集合，但 candidate/ref projection 仍可供 Web 與 Synthesizer 內部 grounding 使用。Trace 只存 allowlisted metadata（plan 摘要、guard codes、tool result codes、event sequence、latency、Synthesizer fallback code），**不含 prompt、原句、arguments、tool result、ID、revision 或 raw exception**。
+
+每個 provider owner 的 `llm_call_metrics` 都包含真實 `call_count` 與 `requested_model_tier`。Planner 的 protocol retry 會累計實際 provider calls，並只在 localhost debug projection 顯示 bounded attempt/failure metadata；durable trace 不保存 prompt 或 raw output。Planner 與 Places／Match／Relationship／Profile 使用可回退的 fast model；Calendar、Web、Synthesizer 使用 main model；ProductInfo bounded path 不呼叫 LLM。`trace.llm_call_count` 由各 owner counters 加總，不以 agent 數量估算。
 
 ## 3. 寫入確認流程（confirmation）
 
@@ -151,6 +157,8 @@ Calendar Agent 提出 `calendar.submit_commands` typed command batch
 
 `PublicAgentTurnContext`（`context.py:build_public_agent_turn_context` 組建）的總體限制：最近 12 則訊息、合計 6000 字元；近期記憶最多 8 筆；prompt 不含 `seed_user_*`、Mongo document、未公開 ID、對方私人記憶或行事曆內容。
 
+Planner 另使用 compact prompt projection：最近 4 則、合計 2,000 字元，會移除與 current message 重複的最新 user history；clock 僅保留 timezone、local date/time、weekday 與實際 temporal references。空的 optional state 省略，active proposal 不含 revision；其他 specialist 仍依上表收到自己的 slice。
+
 ## 5. 背景流程（非同步）
 
 - **Profile extraction**：`public_chat.py` 在回合結束後把已保存的 owner 訊息排入 `profile_task_service` → `profile_skills.py`，message_id 去重，evidence 必須是原句連續子字串；assessment 答案不會進入此 pipeline。
@@ -179,8 +187,9 @@ Every registered runtime uses the same internal `TaskRunnerResult` and
 `run(context_slice, *, task, services)` signature. Proposal runners return
 guarded proposals; Calendar, Web, and ProductInfo runtimes return completed
 `SubTaskResult` values. `RuntimeRegistration` carries optional direct-chat and
-confirmed-result projections, so Scheduler does not branch on domain result
-shapes.
+confirmed-result projections. Scheduler does not inspect domain payload shapes;
+the sole typed branch is the generic `run_if` outcome contract, whose codes
+are produced by the owning runtime.
 
 When the Planner emits `agent="web"`, Scheduler dispatches the registered
 `v3/web_runtime.py` runner and collects one typed result. Web Runtime returns
@@ -220,3 +229,9 @@ candidate-pool cardinality, not the final public card count; an explicit final
 count is represented by `card_intent=explicit_set` and the selected refs.
 Fallback recovery text is intentionally short and does not create place cards
 or a second Markdown presentation when composition fails.
+
+若 `AYUE_V3_WEB_PLACE_BOOTSTRAP_FAST_PATH=on`，且 Web task 是
+`casual_discovery`、已有 Places candidates，Web Runtime 會先經同一個
+`GuardedReadExecutor` 對最多兩個候選做 server-anchored search，再進入原本的
+bounded research/finish loop。Strict verification、沒有候選、Web 未設定與
+Places-only 回合不啟用此優化。

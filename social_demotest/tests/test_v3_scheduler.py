@@ -10,7 +10,7 @@ from services.ayue_agent.v3.calendar_commands import CalendarCommand
 from services.ayue_agent.v3.calendar_drafts import clear_draft, get_draft, public_projection
 from services.ayue_agent.v3.sub_agents.calendar_agent import CalendarAgentResult
 from services.ayue_agent.v3 import calendar_runtime
-from services.ayue_agent.v3.contracts import Plan, SubTask, SubTaskResult, SubTaskStatus, ToolProposal
+from services.ayue_agent.v3.contracts import Plan, SubTask, SubTaskResult, SubTaskStatus, ToolProposal, RunCondition
 from services.ayue_agent.v3.planner import PlannerMetrics
 from services.ayue_agent.v3.confirmation import ConfirmationManager
 from services.ayue_agent.v3.synthesizer import SynthesizerMetrics
@@ -20,12 +20,13 @@ from services.ayue_agent.v3.scheduler import (
     _apply_card_decision, _assessment_start_confirmation_requested,
     _direct_chat_block_reason, _prior_observations_for, _public_place_cards,
     _resolve_presentation_blocks,
+    _condition_skip_reason, _topological_layers,
     run_public_agent_turn_v3,
 )
 
 
 def _sub_metrics():
-    return SubAgentMetrics(input_tokens=10, output_tokens=20, duration_ms=100)
+    return SubAgentMetrics(input_tokens=10, output_tokens=20, duration_ms=100, llm_call_count=1)
 
 
 def _proposal(tool, args=None):
@@ -33,7 +34,7 @@ def _proposal(tool, args=None):
 
 
 def _planner_metrics():
-    return PlannerMetrics(input_tokens=50, output_tokens=60, duration_ms=200)
+    return PlannerMetrics(input_tokens=50, output_tokens=60, duration_ms=200, llm_call_count=1)
 
 
 def _synth_metrics():
@@ -55,6 +56,71 @@ class V3SchedulerTests(unittest.TestCase):
         )
         return turn.model_copy(update=updates)
 
+    def test_calendar_busy_skips_hard_gated_task_without_runner(self):
+        calendar = SubTask(
+            id="c1", agent="calendar", depends_on=[], task_brief="查詢",
+            outcome_contract="calendar.availability.v1",
+        )
+        web = SubTask(
+            id="w1", agent="web", depends_on=[], task_brief="找活動",
+            run_if=RunCondition(source_task_id="c1", required_outcome="calendar.no_scheduled_events"),
+        )
+        synth = SubTask(id="s1", agent="synthesizer", depends_on=["w1"], task_brief="彙整")
+        plan = Plan(tasks=[calendar, web, synth])
+        results = {
+            "c1": [SubTaskResult(
+                task_id="c1", status=SubTaskStatus.OK,
+                outcome_codes=["calendar.has_scheduled_events"],
+            )],
+        }
+        self.assertEqual(_condition_skip_reason(plan.tasks[1], results), "condition_not_met")
+        self.assertEqual([t.id for layer in _topological_layers(plan) for t in layer], ["c1", "w1", "s1"])
+
+    def test_calendar_free_satisfies_hard_gate_and_task_finished_allows_failure(self):
+        calendar = SubTask(
+            id="c1", agent="calendar", depends_on=[], task_brief="查詢",
+            outcome_contract="calendar.availability.v1",
+        )
+        web = SubTask(
+            id="w1", agent="web", depends_on=[], task_brief="找活動",
+            run_if=RunCondition(source_task_id="c1", required_outcome="calendar.no_scheduled_events"),
+        )
+        ordinary = SubTask(
+            id="r1", agent="relationship", depends_on=[], task_brief="列出聯絡人",
+            run_if=RunCondition(source_task_id="c1", required_outcome="task.finished"),
+        )
+        synth = SubTask(id="s1", agent="synthesizer", depends_on=["w1", "r1"], task_brief="彙整")
+        plan = Plan(tasks=[calendar, web, ordinary, synth])
+        free = {"c1": [SubTaskResult(
+            task_id="c1", status=SubTaskStatus.OK,
+            outcome_codes=["calendar.no_scheduled_events"],
+        )]}
+        failed = {"c1": [SubTaskResult(task_id="c1", status=SubTaskStatus.FAILED, error_code="calendar_denied")]}
+        self.assertIsNone(_condition_skip_reason(plan.tasks[1], free))
+        self.assertIsNone(_condition_skip_reason(plan.tasks[2], failed))
+        mixed = {
+            "c1": [
+                free["c1"][0],
+                SubTaskResult(task_id="c1", status=SubTaskStatus.FAILED, error_code="calendar_timeout"),
+            ]
+        }
+        self.assertEqual(_condition_skip_reason(plan.tasks[1], mixed), "condition_unavailable")
+
+    def test_calendar_availability_result_emits_closed_outcome_without_replacing_events(self):
+        task = SubTask(
+            id="c1", agent="calendar", depends_on=[], task_brief="查詢",
+            outcome_contract="calendar.availability.v1",
+        )
+        results = [SubTaskResult(
+            task_id="c1", status=SubTaskStatus.OK,
+            tool_name="calendar.list_my_events",
+            observation={"events": [], "range": "2026-08-15"},
+        )]
+        projected = calendar_runtime._attach_availability_outcome(task, results)
+        self.assertEqual(projected[0].outcome_codes, ["calendar.no_scheduled_events"])
+        self.assertEqual(projected[0].observation["events"], [])
+        self.assertEqual(projected[0].observation["availability"]["event_count"], 0)
+
     def test_direct_chat_returns_without_synthesizer(self):
         ctx = self._ctx("哈囉")
         plan = Plan(mode="direct_chat", tasks=[], direct_reply="这是簡體中文。")
@@ -72,6 +138,8 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertEqual(result.reply, "這是簡體中文。")
         self.assertEqual(len(result.llm_call_metrics), 1)
         self.assertEqual(result.llm_call_metrics[0]["agent"], "planner")
+        self.assertEqual(result.llm_call_metrics[0]["call_count"], 1)
+        self.assertEqual(result.llm_call_metrics[0]["requested_model_tier"], "fast")
         trace = persist_trace.call_args.args[2]
         self.assertEqual(trace["execution_mode"], "direct_chat")
         self.assertEqual(trace["llm_call_count"], 1)
@@ -299,6 +367,51 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertIn("鹽埕埔站", str(observation["result"]))
         self.assertNotIn("ObjectId", str(observation["result"]))
         self.assertNotIn("Traceback", str(observation["result"]))
+
+    def test_repaired_places_plan_runs_normal_places_synthesizer_trajectory(self):
+        """A Planner compatibility repair must not become planner_invalid fallback."""
+        ctx = self._ctx("找附近適合約會的地方")
+        plan = Plan(tasks=[
+            SubTask(id="places1", agent="places", depends_on=[], task_brief="找附近地方"),
+            SubTask(id="synth", agent="synthesizer", depends_on=["places1"], task_brief="整理回覆"),
+        ])
+        planner_metrics = _planner_metrics()
+        planner_metrics.attempts = [{
+            "attempt": 1,
+            "status": "repaired",
+            "failure_code": "",
+            "repair_codes": ["non_web_evidence_policy_removed"],
+        }]
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, planner_metrics)), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
+                 "places": MagicMock(return_value=(
+                     _proposal("places.search_nearby", {
+                         "anchor": "高雄", "categories": ["restaurant"],
+                     }),
+                     _sub_metrics(),
+                 )),
+             }), \
+             patch(
+                 "services.ayue_agent.v3.scheduler.execute_tool",
+                 return_value=MagicMock(
+                     ok=True,
+                     data={"places": [{"name": "一間餐廳", "category": "restaurant"}]},
+                     error_code=None,
+                 ),
+             ) as execute_tool, \
+             patch(
+                 "services.ayue_agent.v3.synthesizer.synthesize",
+                 return_value=("這裡有一間可以看看。", None, _synth_metrics()),
+             ) as synthesize:
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
+            result = run_public_agent_turn_v3(ctx)
+
+        self.assertTrue(result.handled)
+        self.assertIsNone(result.fallback_reason)
+        execute_tool.assert_called_once()
+        synthesize.assert_called_once()
 
     def test_failed_sub_agent_skipped_and_synthesizer_handles_gap(self):
         ctx = self._ctx("你好嗎")
@@ -869,6 +982,43 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertTrue(len(tool_started_events) >= 1)
         self.assertIn("text", tool_started_events[0])
 
+    def test_busy_calendar_hard_gate_does_not_start_downstream_runner(self):
+        ctx = self._ctx("下週六有事就算了，沒事才幫我找活動")
+        plan = Plan(tasks=[
+            SubTask(
+                id="c1", agent="calendar", depends_on=[], task_brief="查詢下週六行程",
+                outcome_contract="calendar.availability.v1",
+            ),
+            SubTask(
+                id="w1", agent="web", depends_on=[], task_brief="找活動",
+                run_if={"source_task_id": "c1", "required_outcome": "calendar.no_scheduled_events"},
+            ),
+            SubTask(id="s1", agent="synthesizer", depends_on=["w1"], task_brief="彙整"),
+        ])
+        events: list[dict] = []
+        calendar_runner = MagicMock(return_value=(
+            [ToolProposal(tool_name="calendar.list_my_events", arguments={})], _sub_metrics(),
+        ))
+        web_runner = MagicMock(return_value=([], _sub_metrics()))
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
+             patch.dict("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
+                 "web": web_runner,
+             }, clear=False), \
+             patch("services.ayue_agent.v3.calendar_runtime.run_calendar", side_effect=calendar_runner), \
+             patch("services.ayue_agent.v3.scheduler.execute_tool", return_value=MagicMock(
+                 ok=True, data={"events": [{"title": "已有安排"}], "range": "下週六"}, error_code=None,
+             )), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("有事，先不安排", None, _synth_metrics())):
+            mock_build.return_value = self._direct_turn(ctx.message)
+            result = run_public_agent_turn_v3(ctx, on_progress=events.append)
+        self.assertTrue(result.handled)
+        web_runner.assert_not_called()
+        self.assertFalse(any(
+            event.get("type") == "tool_started" and event.get("task_id") == "w1"
+            for event in events
+        ))
+
     def test_product_info_progress_events_are_user_visible(self):
         ctx = self._ctx("所以一定會配到剛好要跟我做同一件事的人嗎")
         plan = Plan(tasks=[
@@ -1356,6 +1506,30 @@ class V3SchedulerWriteTests(unittest.TestCase):
         self.assertEqual(exec_write.call_args.kwargs["payload"]["_confirmation_id"], "c1")
 
 class V3SchedulerTraceTests(unittest.TestCase):
+    def test_local_debug_trace_exposes_planner_failure_and_total_calls(self):
+        from services.ayue_agent.v3.debug_trace import get_run
+
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="壞掉")
+        planner_metrics = _planner_metrics()
+        planner_metrics.llm_call_count = 2
+        planner_metrics.retry_count = 1
+        planner_metrics.retry_reason = "missing_tool_call"
+        planner_metrics.failure_code = "missing_tool_call"
+        with patch.dict("os.environ", {"AYUE_LOCAL_DEBUG_TRACE": "on"}), \
+             patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(None, planner_metrics)), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build:
+            mock_build.return_value = MagicMock()
+            mock_build.return_value.clock = MagicMock(model_dump=lambda **_kwargs: {})
+            result = run_public_agent_turn_v3(ctx, debug_enabled=True)
+            debug_run = get_run(result.agent_run_id, "owner")
+
+        planner_event = next(event for event in debug_run["events"] if event["type"] == "planner_completed")
+        self.assertEqual(planner_event["status"], "failed")
+        self.assertEqual(planner_event["failure_code"], "missing_tool_call")
+        self.assertEqual(planner_event["retry_count"], 1)
+        self.assertEqual(planner_event["metrics"]["llm_call_count"], 2)
+        self.assertEqual(debug_run["events"][-1]["response"]["llm_call_count"], 2)
+
     def test_local_debug_trace_marks_direct_chat_fast_path(self):
         from services.ayue_agent.v3.debug_trace import get_run
 
@@ -1384,6 +1558,8 @@ class V3SchedulerTraceTests(unittest.TestCase):
         self.assertEqual(plan_event["mode"], "direct_chat")
         self.assertEqual(plan_event["execution_mode"], "direct_chat")
         self.assertEqual(plan_event["direct_reply"], result.reply)
+        self.assertEqual(plan_event["planner_metrics"]["call_count"], 1)
+        self.assertTrue(plan_event["planner_metrics"]["model_name"])
         self.assertTrue(any(
             event["type"] == "direct_reply_selected" and event.get("mode") == "direct_chat"
             for event in debug_run["events"]
@@ -1420,6 +1596,10 @@ class V3SchedulerTraceTests(unittest.TestCase):
         self.assertIn("plan_created", event_types)
         self.assertIn("subagent_finished", event_types)
         self.assertEqual(debug_run["events"][-1]["type"], "final")
+        planner_event = next(event for event in debug_run["events"] if event["type"] == "planner_completed")
+        self.assertEqual(planner_event["metrics"]["llm_call_count"], 1)
+        self.assertTrue(planner_event["metrics"]["model_name"])
+        self.assertEqual(planner_event["retry_count"], 0)
         synth_event = next(
             event for event in debug_run["events"]
             if event["type"] == "subagent_finished" and event.get("agent") == "synthesizer"
@@ -1429,6 +1609,11 @@ class V3SchedulerTraceTests(unittest.TestCase):
         self.assertTrue(synth_event["used_llm"])
         self.assertEqual(synth_event["input_payload"], {"message": "嗨"})
         self.assertEqual(synth_event["results"][0]["reply"], result.reply)
+        self.assertEqual(synth_event["llm_call_count"], 1)
+        self.assertTrue(synth_event["model_name"])
+        final_event = debug_run["events"][-1]
+        self.assertEqual(final_event["response"]["llm_call_count"], 2)
+        self.assertEqual(len(final_event["response"]["llm_call_metrics"]), 2)
 
     def test_local_debug_trace_marks_synth_fallback_as_degraded(self):
         from services.ayue_agent.v3.debug_trace import get_run

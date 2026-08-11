@@ -33,7 +33,7 @@ def _request(host: str = "testclient") -> Request:
 
 
 class AyueAgentStreamTests(unittest.TestCase):
-    def test_json_direct_chat_v3_does_not_load_legacy_runtime(self):
+    def test_json_direct_chat_v3_does_not_load_removed_public_runtime(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="你好")
         real_import = builtins.__import__
         imported_requests = []

@@ -9,9 +9,10 @@ MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "profiling_db").strip() or "profiling
 DEMO_DESTRUCTIVE_TOOLS_ENABLED = os.getenv("DEMO_DESTRUCTIVE_TOOLS_ENABLED", "off").strip().lower() in {"1", "true", "on"}
 GOOGLE_API_KEY = os.getenv("GOOGLE_AI_STUDIO_API_KEY") or os.getenv("GOOGLE_API_KEY")
 OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "deepseek-v4-flash:cloud")
-OLLAMA_FAST_CHAT_MODEL = os.getenv("OLLAMA_FAST_CHAT_MODEL")
-if not OLLAMA_FAST_CHAT_MODEL:
-    OLLAMA_FAST_CHAT_MODEL = "glm-4.7:cloud" if OLLAMA_CHAT_MODEL == "glm-5.2:cloud" else OLLAMA_CHAT_MODEL
+# Fast-tier routing is opt-in. An empty fast model preserves the main model.
+OLLAMA_FAST_CHAT_MODEL = (
+    os.getenv("OLLAMA_FAST_CHAT_MODEL", "").strip() or OLLAMA_CHAT_MODEL
+)
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "https://ollama.com")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 OLLAMA_REQUEST_TIMEOUT_SECONDS = max(
@@ -37,6 +38,10 @@ AYUE_GOOGLE_PLACE_CARDS_ENABLED = os.getenv("AYUE_GOOGLE_PLACE_CARDS_ENABLED", "
 # Public place-card rendering is off for the current demo.  The server-side
 # candidate projection, refs, IDs, and map URLs remain available internally.
 AYUE_PUBLIC_PLACE_CARDS_ENABLED = os.getenv("AYUE_PUBLIC_PLACE_CARDS_ENABLED", "off").strip().lower() == "on"
+# Opt-in bounded bootstrap for casual Places -> Web research.
+AYUE_V3_WEB_PLACE_BOOTSTRAP_FAST_PATH = os.getenv(
+    "AYUE_V3_WEB_PLACE_BOOTSTRAP_FAST_PATH", "off"
+).strip().lower() in {"1", "true", "on"}
 # Place Details Photos SKU bills the media bytes only (free 1,000/month).
 # The photos field itself rides along in Text Search Pro at no extra cost.
 AYUE_GOOGLE_PLACE_PHOTOS_ENABLED = os.getenv("AYUE_GOOGLE_PLACE_PHOTOS_ENABLED", "off").strip().lower() == "on"

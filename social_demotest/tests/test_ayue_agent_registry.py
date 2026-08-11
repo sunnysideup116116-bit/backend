@@ -4,6 +4,7 @@ from unittest.mock import patch
 from services.ayue_agent.contracts import AgentTurnContext, ToolCall
 from services.ayue_agent.tool_registry import (
     READ_ONLY_TOOLS,
+    SIDE_EFFECT_TOOLS,
     TOOL_REGISTRY,
     ToolRisk,
     executor_arguments_for_turn,
@@ -13,6 +14,13 @@ from services.ayue_agent.tools import execute_tool
 
 
 class AyueAgentRegistryTests(unittest.TestCase):
+    def test_every_write_tool_declares_confirmation(self):
+        self.assertEqual(len(SIDE_EFFECT_TOOLS), 5)
+        for tool_name in SIDE_EFFECT_TOOLS:
+            spec = TOOL_REGISTRY[tool_name]
+            self.assertEqual(spec.risk, ToolRisk.WRITE)
+            self.assertTrue(spec.requires_confirmation, tool_name)
+
     def test_each_registered_read_tool_has_a_runtime_executor_key(self):
         executor_keys = {
             "calendar_events", "calendar_event_find", "calendar_next_event", "current_time", "match_status",

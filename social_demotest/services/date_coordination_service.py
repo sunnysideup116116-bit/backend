@@ -113,7 +113,13 @@ def _notify_date_change(match: dict, actor_id: str, coordination: dict, event_ty
     )
 
 
-def create_invite(match: dict, initiator_id: str, invitee_id: str) -> dict | None:
+def create_invite(
+    match: dict,
+    initiator_id: str,
+    invitee_id: str,
+    *,
+    expected_match_revision: int | None = None,
+) -> dict | None:
     existing = match.get("date_coordination") or {}
     if existing.get("status") in LIVE_STATUSES:
         return None
@@ -127,12 +133,19 @@ def create_invite(match: dict, initiator_id: str, invitee_id: str) -> dict | Non
         "confirmations": {},
         "created_at": datetime.now(timezone.utc),
     }
-    claimed = matches_coll.find_one_and_update(
-        {"_id": match["_id"], "$or": [
+    claim_filter: dict = {"$and": [
+        verified_accepted_match_query(initiator_id, invitee_id),
+        {"_id": match["_id"]},
+        {"$or": [
             {"date_coordination": {"$exists": False}},
             {"date_coordination.status": {"$nin": ["pending_partner", "active"]}},
             {"date_coordination.coordination_id": {"$exists": False}},
         ]},
+    ]}
+    if expected_match_revision:
+        claim_filter["$and"].append({"proposal_revision": expected_match_revision})
+    claimed = matches_coll.find_one_and_update(
+        claim_filter,
         {"$set": {"date_coordination": coordination}},
         return_document=ReturnDocument.AFTER,
     )

@@ -94,9 +94,10 @@ class CalendarAgentResult(list):
         self.command_errors = list(command_errors or [])
 
 
-def _tools_schema() -> list[dict[str, Any]]:
+def _tools_schema(*, availability_only: bool = False) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
-    for name in sorted(_READ_TOOLS):
+    visible_reads = {"calendar.list_my_events"} if availability_only else _READ_TOOLS
+    for name in sorted(visible_reads):
         spec = get_tool_spec(name)
         if spec is None:
             continue
@@ -108,6 +109,8 @@ def _tools_schema() -> list[dict[str, Any]]:
                 "parameters": _clean_schema(planner_arguments_schema(spec)),
             },
         })
+    if availability_only:
+        return tools
     command_spec = get_tool_spec(_COMMAND_TOOL_NAME)
     command_schema = _clean_schema(
         planner_arguments_schema(command_spec)
@@ -135,16 +138,21 @@ def _prompt(context_slice: AgentContextSlice, task_brief: str) -> str:
 
 def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[CalendarAgentResult, SubAgentMetrics]:
     metrics = SubAgentMetrics()
+    metrics.requested_model_tier = "main"
     reads: list[ToolProposal] = []
     commands: list[Any] = []
     command_errors: list[dict[str, str]] = []
     try:
-        tools = _tools_schema()
+        availability_only = bool(context_slice.payload.get("_calendar_availability_only"))
+        tools = _tools_schema(availability_only=availability_only)
         prompt = _prompt(context_slice, task_brief)
+        if availability_only:
+            prompt += "\n這是 availability precheck：只能提出一次 calendar.list_my_events 唯讀查詢，不得提出 mutation。"
         system_prompt = f"{_SYSTEM}\n{_SAFETY_ADDENDUM}"
         metrics.prompt_raw = f"SYSTEM:\n{system_prompt}\nUSER:\n{prompt}"
         metrics.tools_raw = tools
         metrics.input_payload = context_slice.payload
+        metrics.llm_call_count += 1
         result = base_agent.generate_chat_completion_with_tools(
             prompt, tools, temperature=0, system_prompt=system_prompt,
         )

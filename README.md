@@ -19,9 +19,10 @@ Context Builder
 - 本人近期情境與長期記憶 extraction
 - 主動關心 scheduler
 - `@` 已接受聯絡人的公開資訊查詢
+- 公開阿月替已接受聯絡人建立空白約會邀請卡（確認後才建立）
 - Tavily 網路搜尋，以及 OpenStreetMap／Overpass 附近地點、距離與可預覽的地點卡
 - 與公開阿月隔離的阿月悄悄話
-- 離線 deterministic tests 與 trajectory fixtures
+- 離線 deterministic contract／trajectory／state／privacy tests
 
 ## 架構文件（docs/architecture/）
 
@@ -30,7 +31,7 @@ Context Builder
 | [01-project-overview.md](./docs/architecture/01-project-overview.md) | 系統定位、兩個服務、公開阿月 vs 悄悄話、主要資料流 |
 | [02-python-modules.md](./docs/architecture/02-python-modules.md) | 每個 Python 模組在做什麼（routers / services 對照表） |
 | [03-v3-runtime-lifecycle.md](./docs/architecture/03-v3-runtime-lifecycle.md) | 一回合完整生命週期：Planner → Guard → 工具 → Synthesizer、確認流程、trace |
-| [04-tool-registry.md](./docs/architecture/04-tool-registry.md) | 22 個現行工具的契約、執行流程與新增工具檢查清單 |
+| [04-tool-registry.md](./docs/architecture/04-tool-registry.md) | 23 個現行工具的契約、執行流程與新增工具檢查清單 |
 | [05-matchmaker-and-memory.md](./docs/architecture/05-matchmaker-and-memory.md) | port 9001 媒婆、Neo4j 圖記憶、profile pipeline、配對狀態真相 |
 | [06-testing.md](./docs/architecture/06-testing.md) | 測試指令、分類與必覆蓋面向 |
 | [07-guard.md](./docs/architecture/07-guard.md) | Central Guard：審核什麼、GuardResultCode 全表、被拒絕後的處理 |
@@ -40,7 +41,7 @@ Context Builder
 | [subagent-match.md](./docs/architecture/subagent-match.md) | 配對子代理：狀態查詢、搜尋 job、提案 CAS、主動牽線 |
 | [subagent-places.md](./docs/architecture/subagent-places.md) | 地點子代理：附近地點、距離、地點卡、OSM/Google provider |
 | [subagent-web.md](./docs/architecture/subagent-web.md) | Web 子代理：Tavily 查詢、證據等級、活動探索與 Places 串接 |
-| [subagent-relationship.md](./docs/architecture/subagent-relationship.md) | 關係子代理：@ 驗證、已接受聯絡人、可驗證互動摘要 |
+| [subagent-relationship.md](./docs/architecture/subagent-relationship.md) | 關係子代理：@ 驗證、已接受聯絡人、可驗證互動摘要與空白約會邀請卡 |
 | [subagent-profile.md](./docs/architecture/subagent-profile.md) | 個人檔案子代理：self summary、記憶、性格探索 session |
 | [subagent-product-info.md](./docs/architecture/subagent-product-info.md) | 產品資訊子代理：bounded knowledge retrieval、`product_info.v1` observation 與 progress/debug |
 
@@ -49,6 +50,7 @@ Context Builder
 - [AYUE_V3_ARCHITECTURE.md](./AYUE_V3_ARCHITECTURE.md)：實際 runtime、tool、state、API 與 App 遷移方式（內容為 V3 sub-agent 架構）
 - [AGENTS.md](./AGENTS.md)：後續 coding agent 必須遵守的邊界與擴充規則
 - [MEMORY_CONTEXT_ENGINE_GUIDE.md](./MEMORY_CONTEXT_ENGINE_GUIDE.md)：長期建議、Neo4j Graph Memory 與 Context Engine 的資料邊界、Hermes Agent 參考方式和實作順序
+- [FLUTTER_V1_TO_V3_AGENT_GUIDE.md](./docs/FLUTTER_V1_TO_V3_AGENT_GUIDE.md)：從舊 V1 Demo 搬到目前 V3 時，給 Flutter 整合 agent 的替換策略、API 差異與驗收清單
 - [docs/architecture/](./docs/architecture/)：以現行程式為準的架構與 sub-agent 文件；已完成的 migration／Phase 計畫不保留為現況文件
 
 版本名稱約定：`Public V3` 是目前公開阿月架構；`Private V2` 是仍在使用且隔離的悄悄話 runtime。`public-v1`、`web_research.v1`、`product_info.v1` 等名稱是 typed payload 的 schema version，不代表舊 Public runtime。已移除的 Public V1/V2 文件與 prompt 範例不再保留；需要理解層與層之間的 contract 時，以 [09-runtime-interfaces.md](./docs/architecture/09-runtime-interfaces.md) 為入口。
@@ -76,7 +78,7 @@ Context Builder
 - Neo4j 僅在需要完整 matchmaker 記憶功能時設定
 - Tavily 僅在需要即時網路搜尋時設定
 
-附近地點預設使用 OpenStreetMap／Overpass，不需要 Google API key。若要選擇性升級成 Google Places UI Kit 卡片，再設定 `AYUE_GOOGLE_PLACE_CARDS_ENABLED=on`、後端 Places key 與受 HTTP referrer 限制的瀏覽器 Maps key；未設定或載入失敗時仍會保留 OSM 自製卡片。
+附近地點預設使用 OpenStreetMap／Overpass，不需要 Google API key。`AYUE_GOOGLE_PLACE_CARDS_ENABLED=on` 只啟用 Google Places／Routes 後端資料來源；對 Public 回傳 `place_cards`／`presentation_blocks` 還必須另外開啟 `AYUE_PUBLIC_PLACE_CARDS_ENABLED=on`。目前 Demo 的 public card 開關預設關閉，因此 Flutter 應先以文字／Markdown 回覆為正式介面，不能假設一定會收到卡片。未設定 Google keys 或 provider 失敗時，地點查詢仍可回退 OSM。
 
 建立專案虛擬環境並安裝兩個服務的依賴：
 
@@ -156,8 +158,5 @@ Set-Location .\social_demotest
 - 模型不得提供 user、proposal、match、event ID 或 revision。
 - 所有寫入預設需要 confirmation、ownership、CAS 與 idempotency。
 - V3 失敗必須 fail closed，不得自動掉回 legacy。
-- 修真實失敗案例時先新增匿名 trajectory，再修 contract、projection 或 prompt；不要堆疊中文 keyword regex。
+- 修真實失敗案例時先加入對應 owner 的匿名 deterministic trajectory test，再修 contract、projection 或 prompt；不要堆疊中文 keyword regex。
 - 多輪地點推薦由 Public V3 直接依當回合 bounded context 判斷；條件已足夠或使用者把選擇交給阿月時，必須直接查詢，不能重複追問料理類型。
-
-
-> Current runtime: Public Ayue is always V3. Private Ayue remains a separate current V2 runtime; it is not a Public fallback. Public/Private rollout flags are no longer supported.

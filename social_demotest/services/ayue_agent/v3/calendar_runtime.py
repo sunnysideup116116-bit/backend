@@ -49,6 +49,46 @@ RunnerInvoker = Callable[..., Any]
 MetricsPrinter = Callable[[str, Any], Any]
 
 
+def _availability_protocol_failure(task_id: str, *, reason: str) -> SubTaskResult:
+    return SubTaskResult(
+        task_id=task_id,
+        status=SubTaskStatus.FAILED,
+        error_code="calendar_availability_protocol_invalid",
+        observation={"failure": {"code": reason}},
+    )
+
+
+def _attach_availability_outcome(
+    task: SubTask, results: list[SubTaskResult],
+) -> list[SubTaskResult]:
+    """Attach the Calendar-owned closed outcome to one successful list read."""
+    if task.outcome_contract != "calendar.availability.v1":
+        return results
+    if len(results) != 1:
+        return [_availability_protocol_failure(task.id, reason="expected_one_read_result")]
+    result = results[0]
+    if result.status is not SubTaskStatus.OK:
+        # Technical failure is deliberately not converted into a business
+        # outcome; hard-gated downstream tasks fail closed.
+        return results
+    observation = result.observation or {}
+    events = observation.get("events")
+    if not isinstance(events, list):
+        return [_availability_protocol_failure(task.id, reason="events_projection_missing")]
+    event_count = len(events)
+    code = "calendar.no_scheduled_events" if event_count == 0 else "calendar.has_scheduled_events"
+    result.observation = {
+        **observation,
+        "availability": {
+            "schema_version": "calendar.availability.v1",
+            "state": "no_scheduled_events" if event_count == 0 else "has_scheduled_events",
+            "event_count": event_count,
+        },
+    }
+    result.outcome_codes = [code]
+    return results
+
+
 def run(
     context_slice: Any,
     *,
@@ -67,6 +107,14 @@ def run(
         del _runner, _services
         return semantic_runner(_context_slice, task_brief=_task.task_brief)
 
+    if task.outcome_contract == "calendar.availability.v1":
+        # This marker is an internal context hint only.  The runtime still
+        # validates the returned proposal and never trusts the model to choose
+        # an outcome or a mutation capability.
+        if hasattr(context_slice, "model_copy"):
+            context_slice = context_slice.model_copy(deep=True)
+        context_slice.payload = dict(getattr(context_slice, "payload", {}) or {})
+        context_slice.payload["_calendar_availability_only"] = True
     results, metrics = run_task(
         context_slice,
         task=task,
@@ -248,6 +296,12 @@ def run_task(
 
     calendar_commands = list(getattr(proposals, "commands", []) or [])
     calendar_command_errors = list(getattr(proposals, "command_errors", []) or [])
+    if task.outcome_contract == "calendar.availability.v1":
+        if calendar_commands or len(list(proposals or [])) != 1:
+            return [_availability_protocol_failure(task.id, reason="expected_one_calendar_list")], agent_metrics
+        only_proposal = list(proposals or [])[0]
+        if getattr(only_proposal, "tool_name", "") != "calendar.list_my_events":
+            return [_availability_protocol_failure(task.id, reason="calendar_list_only")], agent_metrics
     if not proposals and not calendar_commands:
         if calendar_command_errors:
             return [_invalid_command_result(task.id, calendar_command_errors[0])], agent_metrics
@@ -329,6 +383,9 @@ def run_task(
             services=services,
             max_reads=max_reads,
         ))
+
+    if task.outcome_contract == "calendar.availability.v1":
+        return _attach_availability_outcome(task, results), agent_metrics
 
     if calendar_commands:
         print(f"  [{task.id}] typed calendar commands: {len(calendar_commands)}")

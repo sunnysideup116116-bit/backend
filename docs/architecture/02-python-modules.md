@@ -57,6 +57,8 @@ Pydantic request/response models（例如 `DirectChatRequest`）。
 | `guarded_execution.py` | Specialist runtime 共用的 Guard→executor args→typed tool adapter；含 Web extract URL binding |
 | `calendar_runtime.py` | Calendar clarification、draft/reference、read loop、authority-free commands、preflight 與 confirmation preparation |
 | `web_runtime.py` | Web research/finish phases、tool budgets、observation projection 與 `web_research.v1` assembly |
+| `relationship_runtime.py` | Relationship read／date-card dispatch；只有 validated `write_intent` 才切到受限寫入 proposal surface |
+| `relationship_references.py` | 已接受聯絡人的名稱／拼音／近期 reference 解析；只回 server-owned bounded target metadata |
 | `guard.py` | 純程式碼的 registry/schema/duplicate/read-budget/write-confirmation 驗證 |
 | `context_slicer.py` | 依 agent 建立最小 `AgentContextSlice`；ProductInfo 不會收到 owner/private state |
 | `confirmation.py` | Preview-bound pending confirmation 的 TTL/CAS 管理 |
@@ -117,7 +119,7 @@ V3 runtime 見 `03-v3-runtime-lifecycle.md`；此處列非 V3 檔案：
 | `maps_client.py` | OpenStreetMap／Overpass 附近地點、距離、resolve adapter，TTL cache |
 | `google_places_client.py` | Google Places v1 / Routes API adapter（選用，失敗自動回退 OSM） |
 | `match_opportunity.py` | 配對機會評估：profile basis、active-match block、guidance fingerprint |
-| `public_relationship_projection.py` | 已接受聯絡人的公開投影：`validated_mentioned_contact_ids`、`mentioned_contact_summary`、`accepted_contact_summaries` |
+| `public_relationship_projection.py` | 已接受聯絡人的公開投影：mention 驗證、公開摘要、bounded accepted-contact 清單與日期邀請 target resolution |
 | `proactive_care.py` | 主動關心的 typed care surface：claim、generation、grounding 驗證 |
 | `proactive_scheduler.py` | Server-side 主動關心排程 loop |
 | `private_v2.py` | 悄悄話的獨立 context、registry、composer |

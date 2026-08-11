@@ -15,7 +15,7 @@
 - **發起搜尋**（`match.start_search`，需確認）。
 - **對唯一可操作提案**表達有興趣或婉拒（`match.decide_active_proposal`，revision CAS）。
 
-**不負責**：不讀對方私人資料；不用聊天紀錄猜配對結果（一律讀 canonical observation）；不列出或計算 accepted contacts aggregate，不把「等待回覆」寫成近期情境。
+**不負責**：不讀對方私人資料；不用聊天紀錄猜配對結果（一律讀 canonical observation）；不列出或計算 accepted contacts aggregate，不把「等待回覆」寫成近期情境。「我目前配對到哪些人／現在有配到誰／總共幾位」是 accepted-contact aggregate，必須交給 Relationship，不得因句子含「目前」或「配對」而交給 Match。
 
 ## 2. 可呼叫的工具（4 個）
 

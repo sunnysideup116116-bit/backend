@@ -132,7 +132,7 @@ class ChatRouterCharacterizationTests(unittest.TestCase):
 
     def test_non_public_stream_keeps_its_direct_chat_contract(self):
         req = DirectChatRequest(user_id="owner", contact_id="contact", message="嗨")
-        expected = {"reply": "嗨，想聊什麼？", "agent_version": "legacy"}
+        expected = {"reply": "嗨，想聊什麼？"}
         endpoint, module = _route_module("POST", "/api/direct_chat/stream")
         with patch.object(module, "direct_chat", return_value=expected) as direct, \
              patch.object(module, "_run_public_stream_turn") as public_stream:

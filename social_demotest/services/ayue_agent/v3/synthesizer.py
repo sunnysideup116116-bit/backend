@@ -44,6 +44,8 @@ class SynthesizerMetrics:
     tools_raw: list[dict] | None = None
     input_payload: dict[str, Any] | None = None
     used_llm: bool = False
+    llm_call_count: int = 0
+    requested_model_tier: str = "main"
     reply_source: Literal[
         "capability",
         "verified_observation",
@@ -710,7 +712,19 @@ def _web_research_fallback(result: dict[str, Any]) -> str:
     elif adjacent:
         reply = f"我找到一則相關線索：{adjacent}，但還不能直接確認你問的內容。"
     else:
-        reply = "目前沒有足夠的公開資訊確認你問的內容。"
+        source_title = next(
+            (
+                str(item.get("title") or "").strip()[:120]
+                for item in (result.get("sources") or [])
+                if isinstance(item, dict) and str(item.get("title") or "").strip()
+            ),
+            "",
+        )
+        reply = (
+            f"我找到「{source_title}」這類公開線索，但目前整理還沒完成，先不能確認你問的內容。"
+            if source_title
+            else "目前沒有足夠的公開資訊確認你問的內容。"
+        )
 
     if limitation and limitation not in reply:
         reply += f" {limitation}。"
@@ -863,6 +877,99 @@ def _place_research_fallback(
     return reply[:900], None, []
 
 
+def _server_owned_reply_from_result(result: dict[str, Any]) -> str | None:
+    """Extract only replies explicitly owned by a completed runtime.
+
+    Arbitrary observation text is intentionally not accepted here. The
+    server-owned boundary is limited to mutation verification and pending
+    confirmation previews.
+    """
+    verification = result.get("calendar_mutation_verification")
+    if isinstance(verification, dict):
+        mutation_verbs = {
+            "create": "新增",
+            "update": "修改",
+            "cancel": "取消",
+            "batch": "執行",
+        }
+        status = str(verification.get("status") or "")
+        action = mutation_verbs.get(str(verification.get("action") or ""), "處理")
+        label = str(verification.get("label") or "這筆行程").strip()
+        if status == "verified_success":
+            return f"我確認過了，剛才已{action}「{label}」。"
+        if status == "failed":
+            return f"我確認過了，剛才的{action}「{label}」沒有成功。"
+        if status == "still_active":
+            return f"我確認過了，「{label}」目前仍在行事曆裡，剛才的操作沒有生效。"
+        if status == "partial":
+            return f"剛才的行事曆批次只完成一部分；「{label}」的狀態需要再確認。"
+        if status == "verification_failed":
+            return f"我暫時無法確認「{label}」的最新狀態，剛才的操作沒有再次送出。"
+        if status == "not_available":
+            return "我目前沒有可核對的上一筆行事曆操作；如果你要處理新的行程，請直接告訴我。"
+    if result.get("pending_confirmation"):
+        preview = str(result.get("preview") or "").strip()
+        if preview:
+            return preview
+    return None
+
+
+def _server_owned_reply_from_list_item(item: dict[str, Any]) -> str | None:
+    reply = str(item.get("reply") or "").strip()
+    if reply:
+        return reply
+    data = item.get("data")
+    if isinstance(data, dict):
+        reply = str(data.get("reply") or "").strip()
+        if reply:
+            return reply
+        if data.get("pending_confirmation"):
+            preview = str(data.get("preview") or "").strip()
+            if preview:
+                return preview
+    if item.get("pending_confirmation"):
+        preview = str(item.get("preview") or "").strip()
+        if preview:
+            return preview
+    return None
+
+
+def _partition_server_owned_replies(
+    payload: dict[str, Any],
+) -> tuple[list[str], dict[str, Any]]:
+    """Separate locked runtime replies from observations Synth may compose.
+
+    A list result can contain both locked and ordinary items, so unknown items
+    remain in a cloned observation. This prevents a server-owned reply from
+    hiding unrelated Places/Web/calendar evidence in a mixed turn.
+    """
+    locked: list[str] = []
+    remaining: list[dict[str, Any]] = []
+    for observation in payload.get("observations") or []:
+        if not isinstance(observation, dict):
+            continue
+        result = observation.get("result")
+        if isinstance(result, dict):
+            reply = _server_owned_reply_from_result(result)
+            if reply:
+                locked.append(reply)
+                continue
+        if observation.get("tool") is None and isinstance(result, list):
+            unknown_items: list[Any] = []
+            for item in result:
+                if isinstance(item, dict):
+                    reply = _server_owned_reply_from_list_item(item)
+                    if reply:
+                        locked.append(reply)
+                        continue
+                unknown_items.append(item)
+            if unknown_items:
+                remaining.append({**observation, "result": unknown_items})
+            continue
+        remaining.append(observation)
+    return locked, {**payload, "observations": remaining}
+
+
 def _verified_observation_reply(payload: dict[str, Any]) -> str | None:
     """Return replies that must not be paraphrased by the Synthesizer.
 
@@ -871,51 +978,8 @@ def _verified_observation_reply(payload: dict[str, Any]) -> str | None:
     can ask for the actual missing fields and present bounded candidates in
     natural language; it must not claim that a mutation happened.
     """
-    mutation_verbs = {
-        "create": "新增",
-        "update": "修改",
-        "cancel": "取消",
-        "batch": "執行",
-    }
-    for obs in payload.get("observations") or []:
-        result = obs.get("result")
-        if isinstance(result, dict):
-            verification = result.get("calendar_mutation_verification")
-            if isinstance(verification, dict):
-                status = str(verification.get("status") or "")
-                action = mutation_verbs.get(str(verification.get("action") or ""), "處理")
-                label = str(verification.get("label") or "這筆行程").strip()
-                if status == "verified_success":
-                    return f"我確認過了，剛才已{action}「{label}」。"
-                if status == "failed":
-                    return f"我確認過了，剛才的{action}「{label}」沒有成功。"
-                if status == "still_active":
-                    return f"我確認過了，「{label}」目前仍在行事曆裡，剛才的操作沒有生效。"
-                if status == "partial":
-                    return f"剛才的行事曆批次只完成一部分；「{label}」的狀態需要再確認。"
-                if status == "verification_failed":
-                    return f"我暫時無法確認「{label}」的最新狀態，剛才的操作沒有再次送出。"
-                if status == "not_available":
-                    return "我目前沒有可核對的上一筆行事曆操作；如果你要處理新的行程，請直接告訴我。"
-        if obs.get("tool") is None and isinstance(result, list):
-            replies: list[str] = []
-            for item in result:
-                if not isinstance(item, dict):
-                    continue
-                reply = str(item.get("reply") or "")
-                if not reply:
-                    reply = str((item.get("data") or {}).get("reply") or "")
-                if reply:
-                    replies.append(reply)
-            if replies:
-                return "、".join(replies)
-        if not isinstance(result, dict):
-            continue
-        if result.get("pending_confirmation"):
-            preview = str(result.get("preview") or "").strip()
-            if preview:
-                return preview
-    return None
+    locked, _remaining = _partition_server_owned_replies(payload)
+    return "、".join(locked) if locked else None
 
 
 def synthesize(
@@ -928,16 +992,56 @@ def synthesize(
     server-owned candidate refs before they leave the Synthesizer boundary.
     """
     metrics = SynthesizerMetrics()
-    payload = context_slice.payload
-    metrics.input_payload = payload
+    original_payload = context_slice.payload
+    metrics.input_payload = original_payload
     metrics.tools_raw = []
     metrics.tool_calls_raw = []
-    verified_reply = _verified_observation_reply(payload)
-    if verified_reply:
+    metrics.presentation_blocks = []
+    locked_replies, payload = _partition_server_owned_replies(original_payload)
+    if locked_replies and not payload.get("observations"):
+        verified_reply = "、".join(locked_replies)
         metrics.reply_source = "verified_observation"
         metrics.presentation_messages = [verified_reply]
         metrics.presentation_class = "transaction"
         return verified_reply, None, metrics
+
+    def _finish_with_locked_reply(
+        reply: str,
+        card_decision: dict[str, Any] | None,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Append a server-owned transaction without dropping mixed evidence."""
+        if not locked_replies:
+            return reply, card_decision
+        locked_reply = "\n\n".join(locked_replies)
+        base_messages = list(metrics.presentation_messages or ([reply] if reply else []))
+        if base_messages and base_messages[-1].strip() == locked_reply.strip():
+            return "\n\n".join(base_messages), card_decision
+        if len(base_messages) > 2:
+            base_messages = ["\n\n".join(base_messages)]
+        presentation_class = metrics.presentation_class
+        if presentation_class == "transaction":
+            presentation_class = "grounded_recommendation"
+        messages = base_messages + [locked_reply]
+        presentation = build_presentation(messages, presentation_class)
+        if presentation is None:
+            compact = validate_public_reply(
+                "\n\n".join(base_messages),
+                preserve_details=True,
+                max_chars=1_300,
+                max_sentences=24,
+            ).reply
+            messages = ([compact] if compact else []) + [locked_reply]
+            presentation = build_presentation(messages, "grounded_recommendation")
+        if presentation is not None:
+            metrics.presentation_messages = presentation.messages
+            metrics.presentation_class = presentation.presentation_class
+            return "\n\n".join(presentation.messages), card_decision
+        # The locked text is still returned if an unrelated presentation class
+        # rejects the combined envelope. Keep it bounded and server-owned.
+        metrics.presentation_messages = [locked_reply[:1_200]]
+        metrics.presentation_class = "transaction"
+        return f"{reply}\n\n{locked_reply}".strip(), card_decision
+
     candidate_summaries = _candidate_card_summaries(candidate_cards or [])
     presentation_mode = str(payload.get("presentation_mode") or "default")
     product_info = _product_info_from_payload(payload)
@@ -957,6 +1061,20 @@ def synthesize(
         for item in payload.get("observations") or []
     )
     cards_enabled = public_place_cards_enabled()
+    if (
+        web_only_mode
+        and not direct_finding_count
+        and str(web_research.get("status") or "") == "insufficient_evidence"
+        and str(web_research.get("coverage") or "") in {"none", "adjacent_only"}
+    ):
+        fallback = _web_research_fallback(web_research)
+        presentation = build_presentation([fallback], "grounded_recommendation")
+        metrics.reply_source = "observation_fallback"
+        metrics.fallback_reason = "web_research_insufficient"
+        metrics.presentation_messages = presentation.messages if presentation else [fallback]
+        metrics.presentation_class = "grounded_recommendation"
+        reply, card_decision = _finish_with_locked_reply(fallback, None)
+        return reply, card_decision, metrics
     tools = [
         _compose_public_reply_tool_schema(place_cards_enabled=cards_enabled)
     ] if candidate_summaries or direct_finding_count >= 2 else []
@@ -990,6 +1108,7 @@ def synthesize(
             place_cards_enabled=cards_enabled,
         )
         metrics.prompt_raw = f"SYSTEM:\n{system_prompt}\nUSER:\n{prompt}"
+        metrics.llm_call_count += 1
         result = generate_chat_completion_with_tools(
             prompt, tools, temperature=0.65, system_prompt=system_prompt,
         )
@@ -1022,7 +1141,10 @@ def synthesize(
                 metrics.presentation_messages = composed_messages
                 metrics.presentation_blocks = presentation_blocks
                 metrics.presentation_class = presentation_class
-                return "\n\n".join(composed_messages), card_decision, metrics
+                reply, card_decision = _finish_with_locked_reply(
+                    "\n\n".join(composed_messages), card_decision,
+                )
+                return reply, card_decision, metrics
             composition_failed = True
             metrics.fallback_reason = "unsupported_claim"
         elif composition_required:
@@ -1071,7 +1193,10 @@ def synthesize(
                     metrics.reply_source = "llm"
                     metrics.presentation_messages = presentation.messages
                     metrics.presentation_class = presentation.presentation_class
-                    return "\n\n".join(presentation.messages), card_decision, metrics
+                    reply, card_decision = _finish_with_locked_reply(
+                        "\n\n".join(presentation.messages), card_decision,
+                    )
+                    return reply, card_decision, metrics
                 metrics.fallback_reason = "empty_content"
     except Exception:
         metrics.fallback_reason = "provider_error"
@@ -1090,6 +1215,8 @@ def synthesize(
                 section_ids = set(product_info.get("knowledge_sections") or [])
                 if any(str(item).startswith("matching.") for item in section_ids):
                     topics = ["matching_principles"]
+                elif "relationship.date_invitation" in section_ids:
+                    topics = ["date_invitation"]
                 elif any(str(item).startswith("surfaces.") for item in section_ids):
                     topics = ["surface_scope"]
                 else:
@@ -1100,7 +1227,10 @@ def synthesize(
             metrics.reply_source = "observation_fallback"
             metrics.presentation_messages = presentation.messages
             metrics.presentation_class = "product_info"
-            return "\n\n".join(presentation.messages), None, metrics
+            reply, card_decision = _finish_with_locked_reply(
+                "\n\n".join(presentation.messages), None,
+            )
+            return reply, card_decision, metrics
     if _places_only_payload(payload):
         fallback, card_decision, fallback_blocks = _places_only_fallback(payload, candidate_summaries)
         presentation = build_presentation([fallback], "grounded_recommendation")
@@ -1110,7 +1240,8 @@ def synthesize(
             metrics.presentation_messages = presentation.messages
             metrics.presentation_blocks = fallback_blocks
             metrics.presentation_class = "grounded_recommendation"
-            return fallback, card_decision, metrics
+            reply, card_decision = _finish_with_locked_reply(fallback, card_decision)
+            return reply, card_decision, metrics
     if (
         web_research is not None
         and candidate_summaries
@@ -1126,7 +1257,8 @@ def synthesize(
             metrics.presentation_messages = presentation.messages
             metrics.presentation_blocks = fallback_blocks
             metrics.presentation_class = "grounded_recommendation"
-            return fallback, card_decision, metrics
+            reply, card_decision = _finish_with_locked_reply(fallback, card_decision)
+            return reply, card_decision, metrics
     if web_research is not None and _web_only_payload(payload):
         fallback = _web_research_fallback(web_research)
         presentation = build_presentation([fallback], "grounded_recommendation")
@@ -1134,9 +1266,11 @@ def synthesize(
         metrics.fallback_reason = metrics.fallback_reason or "web_research_fallback"
         metrics.presentation_messages = presentation.messages if presentation else [fallback]
         metrics.presentation_class = "grounded_recommendation"
-        return fallback, None, metrics
+        reply, card_decision = _finish_with_locked_reply(fallback, None)
+        return reply, card_decision, metrics
     metrics.reply_source = "observation_fallback" if payload.get("observations") else "general_fallback"
     fallback = _observation_fallback(payload)
     metrics.presentation_messages = [fallback]
     metrics.presentation_class = "fallback"
-    return fallback, None, metrics
+    reply, card_decision = _finish_with_locked_reply(fallback, None)
+    return reply, card_decision, metrics

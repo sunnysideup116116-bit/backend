@@ -581,6 +581,7 @@ def decide(
     proposals or changing any tool counters.
     """
     metrics = SubAgentMetrics()
+    metrics.requested_model_tier = "main"
     projected = project_web_observations(observations)
     safe_candidates = [
         {
@@ -666,6 +667,7 @@ def decide(
                 "若有 place_candidates，每個 search query 必須有同位置的既有 subject_ref。"
             )
         metrics.prompt_raw = f"SYSTEM:\n{_SYSTEM}\nUSER:\n{attempt_prompt}"
+        metrics.llm_call_count += 1
         try:
             result = generate_chat_completion_with_tools(
                 attempt_prompt, tools, temperature=0, system_prompt=_SYSTEM,

@@ -6134,36 +6134,56 @@ if (metadata.event_type === "date_coordination_form") {
                 totalInput += Number(node.input_tokens || 0);
                 totalOutput += Number(node.output_tokens || 0);
             });
+            const plannerMetrics = planner.metrics || planEvent.planner_metrics || {};
+            const knownCallCount = Number(plannerMetrics.llm_call_count || 0) +
+                Object.values(nodeMap).reduce((sum, node) => sum + Number(node.llm_call_count || 0), 0);
+            const finalCallCount = Number(finalResponse?.llm_call_count);
+            const totalLlmCalls = Number.isFinite(finalCallCount) ? finalCallCount : knownCallCount;
             const latest = events[events.length - 1] || {};
             const statusText = lastDebugRunStatus === "completed" ? "已完成" :
                 lastDebugRunStatus === "running" ? "執行中" : (lastDebugRunStatus || "未知");
             const statusColor = lastDebugRunStatus === "completed" ? "#55e6d9" : "#ffd166";
+            const plannerMode = planner.mode || planEvent.mode || (plan.length ? "tasks" : "—");
             const executionMode = directPlanEvent ? "direct_chat · Fast Path" :
-                (planEvent.mode === "tasks" ? "tasks · 正常 DAG" : (planEvent.mode || "—"));
+                (plannerMode === "tasks" ? "tasks · 正常 DAG" : plannerMode);
 
             let html = '<div class="border-2 border-[#8a72b8] p-3 bg-[#110a22] mb-3">' +
                 '<div class="flex items-center justify-between gap-2">' +
                 '<div class="text-[#ffd166] font-bold text-sm">V3 執行流程</div>' +
                 '<span class="text-[10px] px-2 py-0.5 border" style="color:' + statusColor + ';border-color:' + statusColor + '">' + statusText + '</span></div>' +
-                '<div class="grid grid-cols-4 gap-2 text-[11px] mt-2">' +
+                '<div class="grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px] mt-2">' +
                 '<div><span class="text-gray-400">Input</span><br><b class="text-[#55e6d9]">' + totalInput + '</b></div>' +
                 '<div><span class="text-gray-400">Output</span><br><b class="text-[#55e6d9]">' + totalOutput + '</b></div>' +
+                '<div><span class="text-gray-400">LLM Calls</span><br><b class="text-[#55e6d9]">' + totalLlmCalls + '</b></div>' +
                 '<div><span class="text-gray-400">執行模式</span><br><b class="text-[#ffd166]">' + escapeDebugHtml(executionMode) + '</b></div>' +
                 '<div><span class="text-gray-400">目前階段</span><br><b class="text-[#ffd166]">' + escapeDebugHtml(latest.stage || latest.agent || latest.type || "—") + '</b></div>' +
                 '</div></div>';
 
             if (planner.type) {
                 const plannerStatus = planner.status === "failed" ? "❌ 失敗" : "✅ 完成";
+                const plannerModel = plannerMetrics.model_name || planner.model_name || "—";
+                const plannerTier = plannerMetrics.requested_model_tier || planner.requested_model_tier || "—";
+                const plannerCalls = Number(plannerMetrics.llm_call_count || planner.llm_call_count || 0);
+                const plannerRetryCount = Number(planner.retry_count ?? plannerMetrics.retry_count ?? 0);
+                const plannerRetryReason = planner.retry_reason || plannerMetrics.retry_reason || "";
+                const plannerFailure = planner.failure_code || plannerMetrics.failure_code || "";
                 html += '<div class="border-2 border-[#ffd166] p-3 bg-[#110a22] mb-3">' +
                     '<div class="flex justify-between"><b class="text-[#ffd166] text-xs">📋 Planner</b><span class="text-[10px] text-gray-300">' + plannerStatus + '</span></div>' +
                     (planner.error ? '<div class="text-[10px] text-[#ff6fae] mt-1">' + escapeDebugHtml(planner.error) + '</div>' : '') +
-                    '<div class="text-[10px] text-gray-400 mt-1">mode=' + escapeDebugHtml(planner.mode || planEvent.mode || "tasks") +
+                    '<div class="text-[10px] text-gray-400 mt-1">mode=' + escapeDebugHtml(plannerMode) +
+                    ' · model=' + escapeDebugHtml(plannerModel) +
+                    ' · tier=' + escapeDebugHtml(plannerTier) +
+                    ' · calls=' + plannerCalls +
+                    ' · retry=' + plannerRetryCount +
+                    (plannerRetryReason ? ' · retry_reason=' + escapeDebugHtml(plannerRetryReason) : '') +
+                    (plannerFailure ? ' · failure=' + escapeDebugHtml(plannerFailure) : '') +
                     (directFallbackReason ? ' · direct_chat fallback=' + escapeDebugHtml(directFallbackReason) : '') + '</div>' +
                     '<div class="flex flex-wrap gap-3 mt-2">' +
                     debugDetailButton("Input Prompt", planner.prompt_raw) +
                     debugDetailButton("可用 Functions", planner.available_functions, "#fff1b8") +
                     debugDetailButton("Function Calls", planner.function_calls, "#ff6fae") +
                     debugDetailButton("Raw Output", planner.content_raw, "#c084fc") +
+                    debugDetailButton("Attempts", planner.attempts || [], "#ffd166") +
                     '</div></div>';
             } else {
                 const stage = events.find(event => event.type === "stage_started" && event.stage === "planner");
@@ -6210,10 +6230,16 @@ if (metadata.event_type === "date_coordination_form") {
                 const color = V3_AGENT_COLORS[node.agent] || "#d8c7ff";
                 const status = node.status || (lastDebugRunStatus === "running" ? "running" : "unknown");
                 const statusColor = status === "degraded" ? "#ffd166" : "#d8c7ff";
+                const nodeModel = node.model_name || "—";
+                const nodeTier = node.requested_model_tier || "—";
+                const nodeCalls = Number(node.llm_call_count || 0);
                 html += '<div class="border-2 p-3 bg-[#110a22] mb-3" style="border-color:' + color + '">' +
                     '<div class="flex items-center justify-between gap-2"><b class="text-xs" style="color:' + color + '">' + escapeDebugHtml((V3_AGENT_LABELS[node.agent] || node.agent || "Tool") + " · " + (node.task_id || "")) + '</b>' +
                     '<span class="text-[10px]" style="color:' + statusColor + '">' + escapeDebugHtml(status) + '</span></div>' +
                     (node.task_brief ? '<div class="text-[10px] text-gray-400 mt-1">' + escapeDebugHtml(node.task_brief) + '</div>' : '') +
+                    '<div class="text-[10px] text-gray-400 mt-1">model=' + escapeDebugHtml(nodeModel) +
+                    ' · tier=' + escapeDebugHtml(nodeTier) +
+                    ' · calls=' + nodeCalls + '</div>' +
                     (node.agent === "synthesizer" ? '<div class="text-[10px] text-gray-400 mt-1">' +
                         'reply_source=' + escapeDebugHtml(node.reply_source || "unknown") +
                         ' · used_llm=' + escapeDebugHtml(String(Boolean(node.used_llm))) +

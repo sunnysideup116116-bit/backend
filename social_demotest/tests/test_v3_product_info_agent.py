@@ -36,6 +36,7 @@ class ProductInfoAgentTests(unittest.TestCase):
             return_value=ToolCallResult(content="", tool_calls=[{
                 "name": "decompose_tasks",
                 "arguments": {
+                    "write_intent": "none",
                     "tasks": [
                         {"id": "p", "agent": "product_info", "depends_on": [], "task_brief": turn.message},
                         {"id": "s", "agent": "synthesizer", "depends_on": ["p"], "task_brief": "Compose."},
@@ -65,6 +66,14 @@ class ProductInfoAgentTests(unittest.TestCase):
         self.assertEqual(result["coverage"], "insufficient")
         self.assertEqual(result["failure_code"], "product_knowledge_insufficient")
         self.assertEqual(result["facts"], {})
+
+    def test_date_invitation_question_retrieves_relationship_capability(self):
+        result = retrieve_product_info("你有建立空白約會邀請卡的功能嗎？")
+        self.assertEqual(result["coverage"], "sufficient")
+        self.assertIn("relationship.date_invitation", result["knowledge_sections"])
+        facts = result["facts"]["relationship.date_invitation"]
+        self.assertTrue(facts["available_in_public_ayue"])
+        self.assertTrue(facts["requires_confirmation"])
 
     def test_retriever_rejects_unknown_section_without_guessing(self):
         result = get_product_knowledge(["matching.confirmation", "not.a.real.section"])
@@ -135,7 +144,7 @@ class ProductInfoAgentTests(unittest.TestCase):
         schema = _decompose_tool_schema()["function"]["parameters"]
         self.assertNotIn("product_info_topics", schema["properties"])
         self.assertIn("product_info", _PLANNER_SYSTEM)
-        self.assertIn("normal `product_info` task", _PLANNER_SYSTEM)
+        self.assertIn("正常 product_info -> synthesizer DAG", _PLANNER_SYSTEM)
 
     def test_scheduler_has_no_product_info_orchestration_branch(self):
         from services.ayue_agent.v3 import scheduler

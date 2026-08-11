@@ -119,6 +119,11 @@ def _clean_triples(triples) -> list[dict]:
     return clean
 
 
+# This is a conservative budget proxy based on content length, not model tokenizer output.
+def _estimate_message_tokens(messages: list[dict]) -> int:
+    return sum(len(str(m.get("content", ""))) for m in messages)
+
+
 def _real_pair_messages(room_id: str, participants: list[str], limit: int = 80) -> list[dict]:
     participant_set = {user_id for user_id in participants if user_id}
     if not participant_set:
@@ -329,7 +334,7 @@ def process_relationship_semantic_plan(match_doc: dict | None, room_id: str):
         "message_type": {"$in": ["text", None]}
     }).sort("timestamp", 1).skip(last_processed))
     
-    estimated_tokens = sum(len(str(m.get("content", ""))) for m in new_messages_list)
+    estimated_token_units = _estimate_message_tokens(new_messages_list)
     
     # Print the current buffer content
     print(f"--- [SEMANTIC_PLAN] Current Buffer for Room: {room_id} ---")
@@ -337,15 +342,15 @@ def process_relationship_semantic_plan(match_doc: dict | None, room_id: str):
         print(f"[{m.get('sender_id')}] {m.get('content', '')}")
     print("--------------------------------------")
     
-    if estimated_tokens < 400 and new_messages_count < 8:
-        print(f"[SEMANTIC_PLAN] Room: {room_id} | Buffer not full yet (Tokens: {estimated_tokens}/400, Messages: {new_messages_count}/8). Skipping update.")
+    if estimated_token_units < 600:
+        print(f"[SEMANTIC_PLAN] Room: {room_id} | Buffer not full yet (Token units: {estimated_token_units}/600, New messages: {new_messages_count}). Skipping update.")
         return {"status": "skipped", "reason": "buffer_not_full"}
         
-    print(f"[SEMANTIC_PLAN] Room: {room_id} | Triggering update! (Tokens: {estimated_tokens}, Messages: {new_messages_count})")
+    print(f"[SEMANTIC_PLAN] Room: {room_id} | Triggering update! (Token units: {estimated_token_units}, New messages: {new_messages_count})")
 
     messages = _real_pair_messages(room_id, participants, limit=40)
     chat_log = "\n".join(
-        f"User {{message.get('sender_id')}}: {{message.get('content', '')}}"
+        f"User {message.get('sender_id')}: {message.get('content', '')}"
         for message in messages
     )
     instruction = (

@@ -452,10 +452,13 @@ def _relationship_evidence(ctx: AgentTurnContext, other_id: str | None) -> ToolR
         verified_accepted_match_query(ctx.user_id, other_id)
     ))
     choices = []
+    resolved_ids: list[str] = []
     for match in accepted:
         candidate = _other_id(match, ctx.user_id)
         if other_id and candidate != other_id:
             continue
+        if isinstance(candidate, str) and candidate:
+            resolved_ids.append(candidate)
         summary = (match.get("relationship_memory") or {}).get("shared_summary", "")
         choices.append({
             "counterparty": _display_name(candidate),
@@ -464,11 +467,24 @@ def _relationship_evidence(ctx: AgentTurnContext, other_id: str | None) -> ToolR
         })
     if other_id and not choices:
         return ToolResult(ok=False, error_code="relationship_not_accepted", user_message="這位目前不是已接受配對，我不能把他的資料當成已確認資訊。")
-    return ToolResult(ok=True, data={"relationships": choices})
+    private_data = {}
+    if len(resolved_ids) == 1 and len(choices) == 1:
+        private_data["relationship_contact_reference"] = {
+            "other_id": resolved_ids[0],
+            "safe_label": choices[0]["counterparty"],
+        }
+    return ToolResult(ok=True, data={"relationships": choices}, private_data=private_data)
 
 
 def _mentioned_contact_summary(ctx: AgentTurnContext, other_ids: list[str]) -> ToolResult:
-    return ToolResult(ok=True, data={"contacts": mentioned_contact_summary(ctx.user_id, other_ids)})
+    contacts = mentioned_contact_summary(ctx.user_id, other_ids)
+    private_data = {}
+    if len(other_ids) == 1 and len(contacts) == 1:
+        private_data["relationship_contact_reference"] = {
+            "other_id": other_ids[0],
+            "safe_label": str(contacts[0].get("display_name") or "對方"),
+        }
+    return ToolResult(ok=True, data={"contacts": contacts}, private_data=private_data)
 
 
 def _accepted_contact_list(ctx: AgentTurnContext) -> ToolResult:
