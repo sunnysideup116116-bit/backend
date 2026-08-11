@@ -3,13 +3,16 @@ from pathlib import Path
 
 from services.ayue_agent.product_identity import (
     AYUE_CORE_IDENTITY,
+    AYUE_MISSION_SHORT,
     AYUE_VOICE,
+    AYUE_VOICE_SHORT,
     LEGACY_AYUE_PERSONA,
     PRIVATE_AYUE_PERSONA,
     PUBLIC_AYUE_PERSONA,
     PUBLIC_CAPABILITY_REPLY,
     PUBLIC_REPLY_LENGTH,
     PUBLIC_REPLY_TONE,
+    PUBLIC_VOICE_FEW_SHOTS,
 )
 from services.ayue_agent.private_v2 import PrivateAgentTurnContextV2, _compose
 from services.ayue_agent.v3.planner import _PLANNER_SYSTEM
@@ -31,7 +34,13 @@ class AyueProductIdentityTests(unittest.TestCase):
         self.assertEqual(MEDIATOR_PERSONA, LEGACY_AYUE_PERSONA)
 
     def test_public_planner_and_synthesizer_receive_canonical_identity(self):
-        self.assertIn(PUBLIC_AYUE_PERSONA, _PLANNER_SYSTEM)
+        self.assertIn(AYUE_CORE_IDENTITY, _PLANNER_SYSTEM)
+        self.assertIn(AYUE_MISSION_SHORT, _PLANNER_SYSTEM)
+        self.assertIn(AYUE_VOICE_SHORT, _PLANNER_SYSTEM)
+        self.assertNotIn(PUBLIC_AYUE_PERSONA, _PLANNER_SYSTEM)
+        for question, reply in PUBLIC_VOICE_FEW_SHOTS:
+            self.assertNotIn(question, _PLANNER_SYSTEM)
+            self.assertNotIn(reply, _PLANNER_SYSTEM)
         self.assertIn(PUBLIC_AYUE_PERSONA, _synthesizer_system_prompt("general_conversation", False))
         self.assertIn(PUBLIC_AYUE_PERSONA, _synthesizer_system_prompt("grounded_result", False))
 

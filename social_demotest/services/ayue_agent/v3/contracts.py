@@ -14,6 +14,8 @@ FORBIDDEN_ARG_FIELDS = frozenset({"user_id", "match_id", "event_id", "revision",
 VALID_AGENTS = frozenset({
     "calendar", "places", "web", "match", "relationship", "profile", "product_info", "synthesizer",
 })
+DATE_INVITATION_WRITE_INTENT = "relationship.date_invitation.v1"
+PlannerWriteIntent = Literal["none", "relationship.date_invitation.v1"]
 
 
 class SubTaskStatus(str, Enum):
@@ -39,14 +41,65 @@ class OpportunitySignal(BaseModel):
     confidence: float = 0.0
 
 
+class RunCondition(BaseModel):
+    """A bounded, server-evaluated execution condition.
+
+    ``depends_on`` remains the data edge.  ``run_if`` is a control edge and
+    therefore never causes the source observation to be copied into the
+    downstream agent's prompt.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_task_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="Task id that owns the server-issued control outcome; not a data dependency",
+    )
+    required_outcome: Literal[
+        "task.finished",
+        "calendar.no_scheduled_events",
+        "calendar.has_scheduled_events",
+    ] = Field(
+        description=(
+            "Exact control outcome. Use task.finished for ordinary Calendar prechecks; "
+            "use calendar.no_scheduled_events only for an explicit stop-when-busy request"
+        ),
+    )
+
+
 class SubTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
-    agent: Literal["calendar", "places", "web", "match", "relationship", "profile", "product_info", "synthesizer"]
-    depends_on: list[str] = Field(default_factory=list, max_length=3)
+    agent: Literal["calendar", "places", "web", "match", "relationship", "profile", "product_info", "synthesizer"] = Field(
+        description=(
+            "Domain owner. Use relationship for the aggregate of accepted/established contacts "
+            "(list, count, compare, or choose among them), including colloquial questions such as "
+            "'who have I matched with', and for an explicit request to create a shared date "
+            "invitation card. Use match only for the singleton active proposal/search lifecycle, "
+            "its current status/counterparty, or an explicit start/retry/decision."
+        ),
+    )
+    depends_on: list[str] = Field(default_factory=list, max_length=4)
     task_brief: str = Field(min_length=1, max_length=500)
-    evidence_policy: Literal["casual_discovery", "strict_verification"] | None = None
+    evidence_policy: Literal["casual_discovery", "strict_verification"] | None = Field(
+        default=None,
+        description="Web tasks only; omit for Calendar, Places, Match, Relationship and every other agent",
+    )
+    outcome_contract: Literal["calendar.availability.v1"] | None = Field(
+        default=None,
+        description=(
+            "Calendar availability tasks only; use exactly calendar.availability.v1. "
+            "Never put relationship.date_invitation.v1 here; that belongs only in "
+            "the top-level write_intent. Omit for every other task."
+        ),
+    )
+    run_if: RunCondition | None = Field(
+        default=None,
+        description="Optional Calendar control edge; omit unless a downstream task must wait for a Calendar outcome",
+    )
 
     @model_validator(mode="after")
     def _normalize_evidence_policy(self) -> "SubTask":
@@ -55,6 +108,8 @@ class SubTask(BaseModel):
                 self.evidence_policy = "casual_discovery"
         elif self.evidence_policy is not None:
             raise ValueError("evidence_policy is only valid for Web tasks")
+        if self.outcome_contract is not None and self.agent != "calendar":
+            raise ValueError("outcome_contract is only valid for Calendar tasks")
         return self
 
 
@@ -67,9 +122,16 @@ class Plan(BaseModel):
         default="tasks",
         description="tasks runs the existing DAG; direct_chat is a task-free conversational reply",
     )
+    write_intent: PlannerWriteIntent = Field(
+        default="none",
+        description=(
+            "Typed write capability declared by Planner. Date invitation intent is owned "
+            "exclusively by a Relationship-to-Synthesizer DAG."
+        ),
+    )
     presentation_mode: Literal["default", "itinerary"] = "default"
-    # At most three domain specialists plus one terminal synthesizer.
-    tasks: list[SubTask] = Field(default_factory=list, max_length=4)
+    # At most four domain specialists plus one terminal synthesizer.
+    tasks: list[SubTask] = Field(default_factory=list, max_length=5)
     direct_reply: str | None = Field(
         default=None,
         max_length=160,
@@ -93,6 +155,11 @@ class Plan(BaseModel):
 
     @model_validator(mode="after")
     def _validate_dag(self) -> "Plan":
+        if self.write_intent == DATE_INVITATION_WRITE_INTENT and self.mode != "tasks":
+            raise ValueError(
+                "relationship.date_invitation.v1 requires tasks mode with exactly one "
+                "Relationship task and one terminal Synthesizer"
+            )
         if self.mode == "direct_chat":
             if self.tasks:
                 raise ValueError("direct_chat plan cannot contain tasks")
@@ -126,6 +193,29 @@ class Plan(BaseModel):
         if self.presentation_mode == "itinerary" and not any(t.agent == "places" for t in self.tasks):
             raise ValueError("itinerary plan requires a places task")
 
+        if self.write_intent == DATE_INVITATION_WRITE_INTENT:
+            relationship_tasks = [task for task in self.tasks if task.agent == "relationship"]
+            synthesizer_tasks = [task for task in self.tasks if task.agent == "synthesizer"]
+            if len(self.tasks) != 2 or len(relationship_tasks) != 1 or len(synthesizer_tasks) != 1:
+                raise ValueError(
+                    "relationship.date_invitation.v1 requires exactly one Relationship "
+                    "task and one terminal Synthesizer; Match is never a precheck"
+                )
+            relationship_task = relationship_tasks[0]
+            synthesizer_task = synthesizer_tasks[0]
+            if relationship_task.depends_on or relationship_task.run_if is not None:
+                raise ValueError(
+                    "relationship.date_invitation.v1 Relationship task cannot depend on a precheck"
+                )
+            if synthesizer_task.depends_on != [relationship_task.id]:
+                raise ValueError(
+                    "relationship.date_invitation.v1 Synthesizer must depend only on the Relationship task"
+                )
+            if self.presentation_mode != "default":
+                raise ValueError("relationship.date_invitation.v1 uses default presentation")
+            if self.opportunity is not None and self.opportunity.signal != "none":
+                raise ValueError("relationship.date_invitation.v1 cannot contain an opportunity")
+
         ids = {t.id for t in self.tasks}
         if len(ids) != len(self.tasks):
             raise ValueError("duplicate SubTask id")
@@ -137,6 +227,24 @@ class Plan(BaseModel):
             for dep in t.depends_on:
                 if dep not in ids:
                     raise ValueError(f"SubTask {t.id} depends on unknown {dep}")
+            if t.run_if is not None:
+                if t.agent == "synthesizer":
+                    raise ValueError("synthesizer cannot have run_if")
+                source = t.run_if.source_task_id
+                if source not in ids:
+                    raise ValueError(f"SubTask {t.id} run_if references unknown {source}")
+                if source == t.id:
+                    raise ValueError(f"SubTask {t.id} run_if cannot reference itself")
+                source_task = next(item for item in self.tasks if item.id == source)
+                if source_task.agent == "synthesizer":
+                    raise ValueError("run_if cannot reference the terminal synthesizer")
+                if source in t.depends_on:
+                    raise ValueError("run_if source must be a control edge, not a data dependency")
+                if t.run_if.required_outcome.startswith("calendar."):
+                    if source_task.agent != "calendar":
+                        raise ValueError("calendar outcomes require a Calendar source task")
+                    if source_task.outcome_contract != "calendar.availability.v1":
+                        raise ValueError("Calendar source must declare availability outcome_contract")
         synthesizers = [t for t in self.tasks if t.agent == "synthesizer"]
         if len(synthesizers) != 1:
             raise ValueError("plan must contain exactly one synthesizer")
@@ -148,6 +256,11 @@ class Plan(BaseModel):
             if task.agent != "synthesizer"
             for dep in task.depends_on
         }
+        referenced_domains.update(
+            task.run_if.source_task_id
+            for task in self.tasks
+            if task.agent != "synthesizer" and task.run_if is not None
+        )
         terminal_domain_ids = domain_ids - referenced_domains
         if not terminal_domain_ids <= set(synthesizer.depends_on):
             raise ValueError("synthesizer must depend on every terminal domain task")
@@ -160,7 +273,12 @@ class Plan(BaseModel):
         completed: set[str] = set()
         remaining = list(self.tasks)
         while remaining:
-            ready = [t for t in remaining if set(t.depends_on) <= completed]
+            ready = [
+                t for t in remaining
+                if set(t.depends_on)
+                | ({t.run_if.source_task_id} if t.run_if is not None else set())
+                <= completed
+            ]
             if not ready:
                 raise ValueError("plan contains a dependency cycle")
             completed.update(t.id for t in ready)
@@ -230,3 +348,7 @@ class SubTaskResult(BaseModel):
     error_code: str | None = None
     skip_reason: str | None = None
     guard_code: GuardResultCode | None = None
+    outcome_codes: list[Literal[
+        "calendar.no_scheduled_events",
+        "calendar.has_scheduled_events",
+    ]] = Field(default_factory=list, max_length=2)

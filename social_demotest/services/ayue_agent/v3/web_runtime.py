@@ -5,10 +5,11 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import config
 from services.ayue_agent.web_tools import web_enabled
 
 from .contracts import AgentContextSlice, SubTask, SubTaskResult, SubTaskStatus, ToolProposal
-from .guarded_execution import GuardedExecutionOutcome, GuardedReadExecutor
+from .guarded_execution import GuardedReadExecutor
 from .place_projection import public_place_cards
 from .sub_agents import web_agent
 from .runtime_registry import TaskRunnerResult
@@ -60,11 +61,13 @@ def run(
     execution boundary; this runtime never calls a provider adapter directly.
     """
     aggregate = SubAgentMetrics()
+    aggregate.requested_model_tier = "main"
 
     def accumulate_metrics(metrics: SubAgentMetrics) -> None:
         aggregate.input_tokens += metrics.input_tokens
         aggregate.output_tokens += metrics.output_tokens
         aggregate.duration_ms += metrics.duration_ms
+        aggregate.llm_call_count += metrics.llm_call_count
         aggregate.tool_calls_raw.extend(metrics.tool_calls_raw or [])
         aggregate.rejected_calls.extend(metrics.rejected_calls or [])
         aggregate.content_raw = metrics.content_raw
@@ -117,6 +120,85 @@ def run(
     extract_calls_used = 0
     last_decision = None
     stop_reason = "budget_exhausted"
+
+    def execute_proposals(
+        proposals: list[ToolProposal],
+        proposal_subject_refs: dict[int, str | None],
+    ) -> None:
+        """Execute bounded Web proposals through the shared Guard boundary."""
+        nonlocal tool_calls_used, search_calls_used, extract_calls_used
+        if len(proposals) > 1:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="ayue-web") as pool:
+                futures = {
+                    pool.submit(
+                        services.execute,
+                        proposal,
+                        allowed_tools=frozenset({"web.search", "web.extract"}),
+                        step_count=tool_calls_used + index,
+                        max_reads=MAX_WEB_TOTAL_TOOL_CALLS,
+                        prior_observations=observations,
+                        call_index=tool_calls_used + index,
+                    ): proposal
+                    for index, proposal in enumerate(proposals)
+                }
+                executed_results = [(future.result(), proposal) for future, proposal in futures.items()]
+        else:
+            executed_results = [(
+                services.execute(
+                    proposals[0],
+                    allowed_tools=frozenset({"web.search", "web.extract"}),
+                    step_count=tool_calls_used,
+                    max_reads=MAX_WEB_TOTAL_TOOL_CALLS,
+                    prior_observations=observations,
+                    call_index=tool_calls_used,
+                ),
+                proposals[0],
+            )]
+
+        for outcome, proposal in executed_results:
+            result_item = outcome.result
+            attempted = outcome.attempted
+            if attempted:
+                tool_calls_used += 1
+                if result_item.tool_name == "web.search":
+                    search_calls_used += 1
+                elif result_item.tool_name == "web.extract":
+                    extract_calls_used += 1
+            if result_item.status is SubTaskStatus.OK and result_item.observation:
+                observation = _observation_dict(result_item)
+                subject_ref = proposal_subject_refs.get(id(proposal))
+                if subject_ref:
+                    observation["subject_ref"] = subject_ref
+                observations.append(observation)
+            elif result_item.error_code:
+                failures.append(str(result_item.error_code))
+
+    if (
+        config.AYUE_V3_WEB_PLACE_BOOTSTRAP_FAST_PATH
+        and evidence_policy == "casual_discovery"
+        and place_candidates
+        and search_calls_used == 0
+        and tool_calls_used + min(len(place_candidates), MAX_WEB_INITIAL_SEARCH_QUERIES) <= MAX_WEB_TOTAL_TOOL_CALLS
+    ):
+        bootstrap_proposals: list[ToolProposal] = []
+        bootstrap_subject_refs: dict[int, str | None] = {}
+        for candidate in place_candidates[:MAX_WEB_INITIAL_SEARCH_QUERIES]:
+            proposal = ToolProposal(
+                tool_name="web.search",
+                arguments={
+                    "query": anchor_place_search_query(
+                        candidate_name=str(candidate.get("name") or ""),
+                        address_summary=str(candidate.get("address_summary") or ""),
+                        answer_target=task.task_brief,
+                        suggested_query="",
+                    ),
+                    "recency": "none",
+                    "use_saved_location": False,
+                },
+            )
+            bootstrap_proposals.append(proposal)
+            bootstrap_subject_refs[id(proposal)] = str(candidate.get("candidate_ref") or "") or None
+        execute_proposals(bootstrap_proposals, bootstrap_subject_refs)
 
     for round_index in range(1, MAX_WEB_RESEARCH_DECISION_ITERATIONS + 1):
         decision, metrics = web_agent.decide(
@@ -263,52 +345,7 @@ def run(
             aggregate.error = "web_action_invalid"
             continue
 
-        executed_results: list[tuple[GuardedExecutionOutcome, ToolProposal]]
-        if len(proposals) > 1:
-            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="ayue-web") as pool:
-                futures = {
-                    pool.submit(
-                        services.execute,
-                        proposal,
-                        allowed_tools=frozenset({"web.search", "web.extract"}),
-                        step_count=tool_calls_used + index,
-                        max_reads=MAX_WEB_TOTAL_TOOL_CALLS,
-                        prior_observations=observations,
-                        call_index=tool_calls_used + index,
-                    ): proposal
-                    for index, proposal in enumerate(proposals)
-                }
-                executed_results = [(future.result(), proposal) for future, proposal in futures.items()]
-        else:
-            executed_results = [(
-                services.execute(
-                    proposals[0],
-                    allowed_tools=frozenset({"web.search", "web.extract"}),
-                    step_count=tool_calls_used,
-                    max_reads=MAX_WEB_TOTAL_TOOL_CALLS,
-                    prior_observations=observations,
-                    call_index=tool_calls_used,
-                ),
-                proposals[0],
-            )]
-
-        for outcome, proposal in executed_results:
-            result_item = outcome.result
-            attempted = outcome.attempted
-            if attempted:
-                tool_calls_used += 1
-                if result_item.tool_name == "web.search":
-                    search_calls_used += 1
-                elif result_item.tool_name == "web.extract":
-                    extract_calls_used += 1
-            if result_item.status is SubTaskStatus.OK and result_item.observation:
-                observation = _observation_dict(result_item)
-                subject_ref = proposal_subject_refs.get(id(proposal))
-                if subject_ref:
-                    observation["subject_ref"] = subject_ref
-                observations.append(observation)
-            elif result_item.error_code:
-                failures.append(str(result_item.error_code))
+        execute_proposals(proposals, proposal_subject_refs)
 
     finish_phase_failed = not observations
     if observations:

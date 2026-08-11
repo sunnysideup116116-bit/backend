@@ -47,10 +47,11 @@
 
 唯讀工具只能回傳完成問題所需的最小 typed projection；不傳 Mongo document、raw profile 或內部 ID。
 
-## 3. 寫入工具（4 個，全部需要確認）
+## 3. 寫入工具（5 個，全部需要確認）
 
 | 工具 | executor_key | Planner 參數 | 確認後執行路徑 |
 | --- | --- | --- | --- |
+| `relationship.start_date_coordination` | `date_coordination_start` | `target_source`（mention/name/recent_contact）＋ name 模式的連續原句 `target_evidence_span`；不含 ID | accepted-contact target resolution → pending confirmation → `date_coordination_service.create_invite` 建立空白卡片 |
 | `match.start_search` | `start_search` | 無 | `_start_search` → `start_match_search`（入 job 佇列） |
 | `match.decide_active_proposal` | `decide_active_proposal` | `decision`(interested/declined) | `_decide_active_proposal` → revision CAS |
 | `profile.start_assessment` | `assessment_start` | `kind`(basic/deep) | `_start_assessment` → session 啟動 |
@@ -64,6 +65,7 @@
 - `WEB_TOOLS` = `{web.search, web.extract}`；`PLACES_TOOLS` = `{places.search_nearby, places.measure_distance, places.resolve_place}`。
 - `places_agent` 只看 `PLACES_TOOLS`；`web_agent` 只看 `WEB_TOOLS`。Web 的 research workflow 不放在 Tool Registry 或 Places Agent。
 - `relationship.get_mentioned_contact_summary` 只在 server 驗證過 accepted @ mention 的回合才可見（`planner_tool_names(can_read_mentioned_contacts=...)`）。
+- `relationship.start_date_coordination` 不在一般 Relationship 可見工具中；只有 Planner 產生已驗證的 `write_intent="relationship.date_invitation.v1"` 時，Relationship Runtime 才暴露這一個寫入 function。
 - 明確配對請求（例如「再配對一次」）必須由 Planner 建立 `match` task；`opportunity.social_opening` 只產生短期溫和提議 observation，不建立 confirmation。
 
 ## 5. 執行與驗證流程

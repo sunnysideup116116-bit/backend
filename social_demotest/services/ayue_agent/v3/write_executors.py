@@ -17,6 +17,15 @@ from services.assessment_session_service import start_assessment_session
 from services.ayue_agent.match_opportunity import (
     assess_match_opportunity, missing_basis_question,
 )
+from services.ayue_agent.public_relationship_projection import (
+    display_name as relationship_display_name,
+    resolve_accepted_contact_name,
+)
+from .relationship_references import (
+    clear_reference as clear_relationship_reference,
+    get_reference as get_relationship_reference,
+    remember_contact,
+)
 TOOL_CALLS = db["agent_tool_calls"]
 
 
@@ -115,6 +124,150 @@ def _start_assessment(ctx: Any, arguments: dict[str, Any], *, confirmation_id: s
     ok = outcome.get("status") in {"started", "already_started"}
     _finish(key, "done", {"status": outcome.get("status")})
     return ok, str(outcome.get("reply") or "我們可以從一個輕鬆的問題開始。"), None if ok else str(outcome.get("status") or "assessment_start_failed")
+
+
+def _contact_resolution_failure(status: str, *, name_hint: str = "") -> str:
+    if status == "ambiguous":
+        return "我找到不只一位可能的對象，請指定一位聯絡人後再試一次。"
+    if status == "too_many":
+        return "你的聯絡人較多，請用 @ 或從聯絡人清單指定一位。"
+    if status == "unavailable":
+        return "我現在無法安全確認這位聯絡人，請稍後再試。"
+    if status == "missing_recent":
+        return "我還不確定你說的對方是誰，可以說名字或指定一位聯絡人嗎？"
+    if name_hint:
+        return "我在你已建立聯絡的對象裡找不到這個名字，可以再說一次或指定一位聯絡人嗎？"
+    return "我還不確定你要邀請哪一位，可以說名字或指定一位聯絡人嗎？"
+
+
+def _prepare_date_coordination(
+    arguments: dict[str, Any], ctx: Any, turn: Any,
+) -> tuple[dict[str, Any] | None, str | None]:
+    from services.date_coordination_service import LIVE_STATUSES, find_accepted_match
+
+    mention_ids = list(getattr(turn, "_mentioned_ids", []) or [])
+    if bool(getattr(turn, "mentioned_contact_overflow", False)) or len(mention_ids) > 1:
+        clear_relationship_reference(ctx.user_id)
+        return None, _contact_resolution_failure("ambiguous")
+
+    target_id = ""
+    safe_label = ""
+    resolution_kind = ""
+    target_source = str(arguments.get("target_source") or "")
+    evidence_span = str(arguments.get("target_evidence_span") or "")
+    if len(mention_ids) == 1:
+        target_id = mention_ids[0]
+        safe_label = relationship_display_name(target_id)
+        resolution_kind = "mention"
+    elif target_source == "name":
+        if not evidence_span or evidence_span not in str(ctx.message or ""):
+            clear_relationship_reference(ctx.user_id)
+            return None, _contact_resolution_failure("not_found", name_hint=evidence_span)
+        resolved = resolve_accepted_contact_name(ctx.user_id, evidence_span)
+        if resolved.status not in {"resolved_exact", "resolved_phonetic", "resolved_fuzzy"} or not resolved.other_id:
+            clear_relationship_reference(ctx.user_id)
+            if resolved.status == "ambiguous":
+                names = "、".join(resolved.candidates[:3])
+                return None, f"我找到不只一位可能的對象：{names or '請指定一位'}。你想邀請哪一位？"
+            return None, _contact_resolution_failure(resolved.status, name_hint=evidence_span)
+        target_id = resolved.other_id
+        safe_label = resolved.display_name
+        resolution_kind = resolved.kind or "exact"
+    elif target_source == "recent_contact":
+        reference = get_relationship_reference(ctx.user_id)
+        if not reference:
+            clear_relationship_reference(ctx.user_id)
+            return None, _contact_resolution_failure("missing_recent")
+        target_id = str(reference.get("other_id") or "")
+        safe_label = str(reference.get("safe_label") or "對方")
+        resolution_kind = "recent"
+    else:
+        return None, _contact_resolution_failure("not_found")
+
+    if not target_id:
+        return None, _contact_resolution_failure("not_found")
+    try:
+        match = find_accepted_match(ctx.user_id, target_id)
+    except Exception:
+        return None, _contact_resolution_failure("unavailable")
+    if not match:
+        return None, "這位目前不是已建立聯絡的對象，我沒有建立邀請卡。"
+    coordination = match.get("date_coordination") or {}
+    if coordination.get("status") in LIVE_STATUSES:
+        if coordination.get("status") == "pending_partner":
+            return None, f"你和「{safe_label}」已經有一張等待回覆的約會邀請卡，我不會重複建立。"
+        return None, f"你和「{safe_label}」已有進行中的約會安排，我不會再建立新的卡片。"
+    revision = int(match.get("proposal_revision", 0) or 0)
+    remember_contact(ctx.user_id, target_id, safe_label)
+    return {
+        "action": "relationship.start_date_coordination",
+        "arguments": {},
+        "data": {
+            "other_id": target_id,
+            "match_id": str(match.get("_id") or ""),
+            "expected_match_revision": revision,
+            "safe_label": safe_label[:30],
+            "resolution_kind": resolution_kind,
+        },
+    }, (
+        (f"我把「{evidence_span}」理解成「{safe_label}」。" if resolution_kind in {"fuzzy", "phonetic"} else "")
+        + f"好欸～那我先幫你和「{safe_label}」在聊天室放一張約會邀請卡！"
+        + "等她接受之後，你們就可以一起慢慢補上約會細節囉～"
+    )
+
+
+def _start_date_coordination(
+    ctx: Any, turn: Any, run_id: str, index: int,
+    arguments: dict[str, Any], confirmation_id: str | None,
+    payload: dict[str, Any] | None,
+) -> tuple[bool, str, str | None]:
+    from services.date_coordination_service import LIVE_STATUSES, create_invite, find_accepted_match
+
+    data = payload or {}
+    other_id = str(data.get("other_id") or "")
+    safe_label = str(data.get("safe_label") or "對方")
+    expected_match_id = str(data.get("match_id") or "")
+    expected_revision = int(data.get("expected_match_revision", 0) or 0)
+    if not other_id or not expected_match_id:
+        return False, "這筆邀請確認資訊已失效，請重新提出邀請。", "date_coordination_payload_invalid"
+    try:
+        match = find_accepted_match(ctx.user_id, other_id)
+    except Exception:
+        match = None
+    if not match or str(match.get("_id") or "") != expected_match_id:
+        return False, "你和這位對象的聯絡狀態已變更，因此我沒有建立邀請卡。", "stale_relationship"
+    current_revision = int(match.get("proposal_revision", 0) or 0)
+    if expected_revision and current_revision != expected_revision:
+        return False, "你和這位對象的聯絡狀態已變更，因此我沒有建立邀請卡。", "stale_relationship"
+    existing = match.get("date_coordination") or {}
+    if existing.get("status") in LIVE_STATUSES:
+        return True, f"你和「{safe_label}」已經有進行中的約會邀請卡，我沒有重複建立。", "date_coordination_already_live"
+
+    key = _idempotency_key(confirmation_id, run_id, index, suffix="date_coordination")
+    if not _claim_once(key):
+        return True, f"你和「{safe_label}」的空白約會邀請卡已經建立。", None
+    try:
+        coordination = create_invite(
+            match, ctx.user_id, other_id,
+            expected_match_revision=expected_revision or None,
+        )
+    except Exception as exc:
+        _finish(key, "failed", {"error_code": "date_coordination_write_failed"})
+        return False, "我現在無法建立約會邀請卡，請稍後再試。", type(exc).__name__
+    if coordination is None:
+        try:
+            latest = find_accepted_match(ctx.user_id, other_id)
+        except Exception:
+            latest = None
+        latest_coordination = (latest or {}).get("date_coordination") or {}
+        if latest_coordination.get("status") in LIVE_STATUSES:
+            _finish(key, "done", {"status": "already_live"})
+            return True, f"你和「{safe_label}」已經有進行中的約會邀請卡，我沒有重複建立。", "date_coordination_already_live"
+        _finish(key, "failed", {"error_code": "stale_relationship"})
+        return False, "你和這位對象的聯絡狀態已變更，因此我沒有建立邀請卡。", "stale_relationship"
+    _finish(key, "done", {"status": "created"})
+    remember_contact(ctx.user_id, other_id, safe_label)
+    return True, f"完成啦！邀請卡已經放進聊天室了～接下來就等他回覆，之後你們再一起喬時間和細節。祝你們約會順利、玩得開心～", None
 
 
 def _calendar_event_label(event: dict) -> str:
@@ -338,6 +491,7 @@ _WRITE_EXECUTORS = {
     "match.start_search": lambda ctx, turn, run_id, index, args, cid, payload: _start_search(ctx, run_id, index, confirmation_id=cid),
     "match.decide_active_proposal": lambda ctx, turn, run_id, index, args, cid, payload: _decide_active_proposal(ctx, turn, run_id, index, args, payload),
     "profile.start_assessment": lambda ctx, turn, run_id, index, args, cid, payload: _start_assessment(ctx, args, confirmation_id=cid),
+    "relationship.start_date_coordination": _start_date_coordination,
 }
 
 
@@ -374,6 +528,8 @@ def prepare_write_confirmation(
             "arguments": {"decision": decision},
             "data": {"proposal_revision": revision},
         }, f"要對 {counterparty} 的提案{action_label}嗎？確認後我才會送出。"
+    if tool_name == "relationship.start_date_coordination":
+        return _prepare_date_coordination(arguments, ctx, turn)
     if tool_name == "profile.start_assessment":
         kind = {"basic": "big_five", "deep": "deep_profile"}.get(str(arguments.get("kind") or ""))
         if kind is None:

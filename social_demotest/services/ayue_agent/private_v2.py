@@ -6,7 +6,7 @@ import json
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Literal
 
@@ -35,6 +35,7 @@ from services.ayue_agent.product_identity import (
     PRIVATE_RUNTIME_FALLBACK_REPLY,
 )
 from .public_relationship_projection import display_name, safe_public_profile
+from services.semantic_plan_service import get_relationship_semantic_context
 
 
 PRIVATE_RUNS = db["private_agent_runs"]
@@ -82,6 +83,7 @@ class PrivateAgentTurnContextV2:
     private_history: list[dict[str, str]]
     shared_facts: list[dict[str, str]]
     local_time: str
+    relationship_semantic_context: dict[str, Any] = field(default_factory=dict)
 
 
 def _compact(value: str) -> str:
@@ -123,6 +125,7 @@ def build_private_turn_context_v2(user_id: str, other_id: str, message: str, mat
         private_history=_bounded_history(private_room, owner_id=user_id),
         shared_facts=private_pair_shared_facts(match_doc, user_id, other_id),
         local_time=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M"),
+        relationship_semantic_context=get_relationship_semantic_context(match_doc, pair_room),
     )
 
 PRIVATE_SCOPE_POLICY = """
@@ -164,6 +167,14 @@ Private 沒有 Places 搜尋能力；一般店家資訊或餐廳搜尋要 redire
 
 
 def _legacy_planner_prompt(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]]) -> str:
+    semantic_plan = ctx.relationship_semantic_context.get("semantic_plan", {})
+    strategy = semantic_plan.get("strategy", {})
+    context_data = semantic_plan.get("context", {})
+    sanitized_triples = [
+        {"subject": t.get("subject"), "predicate": t.get("predicate"), "object": t.get("object")}
+        for t in ctx.relationship_semantic_context.get("knowledge_graph_triples", [])[:20]
+        if isinstance(t, dict)
+    ]
     safe = {
         "message": ctx.message, "viewer_profile": ctx.viewer_profile,
         "counterparty_shareable": ctx.counterparty_shareable,
@@ -173,6 +184,14 @@ def _legacy_planner_prompt(ctx: PrivateAgentTurnContextV2, observations: list[di
         # This section is planner-only. It can influence only the four strategy
         # labels below, never text or factual output.
         "counterparty_advisory_strategy_only": ctx.counterparty_advisory,
+        "relationship_semantic_context_strategy_only": {
+            "current_role": semantic_plan.get("current_role"),
+            "macro_summary": context_data.get("macro_summary"),
+            "theme": strategy.get("theme"),
+            "action_plan": strategy.get("action_plan"),
+            "dynamic_content_bounds": strategy.get("dynamic_content_bounds"),
+            "knowledge_graph_triples": sanitized_triples,
+        }
     }
     return f"""{PRIVATE_AYUE_PERSONA}
 
@@ -295,10 +314,22 @@ def _consume_confirmation(ctx: PrivateAgentTurnContextV2, match_doc: dict[str, A
 
 
 def _compose(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]], strategy: str) -> str:
+    semantic_plan = ctx.relationship_semantic_context.get("semantic_plan", {})
+    context_data = semantic_plan.get("context", {})
+    sanitized_triples = [
+        {"subject": t.get("subject"), "predicate": t.get("predicate"), "object": t.get("object")}
+        for t in ctx.relationship_semantic_context.get("knowledge_graph_triples", [])[:20]
+        if isinstance(t, dict)
+    ]
     safe = {
         "message": ctx.message, "viewer_profile": ctx.viewer_profile,
         "counterparty_shareable": ctx.counterparty_shareable, "shared_history": ctx.shared_history,
         "shared_facts": ctx.shared_facts, "observations": observations, "strategy": strategy,
+        "relationship_semantic_context": {
+            "current_role": semantic_plan.get("current_role"),
+            "macro_summary": context_data.get("macro_summary"),
+            "knowledge_graph_triples": sanitized_triples,
+        }
     }
     prompt = f"""{PRIVATE_AYUE_PERSONA}
 

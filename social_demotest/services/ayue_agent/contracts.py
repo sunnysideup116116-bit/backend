@@ -91,6 +91,9 @@ class PublicAgentTurnContext(BaseModel):
     # Public references only. Their executor-side IDs remain on AgentTurnContext.
     mentioned_contacts: list[dict[str, str]] = Field(default_factory=list)
     mentioned_contact_overflow: bool = False
+    # Short-lived, prompt-safe relationship referent. The executor-side ID is
+    # kept in v3.relationship_references and is never part of this model.
+    recent_contact_reference: dict[str, Any] | None = None
     capability_manifest_version: str = "v2"
     match_opportunity_state: str = "not_ready"
     guidance_directive: str = "none"

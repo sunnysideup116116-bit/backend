@@ -158,9 +158,16 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
         public_projection as calendar_reference_projection,
         recent_mutation_projection,
     )
+    from .v3.relationship_references import (
+        get_reference as get_relationship_reference,
+        public_projection as relationship_reference_projection,
+    )
     calendar_draft = calendar_draft_projection(get_calendar_draft(ctx.user_id))
     calendar_recent_reference = calendar_reference_projection(get_calendar_reference(ctx.user_id))
     calendar_recent_mutation = recent_mutation_projection(get_recent_mutation(ctx.user_id))
+    recent_contact_reference = relationship_reference_projection(
+        get_relationship_reference(ctx.user_id)
+    )
     now = time.time()
     if recent_context_draft and now - float(recent_context_draft.get("created_at", 0) or 0) > RECENT_CONTEXT_DRAFT_TTL_SECONDS:
         profiles_coll.update_one({"user_id": ctx.user_id}, {"$unset": {"recent_context_draft": ""}})
@@ -181,6 +188,7 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
         calendar_draft=calendar_draft, calendar_recent_reference=calendar_recent_reference,
         calendar_recent_mutation=calendar_recent_mutation,
         recent_context_draft=recent_context_draft,
+        recent_contact_reference=recent_contact_reference,
         mentioned_contacts=mentioned_contact_refs(ctx.user_id, mentioned_ids),
         mentioned_contact_overflow=bool(ctx.mention_overflow or validation_overflow),
         capability_manifest_version=CAPABILITY_MANIFEST_VERSION,

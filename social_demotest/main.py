@@ -9,6 +9,7 @@ from services.profile_skills import ensure_profile_skill_indexes
 from services.ayue_agent.proactive_scheduler import start_proactive_care_scheduler, stop_proactive_care_scheduler
 from services.ayue_agent.v3.calendar_drafts import ensure_indexes as ensure_calendar_draft_indexes
 from services.ayue_agent.v3.calendar_references import ensure_indexes as ensure_calendar_reference_indexes
+from services.ayue_agent.v3.relationship_references import ensure_indexes as ensure_relationship_reference_indexes
 from services.match_search_job_service import start_match_search_worker, stop_match_search_worker
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -29,6 +30,7 @@ def setup_calendar_indexes():
     ensure_calendar_indexes()
     ensure_calendar_draft_indexes()
     ensure_calendar_reference_indexes()
+    ensure_relationship_reference_indexes()
     ensure_ayue_agent_indexes()
     ensure_map_cache_indexes()
     ensure_profile_skill_indexes()

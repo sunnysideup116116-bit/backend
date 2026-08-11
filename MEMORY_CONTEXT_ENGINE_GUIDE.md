@@ -117,6 +117,9 @@ Saved owner message
 - room-scoped KG triples：共同聊天中可驗證的 entity relation。
 - 不等於 owner durable memory，也不應自動回寫任一方的 `HAS_PREFERENCE`。
 - 對 Public Ayue 或 Private Ayue 只能輸出 consented／shared projection，不能輸出 raw chat 或完整 strategy。
+- Updater 只計算尚未處理的 pair-room 訊息，並以內容長度作保守 budget proxy；累積至少 600 字元單位才更新。短訊息數量本身不觸發更新，避免只因訊息筆數達門檻就呼叫模型。
+- Private V2 由 `PrivateAgentTurnContextV2` 獨立 adapter 讀取 current accepted pair room。Planner projection 只允許 role、macro summary、theme、action plan、dynamic bounds 與最多 20 筆 triples；final composer 再縮小為 role、macro summary 與 triples。Raw plan/Graph 欄位與其他 room 的資料不得進 prompt。
+- Neo4j relationship read 失敗時可退回同一 semantic plan 已保存的 bounded triples；兩者都沒有時回空集合，不得改抓 owner durable memory 或跨 room Graph。
 
 ### 2.4 Public Context
 
@@ -312,6 +315,8 @@ Context Engine 的輸出應是 provider-neutral typed bundle，而不是 prompt 
 
 - A、B 有相同 Trait key 時，讀取仍嚴格依 owner 隔離。
 - 對方私人 memory 永不進 Public context、Private final composer 或 trace。
+- Private relationship projection 僅限 current accepted pair room、allowlisted semantic-plan 欄位與最多 20 筆 triples；raw Mongo／Neo4j 欄位不進 Planner 或 composer。
+- 未滿 600 字元單位的未處理短訊息不觸發 semantic update；達門檻後的 chat-log projection 必須保留實際 sender/content，而不是未展開的格式字串。
 - 同一 message ID 重試不增加 evidence count。
 - disable／restore／correct 會同步 Graph source 與 Mongo preview。
 - 矛盾 evidence 不被後到的低信心訊息靜默覆蓋。

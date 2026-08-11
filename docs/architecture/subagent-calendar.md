@@ -16,6 +16,8 @@
 - **取消**一筆或多筆行程（共同約會同步雙方行事曆並通知對方）。
 - 相對時間詞（這個月、本週、明天…）由 agent 依 clock 自行換算成具體 `YYYY-MM-DD`。
 
+具體日期的個人外出／約會建議會先建立 `calendar.availability.v1` 唯讀 precheck；即使使用者說不要新增行程，也不會建立 mutation。這個 task 只允許一次 `calendar.list_my_events`，成功後由 Calendar Runtime 產生 `calendar.no_scheduled_events` 或 `calendar.has_scheduled_events` typed outcome，供 Scheduler 的 `run_if` 使用。Scheduler 不解析 events，也不把控制 edge 的行程內容傳給 Web、Places 或 Relationship。
+
 **不負責**：不讀取對方行事曆；不猜測配對對象的行程。
 
 ## 2. 可呼叫的工具（5 個）
@@ -123,19 +125,19 @@ Planner 參數（`_CalendarFindArguments`）：
 
 **使用者**：「我這星期天想和小李吃晚餐，幫我看看我那天有沒有空，有的話找附近牛排。」
 
-**Planner** 拆 DAG（依 planner 規則）：
+**Planner** 拆 DAG（依 planner 規則；普通 precheck 使用 `task.finished`，明確「有事就算了」才改用 `calendar.no_scheduled_events`）：
 
 ```json
 {
   "tasks": [
-    {"id": "t1", "agent": "calendar", "depends_on": [], "task_brief": "查詢這週日（8/9）本人行事曆是否有空檔"},
-    {"id": "t2", "agent": "places", "depends_on": [], "task_brief": "搜尋三民區附近的牛排餐廳"},
-    {"id": "t3", "agent": "synthesizer", "depends_on": ["t1", "t2"], "task_brief": "綜合行程衝突與餐廳推薦回覆"}
+    {"id": "t1", "agent": "calendar", "depends_on": [], "outcome_contract": "calendar.availability.v1", "task_brief": "查詢這週日（8/9）本人行事曆是否有空檔"},
+    {"id": "t2", "agent": "places", "depends_on": [], "run_if": {"source_task_id": "t1", "required_outcome": "task.finished"}, "task_brief": "搜尋三民區附近的牛排餐廳"},
+    {"id": "t3", "agent": "synthesizer", "depends_on": ["t2"], "task_brief": "綜合行程衝突與餐廳推薦回覆"}
   ]
 }
 ```
 
-t1 與 t2 平行執行：
+t1 完成後才啟動 t2；Calendar 的 raw observation 只交給 terminal Synthesizer，不經 `run_if` 傳給 Places：
 
 - **t1 (calendar)**：LLM 輸出 `{"tool_name": "calendar.list_my_events", "arguments": {"start_date": "2026-08-09", "end_date": "2026-08-09"}}` → Guard 通過 → `execute_tool` 回傳當天行程（例如 18:00–21:00 電影）。
 - **t2 (places)**：見 `subagent-places.md`。

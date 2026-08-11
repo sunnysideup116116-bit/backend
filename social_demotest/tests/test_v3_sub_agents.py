@@ -15,6 +15,7 @@ from services.ayue_agent.v3.sub_agents.places_agent import (
 from services.ayue_agent.v3.sub_agents.match_agent import run as run_match
 from services.ayue_agent.v3.sub_agents.relationship_agent import (
     _SYSTEM as RELATIONSHIP_SYSTEM,
+    run_date_invitation,
     run as run_relationship,
 )
 from services.ayue_agent.v3.sub_agents.profile_agent import run as run_profile
@@ -174,6 +175,82 @@ class V3SubAgentTests(unittest.TestCase):
         self.assertIsNotNone(proposals)
         self.assertEqual(len(proposals), 1)
         self.assertEqual(proposals[0].tool_name, "relationship.list_accepted_contacts")
+
+    def test_relationship_read_agent_cannot_see_date_write_tool(self):
+        slc = _slice("relationship", {
+            "message": "我有哪些聯絡人？",
+            "recent_messages": [],
+            "mentioned_contacts": [],
+            "mentioned_contact_overflow": False,
+            "clock": _clock().model_dump(),
+            "prior_observations": [],
+        })
+        with patch(
+            "services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{"name": "relationship.list_accepted_contacts", "arguments": {}}]),
+        ) as provider:
+            run_relationship(slc, task_brief="請列出已建立聯絡的對象")
+        visible = provider.call_args.args[1]
+        self.assertEqual(
+            [item["function"]["name"] for item in visible],
+            ["relationship.get_mentioned_contact_summary", "relationship.get_verified_evidence", "relationship.list_accepted_contacts"],
+        )
+
+    def test_date_invitation_runtime_retries_wrong_call_with_only_write_tool(self):
+        slc = _slice("relationship", {
+            "message": "幫我約小安",
+            "recent_messages": [],
+            "mentioned_contacts": [],
+            "mentioned_contact_overflow": False,
+            "recent_contact_reference": None,
+            "clock": _clock().model_dump(),
+            "prior_observations": [],
+        })
+        with patch(
+            "services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools",
+            side_effect=[
+                _fc_result(tool_calls=[{"name": "relationship.list_accepted_contacts", "arguments": {}}]),
+                _fc_result(tool_calls=[{
+                    "name": "relationship.start_date_coordination",
+                    "arguments": {"target_source": "name", "target_evidence_span": "小安"},
+                }]),
+            ],
+        ) as provider:
+            proposals, metrics = run_date_invitation(
+                slc, task_brief="Propose relationship.start_date_coordination exactly once",
+            )
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].tool_name, "relationship.start_date_coordination")
+        self.assertEqual(metrics.llm_call_count, 2)
+        self.assertIn("required_tool_wrong_name", metrics.rejected_calls)
+        for call in provider.call_args_list:
+            visible = call.args[1]
+            self.assertEqual(
+                [item["function"]["name"] for item in visible],
+                ["relationship.start_date_coordination"],
+            )
+
+    def test_date_invitation_provider_timeout_is_not_retried(self):
+        slc = _slice("relationship", {
+            "message": "幫我約小安",
+            "recent_messages": [],
+            "mentioned_contacts": [],
+            "mentioned_contact_overflow": False,
+            "recent_contact_reference": None,
+            "clock": _clock().model_dump(),
+            "prior_observations": [],
+        })
+        with patch(
+            "services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools",
+            side_effect=TimeoutError("provider timeout"),
+        ) as provider:
+            proposals, metrics = run_date_invitation(
+                slc, task_brief="Propose relationship.start_date_coordination exactly once",
+            )
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(proposals, [])
+        self.assertEqual(metrics.llm_call_count, 1)
 
     def test_profile_agent_produces_get_self_summary_proposal(self):
         slc = _slice("profile", {

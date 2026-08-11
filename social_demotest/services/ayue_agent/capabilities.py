@@ -9,7 +9,7 @@ from typing import Any
 from services.ayue_agent.product_identity import AYUE_ROLE_LABEL, AYUE_SURFACE_IDENTITY, PUBLIC_CAPABILITY_REPLY
 
 
-CAPABILITY_MANIFEST_VERSION = "v5"
+CAPABILITY_MANIFEST_VERSION = "v6"
 
 
 CAPABILITY_MANIFEST: dict[str, Any] = {
@@ -50,7 +50,7 @@ CAPABILITY_MANIFEST: dict[str, Any] = {
         "記住你主動分享、可長期使用的偏好與限制",
         "在聊天室重新進行基本性格或深層價值觀探索；中途可以隨時結束，完成後還會再確認才套用新結果",
         "查看、新增、修改及取消你自己的行程；共同約會的變動會同步通知對方，寫入前會先確認",
-        "協助整理你想和對方聊的活動想法；目前不能代替雙方發出約會邀請或成立約會",
+        "可以在你明確指定一位已建立聯絡的對象後，先向你確認，再在你們聊天室建立一張空白約會邀請卡；不代填日期、時間、地點或活動，也不代表對方已接受",
         "確認正式配對進度、對方是否接受與公開共同點，並從已接受聯絡人中整理適合一起參與活動的人選",
         "依既有資料幫你尋找合適的人選",
         "查詢最新公開資訊並附上來源",
@@ -62,6 +62,16 @@ CAPABILITY_MANIFEST: dict[str, Any] = {
         "uses_existing_profile_when_no_new_preferences": True,
         "requires_confirmation": True,
         "may_return_no_suitable_candidate": True,
+    },
+    "relationship": {
+        "date_invitation": {
+            "available_in_public_ayue": True,
+            "requires_accepted_contact": True,
+            "requires_confirmation": True,
+            "creates_empty_card_only": True,
+            "waits_for_partner_acceptance": True,
+            "participants_fill_details_later": True,
+        },
     },
     "terminology": {
         "preferred": ["對象", "人選", "對方", "旅伴"],
@@ -146,6 +156,10 @@ _PRODUCT_KNOWLEDGE_SECTIONS: dict[str, dict[str, Any]] = {
             "may_return_no_suitable_candidate": CAPABILITY_MANIFEST["matching"]["may_return_no_suitable_candidate"],
             "not_random": CAPABILITY_MANIFEST["matching"]["selection"] == "ranked_not_random",
         },
+    },
+    "relationship.date_invitation": {
+        "domain": "relationship",
+        "facts": copy.deepcopy(CAPABILITY_MANIFEST["relationship"]["date_invitation"]),
     },
     "calendar.confirmation": {
         "domain": "calendar",
@@ -249,6 +263,10 @@ PRODUCT_INFO_FAILURE_FALLBACKS: dict[str, str] = {
         "我不會隨機配對，也不是只看一個總分。我會先用你已分享的近期情境、偏好與限制、價值觀和個性縮小範圍，"
         "再交給媒合排序；沒有足夠合適的人就直接說沒有。真的開始搜尋前，我也會先向你確認。"
     ),
+    "date_invitation": (
+        "沒錯喔～你指定一位已建立聯絡的對象後，我會先請你確認；確認後只會在你們聊天室放一張空白邀請卡，"
+        "等對方接受，再由你們一起填寫約會資料，等雙方都確認完成後，就會同步到行事曆囉～"
+    ),
 }
 
 
@@ -313,6 +331,10 @@ def product_info_projection(topics: list[str] | None = None) -> dict[str, Any]:
         }
     if "matching_principles" in selected:
         facts["matching"] = dict(CAPABILITY_MANIFEST["matching"])
+    if "date_invitation" in selected:
+        facts["date_invitation"] = copy.deepcopy(
+            CAPABILITY_MANIFEST["relationship"]["date_invitation"]
+        )
     return {
         "manifest_version": CAPABILITY_MANIFEST_VERSION,
         "topics": selected,

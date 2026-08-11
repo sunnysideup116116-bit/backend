@@ -90,6 +90,10 @@ class GuardedReadExecutor:
     # runtimes without exposing domain authority to the LLM.
     prior_observations: list[dict[str, Any]] = field(default_factory=list)
     max_reads: int = 3
+    # Shared by all task-bound executors in one Public run.  The Scheduler
+    # supplies the lock; this adapter only performs the typed budget check.
+    global_read_count: dict[str, int] | None = None
+    global_max_reads: int | None = None
     create_confirmation: Callable[..., Any] | None = None
     print_llm_metrics: Callable[[str, Any], Any] | None = None
     semantic_runner_override: Callable[..., Any] | None = None
@@ -195,7 +199,26 @@ class GuardedReadExecutor:
                     ),
                     attempted=False,
                 )
+            if (
+                spec.risk.value == "read"
+                and self.global_read_count is not None
+                and self.global_max_reads is not None
+                and self.global_read_count.get("count", 0) >= self.global_max_reads
+            ):
+                self.trace["guard_results"].append(GuardResultCode.STEP_LIMIT_EXCEEDED.value)
+                return GuardedExecutionOutcome(
+                    result=SubTaskResult(
+                        task_id=self.task_id,
+                        status=SubTaskStatus.FAILED,
+                        tool_name=proposal.tool_name,
+                        error_code="public_read_budget_exhausted",
+                        guard_code=GuardResultCode.STEP_LIMIT_EXCEEDED,
+                    ),
+                    attempted=False,
+                )
             self.seen_keys.add(key)
+            if spec.risk.value == "read" and self.global_read_count is not None:
+                self.global_read_count["count"] = self.global_read_count.get("count", 0) + 1
 
         if self.step_prefix:
             step_id = f"{self.task_id}:{self.step_prefix}#{call_index}:{proposal.tool_name}"

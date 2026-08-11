@@ -23,6 +23,8 @@ class SubAgentMetrics:
     input_tokens: int = 0
     output_tokens: int = 0
     duration_ms: int = 0
+    llm_call_count: int = 0
+    requested_model_tier: str = "fast"
     tool_calls_raw: list[dict] = field(default_factory=list)
     content_raw: str = ""
     prompt_raw: str = ""
@@ -116,6 +118,10 @@ def _repair_categories(tool_name: str, arguments: dict[str, Any]) -> dict[str, A
         repaired = [str(item or "").strip().lower() for item in categories if str(item or "").strip()]
     arguments = dict(arguments)
     arguments["categories"] = repaired
+    # Keep the provider trajectory inside the existing bounded Places contract
+    # when it also emits the historical limit=10 shape.
+    if arguments.get("limit") == 10:
+        arguments["limit"] = 8
     return arguments
 
 
@@ -142,8 +148,10 @@ def run_sub_agents(
         metrics.tools_raw = tools
         metrics.input_payload = context_slice.payload
         started = time.perf_counter()
+        metrics.llm_call_count += 1
         result = generate_chat_completion_with_tools(
             prompt, tools, temperature=0, system_prompt=system_prompt,
+            prefer_fast_model=True,
         )
         metrics.input_tokens = result.input_tokens
         metrics.output_tokens = result.output_tokens
@@ -185,6 +193,79 @@ def run_sub_agents(
         metrics.error = str(exc)
         metrics.duration_ms = round((time.perf_counter() - started) * 1000) if "started" in dir() else 0
         return [], metrics
+
+
+def run_required_sub_agent(
+    *, tool_name: str, system_line: str,
+    context_slice: AgentContextSlice, task_brief: str,
+    retry_hint: str, max_attempts: int = 2,
+) -> tuple[list[ToolProposal], SubAgentMetrics]:
+    """Run a bounded function-call loop for a typed single-tool capability.
+
+    The caller owns the semantic decision that this tool is required.  This
+    helper only enforces the provider protocol: exactly one call, the expected
+    function name, and valid planner arguments. Provider timeouts are not
+    retried; malformed or missing calls receive one fixed protocol retry.
+    """
+    metrics = SubAgentMetrics()
+    tools = _build_tools((tool_name,))
+    attempts = max(1, min(int(max_attempts), 2))
+    for attempt in range(1, attempts + 1):
+        prompt = _agent_user_prompt(task_brief, context_slice.payload)
+        if attempt > 1:
+            prompt += f"\n\n{retry_hint}"
+        system_prompt = f"{_SHARED_SYSTEM_POLICY}\n{system_line}"
+        metrics.prompt_raw = f"SYSTEM:\n{system_prompt}\nUSER:\n{prompt}"
+        metrics.tools_raw = tools
+        metrics.input_payload = context_slice.payload
+        started = time.perf_counter()
+        metrics.llm_call_count += 1
+        try:
+            result = generate_chat_completion_with_tools(
+                prompt, tools, temperature=0, system_prompt=system_prompt,
+                prefer_fast_model=True,
+            )
+        except Exception as exc:
+            metrics.error = str(exc)
+            metrics.duration_ms += round((time.perf_counter() - started) * 1000)
+            break
+
+        metrics.input_tokens += int(result.input_tokens or 0)
+        metrics.output_tokens += int(result.output_tokens or 0)
+        metrics.duration_ms += int(result.duration_ms or 0)
+        metrics.tool_calls_raw = result.tool_calls or []
+        metrics.content_raw = result.content or ""
+
+        calls = result.tool_calls or []
+        if len(calls) != 1:
+            metrics.rejected_calls.append("required_tool_call_count")
+            continue
+        call = calls[0]
+        if not isinstance(call, dict) or call.get("name") != tool_name:
+            metrics.rejected_calls.append("required_tool_wrong_name")
+            continue
+
+        arguments = call.get("arguments") or {}
+        spec = get_tool_spec(tool_name)
+        if spec is None or not isinstance(arguments, dict):
+            metrics.rejected_calls.append("required_tool_invalid_arguments")
+            continue
+        if not planner_arguments_allowed(spec, arguments):
+            metrics.rejected_calls.append("required_tool_invalid_arguments")
+            continue
+        try:
+            normalized_arguments = spec.planner_arguments_model.model_validate(
+                arguments,
+            ).model_dump(exclude_defaults=True)
+        except Exception:
+            metrics.rejected_calls.append("required_tool_invalid_arguments")
+            continue
+        metrics.error = ""
+        return [ToolProposal(tool_name=tool_name, arguments=normalized_arguments)], metrics
+
+    if not metrics.error:
+        metrics.error = "required_tool_call_failed"
+    return [], metrics
 
 
 def run_sub_agent(

@@ -34,6 +34,7 @@ _PRODUCT_INFO_STEP_TEXT = "我先整理一下產品資訊…"
 # semantic question can retrieve more than one section in one bounded pass.
 _SECTION_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("capabilities.overview", ("能做什麼", "可以幹嘛", "你是做什麼", "功能", "capabilit", "what can you do", "capabilities")),
+    ("relationship.date_invitation", ("邀請卡", "約會邀請", "空白卡", "建立空白卡", "幫我約", "date invitation")),
     ("identity.overview", ("阿月是誰", "你是誰", "身份", "同一個", "另一個阿月", "same ayue", "same_identity", "identity")),
     ("surfaces.public", ("主聊天室", "公開阿月", "public", "這裡", "surface_scope")),
     ("surfaces.private", ("悄悄話", "雙人聊天室", "private", "私訊", "where_to_ask")),
@@ -54,6 +55,7 @@ _SECTION_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 # stable even when a Windows console is using a legacy code page.
 _SECTION_HINTS += (
     ("capabilities.overview", ("\u80fd\u505a\u4ec0\u9ebc", "\u53ef\u4ee5\u5e79\u561b", "\u529f\u80fd")),
+    ("relationship.date_invitation", ("\u9080\u8acb\u5361", "\u7d04\u6703\u9080\u8acb", "\u7a7a\u767d\u5361", "\u5efa\u7acb\u7a7a\u767d\u5361", "\u5e6b\u6211\u7d04")),
     ("identity.overview", ("\u963f\u6708\u662f\u8ab0", "\u4f60\u662f\u8ab0", "\u8eab\u4efd", "\u540c\u4e00\u500b", "\u53e6\u4e00\u500b\u963f\u6708")),
     ("surfaces.public", ("\u4e3b\u804a\u5929\u5ba4", "\u516c\u958b\u963f\u6708")),
     ("surfaces.private", ("\u6084\u6084\u8a71", "\u96d9\u4eba\u804a\u5929\u5ba4", "\u79c1\u8a0a")),
@@ -254,6 +256,7 @@ def run(
     del services
     started = time.perf_counter()
     metrics = SubAgentMetrics()
+    metrics.requested_model_tier = "none"
     text = _brief_text(context_slice, str(getattr(task, "task_brief", "") or ""))
     metrics.input_payload = {
         "message": str(context_slice.payload.get("message") or "")[:800],

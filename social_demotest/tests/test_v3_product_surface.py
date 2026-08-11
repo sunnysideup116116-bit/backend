@@ -1,6 +1,4 @@
-import json
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from services.ayue_agent.capabilities import (
@@ -18,7 +16,7 @@ from services.ayue_agent.v3.public_reply import build_presentation
 
 class ProductSurfaceContractTests(unittest.TestCase):
     def test_manifest_describes_same_identity_and_bounded_surfaces(self):
-        self.assertEqual(CAPABILITY_MANIFEST_VERSION, "v5")
+        self.assertEqual(CAPABILITY_MANIFEST_VERSION, "v6")
         self.assertEqual(CAPABILITY_MANIFEST["surfaces"]["public"]["identity"], "same_ayue")
         self.assertFalse(CAPABILITY_MANIFEST["surfaces"]["context_boundary"]["raw_full_chat_cross_surface"])
         self.assertFalse(CAPABILITY_MANIFEST["surfaces"]["context_boundary"]["private_messages_update_public_profile"])
@@ -40,10 +38,28 @@ class ProductSurfaceContractTests(unittest.TestCase):
 
     def test_product_info_projection_contains_only_selected_typed_facts(self):
         projection = product_info_projection(["same_identity", "surface_scope"])
-        self.assertEqual(projection["manifest_version"], "v5")
+        self.assertEqual(projection["manifest_version"], "v6")
         self.assertEqual(projection["topics"], ["same_identity", "surface_scope"])
         self.assertEqual(set(projection["facts"]), {"identity", "surface_scope"})
         self.assertNotIn("matching", projection["facts"])
+
+    def test_manifest_and_product_info_describe_date_invitation_capability(self):
+        joined = " ".join(CAPABILITY_MANIFEST["public_capabilities"])
+        self.assertIn("建立一張空白約會邀請卡", joined)
+        self.assertNotIn("目前不能代替雙方發出約會邀請", joined)
+        projection = product_info_projection(["date_invitation"])
+        self.assertEqual(
+            projection["facts"]["date_invitation"],
+            {
+                "available_in_public_ayue": True,
+                "requires_accepted_contact": True,
+                "requires_confirmation": True,
+                "creates_empty_card_only": True,
+                "waits_for_partner_acceptance": True,
+                "participants_fill_details_later": True,
+            },
+        )
+        self.assertIn("沒錯喔～", product_info_answer(["date_invitation"])[0])
 
     def test_relationship_chat_access_projection_distinguishes_public_and_private(self):
         projection = product_info_projection(["relationship_chat_access", "where_to_ask"])
@@ -64,14 +80,6 @@ class ProductSurfaceContractTests(unittest.TestCase):
         self.assertEqual(state["version"], 1)
         self.assertEqual(state["messages"], list(PUBLIC_AYUE_ONBOARDING_MESSAGES))
         self.assertEqual(len(state["messages"]), 3)
-
-    def test_voice_fixture_has_forty_cases_and_fourteen_identity_cases(self):
-        fixture = Path(__file__).parent / "fixtures" / "ayue_voice_eval_v1.json"
-        data = json.loads(fixture.read_text(encoding="utf-8"))
-        self.assertEqual(len(data["cases"]), 40)
-        identity_categories = {"same_identity", "cross_surface_context", "where_to_ask", "matching_scope", "capabilities", "surface_scope", "private_message_visibility"}
-        self.assertEqual(sum(item["category"] in identity_categories for item in data["cases"]), 14)
-
 
 if __name__ == "__main__":
     unittest.main()

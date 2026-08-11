@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from services.ayue_agent.v3.calendar_commands import CalendarCommandBatch
 
@@ -42,6 +42,22 @@ class _RelationshipEvidenceArguments(BaseModel):
 class _MentionedContactSummaryArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     other_ids: list[str] = Field(min_length=1, max_length=3)
+
+
+class _DateCoordinationStartArguments(BaseModel):
+    """Authority-free target reference for the confirmed date-card write."""
+
+    model_config = ConfigDict(extra="forbid")
+    target_source: Literal["mention", "name", "recent_contact"]
+    target_evidence_span: str = Field(default="", max_length=30)
+
+    @model_validator(mode="after")
+    def _validate_target_reference(self) -> "_DateCoordinationStartArguments":
+        if self.target_source == "name" and not self.target_evidence_span.strip():
+            raise ValueError("name target requires target_evidence_span")
+        if self.target_source != "name" and self.target_evidence_span:
+            raise ValueError("only name target may provide target_evidence_span")
+        return self
 
 
 class _ProposalDecisionArguments(BaseModel):
@@ -518,6 +534,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         "我整理一下目前已建立聯絡的對象…",
         output_model=_AcceptedContactListOutput,
     ),
+    "relationship.start_date_coordination": ToolSpec(
+        "relationship.start_date_coordination", ToolRisk.WRITE, "date_coordination_start",
+        "使用者明確要求和一位已建立聯絡的對象建立空白約會邀請卡。只提出一次確認；日期、地點與表單內容由雙方在聊天室自行填寫。",
+        "建立空白約會邀請卡前確認",
+        requires_confirmation=True,
+        planner_arguments_model=_DateCoordinationStartArguments,
+        executor_arguments_model=_NoArguments,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
+    ),
     "memory.search_my_profile": ToolSpec(
         "memory.search_my_profile", ToolRisk.READ, "memory_profile",
         "讀取本人已儲存的偏好與近期情境。",
@@ -580,6 +605,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         "match.decide_active_proposal", ToolRisk.WRITE, "decide_active_proposal",
         "對唯一可操作提案表達有興趣或婉拒；Runtime 注入 proposal revision。",
         "我正在更新這張牽線提案…",
+        requires_confirmation=True,
         planner_arguments_model=_ProposalDecisionArguments,
         executor_arguments_model=_ProposalDecisionArguments,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,

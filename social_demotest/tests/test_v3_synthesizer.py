@@ -325,6 +325,45 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIn("看牙醫", reply)
         self.assertIsNone(card_decision)
 
+    def test_mixed_server_owned_reply_does_not_hide_other_observations(self):
+        candidate_ref = "place_candidate_mixed_0001"
+        slc = self._slice([
+            {
+                "task_id": "calendar1", "status": "ok",
+                "tool": "calendar.verify_recent_mutation",
+                "result": {"calendar_mutation_verification": {
+                    "status": "verified_success", "action": "cancel",
+                    "label": "看牙醫", "outcome": "success",
+                }},
+            },
+            {
+                "task_id": "places1", "status": "ok",
+                "tool": "places.search_nearby",
+                "result": {"places": [{"name": "Cafe A"}]},
+            },
+        ])
+        cards = [{
+            "candidate_ref": candidate_ref, "name": "Cafe A",
+            "category": "cafe", "distance_label": "300 公尺",
+        }]
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="附近可以參考 Cafe A。"),
+        ) as provider:
+            reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
+
+        provider.assert_called_once()
+        prompt = provider.call_args.args[0]
+        self.assertIn("Cafe A", prompt)
+        self.assertNotIn("看牙醫", prompt)
+        self.assertIn("Cafe A", reply)
+        self.assertIn("已取消", reply)
+        self.assertIsNone(card_decision)
+        self.assertEqual(metrics.presentation_blocks, [])
+
     def test_empty_observation_uses_general_conversation_mode(self):
         slc = self._slice([])
         slc.payload["message"] = "我今天有點累"
@@ -1421,6 +1460,62 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIn("same_identity", prompt)
         self.assertIn("另一個阿月是幹啥的", prompt)
         self.assertIn("不要改回通用身份介紹", provider.call_args.kwargs["system_prompt"])
+
+    def test_date_invitation_product_info_answers_the_actual_question_naturally(self):
+        slc = self._slice([{
+            "task_id": "product_info", "status": "ok", "tool": None,
+            "result": {"product_info": {
+                "manifest_version": "v6",
+                "topics": [],
+                "knowledge_sections": ["relationship.date_invitation"],
+                "facts": {"relationship.date_invitation": {
+                    "available_in_public_ayue": True,
+                    "requires_confirmation": True,
+                }},
+            }},
+        }])
+        slc.payload["message"] = "欸所以約會卡是啥？"
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(
+                content="約會卡就是放在你們聊天室裡的共同約會小卡，等對方接受後，你們可以一起填寫約會資料；雙方確認完成後才會同步到行事曆。",
+            ),
+        ) as provider:
+            reply, card_decision, metrics = synthesize(slc)
+        self.assertIn("約會卡就是放在你們聊天室裡的共同約會小卡", reply)
+        self.assertIn("雙方確認完成後才會同步到行事曆", reply)
+        self.assertIsNone(card_decision)
+        self.assertEqual(metrics.reply_source, "llm")
+        self.assertIn("欸所以約會卡是啥", provider.call_args.args[0])
+        self.assertIn("relationship.date_invitation", provider.call_args.args[0])
+
+    def test_date_invitation_product_info_answers_calendar_timing(self):
+        slc = self._slice([{
+            "task_id": "product_info", "status": "ok", "tool": None,
+            "result": {"product_info": {
+                "manifest_version": "v6",
+                "topics": [],
+                "knowledge_sections": ["relationship.date_invitation"],
+                "facts": {"relationship.date_invitation": {
+                    "available_in_public_ayue": True,
+                    "waits_for_partner_acceptance": True,
+                    "participants_fill_details_later": True,
+                }},
+            }},
+        }])
+        slc.payload["message"] = "資料喬好之後會自己進行事曆嗎？"
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(
+                content="還要等你們雙方都確認，確認完成後才會同步到行事曆喔～",
+            ),
+        ) as provider:
+            reply, card_decision, metrics = synthesize(slc)
+        self.assertIn("雙方都確認", reply)
+        self.assertIn("同步到行事曆", reply)
+        self.assertIsNone(card_decision)
+        self.assertEqual(metrics.reply_source, "llm")
+        self.assertIn("資料喬好之後會自己進行事曆嗎", provider.call_args.args[0])
 
     def test_general_provider_failure_does_not_keyword_route_to_matching_copy(self):
         slc = self._slice([])

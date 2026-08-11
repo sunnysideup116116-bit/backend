@@ -87,6 +87,7 @@ def slice_for_agent(
             "recent_messages": turn_ctx.recent_messages,
             "mentioned_contacts": turn_ctx.mentioned_contacts,
             "mentioned_contact_overflow": turn_ctx.mentioned_contact_overflow,
+            "recent_contact_reference": turn_ctx.recent_contact_reference,
             "clock": clock_dump,
             "prior_observations": prior_observations,
         })

@@ -8,9 +8,12 @@ database identifiers or private memory/calendar fields.
 from __future__ import annotations
 
 import re
+import unicodedata
+from dataclasses import dataclass
 from typing import Any
 
 from database import matches_coll, profiles_coll
+from pypinyin import Style, lazy_pinyin
 from services.language_service import normalize_zh_tw
 from services.match_state_service import verified_accepted_match_query
 from services.match_reason_service import reason_for_viewer
@@ -18,6 +21,7 @@ from services.match_reason_service import reason_for_viewer
 
 MAX_MENTIONED_CONTACTS = 3
 MAX_LISTED_ACCEPTED_CONTACTS = 8
+MAX_CONTACT_RESOLUTION_CANDIDATES = 50
 _INTERNAL_REFERENCE_RE = re.compile(r"(?:@?seed_user_[\w-]+|@?demo_user|@?user[_-]?\d+)", re.IGNORECASE)
 _PUBLIC_REASON_KINDS = frozenset({"shared_graph", "shared_context", "shared_value"})
 
@@ -180,6 +184,154 @@ def accepted_contact_ids_by_display_name(user_id: str, name_hint: str) -> list[s
         # Relationship lookup is an authorization boundary and must fail closed.
         return []
     return resolved
+
+
+@dataclass(frozen=True)
+class ContactNameResolution:
+    status: str
+    other_id: str | None = None
+    display_name: str = ""
+    candidates: tuple[str, ...] = ()
+    kind: str = ""
+
+
+def _normalized_contact_label(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", normalize_zh_tw(str(value or ""))).casefold()
+    return "".join(
+        char for char in text
+        if not unicodedata.category(char).startswith(("P", "Z"))
+    ).lstrip("@")[:30]
+
+
+def _phonetic_contact_label(value: Any) -> str:
+    """Return a bounded, tone-free pinyin key for Chinese display names."""
+    normalized = _normalized_contact_label(value)
+    if not normalized or not any("\u3400" <= char <= "\u9fff" for char in normalized):
+        return ""
+    return "".join(
+        lazy_pinyin(
+            normalized,
+            style=Style.NORMAL,
+            strict=False,
+            errors=lambda chars: list(chars),
+        ),
+    ).casefold()
+
+
+def _levenshtein(left: str, right: str) -> int:
+    if len(left) < len(right):
+        left, right = right, left
+    if not right:
+        return len(left)
+    previous = list(range(len(right) + 1))
+    for left_index, left_char in enumerate(left, start=1):
+        current = [left_index]
+        for right_index, right_char in enumerate(right, start=1):
+            current.append(min(
+                current[-1] + 1,
+                previous[right_index] + 1,
+                previous[right_index - 1] + (left_char != right_char),
+            ))
+        previous = current
+    return previous[-1]
+
+
+def _fuzzy_limit(length: int) -> tuple[int, float]:
+    if length <= 1:
+        return 0, 1.0
+    if length <= 4:
+        return 1, 0.0
+    if length <= 8:
+        return 2, 0.70
+    return max(1, int(length * 0.20)), 0.0
+
+
+def resolve_accepted_contact_name(user_id: str, name_hint: str) -> ContactNameResolution:
+    """Resolve a bounded public label only among the owner's accepted contacts."""
+    target = _normalized_contact_label(name_hint)
+    if not target:
+        return ContactNameResolution("not_found")
+    try:
+        cursor = matches_coll.find(
+            verified_accepted_match_query(user_id),
+            {"_id": 0, "from_user": 1, "to_user": 1},
+        )
+        if hasattr(cursor, "limit"):
+            cursor = cursor.limit(MAX_CONTACT_RESOLUTION_CANDIDATES + 1)
+        matches = list(cursor)[:MAX_CONTACT_RESOLUTION_CANDIDATES + 1]
+    except Exception:
+        return ContactNameResolution("unavailable")
+    if len(matches) > MAX_CONTACT_RESOLUTION_CANDIDATES:
+        return ContactNameResolution("too_many")
+
+    ids: list[str] = []
+    for match in matches:
+        candidate = other_id(match, user_id)
+        if isinstance(candidate, str) and candidate and candidate not in ids:
+            ids.append(candidate)
+    if not ids:
+        return ContactNameResolution("not_found")
+    try:
+        profiles = list(profiles_coll.find(
+            {"user_id": {"$in": ids}},
+            {"_id": 0, "user_id": 1, "display_name": 1, "nickname": 1, "name": 1},
+        ))
+    except Exception:
+        return ContactNameResolution("unavailable")
+    labels: list[tuple[str, str, str, str]] = []
+    profile_by_id = {str(item.get("user_id")): item for item in profiles}
+    for candidate in ids:
+        profile = profile_by_id.get(candidate) or {}
+        label = public_text(
+            profile.get("display_name") or profile.get("nickname") or profile.get("name"),
+            30,
+        )
+        normalized = _normalized_contact_label(label)
+        if label and label != "對方" and normalized:
+            labels.append((candidate, label, normalized, _phonetic_contact_label(label)))
+    exact = [(candidate, label) for candidate, label, normalized, _phonetic in labels if normalized == target]
+    if len(exact) == 1:
+        return ContactNameResolution("resolved_exact", exact[0][0], exact[0][1], kind="exact")
+    if len(exact) > 1:
+        return ContactNameResolution("ambiguous", candidates=tuple(label for _, label in exact[:3]))
+
+    phonetic_target = _phonetic_contact_label(target)
+    if phonetic_target:
+        phonetic_matches = [
+            (candidate, label)
+            for candidate, label, _normalized, phonetic in labels
+            if phonetic and phonetic == phonetic_target
+        ]
+        if len(phonetic_matches) == 1:
+            return ContactNameResolution(
+                "resolved_phonetic",
+                phonetic_matches[0][0],
+                phonetic_matches[0][1],
+                kind="phonetic",
+            )
+        if len(phonetic_matches) > 1:
+            return ContactNameResolution(
+                "ambiguous",
+                candidates=tuple(label for _, label in phonetic_matches[:3]),
+            )
+
+    maximum_distance, minimum_similarity = _fuzzy_limit(max(len(target), 1))
+    scored: list[tuple[int, float, str, str]] = []
+    for candidate, label, normalized, _phonetic in labels:
+        length = max(len(target), len(normalized))
+        distance = _levenshtein(target, normalized)
+        similarity = 1.0 - (distance / length if length else 1.0)
+        candidate_limit, candidate_minimum_similarity = _fuzzy_limit(length)
+        if distance <= min(maximum_distance, candidate_limit) and similarity >= max(minimum_similarity, candidate_minimum_similarity):
+            scored.append((distance, similarity, candidate, label))
+    if not scored:
+        return ContactNameResolution("not_found")
+    scored.sort(key=lambda item: (item[0], -item[1], item[3], item[2]))
+    best = scored[0]
+    tied = [item for item in scored if item[0] == best[0] and item[1] == best[1]]
+    if len(tied) > 1 or (len(scored) > 1 and best[1] - scored[1][1] < 0.20):
+        return ContactNameResolution("ambiguous", candidates=tuple(item[3] for item in scored[:3]))
+    return ContactNameResolution("resolved_fuzzy", best[2], best[3], kind="fuzzy")
 
 
 def mentioned_contact_summary(user_id: str, other_user_ids: list[str]) -> list[dict[str, Any]]:

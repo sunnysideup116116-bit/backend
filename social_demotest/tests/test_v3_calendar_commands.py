@@ -99,6 +99,13 @@ class V3CalendarCommandTests(unittest.TestCase):
         for field in ("event_id", "revision", "expected_revision", "user_id", "coordination_id"):
             self.assertNotIn(field, schema_text)
 
+    def test_calendar_availability_schema_is_read_only(self):
+        names = {
+            item["function"]["name"]
+            for item in _tools_schema(availability_only=True)
+        }
+        self.assertEqual(names, {"calendar.list_my_events"})
+
     def test_calendar_agent_command_schema_is_provider_compatible(self):
         command_tool = next(item for item in _tools_schema()
                             if item["function"]["name"] == "calendar.submit_commands")

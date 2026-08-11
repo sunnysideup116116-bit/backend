@@ -787,6 +787,44 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertEqual(observation["status"], "answered")
         self.assertEqual(observation["findings"][0]["subject_ref"], captured_candidates[0][0]["candidate_ref"])
 
+    def test_optional_place_bootstrap_searches_candidates_before_web_decision(self):
+        target = "Find a casual public update about a nearby cafe."
+        slc = _slice(target)
+        slc.payload["prior_observations"] = [{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{
+                "provider": "openstreetmap", "name": "A Cafe", "category": "cafe",
+                "address_summary": "Central District", "distance_m": 700,
+                "map_url": "https://www.openstreetmap.org/?mlat=22.62&mlon=120.31#map=18/22.62/120.31",
+            }]},
+        }]
+        executed_queries = []
+
+        def fake_execute(tc, raw_ctx, *, clock):
+            executed_queries.append(tc.arguments["query"])
+            return SimpleNamespace(ok=True, data=_search_result())
+
+        def fake_decide(*args, **kwargs):
+            decision = self._finish()
+            decision.findings[0].subject_ref = kwargs["place_candidates"][0]["candidate_ref"]
+            return decision, SubAgentMetrics(input_tokens=1)
+
+        with patch.object(web_runtime.config, "AYUE_V3_WEB_PLACE_BOOTSTRAP_FAST_PATH", True), \
+             patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", side_effect=fake_decide) as decide, \
+             patch.object(guarded_execution, "execute_tool", side_effect=fake_execute):
+            results, _metrics = _run_web(
+                SubTask(id="web1", agent="web", task_brief=target),
+                _turn(target), slc, seen_keys=set(), guard_lock=threading.Lock(),
+                on_progress=None, run_id="run", trace=_trace(), debug_enabled=False,
+            )
+
+        self.assertEqual(len(executed_queries), 1)
+        self.assertIn("A Cafe", executed_queries[0])
+        self.assertEqual(decide.call_args.kwargs["search_calls_used"], 1)
+        self.assertEqual(decide.call_args.kwargs["tool_calls_used"], 1)
+        self.assertEqual(results[0].observation["status"], "answered")
+
     def _finish(self, *, coverage="direct_sufficient", status="answered", relation="direct"):
         return WebResearchDecision(
             action="finish",

@@ -12,7 +12,7 @@ from config import (
 
     GOOGLE_API_KEY, GOOGLE_EMBEDDING_MODEL, OLLAMA_HOST, OLLAMA_API_KEY,
 
-    OLLAMA_CHAT_MODEL,
+    OLLAMA_CHAT_MODEL, OLLAMA_FAST_CHAT_MODEL,
     OLLAMA_REQUEST_TIMEOUT_SECONDS,
 
 )
@@ -39,6 +39,29 @@ def get_runtime_model_override() -> dict:
         "thinking_level": _RUNTIME_THINKING_LEVEL,
         "default_model": OLLAMA_CHAT_MODEL,
     }
+
+
+def _resolve_chat_model(
+    *, explicit_model: str | None = None, prefer_fast_model: bool = False,
+) -> str:
+    """Resolve process-wide override before per-call tier preferences."""
+    if _RUNTIME_MODEL_OVERRIDE:
+        return _RUNTIME_MODEL_OVERRIDE
+    if explicit_model:
+        return explicit_model
+    if prefer_fast_model:
+        return OLLAMA_FAST_CHAT_MODEL
+    return OLLAMA_CHAT_MODEL
+
+
+def get_effective_chat_model(
+    *, requested_model_tier: str = "main", explicit_model: str | None = None,
+) -> str:
+    """Return the model name that a debug/telemetry surface will actually use."""
+    return _resolve_chat_model(
+        explicit_model=explicit_model,
+        prefer_fast_model=requested_model_tier == "fast",
+    )
 
 
 @dataclass
@@ -133,7 +156,7 @@ def generate_chat_completion(
 
         raise RuntimeError("缺少 OLLAMA_API_KEY，無法呼叫 Ollama Cloud 聊天模型")
 
-    effective_model = model or _RUNTIME_MODEL_OVERRIDE or OLLAMA_CHAT_MODEL
+    effective_model = _resolve_chat_model(explicit_model=model)
 
     payload = {
 
@@ -210,12 +233,15 @@ def generate_chat_completion_with_tools(
     *,
 
     system_prompt: str | None = None,
+    prefer_fast_model: bool = False,
 ) -> ToolCallResult:
     """Native function-calling path using Ollama's tools parameter."""
     if not OLLAMA_API_KEY:
         raise RuntimeError("缺少 OLLAMA_API_KEY，無法呼叫 Ollama Cloud 聊天模型")
 
-    effective_model = model or _RUNTIME_MODEL_OVERRIDE or OLLAMA_CHAT_MODEL
+    effective_model = _resolve_chat_model(
+        explicit_model=model, prefer_fast_model=prefer_fast_model,
+    )
     options: dict = {"temperature": temperature, "num_predict": max_tokens}
     if _RUNTIME_THINKING_LEVEL and _RUNTIME_THINKING_LEVEL != "off":
         options["think"] = _RUNTIME_THINKING_LEVEL
