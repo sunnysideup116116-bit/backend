@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 class ChatType(str, Enum):
     big_five = "big_five"
@@ -21,6 +21,10 @@ class MatchRequest(BaseModel):
 class ClearRequest(BaseModel):
     user_id: str
 
+class BigFiveProfileInitRequest(BaseModel):
+    user_id: str
+    initial_interest: str | None = None
+
 class AcceptRequest(BaseModel):
     user_id: str
     match_id: str
@@ -33,6 +37,7 @@ class DirectChatRequest(BaseModel):
     chat_type: str = "direct"  # "direct", "deep_profile"
     mentioned_other_id: str | None = None
     mentioned_other_ids: list[str] | None = None
+    message_timestamp: str | None = None  # ISO 8601，建議帶時區；用於風險時段判定
 
 class GuidanceActivityRequest(BaseModel):
     user_id: str
@@ -60,13 +65,6 @@ class SettingsRequest(BaseModel):
 class MediatorToneRequest(BaseModel):
     user_id: str
     mediator_tone: str = "friend"  # "friend", "gentle", "enthusiastic"
-    probe_mode: str | None = None
-
-class MediatorProbeRequest(BaseModel):
-    user_id: str
-    other_id: str
-    force: bool = False
-    kind: str | None = None
 
 class ProfileMemoryActionRequest(BaseModel):
     user_id: str
@@ -77,6 +75,29 @@ class ProfileMemoryActionRequest(BaseModel):
 class ResetRequest(BaseModel):
     user_id: str
     state: str  # "big_five" or "deep_profile"
+
+
+class DateForm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    date: str = ""
+    time: str = ""
+    activity: str = ""
+    budget: str = ""
+
+
+class DateUpdateRequest(BaseModel):
+    user_id: str
+    other_id: str
+    form: DateForm
+    form_revision: int | None = None
+
+
+class DateConfirmRequest(BaseModel):
+    user_id: str
+    other_id: str
+    form_revision: int | None = None
+
 
 class RiskFeedbackRequest(BaseModel):
     triggered_by_msg_id: str

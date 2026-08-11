@@ -1,10 +1,10 @@
-﻿import sys
+import sys
 import atexit
 from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from routers import chat, match, system, frontend
+from routers import admin, chat, frontend, match, system
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -16,6 +16,16 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 app = FastAPI(title="Profiling System API", description="AI Matchmaker API Backend")
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "main_app": "mounted",
+        "matchmaker_agent": "external:http://127.0.0.1:9001",
+        "risk_backend": "external:http://127.0.0.1:8001",
+    }
 
 
 @app.exception_handler(Exception)
@@ -32,6 +42,7 @@ app.add_middleware(
 )
 
 app.include_router(frontend.router)
+app.include_router(admin.router)
 app.include_router(chat.router)
 app.include_router(match.router)
 app.include_router(system.router)

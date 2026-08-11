@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🛡️ AI 社交安全與偏好審查管理儀表板 | Admin Dashboard</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet">
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
+                    colors: {
+                        darkBg: '#0b0f19',
+                        darkPanel: '#111827',
+                        glassBg: 'rgba(17, 24, 39, 0.75)',
+                        glassBorder: 'rgba(255, 255, 255, 0.08)',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            background-color: #0b0f19;
+            background-image:
+                radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.12), transparent 45%),
+                radial-gradient(circle at 90% 80%, rgba(244, 63, 94, 0.1), transparent 45%),
+                radial-gradient(circle at 50% 50%, rgba(16, 185, 129, 0.06), transparent 50%);
+            color: #f3f4f6;
+            min-height: 100vh;
+        }
+
+        .glass-panel {
+            background: rgba(17, 24, 39, 0.75);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+        }
+
+        .glass-card {
+            background: rgba(31, 41, 55, 0.4);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            transition: all 0.2s ease-in-out;
+        }
+
+        .glass-card:hover {
+            border-color: rgba(255, 255, 255, 0.15);
+            transform: translateY(-2px);
+        }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: rgba(15, 23, 42, 0.6);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.18);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        /* Status Badge Styling */
+        .risk-badge-blocked {
+            background: rgba(225, 29, 72, 0.2);
+            color: #fda4af;
+            border: 1px solid rgba(225, 29, 72, 0.5);
+            box-shadow: 0 0 10px rgba(225, 29, 72, 0.2);
+        }
+
+        .risk-badge-restricted {
+            background: rgba(168, 85, 247, 0.2);
+            color: #d8b4fe;
+            border: 1px solid rgba(168, 85, 247, 0.5);
+            box-shadow: 0 0 10px rgba(168, 85, 247, 0.15);
+        }
+
+        .risk-badge-warning {
+            background: rgba(245, 158, 11, 0.2);
+            color: #fde68a;
+            border: 1px solid rgba(245, 158, 11, 0.5);
+            box-shadow: 0 0 10px rgba(245, 158, 11, 0.15);
+        }
+
+        .risk-badge-observation {
+            background: rgba(59, 130, 246, 0.2);
+            color: #93c5fd;
+            border: 1px solid rgba(59, 130, 246, 0.5);
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.15);
+        }
+
+        .risk-badge-safe {
+            background: rgba(16, 185, 129, 0.18);
+            color: #6ee7b7;
+            border: 1px solid rgba(16, 185, 129, 0.4);
+        }
+
+        .tab-btn.active {
+            color: #ffffff;
+            border-bottom: 2px solid #8b5cf6;
+            background: rgba(139, 92, 246, 0.12);
+        }
+    </style>
+</head>
+
+<body class="font-sans antialiased p-4 md:p-8">
+
+    <!-- Top App Bar & Header -->
+    <header class="max-w-7xl mx-auto mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+            <div class="flex items-center gap-3">
+                <span class="text-3xl">🛡️</span>
+                <div>
+                    <h1
+                        class="text-2xl md:text-3xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-violet-400 via-sky-400 to-emerald-400">
+                        AI 社交安全與偏好審查管理儀表板
+                    </h1>
+                    <p class="text-xs text-gray-400 mt-1 font-mono">ADMIN AUDIT DASHBOARD • REAL-TIME SAFETY & MEMORY
+                        METRICS</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- System Microservice Status Pill & Controls -->
+        <div class="flex items-center gap-3">
+            <div
+                class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/80 border border-slate-700/60 text-xs">
+                <span class="text-gray-400 font-mono">Port 8001 (Risk):</span>
+                <span id="status-8001" class="flex items-center gap-1.5 font-semibold text-amber-400">
+                    <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span> 檢查中...
+                </span>
+            </div>
+            <div
+                class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/80 border border-slate-700/60 text-xs">
+                <span class="text-gray-400 font-mono">Port 9001 (Agent):</span>
+                <span id="status-9001" class="flex items-center gap-1.5 font-semibold text-amber-400">
+                    <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span> 檢查中...
+                </span>
+            </div>
+            <button onclick="fetchData()"
+                class="px-3.5 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold shadow-lg shadow-violet-500/20 transition flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
+                    </path>
+                </svg>
+                重新載入
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="max-w-7xl mx-auto space-y-8">
+
+        <!-- Stat Cards Row -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+            <!-- Stat 1 -->
+            <div class="glass-panel rounded-2xl p-5 border-l-4 border-l-sky-500">
+                <div class="flex justify-between items-start">
+                    <div>
+                        <div class="text-xs font-medium text-gray-400 uppercase tracking-wider">總審核對話訊息</div>
+                        <div id="stat-total" class="text-3xl font-black text-white mt-1.5 font-mono">--</div>
+                    </div>
+                    <div
+                        class="w-10 h-10 rounded-xl bg-sky-500/10 text-sky-400 flex items-center justify-center text-xl">
+                        💬</div>
+                </div>
+                <div class="text-[11px] text-gray-400 mt-3 flex items-center gap-1">
+                    <span class="text-sky-400">●</span> 由 Port 8001 NLP/Rule 引擎自動審計
+                </div>
+            </div>
+
+            <!-- Stat 2 -->
+            <div class="glass-panel rounded-2xl p-5 border-l-4 border-l-rose-500">
+                <div class="flex justify-between items-start">
+                    <div>
+                        <div class="text-xs font-medium text-gray-400 uppercase tracking-wider">嚴重高風險攔截數</div>
+                        <div id="stat-blocked" class="text-3xl font-black text-rose-400 mt-1.5 font-mono">--</div>
+                    </div>
+                    <div
+                        class="w-10 h-10 rounded-xl bg-rose-500/10 text-rose-400 flex items-center justify-center text-xl">
+                        🚫</div>
+                </div>
+                <div class="text-[11px] text-gray-400 mt-3 flex items-center gap-1">
+                    <span class="text-rose-400">●</span> 觸發 Guardrail 或最高風險界線
+                </div>
+            </div>
+
+            <!-- Stat 3 -->
+            <div class="glass-panel rounded-2xl p-5 border-l-4 border-l-amber-500">
+                <div class="flex justify-between items-start">
+                    <div>
+                        <div class="text-xs font-medium text-gray-400 uppercase tracking-wider">風險警告/介入次數</div>
+                        <div id="stat-warnings" class="text-3xl font-black text-amber-300 mt-1.5 font-mono">--</div>
+                    </div>
+                    <div
+                        class="w-10 h-10 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center text-xl">
+                        ⚠️</div>
+                </div>
+                <div class="text-[11px] text-gray-400 mt-3 flex items-center gap-1">
+                    <span class="text-amber-400">●</span> 觸發小幫手或引導介入指令
+                </div>
+            </div>
+
+            <!-- Stat 4 -->
+            <div class="glass-panel rounded-2xl p-5 border-l-4 border-l-emerald-500">
+                <div class="flex justify-between items-start">
+                    <div>
+                        <div class="text-xs font-medium text-gray-400 uppercase tracking-wider">AI 萃取偏好記憶數</div>
+                        <div id="stat-memories" class="text-3xl font-black text-emerald-400 mt-1.5 font-mono">--</div>
+                    </div>
+                    <div
+                        class="w-10 h-10 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center text-xl">
+                        🧠</div>
+                </div>
+                <div class="text-[11px] text-gray-400 mt-3 flex items-center gap-1">
+                    <span class="text-emerald-400">●</span> Port 9001 萃取 confidence ≥ 0.85
+                </div>
+            </div>
+        </div>
+
+        <!-- Navigation Tabs -->
+        <div class="flex border-b border-gray-800 space-x-2">
+            <button id="tab-btn-logs" onclick="switchTab('logs')"
+                class="tab-btn active px-5 py-3 font-semibold text-sm rounded-t-xl transition flex items-center gap-2">
+                <span>🛡️ 訊息風險審查日誌 (Risk & Moderation)</span>
+            </button>
+            <button id="tab-btn-memories" onclick="switchTab('memories')"
+                class="tab-btn px-5 py-3 font-semibold text-sm rounded-t-xl text-gray-400 hover:text-gray-200 transition flex items-center gap-2">
+                <span>🧠 用戶偏好記憶與圖譜 (Port 9001)</span>
+            </button>
+        </div>
+
+        <!-- ================= TAB 1: Risk & Safety Logs ================= -->
+        <section id="tab-content-logs" class="space-y-4">
+            <!-- Filter Toolbar -->
+            <div class="glass-panel rounded-xl p-4 flex flex-col md:flex-row items-center justify-between gap-4">
+                <div class="flex flex-wrap items-center gap-3 w-full md:w-auto">
+                    <!-- Search Input -->
+                    <div class="relative w-full sm:w-64">
+                        <input type="text" id="search-input" onkeyup="filterLogs()" placeholder="搜尋對話 ID、發送者或訊息內容..."
+                            class="w-full bg-slate-900/90 border border-slate-700/70 rounded-lg px-3.5 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-violet-500">
+                    </div>
+                    <!-- Status Filter -->
+                    <select id="status-filter" onchange="filterLogs()"
+                        class="bg-slate-900/90 border border-slate-700/70 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500">
+                        <option value="all">所有風險狀態</option>
+                        <option value="safe">✅ 安全 (Safe)</option>
+                        <option value="observation">🔍 觀察 (Observation)</option>
+                        <option value="warning">⚠️ 警告 (Warning)</option>
+                        <option value="restricted">🚷 限制 (Restricted)</option>
+                        <option value="blocked">🚫 攔截 (Blocked)</option>
+                    </select>
+
+                    <!-- Chat Type Filter -->
+                    <select id="type-filter" onchange="filterLogs()"
+                        class="bg-slate-900/90 border border-slate-700/70 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500">
+                        <option value="all">所有對話類型</option>
+                        <option value="pair">👥 配對用戶對話</option>
+                        <option value="assistant">🌙 AI 媒人阿月聊天</option>
+                        <option value="analysis">🔮 性格分析測驗</option>
+                    </select>
+                </div>
+
+                <div class="flex items-center gap-3 text-xs text-gray-400 w-full md:w-auto justify-end">
+                    <label class="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" id="auto-refresh-toggle" onchange="toggleAutoRefresh(this.checked)"
+                            class="rounded bg-slate-800 border-slate-700 text-violet-600 focus:ring-violet-500">
+                        <span>自動每 5 秒刷新</span>
+                    </label>
+                    <span id="last-updated-time" class="font-mono text-gray-500">尚未更新</span>
+                </div>
+            </div>
+
+            <!-- Table of Audit Logs (Clean Layout Fix) -->
+            <div class="glass-panel rounded-2xl overflow-hidden border border-slate-800">
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs border-collapse">
+                        <thead class="bg-slate-900/95 text-gray-400 uppercase font-mono border-b border-gray-800">
+                            <tr>
+                                <th class="p-4 w-40 min-w-[150px]">時間</th>
+                                <th class="p-4 w-48 min-w-[160px]">對話與發送者</th>
+                                <th class="p-4 min-w-[240px]">訊息內容</th>
+                                <th class="p-4 w-44 min-w-[160px] text-center">審查結果</th>
+                                <th class="p-4 w-28 min-w-[100px] text-center">最高得分</th>
+                                <th class="p-4 w-36 min-w-[120px]">Guardrail / 規則</th>
+                                <th class="p-4 w-36 min-w-[130px] text-center">詳細診斷</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logs-tbody" class="divide-y divide-gray-800/60">
+                            <tr>
+                                <td colspan="7" class="p-8 text-center text-gray-500">載入數據中...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ================= TAB 2: User Preference Memories ================= -->
+        <section id="tab-content-memories" class="hidden space-y-6">
+            <div class="glass-panel rounded-xl p-5 flex flex-col md:flex-row items-center justify-between gap-4">
+                <div class="flex items-center gap-3 w-full md:w-auto">
+                    <label class="text-xs font-semibold text-gray-300 whitespace-nowrap">選擇對象用戶：</label>
+                    <select id="user-selector" onchange="loadUserMemories(this.value)"
+                        class="bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+                        <option value="">載入用戶列表中...</option>
+                    </select>
+                </div>
+                <div class="text-xs text-gray-400">
+                    💡 由 Port 9001 萃取並寫入 Neo4j 圖資料庫 (`(User)-[:HAS_PREFERENCE]->(Trait)`)
+                </div>
+            </div>
+
+            <div id="memory-cards-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div class="glass-card rounded-xl p-5 text-center text-gray-500 col-span-full">請從上方選單選擇用戶以檢視萃取偏好。</div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Detail Modal for 5-Dimension Scores & Reasoning -->
+    <div id="detail-modal"
+        class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4">
+        <div
+            class="glass-panel rounded-3xl max-w-2xl w-full p-6 md:p-8 space-y-6 max-h-[90vh] overflow-y-auto border border-violet-500/30 shadow-2xl">
+            <!-- Modal Header -->
+            <div class="flex justify-between items-start border-b border-gray-800 pb-4">
+                <div>
+                    <div class="flex items-center gap-2">
+                        <span class="text-xl">📊</span>
+                        <h3 class="text-lg font-bold text-white">詳細風險評分與 LLM 判斷推理</h3>
+                    </div>
+                    <p id="modal-msg-id" class="text-xs font-mono text-gray-400 mt-1">Msg ID: --</p>
+                </div>
+                <button onclick="closeModal()"
+                    class="text-gray-400 hover:text-white text-2xl font-bold p-1 leading-none">&times;</button>
+            </div>
+
+            <!-- Message Preview -->
+            <div class="bg-slate-900/80 rounded-xl p-4 border border-slate-800 space-y-2">
+                <div class="text-[11px] text-gray-500 font-mono">【當前對話訊息內容】</div>
+                <p id="modal-msg-content"
+                    class="text-sm font-medium text-white italic bg-black/40 p-3 rounded-lg border border-slate-800/80">
+                    --</p>
+                <div class="flex flex-wrap gap-4 pt-1 text-[11px] text-gray-400 font-mono">
+                    <span>Sender: <strong id="modal-sender" class="text-sky-400">--</strong></span>
+                    <span>Conversation: <strong id="modal-conv" class="text-violet-400">--</strong></span>
+                </div>
+            </div>
+
+            <!-- 5 Dimension Scores Progress Bars -->
+            <div>
+                <div class="flex justify-between items-center mb-3">
+                    <h4 class="text-xs font-bold uppercase text-gray-300 tracking-wider">🎯 五大風險維度得分 (0.00 ~ 1.00)</h4>
+                    <div class="flex gap-4 text-[10px] font-mono">
+                        <span class="flex items-center gap-1"><span class="w-2.5 h-1.5 bg-sky-400 inline-block"></span>
+                            單則增量 Delta</span>
+                        <span class="flex items-center gap-1"><span class="w-2.5 h-2 bg-rose-500 inline-block"></span>
+                            累積狀態 State</span>
+                    </div>
+                </div>
+                <div class="space-y-4 font-mono text-xs">
+                    <!-- Sexual Boundary -->
+                    <div>
+                        <div class="flex justify-between mb-1">
+                            <span class="text-rose-300 font-sans font-medium">1. 性界線越界 (sexual_boundary)</span>
+                            <span class="text-gray-400 text-[11px]">
+                                Delta: <strong id="delta-val-sexual" class="text-sky-300 font-bold">0.00</strong> |
+                                累積: <strong id="score-val-sexual" class="text-rose-400 font-bold">0.00</strong>
+                            </span>
+                        </div>
+                        <div class="space-y-1 bg-slate-950/40 p-2 rounded-lg border border-slate-900">
+                            <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden" title="單則增量 Delta">
+                                <div id="delta-bar-sexual" class="h-full bg-sky-400 transition-all duration-300"
+                                    style="width: 0%"></div>
+                            </div>
+                            <div class="w-full h-2.5 bg-slate-800 rounded-full overflow-hidden" title="累積持續風險 State">
+                                <div id="score-bar-sexual" class="h-full bg-rose-500 transition-all duration-300"
+                                    style="width: 0%"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Coercion -->
+                    <div>
+                        <div class="flex justify-between mb-1">
+                            <span class="text-amber-300 font-sans font-medium">2. 強迫/威脅 (coercion)</span>
+                            <span class="text-gray-400 text-[11px]">
+                                Delta: <strong id="delta-val-coercion" class="text-sky-300 font-bold">0.00</strong> |
+                                累積: <strong id="score-val-coercion" class="text-amber-400 font-bold">0.00</strong>
+                            </span>
+                        </div>
+                        <div class="space-y-1 bg-slate-950/40 p-2 rounded-lg border border-slate-900">
+                            <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden" title="單則增量 Delta">
+                                <div id="delta-bar-coercion" class="h-full bg-sky-400 transition-all duration-300"
+                                    style="width: 0%"></div>
+                            </div>
+                            <div class="w-full h-2.5 bg-slate-800 rounded-full overflow-hidden" title="累積持續風險 State">
+                                <div id="score-bar-coercion" class="h-full bg-amber-500 transition-all duration-300"
+                                    style="width: 0%"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Manipulation -->
+                    <div>
+                        <div class="flex justify-between mb-1">
+                            <span class="text-purple-300 font-sans font-medium">3. 操控/情緒勒索 (manipulation)</span>
+                            <span class="text-gray-400 text-[11px]">
+                                Delta: <strong id="delta-val-manipulation" class="text-sky-300 font-bold">0.00</strong>
+                                |
+                                累積: <strong id="score-val-manipulation" class="text-purple-400 font-bold">0.00</strong>
+                            </span>
+                        </div>
+                        <div class="space-y-1 bg-slate-950/40 p-2 rounded-lg border border-slate-900">
+                            <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden" title="單則增量 Delta">
+                                <div id="delta-bar-manipulation" class="h-full bg-sky-400 transition-all duration-300"
+                                    style="width: 0%"></div>
+                            </div>
+                            <div class="w-full h-2.5 bg-slate-800 rounded-full overflow-hidden" title="累積持續風險 State">
+                                <div id="score-bar-manipulation"
+                                    class="h-full bg-purple-500 transition-all duration-300" style="width: 0%"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Harassment -->
+                    <div>
+                        <div class="flex justify-between mb-1">
+                            <span class="text-sky-300 font-sans font-medium">4. 持續騷擾 (harassment)</span>
+                            <span class="text-gray-400 text-[11px]">
+                                Delta: <strong id="delta-val-harassment" class="text-sky-300 font-bold">0.00</strong> |
+                                累積: <strong id="score-val-harassment" class="text-sky-400 font-bold">0.00</strong>
+                            </span>
+                        </div>
+                        <div class="space-y-1 bg-slate-950/40 p-2 rounded-lg border border-slate-900">
+                            <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden" title="單則增量 Delta">
+                                <div id="delta-bar-harassment" class="h-full bg-sky-400 transition-all duration-300"
+                                    style="width: 0%"></div>
+                            </div>
+                            <div class="w-full h-2.5 bg-slate-800 rounded-full overflow-hidden" title="累積持續風險 State">
+                                <div id="score-bar-harassment" class="h-full bg-sky-500 transition-all duration-300"
+                                    style="width: 0%"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Emotional Pressure -->
+                    <div>
+                        <div class="flex justify-between mb-1">
+                            <span class="text-indigo-300 font-sans font-medium">5. 情緒施壓 (emotional_pressure)</span>
+                            <span class="text-gray-400 text-[11px]">
+                                Delta: <strong id="delta-val-pressure" class="text-sky-300 font-bold">0.00</strong> |
+                                累積: <strong id="score-val-pressure" class="text-indigo-400 font-bold">0.00</strong>
+                            </span>
+                        </div>
+                        <div class="space-y-1 bg-slate-950/40 p-2 rounded-lg border border-slate-900">
+                            <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden" title="單則增量 Delta">
+                                <div id="delta-bar-pressure" class="h-full bg-sky-400 transition-all duration-300"
+                                    style="width: 0%"></div>
+                            </div>
+                            <div class="w-full h-2.5 bg-slate-800 rounded-full overflow-hidden" title="累積持續風險 State">
+                                <div id="score-bar-pressure" class="h-full bg-indigo-500 transition-all duration-300"
+                                    style="width: 0%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Diagnostic Signals & Confidence -->
+            <div
+                class="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-900/60 p-3.5 rounded-xl border border-slate-800 text-center font-mono">
+                <div>
+                    <div class="text-[10px] text-gray-400">NLP 信心度</div>
+                    <div id="modal-confidence" class="text-sm font-bold text-emerald-400">0.00</div>
+                </div>
+                <div>
+                    <div class="text-[10px] text-gray-400">綜合分數 Composite</div>
+                    <div id="modal-composite" class="text-sm font-bold text-sky-400">0.00</div>
+                </div>
+                <div>
+                    <div class="text-[10px] text-gray-400">最高分 Max</div>
+                    <div id="modal-max" class="text-sm font-bold text-amber-400">0.00</div>
+                </div>
+                <div>
+                    <div class="text-[10px] text-gray-400">趨勢強度 Trend</div>
+                    <div id="modal-trend" class="text-sm font-bold text-purple-400">0.00</div>
+                </div>
+            </div>
+
+            <!-- LLM Reasoning Breakdown -->
+            <div>
+                <h4 class="text-xs font-bold uppercase text-gray-300 tracking-wider mb-2">🧠 LLM 審查推理與依據 (nlp_reasoning)
+                </h4>
+                <div id="modal-reasoning"
+                    class="bg-slate-950 p-4 rounded-xl text-xs text-gray-300 leading-relaxed border border-slate-800 font-mono whitespace-pre-wrap">
+                    尚無詳細推理摘要...
+                </div>
+            </div>
+
+            <!-- Intervention Action Directives -->
+            <div
+                class="flex justify-between items-center bg-slate-900 p-3.5 rounded-xl border border-slate-800 text-xs">
+                <div>
+                    <span class="text-gray-400">對發送者處置：</span>
+                    <strong id="modal-sender-action" class="text-amber-300 font-mono">none</strong>
+                </div>
+                <div>
+                    <span class="text-gray-400">對接收者處置：</span>
+                    <strong id="modal-receiver-action" class="text-sky-300 font-mono">none</strong>
+                </div>
+            </div>
+
+            <!-- Modal Footer -->
+            <div class="pt-2 flex justify-end">
+                <button onclick="closeModal()"
+                    class="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white">關閉視窗</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript Logic -->
+    <script>
+        let allLogs = [];
+        let autoRefreshTimer = null;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            fetchData();
+            loadUserList();
+        });
+
+        async function fetchData() {
+            fetchStats();
+            fetchLogs();
+            document.getElementById('last-updated-time').innerText = '更新於 ' + new Date().toLocaleTimeString();
+        }
+
+        async function fetchStats() {
+            try {
+                const res = await fetch('/api/admin/stats');
+                const data = await res.json();
+                document.getElementById('stat-total').innerText = data.total_messages || 0;
+                document.getElementById('stat-blocked').innerText = data.blocked_count || 0;
+                document.getElementById('stat-warnings').innerText = data.warning_count || 0;
+                document.getElementById('stat-memories').innerText = data.memory_count || 0;
+
+                // Microservices status
+                const s8001 = document.getElementById('status-8001');
+                if (data.risk_8001_status === 'online') {
+                    s8001.className = 'flex items-center gap-1.5 font-semibold text-emerald-400';
+                    s8001.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400"></span> Online';
+                } else {
+                    s8001.className = 'flex items-center gap-1.5 font-semibold text-rose-400';
+                    s8001.innerHTML = '<span class="w-2 h-2 rounded-full bg-rose-500"></span> Offline';
+                }
+
+                const s9001 = document.getElementById('status-9001');
+                if (data.agent_9001_status === 'online') {
+                    s9001.className = 'flex items-center gap-1.5 font-semibold text-emerald-400';
+                    s9001.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400"></span> Online';
+                } else {
+                    s9001.className = 'flex items-center gap-1.5 font-semibold text-rose-400';
+                    s9001.innerHTML = '<span class="w-2 h-2 rounded-full bg-rose-500"></span> Offline';
+                }
+            } catch (err) {
+                console.error('Failed to fetch stats:', err);
+            }
+        }
+
+        async function fetchLogs() {
+            try {
+                const res = await fetch('/api/admin/audit-logs?limit=100');
+                const data = await res.json();
+                allLogs = data.logs || [];
+                renderLogs(allLogs);
+            } catch (err) {
+                console.error('Failed to fetch logs:', err);
+            }
+        }
+
+        function renderLogs(logs) {
+            const tbody = document.getElementById('logs-tbody');
+            if (!logs || logs.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="7" class="p-8 text-center text-gray-500">尚無訊息審查紀錄。</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = logs.map(log => {
+                const level = (log.risk_level || '').toLowerCase();
+                let badgeClass = 'risk-badge-safe';
+                let badgeIcon = '✅';
+                let badgeLabel = '安全 Safe';
+
+                if (level === 'blocked' || log.is_blocked) {
+                    badgeClass = 'risk-badge-blocked';
+                    badgeIcon = '🚫';
+                    badgeLabel = '攔截 Blocked';
+                } else if (level === 'restricted') {
+                    badgeClass = 'risk-badge-restricted';
+                    badgeIcon = '🚷';
+                    badgeLabel = '限制 Restricted';
+                } else if (level === 'warning') {
+                    badgeClass = 'risk-badge-warning';
+                    badgeIcon = '⚠️';
+                    badgeLabel = '警告 Warning';
+                } else if (level === 'observation') {
+                    badgeClass = 'risk-badge-observation';
+                    badgeIcon = '🔍';
+                    badgeLabel = '觀察 Obs';
+                }
+
+                const maxScore = (log.diagnostic_signals && log.diagnostic_signals.max) ? log.diagnostic_signals.max.toFixed(2) : '0.00';
+                const flagged = (log.guardrail_flagged_words && log.guardrail_flagged_words.length) ? log.guardrail_flagged_words.join(', ') : '無';
+
+                // Format timestamp
+                let tsFormatted = '--';
+                if (log.timestamp) {
+                    try {
+                        const dt = new Date(log.timestamp);
+                        tsFormatted = dt.toLocaleString('zh-TW', { hour12: false });
+                    } catch (e) {
+                        tsFormatted = log.timestamp.replace('T', ' ').substring(0, 19);
+                    }
+                }
+
+                // Chat sender type tag
+                const sender = log.sender_id || 'User';
+                let senderTag = `<span class="text-sky-400 font-bold font-mono">${sender}</span>`;
+                if (sender === 'ai_assistant' || sender.includes('assistant')) {
+                    senderTag = `<span class="text-violet-400 font-bold font-mono flex items-center gap-1">🌙 媒人阿月</span>`;
+                }
+
+                return `
+                    <tr class="hover:bg-slate-800/50 transition border-b border-slate-800/40">
+                        <td class="p-4 font-mono text-gray-400 whitespace-nowrap text-[11px] align-middle">${tsFormatted}</td>
+                        <td class="p-4 align-middle">
+                            <div>${senderTag}</div>
+                            <div class="text-[10px] text-gray-500 font-mono truncate max-w-[140px]" title="${log.conversation_id || ''}">${log.conversation_id || '-'}</div>
+                        </td>
+                        <td class="p-4 text-gray-200 max-w-sm align-middle">
+                            <div class="line-clamp-2 leading-relaxed text-xs" title="${log.content || ''}">${log.content || '-'}</div>
+                        </td>
+                        <td class="p-4 text-center align-middle whitespace-nowrap">
+                            <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${badgeClass}">
+                                <span>${badgeIcon}</span>
+                                <span>${badgeLabel}</span>
+                            </span>
+                        </td>
+                        <td class="p-4 text-center align-middle font-mono font-extrabold text-sm ${maxScore > 0.5 ? 'text-rose-400' : 'text-emerald-400'}">
+                            ${maxScore}
+                        </td>
+                        <td class="p-4 text-gray-400 font-mono text-[11px] align-middle truncate max-w-[120px]">${flagged}</td>
+                        <td class="p-4 text-center align-middle whitespace-nowrap">
+                            <button onclick="openModal('${log.message_id}')" 
+                                class="px-3 py-1.5 rounded-lg bg-violet-900/40 hover:bg-violet-800/70 border border-violet-500/40 text-violet-300 font-semibold transition text-xs shadow-sm">
+                                📊 查看分數與推理
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function filterLogs() {
+            const query = document.getElementById('search-input').value.toLowerCase();
+            const status = document.getElementById('status-filter').value;
+            const type = document.getElementById('type-filter').value;
+
+            const filtered = allLogs.filter(log => {
+                const matchQuery = (log.content || '').toLowerCase().includes(query) ||
+                    (log.sender_id || '').toLowerCase().includes(query) ||
+                    (log.conversation_id || '').toLowerCase().includes(query);
+
+                let matchStatus = true;
+                const level = (log.risk_level || '').toLowerCase();
+                if (status === 'blocked') {
+                    matchStatus = level === 'blocked' || log.is_blocked;
+                } else if (status === 'restricted') {
+                    matchStatus = level === 'restricted';
+                } else if (status === 'warning') {
+                    matchStatus = level === 'warning';
+                } else if (status === 'observation') {
+                    matchStatus = level === 'observation';
+                } else if (status === 'safe') {
+                    matchStatus = (level === 'safe' || level === 'normal' || !level) && !log.is_blocked;
+                }
+
+                let matchType = true;
+                const conv = (log.conversation_id || '').toLowerCase();
+                const sender = (log.sender_id || '').toLowerCase();
+                if (type === 'assistant') {
+                    matchType = sender.includes('assistant') || conv.includes('ai_assistant');
+                } else if (type === 'analysis') {
+                    matchType = conv.includes('big_five') || conv.includes('deep_profile');
+                } else if (type === 'pair') {
+                    matchType = !conv.includes('big_five') && !conv.includes('deep_profile') && !sender.includes('assistant');
+                }
+
+                return matchQuery && matchStatus && matchType;
+            });
+
+            renderLogs(filtered);
+        }
+
+        function toggleAutoRefresh(checked) {
+            if (checked) {
+                autoRefreshTimer = setInterval(fetchData, 5000);
+            } else {
+                if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+            }
+        }
+
+        function switchTab(tabName) {
+            document.getElementById('tab-btn-logs').classList.remove('active');
+            document.getElementById('tab-btn-memories').classList.remove('active');
+            document.getElementById('tab-content-logs').classList.add('hidden');
+            document.getElementById('tab-content-memories').classList.add('hidden');
+
+            if (tabName === 'logs') {
+                document.getElementById('tab-btn-logs').classList.add('active');
+                document.getElementById('tab-content-logs').classList.remove('hidden');
+            } else {
+                document.getElementById('tab-btn-memories').classList.add('active');
+                document.getElementById('tab-content-memories').classList.remove('hidden');
+            }
+        }
+
+        // User Memories (Port 9001)
+        async function loadUserList() {
+            try {
+                const res = await fetch('/api/admin/users');
+                const data = await res.json();
+                const sel = document.getElementById('user-selector');
+                if (data.users && data.users.length > 0) {
+                    sel.innerHTML = data.users.map(u =>
+                        `<option value="${u.user_id}">${u.name} (${u.user_id}) - ${u.mbti}</option>`
+                    ).join('');
+                    loadUserMemories(data.users[0].user_id);
+                } else {
+                    sel.innerHTML = `<option value="demo_user">demo_user (預設)</option>`;
+                    loadUserMemories('demo_user');
+                }
+            } catch (err) {
+                console.error('Failed to load users:', err);
+            }
+        }
+
+        async function loadUserMemories(userId) {
+            if (!userId) return;
+            const container = document.getElementById('memory-cards-container');
+            container.innerHTML = `<div class="glass-card rounded-xl p-5 text-center text-gray-400 col-span-full">載入 Port 9001 記憶數據中...</div>`;
+
+            try {
+                const res = await fetch(`/api/admin/user-memories/${userId}`);
+                const data = await res.json();
+                const memories = data.memories || [];
+
+                if (memories.length === 0) {
+                    container.innerHTML = `<div class="glass-card rounded-xl p-5 text-center text-gray-500 col-span-full">目前該用戶尚無 Neo4j 偏好記憶紀錄。</div>`;
+                    return;
+                }
+
+                container.innerHTML = memories.map(mem => {
+                    const stance = mem.stance || 'like';
+                    let stanceBadge = 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40';
+                    let stanceText = '喜歡 (Like)';
+                    if (stance === 'dislike') {
+                        stanceBadge = 'bg-rose-500/20 text-rose-300 border-rose-500/40';
+                        stanceText = '討厭 (Dislike)';
+                    } else if (stance === 'avoid') {
+                        stanceBadge = 'bg-amber-500/20 text-amber-300 border-amber-500/40';
+                        stanceText = '避開 (Avoid)';
+                    } else if (stance === 'require') {
+                        stanceBadge = 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40';
+                        stanceText = '必要 (Require)';
+                    }
+
+                    const confidence = mem.confidence ? (mem.confidence * 100).toFixed(0) + '%' : '85%';
+
+                    return `
+                        <div class="glass-card rounded-2xl p-5 space-y-3">
+                            <div class="flex justify-between items-start">
+                                <span class="px-2.5 py-1 rounded-full text-[11px] font-bold border ${stanceBadge}">${stanceText}</span>
+                                <span class="text-xs font-mono text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded">Confidence: ${confidence}</span>
+                            </div>
+                            <div>
+                                <h4 class="text-base font-bold text-white">${mem.label || mem.name || mem.key}</h4>
+                                <div class="text-xs text-gray-400 font-mono mt-0.5">key: ${mem.key || '-'}</div>
+                            </div>
+                            <div class="flex justify-between items-center text-[11px] text-gray-500 border-t border-gray-800/80 pt-2 font-mono">
+                                <span>分類: ${mem.category || 'lifestyle'}</span>
+                                <span>Port 9001 Extracted</span>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+            } catch (err) {
+                container.innerHTML = `<div class="glass-card rounded-xl p-5 text-center text-rose-400 col-span-full">載入記憶失敗: ${err.message}</div>`;
+            }
+        }
+
+        // Modal Functions
+        function openModal(messageId) {
+            const log = allLogs.find(l => l.message_id === messageId);
+            if (!log) return;
+
+            document.getElementById('modal-msg-id').innerText = 'Msg ID: ' + (log.message_id || '--');
+            document.getElementById('modal-msg-content').innerText = `"${log.content || ''}"`;
+            document.getElementById('modal-sender').innerText = log.sender_id || '--';
+            document.getElementById('modal-conv').innerText = log.conversation_id || '--';
+
+            // 5 dimension scores (Cumulative State)
+            const cumulative = log.risk_state || {};
+            // 5 dimension deltas (Delta)
+            const delta = log.delta_final || log.delta_nlp || {};
+
+            setScore('sexual', cumulative.sexual_boundary || 0, delta.sexual_boundary || 0);
+            setScore('coercion', cumulative.coercion || 0, delta.coercion || 0);
+            setScore('manipulation', cumulative.manipulation || 0, delta.manipulation || 0);
+            setScore('harassment', cumulative.harassment || 0, delta.harassment || 0);
+            setScore('pressure', cumulative.emotional_pressure || 0, delta.emotional_pressure || 0);
+
+            // Signals
+            const sigs = log.diagnostic_signals || {};
+            document.getElementById('modal-confidence').innerText = (log.confidence || 0).toFixed(2);
+            document.getElementById('modal-composite').innerText = (sigs.composite || 0).toFixed(4);
+            document.getElementById('modal-max').innerText = (sigs.max || 0).toFixed(4);
+            document.getElementById('modal-trend').innerText = (sigs.trend || 0).toFixed(4);
+
+            // Reasoning
+            document.getElementById('modal-reasoning').innerText = log.nlp_reasoning || '無詳細推理摘要。';
+
+            // Actions
+            document.getElementById('modal-sender-action').innerText = log.sender_action || 'none';
+            document.getElementById('modal-receiver-action').innerText = log.receiver_action || 'none';
+
+            document.getElementById('detail-modal').classList.remove('hidden');
+        }
+
+        function setScore(id, cumulativeVal, deltaVal) {
+            const cNum = parseFloat(cumulativeVal || 0);
+            const dNum = parseFloat(deltaVal || 0);
+
+            document.getElementById(`score-val-${id}`).innerText = cNum.toFixed(2);
+            document.getElementById(`delta-val-${id}`).innerText = dNum.toFixed(2);
+
+            document.getElementById(`score-bar-${id}`).style.width = Math.min(100, Math.max(0, cNum * 100)) + '%';
+            document.getElementById(`delta-bar-${id}`).style.width = Math.min(100, Math.max(0, dNum * 100)) + '%';
+        }
+
+        function closeModal() {
+            document.getElementById('detail-modal').classList.add('hidden');
+        }
+    </script>
+</body>
+
+</html>

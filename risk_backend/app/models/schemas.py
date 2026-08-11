@@ -82,6 +82,11 @@ class RiskDetectionRequest(BaseModel):
     prior_risk_state: Optional[RiskState] = None
     relationship_memory: Optional[RelationshipMetrics] = None
     last_summary: Optional[ConversationSummary] = None
+    message_timestamp: Optional[str] = Field(
+        None,
+        description="訊息發送時間 (ISO 8601)。用於時段相關的情境判定；未提供時以處理當下為準。"
+                    "正式運作可省略；離線重跑歷史訊息或評估時應帶入，以確保結果可重現。"
+    )
 
 class RiskDetectionResponse(BaseModel):
     """風險檢測回應"""
@@ -92,6 +97,18 @@ class RiskDetectionResponse(BaseModel):
     new_risk_state: RiskState
     risk_level: str
     should_intervene: bool
+    nlp_reasoning: Optional[str] = None
+    nlp_confidence: float = Field(
+        0.0,
+        description="NLP 引擎對本次判斷的自評信心。融合層據此決定規則／語意的權重。"
+    )
+    nlp_degraded: bool = Field(
+        False,
+        description="NLP 是否走了 fallback（LLM 呼叫或解析失敗）。為 True 時語意通道的 delta 恆為 0，"
+                    "本次判斷僅由規則引擎與情境層支撐，風險等級可能被低估。"
+                    "呼叫端應將此視為『判斷不完整』而非『判定安全』；離線評估時必須排除或另行標記，"
+                    "否則失敗案例會與真正的 safe 混在一起無法分辨（見 known-issues #17）。"
+    )
     intervention_message: Optional[str] = None
     intervention_command: Optional[Any] = None
     triggered_rules: List[str] = []
@@ -102,3 +119,14 @@ class FeedbackRequest(BaseModel):
     triggered_by_msg_id: str
     role: str
     feedback: str
+
+class SenderAppealRequest(BaseModel):
+    """寄件方對某次介入的文字申訴。
+
+    僅供人工稽核使用，**不進入任何演算法**：若讓被警告者自述無惡意即可
+    降低風險分數，將形成可被濫用的繞道。
+    """
+    triggered_by_msg_id: str
+    sender_id: str
+    appeal_text: str = Field(..., min_length=1, max_length=2000,
+                             description="寄件方對此次介入的說明或異議")

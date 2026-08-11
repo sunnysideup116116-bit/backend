@@ -182,11 +182,29 @@ class RelationshipService:
                 return {"user_a_id": sender_id, "user_b_id": receiver_id}
 
     def compute_familiarity_score(self, total_messages: int, interaction_days: int, balance: float) -> float:
-        """實作文檔中的對數飽和公式"""
+        """對數飽和公式：互動量與時間跨度決定熟悉度，對話越單向則整體打折。
+
+        2026-08-05 修正：balance 由加法項改為乘法項。
+
+        原式為 `0.40*msg + 0.40*days + 0.20*balance`，其中 balance_factor 在雙方
+        發言平衡時恆為 1.0，等於**無條件贈送 0.20 的地板分**。後果有二：
+
+        1. 全新對話（1 則訊息、第 1 天、發言平衡）的熟悉度即為 0.3059，而
+           `abnormal_acceleration_grooming` 的條件是 `familiarity_max: 0.3`
+           ——**該規則在平衡對話下永遠無法觸發**，掠奪者加速關係的偵測形同失效。
+        2. 「熟人」（100 則／30 天）即達 0.80，使 `stable_familiar_relationship`
+           的降權門檻 0.7 過早成立，風險抑制套用得太寬。
+
+        改為乘法後，「對話單向就打折」才真的是打折，而非「平衡就送分」。
+        錨點（balance=0.5）：剛認識 0.22／初步認識 0.51／熟人 0.75／熟識 0.91／深交 1.00。
+
+        ⚠️ 此改動會改變所有讀取 familiarity_score 的判斷，相關規則門檻已同步調整
+        （見 kb_scenario_rules 的熟識降權三層與 abnormal_acceleration_grooming）。
+        """
         msg_factor = min(1.0, math.log(1 + total_messages) / math.log(1 + 501))
         days_factor = min(1.0, math.log(1 + interaction_days) / math.log(1 + 91))
         balance_factor = 1 - 2 * abs(balance - 0.5)
-        score = (0.40 * msg_factor) + (0.40 * days_factor) + (0.20 * balance_factor)
+        score = (0.50 * msg_factor + 0.50 * days_factor) * balance_factor
         return round(score, 4)
 
     async def get_memory_context(self, conv_id: str) -> dict:

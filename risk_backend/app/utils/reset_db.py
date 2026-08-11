@@ -14,14 +14,22 @@ def reset_collections():
     db = Databases(client)
     db_id = os.getenv('APPWRITE_DB_ID')
 
-    # 根據你提供的實際 Collection ID 列表
+    # 所有「操作型資料」collection。
+    # 三個記憶／回饋相關的表過去未被清除，會造成評估污染：
+    #   conversation_summaries    L1 摘要（親密度指標）殘留會蓋掉評估時種入的值
+    #   relationship_metrics      L2 關係指標同上
+    #   guardrail_context_reviews 背景判斷結果會餵進 feedback_signal，
+    #                             舊的 concerning 會讓後續風險被莫名放大
     target_collections = [
-        "messages", 
-        "temporal_features", 
-        "risk_analysis_logs_",
-        "risk_state_history", 
-        "intervention_logs", 
-        "conversations"
+        "messages",
+        "temporal_features",
+        "risk_analysis_logs",
+        "risk_state_history",
+        "intervention_logs",
+        "conversations",
+        "conversation_summaries",
+        "relationship_metrics",
+        "guardrail_context_reviews",
     ]
 
     for coll_id in target_collections:

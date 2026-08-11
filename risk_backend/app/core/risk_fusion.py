@@ -59,8 +59,16 @@ class RiskFusionLayer:
         final_values = {}
         fields = ['sexual_boundary', 'coercion', 'manipulation', 'harassment', 'emotional_pressure']
         for field in fields:
-            # 簡單相加，並限制最大值為 1.0 (防止風險值溢出)
             sum_val = getattr(base_delta, field) + getattr(bonus_delta, field)
-            final_values[field] = min(1.0, sum_val)
-            
+            # 上限 1.0：防止風險值溢出。
+            # 下限 0.0（2026-08-05 新增）：抑制型情境規則（如 stable_familiar_relationship）
+            # 的負向 bonus 原本可把單則訊息的 delta 壓成負值，語意上等同宣稱「這則訊息
+            # 降低了關係的風險」——對死亡威脅之類的內容顯然不成立。
+            # 更嚴重的是，負值會壓低 composite 中權重 0.30 的 spread（活躍維度比例），
+            # 使等級被連帶拉低：holdout 的 H08「你敢離開我 我就殺死你」即因四個維度
+            # 轉負而只判到 warning（見 known-issues #21）。
+            # 抑制的設計意圖是「提高容忍度」，不是「反向抵銷」，故夾在 0。
+            # 既有累積風險的消退由 Step 7 的 decay 負責，不依賴負向 delta。
+            final_values[field] = max(0.0, min(1.0, sum_val))
+
         return RiskState(**final_values)

@@ -31,8 +31,13 @@ def check_risk(
     sender_id: str,
     receiver_id: str,
     content: str,
+    message_timestamp: Optional[str] = None,
 ) -> Optional[dict]:
     """Call POST /api/v1/risk/detect on the risk service.
+
+    message_timestamp: 訊息發送時間 (ISO 8601，建議帶時區標記)。用於時段相關的
+    情境判定；未提供時風險服務以處理當下為準。即時處理時差異不大，但在重試、
+    排隊或補送情境下會有差別。
 
     Returns the parsed response dict on success, or None on any failure
     (timeout, connection error, non-200 status, malformed JSON).
@@ -46,6 +51,8 @@ def check_risk(
         "receiver_id": receiver_id,
         "current_message": content,
     }
+    if message_timestamp:
+        payload["message_timestamp"] = message_timestamp
     try:
         with httpx.Client(timeout=_TIMEOUT) as client:
             resp = client.post(f"{_BASE_URL}/api/v1/risk/detect", json=payload)

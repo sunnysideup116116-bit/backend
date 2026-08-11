@@ -989,6 +989,14 @@ def decline_match(req: AcceptRequest, background_tasks: BackgroundTasks):
         # 情境 B：接收者婉拒邀請 → 回饋「接收者」的偏好
         from_doc = profiles_coll.find_one({"user_id": from_id})
         target_traits = from_doc.get("big_five", {}) if from_doc else {}
+
+        queue_mediator_event(
+            from_id,
+            "這次牽線對方目前沒有接下。沒關係，可能只是彼此當下的節奏不同，我會繼續幫你留意更合適的人。",
+            "match_declined",
+            match_id=req.match_id,
+            other_id=to_id,
+        )
         
         def notify_agent_decline_receiver():
             try:

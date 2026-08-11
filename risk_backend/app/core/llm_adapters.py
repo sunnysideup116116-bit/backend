@@ -13,15 +13,83 @@ LLM Adapter Layer - 統一不同 provider 的 chat completion / generate 介面
 """
 
 import os
-from typing import Optional, Protocol
+import random
+import time
+from typing import Callable, Optional, Protocol
 
 
 class LLMAdapter(Protocol):
     def generate(self, prompt: str, model: str) -> str: ...
 
 
+# ---------------------------------------------------------------------------
+# 重試與逾時（2026-08-05 新增，known-issues #2）
+# ---------------------------------------------------------------------------
+# 為何需要：呼叫失敗時 `nlp_engine._fallback_result()` 回傳全 0 的 delta，
+# 對一則不具行為異常的訊息即等同判 `safe`（known-issues #17）。
+# 也就是說**網路抖動會直接變成安全破口**——這不是理論風險：
+# 2026-08-05 驗證 temperature 修正時連續發送請求，即因速率限制觸發此路徑。
+#
+# ⚠️ 重試只對「呼叫失敗」有效，對「答案不好」無效。
+#    temperature 已固定為 0，重試拿到的是同一個答案。
+#    這是正確的行為，但別誤以為重試能改善判斷品質。
+#
+# 只重試暫時性錯誤：金鑰錯誤、參數錯誤等永久性失敗應立刻放棄，
+# 否則只是把一次失敗變成三次失敗、延遲三倍。
+
+LLM_MAX_ATTEMPTS = int(os.getenv("LLM_MAX_ATTEMPTS", "3"))
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+LLM_BACKOFF_BASE = float(os.getenv("LLM_BACKOFF_BASE", "1.0"))
+
+# 依例外類別名稱判斷是否暫時性。跨 SDK 通用，不必逐一 import 各家的例外型別
+# （google.api_core、openai、httpx 的類別名稱皆涵蓋於下）。
+_TRANSIENT_NAME_HINTS = (
+    "ratelimit", "resourceexhausted", "toomanyrequests",
+    "serviceunavailable", "unavailable",
+    "timeout", "deadlineexceeded",
+    "internalservererror", "internalerror", "apiconnection",
+    "connectionerror", "remoteprotocol",
+)
+_TRANSIENT_STATUS = {408, 409, 429, 500, 502, 503, 504}
+
+
+def _is_transient(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    if any(h in name for h in _TRANSIENT_NAME_HINTS):
+        return True
+    for attr in ("status_code", "code", "http_status"):
+        val = getattr(exc, attr, None)
+        if isinstance(val, int) and val in _TRANSIENT_STATUS:
+            return True
+    return False
+
+
+def call_with_retry(fn: Callable[[], str], label: str = "LLM") -> str:
+    """執行 fn，對暫時性錯誤做指數退避重試。
+
+    退避加入隨機抖動（jitter），避免多個併發請求在同一時刻一起重試而再次撞上限額。
+    """
+    last_exc = None
+    for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 — 需依內容分類，故先全捕捉
+            last_exc = e
+            if not _is_transient(e):
+                print(f"   [ {label} ] 永久性錯誤，不重試：{type(e).__name__}: {e}")
+                raise
+            if attempt >= LLM_MAX_ATTEMPTS:
+                print(f"   [ {label} ] 重試 {LLM_MAX_ATTEMPTS} 次仍失敗：{type(e).__name__}")
+                raise
+            wait = LLM_BACKOFF_BASE * (2 ** (attempt - 1)) * (1 + random.random() * 0.25)
+            print(f"   [ {label} ] 暫時性錯誤（{type(e).__name__}），"
+                  f"{wait:.1f}s 後重試（第 {attempt}/{LLM_MAX_ATTEMPTS} 次）")
+            time.sleep(wait)
+    raise last_exc  # pragma: no cover — 迴圈內必定 return 或 raise
+
+
 class GeminiAdapter:
-    """Google Generative AI 包裝"""
+    """Google Generative AI 包裝（新版 google.genai SDK）"""
 
     def __init__(self):
         from google import genai
@@ -34,18 +102,26 @@ class GeminiAdapter:
     def generate(self, prompt: str, model: str) -> str:
         if not self._client:
             raise RuntimeError("GeminiAdapter 缺少 GOOGLE_API_KEY / GEMINI_API_KEY")
-        try:
+
+        # temperature=0（2026-08-05 新增）：原本未指定，沿用模型預設值。
+        # 實測同一則案例連跑三次，sexual_boundary 出現 0.75／0.75／0.65 的擺盪；
+        # 整個 test 集重跑一次，22 則中有 15 則（68%）NLP 分數改變，
+        # 3 則（14%）連最終等級都翻掉——大於我們想量測的多數效果量，
+        # 使「修正前 vs 修正後」的比較無法解讀（見 known-issues #23）。
+        # 設為 0 後三次結果完全相同。
+        # 這同時也是風險系統該有的性質：同樣的訊息與脈絡，應得到同樣的判斷。
+        def _once() -> str:
             response = self._client.models.generate_content(
                 model=model,
                 contents=prompt,
                 config=self._types.GenerateContentConfig(
-                    http_options=self._types.HttpOptions(timeout=10000),
+                    temperature=0.0,
+                    http_options=self._types.HttpOptions(timeout=LLM_TIMEOUT_SECONDS * 1000),
                 ),
             )
             return response.text
-        except Exception as e:
-            print(f"      [ Gemini SDK Error ] {e}")
-            raise e
+
+        return call_with_retry(_once, label="Gemini")
 
 
 class OpenAICompatAdapter:
@@ -58,15 +134,28 @@ class OpenAICompatAdapter:
             raise ValueError("OpenAICompatAdapter requires base_url")
         if not api_key:
             raise ValueError("OpenAICompatAdapter requires api_key")
-        self._client = OpenAI(base_url=base_url, api_key=api_key)
+        # max_retries=0：關閉 SDK 內建重試，改由 call_with_retry 統一處理，
+        # 以免兩層重試相乘（3 × 2 = 6 次）使失敗情境的延遲不可預期。
+        self._client = OpenAI(base_url=base_url, api_key=api_key,
+                              timeout=LLM_TIMEOUT_SECONDS, max_retries=0)
 
-    def generate(self, prompt: str, model: str) -> str:
-        resp = self._client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-        )
-        return resp.choices[0].message.content or ""
+    def generate(self, prompt: str, model: str, extra_kwargs: Optional[dict] = None) -> str:
+        def _once() -> str:
+            kwargs = dict(extra_kwargs or {})
+            resp = self._client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                # 與 GeminiAdapter 一致設為 0（2026-08-05）：判斷的可重現性是本系統的設計性質，
+                # 不因走哪條 provider 路徑而異。原值 0.1 使 provider 切換會重新引入不確定性。
+                # 已實測 llama-guard3:1b 與 gemma4:e2b 在 0.0 下三次輸出完全相同，未見小模型退化。
+                temperature=0.0,
+                # llama.cpp 專用參數（如 chat_template_kwargs）需走 extra_body，
+                # openai SDK 會拒絕未知的頂層參數。
+                extra_body=kwargs,
+            )
+            return resp.choices[0].message.content or ""
+
+        return call_with_retry(_once, label="OpenAICompat")
 
 
 class OllamaAdapter:
@@ -78,25 +167,24 @@ class OllamaAdapter:
 
     def generate(self, prompt: str, model: str) -> str:
         import requests
-        data = {
-            "model": model,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "stream": False,
-            "think": False,
-            "options": {
-                "temperature": 0.1
+
+        def _once() -> str:
+            data = {
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+                "stream": False,
+                "think": False,
+                "options": {
+                    "temperature": 0.0
+                }
             }
-        }
-        try:
-            resp = requests.post(self._url, json=data, timeout=15.0)
+            resp = requests.post(self._url, json=data, timeout=LLM_TIMEOUT_SECONDS)
             resp.raise_for_status()
             return resp.json()["message"]["content"]
-        except Exception as e:
-            print(f"      [ Ollama Native Error ] {e}")
-            raise e
 
+        return call_with_retry(_once, label="Ollama")
 
 
 def _make_openai_compat(base_url: Optional[str], api_key: Optional[str]) -> OpenAICompatAdapter:
@@ -156,7 +244,6 @@ def get_guardrail_classifier_adapter() -> LLMAdapter:
         base_url,
         os.getenv("GUARDRAIL_API_KEY"),
     )
-
 
 
 def get_guardrail_classifier_model() -> str:

@@ -77,10 +77,28 @@ def test_apply_scenario_bonus_caps_at_one():
     assert result.harassment == pytest.approx(1.0)
 
 
-def test_apply_scenario_bonus_preserves_negative():
+def test_apply_scenario_bonus_floors_at_zero():
+    """抑制型情境規則可把 delta 降到 0，但不得使其為負。
+
+    2026-08-05 修改：原測試名為 `..._preserves_negative`，斷言結果為 −0.2。
+    負值語意上等同「這則訊息降低了關係的風險」，對死亡威脅之類的內容不成立；
+    且負值會壓低 composite 中的 spread（活躍維度比例），連帶拉低等級——
+    holdout 的 H08 即因此只判到 warning（見 known-issues #21）。
+    抑制的設計意圖是「提高容忍度」而非「反向抵銷」，故下限夾在 0。
+    """
     result = RiskFusionLayer().apply_scenario_bonus(
         RiskState(harassment=0.1),
         RiskState(harassment=-0.3),
     )
 
-    assert result.harassment == pytest.approx(-0.2)
+    assert result.harassment == pytest.approx(0.0)
+
+
+def test_apply_scenario_bonus_still_suppresses_within_range():
+    """夾下限不得使抑制失效：抑制幅度小於原分數時仍應正常扣分。"""
+    result = RiskFusionLayer().apply_scenario_bonus(
+        RiskState(harassment=0.5),
+        RiskState(harassment=-0.3),
+    )
+
+    assert result.harassment == pytest.approx(0.2)

@@ -1,15 +1,15 @@
-﻿import json
+import json
 import time
-import os
 import re
 import uuid
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pymongo import ReturnDocument
 from pymongo.errors import PyMongoError
 from models import (
-    ChatRequest, DirectChatRequest, MediatorPrivateRequest, MediatorProbeRequest,
+    ChatRequest, DirectChatRequest, MediatorPrivateRequest,
     RelationshipGameRequest, RelationshipQuizAnswerRequest, ResetRequest,
     RiskFeedbackRequest, GuidanceActivityRequest, GuidanceSuggestionRequest,
+    DateUpdateRequest, DateConfirmRequest,
 )
 from database import profiles_coll, messages_coll, matches_coll
 from config import OLLAMA_FAST_CHAT_MODEL
@@ -17,15 +17,27 @@ from services.ai_service import analyze_big_five, analyze_deep_profile, get_embe
 from services.chat_service import generate_room_id, save_message
 from services.memory_service import observe_user_memory, get_user_graph_memories
 from services.mediator_event_service import claim_next_mediator_event, queue_mediator_event
+from services.date_coordination_service import (
+    StaleDateFormError,
+    confirm_date_form as confirm_date_state,
+    new_date_coordination,
+    update_date_form as update_date_state,
+)
+from services.semantic_plan_service import (
+    get_relationship_semantic_context,
+    process_relationship_semantic_plan,
+)
+from services.ai_service import orchestrate_date_coordination
 from services import risk_client
 
 router = APIRouter(prefix="/api", tags=["Chat"])
+
+
+def analysis_room_id(user_id: str, state: str) -> str:
+    return generate_room_id(user_id, f"{state}_assistant")
+
+
 MATCH_READINESS_THRESHOLD = 75
-FEEDBACK_COOLDOWN_SECONDS = 120
-PROBE_PENDING_TTL = 72 * 3600
-PROBE_IN_FLIGHT_STATUSES = {
-    "queued", "awaiting_answer", "awaiting_sentiment", "awaiting_consent"
-}
 QUIZ_TTL_SECONDS = 7 * 86400
 QUIZ_QUESTIONS = [
     {
@@ -60,21 +72,16 @@ MEDIATOR_TONES = {
 }
 
 RELATIONSHIP_EVENT_TYPES = {
-    "feedback_request", "feedback_consent_request", "probe_result",
-    "gentle_closure", "mutual_interest", "probe_question",
     "date_coordination_request", "date_coordination_result",
-    "date_coordination_cancelled", "match_connected",
+    "date_coordination_cancelled", "date_coordination_form",
+    "date_coordination_chat", "date_coordination_success", "match_connected",
     "compatibility_quiz_invite"
 }
 
-PROBE_QUESTIONS = {
-    "sentiment": "你跟這位聊起來感覺如何？",
-    "fun_fact": "有沒有一件關於你的有趣小事，可以讓我之後幫你們找話題？",
-    "weekend": "你這週末大概想怎麼過？",
-    "conversation_hook": "如果要讓對方更好開話題，你希望我透露哪個輕鬆的小線索？",
-    "availability": "你近期哪個時間比較方便認識新朋友？",
+RETIRED_PRIVATE_EVENT_TYPES = {
+    "feedback_request", "feedback_consent_request", "probe_result",
+    "gentle_closure", "mutual_interest", "probe_question",
 }
-LOW_SENSITIVITY_PROBES = {"fun_fact", "weekend", "conversation_hook", "availability"}
 
 def profile_display_name(doc: dict | None, fallback_id: str) -> str:
     if doc:
@@ -92,26 +99,6 @@ def mediator_style(user_id: str) -> str:
 def relationship_unread_field(match_doc: dict, user_id: str) -> str:
     role = "from" if match_doc.get("from_user") == user_id else "to"
     return f"private_unread.{role}"
-
-def participant_role(match_doc: dict, user_id: str) -> str:
-    return "from" if match_doc.get("from_user") == user_id else "to"
-
-def participant_probe_state(match_doc: dict, user_id: str) -> dict:
-    return (((match_doc.get("mediator_state") or {}).get("participants") or {}).get(participant_role(match_doc, user_id)) or {})
-
-def participant_probe_field(match_doc: dict, user_id: str) -> str:
-    return f"mediator_state.participants.{participant_role(match_doc, user_id)}"
-
-def probe_policy(user_id: str):
-    doc = profiles_coll.find_one({"user_id": user_id}, {"probe_mode": 1}) or {}
-    mode = doc.get("probe_mode", "balanced")
-    if mode == "manual":
-        return mode, 10**9, 10**9, 86400
-    if mode == "active":
-        return mode, 6, 600, 21600
-    if os.getenv("MEDIATOR_DEMO_FAST_PROBE", "0") == "1":
-        return mode, 6, 120, 300
-    return mode, 8, 1800, 86400
 
 def trigger_proactive_match(user_id: str, source: str = "automatic", force_new: bool = False):
     from routers.match import create_proactive_match_proposal
@@ -506,55 +493,10 @@ def grounded_relationship_fallback(relationships: list[dict], compare: bool = Fa
     ids = "、".join("@" + item["other_id"] for item in relationships)
     return f"我目前能根據已接受配對與聊天資料回答：{ids}。更細的判斷要等你們多聊一點。"
 
-def choose_probe_kind(match_doc: dict, requested_kind: str | None = None) -> str:
-    if requested_kind in PROBE_QUESTIONS:
-        return requested_kind
-    recent = [item.get("kind") for item in (match_doc.get("probe_history", []) or [])[-5:]]
-    for kind in ("fun_fact", "conversation_hook", "weekend", "availability", "sentiment"):
-        if (not recent or kind != recent[-1]) and kind not in recent[-3:]:
-            return kind
-    return "fun_fact"
-
-
-def normalize_date_answer(stage: str, message: str):
-    if stage == "availability":
-        choices = [value for value in ("今天", "明天", "週末", "晚上", "下午") if value in message]
-        return choices or ["時間再確認"]
-    if stage == "activity":
-        choices = [value for value in ("吃飯", "咖啡", "運動", "讀書", "看電影", "散步") if value in message]
-        return choices or ["輕鬆活動"]
-    if any(word in message for word in ("一千", "1000", "不限")):
-        return "1000以上"
-    if any(word in message for word in ("五百", "500", "便宜")):
-        return "500以內"
-    return "500-1000"
-
-
 def is_date_cancellation(message: str) -> bool:
     compact = re.sub(r"\s+", "", message)
     return any(phrase in compact for phrase in ("不要約", "取消", "先不要", "不用了", "改天", "不想約", "暫停"))
 
-
-def date_overlap(first: dict, second: dict):
-    times = [item for item in first.get("availability", []) if item in second.get("availability", [])]
-    activities = [item for item in first.get("activity", []) if item in second.get("activity", [])]
-    return {
-        "time": times[0] if times else None,
-        "activity": activities[0] if activities else None,
-        "budget": first.get("budget") if first.get("budget") == second.get("budget") else "彈性預算",
-    }
-
-def classify_feedback(message: str) -> str:
-    try:
-        prompt = f"""
-請判斷以下配對回饋的情緒，只輸出 JSON：{{"sentiment":"positive|negative|neutral"}}
-使用者訊息：{message}
-"""
-        result = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True))
-        sentiment = result.get("sentiment", "neutral")
-        return sentiment if sentiment in {"positive", "negative", "neutral"} else "neutral"
-    except Exception:
-        return "neutral"
 
 def classify_proposal_intent(message: str, situation: str = "match_search_confirmation"):
     compact = re.sub(r"\s+", "", (message or "").strip())
@@ -603,116 +545,6 @@ def classify_proposal_intent(message: str, situation: str = "match_search_confir
         return True
     return None
 
-def feedback_share_consent(message: str) -> bool:
-    try:
-        prompt = f"""
-請判斷使用者是否同意把這段配對回饋轉述給對方或讓媒人拿去做後續協調。
-只輸出 JSON：{{"consent":true|false,"confidence":0.0}}
-使用者訊息：{message}
-"""
-        result = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True))
-        return bool(result.get("consent")) and float(result.get("confidence", 0)) >= 0.6
-    except Exception:
-        return False
-
-
-def handle_private_feedback(user_id: str, user_doc: dict, message: str):
-    match_id = user_doc.get("pending_feedback_match_id")
-    if not match_id:
-        return None
-    try:
-        from bson.objectid import ObjectId
-        match_doc = matches_coll.find_one({"_id": ObjectId(match_id)})
-    except Exception:
-        match_doc = None
-    if not match_doc:
-        profiles_coll.update_one(
-            {"user_id": user_id},
-            {"$unset": {"pending_feedback_match_id": "", "pending_feedback_other_id": ""}}
-        )
-        return None
-
-    other_id = match_doc["to_user"] if match_doc["from_user"] == user_id else match_doc["from_user"]
-    sentiment = classify_feedback(message)
-    share_consent = feedback_share_consent(message)
-    feedback_entry = {
-        "sentiment": sentiment,
-        "share_consent": share_consent,
-        "updated_at": time.time()
-    }
-    matches_coll.update_one(
-        {"_id": match_doc["_id"]},
-        {"$set": {
-            f"private_feedback.{user_id}": feedback_entry,
-            f"private_feedback_text.{user_id}": message,
-        }}
-    )
-    profiles_coll.update_one(
-        {"user_id": user_id},
-        {"$unset": {"pending_feedback_match_id": "", "pending_feedback_other_id": ""}}
-    )
-
-    refreshed = matches_coll.find_one({"_id": match_doc["_id"]}) or match_doc
-    feedback = refreshed.get("private_feedback", {})
-    other_feedback = feedback.get(other_id, {})
-    if isinstance(other_feedback, str):
-        other_feedback = {"sentiment": other_feedback, "share_consent": False}
-    other_sentiment = other_feedback.get("sentiment")
-    other_consent = bool(other_feedback.get("share_consent"))
-    probe_requesters = set(refreshed.get("probe_requested_by", []))
-
-    if other_id in probe_requesters and share_consent:
-        if sentiment == "positive":
-            queue_mediator_event(
-                other_id,
-                f"我幫你打聽到一點好消息：{user_id} 對你的感覺是正向的。你可以放鬆一點繼續聊。",
-                "probe_result",
-                match_id=str(match_doc["_id"]),
-                other_id=user_id
-            )
-        elif sentiment == "negative":
-            queue_mediator_event(
-                other_id,
-                "我幫你問過了，對方目前沒有想再往前推。我會先幫你們保留體面，不硬撮合。",
-                "gentle_closure",
-                match_id=str(match_doc["_id"]),
-                other_id=user_id
-            )
-        matches_coll.update_one(
-            {"_id": match_doc["_id"]},
-            {"$pull": {"probe_requested_by": other_id}}
-        )
-
-    if sentiment == "positive" and share_consent and other_sentiment == "positive" and other_consent:
-        for recipient, crush in ((user_id, other_id), (other_id, user_id)):
-            queue_mediator_event(
-                recipient,
-                f"我兩邊都確認過了，{crush} 對你也有好感。你們可以自然多聊一點，我會在旁邊幫忙看節奏。",
-                "mutual_interest",
-                match_id=str(match_doc["_id"]),
-                other_id=crush
-            )
-        return f"我記下來了，也會幫你把好感小心地傳給 {other_id}。"
-
-    if sentiment == "negative":
-        if share_consent and other_sentiment == "positive" and other_consent:
-            queue_mediator_event(
-                other_id,
-                "我幫你探過了，對方目前沒有想繼續往前。我會幫你們自然收住，不讓場面尷尬。",
-                "gentle_closure",
-                match_id=str(match_doc["_id"]),
-                other_id=user_id
-            )
-        if share_consent:
-            return "收到，我會把你的意思整理成比較溫和的說法，不會把原話硬丟給對方。"
-        return "收到，我只把這個當成你的私下回饋，不會轉述給對方。"
-
-    if sentiment == "positive":
-        if share_consent:
-            return f"懂了，我會幫你把這份好感小心傳給 {other_id}，不會講得太用力。"
-        return "收到，我先幫你記著這份好感，暫時不替你轉述。"
-    return "收到，我先幫你記下來。等你想更明確一點，我再幫你往前推。"
-
 def mark_post_chat_activity(match_doc: dict, room_id: str):
     if not match_doc:
         return 0
@@ -722,6 +554,23 @@ def mark_post_chat_activity(match_doc: dict, room_id: str):
         {"$set": {"shared_message_count": count, "last_chat_at": time.time()}}
     )
     return count
+
+def normalize_answer_templates(result: dict) -> list[str]:
+    if result.get("is_complete", False):
+        return []
+    raw_templates = result.get("answer_templates")
+    if isinstance(raw_templates, list):
+        templates = []
+        for value in raw_templates:
+            text = re.sub(r"\s+", " ", str(value or "")).strip()[:80]
+            if text and text not in templates:
+                templates.append(text)
+            if len(templates) == 2:
+                return templates
+    return [
+        "我通常會先觀察一下，再決定要不要加入。",
+        "如果氣氛自在，我會主動跟大家聊起來。",
+    ]
 
 def summarize_relationship(match_id, room_id: str):
     match_doc = matches_coll.find_one({"_id": match_id})
@@ -751,91 +600,46 @@ def summarize_relationship(match_id, room_id: str):
     except Exception as e:
         print(f"Relationship summary error: {e}")
 
-def queue_due_feedback(user_id: str):
-    mode, min_messages, idle_seconds, cooldown_seconds = probe_policy(user_id)
-    if mode == "manual":
-        return
-    now = time.time()
-    candidates = list(matches_coll.find({"status": "accepted", "$or": [{"from_user": user_id}, {"to_user": user_id}]}))
-    for match_doc in candidates:
-        count = int(match_doc.get("shared_message_count", 0))
-        if count < min_messages or float(match_doc.get("last_chat_at", now)) > now - idle_seconds:
-            continue
-        state = participant_probe_state(match_doc, user_id)
-        status = state.get("status", "idle")
-        if status in PROBE_IN_FLIGHT_STATUSES:
-            if float(state.get("asked_at", now)) < now - PROBE_PENDING_TTL:
-                matches_coll.update_one({"_id": match_doc["_id"]}, {"$set": {
-                    participant_probe_field(match_doc, user_id) + ".status": "expired"}})
-            continue
-        last_count = int(state.get("message_count_snapshot", 0))
-        if state.get("completed_at") and (count - last_count < 6 or now < float(state.get("cooldown_until", 0))):
-            continue
-        other_id = match_doc["to_user"] if match_doc["from_user"] == user_id else match_doc["from_user"]
-        kind = choose_probe_kind(match_doc)
-        question = PROBE_QUESTIONS[kind]
-        probe_id = uuid.uuid4().hex
-        probe_state = {"status": "queued", "trigger": "auto", "requester_id": None,
-                       "probe_id": probe_id,
-                       "kind": kind, "question": question,
-                       "asked_at": now, "message_count_snapshot": count,
-                       "cooldown_until": now + cooldown_seconds}
-        state_field = participant_probe_field(match_doc, user_id)
-        claimed = matches_coll.update_one(
-            {
-                "_id": match_doc["_id"],
-                "$or": [
-                    {f"{state_field}.status": {"$nin": list(PROBE_IN_FLIGHT_STATUSES)}},
-                    {f"{state_field}.asked_at": {"$lt": now - PROBE_PENDING_TTL}},
-                ],
-            },
-            {"$set": {participant_probe_field(match_doc, user_id): probe_state},
-             "$push": {"probe_history": {
-                 "probe_id": probe_id,
-                 "kind": kind, "asked_to": user_id, "asked_at": now,
-                 "status": "queued", "trigger": "auto"
-             }}}
-        )
-        if not claimed.modified_count:
-            continue
-        queue_mediator_event(
-            user_id, question, "probe_question", match_id=str(match_doc["_id"]),
-            other_id=other_id, origin="auto", probe_kind=kind, probe_id=probe_id
-        )
-        return
-
 @router.post("/chat")
 def chat_endpoint(req: ChatRequest):
+    if req.state not in {"big_five", "deep_profile"}:
+        raise HTTPException(status_code=400, detail="Invalid state")
+
+    room_id = analysis_room_id(req.user_id, req.state)
+    save_message(room_id, req.user_id, req.message)
+
     if req.state == "big_five":
         user_doc = profiles_coll.find_one({"user_id": req.user_id})
         prev_big_five = user_doc.get("temp_big_five", {}) if user_doc else {}
         interaction_count = user_doc.get("interaction_count", 0) if user_doc else 0
-        
+
         result = analyze_big_five(req.message, prev_big_five, interaction_count, req.initial_interest)
-        
+
         update_fields = {
             "temp_big_five": result.get("big_five", {}),
             "interaction_count": interaction_count + 1
         }
-        
+
         if result.get("is_complete", False):
             update_fields["big_five"] = result.get("big_five", {})
-            room_id = generate_room_id(req.user_id, "ai_assistant")
-            count = messages_coll.count_documents({"room_id": room_id})
+            ai_room_id = generate_room_id(req.user_id, "ai_assistant")
+            count = messages_coll.count_documents({"room_id": ai_room_id})
             if count == 0:
-                save_message(room_id, "ai_assistant", "我大概更了解你的個性了。接下來可以聊聊你最近想做什麼、想去哪裡。")
+                save_message(ai_room_id, "ai_assistant", "我大概更了解你的個性了。接下來可以聊聊你最近想做什麼、想去哪裡。")
 
         profiles_coll.update_one(
-            {"user_id": req.user_id}, 
-            {"$set": update_fields}, 
+            {"user_id": req.user_id},
+            {"$set": update_fields},
             upsert=True
         )
+        save_message(room_id, f"{req.state}_assistant", result.get("reply", ""))
 
         return {
-            "status": "success", 
-            "big_five": result.get("big_five"), 
+            "status": "success",
+            "big_five": result.get("big_five"),
             "reply": result.get("reply"),
-            "is_complete": result.get("is_complete", False)
+            "is_complete": result.get("is_complete", False),
+            "answer_templates": normalize_answer_templates(result),
         }
     elif req.state == "deep_profile":
         user_doc = profiles_coll.find_one({"user_id": req.user_id})
@@ -843,37 +647,36 @@ def chat_endpoint(req: ChatRequest):
         interaction_count = user_doc.get("interaction_count_deep", 0) if user_doc else 0
         big_five = user_doc.get("big_five", {}) if user_doc else {}
         current_context = user_doc.get("current_context", "") if user_doc else ""
-        
+
         user_context = {"big_five": big_five, "current_context": current_context}
-        
+
         result = analyze_deep_profile(req.message, prev_deep, interaction_count, user_context)
-        
+
         update_fields = {
             "temp_deep_profile": result.get("deep_profile", {}),
             "interaction_count_deep": interaction_count + 1
         }
-        
+
         if result.get("is_complete", False):
             update_fields["deep_profile"] = result.get("deep_profile", {})
-            room_id = generate_room_id(req.user_id, "ai_assistant")
-            count = messages_coll.count_documents({"room_id": room_id})
+            ai_room_id = generate_room_id(req.user_id, "ai_assistant")
+            count = messages_coll.count_documents({"room_id": ai_room_id})
             if count == 0:
-                save_message(room_id, "ai_assistant", "我也更了解你重視什麼了。之後你想找人一起做什麼，直接跟我說就好。")
+                save_message(ai_room_id, "ai_assistant", "我也更了解你重視什麼了。之後你想找人一起做什麼，直接跟我說就好。")
 
         profiles_coll.update_one(
-            {"user_id": req.user_id}, 
-            {"$set": update_fields}, 
+            {"user_id": req.user_id},
+            {"$set": update_fields},
             upsert=True
         )
+        save_message(room_id, f"{req.state}_assistant", result.get("reply", ""))
 
         return {
-            "status": "success", 
-            "deep_profile": result.get("deep_profile"), 
+            "status": "success",
+            "deep_profile": result.get("deep_profile"),
             "reply": result.get("reply"),
             "is_complete": result.get("is_complete", False)
         }
-    else:
-        raise HTTPException(status_code=400, detail="Invalid state")
 
 @router.post("/chat/reset")
 def reset_chat_state(req: ResetRequest):
@@ -888,6 +691,36 @@ def reset_chat_state(req: ResetRequest):
             {"$set": {"interaction_count_deep": 0, "temp_deep_profile": {}}}
         )
     return {"status": "success"}
+
+@router.get("/chat/messages/{state}")
+def get_analysis_messages(state: str, user_id: str):
+    if state not in {"big_five", "deep_profile"}:
+        raise HTTPException(status_code=400, detail="Invalid state")
+
+    room_id = analysis_room_id(user_id, state)
+    count = messages_coll.count_documents({"room_id": room_id})
+    if count == 0:
+        user_doc = profiles_coll.find_one({"user_id": user_id})
+        interest = user_doc.get("initial_interest") if user_doc else None
+        if state == "big_five" and interest:
+            greeting = (
+                f"我看到你註冊時提到「{interest}」。我們就從這個開始聊，"
+                "我會透過幾個情境問題整理你的性格傾向。"
+            )
+        elif state == "big_five":
+            greeting = (
+                "我們先從最近讓你印象深刻的一件事開始聊起，"
+                "我會逐步整理你的性格傾向。"
+            )
+        else:
+            greeting = "我們來聊聊你在關係和未來生活中真正重視的事情。"
+        save_message(room_id, f"{state}_assistant", greeting)
+
+    msgs = []
+    for msg in messages_coll.find({"room_id": room_id}).sort("timestamp", 1):
+        msg["id"] = str(msg.pop("_id"))
+        msgs.append(msg)
+    return {"messages": msgs}
 
 @router.get("/messages/{contact_id}")
 def get_messages(contact_id: str, user_id: str):
@@ -914,8 +747,15 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
         sender_id=req.user_id,
         receiver_id=req.contact_id,
         content=req.message,
+        message_timestamp=req.message_timestamp,
     )
     if risk_client.is_blocked(risk_assessment):
+        save_message(
+            room_id, req.user_id, req.message,
+            risk_assessment=risk_assessment,
+            is_blocked=True,
+            delivery_status="blocked"
+        )
         return {
             "reply": None,
             "is_blocked": True,
@@ -934,7 +774,12 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
     if req.contact_id == "ai_assistant" and requested_mentions:
         prefix = " ".join("@" + other_id for other_id in requested_mentions)
         display_message = f"{prefix} {req.message}".strip()
-    save_message(room_id, req.user_id, display_message)
+    save_message(
+        room_id, req.user_id, display_message,
+        risk_assessment=risk_assessment,
+        is_blocked=False,
+        delivery_status="delivered"
+    )
     profiles_coll.update_one(
         {"user_id": req.user_id},
         {"$set": {"last_user_activity_at": time.time()}},
@@ -1417,6 +1262,10 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
             ]
         })
         message_count = mark_post_chat_activity(match_doc, room_id)
+        if match_doc:
+            background_tasks.add_task(
+                process_relationship_semantic_plan, match_doc, room_id
+            )
         if match_doc and message_count >= 6:
             background_tasks.add_task(summarize_relationship, match_doc["_id"], room_id)
         return with_risk({"reply": None, "message_saved": True, "feedback_scheduled": bool(match_doc)})
@@ -1452,7 +1301,7 @@ def report_guidance_activity(req: GuidanceActivityRequest):
 def get_guidance_status(user_id: str, contact_id: str):
     doc = profiles_coll.find_one(
         {"user_id": user_id},
-        {"guidance": 1, "mediator_tone": 1, "probe_mode": 1},
+        {"guidance": 1, "mediator_tone": 1},
     ) or {}
     return {
         "status": "available",
@@ -1460,7 +1309,6 @@ def get_guidance_status(user_id: str, contact_id: str):
         "contact_id": contact_id,
         "last_activity_at": (doc.get("guidance") or {}).get("last_activity_at"),
         "mediator_tone": doc.get("mediator_tone", "friend"),
-        "probe_mode": doc.get("probe_mode", "balanced"),
     }
 
 
@@ -1586,16 +1434,13 @@ def get_mediator_private_messages(other_id: str, user_id: str):
         raise HTTPException(status_code=403, detail="只能查看已接受配對的媒人私聊")
     room_id = generate_mediator_private_room_id(user_id, other_id)
     if messages_coll.count_documents({"room_id": room_id}) == 0:
-        save_message(room_id, "ai_assistant", f"這裡可以私下跟我打聽 {other_id}，我會盡量只講有根據的事。")
+        save_message(room_id, "ai_assistant", f"這裡可以私下跟我聊聊 {other_id}，我只會根據已知互動提供建議。")
     unread_field = relationship_unread_field(match_doc, user_id)
     unread_count = int((match_doc.get("private_unread", {}) or {}).get(
         "from" if match_doc.get("from_user") == user_id else "to", 0
     ))
     matches_coll.update_one({"_id": match_doc["_id"]}, {"$set": {unread_field: 0}})
     user_doc = profiles_coll.find_one({"user_id": user_id}) or {}
-    pending = user_doc.get("pending_private_feedback") or {}
-    if pending.get("other_id") != other_id:
-        pending = {}
     pending_date = user_doc.get("pending_date_coordination") or {}
     if pending_date.get("other_id") != other_id:
         pending_date = {}
@@ -1604,32 +1449,12 @@ def get_mediator_private_messages(other_id: str, user_id: str):
         "messages": msgs,
         "other_id": other_id,
         "unread_count": unread_count,
-        "pending_step": pending.get("stage") or (
+        "pending_step": (
             "date_" + pending_date.get("stage") if pending_date.get("stage") else None
         ),
-        "probe_state": participant_probe_state(match_doc, user_id),
-        "other_probe_state": participant_probe_state(match_doc, other_id),
-        "mediator_tone": user_doc.get("mediator_tone", "friend")
+        "mediator_tone": user_doc.get("mediator_tone", "friend"),
+        "date_coordination": match_doc.get("date_coordination") or {},
     }
-
-def consent_intent(message: str):
-    try:
-        prompt = f"""
-請判斷使用者是否同意媒人把訊息/回饋轉述或分享給另一位配對對象。
-只輸出 JSON：{{"consent":true|false|null,"confidence":0.0}}
-使用者訊息：{message}
-"""
-        result = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True))
-        if float(result.get("confidence", 0)) < 0.55:
-            return None
-        consent = result.get("consent")
-        if consent is True:
-            return True
-        if consent is False:
-            return False
-    except Exception as e:
-        print(f"Consent intent classification failed: {e}")
-    return None
 
 def save_private_mediator_reply(room_id: str, reply: str, event_type="text", actions=None):
     message_type = "mediator_card" if actions else "text"
@@ -1637,87 +1462,6 @@ def save_private_mediator_reply(room_id: str, reply: str, event_type="text", act
         room_id, "ai_assistant", reply, message_type=message_type,
         metadata={"event_type": event_type, "actions": actions or []}
     )
-
-def deliver_consented_signal(match_doc: dict, feedback_user: str, requester_id: str, sentiment: str):
-    if sentiment == "positive":
-        queue_mediator_event(
-            requester_id,
-            f"我幫你問到一點好消息：{feedback_user} 對你的感覺是正向的，可以自然繼續聊。",
-            "probe_result", match_id=str(match_doc["_id"]), other_id=feedback_user
-        )
-    elif sentiment == "negative":
-        queue_mediator_event(
-            requester_id,
-            "我幫你探過了，對方目前沒有想往前推。我會幫你們自然收住，不硬撮合。",
-            "gentle_closure", match_id=str(match_doc["_id"]), other_id=feedback_user
-        )
-
-def request_relationship_probe(
-    user_id: str, other_id: str, force: bool = False, requested_kind: str | None = None
-):
-    match_doc = find_accepted_match(user_id, other_id)
-    if not match_doc:
-        raise HTTPException(status_code=403, detail="只能對已接受配對打聽")
-    target_state = participant_probe_state(match_doc, other_id)
-    status = target_state.get("status", "idle")
-    now, count = time.time(), int(match_doc.get("shared_message_count", 0))
-    if status in PROBE_IN_FLIGHT_STATUSES and float(target_state.get("asked_at", now)) > now - PROBE_PENDING_TTL:
-        return {"status": "already_pending", "reply": "我已經在幫你問了，先等對方回覆。"}
-    new_messages = count - int(target_state.get("message_count_snapshot", 0))
-    if status == "completed" and new_messages < 6:
-        return {"status": "recently_completed", "reply": "我剛幫你問過一次，先讓你們多聊幾句再打聽會比較自然。"}
-    if status == "completed" and now < float(target_state.get("cooldown_until", 0)) and not force:
-        return {"status": "needs_confirmation", "reply": "我剛打聽過，現在再問可能有點密。你確定要我再問一次嗎？"}
-    _, _, _, cooldown = probe_policy(user_id)
-    kind = choose_probe_kind(match_doc, requested_kind)
-    question = PROBE_QUESTIONS[kind]
-    probe_id = uuid.uuid4().hex
-    state = {"status": "queued", "trigger": "manual", "requester_id": user_id,
-             "probe_id": probe_id,
-             "kind": kind, "question": question,
-             "asked_at": now, "message_count_snapshot": count, "cooldown_until": now + cooldown}
-    state_field = participant_probe_field(match_doc, other_id)
-    claimed = matches_coll.update_one(
-        {
-            "_id": match_doc["_id"],
-            "$or": [
-                {f"{state_field}.status": {"$nin": list(PROBE_IN_FLIGHT_STATUSES)}},
-                {f"{state_field}.asked_at": {"$lt": now - PROBE_PENDING_TTL}},
-            ],
-        },
-        {"$set": {participant_probe_field(match_doc, other_id): state},
-         "$push": {"probe_history": {
-             "probe_id": probe_id,
-             "kind": kind, "asked_to": other_id, "asked_at": now, "status": "queued",
-             "trigger": "manual", "requester_id": user_id
-         }}}
-    )
-    if not claimed.modified_count:
-        return {"status": "already_pending", "reply": "我已經在幫你問了，先等對方回覆。"}
-    queue_mediator_event(
-        other_id, question, "probe_question", match_id=str(match_doc["_id"]),
-        other_id=user_id, origin="probe", requester_id=user_id, probe_kind=kind,
-        probe_id=probe_id
-    )
-    return {"status": "started", "kind": kind,
-            "reply": "好，我會用不尷尬的方式幫你探一下。"}
-
-def is_relationship_probe_request(message: str) -> bool:
-    try:
-        prompt = f"""
-請判斷使用者是否在要求媒人私下幫忙打聽另一位配對對象，例如問對方想法、好感、近況、可不可以透露一些八卦。
-只輸出 JSON：{{"probe":true|false,"confidence":0.0}}
-使用者訊息：{message}
-"""
-        result = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True))
-        return bool(result.get("probe")) and float(result.get("confidence", 0)) >= 0.6
-    except Exception as e:
-        print(f"Relationship probe classification failed: {e}")
-        return False
-
-@router.post("/mediator/probe")
-def mediator_probe(req: MediatorProbeRequest):
-    return request_relationship_probe(req.user_id, req.other_id, req.force, req.kind)
 
 @router.post("/mediator/private")
 def mediator_private_chat(req: MediatorPrivateRequest, background_tasks: BackgroundTasks):
@@ -1727,7 +1471,6 @@ def mediator_private_chat(req: MediatorPrivateRequest, background_tasks: Backgro
 
     room_id = generate_mediator_private_room_id(req.user_id, req.other_id)
     save_message(room_id, req.user_id, req.message)
-    safe_summary = re.sub(r"\s+", " ", req.message).strip()[:60]
     profiles_coll.update_one(
         {"user_id": req.user_id},
         {"$set": {"last_user_activity_at": time.time()}},
@@ -1735,249 +1478,198 @@ def mediator_private_chat(req: MediatorPrivateRequest, background_tasks: Backgro
     )
     background_tasks.add_task(observe_user_memory, req.user_id, req.message, "relationship_private", str(match_doc["_id"]))
     user_doc = profiles_coll.find_one({"user_id": req.user_id}) or {}
-    pending = user_doc.get("pending_private_feedback") or {}
-    pending_matches = pending.get("match_id") == str(match_doc["_id"]) and pending.get("other_id") == req.other_id
-    pending_date = user_doc.get("pending_date_coordination") or {}
-    date_matches = (
-        pending_date.get("match_id") == str(match_doc["_id"])
-        and pending_date.get("other_id") == req.other_id
+    date_coordination = match_doc.get("date_coordination", {}) or {}
+    is_active_date = date_coordination.get("status") in {"active", "gathering"}
+    legacy_date = user_doc.get("pending_date_coordination") or {}
+    legacy_date_matches = (
+        legacy_date.get("match_id") == str(match_doc["_id"])
+        and legacy_date.get("other_id") == req.other_id
     )
 
-    if is_date_cancellation(req.message) and (date_matches or "約" in req.message):
-        role = participant_role(match_doc, req.user_id)
-        date_state = match_doc.get("date_coordination", {}) or {}
-        other_role = participant_role(match_doc, req.other_id)
-        other_had_started = bool((date_state.get("participants", {}) or {}).get(other_role))
+    if legacy_date_matches and not is_active_date:
+        legacy_data = legacy_date.get("data") or {}
+        date_coordination = new_date_coordination(time.time())
+        date_coordination["room_id"] = str(match_doc["_id"])
+        date_coordination = update_date_state(
+            date_coordination,
+            {
+                "date": "",
+                "time": "、".join(legacy_data.get("availability") or []),
+                "activity": "、".join(legacy_data.get("activity") or []),
+                "budget": legacy_data.get("budget") or "",
+            },
+        )
         profiles_coll.update_one(
-            {"user_id": req.user_id}, {"$unset": {"pending_date_coordination": ""}}
+            {"user_id": req.user_id},
+            {"$unset": {"pending_date_coordination": ""}},
         )
         matches_coll.update_one(
             {"_id": match_doc["_id"]},
-            {
-                "$set": {
-                    "date_coordination.status": "cancelled",
-                    "date_coordination.cancelled_by": req.user_id,
-                    "date_coordination.cancelled_at": time.time(),
-                },
-                "$unset": {f"date_coordination.participants.{role}": ""},
-            },
+            {"$set": {"date_coordination": date_coordination}},
         )
-        if other_had_started:
-            queue_mediator_event(
-                req.other_id, "對方先取消這次約會協調，我們先不往下排。",
-                "date_coordination_cancelled", match_id=str(match_doc["_id"]),
-                other_id=req.user_id,
-            )
+        is_active_date = True
+
+    if is_active_date and is_date_cancellation(req.message):
+        cancelled_at = time.time()
+        matches_coll.update_one(
+            {"_id": match_doc["_id"]},
+            {"$set": {
+                "date_coordination.status": "cancelled",
+                "date_coordination.cancelled_by": req.user_id,
+                "date_coordination.cancelled_at": cancelled_at,
+            }},
+        )
+        queue_mediator_event(
+            req.other_id,
+            "對方先取消這次約會協調，我們先不往下排。",
+            "date_coordination_cancelled",
+            match_id=str(match_doc["_id"]),
+            other_id=req.user_id,
+        )
         reply = "好，這次約會協調我先幫你取消。"
         save_private_mediator_reply(room_id, reply, "date_coordination_cancelled")
         return {"reply": reply, "pending_step": None}
 
-    if "約" in req.message and not date_matches:
-        pending_date = {
-            "match_id": str(match_doc["_id"]), "other_id": req.other_id,
-            "stage": "availability", "data": {}
-        }
-        profiles_coll.update_one(
-            {"user_id": req.user_id}, {"$set": {"pending_date_coordination": pending_date}}
-        )
-        reply = "可以，我先幫你們對時間。你比較方便今天、明天、週末，還是晚上？"
-        save_private_mediator_reply(room_id, reply, "date_coordination_request")
-        return {"reply": reply, "pending_step": "date_availability"}
-
-    if date_matches:
-        stage = pending_date.get("stage", "availability")
-        data = pending_date.get("data", {})
-        data[stage] = normalize_date_answer(stage, req.message)
-        if stage == "availability":
-            pending_date.update({"stage": "activity", "data": data})
-            profiles_coll.update_one(
-                {"user_id": req.user_id}, {"$set": {"pending_date_coordination": pending_date}}
-            )
-            reply = "好，那活動想排吃飯、咖啡、運動、讀書、看電影，還是散步？"
-            save_private_mediator_reply(room_id, reply, "date_coordination_request")
-            return {"reply": reply, "pending_step": "date_activity"}
-        if stage == "activity":
-            pending_date.update({"stage": "budget", "data": data})
-            profiles_coll.update_one(
-                {"user_id": req.user_id}, {"$set": {"pending_date_coordination": pending_date}}
-            )
-            reply = "預算大概抓多少？500 以內、500 到 1000，還是 1000 以上？"
-            save_private_mediator_reply(room_id, reply, "date_coordination_request")
-            return {"reply": reply, "pending_step": "date_budget"}
-
-        role = participant_role(match_doc, req.user_id)
-        data["budget"] = data.pop("budget", normalize_date_answer("budget", req.message))
+    if "幫我們協調約會" in req.message and not is_active_date:
+        date_coordination = new_date_coordination(time.time())
+        date_coordination["room_id"] = str(match_doc["_id"])
         matches_coll.update_one(
             {"_id": match_doc["_id"]},
-            {"$set": {f"date_coordination.participants.{role}": data}}
+            {"$set": {"date_coordination": date_coordination}},
         )
-        profiles_coll.update_one(
-            {"user_id": req.user_id}, {"$unset": {"pending_date_coordination": ""}}
-        )
-        refreshed = matches_coll.find_one({"_id": match_doc["_id"]}) or {}
-        participants = ((refreshed.get("date_coordination") or {}).get("participants") or {})
-        other_role = participant_role(match_doc, req.other_id)
-        if not participants.get(other_role):
-            queue_mediator_event(
-                req.other_id, "對方想跟你對一下約會時間和活動，我來幫你們兩邊協調。",
-                "date_coordination_request", match_id=str(match_doc["_id"]), other_id=req.user_id
-            )
-            reply = "好，我先幫你記下來，也會去問對方方便的時間和活動。"
-        else:
-            overlap = date_overlap(data, participants[other_role])
-            if overlap["time"] and overlap["activity"]:
-                result_text = f"我看你們可以約 {overlap['time']}，活動可以先抓 {overlap['activity']}，預算大概是 {overlap['budget']}。"
-            else:
-                result_text = "你們目前時間或活動還沒有完全重疊，我建議先多丟兩個備案。"
-            matches_coll.update_one(
-                {"_id": match_doc["_id"]},
-                {"$set": {"date_coordination.status": "completed",
-                          "date_coordination.overlap": overlap,
-                          "date_coordination.completed_at": time.time()}}
-            )
-            queue_mediator_event(
-                req.other_id, result_text, "date_coordination_result",
-                match_id=str(match_doc["_id"]), other_id=req.user_id
-            )
-            reply = result_text
-        save_private_mediator_reply(room_id, reply, "date_coordination_result")
-        return {"reply": reply, "pending_step": None}
+        is_active_date = True
 
-    is_probe_command = is_relationship_probe_request(req.message)
-    if pending_matches and pending.get("stage") == "probe_answer":
-        kind = pending.get("kind", "fun_fact")
-        requester_id = pending.get("requester_id")
-        matches_coll.update_one(
-            {"_id": match_doc["_id"]},
-            {"$set": {
-                participant_probe_field(match_doc, req.user_id) + ".status": "completed",
-                participant_probe_field(match_doc, req.user_id) + ".completed_at": time.time(),
-                participant_probe_field(match_doc, req.user_id) + ".shared_summary": safe_summary,
-            }, "$push": {"probe_history": {
-                "kind": kind, "asked_to": req.user_id, "answered_at": time.time(),
-                "status": "completed", "shared_summary": safe_summary
-            }}}
+    if is_active_date:
+        pair_room_id = generate_room_id(
+            match_doc["from_user"], match_doc["to_user"]
         )
-        profiles_coll.update_one({"user_id": req.user_id}, {"$unset": {"pending_private_feedback": ""}})
-        if requester_id and requester_id == req.other_id:
-            queue_mediator_event(
-                requester_id, f"對方回覆我了：{safe_summary}",
-                "probe_result", match_id=str(match_doc["_id"]), other_id=req.user_id,
-                probe_kind=kind
-            )
-        reply = "收到，我會幫你整理成不尷尬的說法。"
-        save_private_mediator_reply(room_id, reply)
-        return {"reply": reply, "pending_step": None, "probe_kind": kind}
-
-    if pending_matches and pending.get("stage") == "sentiment" and is_probe_command:
-        probe_result = request_relationship_probe(req.user_id, req.other_id, False, "sentiment")
-        save_private_mediator_reply(room_id, probe_result["reply"])
-        return {"reply": probe_result["reply"], "pending_step": "sentiment", "probe_status": probe_result["status"]}
-
-    if pending_matches and pending.get("stage") == "sentiment":
-        sentiment = classify_feedback(req.message)
-        matches_coll.update_one(
-            {"_id": match_doc["_id"]},
-            {"$set": {f"private_feedback.{req.user_id}": {
-                "sentiment": sentiment, "share_consent": None, "updated_at": time.time()
-            }}}
+        semantic_context = get_relationship_semantic_context(
+            match_doc, pair_room_id
         )
-        pending["stage"] = "consent"
-        pending["sentiment"] = sentiment
-        matches_coll.update_one({"_id": match_doc["_id"]}, {"$set": {
-            participant_probe_field(match_doc, req.user_id) + ".status": "awaiting_consent",
-            participant_probe_field(match_doc, req.user_id) + ".sentiment": sentiment}})
-        profiles_coll.update_one(
-            {"user_id": req.user_id}, {"$set": {"pending_private_feedback": pending}}
-        )
-        reply = "這段回饋要不要讓我用比較溫和的方式轉述給對方？"
-        actions = [
-            {"label": "可以轉述", "value": "可以，你幫我整理後轉述"},
-            {"label": "不要轉述", "value": "先不要，這只給你知道"}
-        ]
-        save_private_mediator_reply(room_id, reply, "feedback_consent_request", actions)
-        return {"reply": reply, "pending_step": "consent", "actions": actions}
-
-    if pending_matches and pending.get("stage") == "consent":
-        consent = consent_intent(req.message)
-        if consent is None:
-            reply = "我怕誤會你，這段要不要讓我轉述給對方？可以直接說可以或先不要。"
-            save_private_mediator_reply(room_id, reply)
-            return {"reply": reply, "pending_step": "consent"}
-        sentiment = pending.get("sentiment", "neutral")
-        matches_coll.update_one(
-            {"_id": match_doc["_id"]},
-            {"$set": {
-                f"private_feedback.{req.user_id}.share_consent": consent,
-                f"private_feedback.{req.user_id}.updated_at": time.time()
-            }}
-        )
-        profiles_coll.update_one({"user_id": req.user_id}, {"$unset": {"pending_private_feedback": ""}})
-        matches_coll.update_one({"_id": match_doc["_id"]}, {"$set": {
-            participant_probe_field(match_doc, req.user_id) + ".status": "completed",
-            participant_probe_field(match_doc, req.user_id) + ".sentiment": sentiment,
-            participant_probe_field(match_doc, req.user_id) + ".share_consent": consent,
-            participant_probe_field(match_doc, req.user_id) + ".completed_at": time.time()}})
-        requester_id = pending.get("requester_id")
-        if consent and requester_id and requester_id == req.other_id:
-            deliver_consented_signal(match_doc, req.user_id, requester_id, sentiment)
-        refreshed = matches_coll.find_one({"_id": match_doc["_id"]}) or {}
-        feedback = refreshed.get("private_feedback", {}) or {}
-        mine = feedback.get(req.user_id, {}) or {}
-        theirs = feedback.get(req.other_id, {}) or {}
-        if (mine.get("sentiment") == "positive" and mine.get("share_consent") is True
-                and theirs.get("sentiment") == "positive" and theirs.get("share_consent") is True):
-            queue_mediator_event(
-                req.user_id, f"我兩邊都確認過了，{req.other_id} 對你也有好感。可以自然多聊一點。",
-                "mutual_interest", match_id=str(match_doc["_id"]), other_id=req.other_id
-            )
-        reply = "好，我會幫你溫和轉述。" if consent else "收到，我只把這個當成你私下跟我說的，不會轉述。"
-        save_private_mediator_reply(room_id, reply)
-        return {"reply": reply, "pending_step": None}
-
-    asks_about_feelings = is_probe_command
-    if asks_about_feelings:
-        requested_kind = "fun_fact" if any(word in req.message for word in ("有趣", "八卦", "小事", "話題")) else "sentiment"
-        probe_result = request_relationship_probe(req.user_id, req.other_id, False, requested_kind)
-        reply = probe_result["reply"]
-    else:
-        feedback = match_doc.get("private_feedback", {}) or {}
-        consented_signal = None
-        other_feedback = feedback.get(req.other_id, {}) or {}
-        if other_feedback.get("share_consent") is True:
-            consented_signal = other_feedback.get("sentiment")
         relationship_context = {
-            "viewer": mediator_profile_context(req.user_id, req.message),
-            "partner": mediator_profile_context(req.other_id, req.message),
+            "viewer": {
+                "user_id": req.user_id,
+                "profile": user_doc.get("deep_profile"),
+            },
+            "partner": {"user_id": req.other_id},
             "relationship": {
                 "match_id": str(match_doc["_id"]),
-                "match_reason_for_viewer": (
-                    match_doc.get("reason") if match_doc.get("from_user") == req.user_id
-                    else match_doc.get("receiver_reason", match_doc.get("reason"))
+                "shared_chat_summary": match_doc.get(
+                    "relationship_memory", {}
                 ),
-                "validated_reason_items": match_doc.get("reason_items", []),
-                "shared_chat_summary": match_doc.get("relationship_memory", {}),
-                "latest_shared_chat": latest_shared_chat(match_doc, 16),
-                "viewer_mediator_state": participant_probe_state(match_doc, req.user_id),
-                "partner_mediator_state": participant_probe_state(match_doc, req.other_id),
-                "partner_consented_signal": consented_signal,
+                "semantic_plan": semantic_context.get("semantic_plan", {}),
+                "chat_knowledge_graph": semantic_context.get(
+                    "knowledge_graph_triples", []
+                ),
             },
         }
-        prompt = f"""
+        result = orchestrate_date_coordination(
+            req.message, date_coordination, relationship_context
+        )
+        reply = result.get("reply") or "我了解了。"
+
+        if result.get("form"):
+            date_coordination = update_date_state(
+                date_coordination, result["form"]
+            )
+        if result.get("show_form"):
+            date_coordination["status"] = "active"
+
+        matches_coll.update_one(
+            {"_id": match_doc["_id"]},
+            {"$set": {"date_coordination": date_coordination}},
+        )
+        save_private_mediator_reply(
+            room_id, reply, "date_coordination_chat"
+        )
+
+        if result.get("show_form"):
+            form_payload = date_coordination["form"]
+            confirmations = date_coordination.get("confirmations", {})
+            form_revision = date_coordination["form_revision"]
+            card_metadata = {
+                "event_type": "date_coordination_form",
+                "match_id": str(match_doc["_id"]),
+                "form": form_payload,
+                "form_revision": form_revision,
+                "confirmations": confirmations,
+            }
+            queue_mediator_event(
+                req.other_id,
+                "對方正在提議約會時間跟地點，你來看看適不適合！",
+                "date_coordination_form",
+                match_id=str(match_doc["_id"]),
+                other_id=req.user_id,
+                form=form_payload,
+                form_revision=form_revision,
+                confirmations=confirmations,
+            )
+            save_message(
+                pair_room_id,
+                "ai_assistant",
+                "阿月幫你們整理了約會表單，雙方確認後就成立囉！",
+                message_type="mediator_card",
+                metadata=card_metadata,
+            )
+
+        return {
+            "reply": reply,
+            "pending_step": None,
+            "date_coordination": date_coordination,
+        }
+
+    pair_room_id = generate_room_id(
+        match_doc["from_user"], match_doc["to_user"]
+    )
+    semantic_context = get_relationship_semantic_context(
+        match_doc, pair_room_id
+    )
+    relationship_context = {
+        "viewer": mediator_profile_context(req.user_id, req.message),
+        "partner": mediator_profile_context(req.other_id, req.message),
+        "relationship": {
+            "match_id": str(match_doc["_id"]),
+            "match_reason_for_viewer": (
+                match_doc.get("reason")
+                if match_doc.get("from_user") == req.user_id
+                else match_doc.get("receiver_reason", match_doc.get("reason"))
+            ),
+            "validated_reason_items": match_doc.get("reason_items", []),
+            "shared_chat_summary": match_doc.get("relationship_memory", {}),
+            "latest_shared_chat": latest_shared_chat(match_doc, 16),
+            "semantic_plan": semantic_context.get("semantic_plan", {}),
+            "chat_knowledge_graph": semantic_context.get(
+                "knowledge_graph_triples", []
+            ),
+        },
+    }
+    prompt = f"""
 {MEDIATOR_PERSONA}
 媒人語氣：{mediator_style(req.user_id)}
-你正在跟使用者私下聊另一位已配對對象。請像媒人一樣回答，但只能根據提供的資料，不要編造對方隱私或心意。
+
+你現在是使用者的一位「共同朋友」，正在私下跟他聊他的配對對象。請展現朋友的主觀與同理心，而不是客觀冰冷的分析工具。
+
+回答守則：
+1. 適度偏袒並支持使用者，以非常口語的方式表達；不確定時直接說不知道。
+2. 察覺尷尬或卡關時，主動給具體的破冰句或延續話題方式。
+3. 只能從 chat_knowledge_graph 提取無傷大雅的正面喜好或習慣來助攻。
+4. 不得透露極私密的心意、地雷或核心感情決策，也不得編造資料。
+5. 嚴格遵守 semantic_plan 的 current_role：
+   FRIEND 是建立共鳴並給輕鬆開場；ADVISER 是給戰術與回覆包裝；
+   MENTOR 是用問題引導使用者釐清目標；FACILITATOR 是輕推當前話題。
 
 資料：
 {json.dumps(relationship_context, ensure_ascii=False)}
 
 使用者訊息：{req.message}
 """
-        try:
-            reply = generate_chat_completion(prompt, temperature=0.35, json_output=False)
-        except Exception as e:
-            print(f"Mediator private chat error: {e}")
-            reply = "我剛剛有點卡住，等我一下再幫你整理得更清楚。"
+    try:
+        reply = generate_chat_completion(
+            prompt, temperature=0.35, json_output=False
+        )
+    except Exception as e:
+        print(f"Mediator private chat error: {e}")
+        reply = "我剛剛有點卡住，等我一下再幫你整理得更清楚。"
 
     save_private_mediator_reply(room_id, reply)
     return {"reply": reply, "pending_step": None}
@@ -2108,6 +1800,129 @@ def cancel_relationship_quiz(req: RelationshipGameRequest):
     return {"status": "cancelled"}
 
 
+@router.post("/relationship/date/update")
+def update_date_form(req: DateUpdateRequest):
+    match_doc = find_accepted_match(req.user_id, req.other_id)
+    if not match_doc:
+        raise HTTPException(status_code=403, detail="只能在已接受配對中使用約會表單")
+
+    current = match_doc.get("date_coordination") or {}
+    if current.get("status") not in {"active", "gathering"}:
+        raise HTTPException(status_code=400, detail="目前沒有進行中的約會協調")
+
+    current_revision = int(current.get("form_revision", 1))
+    expected_revision = req.form_revision or current_revision
+    if expected_revision != current_revision:
+        raise HTTPException(status_code=409, detail="約會表單已更新，請重新載入")
+
+    updated = update_date_state(current, req.form.model_dump())
+    query = {"_id": match_doc["_id"]}
+    if "form_revision" in current:
+        query["date_coordination.form_revision"] = expected_revision
+    result = matches_coll.update_one(
+        query,
+        {"$set": {"date_coordination": updated}},
+    )
+    if not result.modified_count:
+        raise HTTPException(status_code=409, detail="約會表單已更新，請重新載入")
+
+    queue_mediator_event(
+        req.other_id,
+        f"{req.user_id} 更新了約會表單，請確認。",
+        "date_coordination_form",
+        match_id=str(match_doc["_id"]),
+        other_id=req.user_id,
+        form=updated["form"],
+        form_revision=updated["form_revision"],
+        confirmations=updated["confirmations"],
+        silent=True,
+    )
+    return {
+        "status": "success",
+        "form": updated["form"],
+        "form_revision": updated["form_revision"],
+    }
+
+
+@router.post("/relationship/date/confirm")
+def confirm_date_form(req: DateConfirmRequest):
+    match_doc = find_accepted_match(req.user_id, req.other_id)
+    if not match_doc:
+        raise HTTPException(status_code=403, detail="只能在已接受配對中使用約會表單")
+
+    current = match_doc.get("date_coordination") or {}
+    if current.get("status") == "completed":
+        return {
+            "status": "completed",
+            "form": current.get("form", {}),
+            "form_revision": int(current.get("form_revision", 1)),
+        }
+    if current.get("status") != "active":
+        raise HTTPException(status_code=400, detail="約會表單尚未完成")
+
+    current_revision = int(current.get("form_revision", 1))
+    expected_revision = req.form_revision or current_revision
+    try:
+        updated = confirm_date_state(
+            current,
+            user_id=req.user_id,
+            participant_ids=(match_doc["from_user"], match_doc["to_user"]),
+            expected_revision=expected_revision,
+            now=time.time(),
+        )
+    except StaleDateFormError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    query = {"_id": match_doc["_id"]}
+    if "form_revision" in current:
+        query["date_coordination.form_revision"] = current_revision
+    result = matches_coll.update_one(
+        query,
+        {"$set": {"date_coordination": updated}},
+    )
+    if not result.modified_count:
+        raise HTTPException(status_code=409, detail="約會表單已更新，請重新載入")
+
+    if updated["status"] == "completed":
+        matches_coll.update_one(
+            {"_id": match_doc["_id"]},
+            {"$addToSet": {"established_dates": updated}},
+        )
+        pair_room_id = generate_room_id(
+            match_doc["from_user"], match_doc["to_user"]
+        )
+        save_message(
+            pair_room_id,
+            "ai_assistant",
+            "太棒了！雙方都確認了這次的約會，祝你們玩得開心！",
+            message_type="mediator_card",
+            metadata={
+                "event_type": "date_coordination_success",
+                "form": updated["form"],
+                "form_revision": updated["form_revision"],
+            },
+        )
+    else:
+        queue_mediator_event(
+            req.other_id,
+            f"{req.user_id} 已確認約會表單，等你確認。",
+            "date_coordination_form",
+            match_id=str(match_doc["_id"]),
+            other_id=req.user_id,
+            form=updated["form"],
+            form_revision=updated["form_revision"],
+            confirmations=updated["confirmations"],
+            silent=True,
+        )
+    return {
+        "status": (
+            "completed" if updated["status"] == "completed" else "waiting"
+        ),
+        "form": updated["form"],
+        "form_revision": updated["form_revision"],
+    }
+
+
 @router.post("/relationship/topic")
 def draw_relationship_topic(req: RelationshipGameRequest):
     match_doc = find_accepted_match(req.user_id, req.other_id)
@@ -2120,7 +1935,17 @@ def draw_relationship_topic(req: RelationshipGameRequest):
     today = time.strftime("%Y-%m-%d", time.localtime())
     topic_box = games.get("topic_box", {}) or {}
     if topic_box.get("drawn_date") == today:
-        return {"status": "already_drawn", "topic": topic_box.get("topic")}
+        topic = topic_box.get("topic") or ""
+        if topic:
+            save_message(
+                generate_room_id(match_doc["from_user"], match_doc["to_user"]),
+                "ai_assistant", topic, message_type="mediator_card",
+                metadata={
+                    "event_type": "topic_box",
+                    "source": topic_box.get("source", "existing_topic"),
+                },
+            )
+        return {"status": "already_drawn", "topic": topic}
     overlaps = (quiz.get("result", {}) or {}).get("matches", [])
     if overlaps:
         common = overlaps[0]["answer"]
@@ -2156,11 +1981,17 @@ def proactive_check(user_id: str, conversation_active: bool = False):
     if not user_doc:
         return {"has_new": False}
 
-    queue_due_feedback(user_id)
-
     profiles_coll.update_one(
-        {"user_id": user_id, "memory_notices.0": {"$exists": True}},
-        {"$set": {"memory_notices": []}},
+        {"user_id": user_id},
+        {
+            "$set": {"memory_notices": []},
+            "$pull": {
+                "mediator_inbox": {
+                    "type": {"$in": list(RETIRED_PRIVATE_EVENT_TYPES)}
+                }
+            },
+            "$unset": {"pending_private_feedback": ""},
+        },
     )
 
     # Deliver the highest-priority queued event. Claiming by event_id prevents
@@ -2187,42 +2018,13 @@ def proactive_check(user_id: str, conversation_active: bool = False):
             "event_type": event_type,
             "match_id": event.get("match_id"),
             "other_id": other_id,
-            "probe_id": event.get("probe_id"),
             "proposal_role": event.get("proposal_role"),
             "matches": event.get("matches", []),
             "actions": event.get("actions", [])
         }
         if relationship_private:
             room_id = generate_mediator_private_room_id(user_id, other_id)
-            if event_type in {"feedback_request", "probe_question"}:
-                # Older builds could enqueue the same probe on every poll. Once
-                # one is claimed, discard the remaining copies for this relation.
-                profiles_coll.update_one(
-                    {"user_id": user_id},
-                    {"$pull": {"mediator_inbox": {
-                        "type": {"$in": ["feedback_request", "probe_question"]},
-                        "match_id": event.get("match_id"),
-                    }}},
-                )
-                state = participant_probe_state(event_match, user_id)
-                if event.get("probe_id") and state.get("probe_id") != event.get("probe_id"):
-                    return {"has_new": False, "deduplicated": True}
-                asked_at = float(state.get("asked_at", 0))
-                duplicate_query = {
-                    "room_id": room_id,
-                    "metadata.event_type": event_type,
-                }
-                if event.get("probe_id"):
-                    duplicate_query["metadata.probe_id"] = event.get("probe_id")
-                else:
-                    duplicate_query["timestamp"] = {"$gte": asked_at - 1}
-                duplicate = asked_at and messages_coll.find_one(duplicate_query)
-                if duplicate and state.get("status") in {"awaiting_answer", "awaiting_sentiment", "awaiting_consent"}:
-                    return {"has_new": False, "deduplicated": True}
             delivered_message = event.get("message", "阿月有一則新消息。")
-            if event_type == "feedback_request":
-                delivered_message = "你跟這位聊起來感覺如何？"
-                message_metadata["actions"] = []
             save_message(
                 room_id, "ai_assistant", delivered_message,
                 message_type="mediator_card" if message_metadata["actions"] else "text",
@@ -2235,19 +2037,7 @@ def proactive_check(user_id: str, conversation_active: bool = False):
             ) or event_match
             role = "from" if event_match.get("from_user") == user_id else "to"
             unread_count = int((updated_match.get("private_unread", {}) or {}).get(role, 1))
-            if event_type in {"feedback_request", "probe_question"}:
-                requester_id = event.get("requester_id") or participant_probe_state(event_match, user_id).get("requester_id")
-                probe_kind = event.get("probe_kind") or participant_probe_state(event_match, user_id).get("kind", "sentiment")
-                stage = "sentiment" if probe_kind == "sentiment" else "probe_answer"
-                profiles_coll.update_one({"user_id": user_id}, {"$set": {"pending_private_feedback": {
-                    "match_id": str(event_match["_id"]), "other_id": other_id,
-                    "stage": stage, "kind": probe_kind, "origin": event.get("origin", "auto"),
-                    "requester_id": requester_id, "probe_id": event.get("probe_id")}}})
-                matches_coll.update_one({"_id": event_match["_id"]}, {"$set": {
-                    participant_probe_field(event_match, user_id) + ".status":
-                        "awaiting_sentiment" if stage == "sentiment" else "awaiting_answer",
-                    participant_probe_field(event_match, user_id) + ".asked_at": time.time()}})
-            elif event_type == "date_coordination_request":
+            if event_type == "date_coordination_request":
                 profiles_coll.update_one({"user_id": user_id}, {"$set": {
                     "pending_date_coordination": {
                         "match_id": str(event_match["_id"]), "other_id": other_id,

@@ -55,9 +55,10 @@ def health():
     }
 
 
-from routers import chat, frontend, match, system  # noqa: E402
+from routers import admin, chat, frontend, match, system  # noqa: E402
 
 app.include_router(frontend.router)
+app.include_router(admin.router)
 app.include_router(chat.router)
 app.include_router(match.router)
 app.include_router(system.router)
