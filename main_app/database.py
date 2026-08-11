@@ -1,4 +1,4 @@
-﻿import os
+import os
 
 from pymongo import MongoClient
 from config import MONGO_URI
@@ -10,7 +10,8 @@ mongo_client = MongoClient(
     connectTimeoutMS=int(os.getenv("MONGO_CONNECT_TIMEOUT_MS", "5000")),
     socketTimeoutMS=int(os.getenv("MONGO_SOCKET_TIMEOUT_MS", "10000")),
 )
-db = mongo_client["profiling_db"]
+db_name = os.getenv("MONGO_DB_NAME", "profiling_db")
+db = mongo_client[db_name]
 profiles_coll = db["profiles"]
 matches_coll = db["matches"]
 messages_coll = db["messages"]

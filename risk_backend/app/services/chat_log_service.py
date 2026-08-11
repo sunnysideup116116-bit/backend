@@ -1,6 +1,7 @@
 import os
 import json
 from datetime import datetime, timezone
+from typing import Optional
 from dotenv import load_dotenv
 from appwrite.client import Client
 from appwrite.services.databases import Databases
@@ -181,6 +182,8 @@ class ChatLogService:
                 "delta_final": json.dumps(final_delta.model_dump()),
                 "nlp_reasoning": nlp_res.get('reasoning', 'No reasoning provided'),
                 "confidence": float(nlp_res.get('confidence', 0.5)),
+                # NLP 判定本則成立的特徵，作為可解釋的審計軌跡（B5-①）
+                "detected_features": json.dumps(nlp_res.get("detected_features", []), ensure_ascii=False)[:1000],
                 "triggered_rules": json.dumps(rule_res['triggered_rules']),
                 "triggered_scenarios": json.dumps(scenarios),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -191,7 +194,7 @@ class ChatLogService:
                 "guardrail_flagged_words": json.dumps(flagged_words or []),
                 "guardrail_classifier_flag": json.dumps(classifier_flag or {}),
             }
-            self.db.create_document(self.db_id, "risk_analysis_logs_", ID.unique(), data)
+            self.db.create_document(self.db_id, "risk_analysis_logs", ID.unique(), data)
         except Exception as e:
             print(f"log_analysis_detail failed: {e}")
 
@@ -331,7 +334,11 @@ class ChatLogService:
             return False
 
     async def get_remaining_cooldown(self, conversation_id: str, user_id: str) -> int:
-        """從最近一筆 intervention_logs 算剩餘冷卻秒數；無紀錄或已過期回 0。"""
+        """依最近一筆介入記錄計算寄件方剩餘的冷卻秒數；無紀錄或已過期回 0。
+
+        冷卻必須由後端依「當初施加的秒數 − 已經過時間」推算，前端才能在重開
+        App 或換裝置後還原倒數。若僅由前端自行計時，關閉重開即形同解除。
+        """
         try:
             response = self.db.list_documents(
                 self.db_id, "intervention_logs",
@@ -346,18 +353,57 @@ class ChatLogService:
                 return 0
             doc = response.documents[0]
             data = doc.data if hasattr(doc, 'data') else doc
-            cooldown = int(data.get("cooldown_seconds", 0) or 0)
+
+            cooldown = int(data.get("cooldown_seconds") or 0)
             if cooldown <= 0:
                 return 0
-            ts_str = data.get("timestamp")
-            if not ts_str:
+
+            ts = data.get("timestamp")
+            if not ts:
                 return 0
-            ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
-            elapsed = (datetime.now(ts.tzinfo) - ts).total_seconds()
+            last_ts = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+
+            elapsed = (datetime.now(timezone.utc) - last_ts).total_seconds()
             return max(0, int(cooldown - elapsed))
         except Exception as e:
             print(f"get_remaining_cooldown failed: {e}")
             return 0
+
+    async def get_last_displayed_intervention(self, conversation_id: str, user_id: str, role: str) -> Optional[dict]:
+        """取得該對話／使用者最近一次**實際對指定角色顯示過**的介入。
+
+        用於介入顯示節流：被節流而未顯示的紀錄，其 `{role}_action` 會是 "none" 或
+        "suppressed"，不應視為「上次顯示」，否則節流窗會被自己不斷推遲。
+
+        回傳 {"risk_level": str, "timestamp": str} 或 None。
+        """
+        if role not in ("sender", "receiver"):
+            return None
+        field = f"{role}_action"
+        try:
+            response = self.db.list_documents(
+                self.db_id, "intervention_logs",
+                queries=[
+                    Query.equal("conversation_id", conversation_id),
+                    Query.equal("user_id", user_id),
+                    Query.order_desc("timestamp"),
+                    Query.limit(20),
+                ]
+            )
+            for doc in response.documents:
+                data = doc.data if hasattr(doc, 'data') else doc
+                action = data.get(field)
+                if action and action not in ("none", "suppressed"):
+                    return {
+                        "risk_level": data.get("risk_level"),
+                        "timestamp": data.get("timestamp"),
+                    }
+            return None
+        except Exception as e:
+            print(f"get_last_displayed_intervention failed: {e}")
+            return None
 
     async def update_intervention_feedback(self, msg_id: str, role: str, feedback: str) -> bool:
         """
@@ -472,3 +518,46 @@ class ChatLogService:
         except Exception as e:
             print(f"get_recent_guardrail_context_reviews failed: {e}")
             return []
+
+    async def save_sender_appeal(self, msg_id: str, sender_id: str, appeal_text: str) -> dict:
+        """寫入寄件方對某次介入的文字申訴，供人工稽核。
+
+        **此內容不進入任何演算法**：若讓被警告者自述無惡意即可降低風險分數，
+        將形成可被濫用的繞道。僅寫入 intervention_logs 供後台並列檢視。
+
+        回傳 {"ok": bool, "error": str|None}。
+        需 Appwrite 的 intervention_logs collection 具備 `sender_appeal_text` 屬性
+        （String，建議 size 2000）；屬性未建立時會回傳明確錯誤而非靜默失敗。
+        """
+        try:
+            response = self.db.list_documents(
+                self.db_id, "intervention_logs",
+                queries=[
+                    Query.equal("triggered_by_msg_id", msg_id),
+                    Query.order_desc("timestamp"),
+                    Query.limit(1)
+                ]
+            )
+            if not response.documents:
+                return {"ok": False, "error": "not_found"}
+
+            doc = response.documents[0]
+            data = doc.data if hasattr(doc, 'data') else doc
+            doc_id = doc.id if hasattr(doc, 'id') else doc['$id']
+
+            # 僅允許該則訊息的寄件方本人提出申訴
+            if data.get("sender_id") != sender_id:
+                return {"ok": False, "error": "sender_mismatch"}
+
+            self.db.update_document(
+                self.db_id, "intervention_logs", doc_id,
+                {"sender_appeal_text": appeal_text}
+            )
+            return {"ok": True, "error": None}
+        except Exception as e:
+            msg = str(e)
+            if "sender_appeal_text" in msg or "Unknown attribute" in msg or "Invalid document structure" in msg:
+                print("save_sender_appeal failed: Appwrite intervention_logs 尚未建立 sender_appeal_text 屬性")
+                return {"ok": False, "error": "attribute_missing"}
+            print(f"save_sender_appeal failed: {e}")
+            return {"ok": False, "error": "unknown"}

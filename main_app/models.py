@@ -37,6 +37,7 @@ class DirectChatRequest(BaseModel):
     chat_type: str = "direct"  # "direct", "deep_profile"
     mentioned_other_id: str | None = None
     mentioned_other_ids: list[str] | None = None
+    message_timestamp: str | None = None  # ISO 8601，建議帶時區；用於風險時段判定
 
 class GuidanceActivityRequest(BaseModel):
     user_id: str

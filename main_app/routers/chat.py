@@ -747,6 +747,7 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
         sender_id=req.user_id,
         receiver_id=req.contact_id,
         content=req.message,
+        message_timestamp=req.message_timestamp,
     )
     if risk_client.is_blocked(risk_assessment):
         save_message(
