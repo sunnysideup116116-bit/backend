@@ -415,13 +415,3 @@ git -C /home/sunny/桌面/Graduate_Project/DatingApp switch 0726-new
 ```
 
 切換後需重新啟動後端；若 Flutter 的 API URL 或程式碼版本不同，也應重新建置。
-
-## 13. 建議的日常啟動順序
-
-1. 確認前後端都是 `0726-new`。
-2. 從 `Graduate_Project/Server` 執行 `./start_all.sh`。
-3. 確認 `8000`、`8001`、`9001` 正常。
-4. 從 `Graduate_Project/DatingApp` 執行 `python3 run_test.py`。
-5. 第一次執行或程式碼有更新時選擇重新編譯。
-6. 測試註冊、Big Five、配對拒絕、默契測驗與今日話題。
-

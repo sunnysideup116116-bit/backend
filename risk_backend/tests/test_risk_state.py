@@ -298,3 +298,49 @@ def test_background_concerning_wins_over_feedback_trust(machine):
 
     assert machine.last_diagnostic["feedback_signal"] == "alert"
     assert new_state.harassment == pytest.approx(0.3)
+
+
+# --- SPREAD_MODE 開關（校準期暫時設施，見 risk_state.compute_spread 說明）---
+
+@pytest.fixture
+def spread(monkeypatch):
+    """取得 compute_spread（本檔的 import 一律延後到 fixture 內，見上方 machine）。"""
+    monkeypatch.setenv("APPWRITE_ENDPOINT", "http://test/v1")
+    monkeypatch.setenv("APPWRITE_PROJECT_ID", "test-proj")
+    monkeypatch.setenv("APPWRITE_API_KEY", "test-key")
+    monkeypatch.setenv("APPWRITE_DB_ID", "test-db")
+    from app.core.risk_state import RiskStateMachine
+    return RiskStateMachine.compute_spread
+
+
+def test_spread_count_is_binary_above_floor(spread):
+    """原始設計：只要超過 noise_floor 就算一票，不論強弱。"""
+    assert spread([1.0, 0.20, 0.15, 0.12, 0.20], 'count', 0.10) == pytest.approx(1.0)
+    assert spread([1.0, 0.0, 0.0, 0.0, 0.0], 'count', 0.10) == pytest.approx(0.2)
+
+
+def test_spread_effdim_matches_dimension_count_when_equal(spread):
+    """有效維度數的定義性質：均等時等於維度數、集中時等於 1。"""
+    assert spread([0.6] * 5, 'effdim') == pytest.approx(1.0)          # 5 個有效維度 / 5
+    assert spread([1.0, 0, 0, 0, 0], 'effdim') == pytest.approx(0.2)  # 1 個 / 5
+
+
+def test_spread_effdim_discounts_weak_residue(spread):
+    """核心差異：一個強維度 + 四個殘影，不應等同五個真實訊號。
+
+    此為 B6 前導評估 M06 的實況（參考答案 warning，系統判 blocked）。
+    """
+    residue = [1.0, 0.20, 0.15, 0.12, 0.20]
+    assert spread(residue, 'count', 0.10) == pytest.approx(1.0)
+    assert spread(residue, 'effdim') == pytest.approx(0.4991, abs=1e-3)
+    assert spread(residue, 'effdim') < spread(residue, 'count', 0.10)
+
+
+def test_spread_unknown_mode_falls_back_to_count(spread):
+    """設定錯字不應改變行為，一律退回原始定義。"""
+    assert spread([0.5, 0.5, 0, 0, 0], 'typo_mode', 0.10) == pytest.approx(0.4)
+
+
+def test_spread_all_zero_is_safe(spread):
+    assert spread([0.0] * 5, 'effdim') == 0.0
+    assert spread([0.0] * 5, 'count', 0.10) == 0.0

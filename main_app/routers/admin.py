@@ -60,7 +60,7 @@ def get_audit_logs(
     status: Optional[str] = Query(None, description="filter by delivery_status or risk_level"),
     conversation_id: Optional[str] = Query(None, description="filter by conversation_id"),
 ):
-    """Fetch combined audit logs from Appwrite (messages, risk_analysis_logs_, risk_state_history, intervention_logs)."""
+    """Fetch combined audit logs from Appwrite (messages, risk_analysis_logs, risk_state_history, intervention_logs)."""
     db, db_id, AWQuery = _get_appwrite_db()
 
     if not db or not db_id:
@@ -78,7 +78,7 @@ def get_audit_logs(
         # 2. Fetch analysis details map (by message_id)
         analysis_map = {}
         try:
-            an_res = db.list_documents(db_id, "risk_analysis_logs_", queries=[AWQuery.order_desc("timestamp"), AWQuery.limit(limit * 2)])
+            an_res = db.list_documents(db_id, "risk_analysis_logs", queries=[AWQuery.order_desc("timestamp"), AWQuery.limit(limit * 2)])
             an_docs = an_res.get("documents", []) if isinstance(an_res, dict) else an_res.documents
             for doc in an_docs:
                 d = doc if isinstance(doc, dict) else (doc.data if hasattr(doc, 'data') else doc.to_dict())
@@ -86,7 +86,7 @@ def get_audit_logs(
                 if m_id and m_id not in analysis_map:
                     analysis_map[m_id] = d
         except Exception as e:
-            print(f"[admin] fetch risk_analysis_logs_ failed: {e}")
+            print(f"[admin] fetch risk_analysis_logs failed: {e}")
 
         # 3. Fetch risk state history map (by triggered_by_msg_id)
         state_map = {}
