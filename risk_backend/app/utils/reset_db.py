@@ -23,7 +23,7 @@ def reset_collections():
     target_collections = [
         "messages",
         "temporal_features",
-        "risk_analysis_logs",
+        "risk_analysis_logs_",
         "risk_state_history",
         "intervention_logs",
         "conversations",

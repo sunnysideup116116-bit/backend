@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://service.misproject.us.ci/contracts/ayue-v3-match-decision.schema.json",
+  "title": "Ayue V3 Match Card Decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["user_id", "match_id", "action", "expected_status", "explicit_reasons"],
+  "properties": {
+    "user_id": {"type": "string", "minLength": 1},
+    "match_id": {"type": "string", "minLength": 1},
+    "action": {"enum": ["accept", "decline", "cancel"]},
+    "expected_status": {"enum": ["draft", "pending"]},
+    "expected_revision": {"type": ["integer", "null"], "minimum": 0},
+    "explicit_reasons": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {"type": "string", "minLength": 1, "maxLength": 140}
+    }
+  },
+  "x-http-409-policy": "refresh_without_replay",
+  "x-authority-note": "expected_revision is optional because the canonical demo website currently performs status-CAS. When a visible projection includes a revision, Flutter echoes it without manufacturing a value."
+}

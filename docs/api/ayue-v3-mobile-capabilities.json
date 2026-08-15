@@ -1,0 +1,54 @@
+{
+  "contract_version": 1,
+  "backend": {
+    "name": "ayue",
+    "public_agent_version": "v3",
+    "private_agent_version": "v2"
+  },
+  "capabilities": {
+    "public_stream": {
+      "available": true,
+      "transport": "ndjson",
+      "endpoint": "/api/direct_chat/stream"
+    },
+    "assessment_controls": {
+      "available": true,
+      "typed_cancel": true
+    },
+    "context_confirmation": {
+      "available": true,
+      "background_status_polling": true
+    },
+    "calendar": {
+      "available": true,
+      "typed_mutations": true
+    },
+    "date_coordination": {
+      "available": true,
+      "typed_cards": true
+    },
+    "match_decision": {
+      "available": true,
+      "mode": "status_cas",
+      "revision": "echo_when_present",
+      "conflict_policy": "refresh_without_replay"
+    },
+    "place_cards": {
+      "available": false,
+      "text_fallback_required": true
+    },
+    "private_mediator": {
+      "available": true,
+      "agent_version": "v2"
+    },
+    "relationship_quiz": {
+      "available": true,
+      "random_topic_route": false
+    },
+    "risk_projection": {
+      "available": true,
+      "status": "pair_chat_pre_persistence",
+      "failure_policy": "deliver_degraded"
+    }
+  }
+}

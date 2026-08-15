@@ -790,14 +790,14 @@ routers/match.py accept_match(情境B)
 ### 8.1 一鍵啟動（建議）
 ```bash
 cd Server
-./start_all.sh
+./scripts/start_ayue_services.sh
 ```
-`start_all.sh` 會：
-1. 清理 8000 / 8001 / 9001 port。
-2. 背景啟動 `risk_backend`（:8001）。
-3. 背景啟動 `matchmaker_agent`（:9001）。
-4. 前景啟動 `main.py`（:8000）。
-5. 結束時自動 kill 背景服務。
+`start_ayue_services.sh` 不會清理或強制終止已有 process，會啟動：
+1. Guardrail classifier（:8081）。
+2. `risk_backend`（:8001）。
+3. `matchmaker_agent`（:9001）。
+4. Ayue V3 Social backend（:8000）。
+5. 四服務健康檢查；結束 orchestrator 時正常停止它啟動的子行程。
 
 啟動後：
 - 前端頁面：`http://localhost:8000/`
@@ -809,14 +809,12 @@ cd Server
 
 ### 8.2 個別啟動
 ```bash
-# 風險後端
-cd Server/risk_backend && ../venv/bin/python main.py            # :8001
-
-# 媒婆 Agent
-cd Server/matchmaker_agent && ../venv/bin/python agent_api.py   # :9001
-
-# 主伺服器（含 ai_gen）
-cd Server && venv/bin/python main.py                            # :8000
+cd Server
+./scripts/run_ayue_guardrail.sh    # :8081
+./scripts/run_ayue_risk.sh         # :8001
+./scripts/run_ayue_matchmaker.sh   # :9001
+./scripts/run_ayue_social.sh       # :8000
+./scripts/check_ayue_services.sh
 ```
 
 ### 8.3 MongoDB（目前用 Atlas 雲端，本地已停用）

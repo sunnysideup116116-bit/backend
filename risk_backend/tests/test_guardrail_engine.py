@@ -36,6 +36,7 @@ def test_block_mode_keyword_blocks(guardrail):
     assert result["is_blocked"] is True
     assert "殺死你" in result["reason"]
     assert result["flagged_words"] == ["殺死你"]
+    assert result["degraded"] is False
 
 
 def test_block_mode_phrase_blocks(guardrail):
@@ -72,6 +73,7 @@ def test_no_match_clean_result(guardrail):
     result = asyncio.run(guardrail.check("今天天氣真好我們去公園走走"))
     assert result["is_blocked"] is False
     assert result.get("flagged_words", []) == []
+    assert result["degraded"] is True
 
 
 def test_block_preserves_prior_flag_words(guardrail):
@@ -148,6 +150,29 @@ def test_classifier_safe_no_flag(monkeypatch):
 
     assert result["is_blocked"] is False
     assert result["classifier_flagged"] is False
+    assert result["degraded"] is False
+
+
+def test_classifier_error_is_marked_degraded(monkeypatch):
+    monkeypatch.setenv("GUARDRAIL_PROVIDER", "llm_classifier")
+    monkeypatch.setenv("GUARDRAIL_BASE_URL", "http://test/v1")
+    monkeypatch.setenv("GUARDRAIL_API_KEY", "test")
+    monkeypatch.setenv("GUARDRAIL_MODEL", "test-model")
+
+    mock_adapter = MagicMock()
+    mock_adapter.generate.side_effect = ConnectionError("unavailable")
+
+    with patch("app.core.guardrail_engine.KBService.get_hard_block_records", return_value=[]):
+        from app.core.guardrail_engine import GuardrailEngine
+
+        g = GuardrailEngine()
+        g._classifier_adapter = mock_adapter
+        g._classifier_model = "test"
+        result = asyncio.run(g.check("普通閒聊"))
+
+    assert result["is_blocked"] is False
+    assert result["classifier_flagged"] is False
+    assert result["degraded"] is True
 
 
 def test_mysql_block_still_blocks_even_if_classifier_safe(guardrail):

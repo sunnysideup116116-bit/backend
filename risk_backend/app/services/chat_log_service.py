@@ -194,7 +194,7 @@ class ChatLogService:
                 "guardrail_flagged_words": json.dumps(flagged_words or []),
                 "guardrail_classifier_flag": json.dumps(classifier_flag or {}),
             }
-            self.db.create_document(self.db_id, "risk_analysis_logs", ID.unique(), data)
+            self.db.create_document(self.db_id, "risk_analysis_logs_", ID.unique(), data)
         except Exception as e:
             print(f"log_analysis_detail failed: {e}")
 
