@@ -6,7 +6,7 @@ error handling, and graceful degradation so callers can stay simple.
 
 Environment variables:
   RISK_SERVICE_URL  base URL of the risk service (default: http://localhost:8001)
-  RISK_TIMEOUT_SEC  request timeout in seconds (default: 1.5)
+  RISK_TIMEOUT_SEC  request timeout in seconds (default: 20)
 """
 
 import os
@@ -20,7 +20,7 @@ load_dotenv()
 
 
 _BASE_URL = os.getenv("RISK_SERVICE_URL", "http://127.0.0.1:8001")
-_TIMEOUT = float(os.getenv("RISK_TIMEOUT_SEC", "30.0"))
+_TIMEOUT = float(os.getenv("RISK_TIMEOUT_SEC", "20.0"))
 
 
 _RISK_UI_LEVELS = {"warning", "restricted", "blocked"}
@@ -116,11 +116,11 @@ def should_show_risk_ui(risk_level: str) -> bool:
 
 
 def is_blocked(risk_assessment: Optional[dict]) -> bool:
-    """Convenience guard for callers that only care about the block decision."""
+    """Return True only for an explicit non-deliverable Risk decision."""
     if not risk_assessment:
         return False
     level = risk_assessment.get("risk_level")
-    return level == "blocked" or level == "restricted"
+    return level == "blocked"
 
 
 

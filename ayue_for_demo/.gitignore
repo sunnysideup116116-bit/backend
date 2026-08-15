@@ -1,0 +1,48 @@
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+.local-venv/
+.project-venv/
+env/
+ENV/
+agent_env/
+matchmaker_agent/agent_env/
+
+# Local secrets / config
+.env
+.env.*
+!.env.example
+
+# Logs / scratch output
+*.log
+.runlogs/
+ping_out.txt
+test_out.txt
+chat_resp.txt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build / package artifacts
+build/
+dist/
+*.egg-info/
+
+# Agent / tooling working dirs (machine-local, not part of the product)
+.superpowers/
+.claude/
+
+# Test / coverage caches
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/

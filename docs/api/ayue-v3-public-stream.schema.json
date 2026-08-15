@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://service.misproject.us.ci/contracts/ayue-v3-public-stream.schema.json",
+  "title": "Ayue V3 Public NDJSON Event",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "agent_run_id"],
+      "properties": {
+        "type": {"const": "run_started"},
+        "agent_run_id": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "agent_run_id", "text"],
+      "properties": {
+        "type": {"const": "tool_started"},
+        "agent_run_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "text": {"type": "string", "maxLength": 200}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "agent_run_id", "outcome", "duration_ms"],
+      "properties": {
+        "type": {"const": "tool_finished"},
+        "agent_run_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "outcome": {"enum": ["ok", "error"]},
+        "duration_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "response"],
+      "properties": {
+        "type": {"const": "final"},
+        "response": {"$ref": "ayue-v3-final-response.schema.json"}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "agent_run_id", "reply"],
+      "properties": {
+        "type": {"const": "error"},
+        "agent_run_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "reply": {"type": "string", "minLength": 1, "maxLength": 240}
+      }
+    }
+  ]
+}

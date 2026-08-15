@@ -150,6 +150,22 @@ def test_retry_raises_after_max_attempts(monkeypatch):
     assert len(calls) == 3
 
 
+def test_component_retry_budget_can_disable_retries(monkeypatch):
+    from app.core import llm_adapters as la
+    monkeypatch.setattr(la, "LLM_BACKOFF_BASE", 0.0)
+
+    ServiceUnavailable = _transient("ServiceUnavailable")
+    calls = []
+
+    def fn():
+        calls.append(1)
+        raise ServiceUnavailable("503")
+
+    with pytest.raises(ServiceUnavailable):
+        la.call_with_retry(fn, label="Guardrail", max_attempts=1)
+    assert len(calls) == 1
+
+
 def test_transient_detected_by_status_code():
     """類別名稱看不出來時，改以 status_code 判斷。"""
     from app.core import llm_adapters as la

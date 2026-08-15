@@ -109,6 +109,12 @@ class RiskDetectionResponse(BaseModel):
                     "呼叫端應將此視為『判斷不完整』而非『判定安全』；離線評估時必須排除或另行標記，"
                     "否則失敗案例會與真正的 safe 混在一起無法分辨（見 known-issues #17）。"
     )
+    guardrail_degraded: bool = Field(
+        False,
+        description="Guardrail 第二層是否因呼叫、初始化或設定問題未實際執行。"
+                    "為 True 代表『未檢查』，不代表『檢查後安全』；本地禁詞層仍會正常執行。"
+                    "此欄位僅供觀測，不改變風險計分與投遞決策。"
+    )
     intervention_message: Optional[str] = None
     intervention_command: Optional[Any] = None
     triggered_rules: List[str] = []

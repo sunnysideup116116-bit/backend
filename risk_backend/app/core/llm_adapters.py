@@ -41,6 +41,11 @@ LLM_MAX_ATTEMPTS = int(os.getenv("LLM_MAX_ATTEMPTS", "3"))
 LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
 LLM_BACKOFF_BASE = float(os.getenv("LLM_BACKOFF_BASE", "1.0"))
 
+# Guardrail classifier is optional and must not consume the NLP engine's much
+# larger retry budget. Rule and NLP evaluation remain available when it fails.
+GUARDRAIL_MAX_ATTEMPTS = int(os.getenv("GUARDRAIL_MAX_ATTEMPTS", "1"))
+GUARDRAIL_TIMEOUT_SECONDS = float(os.getenv("GUARDRAIL_TIMEOUT_SECONDS", "3"))
+
 # 依例外類別名稱判斷是否暫時性。跨 SDK 通用，不必逐一 import 各家的例外型別
 # （google.api_core、openai、httpx 的類別名稱皆涵蓋於下）。
 _TRANSIENT_NAME_HINTS = (
@@ -64,13 +69,18 @@ def _is_transient(exc: Exception) -> bool:
     return False
 
 
-def call_with_retry(fn: Callable[[], str], label: str = "LLM") -> str:
+def call_with_retry(
+    fn: Callable[[], str],
+    label: str = "LLM",
+    max_attempts: Optional[int] = None,
+) -> str:
     """執行 fn，對暫時性錯誤做指數退避重試。
 
     退避加入隨機抖動（jitter），避免多個併發請求在同一時刻一起重試而再次撞上限額。
     """
+    attempts = LLM_MAX_ATTEMPTS if max_attempts is None else max(1, max_attempts)
     last_exc = None
-    for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+    for attempt in range(1, attempts + 1):
         try:
             return fn()
         except Exception as e:  # noqa: BLE001 — 需依內容分類，故先全捕捉
@@ -78,12 +88,12 @@ def call_with_retry(fn: Callable[[], str], label: str = "LLM") -> str:
             if not _is_transient(e):
                 print(f"   [ {label} ] 永久性錯誤，不重試：{type(e).__name__}: {e}")
                 raise
-            if attempt >= LLM_MAX_ATTEMPTS:
-                print(f"   [ {label} ] 重試 {LLM_MAX_ATTEMPTS} 次仍失敗：{type(e).__name__}")
+            if attempt >= attempts:
+                print(f"   [ {label} ] 重試 {attempts} 次仍失敗：{type(e).__name__}")
                 raise
             wait = LLM_BACKOFF_BASE * (2 ** (attempt - 1)) * (1 + random.random() * 0.25)
             print(f"   [ {label} ] 暫時性錯誤（{type(e).__name__}），"
-                  f"{wait:.1f}s 後重試（第 {attempt}/{LLM_MAX_ATTEMPTS} 次）")
+                  f"{wait:.1f}s 後重試（第 {attempt}/{attempts} 次）")
             time.sleep(wait)
     raise last_exc  # pragma: no cover — 迴圈內必定 return 或 raise
 
@@ -127,17 +137,28 @@ class GeminiAdapter:
 class OpenAICompatAdapter:
     """OpenAI 相容 chat completion 包裝（適用 Groq / OpenRouter / Together / 等等）"""
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout: Optional[float] = None,
+        max_attempts: Optional[int] = None,
+    ):
         from openai import OpenAI
 
         if not base_url:
             raise ValueError("OpenAICompatAdapter requires base_url")
         if not api_key:
             raise ValueError("OpenAICompatAdapter requires api_key")
+        self._max_attempts = max_attempts
         # max_retries=0：關閉 SDK 內建重試，改由 call_with_retry 統一處理，
         # 以免兩層重試相乘（3 × 2 = 6 次）使失敗情境的延遲不可預期。
-        self._client = OpenAI(base_url=base_url, api_key=api_key,
-                              timeout=LLM_TIMEOUT_SECONDS, max_retries=0)
+        self._client = OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=LLM_TIMEOUT_SECONDS if timeout is None else timeout,
+            max_retries=0,
+        )
 
     def generate(self, prompt: str, model: str, extra_kwargs: Optional[dict] = None) -> str:
         def _once() -> str:
@@ -155,7 +176,11 @@ class OpenAICompatAdapter:
             )
             return resp.choices[0].message.content or ""
 
-        return call_with_retry(_once, label="OpenAICompat")
+        return call_with_retry(
+            _once,
+            label="OpenAICompat",
+            max_attempts=self._max_attempts,
+        )
 
 
 class OllamaAdapter:
@@ -187,10 +212,20 @@ class OllamaAdapter:
         return call_with_retry(_once, label="Ollama")
 
 
-def _make_openai_compat(base_url: Optional[str], api_key: Optional[str]) -> OpenAICompatAdapter:
+def _make_openai_compat(
+    base_url: Optional[str],
+    api_key: Optional[str],
+    timeout: Optional[float] = None,
+    max_attempts: Optional[int] = None,
+) -> OpenAICompatAdapter:
     if not base_url or not api_key:
         raise RuntimeError("openai_compat provider 需要 base_url 與 api_key 環境變數")
-    return OpenAICompatAdapter(base_url=base_url, api_key=api_key)
+    return OpenAICompatAdapter(
+        base_url=base_url,
+        api_key=api_key,
+        timeout=timeout,
+        max_attempts=max_attempts,
+    )
 
 
 def get_nlp_adapter() -> LLMAdapter:
@@ -243,6 +278,8 @@ def get_guardrail_classifier_adapter() -> LLMAdapter:
     return _make_openai_compat(
         base_url,
         os.getenv("GUARDRAIL_API_KEY"),
+        timeout=GUARDRAIL_TIMEOUT_SECONDS,
+        max_attempts=GUARDRAIL_MAX_ATTEMPTS,
     )
 
 
