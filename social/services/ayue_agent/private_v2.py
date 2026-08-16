@@ -313,7 +313,7 @@ def _consume_confirmation(ctx: PrivateAgentTurnContextV2, match_doc: dict[str, A
     return True, "這個邀請目前無法送出。"
 
 
-def _compose(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]], strategy: str) -> str:
+def _compose(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]], strategy: str, on_token: Callable[[str], None] | None = None) -> str:
     semantic_plan = ctx.relationship_semantic_context.get("semantic_plan", {})
     context_data = semantic_plan.get("context", {})
     sanitized_triples = [
@@ -337,7 +337,7 @@ def _compose(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]],
 只能依 safe context 回答；不能提及、猜測或暗示對方未公開的私人資料、私人悄悄話或行事曆內容。calendar observation 只能說是否有既有安排與時段，不能說活動內容。不要提及工具、模型、系統或權限。
 安全 context：{json.dumps(safe, ensure_ascii=False)}"""
     try:
-        response = generate_chat_completion(prompt, temperature=.45)
+        response = generate_chat_completion(prompt, temperature=.45, on_token=on_token)
         reply = str(getattr(response, "content", response) or "").strip()
         if reply and not re.search(r"(?:私人資料|工具|prompt|seed_user|資料庫)", reply, re.I):
             return reply[:360]
@@ -366,7 +366,7 @@ def _trace(run_id: str, payload: dict[str, Any]) -> None:
 
 def run_private_agent_turn_v2(
     *, user_id: str, other_id: str, message: str, match_doc: dict[str, Any], on_progress: Callable[[dict[str, str]], None] | None = None,
-    agent_run_id: str | None = None,
+    agent_run_id: str | None = None, on_token: Callable[[str], None] | None = None,
 ) -> AgentResult:
     started = time.perf_counter()
     run_id, observations, trace = agent_run_id or uuid.uuid4().hex, [], {"visible_tools": sorted(PRIVATE_TOOL_REGISTRY), "decisions": [], "guard": [], "tools": [], "context_ms": 0, "model_ms": [], "tool_ms": []}
@@ -389,7 +389,7 @@ def run_private_agent_turn_v2(
                 trace["model_ms"].append(round((time.perf_counter() - model_started) * 1000))
                 if not decision:
                     compose_started = time.perf_counter()
-                    result = AgentResult(handled=True, reply=_compose(ctx, observations, "warm"), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2", fallback_reason="planner_invalid")
+                    result = AgentResult(handled=True, reply=_compose(ctx, observations, "warm", on_token), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2", fallback_reason="planner_invalid")
                     trace["model_ms"].append(round((time.perf_counter() - compose_started) * 1000))
                     break
                 trace["decisions"].append({"kind": decision.kind, "tool": decision.tool_name, "confidence": decision.confidence})
@@ -415,22 +415,27 @@ def run_private_agent_turn_v2(
                 if decision.kind == "final":
                     reply = _planner_reply(decision)
                     if reply:
+                        if on_token:
+                            time.sleep(0.035)
+                            for start in range(0, len(reply), 6):
+                                on_token(reply[start:start + 6])
+                                time.sleep(0.035)
                         result = AgentResult(handled=True, reply=reply, conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
                     else:
                         compose_started = time.perf_counter()
-                        result = AgentResult(handled=True, reply=_compose(ctx, observations, decision.strategy), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
+                        result = AgentResult(handled=True, reply=_compose(ctx, observations, decision.strategy, on_token), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
                         trace["model_ms"].append(round((time.perf_counter() - compose_started) * 1000))
                     break
                 spec = PRIVATE_TOOL_REGISTRY.get(str(decision.tool_name or ""))
                 if not spec or spec.risk != "read":
                     trace["guard"].append("tool_not_allowed")
-                    result = AgentResult(handled=True, reply=_compose(ctx, observations, decision.strategy), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2", fallback_reason="tool_not_allowed")
+                    result = AgentResult(handled=True, reply=_compose(ctx, observations, decision.strategy, on_token), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2", fallback_reason="tool_not_allowed")
                     break
                 arguments = {"scope": str(decision.arguments.get("scope") or "")[:80]}
                 key = spec.name + json.dumps(arguments, ensure_ascii=False, sort_keys=True)
                 if key in seen:
                     trace["guard"].append("duplicate_observation_reused")
-                    result = AgentResult(handled=True, reply=_compose(ctx, observations, decision.strategy), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
+                    result = AgentResult(handled=True, reply=_compose(ctx, observations, decision.strategy, on_token), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
                     break
                 seen.add(key)
                 step = f"{index}:read"
@@ -446,7 +451,7 @@ def run_private_agent_turn_v2(
                 observations.append({"tool": spec.name, "result": data})
             if result is None:
                 compose_started = time.perf_counter()
-                result = AgentResult(handled=True, reply=_compose(ctx, observations, "warm"), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
+                result = AgentResult(handled=True, reply=_compose(ctx, observations, "warm", on_token), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
                 trace["model_ms"].append(round((time.perf_counter() - compose_started) * 1000))
     except Exception as exc:
         trace["exception"] = type(exc).__name__

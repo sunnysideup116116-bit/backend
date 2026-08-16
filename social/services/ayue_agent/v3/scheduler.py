@@ -1000,6 +1000,7 @@ def _run_sub_task(
 
 def run_public_agent_turn_v3(
     ctx: AgentTurnContext, *, on_progress: ProgressCallback | None = None,
+    on_token: Callable[[str], None] | None = None,
     debug_enabled: bool = False,
 ) -> AgentResult:
     """V3 sub-agent runtime entry point."""
@@ -1030,6 +1031,23 @@ def run_public_agent_turn_v3(
             clock=clock.model_dump(mode="json"),
         )
     _emit_progress(on_progress, "run_started", trace=trace, agent_run_id=run_id)
+
+    token_state = {"emitted": False}
+
+    def emit_token_fragment(fragment: str) -> None:
+        if on_token is None or not fragment:
+            return
+        token_state["emitted"] = True
+        on_token(fragment)
+
+    def replay_reply_tokens(reply_text: str) -> None:
+        if on_token is None or token_state["emitted"] or not reply_text:
+            return
+        token_state["emitted"] = True
+        chunk_size = 6
+        for start in range(0, len(reply_text), chunk_size):
+            on_token(reply_text[start:start + chunk_size])
+            time.sleep(0.035)
 
     _print_separator("V3 RUN START")
     print(f"  run_id={run_id}")
@@ -1066,6 +1084,7 @@ def run_public_agent_turn_v3(
                     "llm_call_metrics": result.llm_call_metrics or [],
                 },
             )
+        replay_reply_tokens(result.reply or "")
         return result
 
     def _assessment_result(outcome: dict, session: dict, run_id: str) -> AgentResult:
@@ -1208,7 +1227,7 @@ def run_public_agent_turn_v3(
                 "error_code": None,
                 "skip_reason": None,
             }])
-            reply, _card_decision, synth_metrics = synthesizer.synthesize(synth_slice)
+            reply, _card_decision, synth_metrics = synthesizer.synthesize(synth_slice, on_token=emit_token_fragment)
             _print_llm_metrics("synthesizer", synth_metrics)
             return _finalize_debug(AgentResult(
                 handled=True,
@@ -1232,7 +1251,7 @@ def run_public_agent_turn_v3(
             ),
         )
         synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{"task_id":"confirm","status":"ok","tool":None,"result":results,"error_code":None,"skip_reason":None}])
-        reply, _card_decision, synth_metrics = synthesizer.synthesize(synth_slice)
+        reply, _card_decision, synth_metrics = synthesizer.synthesize(synth_slice, on_token=emit_token_fragment)
         server_reply = _server_owned_confirmed_date_reply(results)
         if server_reply:
             reply = server_reply
@@ -1674,7 +1693,7 @@ def run_public_agent_turn_v3(
             depends_on=[task.id for task in plan.tasks if task.agent != "synthesizer"],
             input_payload=synth_slice.payload, candidate_cards=candidate_cards,
         )
-    reply, card_decision, synth_metrics = synthesizer.synthesize(synth_slice, candidate_cards=candidate_cards)
+    reply, card_decision, synth_metrics = synthesizer.synthesize(synth_slice, candidate_cards=candidate_cards, on_token=emit_token_fragment)
     server_reply = _server_owned_date_coordination_reply(task_results)
     server_failure_reply = _server_owned_date_coordination_failure_reply(
         task_results, write_intent=plan.write_intent,

@@ -3568,6 +3568,7 @@ if (metadata.event_type === "date_coordination_form") {
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
+            let streamingText = '';
             while (true) {
                 const { value, done } = await reader.read();
                 buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
@@ -3579,6 +3580,19 @@ if (metadata.event_type === "date_coordination_form") {
                     if (event.type === 'run_started') setPrivateProgress('阿月正在想一下…');
                     if (event.type === 'tool_started') setPrivateProgress(event.text);
                     if (event.type === 'tool_finished') setPrivateProgress(event.outcome === 'ok' ? '我整理一下…' : '我再確認一下…');
+                    if (event.type === 'token') {
+                        streamingText += event.text || '';
+                        const container = document.getElementById("mediator-private-messages");
+                        let bubble = document.getElementById("mediator-private-progress");
+                        if (!bubble) {
+                            bubble = document.createElement("div");
+                            bubble.id = "mediator-private-progress";
+                            bubble.className = "chat-bubble bubble-other text-sm opacity-75";
+                            container.appendChild(bubble);
+                        }
+                        bubble.textContent = streamingText;
+                        container.scrollTop = container.scrollHeight;
+                    }
                     if (event.type === 'final') {
                         clearPrivateProgress();
                         return event.response;
@@ -3946,6 +3960,32 @@ if (metadata.event_type === "date_coordination_form") {
             lastDebugRunStatus = "running";
             window.v3RunElapsedMs = 0;
             window.v3RunStartedAt = (typeof sendStartedAt === "number" && sendStartedAt > 0) ? sendStartedAt : performance.now();
+            let streamingText = "";
+            let streamingBubble = null;
+            const removeStreamingBubble = () => {
+                if (streamingBubble) {
+                    streamingBubble.remove();
+                    streamingBubble = null;
+                }
+                streamingText = "";
+            };
+            const renderStreamingText = () => {
+                if (!streamingText) {
+                    removeStreamingBubble();
+                    return;
+                }
+                const cm = document.getElementById("room-messages");
+                if (streamingBubble) {
+                    streamingBubble.textContent = streamingText;
+                } else {
+                    clearAyueProgressBubble();
+                    streamingBubble = document.createElement("div");
+                    streamingBubble.className = "chat-bubble bubble-other whitespace-pre-wrap";
+                    streamingBubble.textContent = streamingText;
+                    cm.appendChild(streamingBubble);
+                }
+                cm.scrollTop = cm.scrollHeight;
+            };
             try {
                 while (true) {
                     const {done, value} = await reader.read();
@@ -3965,13 +4005,19 @@ if (metadata.event_type === "date_coordination_form") {
                         }
                         if (event.type === "planner_decision") showAyueProgress("阿月正在想一下…");
                         if (event.type === "tool_started") showAyueProgress(event.text || "我確認一下…");
+                        if (event.type === "token") {
+                            streamingText += event.text || "";
+                            renderStreamingText();
+                        }
                         if (event.type === "final") {
+                            removeStreamingBubble();
                             finalResponse = event.response || {};
                             window.v3RunElapsedMs = performance.now() - window.v3RunStartedAt;
                             lastDebugRunStatus = "completed";
                             scheduleDebugTraceRefresh(50);
                         }
                         if (event.type === "error") {
+                            removeStreamingBubble();
                             lastDebugRunStatus = "error";
                             scheduleDebugTraceRefresh(50);
                             throw new Error(event.reply || "伺服器暫時無法回覆");
@@ -3986,12 +4032,14 @@ if (metadata.event_type === "date_coordination_form") {
                     debugEvents.push(event);
                     lastDebugTrace.push(event);
                     if (event.type === "final") {
+                        removeStreamingBubble();
                         finalResponse = event.response || {};
                         window.v3RunElapsedMs = performance.now() - window.v3RunStartedAt;
                         lastDebugRunStatus = "completed";
                         scheduleDebugTraceRefresh(50);
                     }
                     if (event.type === "error") {
+                        removeStreamingBubble();
                         lastDebugRunStatus = "error";
                         scheduleDebugTraceRefresh(50);
                         throw new Error(event.reply || "伺服器暫時無法回覆");
@@ -4002,6 +4050,7 @@ if (metadata.event_type === "date_coordination_form") {
             } finally {
                 window.clearTimeout(streamTimeout);
                 clearAyueProgressBubble();
+                removeStreamingBubble();
             }
             if (!finalResponse) throw new Error("連線中斷，請稍後再試。");
             return finalResponse;

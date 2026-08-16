@@ -111,11 +111,12 @@ def save_private_mediator_reply(room_id: str, reply: str, event_type="text", act
     )
 
 
-def _run_private_v2_saved_turn(req: MediatorPrivateRequest, match_doc: dict, room_id: str, on_progress=None, agent_run_id: str | None = None) -> dict:
+def _run_private_v2_saved_turn(req: MediatorPrivateRequest, match_doc: dict, room_id: str, on_progress=None, agent_run_id: str | None = None, on_token=None) -> dict:
     """Persist exactly one private V2 final after the owner message is saved."""
     result = run_private_agent_turn_v2(
         user_id=req.user_id, other_id=req.other_id, message=req.message,
         match_doc=match_doc, on_progress=on_progress, agent_run_id=agent_run_id,
+        on_token=on_token,
     )
     reply = result.reply or PRIVATE_RUNTIME_FALLBACK_REPLY
     handoff = result.handoff.model_dump() if getattr(result, "handoff", None) else None
@@ -183,7 +184,7 @@ def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: 
     fallback_run_id = uuid.uuid4().hex
 
     def emit(event: dict) -> None:
-        if event.get("type") not in {"run_started", "tool_started", "tool_finished"}:
+        if event.get("type") not in {"run_started", "tool_started", "tool_finished", "token"}:
             return
         safe = {key: event[key] for key in ("type", "agent_run_id", "step_id", "text", "outcome") if key in event}
         try:
@@ -193,11 +194,15 @@ def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: 
 
     def worker() -> None:
         worker_tasks = BackgroundTasks()
+
+        def emit_token(fragment: str) -> None:
+            emit({"type": "token", "agent_run_id": fallback_run_id, "text": fragment})
+
         try:
             room_id = generate_mediator_private_room_id(req.user_id, req.other_id)
             user_message = save_message(room_id, req.user_id, req.message)
             emit({"type": "run_started", "agent_run_id": fallback_run_id})
-            response = _run_private_v2_saved_turn(req, match_doc, room_id, emit, fallback_run_id)
+            response = _run_private_v2_saved_turn(req, match_doc, room_id, emit, fallback_run_id, on_token=emit_token)
             event_queue.put({"type": "final", "response": response})
         except Exception:
             event_queue.put({"type": "error", "agent_run_id": fallback_run_id, "reply": PRIVATE_RUNTIME_FALLBACK_REPLY})

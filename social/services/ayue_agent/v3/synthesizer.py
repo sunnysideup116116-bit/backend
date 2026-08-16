@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -985,6 +985,7 @@ def _verified_observation_reply(payload: dict[str, Any]) -> str | None:
 def synthesize(
     context_slice: AgentContextSlice,
     candidate_cards: list[dict[str, Any]] | None = None,
+    on_token: Callable[[str], None] | None = None,
 ) -> tuple[str, dict[str, Any] | None, SynthesizerMetrics]:
     """Produce the final user reply from all sub-agent observations.
 
@@ -1111,6 +1112,7 @@ def synthesize(
         metrics.llm_call_count += 1
         result = generate_chat_completion_with_tools(
             prompt, tools, temperature=0.65, system_prompt=system_prompt,
+            on_token=on_token if not tools else None,
         )
         if not isinstance(result, ToolCallResult):
             raise RuntimeError("synthesizer_invalid_provider_result")

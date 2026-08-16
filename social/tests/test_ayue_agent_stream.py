@@ -378,7 +378,7 @@ class AyueAgentStreamTests(unittest.TestCase):
     def test_public_stream_emits_only_safe_progress_and_compatible_final_response(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="今天幾月幾號")
 
-        def fake_turn(_req, _tasks, emit):
+        def fake_turn(_req, _tasks, emit, on_token=None):
             emit({"type": "run_started", "agent_run_id": "run-1"})
             emit({
                 "type": "plan_created", "agent_run_id": "run-1",
@@ -414,6 +414,28 @@ class AyueAgentStreamTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, public_text)
 
+    def test_public_stream_publishes_bounded_token_fragments(self):
+        req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="說點什麼")
+        received: list[str] = []
+
+        def fake_turn(_req, _tasks, emit, on_token=None):
+            emit({"type": "run_started", "agent_run_id": "run-tok"})
+            if on_token:
+                on_token("你")
+                on_token("好")
+                on_token("，很高興認識你。" * 300)
+            return {"reply": "你好，很高興認識你。", "agent_version": "v3", "agent_run_id": "run-tok"}
+
+        with             patch("routers.public_chat._run_public_stream_turn", side_effect=fake_turn):
+            response = direct_chat_stream(req, BackgroundTasks(), _request())
+            chunks = asyncio.run(_collect(response))
+        events = [json.loads(chunk) for chunk in chunks]
+        self.assertEqual([event["type"] for event in events], ["run_started", "token", "token", "token", "final"])
+        self.assertEqual("".join(event["text"] for event in events if event["type"] == "token")[:2], "你好")
+        for event in events:
+            if event["type"] == "token":
+                self.assertLessEqual(len(event["text"]), 600)
+
     def test_stream_hides_raw_exception_details(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="幫我查一下")
         with             patch("routers.public_chat._run_public_stream_turn", side_effect=RuntimeError("seed_user_08 raw database error")):
@@ -429,7 +451,7 @@ class AyueAgentStreamTests(unittest.TestCase):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="記得我想旅行")
         background_finished = threading.Event()
 
-        def fake_turn(_req, tasks, emit):
+        def fake_turn(_req, tasks, emit, on_token=None):
             tasks.add_task(background_finished.set)
             emit({"type": "run_started", "agent_run_id": "run-background"})
             return {"reply": "我記得。", "agent_version": "v2", "agent_run_id": "run-background"}
@@ -443,7 +465,7 @@ class AyueAgentStreamTests(unittest.TestCase):
     def test_unknown_progress_event_is_not_published(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="聊天")
 
-        def fake_turn(_req, _tasks, emit):
+        def fake_turn(_req, _tasks, emit, on_token=None):
             emit({"type": "debug", "prompt": "seed_user_08", "result": {"private": True}})
             return {"reply": "好呀。", "agent_version": "v2", "agent_run_id": "run-safe"}
 

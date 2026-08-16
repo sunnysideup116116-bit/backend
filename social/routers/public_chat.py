@@ -134,6 +134,7 @@ def _complete_public_turn(
     requested_mentions: list[str],
     mention_overflow: bool = False,
     on_progress=None,
+    on_token=None,
     background_tasks: BackgroundTasks | None = None,
     user_message_id: str | None = None,
     debug_enabled: bool = False,
@@ -153,7 +154,8 @@ def _complete_public_turn(
         recent_history=history,
     )
     agent_result = run_public_agent_turn_v3(
-        agent_ctx, on_progress=on_progress, debug_enabled=debug_enabled,
+        agent_ctx, on_progress=on_progress, on_token=on_token,
+        debug_enabled=debug_enabled,
     )
     complete_public_ayue_onboarding(req.user_id)
     latest_profile = profiles_coll.find_one(
@@ -235,7 +237,7 @@ def _complete_public_turn(
 
 def _run_public_stream_turn(
     req: DirectChatRequest, background_tasks: BackgroundTasks, on_progress,
-    *, debug_enabled: bool = False,
+    *, on_token=None, debug_enabled: bool = False,
 ) -> dict:
     """Public-only stream path; mirrors the V3 branch of direct_chat exactly once."""
     room_id = generate_room_id(req.user_id, req.contact_id)
@@ -260,7 +262,8 @@ def _run_public_stream_turn(
     )
     return _complete_public_turn(
         req, room_id, requested_mentions, mention_overflow, on_progress,
-        background_tasks=background_tasks, user_message_id=user_message.get("message_id"),
+        on_token=on_token, background_tasks=background_tasks,
+        user_message_id=user_message.get("message_id"),
         debug_enabled=debug_enabled,
     )
 
@@ -301,6 +304,15 @@ def _sanitize_public_stream_event(event: dict) -> dict | None:
             "agent_run_id": run_id,
             "outcome": outcome,
             "duration_ms": max(0, int(event.get("duration_ms") or 0)),
+        }
+    if event_type == "token":
+        text = str(event.get("text") or "")
+        if not text:
+            return None
+        return {
+            "type": "token",
+            "agent_run_id": run_id or None,
+            "text": text[:600],
         }
     if event_type == "final" and isinstance(event.get("response"), dict):
         return {"type": "final", "response": event["response"]}
@@ -350,12 +362,17 @@ def direct_chat_stream(
         worker_background_tasks = BackgroundTasks()
         try:
             if req.contact_id == "ai_assistant":
+                def emit_token(fragment: str) -> None:
+                    emit({"type": "token", "agent_run_id": state["agent_run_id"], "text": fragment})
                 if debug_enabled:
                     response = _run_public_stream_turn(
-                        req, worker_background_tasks, emit, debug_enabled=True,
+                        req, worker_background_tasks, emit,
+                        on_token=emit_token, debug_enabled=True,
                     )
                 else:
-                    response = _run_public_stream_turn(req, worker_background_tasks, emit)
+                    response = _run_public_stream_turn(
+                        req, worker_background_tasks, emit, on_token=emit_token,
+                    )
             else:
                 # Stream is intentionally optional for legacy/private contacts;
                 # preserve their established direct-chat behavior as one final event.
