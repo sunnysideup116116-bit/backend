@@ -330,7 +330,7 @@ class V3SchedulerTests(unittest.TestCase):
             },
         }
 
-        def fake_synth(slice_payload, candidate_cards=None):
+        def fake_synth(slice_payload, candidate_cards=None, on_token=None):
             seen_observations["items"] = slice_payload.payload.get("observations", [])
             return ("目前無法解析鹽埕埔站", None, _synth_metrics())
 
@@ -926,7 +926,7 @@ class V3SchedulerTests(unittest.TestCase):
             SubTask(id="t3", agent="synthesizer", depends_on=["t2"], task_brief="彙整"),
         ])
         seen_obs = {}
-        def fake_synth(slice_payload, candidate_cards=None):
+        def fake_synth(slice_payload, candidate_cards=None, on_token=None):
             seen_obs["observations"] = slice_payload.payload.get("observations", [])
             return ("好", None, _synth_metrics())
         def fake_runner(context_slice, *, task_brief):
@@ -1258,7 +1258,7 @@ class V3SchedulerTests(unittest.TestCase):
         ])
         seen_observations = {}
 
-        def fake_synth(slice_payload, candidate_cards=None):
+        def fake_synth(slice_payload, candidate_cards=None, on_token=None):
             seen_observations["observations"] = slice_payload.payload.get("observations", [])
             return ("小晴的資料這次沒查到", None, _synth_metrics())
 
@@ -1295,7 +1295,7 @@ class V3SchedulerTests(unittest.TestCase):
         ])
         seen_observations = {}
 
-        def fake_synth(slice_payload, candidate_cards=None):
+        def fake_synth(slice_payload, candidate_cards=None, on_token=None):
             seen_observations["observations"] = slice_payload.payload.get("observations", [])
             return ("行程查到了，關係資料這次沒查到", None, _synth_metrics())
 
@@ -1444,7 +1444,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
             SubTask(id="t2", agent="synthesizer", depends_on=["t1"], task_brief="彙整"),
         ])
         seen_obs = {}
-        def fake_synth(slice_payload, candidate_cards=None):
+        def fake_synth(slice_payload, candidate_cards=None, on_token=None):
             seen_obs["observations"] = slice_payload.payload.get("observations", [])
             return ("好", None, _synth_metrics())
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
@@ -1473,7 +1473,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
     def test_confirm_path_executes_write_and_relays_reply(self):
         ctx = self._ctx("確認")
         seen_obs = {}
-        def fake_synth(slice_payload, candidate_cards=None):
+        def fake_synth(slice_payload, candidate_cards=None, on_token=None):
             seen_obs["observations"] = slice_payload.payload.get("observations", [])
             return ("好，我開始幫你找", None, _synth_metrics())
         with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
@@ -1702,7 +1702,7 @@ class V3SchedulerOpportunityTests(unittest.TestCase):
             SubTask(id="t1", agent="synthesizer", depends_on=[], task_brief="回覆"),
         ], opportunity=OpportunitySignal(signal="social_opening", evidence_span="一個人去有點孤單", confidence=0.9))
         seen_obs = {}
-        def fake_synth(slice_payload, candidate_cards=None):
+        def fake_synth(slice_payload, candidate_cards=None, on_token=None):
             seen_obs["observations"] = slice_payload.payload.get("observations", [])
             return ("好", None, _synth_metrics())
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
@@ -1987,7 +1987,7 @@ class V3SchedulerReuseTests(unittest.TestCase):
             SubTask(id="t2", agent="synthesizer", depends_on=["t1"], task_brief="彙整"),
         ])
         seen_obs = {}
-        def fake_synth(slice_payload, candidate_cards=None):
+        def fake_synth(slice_payload, candidate_cards=None, on_token=None):
             seen_obs["observations"] = slice_payload.payload.get("observations", [])
             return ("沒查到", None, _synth_metrics())
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \

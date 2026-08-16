@@ -1,6 +1,7 @@
 import json
 import time
 from dataclasses import dataclass
+from typing import Callable
 
 import google.generativeai as genai
 
@@ -150,6 +151,8 @@ def generate_chat_completion(
 
     system_prompt: str | None = None,
 
+    on_token: Callable[[str], None] | None = None,
+
 ) -> ChatResult:
 
     if not OLLAMA_API_KEY:
@@ -177,15 +180,26 @@ def generate_chat_completion(
 
     started = time.perf_counter()
 
-    response = ollama_client.chat(**payload)
+    if on_token is None:
+        response = ollama_client.chat(**payload)
+        content = response["message"]["content"].strip()
+        input_tokens = int(response.get("prompt_eval_count") or 0)
+        output_tokens = int(response.get("eval_count") or 0)
+    else:
+        response = ollama_client.chat(**payload, stream=True)
+        content_parts: list[str] = []
+        input_tokens = 0
+        output_tokens = 0
+        for chunk in response:
+            fragment = (chunk.get("message") or {}).get("content") or ""
+            if fragment:
+                content_parts.append(fragment)
+                on_token(fragment)
+            input_tokens = int(chunk.get("prompt_eval_count") or 0) or input_tokens
+            output_tokens = int(chunk.get("eval_count") or 0) or output_tokens
+        content = "".join(content_parts).strip()
 
     duration_ms = round((time.perf_counter() - started) * 1000)
-
-    content = response["message"]["content"].strip()
-
-    input_tokens = int(response.get("prompt_eval_count") or 0)
-
-    output_tokens = int(response.get("eval_count") or 0)
 
     
 
@@ -234,6 +248,7 @@ def generate_chat_completion_with_tools(
 
     system_prompt: str | None = None,
     prefer_fast_model: bool = False,
+    on_token: Callable[[str], None] | None = None,
 ) -> ToolCallResult:
     """Native function-calling path using Ollama's tools parameter."""
     if not OLLAMA_API_KEY:
@@ -247,17 +262,45 @@ def generate_chat_completion_with_tools(
         options["think"] = _RUNTIME_THINKING_LEVEL
 
     started = time.perf_counter()
-    response = ollama_client.chat(
-        model=effective_model,
-        messages=_chat_messages(prompt, system_prompt),
-        tools=tools,
-        options=options,
-    )
+    if on_token is None:
+        response = ollama_client.chat(
+            model=effective_model,
+            messages=_chat_messages(prompt, system_prompt),
+            tools=tools,
+            options=options,
+        )
+    else:
+        response = ollama_client.chat(
+            model=effective_model,
+            messages=_chat_messages(prompt, system_prompt),
+            tools=tools,
+            options=options,
+            stream=True,
+        )
     duration_ms = round((time.perf_counter() - started) * 1000)
 
-    msg = response.get("message", {})
-    content = (msg.get("content") or "").strip()
-    tool_calls_raw = msg.get("tool_calls") or []
+    content_parts: list[str] = []
+    tool_calls_raw: list[dict] = []
+    input_tokens = 0
+    output_tokens = 0
+    if on_token is None:
+        msg = response.get("message", {})
+        content = (msg.get("content") or "").strip()
+        tool_calls_raw = msg.get("tool_calls") or []
+        input_tokens = int(response.get("prompt_eval_count") or 0)
+        output_tokens = int(response.get("eval_count") or 0)
+    else:
+        for chunk in response:
+            msg = chunk.get("message", {})
+            fragment = (msg.get("content") or "").strip()
+            if fragment:
+                content_parts.append(fragment)
+                on_token(fragment)
+            if msg.get("tool_calls"):
+                tool_calls_raw = msg.get("tool_calls") or []
+            input_tokens = int(chunk.get("prompt_eval_count") or 0) or input_tokens
+            output_tokens = int(chunk.get("eval_count") or 0) or output_tokens
+        content = "".join(content_parts).strip()
     tool_calls = []
     for tc in tool_calls_raw:
         fn = tc.get("function", {})
@@ -266,8 +309,6 @@ def generate_chat_completion_with_tools(
             "arguments": fn.get("arguments", {}) or {},
         })
 
-    input_tokens = int(response.get("prompt_eval_count") or 0)
-    output_tokens = int(response.get("eval_count") or 0)
     return ToolCallResult(
         content=content, tool_calls=tool_calls,
         input_tokens=input_tokens, output_tokens=output_tokens,
