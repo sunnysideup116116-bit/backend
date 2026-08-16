@@ -221,12 +221,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--social-env",
         type=Path,
-        default=server_root / "ayue_for_demo" / "social_demotest" / ".env",
+        default=server_root / "social" / ".env",
     )
     parser.add_argument(
         "--matchmaker-env",
         type=Path,
-        default=server_root / "ayue_for_demo" / "matchmaker_agent" / ".env",
+        default=server_root / "matchmaker_agent" / ".env",
     )
     parser.add_argument("--check-services", action="store_true")
     parser.add_argument("--risk-url", default="http://127.0.0.1:8001/health")

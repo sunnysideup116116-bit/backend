@@ -10,6 +10,7 @@ env/
 ENV/
 agent_env/
 matchmaker_agent/agent_env/
+.local-venv/
 
 # Local secrets / config
 .env
@@ -21,6 +22,7 @@ matchmaker_agent/agent_env/
 ping_out.txt
 test_out.txt
 chat_resp.txt
+.runtime-logs/
 
 # OS / editor
 .DS_Store

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 server_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-service_root="$server_root/ayue_for_demo/matchmaker_agent"
-python_bin="$server_root/ayue_for_demo/.local-venv/matchmaker/bin/python"
+service_root="$server_root/matchmaker_agent"
+python_bin="$server_root/.local-venv/matchmaker/bin/python"
 port="${AYUE_MATCHMAKER_PORT:-9001}"
 
 if [[ ! -x "$python_bin" ]]; then

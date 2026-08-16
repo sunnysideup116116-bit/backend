@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 SERVER_ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = SERVER_ROOT / "integrations" / "ayue_v3_capabilities.py"
+MODULE_PATH = SERVER_ROOT / "tests" / "contracts" / "fixtures" / "ayue_v3_capabilities.py"
 MANIFEST_PATH = SERVER_ROOT / "docs" / "api" / "ayue-v3-mobile-capabilities.json"
 
 

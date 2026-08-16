@@ -3,11 +3,11 @@ from pathlib import Path
 
 
 SERVER_ROOT = Path(__file__).resolve().parents[2]
-CALENDAR = SERVER_ROOT / "ayue_for_demo" / "social_demotest" / "routers" / "calendar.py"
-CALENDAR_SERVICE = SERVER_ROOT / "ayue_for_demo" / "social_demotest" / "services" / "calendar_service.py"
-DATES = SERVER_ROOT / "ayue_for_demo" / "social_demotest" / "routers" / "relationship_dates.py"
-QUIZ = SERVER_ROOT / "ayue_for_demo" / "social_demotest" / "routers" / "relationship_quiz.py"
-MODELS = SERVER_ROOT / "ayue_for_demo" / "social_demotest" / "models.py"
+CALENDAR = SERVER_ROOT / "social" / "routers" / "calendar.py"
+CALENDAR_SERVICE = SERVER_ROOT / "social" / "services" / "calendar_service.py"
+DATES = SERVER_ROOT / "social" / "routers" / "relationship_dates.py"
+QUIZ = SERVER_ROOT / "social" / "routers" / "relationship_quiz.py"
+MODELS = SERVER_ROOT / "social" / "models.py"
 DOCUMENT = SERVER_ROOT / "docs" / "api" / "ayue-v3-calendar-relationship.md"
 
 

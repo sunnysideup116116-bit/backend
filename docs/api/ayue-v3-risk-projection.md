@@ -12,7 +12,7 @@ authenticated request
 -> canonical Ayue V3 or pair-chat flow
 ```
 
-The reference adapter remains at `integrations/ayue_v3_risk_adapter.py`. The live pair-chat boundary is implemented by `social_demotest/services/risk_policy_service.py` and is called by the non-Ayue branch of `routers/public_chat.py` before receiver-visible persistence. Public V3 and Private V2 orchestration are unchanged.
+The reference adapter remains at `tests/contracts/fixtures/ayue_v3_risk_adapter.py`. The live pair-chat boundary is implemented by `social/services/risk_policy_service.py` and is called by the non-Ayue branch of `routers/public_chat.py` before receiver-visible persistence. Public V3 and Private V2 orchestration are unchanged.
 
 ## Delivery policy
 

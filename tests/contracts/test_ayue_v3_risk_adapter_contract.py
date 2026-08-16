@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 
 SERVER_ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = SERVER_ROOT / "integrations" / "ayue_v3_risk_adapter.py"
+MODULE_PATH = SERVER_ROOT / "tests" / "contracts" / "fixtures" / "ayue_v3_risk_adapter.py"
 DOCUMENT = SERVER_ROOT / "docs" / "api" / "ayue-v3-risk-projection.md"
 
 
