@@ -5,10 +5,10 @@ from pathlib import Path
 
 
 SERVER_ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = SERVER_ROOT / "integrations" / "ayue_v3_contracts.py"
+MODULE_PATH = SERVER_ROOT / "tests" / "contracts" / "fixtures" / "ayue_v3_contracts.py"
 SCHEMA_PATH = SERVER_ROOT / "docs" / "api" / "ayue-v3-match-decision.schema.json"
-MATCH_ROUTER = SERVER_ROOT / "ayue_for_demo" / "social_demotest" / "routers" / "match.py"
-WEBSITE = SERVER_ROOT / "ayue_for_demo" / "social_demotest" / "frontend.html"
+MATCH_ROUTER = SERVER_ROOT / "social" / "routers" / "match.py"
+WEBSITE = SERVER_ROOT / "social" / "frontend.html"
 
 
 def load_contracts():

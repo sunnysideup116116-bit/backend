@@ -1,6 +1,6 @@
 # Ayue V3 Website-to-Flutter UI Contract
 
-`Server/ayue_for_demo/social_demotest/frontend.html` is the executable visual reference. Flutter may adapt spacing and platform controls, but must preserve the same states, actions, concurrency rules, privacy boundaries, and fallback behavior.
+`Server/social/frontend.html` is the executable visual reference. Flutter may adapt spacing and platform controls, but must preserve the same states, actions, concurrency rules, privacy boundaries, and fallback behavior.
 
 ## Universal rules
 

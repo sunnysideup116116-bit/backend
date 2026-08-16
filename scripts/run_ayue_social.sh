@@ -2,8 +2,8 @@
 set -euo pipefail
 
 server_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-service_root="$server_root/ayue_for_demo/social_demotest"
-python_bin="$server_root/ayue_for_demo/.local-venv/social/bin/python"
+service_root="$server_root/social"
+python_bin="$server_root/.local-venv/social/bin/python"
 port="${AYUE_SOCIAL_PORT:-8000}"
 
 if [[ ! -x "$python_bin" ]]; then

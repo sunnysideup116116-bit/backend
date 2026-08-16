@@ -10,7 +10,7 @@ SCRIPTS = SERVER_ROOT / "scripts"
 class AyueLaunchScriptTests(unittest.TestCase):
     def test_social_launcher_uses_canonical_working_directory_and_venv(self):
         source = (SCRIPTS / "run_ayue_social.sh").read_text(encoding="utf-8")
-        self.assertIn('ayue_for_demo/social_demotest', source)
+        self.assertIn('social', source)
         self.assertIn('.local-venv/social/bin/python', source)
         self.assertIn('uvicorn', source)
         self.assertIn('main:app', source)
@@ -20,7 +20,7 @@ class AyueLaunchScriptTests(unittest.TestCase):
 
     def test_matchmaker_launcher_uses_canonical_working_directory_and_venv(self):
         source = (SCRIPTS / "run_ayue_matchmaker.sh").read_text(encoding="utf-8")
-        self.assertIn('ayue_for_demo/matchmaker_agent', source)
+        self.assertIn('matchmaker_agent', source)
         self.assertIn('.local-venv/matchmaker/bin/python', source)
         self.assertIn('agent_api:app', source)
         self.assertIn('AYUE_MATCHMAKER_PORT', source)

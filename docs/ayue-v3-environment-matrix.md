@@ -6,8 +6,8 @@ The table records variable names and public defaults only. Secret values from `s
 
 | Service | Working directory | Dotenv path | Isolated Python |
 |---|---|---|---|
-| Social / Public Ayue V3 / Private Ayue V2 | `Server/ayue_for_demo/social_demotest` | `Server/ayue_for_demo/social_demotest/.env` through `load_dotenv()` | `Server/ayue_for_demo/.local-venv/social/bin/python` |
-| Matchmaker | `Server/ayue_for_demo/matchmaker_agent` | Explicit `Server/ayue_for_demo/matchmaker_agent/.env` | `Server/ayue_for_demo/.local-venv/matchmaker/bin/python` |
+| Social / Public Ayue V3 / Private Ayue V2 | `Server/social` | `Server/social/.env` through `load_dotenv()` | `Server/.local-venv/social/bin/python` |
+| Matchmaker | `Server/matchmaker_agent` | Explicit `Server/matchmaker_agent/.env` | `Server/.local-venv/matchmaker/bin/python` |
 | Risk backend | `Server/risk_backend` | Existing risk configuration; not copied into Ayue dotenv files | Existing Server environment |
 | Guardrail classifier | standalone `llama-server` | `Server/.env` model path, alias, port, timeout and retry budget | Native binary configured by `GUARDRAIL_SERVER_BIN` |
 

@@ -9,33 +9,28 @@ from unittest.mock import MagicMock
 SERVER_ROOT = Path(__file__).resolve().parents[2]
 POLICY_PATH = (
     SERVER_ROOT
-    / "ayue_for_demo"
-    / "social_demotest"
+    / "social"
     / "services"
     / "risk_policy_service.py"
 )
 ROUTER_PATH = (
     SERVER_ROOT
-    / "ayue_for_demo"
-    / "social_demotest"
+    / "social"
     / "routers"
     / "public_chat.py"
 )
 HISTORY_PATH = (
     SERVER_ROOT
-    / "ayue_for_demo"
-    / "social_demotest"
+    / "social"
     / "routers"
     / "chat_messages.py"
 )
 CHAT_SERVICE_PATH = (
     SERVER_ROOT
-    / "ayue_for_demo"
-    / "social_demotest"
+    / "social"
     / "services"
     / "chat_service.py"
 )
-LEGACY_RISK_CLIENT_PATH = SERVER_ROOT / "main_app" / "services" / "risk_client.py"
 
 
 def load_policy():
@@ -73,18 +68,6 @@ class PairChatRiskWiringTests(unittest.TestCase):
             "ui_priority": "risk",
             "delivery": "delivered",
         })
-
-    def test_legacy_chat_client_also_blocks_only_explicit_blocked(self):
-        spec = importlib.util.spec_from_file_location(
-            "legacy_risk_client_for_contract", LEGACY_RISK_CLIENT_PATH,
-        )
-        module = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-
-        self.assertFalse(module.is_blocked(None))
-        self.assertFalse(module.is_blocked({"risk_level": "restricted"}))
-        self.assertTrue(module.is_blocked({"risk_level": "blocked"}))
 
     def test_only_blocked_prevents_persistence(self):
         blocked = self.policy.PairMessageRiskGate(

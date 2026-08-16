@@ -1,9 +1,0 @@
-Flask
-Flask-CORS
-google-genai
-pymongo
-certifi
-requests
-PyPDF2
-openai
-python-dotenv

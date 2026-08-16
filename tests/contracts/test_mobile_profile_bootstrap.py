@@ -3,9 +3,9 @@ from pathlib import Path
 
 
 SERVER_ROOT = Path(__file__).resolve().parents[2]
-MODELS = SERVER_ROOT / "ayue_for_demo" / "social_demotest" / "models.py"
-ROUTER = SERVER_ROOT / "ayue_for_demo" / "social_demotest" / "routers" / "chat_onboarding.py"
-SERVICE = SERVER_ROOT / "ayue_for_demo" / "social_demotest" / "services" / "assessment_session_service.py"
+MODELS = SERVER_ROOT / "social" / "models.py"
+ROUTER = SERVER_ROOT / "social" / "routers" / "chat_onboarding.py"
+SERVICE = SERVER_ROOT / "social" / "services" / "assessment_session_service.py"
 DOCUMENT = SERVER_ROOT / "docs" / "api" / "ayue-v3-mobile-bootstrap.md"
 
 

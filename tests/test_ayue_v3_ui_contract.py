@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 SERVER_ROOT = Path(__file__).resolve().parents[1]
-FRONTEND = SERVER_ROOT / "ayue_for_demo" / "social_demotest" / "frontend.html"
+FRONTEND = SERVER_ROOT / "social" / "frontend.html"
 CONTRACT = SERVER_ROOT / "docs" / "ayue-v3-ui-contract.md"
 
 

@@ -7,7 +7,7 @@ This file records only integration changes to the canonical Ayue V3 backend impo
 - Upstream repository: `https://github.com/chenjia0510/ayue_for_demo.git`
 - Upstream branch: `main`
 - Upstream commit: `dfe78136ad75a911c8b9fae95e1e9da0b97752cf`
-- Canonical imported location: `Server/ayue_for_demo/`
+- Canonical imported location: `Server/`
 - Import date: 2026-08-12 (Asia/Taipei)
 
 ## Change 001: Preserve the new backend as an isolated canonical subtree
@@ -22,10 +22,10 @@ This file records only integration changes to the canonical Ayue V3 backend impo
 
 **After:**
 
-- The verified upstream source is preserved at `Server/ayue_for_demo/`.
+- The verified upstream source is preserved at `Server/`.
 - Existing Server components remain unchanged in their original paths.
-- New/old behavior conflicts will be resolved in favor of `Server/ayue_for_demo/`.
-- The bundled `social_demotest/frontend.html` and image assets remain the visual reference for Flutter integration.
+- New/old behavior conflicts will be resolved in favor of `Server/`.
+- The bundled `social/frontend.html` and image assets remain the visual reference for Flutter integration.
 - The local-only `social.env` and upstream `.git` directory were not imported.
 
 **Canonical backend files modified:** None. The upstream files were imported without content changes.
@@ -41,7 +41,7 @@ This file records only integration changes to the canonical Ayue V3 backend impo
 
 **After:**
 
-- `ayue_for_demo/.local-venv/social` is reserved for `social_demotest/requirements.txt`.
+- `ayue_for_demo/.local-venv/social` is reserved for `social/requirements.txt`.
 - `ayue_for_demo/.local-venv/matchmaker` is reserved for `matchmaker_agent/requirements.txt`.
 - Both directories remain ignored by the imported `.gitignore`.
 - Neither upstream requirements file was changed.
@@ -61,7 +61,7 @@ This file records only integration changes to the canonical Ayue V3 backend impo
 
 **After:**
 
-- `scripts/provision_ayue_v3_env.sh` selects only canonical social keys into ignored `social_demotest/.env`.
+- `scripts/provision_ayue_v3_env.sh` selects only canonical social keys into ignored `social/.env`.
 - It selects only matchmaker LLM, Neo4j, and ranking keys into ignored `matchmaker_agent/.env`.
 - Both generated files use permission mode `600`.
 - Removed rollout flags are not migrated.
@@ -101,8 +101,8 @@ This file records only integration changes to the canonical Ayue V3 backend impo
 
 - `docs/ayue-v3-ui-contract.md` maps website states and actions to intended Flutter components.
 - `docs/api/` contains versioned stream, response, match, bootstrap, calendar/relationship, safety, and capability contracts.
-- `integrations/ayue_v3_contracts.py` provides a reference NDJSON decoder, public event validator, and match-card client guards.
-- `integrations/ayue_v3_capabilities.py` derives safe place-card availability from configuration without exposing keys.
+- `tests/contracts/fixtures/ayue_v3_contracts.py` provides a reference NDJSON decoder, public event validator, and match-card client guards.
+- `tests/contracts/fixtures/ayue_v3_capabilities.py` derives safe place-card availability from configuration without exposing keys.
 - Match revision remains optional to match the canonical website's current status-CAS behavior; clients echo revision only when supplied.
 - Risk projection remains advertised as unavailable until it is wired into the canonical HTTP path.
 
@@ -119,7 +119,7 @@ This file records only integration changes to the canonical Ayue V3 backend impo
 
 **After:**
 
-- `integrations/ayue_v3_risk_adapter.py` defines bounded risk requests, an idempotency cache, explicit allow/block/local-guard policies, a single-use persistence permit, and a receiver-history filter.
+- `tests/contracts/fixtures/ayue_v3_risk_adapter.py` defines bounded risk requests, an idempotency cache, explicit allow/block/local-guard policies, a single-use persistence permit, and a receiver-history filter.
 - Public projection excludes raw diagnosis, risk state, classifier evidence, and prompts.
 - The adapter is intentionally not imported by canonical routers and therefore does not change live backend behavior yet.
 
@@ -217,11 +217,11 @@ This file records only integration changes to the canonical Ayue V3 backend impo
 
 **Canonical backend files modified:**
 
-- `ayue_for_demo/social_demotest/models.py`
-- `ayue_for_demo/social_demotest/routers/public_chat.py`
-- `ayue_for_demo/social_demotest/routers/chat_messages.py`
-- `ayue_for_demo/social_demotest/services/chat_service.py`
-- `ayue_for_demo/social_demotest/services/risk_policy_service.py` (new)
+- `ayue_for_demo/social/models.py`
+- `ayue_for_demo/social/routers/public_chat.py`
+- `ayue_for_demo/social/routers/chat_messages.py`
+- `ayue_for_demo/social/services/chat_service.py`
+- `ayue_for_demo/social/services/risk_policy_service.py` (new)
 
 ## Change 012: Make the Calendar coordination index valid on deployed MongoDB
 
@@ -239,7 +239,7 @@ This file records only integration changes to the canonical Ayue V3 backend impo
 
 **Canonical backend files modified:**
 
-- `ayue_for_demo/social_demotest/services/calendar_service.py`
+- `ayue_for_demo/social/services/calendar_service.py`
 
 ## Change 013: Render typed GIF messages and stabilize Flutter chat history
 
@@ -283,7 +283,7 @@ This file records only integration changes to the canonical Ayue V3 backend impo
 
 **Canonical backend files/symbols modified:**
 
-- `ayue_for_demo/social_demotest/services/risk_policy_service.py`: `PairMessageRiskGate.__init__`, `PairMessageRiskGate.evaluate`
+- `ayue_for_demo/social/services/risk_policy_service.py`: `PairMessageRiskGate.__init__`, `PairMessageRiskGate.evaluate`
 - `main_app/services/risk_client.py`: timeout fallback and `is_blocked` delivery semantics
 - `risk_backend/app/services/chat_log_service.py`: `ChatLogService.log_analysis_detail`
 - `risk_backend/app/core/llm_adapters.py`: `call_with_retry`, `OpenAICompatAdapter`, `_make_openai_compat`, `get_guardrail_classifier_adapter`
@@ -294,7 +294,7 @@ This file records only integration changes to the canonical Ayue V3 backend impo
 - `risk_backend/app/utils/reset_db.py`: `reset_collections`
 - `risk_backend/db_setup/appwrite_schema_dump.json`
 - `risk_backend/db_setup/migrate_appwrite_schema.py` (new)
-- `integrations/ayue_v3_risk_adapter.py`
+- `tests/contracts/fixtures/ayue_v3_risk_adapter.py`
 - `scripts/provision_ayue_v3_env.sh`, `run_ayue_risk.sh`, `run_ayue_guardrail.sh`, `start_ayue_services.sh`, `check_ayue_services.sh`, `validate_ayue_v3_environment.py`
 - Risk projection, capability, environment, database setup, and startup documentation
 
@@ -324,8 +324,8 @@ This file records only integration changes to the canonical Ayue V3 backend impo
 
 **Canonical backend files/symbols modified:**
 
-- `ayue_for_demo/social_demotest/routers/public_chat.py`: `direct_chat`
-- `ayue_for_demo/social_demotest/frontend.html`: pair response rendering guard
+- `ayue_for_demo/social/routers/public_chat.py`: `direct_chat`
+- `ayue_for_demo/social/frontend.html`: pair response rendering guard
 - `docs/ayue-v3-ui-contract.md`
 - Flutter runtime changes are confined to `DatingApp/lib/`.
 

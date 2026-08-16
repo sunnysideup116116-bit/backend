@@ -1,2 +1,0 @@
-run python app.py
-open index.html with google

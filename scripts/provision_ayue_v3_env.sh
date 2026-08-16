@@ -2,12 +2,12 @@
 set -euo pipefail
 
 server_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-canonical_root="$server_root/ayue_for_demo"
+canonical_root="$server_root"
 supplied_social_env="${AYUE_SOCIAL_ENV_SOURCE:-/home/sunny/下載/ayue_for_demo-main/social.env}"
 existing_server_env="${AYUE_SERVER_ENV_SOURCE:-$server_root/.env}"
-social_example="$canonical_root/social_demotest/.env.example"
+social_example="$canonical_root/social/.env.example"
 matchmaker_example="$canonical_root/matchmaker_agent/.env.example"
-social_target="$canonical_root/social_demotest/.env"
+social_target="$canonical_root/social/.env"
 matchmaker_target="$canonical_root/matchmaker_agent/.env"
 
 for required_file in "$supplied_social_env" "$existing_server_env" "$social_example" "$matchmaker_example"; do
