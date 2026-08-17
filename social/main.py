@@ -1,5 +1,7 @@
+import os
 import sys
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from routers import calendar, chat, match, system, frontend
 from routers.match import ensure_match_indexes
 from services.calendar_service import ensure_calendar_indexes
@@ -18,6 +20,25 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 app = FastAPI(title="Profiling System API", description="AI Matchmaker API Backend")
+
+# CORS: allow browser clients (e.g. the Flutter web build hosted on GitHub
+# Pages) to call this API. Mobile apps are unaffected by CORS.
+# With allow_credentials=True the browser requires explicit origins (no
+# wildcard), so GitHub Pages origins are matched via regex; additional
+# origins can be supplied via the CORS_ORIGINS env var (comma-separated).
+_cors_origins = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_origin_regex=r"https://.*\.github\.io",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(frontend.router)
 app.include_router(chat.router)
