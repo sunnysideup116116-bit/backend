@@ -1,6 +1,7 @@
 import unittest
 
 from services.ayue_agent.contracts import PublicAgentTurnContext, TurnClockV1
+from services.conversation_compaction_contracts import ConversationSummaryV1
 from services.ayue_agent.v3.context_slicer import slice_for_agent
 
 
@@ -48,10 +49,39 @@ class V3ContextSlicerTests(unittest.TestCase):
         self.assertNotIn("user_location", s.payload)
         self.assertNotIn("recent_context", s.payload)
 
-    def test_relationship_slice_excludes_calendar_and_match_details(self):
+    def test_match_slice_carries_bounded_continuity_and_event_invitation(self):
+        self.turn.conversation_continuity = ConversationSummaryV1(
+            active_topics=["週末想逛市集"], owner_goals=["找人一起去"],
+        )
+        self.turn.active_event_invitation = {
+            "status": "draft", "stage": "waiting_user", "event_title": "港邊市集",
+            "counterparty": "小安", "user_can_decide": True, "proposal_revision": 3,
+        }
+        sliced = slice_for_agent("match", self.turn, prior_observations=[])
+        self.assertEqual(sliced.payload["active_event_invitation"], {
+            "status": "draft", "event_title": "港邊市集", "counterparty": "小安",
+            "user_can_decide": True,
+        })
+        self.assertEqual(sliced.payload["conversation_continuity"], {
+            "active_topics": ["週末想逛市集"], "owner_goals": ["找人一起去"],
+            "known_continuity": [], "unresolved_questions": [],
+            "ayue_commitments": [], "recent_decisions": [],
+        })
+
+    def test_web_slice_excludes_internal_profile_and_caps_history(self):
+        self.turn.recent_messages = [
+            {"role": "user", "content": f"msg {i}"} for i in range(8)
+        ]
+        s = slice_for_agent("web", self.turn, prior_observations=[])
+        self.assertEqual(s.agent, "web")
+        self.assertNotIn("recent_context", s.payload)
+        self.assertNotIn("active_proposal", s.payload)
+        self.assertLessEqual(len(s.payload["recent_messages"]), 4)
+
+    def test_relationship_slice_contains_only_public_relationship_fields(self):
         s = slice_for_agent("relationship", self.turn, prior_observations=[])
         self.assertEqual(s.agent, "relationship")
-        self.assertIn("mentioned_contacts", s.payload)
+        self.assertIn("clock", s.payload)
         self.assertIn("recent_messages", s.payload)
         self.assertNotIn("active_proposal", s.payload)
 
@@ -63,13 +93,15 @@ class V3ContextSlicerTests(unittest.TestCase):
         self.assertNotIn("active_proposal", s.payload)
         self.assertNotIn("user_location", s.payload)
 
-    def test_synthesizer_slice_contains_all_observations(self):
+    def test_synthesizer_slice_contains_all_observations_and_user_preferences(self):
         prior = [{"task_id": "t1", "tool": "calendar.list_my_events", "result": {"events": []}}]
         s = slice_for_agent("synthesizer", self.turn, prior_observations=prior)
         self.assertEqual(s.agent, "synthesizer")
         self.assertIn("observations", s.payload)
         self.assertEqual(s.payload["observations"], prior)
         self.assertIn("recent_messages", s.payload)
+        self.assertIn("user_preferences", s.payload)
+        self.assertEqual(s.payload["user_preferences"], ["喜歡戶外活動"])
 
     def test_prior_observations_injected_into_dependent_places_slice(self):
         prior = [{"task_id": "t2", "tool": "places.search_nearby", "result": {"places": [{"name": "陽明山國家公園"}]}}]
@@ -78,8 +110,6 @@ class V3ContextSlicerTests(unittest.TestCase):
         self.assertEqual(s.payload["prior_observations"], prior)
 
     def test_calendar_write_slice_carries_find_candidates(self):
-        # 修改/取消行程：read task 的 find_my_event ambiguous+candidates 必須
-        # 完整進入 write task 的 context，write agent 才能比對候選後再提出寫入。
         prior = [{
             "task_id": "t1", "status": "ok", "tool": "calendar.find_my_event",
             "result": {

@@ -243,6 +243,9 @@ Editorial grounded recommendation contract:
   "對方" when a public name is available. A pending match/proposal is a separate state and must not be presented
   as an accepted contact.
 
+User preferences contract:
+- When user_preferences are provided in the context data (e.g. food tastes, dietary restrictions, favorite activities), naturally respect and incorporate them when making suggestions or chatting. Do not mechanically recite them as a bulleted checklist.
+
 Web research grounding contract:
 - When an observation contains schema_version=web_research.v1, use its research_question and answer_target as the question authority.
 - For Web-only `web_research.v1` results in any valid status (`answered`, `partial`, `insufficient_evidence`, `degraded`, or `unavailable`), compose a natural answer from that typed result first; preserve its limitation or unavailable status and do not require fixed headings or list formatting.
@@ -300,7 +303,9 @@ def _build_prompt(slice_payload: dict[str, Any], candidate_summaries: list[dict[
             ),
         },
         "recent_messages": slice_payload.get("recent_messages") or [],
+        "conversation_continuity": slice_payload.get("conversation_continuity") or None,
         "background_memory": str(slice_payload.get("recent_context") or "").strip()[:300],
+        "user_preferences": list(slice_payload.get("user_preferences") or []),
         "user_location": slice_payload.get("user_location") or "",
         "clock": slice_payload.get("clock") or {},
         "candidate_cards": candidate_summaries,

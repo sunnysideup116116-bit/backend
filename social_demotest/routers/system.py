@@ -19,6 +19,7 @@ from services.ayue_agent.web_tools import web_enabled
 from services.profile_location import normalize_profile_location, safe_profile_location
 from services.ayue_agent.public_relationship_projection import anonymize_counterparty_payload
 from services.match_reason_service import V4_REASON_VERSION, reason_for_viewer
+from services.proposal_namespace import namespace_for_document
 from services.demo_cleanup_service import DemoCleanupError, clear_all_demo_state, graph_health
 
 router = APIRouter(prefix="/api", tags=["System"])
@@ -125,12 +126,26 @@ def init_system(user_id: str):
         mediator_tone_selected = bool(my_doc.get("mediator_tone_selected", False))
         probe_mode = my_doc.get("probe_mode", "balanced")
         profile_memories = normalize_model_text(my_doc.get("profile_memory_preview", []))
+        if not profile_memories:
+            try:
+                from services.memory_service import get_user_graph_memories, memory_summary
+                graph_memories = get_user_graph_memories(user_id, limit=12)
+                if graph_memories:
+                    profile_memories = graph_memories
+                    profiles_coll.update_one(
+                        {"user_id": user_id},
+                        {"$set": {
+                            "profile_memory_preview": graph_memories,
+                            "profile_memory_summary": memory_summary(graph_memories),
+                        }}
+                    )
+            except Exception:
+                pass
         context_revision = int(my_doc.get("current_context_revision", 0))
         match_search = my_doc.get("match_search", {"status": "idle"})
         onboarding_completed = bool(my_doc.get("onboarding_completed", False))
         my_initial_interest = normalize_zh_tw(my_doc.get("initial_interest"), max_length=120) or None
         user_location = safe_profile_location(my_doc)
-                
     return {
         "users": users,
         "is_complete": is_complete,
@@ -314,6 +329,8 @@ def get_notifications(user_id: str):
         if p.get("reason_version") == V4_REASON_VERSION:
             results.append({
                 "match_id": str(p["_id"]),
+                "proposal_namespace": namespace_for_document(p),
+                "proposal_revision": int(p.get("proposal_revision", 0) or 0),
                 "viewer_reason": viewer_reason,
                 # Compatibility aliases contain the same receiver projection;
                 # they do not expose the initiator preview.
@@ -336,6 +353,8 @@ def get_notifications(user_id: str):
         ) if from_doc else []
         results.append({
             "match_id": str(p["_id"]),
+            "proposal_namespace": namespace_for_document(p),
+            "proposal_revision": int(p.get("proposal_revision", 0) or 0),
             "from_user": p["from_user"],
             "reason": anonymize_counterparty_payload(
                 p["reason"], p["from_user"], counterparty_name=from_name,
@@ -432,7 +451,23 @@ def undo_recent_context(req: ClearRequest):
 @router.get("/profile/memories")
 def get_profile_memories(user_id: str):
     doc = profiles_coll.find_one({"user_id": user_id}, {"profile_memory_preview": 1, "profile_memory_summary": 1}) or {}
-    return {"memories": doc.get("profile_memory_preview", []), "summary": doc.get("profile_memory_summary", "")}
+    memories = doc.get("profile_memory_preview", [])
+    if not memories:
+        try:
+            from services.memory_service import get_user_graph_memories, memory_summary
+            graph_memories = get_user_graph_memories(user_id, limit=12)
+            if graph_memories:
+                memories = graph_memories
+                profiles_coll.update_one(
+                    {"user_id": user_id},
+                    {"$set": {
+                        "profile_memory_preview": graph_memories,
+                        "profile_memory_summary": memory_summary(graph_memories),
+                    }}
+                )
+        except Exception:
+            pass
+    return {"memories": memories, "summary": doc.get("profile_memory_summary", "")}
 
 @router.post("/profile/memories/action")
 def profile_memory_action(req: ProfileMemoryActionRequest):

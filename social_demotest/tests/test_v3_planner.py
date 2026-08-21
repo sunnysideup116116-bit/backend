@@ -217,6 +217,25 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(normalized, arguments)
         self.assertIsNot(normalized, arguments)
 
+    def test_unhashable_optional_provider_value_reaches_strict_validation(self):
+        arguments = {"tasks": [{
+            "id": "p1", "agent": "places", "depends_on": [],
+            "task_brief": "找地方", "evidence_policy": {"unexpected": "value"},
+        }]}
+
+        normalized, codes = _normalize_provider_plan_arguments(arguments)
+
+        self.assertEqual(normalized, arguments)
+        self.assertEqual(codes, [])
+
+        malformed_agent = {"tasks": [{
+            "id": "p1", "agent": {"unexpected": "places"},
+            "depends_on": [], "task_brief": "找地方",
+        }]}
+        normalized, codes = _normalize_provider_plan_arguments(malformed_agent)
+        self.assertEqual(normalized, malformed_agent)
+        self.assertEqual(codes, [])
+
     def test_invalid_unknown_and_graph_drift_are_not_repaired(self):
         cases = [
             {"agent": "places", "evidence_policy": "not-valid"},
@@ -438,6 +457,35 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(provider.call_count, 2)
         self.assertEqual(metrics.retry_reason, "invalid_arguments")
         self.assertEqual(metrics.direct_chat_fallback_reason, "")
+
+    def test_unhashable_optional_value_retries_instead_of_crashing_stream(self):
+        turn = self._turn("陪我聊聊天")
+        malformed = {
+            "mode": "tasks",
+            "tasks": [{
+                "id": "s1", "agent": "synthesizer", "depends_on": [],
+                "task_brief": "自然回覆", "evidence_policy": {"bad": "shape"},
+            }],
+        }
+        repaired = {
+            "mode": "direct_chat", "tasks": [], "direct_reply": "好啊，最近怎麼了？",
+        }
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            side_effect=[
+                _fc_result(tool_calls=[{
+                    "name": "decompose_tasks", "arguments": malformed,
+                }]),
+                _fc_result(tool_calls=[{
+                    "name": "decompose_tasks", "arguments": repaired,
+                }]),
+            ],
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+
+        self.assertEqual(plan.mode, "direct_chat")
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(metrics.retry_reason, "invalid_arguments")
 
     def test_legacy_product_info_mode_is_repaired_into_normal_dag(self):
         turn = self._turn("你跟這個 App 是做什麼的？")

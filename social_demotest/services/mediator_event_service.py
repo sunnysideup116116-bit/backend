@@ -9,6 +9,7 @@ EVENT_PRIORITIES = {
     "match_proposal": 100,
     "incoming_match_interest": 100,
     "match_connected": 90,
+    "event_invitation_accepted": 90,
     "match_connected_gif": 85,
     "probe_result": 80,
     "gentle_closure": 80,

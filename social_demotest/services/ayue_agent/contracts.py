@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from services.conversation_compaction_contracts import ConversationSummaryV1
 
 
 class DecisionKind(str, Enum):
@@ -79,10 +80,12 @@ class PublicAgentTurnContext(BaseModel):
     room_id: str
     message: str
     recent_messages: list[dict[str, str]] = Field(default_factory=list)
+    conversation_continuity: ConversationSummaryV1 | None = None
     recent_context: str = ""
     user_location: str = ""
     relevant_memories: list[str] = Field(default_factory=list)
     active_proposal: dict[str, Any] | None = None
+    active_event_invitation: dict[str, Any] | None = None
     latest_match_outcome: dict[str, Any] | None = None
     calendar_draft: dict[str, Any] | None = None
     calendar_recent_reference: dict[str, Any] | None = None
