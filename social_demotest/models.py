@@ -21,6 +21,17 @@ class MatchRequest(BaseModel):
     force_new: bool = False
     confirmed: bool = False
 
+class ProactiveEventRequest(BaseModel):
+    user_id: str
+
+class EventOpportunityScanRequest(BaseModel):
+    max_proposals: int = Field(default=3, ge=1, le=10)
+
+class EventDiscoveryRequest(BaseModel):
+    region: str = "高雄"
+    window_days: int = Field(default=30, ge=1, le=60)
+    categories: list[str] | None = None
+
 class ClearRequest(BaseModel):
     user_id: str
 
@@ -34,6 +45,7 @@ class MatchDecisionRequest(AcceptRequest):
     action: str
     expected_status: str
     expected_revision: int | None = None
+    proposal_namespace: str | None = None
 
 class DirectChatRequest(BaseModel):
     user_id: str

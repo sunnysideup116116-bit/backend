@@ -12,7 +12,9 @@ import uuid
 from typing import Any
 
 from database import db
-from services.match_action_service import decide_active_proposal, start_match_search
+from services.match_action_service import (
+    decide_active_event_invitation, decide_active_proposal, start_match_search,
+)
 from services.assessment_session_service import start_assessment_session
 from services.ayue_agent.match_opportunity import (
     assess_match_opportunity, missing_basis_question,
@@ -108,6 +110,38 @@ def _decide_active_proposal(
         return True, "好，我已更新這張牽線提案。" if decision == "interested" else "好，這張提案已替你婉拒。", None
     except Exception as exc:
         return False, "我現在不能安全地更新這張提案。", type(exc).__name__
+
+
+def _decide_active_event_invitation(
+    ctx: Any, turn: Any, run_id: str, index: int,
+    arguments: dict[str, Any], payload: dict[str, Any] | None,
+) -> tuple[bool, str, str | None]:
+    invitation = turn.active_event_invitation or {}
+    decision = str(arguments.get("decision") or "")
+    expected_revision = int((payload or {}).get("proposal_revision", 0) or 0)
+    if (
+        not invitation.get("user_can_decide")
+        or decision not in {"interested", "declined"}
+        or expected_revision <= 0
+        or int(invitation.get("proposal_revision", 0) or 0) != expected_revision
+    ):
+        return False, "目前沒有一張可由你決定的活動牽線邀請。", "event_decision_not_actionable"
+    try:
+        outcome = decide_active_event_invitation(
+            user_id=ctx.user_id,
+            decision=decision,
+            expected_revision=expected_revision,
+            idempotency_key=_idempotency_key(None, run_id, index, suffix="event_invitation"),
+        )
+        if outcome.get("stale"):
+            return True, "這張活動邀請剛剛已更新，我沒有覆寫最新結果。", "stale_revision"
+        if outcome.get("status") != "success":
+            return False, "我現在不能安全地更新這張活動邀請。", str(outcome.get("status") or "event_decision_failed")
+        if decision == "interested":
+            return True, "好，我已替你對這張活動邀請表示有興趣。", None
+        return True, "好，這張活動邀請已替你婉拒。", None
+    except Exception as exc:
+        return False, "我現在不能安全地更新這張活動邀請。", type(exc).__name__
 
 
 def _start_assessment(ctx: Any, arguments: dict[str, Any], *, confirmation_id: str | None) -> tuple[bool, str, str | None]:
@@ -490,6 +524,7 @@ def _calendar_execute(
 _WRITE_EXECUTORS = {
     "match.start_search": lambda ctx, turn, run_id, index, args, cid, payload: _start_search(ctx, run_id, index, confirmation_id=cid),
     "match.decide_active_proposal": lambda ctx, turn, run_id, index, args, cid, payload: _decide_active_proposal(ctx, turn, run_id, index, args, payload),
+    "match.decide_active_event_invitation": lambda ctx, turn, run_id, index, args, cid, payload: _decide_active_event_invitation(ctx, turn, run_id, index, args, payload),
     "profile.start_assessment": lambda ctx, turn, run_id, index, args, cid, payload: _start_assessment(ctx, args, confirmation_id=cid),
     "relationship.start_date_coordination": _start_date_coordination,
 }
@@ -528,6 +563,21 @@ def prepare_write_confirmation(
             "arguments": {"decision": decision},
             "data": {"proposal_revision": revision},
         }, f"要對 {counterparty} 的提案{action_label}嗎？確認後我才會送出。"
+    if tool_name == "match.decide_active_event_invitation":
+        invitation = turn.active_event_invitation or {}
+        decision = str(arguments.get("decision") or "")
+        if not invitation.get("user_can_decide") or decision not in {"interested", "declined"}:
+            return None, "目前沒有一張可由你決定的活動牽線邀請。"
+        revision = int(invitation.get("proposal_revision", 0) or 0)
+        if revision <= 0:
+            return None, "這張活動邀請的狀態已更新，請重新查看後再決定。"
+        title = str(invitation.get("event_title") or "這個活動")[:80]
+        action_label = "表示有興趣" if decision == "interested" else "婉拒"
+        return {
+            "action": tool_name,
+            "arguments": {"decision": decision},
+            "data": {"proposal_revision": revision},
+        }, f"要對「{title}」的活動牽線邀請{action_label}嗎？確認後我才會送出。"
     if tool_name == "relationship.start_date_coordination":
         return _prepare_date_coordination(arguments, ctx, turn)
     if tool_name == "profile.start_assessment":

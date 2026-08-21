@@ -381,6 +381,18 @@
             font-size: 12px;
         }
 
+        .event-proposal-details {
+            margin-top: 12px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(138, 82, 56, .22);
+            font-size: 12px;
+            line-height: 1.55;
+        }
+
+        .event-proposal-title { color: #9a4f2b; font-size: 14px; font-weight: 800; }
+        .event-proposal-meta { display: grid; gap: 3px; margin-top: 6px; opacity: .88; }
+        .event-proposal-source { display: inline-block; margin-top: 8px; color: #9a4f2b; font-weight: 700; }
+
         #mediator-private-panel {
             background: #1b1032;
             border-left: 4px solid var(--pixel-yellow);
@@ -977,6 +989,25 @@
                             <div class="flex justify-between gap-2"><span>近期情境</span><span id="demo-recent-context" class="truncate">—</span></div>
                             <div class="flex justify-between gap-2"><span>Graph</span><span id="demo-graph-status">unknown</span></div>
                             <div class="flex justify-between gap-2"><span>配對搜尋</span><span id="demo-match-status">—</span></div>
+                            <div class="flex justify-between gap-2"><span>活動建圖</span><span id="demo-event-job-status">待命</span></div>
+                        </div>
+
+                        <div>
+                            <div class="text-[10px] uppercase tracking-wider text-gray-500 mb-2">活動媒合流程</div>
+                            <div class="flex flex-col gap-2">
+                                <button id="demo-event-reset-button" type="button" onclick="resetEventDemoData(event)"
+                                    class="text-[11px] text-red-300 border border-red-500/20 rounded py-2 px-2 text-left disabled:opacity-40">
+                                    <span class="font-bold">1.</span> 刪除 Event 與孤立 Concept
+                                </button>
+                                <button id="demo-event-discover-button" type="button" onclick="startEventDiscoveryDemo(event)"
+                                    class="text-[11px] text-sky-300 border border-sky-500/20 rounded py-2 px-2 text-left disabled:opacity-40">
+                                    <span class="font-bold">2.</span> 搜尋活動並建立 Graph
+                                </button>
+                                <button id="demo-event-invite-button" type="button" onclick="sendEventInvitationsDemo(event)"
+                                    class="text-[11px] text-emerald-300 border border-emerald-500/20 rounded py-2 px-2 text-left disabled:opacity-40">
+                                    <span class="font-bold">3.</span> 掃描並發送約會邀請
+                                </button>
+                            </div>
                         </div>
 
                         <div>
@@ -1341,6 +1372,8 @@
         let activeContactId = null;
         let activeMatchId = null; // for notification
         let activeMatchExpectedStatus = null;
+        let activeMatchProposalNamespace = null;
+        let activeMatchProposalRevision = null;
         const matchDecisionInFlight = new Set();
         let activeMatchFromUser = null; // for auto jump to chat
         let activeMatchBigFive = null; // 候選人 big_five，供婉拒 Checkbox 使用
@@ -3146,6 +3179,82 @@
             }
         }
 
+        function formatProposalEventTime(event) {
+            const sessions = Array.isArray(event?.sessions) ? event.sessions.slice(0, 8) : [];
+            if (sessions.length > 1) {
+                return sessions.map(session => formatProposalEventTime(session)).filter(Boolean).join("、");
+            }
+            const startsAt = Number(event?.starts_at || 0);
+            if (!startsAt) return "";
+            const starts = new Date(startsAt * 1000);
+            const dateFormatter = new Intl.DateTimeFormat("zh-TW", {
+                timeZone: "Asia/Taipei", month: "numeric", day: "numeric", weekday: "short"
+            });
+            const dateText = dateFormatter.format(starts);
+            const endsAt = Number(event?.ends_at || 0);
+            const ends = endsAt ? new Date(endsAt * 1000) : null;
+            const endDateText = ends ? dateFormatter.format(ends) : "";
+            const dateKeyFormatter = new Intl.DateTimeFormat("en-CA", {
+                timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit"
+            });
+            const sameTaipeiDate = ends ? dateKeyFormatter.format(starts) === dateKeyFormatter.format(ends) : true;
+            if (event?.time_precision !== "datetime") {
+                return endDateText && !sameTaipeiDate ? `${dateText}–${endDateText}` : dateText;
+            }
+            const timeFormatter = new Intl.DateTimeFormat("zh-TW", {
+                timeZone: "Asia/Taipei", hour: "2-digit", minute: "2-digit", hour12: false
+            });
+            const timeText = timeFormatter.format(starts);
+            if (!ends) return `${dateText} ${timeText}`;
+            const endText = timeFormatter.format(ends);
+            return sameTaipeiDate
+                ? `${dateText} ${timeText}–${endText}`
+                : `${dateText} ${timeText}–${endDateText} ${endText}`;
+        }
+
+        function renderProposalEventDetails(card, event) {
+            card?.querySelector(".event-proposal-details")?.remove();
+            if (!card || !event?.title) return;
+            const details = document.createElement("div");
+            details.className = "event-proposal-details";
+            const title = document.createElement("div");
+            title.className = "event-proposal-title";
+            title.textContent = event.title;
+            details.appendChild(title);
+
+            const meta = document.createElement("div");
+            meta.className = "event-proposal-meta";
+            const timeText = formatProposalEventTime(event);
+            const placeText = [event.region, event.venue].filter(Boolean).join(" · ");
+            [
+                timeText ? `時間｜${timeText}` : "",
+                placeText ? `地點｜${placeText}` : "",
+                event.category ? `類型｜${event.category}` : ""
+            ].filter(Boolean).forEach(value => {
+                const line = document.createElement("div");
+                line.textContent = value;
+                meta.appendChild(line);
+            });
+            if (meta.childElementCount) details.appendChild(meta);
+
+            if (event.source_url) {
+                try {
+                    const url = new URL(event.source_url);
+                    if (["http:", "https:"].includes(url.protocol)) {
+                        const source = document.createElement("a");
+                        source.className = "event-proposal-source";
+                        source.href = url.href;
+                        source.target = "_blank";
+                        source.rel = "noopener noreferrer";
+                        source.textContent = "查看活動資訊 ↗";
+                        details.appendChild(source);
+                    }
+                } catch (_) {}
+            }
+            const actions = card.querySelector(".mediator-card-actions");
+            card.insertBefore(details, actions || null);
+        }
+
         function appendRoomMessage(text, isUser, messageData = {}) {
             const cm = document.getElementById("room-messages");
             const presentationMessages = messageData?.metadata?.presentation_messages;
@@ -3268,6 +3377,9 @@
                     body.textContent = text;
                 }
                 card.appendChild(body);
+                if (isProposal && proposal?.event) {
+                    renderProposalEventDetails(card, proposal.event);
+                }
 
                 const actions = document.createElement("div");
                 actions.className = "mediator-card-actions";
@@ -4124,14 +4236,13 @@ if (metadata.event_type === "date_coordination_form") {
                         });
                     }
                     if (data.mode === "proposal_response" || data.new_status) {
-                        window.activeMatchProposalId = null;
-                        const cards = document.querySelectorAll(".mediator-card[data-match-id]");
-                        cards.forEach(card => {
-                            const actions = card.querySelector(".mediator-card-actions");
-                            if (actions) {
-                                actions.innerHTML = '<span class="text-xs text-gray-500">已完成回覆</span>';
-                            }
-                        });
+                        const resolvedMatchId = data.match_id || window.activeMatchProposalId;
+                        if (resolvedMatchId) {
+                            setMatchCardState(resolvedMatchId, data.new_status || "accepted");
+                        }
+                        if (window.activeMatchProposalId === resolvedMatchId) {
+                            window.activeMatchProposalId = null;
+                        }
                     }
                     if (activeContactId === "ai_assistant" && data.context_confirmation_needed) {
                         appendContextConfirmationNotice();
@@ -4195,8 +4306,21 @@ if (metadata.event_type === "date_coordination_form") {
             actions.innerHTML = "";
             const stage = state.stage;
             const status = state.status;
+            const proposalNamespace = state.proposal_namespace || proposal.proposal_namespace || "relationship_match";
+            const proposalRevision = Number.isInteger(state.proposal_revision)
+                ? state.proposal_revision
+                : (Number.isInteger(proposal.proposal_revision) ? proposal.proposal_revision : null);
+            proposal.proposal_namespace = proposalNamespace;
+            proposal.proposal_revision = proposalRevision;
             if (["accepted", "declined", "expired"].includes(status)) {
-                const labels = {accepted: "雙方都已接受，聊天室已開啟。", declined: "這張提案已婉拒。", expired: "這張提案已過期。"};
+                const chatReused = Boolean(state.chat_reused ?? proposal.chat_reused);
+                proposal.chat_reused = chatReused;
+                const acceptedLabel = proposalNamespace === "event_invitation" && chatReused
+                    ? "雙方都已接受這次活動邀請，會沿用原本的聊天室。"
+                    : (proposalNamespace === "event_invitation"
+                        ? "雙方都已接受活動邀請，聊天室已開啟。"
+                        : "雙方都已接受，聊天室已開啟。");
+                const labels = {accepted: acceptedLabel, declined: "這張提案已婉拒。", expired: "這張提案已過期。"};
                 actions.innerHTML = `<span class="text-xs text-gray-500">${labels[status]}</span>`;
                 return;
             }
@@ -4206,7 +4330,7 @@ if (metadata.event_type === "date_coordination_form") {
                 cancelBtn.type = "button";
                 cancelBtn.className = "bg-slate-700";
                 cancelBtn.textContent = "取消邀請，改找下一位";
-                cancelBtn.onclick = () => cancelPendingMatch(matchId, actions);
+                cancelBtn.onclick = () => cancelPendingMatch(matchId, actions, proposalNamespace, proposalRevision);
                 actions.appendChild(cancelBtn);
                 return;
             }
@@ -4225,6 +4349,8 @@ if (metadata.event_type === "date_coordination_form") {
                     if (action === "decline") {
                         activeMatchId = matchId;
                         activeMatchExpectedStatus = expectedStatus;
+                        activeMatchProposalNamespace = proposalNamespace;
+                        activeMatchProposalRevision = proposalRevision;
                         activeMatchFromUser = candidateId;
                         activeDeclineMatchId = null;
                         activeDeclineCardIdx = null;
@@ -4236,9 +4362,19 @@ if (metadata.event_type === "date_coordination_form") {
                     }
                     btn.disabled = true;
                     try {
-                        const result = await decideMatch(matchId, "accept", expectedStatus);
+                        const result = await decideMatch(
+                            matchId, "accept", expectedStatus, [], proposalNamespace, proposalRevision
+                        );
+                        proposal.proposal_revision = result.proposal_revision;
+                        proposal.chat_reused = Boolean(result.chat_reused);
                         const nextStage = result.new_status === "pending" ? "waiting_other" : result.new_status;
-                        renderProposalActions(matchId, actions, {status: result.new_status, stage: nextStage}, proposal, candidateId);
+                        renderProposalActions(matchId, actions, {
+                            status: result.new_status,
+                            stage: nextStage,
+                            proposal_namespace: result.proposal_namespace,
+                            proposal_revision: result.proposal_revision,
+                            chat_reused: result.chat_reused
+                        }, proposal, candidateId);
                     } catch (err) {
                         btn.disabled = false;
                         if (err.code !== "MATCH_STATE_SYNCED") actions.insertAdjacentHTML("beforeend", `<span class="text-xs text-red-300">${err.message}</span>`);
@@ -4259,6 +4395,13 @@ if (metadata.event_type === "date_coordination_form") {
                 if (!res.ok) throw new Error(state.detail || "狀態讀取失敗");
                 const currentCopy = actions.closest(".mediator-card")?.querySelector(".match-proposal-copy");
                 if (currentCopy && state.viewer_reason) currentCopy.textContent = state.viewer_reason;
+                if (state.event) {
+                    proposal.event = state.event;
+                    renderProposalEventDetails(actions.closest(".mediator-card"), state.event);
+                }
+                proposal.proposal_namespace = state.proposal_namespace || proposal.proposal_namespace;
+                proposal.proposal_revision = state.proposal_revision;
+                proposal.chat_reused = Boolean(state.chat_reused);
                 renderProposalActions(matchId, actions, state, proposal, candidateId);
             } catch (err) {
                 actions.innerHTML = '<span class="text-xs text-gray-500">暫時無法確認狀態，操作按鈕已停用。</span>';
@@ -4291,14 +4434,22 @@ if (metadata.event_type === "date_coordination_form") {
             setMatchCardState(proposal.match_id, liveMatch.status, proposal.stage);
         }
 
-        async function decideMatch(matchId, action, expectedStatus, explicitReasons = []) {
+        async function decideMatch(
+            matchId, action, expectedStatus, explicitReasons = [],
+            proposalNamespace = null, expectedRevision = null
+        ) {
             if (!matchId || matchDecisionInFlight.has(matchId)) return null;
             matchDecisionInFlight.add(matchId);
             try {
                 const res = await fetch('/api/match/decision', {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({user_id: currentUserId, match_id: matchId, action: action,
-                        expected_status: expectedStatus, explicit_reasons: explicitReasons})
+                    body: JSON.stringify({
+                        user_id: currentUserId, match_id: matchId, action: action,
+                        expected_status: expectedStatus,
+                        expected_revision: expectedRevision,
+                        proposal_namespace: proposalNamespace,
+                        explicit_reasons: explicitReasons
+                    })
                 });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) {
@@ -4320,9 +4471,9 @@ if (metadata.event_type === "date_coordination_form") {
             }
         }
 
-        async function cancelPendingMatch(matchId, actions) {
+        async function cancelPendingMatch(matchId, actions, proposalNamespace = null, proposalRevision = null) {
             try {
-                await decideMatch(matchId, "cancel", "pending");
+                await decideMatch(matchId, "cancel", "pending", [], proposalNamespace, proposalRevision);
                 if (actions) actions.innerHTML = '<span class="text-xs text-gray-500">邀請已取消，可以再找下一位。</span>';
             } catch (err) {
                 if (err.code !== "MATCH_STATE_SYNCED" && actions) actions.insertAdjacentHTML("beforeend", `<span class="text-xs text-red-300">${err.message}</span>`);
@@ -4668,7 +4819,10 @@ if (metadata.event_type === "date_coordination_form") {
             const idx = activeDeclineCardIdx;
             if (!matchId) return;
             try {
-                await decideMatch(matchId, "decline", expectedStatus, explicitReasons);
+                await decideMatch(
+                    matchId, "decline", expectedStatus, explicitReasons,
+                    activeMatchProposalNamespace, activeMatchProposalRevision
+                );
                 if (isDraftCard && idx !== null && idx >= 0 && idx < activeDraftMatches.length) {
                     activeDraftMatches[idx].status = "declined";
                     updateCardUI(idx, "declined");
@@ -4687,6 +4841,8 @@ if (metadata.event_type === "date_coordination_form") {
                 activeDeclineMatchId = null;
                 activeDeclineCardIdx = null;
                 activeMatchExpectedStatus = null;
+                activeMatchProposalNamespace = null;
+                activeMatchProposalRevision = null;
             }
         }
         // 🥚 更新單張卡片的 UI
@@ -4854,7 +5010,13 @@ if (metadata.event_type === "date_coordination_form") {
                 if (data.notifications && data.notifications.length > 0) {
                     const first = data.notifications[0];
                     if (document.getElementById("notif-modal").classList.contains("hidden") && document.getElementById("decline-modal").classList.contains("hidden")) {
-                        showNotification(first.match_id, first.from_user || "對方", first.viewer_reason || first.receiver_reason || first.reason, first.from_user_big_five || {}, first.from_user_context || "", first.distinctive_tags || first.from_user_distinctive_tags || null);
+                        showNotification(
+                            first.match_id, first.from_user || "對方",
+                            first.viewer_reason || first.receiver_reason || first.reason,
+                            first.from_user_big_five || {}, first.from_user_context || "",
+                            first.distinctive_tags || first.from_user_distinctive_tags || null,
+                            first.proposal_namespace, first.proposal_revision
+                        );
                     }
                 }
             } catch (e) { }
@@ -4919,8 +5081,13 @@ if (metadata.event_type === "date_coordination_form") {
         setInterval(checkNotifications, 5000);
         setInterval(pollDateCoordinationState, 4000);
 
-        function showNotification(matchId, fromUser, reason, bigFive, context, distinctiveTags) {
+        function showNotification(
+            matchId, fromUser, reason, bigFive, context, distinctiveTags,
+            proposalNamespace = "relationship_match", proposalRevision = null
+        ) {
             activeMatchId = matchId;
+            activeMatchProposalNamespace = proposalNamespace;
+            activeMatchProposalRevision = Number.isInteger(proposalRevision) ? proposalRevision : null;
             activeMatchFromUser = fromUser;
             activeDeclineMatchId = null;
             activeDeclineCardIdx = null;
@@ -4946,7 +5113,10 @@ if (metadata.event_type === "date_coordination_form") {
                 return;
             }
             try {
-                const result = await decideMatch(activeMatchId, "accept", "pending");
+                const result = await decideMatch(
+                    activeMatchId, "accept", "pending", [],
+                    activeMatchProposalNamespace, activeMatchProposalRevision
+                );
                 if (result.new_status === "accepted") {
                     switchStage(true);
                     await loadContacts();
@@ -5082,6 +5252,83 @@ if (metadata.event_type === "date_coordination_form") {
             setText("demo-match-status", matchLabel);
         }
 
+        let demoEventJobPollTimer = null;
+
+        function setDemoEventButtonsRunning(running) {
+            ["demo-event-reset-button", "demo-event-discover-button", "demo-event-invite-button"].forEach(id => {
+                const button = document.getElementById(id);
+                if (button) button.disabled = running;
+            });
+        }
+
+        function renderDemoEventJobStatus(data) {
+            const node = document.getElementById("demo-event-job-status");
+            const state = data.state || "idle";
+            const labels = {
+                idle: "待命", queued: "排隊中…", running: "搜尋與建圖中…",
+                completed: "已完成", failed: "執行失敗"
+            };
+            if (node) {
+                let label = labels[state] || state;
+                const stages = {
+                    starting: "準備中…", resetting: "清理舊活動中…",
+                    discovering: "搜尋與建圖中…",
+                    waiting_relevance: "等待活動關聯建立中…",
+                    scanning_invitations: "掃描約會機會中…"
+                };
+                if (state === "running" && stages[data.stage]) label = stages[data.stage];
+                if (state === "completed") label += `（${Number(data.ingested_count || 0)} 筆）`;
+                node.textContent = label;
+                node.className = state === "failed" ? "text-red-300" :
+                    state === "completed" ? "text-emerald-300" :
+                    ["queued", "running"].includes(state) ? "text-sky-300" : "text-gray-300";
+            }
+            const running = ["queued", "running"].includes(state);
+            setDemoEventButtonsRunning(running);
+            return running;
+        }
+
+        function stopDemoEventJobPolling() {
+            if (demoEventJobPollTimer) clearInterval(demoEventJobPollTimer);
+            demoEventJobPollTimer = null;
+        }
+
+        async function refreshDemoEventJobStatus(quiet = false) {
+            try {
+                const res = await fetch("/api/demo/events/discover/status");
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "活動狀態讀取失敗");
+                const running = renderDemoEventJobStatus(data);
+                if (!running) stopDemoEventJobPolling();
+                if (!quiet && data.state === "completed") {
+                    const counts = Object.entries(data.active_category_counts || {})
+                        .map(([category, count]) => `${category} ${count}`).join("、");
+                    const integrity = data.graph_integrity || {};
+                    if (integrity.user_projection_preserved === false) {
+                        setDemoToolFeedback(
+                            `活動已寫入，但 User 數從 ${integrity.users_before} 變成 ${integrity.users_after}，請停止 Demo 並查看後端紀錄`,
+                            true
+                        );
+                    } else {
+                        const userSummary = Number.isInteger(integrity.users_after)
+                            ? `；User ${integrity.users_after} 筆（搜尋前後未變）` : "";
+                        setDemoToolFeedback(`活動建圖完成：${counts || `${data.ingested_count || 0} 筆`}${userSummary}`);
+                    }
+                } else if (!quiet && data.state === "failed") {
+                    setDemoToolFeedback(`活動建圖失敗：${data.error_code || "請查看後端紀錄"}`, true);
+                }
+                return data;
+            } catch (error) {
+                if (!quiet) setDemoToolFeedback(error.message || "活動狀態讀取失敗", true);
+                return null;
+            }
+        }
+
+        function startDemoEventJobPolling() {
+            stopDemoEventJobPolling();
+            demoEventJobPollTimer = setInterval(() => refreshDemoEventJobStatus(false), 5000);
+        }
+
         async function refreshDemoToolStatus() {
             if (!currentUserId) return;
             try {
@@ -5089,9 +5336,68 @@ if (metadata.event_type === "date_coordination_form") {
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) throw new Error(data.detail || "讀取失敗");
                 renderDemoToolStatus(data);
+                await refreshDemoEventJobStatus(true);
                 setDemoToolFeedback("狀態已更新");
             } catch (error) {
                 setDemoToolFeedback(error.message || "無法讀取 DEMO 狀態", true);
+            }
+        }
+
+        async function resetEventDemoData(event) {
+            if (!confirm("確定重置本週 Event 庫存嗎？會刪除 Event 與因此孤立的 Concept，並將尚未決定的舊活動邀請標記為已過期。使用者、一般配對、已接受與已婉拒歷史都會保留。")) return;
+            const button = event.currentTarget;
+            setDemoEventButtonsRunning(true);
+            button.textContent = "清除中…";
+            try {
+                const res = await fetch("/api/demo/events/reset?confirm=true", {method: "POST"});
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "活動資料清除失敗");
+                const graph = data.graph || {};
+                const mongo = data.mongo || {};
+                setDemoToolFeedback(`已刪除 ${graph.events_deleted || 0} 個 Event、${graph.orphan_concepts_deleted || 0} 個孤立 Concept；過期 ${mongo.expired_proposal_count || 0} 張未決定邀請`);
+                await refreshDemoEventJobStatus(true);
+            } catch (error) {
+                setDemoToolFeedback(error.message || "活動資料清除失敗", true);
+            } finally {
+                button.innerHTML = '<span class="font-bold">1.</span> 刪除 Event 與孤立 Concept';
+                setDemoEventButtonsRunning(false);
+            }
+        }
+
+        async function startEventDiscoveryDemo(event) {
+            const button = event.currentTarget;
+            setDemoEventButtonsRunning(true);
+            button.textContent = "已送至後台，準備搜尋…";
+            try {
+                const res = await fetch("/api/demo/events/discover/start", {method: "POST"});
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "無法啟動活動建圖");
+                renderDemoEventJobStatus(data);
+                setDemoToolFeedback(data.status === "already_running" ? "活動建圖已在背景執行" : "活動建圖已送至背景執行，可以繼續操作其他頁面");
+                startDemoEventJobPolling();
+            } catch (error) {
+                setDemoToolFeedback(error.message || "無法啟動活動建圖", true);
+                setDemoEventButtonsRunning(false);
+            } finally {
+                button.innerHTML = '<span class="font-bold">2.</span> 搜尋活動並建立 Graph';
+            }
+        }
+
+        async function sendEventInvitationsDemo(event) {
+            if (!confirm("確定掃描目前 Event Graph，最多建立 3 組活動邀請嗎？")) return;
+            const button = event.currentTarget;
+            setDemoEventButtonsRunning(true);
+            button.textContent = "掃描邀請中…";
+            try {
+                const res = await fetch("/api/demo/events/invitations/scan?confirm=true&max_proposals=3", {method: "POST"});
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "邀請掃描失敗");
+                setDemoToolFeedback(`邀請掃描完成：建立 ${Number(data.created_count || 0)} 組，檢查 ${Number(data.scanned_count || 0)} 位使用者`);
+            } catch (error) {
+                setDemoToolFeedback(error.message || "邀請掃描失敗", true);
+            } finally {
+                button.innerHTML = '<span class="font-bold">3.</span> 掃描並發送約會邀請';
+                setDemoEventButtonsRunning(false);
             }
         }
 

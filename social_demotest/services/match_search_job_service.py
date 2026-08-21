@@ -13,6 +13,7 @@ from pymongo.errors import DuplicateKeyError
 
 from database import db, profiles_coll
 from services.mediator_event_service import queue_mediator_event
+from services.proposal_namespace import RELATIONSHIP_MATCH_NAMESPACE
 
 
 MATCH_SEARCH_JOBS = db["match_search_jobs"]
@@ -359,6 +360,7 @@ def run_one_match_search_job() -> bool:
             str(job.get("user_id") or ""), proposal_message, "match_proposal",
             event_key=f"match-search-job:{job.get('job_id')}:proposal",
             match_id=first.get("match_id"), proposal_role="initiator",
+            proposal_namespace=RELATIONSHIP_MATCH_NAMESPACE,
         )
     return True
 
