@@ -236,6 +236,36 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIsNone(card_decision)
         self.assertEqual(metrics.presentation_blocks, [])
 
+    def test_disabled_cards_expose_no_compose_tool_and_stream_tokens(self):
+        """With public cards off, places turns must not wait for a compose
+        tool call: no compose_public_reply is exposed and on_token streaming
+        is forwarded to the provider."""
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{"name": "候選店"}]},
+        }])
+        cards = [{"candidate_ref": "place_a", "name": "候選店", "category": "restaurant"}]
+        tokens: list[str] = []
+
+        def _collect(fragment: str) -> None:
+            tokens.append(fragment)
+
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="候選店離你很近，可以直接列入晚餐考慮。"),
+        ) as provider:
+            reply, card_decision, metrics = synthesize(
+                slc, candidate_cards=cards, on_token=_collect,
+            )
+        self.assertIn("候選店", reply)
+        self.assertIsNone(card_decision)
+        self.assertEqual(metrics.presentation_blocks, [])
+        self.assertEqual(provider.call_args.args[1], [])
+        self.assertIs(provider.call_args.kwargs["on_token"], _collect)
+
     def test_itinerary_card_intent_none_does_not_render_candidates(self):
         slc = self._slice([{
             "task_id": "places1", "status": "ok", "tool": "places.search_nearby",

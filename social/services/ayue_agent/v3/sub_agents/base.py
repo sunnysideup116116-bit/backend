@@ -31,10 +31,29 @@ class SubAgentMetrics:
     tools_raw: list[dict] = field(default_factory=list)
     input_payload: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    # Per-provider-request breakdown (ttft/tps/input/output/model) for the
+    # loopback-only debug panel.  Populated at every generate_*_with_tools
+    # call site; aggregates stay in input_tokens/output_tokens/duration_ms.
+    llm_requests: list[dict[str, Any]] = field(default_factory=list)
     # Safe parser outcomes for local debug and scheduler classification.  This
     # contains codes only; raw arguments remain in the existing loopback-only
     # debug payload and never enter public trace.
     rejected_calls: list[str] = field(default_factory=list)
+
+
+def _record_llm_request(metrics: SubAgentMetrics, result: Any, duration_ms: int = 0) -> None:
+    """Append one provider request summary to the metrics debug envelope."""
+    try:
+        metrics.llm_requests.append({
+            "input_tokens": int(getattr(result, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(result, "output_tokens", 0) or 0),
+            "duration_ms": int(getattr(result, "duration_ms", 0) or 0) or int(duration_ms or 0),
+            "ttft_ms": int(getattr(result, "ttft_ms", 0) or 0),
+            "tps": round(float(getattr(result, "tps", 0) or 0), 3),
+            "model_name": str(getattr(result, "model_name", "") or ""),
+        })
+    except Exception:
+        pass
 
 
 def _build_tools(tool_names: Iterable[str]) -> list[dict]:
@@ -158,6 +177,7 @@ def run_sub_agents(
         metrics.duration_ms = result.duration_ms
         metrics.tool_calls_raw = result.tool_calls or []
         metrics.content_raw = result.content or ""
+        _record_llm_request(metrics, result)
         for tc in result.tool_calls or []:
             tool_name = tc.get("name", "")
             arguments = tc.get("arguments", {}) or {}
@@ -235,6 +255,7 @@ def run_required_sub_agent(
         metrics.duration_ms += int(result.duration_ms or 0)
         metrics.tool_calls_raw = result.tool_calls or []
         metrics.content_raw = result.content or ""
+        _record_llm_request(metrics, result)
 
         calls = result.tool_calls or []
         if len(calls) != 1:

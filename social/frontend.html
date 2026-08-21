@@ -5798,6 +5798,159 @@ if (metadata.event_type === "date_coordination_form") {
             return node.innerHTML;
         }
 
+        function fmtSeconds(ms) {
+            const value = Number(ms || 0);
+            return (value / 1000).toFixed(3) + "s";
+        }
+
+        function fmtSecondsDelta(prevMs, ms) {
+            const delta = Math.max(0, Number(ms || 0) - Number(prevMs || 0));
+            return "+" + (delta / 1000).toFixed(3) + "s";
+        }
+
+        function llmRequestsSummary(requests) {
+            const list = Array.isArray(requests) ? requests : [];
+            if (!list.length) return "";
+            let input = 0, output = 0, ttft = 0, tpsSum = 0;
+            for (const req of list) {
+                input += Number(req.input_tokens || 0);
+                output += Number(req.output_tokens || 0);
+                ttft += Number(req.ttft_ms || 0);
+                tpsSum += Number(req.tps || 0);
+            }
+            const avgTps = list.length ? (tpsSum / list.length) : 0;
+            return '<div class="text-[10px] text-gray-400 mt-1">' +
+                '<span class="text-[#55e6d9]">LLM Request ×' + list.length + '</span>' +
+                ' · 總Input=' + input + ' · 總Output=' + output +
+                ' · 平均TTFT=' + fmtSeconds(Math.round(ttft / list.length)) +
+                ' · 平均TPS=' + avgTps.toFixed(1) +
+                '</div>' +
+                '<div class="text-[10px] mt-1"><button type="button" onclick="toggleLlmRequestDetail(this)" data-requests="' +
+                encodeURIComponent(JSON.stringify(list)) + '" class="text-[#55e6d9] underline cursor-pointer">展開每次 LLM Request（TTFT / TPS / Input）</button></div>';
+        }
+
+        function toggleLlmRequestDetail(btn) {
+            const existing = btn.closest(".border-2").querySelector(".llm-request-detail");
+            if (existing) {
+                existing.remove();
+                return;
+            }
+            let list = [];
+            try { list = JSON.parse(decodeURIComponent(btn.dataset.requests || "[]")); } catch (e) { list = []; }
+            const container = document.createElement("div");
+            container.className = "llm-request-detail mt-1 space-y-1";
+            if (!list.length) {
+                container.innerHTML = '<div class="text-[10px] text-gray-500">無 request 資料</div>';
+            } else {
+                list.forEach((req, index) => {
+                    const model = String(req.model_name || "—");
+                    const tps = Number(req.tps || 0);
+                    container.innerHTML += '<div class="p-1 border border-[#4f3d75] bg-[#0a0618]">' +
+                        '<div class="text-[9px] text-gray-400">#' + (index + 1) + ' · ' + escapeDebugHtml(model) + '</div>' +
+                        '<div class="grid grid-cols-5 gap-1 text-[9px] mt-0.5">' +
+                        '<div><span class="text-gray-500">Input</span><br><b class="text-[#55e6d9]">' + (req.input_tokens || 0) + '</b></div>' +
+                        '<div><span class="text-gray-500">Output</span><br><b class="text-[#55e6d9]">' + (req.output_tokens || 0) + '</b></div>' +
+                        '<div><span class="text-gray-500">耗時</span><br><b class="text-[#fff1b8]">' + fmtSeconds(req.duration_ms) + '</b></div>' +
+                        '<div><span class="text-gray-500">TTFT</span><br><b class="text-[#fff1b8]">' + fmtSeconds(req.ttft_ms) + '</b></div>' +
+                        '<div><span class="text-gray-500">TPS</span><br><b class="text-[#7dd87f]">' + (tps ? tps.toFixed(1) : "—") + '</b></div>' +
+                        '</div></div>';
+                });
+            }
+            btn.closest(".border-2").appendChild(container);
+        }
+
+        function renderDebugTimeline(events) {
+            const list = Array.isArray(events) ? events : [];
+            const toolStartedAt = {};
+            const callDurations = {};
+            for (let i = 0; i < list.length; i++) {
+                const evt = list[i];
+                const at = Number(evt.at_ms || 0);
+                if (evt.type === "tool_started") {
+                    const callId = evt.step_id || (evt.task_id + ":" + evt.function);
+                    toolStartedAt[callId] = at;
+                } else if (evt.type === "tool_finished") {
+                    const callId = evt.step_id || (evt.task_id + ":" + evt.function);
+                    if (toolStartedAt[callId] !== undefined) {
+                        callDurations[callId] = at - toolStartedAt[callId];
+                    } else {
+                        callDurations[callId] = Number(evt.duration_ms || 0);
+                    }
+                }
+            }
+            const fnDurations = {};
+            for (let i = 0; i < list.length; i++) {
+                const evt = list[i];
+                if (evt.type !== "function_call") continue;
+                const key = evt.call_id || (evt.task_id + "#" + evt.call_index + ":" + evt.function);
+                const startedAt = Number(evt.at_ms || 0);
+                let endAt = startedAt;
+                for (let j = i + 1; j < list.length; j++) {
+                    const next = list[j];
+                    if (next.type === "tool_finished" &&
+                        (next.step_id === key ||
+                         (next.task_id === evt.task_id && next.function === evt.function))) {
+                        endAt = Number(next.at_ms || 0);
+                        break;
+                    }
+                    if (next.type === "subagent_finished" && next.task_id === evt.task_id) break;
+                }
+                fnDurations[key] = endAt - startedAt;
+            }
+            const rows = [];
+            list.forEach((evt, index) => {
+                const at = Number(evt.at_ms || 0);
+                const prev = index > 0 ? Number(list[index - 1].at_ms || 0) : 0;
+                let detail = "";
+                const taskId = evt.task_id ? " · <span class=\"text-[#d8c7ff]\">" + escapeDebugHtml(evt.task_id) + "</span>" : "";
+                const fn = evt.function ? " · <span class=\"text-[#fff1b8]\">" + escapeDebugHtml(evt.function) + "</span>" : "";
+                const agent = evt.agent && evt.agent !== evt.task_id ? " · <span class=\"text-[#55e6d9]\">" + escapeDebugHtml(evt.agent) + "</span>" : "";
+                const outcome = evt.outcome ? " · " + escapeDebugHtml(evt.outcome) : "";
+                let timing = "";
+                if (evt.type === "tool_finished") {
+                    const callId = evt.step_id || (evt.task_id + ":" + evt.function);
+                    const d = Number(evt.duration_ms || 0) || callDurations[callId] || 0;
+                    timing = d ? " · <span class=\"text-[#7dd87f]\">執行 " + fmtSeconds(d) + "</span>" : "";
+                } else if (evt.type === "function_call") {
+                    const key = evt.call_id || (evt.task_id + "#" + evt.call_index + ":" + evt.function);
+                    let d = fnDurations[key] || 0;
+                    if (!d) {
+                        for (const [k2, v2] of Object.entries(fnDurations)) {
+                            if (k2 !== key && k2.endsWith(":" + evt.function) && k2.includes(evt.task_id)) {
+                                d = v2;
+                                break;
+                            }
+                        }
+                    }
+                    timing = d ? " · <span class=\"text-[#7dd87f]\">至完成 " + fmtSeconds(d) + "</span>" : "";
+                } else if (evt.type === "subagent_finished") {
+                    const d = Number(evt.duration_ms || 0);
+                    timing = d ? " · <span class=\"text-[#7dd87f]\">耗時 " + fmtSeconds(d) + "</span>" : "";
+                    const inTok = Number(evt.input_tokens || 0);
+                    const outTok = Number(evt.output_tokens || 0);
+                    timing += (inTok || outTok) ? " · <span class=\"text-[#55e6d9]\">in=" + inTok + " out=" + outTok + "</span>" : "";
+                } else if (evt.type === "planner_completed") {
+                    const m = evt.metrics || {};
+                    const d = Number(m.duration_ms || 0);
+                    timing = d ? " · <span class=\"text-[#7dd87f]\">耗時 " + fmtSeconds(d) + "</span>" : "";
+                } else if (evt.type === "plan_created") {
+                    const m = evt.planner_metrics || {};
+                    const d = Number(m.duration_ms || 0);
+                    const inTok = Number(m.input_tokens || 0);
+                    timing = d ? " · <span class=\"text-[#7dd87f]\">耗時 " + fmtSeconds(d) + "</span>" : "";
+                    timing += inTok ? " · <span class=\"text-[#55e6d9]\">in=" + inTok + " out=" + Number(m.output_tokens || 0) + "</span>" : "";
+                }
+                const status = evt.status ? " · " + escapeDebugHtml(evt.status) : "";
+                rows.push('<div class="text-[9px] text-gray-500">' +
+                    '<span class="text-[#fff1b8]">+' + fmtSeconds(at) + '</span>' +
+                    ' <span class="text-gray-600">(' + fmtSecondsDelta(prev, at) + ')</span> · ' +
+                    '<span class="text-[#8a72b8]">' + escapeDebugHtml(evt.type) + '</span>' +
+                    taskId + agent + fn + outcome + status + timing +
+                    '</div>');
+            });
+            return rows.join("");
+        }
+
         function scheduleDebugTraceRefresh(delay = 500) {
             if (debugTracePollTimer) window.clearTimeout(debugTracePollTimer);
             debugTracePollTimer = window.setTimeout(() => {
@@ -6185,6 +6338,21 @@ if (metadata.event_type === "date_coordination_form") {
                 totalInput += Number(node.input_tokens || 0);
                 totalOutput += Number(node.output_tokens || 0);
             });
+            const allRequests = [];
+            const collectRequests = (value) => {
+                if (Array.isArray(value)) value.forEach(req => {
+                    if (req && typeof req === "object") allRequests.push(req);
+                });
+            };
+            collectRequests(planner.llm_requests || planEvent.llm_requests);
+            Object.values(nodeMap).forEach(node => collectRequests(node.llm_requests));
+            let totalTtftMs = 0, totalTps = 0;
+            allRequests.forEach(req => {
+                totalTtftMs += Number(req.ttft_ms || 0);
+                totalTps += Number(req.tps || 0);
+            });
+            const avgTtft = allRequests.length ? Math.round(totalTtftMs / allRequests.length) : 0;
+            const avgTps = allRequests.length ? (totalTps / allRequests.length) : 0;
             const plannerMetrics = planner.metrics || planEvent.planner_metrics || {};
             const knownCallCount = Number(plannerMetrics.llm_call_count || 0) +
                 Object.values(nodeMap).reduce((sum, node) => sum + Number(node.llm_call_count || 0), 0);
@@ -6202,10 +6370,14 @@ if (metadata.event_type === "date_coordination_form") {
                 '<div class="flex items-center justify-between gap-2">' +
                 '<div class="text-[#ffd166] font-bold text-sm">V3 執行流程</div>' +
                 '<span class="text-[10px] px-2 py-0.5 border" style="color:' + statusColor + ';border-color:' + statusColor + '">' + statusText + '</span></div>' +
-                '<div class="grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px] mt-2">' +
+                '<div class="grid grid-cols-2 md:grid-cols-6 gap-2 text-[11px] mt-2">' +
                 '<div><span class="text-gray-400">Input</span><br><b class="text-[#55e6d9]">' + totalInput + '</b></div>' +
                 '<div><span class="text-gray-400">Output</span><br><b class="text-[#55e6d9]">' + totalOutput + '</b></div>' +
                 '<div><span class="text-gray-400">LLM Calls</span><br><b class="text-[#55e6d9]">' + totalLlmCalls + '</b></div>' +
+                (allRequests.length ?
+                    '<div><span class="text-gray-400">平均 TTFT</span><br><b class="text-[#fff1b8]">' + fmtSeconds(avgTtft) + '</b></div>' +
+                    '<div><span class="text-gray-400">平均 TPS</span><br><b class="text-[#7dd87f]">' + avgTps.toFixed(1) + '</b></div>'
+                    : '') +
                 '<div><span class="text-gray-400">執行模式</span><br><b class="text-[#ffd166]">' + escapeDebugHtml(executionMode) + '</b></div>' +
                 '<div><span class="text-gray-400">目前階段</span><br><b class="text-[#ffd166]">' + escapeDebugHtml(latest.stage || latest.agent || latest.type || "—") + '</b></div>' +
                 '</div></div>';
@@ -6235,7 +6407,9 @@ if (metadata.event_type === "date_coordination_form") {
                     debugDetailButton("Function Calls", planner.function_calls, "#ff6fae") +
                     debugDetailButton("Raw Output", planner.content_raw, "#c084fc") +
                     debugDetailButton("Attempts", planner.attempts || [], "#ffd166") +
-                    '</div></div>';
+                    '</div>' +
+                    llmRequestsSummary(planner.llm_requests) +
+                    '</div>';
             } else {
                 const stage = events.find(event => event.type === "stage_started" && event.stage === "planner");
                 if (stage) html += '<div class="border-2 border-[#ffd166] p-3 bg-[#110a22] mb-3 text-xs text-[#ffd166]">⏳ ' + escapeDebugHtml(stage.label || "Planner 執行中") + '</div>';
@@ -6304,13 +6478,18 @@ if (metadata.event_type === "date_coordination_form") {
                     debugDetailButton("模型 Function Calls（卡片決策）", node.tool_calls_raw, "#ff6fae") +
                     debugDetailButton("Raw Output", node.content_raw, "#c084fc") +
                     debugDetailButton("節點結果（Final 來源）", node.results, "#7dd87f") +
-                    '</div>';
+                    '</div>' +
+                    llmRequestsSummary(node.llm_requests) +
+                    '';
                 if (node.calls && node.calls.length) {
                     html += '<div class="mt-3 text-[10px] text-gray-400">實際 Function／Tool 執行</div>';
                     node.calls.forEach(call => {
                         const outcome = call.outcome || call.guard?.code || "proposed";
+                        const callDuration = Number(call.duration_ms || 0);
                         html += '<div class="mt-1 p-2 border border-[#4f3d75] bg-[#0a0618]">' +
-                            '<div class="flex justify-between gap-2"><b class="text-[10px] text-[#fff1b8] break-all">' + escapeDebugHtml(call.function || "function") + '</b><span class="text-[9px] text-gray-500">' + escapeDebugHtml(outcome) + '</span></div>' +
+                            '<div class="flex justify-between gap-2"><b class="text-[10px] text-[#fff1b8] break-all">' + escapeDebugHtml(call.function || "function") + '</b>' +
+                            '<span class="text-[9px] text-gray-500">' + escapeDebugHtml(outcome) +
+                            (callDuration ? ' · <span class="text-[#7dd87f]">' + fmtSeconds(callDuration) + '</span>' : '') + '</span></div>' +
                             '<div class="flex flex-wrap gap-3 mt-1">' +
                             debugDetailButton("Planner args", call.planner_arguments) +
                             debugDetailButton("Executor args", call.executor_arguments, "#fb923c") +
@@ -6326,8 +6505,8 @@ if (metadata.event_type === "date_coordination_form") {
                 html += '<div class="border-2 border-[#55e6d9] p-3 bg-[#110a22] mb-3"><b class="text-xs text-[#55e6d9]">🏁 Final</b><div class="text-[11px] text-[#fff1b8] mt-1">' + escapeDebugHtml(finalResponse.reply || "") + '</div></div>';
             }
 
-            html += '<div class="border border-[#4f3d75] p-2 bg-[#0a0618]"><div class="text-[10px] text-gray-400 mb-1">事件時間軸</div>' +
-                events.map(event => '<div class="text-[9px] text-gray-500">+' + Number(event.at_ms || 0) + 'ms · ' + escapeDebugHtml(event.type) + (event.task_id ? ' · ' + escapeDebugHtml(event.task_id) : '') + '</div>').join("") + '</div>';
+            html += '<div class="border border-[#4f3d75] p-2 bg-[#0a0618]"><div class="text-[10px] text-gray-400 mb-1">事件時間軸（單位秒，+Δ 為與上一事件間隔）</div>' +
+                renderDebugTimeline(events) + '</div>';
             content.innerHTML = html;
         }
 

@@ -161,6 +161,8 @@ def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[CalendarA
         metrics.duration_ms = result.duration_ms
         metrics.tool_calls_raw = result.tool_calls or []
         metrics.content_raw = result.content or ""
+        if hasattr(base_agent, "_record_llm_request"):
+            base_agent._record_llm_request(metrics, result)
         for tool_call in result.tool_calls or []:
             name = str(tool_call.get("name") or "")
             arguments = tool_call.get("arguments") or {}

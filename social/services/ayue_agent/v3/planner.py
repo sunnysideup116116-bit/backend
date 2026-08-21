@@ -48,6 +48,7 @@ class PlannerMetrics:
     tool_calls_raw: list[dict] | None = None
     tools_raw: list[dict] | None = None
     error: str = ""
+    llm_requests: list[dict[str, Any]] = field(default_factory=list)
     decision_mode: Literal["tasks", "direct_chat", "product_info"] | None = None
     direct_chat_fallback_reason: str = ""
     product_info_fallback_reason: str = ""
@@ -236,6 +237,9 @@ def _record_planner_attempt(
     duration_ms: int = 0,
     error: str = "",
     repair_codes: list[str] | None = None,
+    ttft_ms: int = 0,
+    tps: float = 0.0,
+    model_name: str = "",
 ) -> None:
     """Keep a bounded, local-debug-only summary for each provider attempt."""
     metrics.attempts.append({
@@ -245,11 +249,29 @@ def _record_planner_attempt(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "duration_ms": duration_ms,
+        "ttft_ms": ttft_ms,
+        "tps": tps,
+        "model_name": model_name,
         "raw_content": raw_content,
         "tool_calls": tool_calls or [],
         "error": error,
         "repair_codes": [code for code in (repair_codes or []) if code in _REPAIR_CODES][:2],
     })
+
+
+def _record_planner_request(metrics: PlannerMetrics, result: Any) -> None:
+    """Append one provider request summary to the Planner debug envelope."""
+    try:
+        metrics.llm_requests.append({
+            "input_tokens": int(getattr(result, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(result, "output_tokens", 0) or 0),
+            "duration_ms": int(getattr(result, "duration_ms", 0) or 0),
+            "ttft_ms": int(getattr(result, "ttft_ms", 0) or 0),
+            "tps": round(float(getattr(result, "tps", 0) or 0), 3),
+            "model_name": str(getattr(result, "model_name", "") or ""),
+        })
+    except Exception:
+        pass
 
 
 class _OpportunityArguments(BaseModel):
@@ -589,7 +611,6 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                 error=metrics.error,
             )
             break
-
         input_tokens = int(result.input_tokens or 0)
         output_tokens = int(result.output_tokens or 0)
         duration_ms = int(result.duration_ms or 0)
@@ -599,6 +620,7 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
         metrics.raw_content = str(result.content or "")
         metrics.tool_calls_raw = result.tool_calls or []
         metrics.error = ""
+        _record_planner_request(metrics, result)
 
         if not result.tool_calls:
             failure_code = "missing_tool_call"
@@ -607,6 +629,9 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                 failure_code=failure_code, raw_content=metrics.raw_content,
                 tool_calls=metrics.tool_calls_raw, input_tokens=input_tokens,
                 output_tokens=output_tokens, duration_ms=duration_ms,
+                ttft_ms=int(getattr(result, "ttft_ms", 0) or 0),
+                tps=round(float(getattr(result, "tps", 0) or 0), 3),
+                model_name=str(getattr(result, "model_name", "") or ""),
             )
         else:
             tc = result.tool_calls[0]
@@ -617,6 +642,9 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                     failure_code=failure_code, raw_content=metrics.raw_content,
                     tool_calls=metrics.tool_calls_raw, input_tokens=input_tokens,
                     output_tokens=output_tokens, duration_ms=duration_ms,
+                    ttft_ms=int(getattr(result, "ttft_ms", 0) or 0),
+                    tps=round(float(getattr(result, "tps", 0) or 0), 3),
+                    model_name=str(getattr(result, "model_name", "") or ""),
                 )
             else:
                 arguments = tc.get("arguments") or {}
@@ -639,6 +667,9 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                             input_tokens=input_tokens, output_tokens=output_tokens,
                             duration_ms=duration_ms,
                             repair_codes=repair_codes,
+                            ttft_ms=int(getattr(result, "ttft_ms", 0) or 0),
+                            tps=round(float(getattr(result, "tps", 0) or 0), 3),
+                            model_name=str(getattr(result, "model_name", "") or ""),
                         )
                         return _product_info_plan(turn_ctx.message), metrics
                     failure_code = "invalid_arguments"
@@ -650,6 +681,9 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                         tool_calls=metrics.tool_calls_raw, input_tokens=input_tokens,
                         output_tokens=output_tokens, duration_ms=duration_ms,
                         error=metrics.error,
+                        ttft_ms=int(getattr(result, "ttft_ms", 0) or 0),
+                        tps=round(float(getattr(result, "tps", 0) or 0), 3),
+                        model_name=str(getattr(result, "model_name", "") or ""),
                     )
                 else:
                     opportunity = _opportunity_from_arguments(validated)
@@ -689,6 +723,9 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                                 tool_calls=metrics.tool_calls_raw, input_tokens=input_tokens,
                                 output_tokens=output_tokens, duration_ms=duration_ms,
                                 error=metrics.error,
+                                ttft_ms=int(getattr(result, "ttft_ms", 0) or 0),
+                                tps=round(float(getattr(result, "tps", 0) or 0), 3),
+                                model_name=str(getattr(result, "model_name", "") or ""),
                             )
                             plan = None
                         else:
@@ -704,6 +741,9 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                             input_tokens=input_tokens, output_tokens=output_tokens,
                             duration_ms=duration_ms,
                             repair_codes=repair_codes,
+                            ttft_ms=int(getattr(result, "ttft_ms", 0) or 0),
+                            tps=round(float(getattr(result, "tps", 0) or 0), 3),
+                            model_name=str(getattr(result, "model_name", "") or ""),
                         )
                         metrics.failure_code = ""
                         metrics.error = ""

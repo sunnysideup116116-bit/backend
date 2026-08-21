@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -64,6 +64,7 @@ class SynthesizerMetrics:
         "web_casual_sources",
     ] | None = None
     error_code: str | None = None
+    llm_requests: list[dict[str, Any]] = field(default_factory=list)
     presentation_messages: list[str] | None = None
     presentation_blocks: list[dict[str, Any]] | None = None
     presentation_class: Literal[
@@ -1078,7 +1079,7 @@ def synthesize(
         return reply, card_decision, metrics
     tools = [
         _compose_public_reply_tool_schema(place_cards_enabled=cards_enabled)
-    ] if candidate_summaries or direct_finding_count >= 2 else []
+    ] if cards_enabled and (candidate_summaries or direct_finding_count >= 2) else []
     metrics.tools_raw = tools
     try:
         prompt_payload = payload
@@ -1122,6 +1123,17 @@ def synthesize(
         metrics.raw_content = str(result.content or "")
         metrics.tool_calls_raw = result.tool_calls or []
         metrics.used_llm = True
+        try:
+            metrics.llm_requests.append({
+                "input_tokens": int(result.input_tokens or 0),
+                "output_tokens": int(result.output_tokens or 0),
+                "duration_ms": int(result.duration_ms or 0),
+                "ttft_ms": int(getattr(result, "ttft_ms", 0) or 0),
+                "tps": round(float(getattr(result, "tps", 0) or 0), 3),
+                "model_name": str(getattr(result, "model_name", "") or ""),
+            })
+        except Exception:
+            pass
         composed = _parse_composed_reply(result, candidate_summaries, web_research)
         composition_required = bool(
             cards_enabled and candidate_summaries and has_place_observation

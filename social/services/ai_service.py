@@ -235,6 +235,9 @@ class ToolCallResult:
     output_tokens: int = 0
     duration_ms: int = 0
     prompt: str = ""
+    ttft_ms: int = 0
+    tps: float = 0.0
+    model_name: str = ""
 
 
 def generate_chat_completion_with_tools(
@@ -262,6 +265,7 @@ def generate_chat_completion_with_tools(
         options["think"] = _RUNTIME_THINKING_LEVEL
 
     started = time.perf_counter()
+    first_token_at: float | None = None
     if on_token is None:
         response = ollama_client.chat(
             model=effective_model,
@@ -293,6 +297,8 @@ def generate_chat_completion_with_tools(
         for chunk in response:
             msg = chunk.get("message", {})
             fragment = (msg.get("content") or "").strip()
+            if first_token_at is None and (fragment or msg.get("tool_calls")):
+                first_token_at = time.perf_counter()
             if fragment:
                 content_parts.append(fragment)
                 on_token(fragment)
@@ -301,6 +307,8 @@ def generate_chat_completion_with_tools(
             input_tokens = int(chunk.get("prompt_eval_count") or 0) or input_tokens
             output_tokens = int(chunk.get("eval_count") or 0) or output_tokens
         content = "".join(content_parts).strip()
+    ttft_ms = round((first_token_at - started) * 1000) if first_token_at is not None else duration_ms
+    tps = round((output_tokens / max(duration_ms - ttft_ms, 1)) * 1000, 3) if output_tokens else 0.0
     tool_calls = []
     for tc in tool_calls_raw:
         fn = tc.get("function", {})
@@ -313,6 +321,7 @@ def generate_chat_completion_with_tools(
         content=content, tool_calls=tool_calls,
         input_tokens=input_tokens, output_tokens=output_tokens,
         duration_ms=duration_ms, prompt=prompt,
+        ttft_ms=ttft_ms, tps=tps, model_name=effective_model,
     )
 
 

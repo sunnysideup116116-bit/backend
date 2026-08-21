@@ -1127,6 +1127,32 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertLessEqual(len(rows[0]["snippet"]), 600)
         self.assertEqual(rows[0]["source_ref"], "web_source_01")
 
+    def test_projection_stops_once_research_context_chars_reached(self):
+        observations = [
+            {"tool": "web.search", "result": {"results": [
+                {"title": f"bulk {index}", "url": f"https://example.com/bulk-{index}",
+                 "snippet": "y" * 4000}
+                for index in range(5)
+            ]}},
+            {"tool": "web.extract", "result": {"pages": [{
+                "url": "https://example.com/large",
+                "content": "z" * 8_000,
+                "truncated": True,
+            }]}},
+            {"tool": "web.search", "result": {"results": [
+                {"title": "late", "url": "https://example.com/late",
+                 "snippet": "Late evidence must not enter the prompt once the cap is hit."},
+            ]}},
+        ]
+        projected = project_web_observations(observations)
+        tools = [item["tool"] for item in projected]
+        self.assertIn("web.extract", tools)
+        self.assertNotIn("late", [
+            row["snippet"]
+            for item in projected if item["tool"] == "web.search"
+            for row in item["result"]["results"]
+        ])
+
     def test_extract_projection_keeps_8000_chars_per_page(self):
         observations = [{"tool": "web.extract", "result": {"pages": [{
             "url": "https://example.com/article",
