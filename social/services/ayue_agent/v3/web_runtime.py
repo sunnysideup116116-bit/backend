@@ -74,6 +74,7 @@ def run(
         aggregate.prompt_raw = metrics.prompt_raw
         aggregate.tools_raw = metrics.tools_raw
         aggregate.input_payload = metrics.input_payload
+        aggregate.llm_requests.extend(metrics.llm_requests or [])
         if metrics.error:
             aggregate.error = metrics.error
 

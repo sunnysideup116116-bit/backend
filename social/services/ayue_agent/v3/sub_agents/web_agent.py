@@ -685,6 +685,17 @@ def decide(
         metrics.duration_ms += result.duration_ms
         metrics.content_raw = str(result.content or "")
         metrics.tool_calls_raw.extend(result.tool_calls or [])
+        try:
+            metrics.llm_requests.append({
+                "input_tokens": int(result.input_tokens or 0),
+                "output_tokens": int(result.output_tokens or 0),
+                "duration_ms": int(result.duration_ms or 0),
+                "ttft_ms": int(getattr(result, "ttft_ms", 0) or 0),
+                "tps": round(float(getattr(result, "tps", 0) or 0), 3),
+                "model_name": str(getattr(result, "model_name", "") or ""),
+            })
+        except Exception:
+            pass
         if not result.tool_calls:
             last_error = "web_decision_missing_function_call"
         else:

@@ -241,6 +241,19 @@ def _print_llm_metrics(label: str, metrics: Any) -> None:
         f"  [{label}] model={model}  tier={tier}  llm_calls={calls}"
         f"  input_tokens={inp}  output_tokens={out}  duration={dur}ms"
     )
+    requests = getattr(metrics, "llm_requests", None) or []
+    for index, req in enumerate(requests):
+        try:
+            print(
+                f"  [{label}#{index + 1}] request: input={int(req.get('input_tokens', 0) or 0)}"
+                f"  output={int(req.get('output_tokens', 0) or 0)}"
+                f"  duration={int(req.get('duration_ms', 0) or 0)}ms"
+                f"  ttft={int(req.get('ttft_ms', 0) or 0)}ms"
+                f"  tps={float(req.get('tps', 0) or 0):.1f}"
+                f"  model={req.get('model_name', '')}"
+            )
+        except Exception:
+            pass
     total = inp + out
     print(f"  [{label}] total_tokens={total}")
 
@@ -1330,6 +1343,7 @@ def run_public_agent_turn_v3(
                 "retry_reason": planner_metrics.retry_reason,
                 "failure_code": planner_metrics.failure_code,
             },
+            llm_requests=planner_metrics.llm_requests or [],
             mode=planner_metrics.decision_mode,
             direct_chat_fallback_reason=planner_metrics.direct_chat_fallback_reason or None,
             product_info_fallback_reason=planner_metrics.product_info_fallback_reason or None,
@@ -1423,6 +1437,7 @@ def run_public_agent_turn_v3(
                     content_raw=planner_metrics.raw_content,
                     function_calls=planner_metrics.tool_calls_raw or [],
                     available_functions=planner_metrics.tools_raw or [],
+                    llm_requests=planner_metrics.llm_requests or [],
                 )
                 append_debug_event(
                     run_id, "direct_reply_selected", mode="direct_chat",
@@ -1540,6 +1555,7 @@ def run_public_agent_turn_v3(
             content_raw=planner_metrics.raw_content,
             function_calls=planner_metrics.tool_calls_raw or [],
             available_functions=planner_metrics.tools_raw or [],
+            llm_requests=planner_metrics.llm_requests or [],
         )
 
     guard_lock = threading.Lock()
@@ -1627,6 +1643,7 @@ def run_public_agent_turn_v3(
                         model_name=_metric_model_name(agent_metrics),
                         proposal_parse_error=agent_metrics.error,
                         rejected_calls=agent_metrics.rejected_calls,
+                        llm_requests=agent_metrics.llm_requests or [],
                         results=[item.model_dump(mode="json") for item in result],
                     )
             else:
@@ -1746,6 +1763,7 @@ def run_public_agent_turn_v3(
             llm_call_count=_metric_call_count(synth_metrics),
             requested_model_tier=synth_metrics.requested_model_tier,
             model_name=_metric_model_name(synth_metrics),
+            llm_requests=synth_metrics.llm_requests or [],
             results=[{"reply": reply, "card_decision": card_decision}],
         )
 
