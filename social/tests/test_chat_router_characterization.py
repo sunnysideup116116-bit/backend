@@ -45,6 +45,7 @@ EXPECTED_ROUTES = {
     ("POST", "/api/public-ayue/onboarding/complete"): ("ClearRequest", ()),
     ("POST", "/api/mediator/private"): ("MediatorPrivateRequest", ()),
     ("POST", "/api/mediator/private/stream"): ("MediatorPrivateRequest", ()),
+    ("POST", "/api/presence"): ("ClearRequest", ()),
     ("POST", "/api/relationship/date/cancel"): ("CalendarActionRequest", ("other_id", "coordination_id")),
     ("POST", "/api/relationship/date/confirm"): ("DateConfirmRequest", ()),
     ("POST", "/api/relationship/date/invite/respond"): ("DateInviteResponseRequest", ()),

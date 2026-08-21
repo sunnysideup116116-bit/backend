@@ -67,6 +67,22 @@ def get_contacts(user_id: str):
         "context": "先懂你，再在合適時機陪你牽線的媒人朋友。",
         "is_locked": ai_locked,
     }]
+    room_ids = [
+        generate_room_id(
+            user_id,
+            match_doc["to_user"] if match_doc["from_user"] == user_id else match_doc["from_user"],
+        )
+        for match_doc in matches
+    ]
+    latest_by_room = {}
+    if room_ids:
+        for msg in messages_coll.find(
+            {"room_id": {"$in": room_ids}, "is_blocked": {"$ne": True}},
+            {"_id": 0, "room_id": 1, "content": 1},
+        ).sort("timestamp", -1):
+            room = msg.get("room_id")
+            if room and room not in latest_by_room:
+                latest_by_room[room] = msg.get("content", "")
     for match_doc in matches:
         other_id = match_doc["to_user"] if match_doc["from_user"] == user_id else match_doc["from_user"]
         other_doc = profiles_coll.find_one({"user_id": other_id})
@@ -75,5 +91,6 @@ def get_contacts(user_id: str):
             "name": mentioned_contact_refs(user_id, [other_id])[0]["display_name"],
             "role": "user",
             "context": other_doc.get("current_context", "尚無近期情境") if other_doc else "尚無近期情境",
+            "latest_message": latest_by_room.get(generate_room_id(user_id, other_id), ""),
         })
     return {"contacts": contacts}

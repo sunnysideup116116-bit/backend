@@ -435,6 +435,41 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=403, detail="只能傳送訊息給已接受的配對")
 
     client_message_id = req.client_message_id or uuid.uuid4().hex
+
+    # Image messages carry no analyzable text; skip the risk gate and any
+    # text-driven assist so an empty message never reaches the LLM.
+    if req.file_id:
+        risk_projection = {
+            "level": "safe",
+            "ui_priority": "coach",
+            "delivery": "delivered",
+        }
+        user_message = save_pair_owner_message_once(
+            room_id,
+            req.user_id,
+            "",
+            client_message_id=client_message_id,
+            risk_projection=risk_projection,
+            message_type="image",
+            file_id=req.file_id,
+        )
+        if not user_message.get("created"):
+            return {
+                "reply": "",
+                "duplicate": True,
+                "risk_assessment": risk_projection,
+                "ui_priority": risk_projection["ui_priority"],
+            }
+        profiles_coll.update_one(
+            {"user_id": req.user_id}, {"$set": {"last_user_activity_at": time.time()}}, upsert=True,
+        )
+        return {
+            "reply": "",
+            "image_sent": True,
+            "risk_assessment": risk_projection,
+            "ui_priority": risk_projection["ui_priority"],
+        }
+
     risk_decision = pair_message_risk_gate.evaluate(
         conversation_id=room_id,
         sender_id=req.user_id,
