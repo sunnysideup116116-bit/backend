@@ -57,19 +57,23 @@ cleanup_port 8000
 cleanup_port 8001
 cleanup_port 9001
 
-declare -a SERVICE_PIDS=()
-
-stop_all() {
-    echo -e "\n\n${YELLOW}🛑 Shutting down all services...${NC}"
+stop_services() {
+    echo -e "\n${YELLOW}🛑 Stopping services...${NC}"
     for pid in "${SERVICE_PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             kill -15 "$pid" 2>/dev/null || true
             kill -9 "$pid" 2>/dev/null || true
         fi
     done
+    SERVICE_PIDS=()
     cleanup_port 8000 >/dev/null 2>&1 || true
     cleanup_port 8001 >/dev/null 2>&1 || true
     cleanup_port 9001 >/dev/null 2>&1 || true
+}
+
+stop_all() {
+    echo -e "\n\n${YELLOW}🛑 Shutting down all services...${NC}"
+    stop_services
     echo -e "${GREEN}👋 Shutdown complete. Have a great day!${NC}"
     exit 0
 }
@@ -102,65 +106,89 @@ wait_for_health() {
     return 1
 }
 
-# 2. Start Guardrail Classifier (Port 8081) if not already active
-echo -e "\n${CYAN}🛡️  Step 2: Checking Guardrail Classifier on Port 8081...${NC}"
-if curl --fail --silent --show-error --max-time 1 "http://127.0.0.1:8081/v1/models" >/dev/null 2>&1; then
-    echo -e "${GREEN}✨ Guardrail Classifier is already running on Port 8081.${NC}"
-else
-    if [ -x "$SERVER_ROOT/scripts/run_ayue_guardrail.sh" ]; then
-        "$SERVER_ROOT/scripts/run_ayue_guardrail.sh" >"$LOG_DIR/guardrail.log" 2>&1 &
-        GUARDRAIL_PID=$!
-        SERVICE_PIDS+=("$GUARDRAIL_PID")
-        echo -e "${GREEN}✅ Guardrail started (PID: $GUARDRAIL_PID). Logs: $LOG_DIR/guardrail.log${NC}"
-        wait_for_health "Guardrail Classifier" "http://127.0.0.1:8081/v1/models" "$LOG_DIR/guardrail.log" 8 || true
+start_services() {
+    # 2. Start Guardrail Classifier (Port 8081) if not already active
+    echo -e "\n${CYAN}🛡️  Checking Guardrail Classifier on Port 8081...${NC}"
+    if curl --fail --silent --show-error --max-time 1 "http://127.0.0.1:8081/v1/models" >/dev/null 2>&1; then
+        echo -e "${GREEN}✨ Guardrail Classifier is already running on Port 8081.${NC}"
+    else
+        if [ -x "$SERVER_ROOT/scripts/run_ayue_guardrail.sh" ]; then
+            "$SERVER_ROOT/scripts/run_ayue_guardrail.sh" >"$LOG_DIR/guardrail.log" 2>&1 &
+            GUARDRAIL_PID=$!
+            SERVICE_PIDS+=("$GUARDRAIL_PID")
+            echo -e "${GREEN}✅ Guardrail started (PID: $GUARDRAIL_PID). Logs: $LOG_DIR/guardrail.log${NC}"
+            wait_for_health "Guardrail Classifier" "http://127.0.0.1:8081/v1/models" "$LOG_DIR/guardrail.log" 8 || true
+        fi
     fi
-fi
 
-# 3. Start Risk Detection Backend (Port 8001)
-echo -e "\n${CYAN}🛡️  Step 3: Starting Risk Detection Backend on Port 8001...${NC}"
-"$SERVER_ROOT/scripts/run_ayue_risk.sh" >"$LOG_DIR/risk.log" 2>&1 &
-RISK_PID=$!
-SERVICE_PIDS+=("$RISK_PID")
-echo -e "${GREEN}✅ Risk Backend started (PID: $RISK_PID). Logs: $LOG_DIR/risk.log${NC}"
-if ! wait_for_health "Risk Backend" "http://127.0.0.1:8001/health" "$LOG_DIR/risk.log" 10; then
+    # 3. Start Risk Detection Backend (Port 8001)
+    echo -e "\n${CYAN}🛡️  Starting Risk Detection Backend on Port 8001...${NC}"
+    "$SERVER_ROOT/scripts/run_ayue_risk.sh" >"$LOG_DIR/risk.log" 2>&1 &
+    RISK_PID=$!
+    SERVICE_PIDS+=("$RISK_PID")
+    echo -e "${GREEN}✅ Risk Backend started (PID: $RISK_PID). Logs: $LOG_DIR/risk.log${NC}"
+    if ! wait_for_health "Risk Backend" "http://127.0.0.1:8001/health" "$LOG_DIR/risk.log" 10; then
+        return 1
+    fi
+
+    # 4. Start Matchmaker Agent (Port 9001)
+    echo -e "\n${CYAN}💘 Starting Matchmaker Agent on Port 9001...${NC}"
+    "$SERVER_ROOT/scripts/run_ayue_matchmaker.sh" >"$LOG_DIR/matchmaker.log" 2>&1 &
+    MATCHMAKER_PID=$!
+    SERVICE_PIDS+=("$MATCHMAKER_PID")
+    echo -e "${GREEN}✅ Matchmaker Agent started (PID: $MATCHMAKER_PID). Logs: $LOG_DIR/matchmaker.log${NC}"
+    if ! wait_for_health "Matchmaker Agent" "http://127.0.0.1:9001/health" "$LOG_DIR/matchmaker.log" 10; then
+        return 1
+    fi
+
+    # 5. Start Ayue Social / Main API (Port 8000)
+    echo -e "\n${CYAN}🚀 Starting Ayue Social Backend on Port 8000...${NC}"
+    "$SERVER_ROOT/scripts/run_ayue_social.sh" >"$LOG_DIR/social.log" 2>&1 &
+    SOCIAL_PID=$!
+    SERVICE_PIDS+=("$SOCIAL_PID")
+    echo -e "${GREEN}✅ Ayue Social Backend started (PID: $SOCIAL_PID). Logs: $LOG_DIR/social.log${NC}"
+    if ! wait_for_health "Ayue Social" "http://127.0.0.1:8000/api/health" "$LOG_DIR/social.log" 15; then
+        return 1
+    fi
+
+    # 6. Service Health Check & Dashboard Summary
+    echo -e "\n${GREEN}================================================================${NC}"
+    echo -e "${GREEN}🎉 All Dating App Backend Services are RUNNING & HEALTHY!${NC}"
+    echo -e "${GREEN}----------------------------------------------------------------${NC}"
+    echo -e "${GREEN}   📱 前端頁面:       http://localhost:8000/${NC}"
+    echo -e "${GREEN}   🔌 阿月核心 API:    http://localhost:8000/api/${NC}"
+    echo -e "${GREEN}   🛡️  風險偵測後端:   http://localhost:8001/health${NC}"
+    echo -e "${GREEN}   💘 媒婆 Agent:      http://localhost:9001/health${NC}"
+    echo -e "${GREEN}   🛡️  Guardrail:      http://localhost:8081/v1/models${NC}"
+    echo -e "${GREEN}   ❤️  主系統健康檢查: http://localhost:8000/api/health${NC}"
+    echo -e "${GREEN}================================================================${NC}"
+    echo -e "${CYAN}💡 [熱重載] 修改任何 Python 檔存檔後會自動 reload${NC}"
+    echo -e "${CYAN}💡 [手動刷新] 輸入 'r' 鍵即可手動重新啟動所有服務${NC}"
+    echo -e "${CYAN}💡 [退出] 輸入 'q' 或按 Ctrl+C 結束程式${NC}\n"
+    return 0
+}
+
+if ! start_services; then
     stop_all
     exit 1
 fi
 
-# 4. Start Matchmaker Agent (Port 9001)
-echo -e "\n${CYAN}💘 Step 4: Starting Matchmaker Agent on Port 9001...${NC}"
-"$SERVER_ROOT/scripts/run_ayue_matchmaker.sh" >"$LOG_DIR/matchmaker.log" 2>&1 &
-MATCHMAKER_PID=$!
-SERVICE_PIDS+=("$MATCHMAKER_PID")
-echo -e "${GREEN}✅ Matchmaker Agent started (PID: $MATCHMAKER_PID). Logs: $LOG_DIR/matchmaker.log${NC}"
-if ! wait_for_health "Matchmaker Agent" "http://127.0.0.1:9001/health" "$LOG_DIR/matchmaker.log" 10; then
-    stop_all
-    exit 1
-fi
-
-# 5. Start Ayue Social / Main API (Port 8000)
-echo -e "\n${CYAN}🚀 Step 5: Starting Ayue Social Backend on Port 8000...${NC}"
-"$SERVER_ROOT/scripts/run_ayue_social.sh" >"$LOG_DIR/social.log" 2>&1 &
-SOCIAL_PID=$!
-SERVICE_PIDS+=("$SOCIAL_PID")
-echo -e "${GREEN}✅ Ayue Social Backend started (PID: $SOCIAL_PID). Logs: $LOG_DIR/social.log${NC}"
-if ! wait_for_health "Ayue Social" "http://127.0.0.1:8000/api/health" "$LOG_DIR/social.log" 15; then
-    stop_all
-    exit 1
-fi
-
-# 6. Service Health Check & Dashboard Summary
-echo -e "\n${GREEN}================================================================${NC}"
-echo -e "${GREEN}🎉 All Dating App Backend Services are RUNNING & HEALTHY!${NC}"
-echo -e "${GREEN}----------------------------------------------------------------${NC}"
-echo -e "${GREEN}   📱 前端頁面:       http://localhost:8000/${NC}"
-echo -e "${GREEN}   🔌 阿月核心 API:    http://localhost:8000/api/${NC}"
-echo -e "${GREEN}   🛡️  風險偵測後端:   http://localhost:8001/health${NC}"
-echo -e "${GREEN}   💘 媒婆 Agent:      http://localhost:9001/health${NC}"
-echo -e "${GREEN}   🛡️  Guardrail:      http://localhost:8081/v1/models${NC}"
-echo -e "${GREEN}   ❤️  主系統健康檢查: http://localhost:8000/api/health${NC}"
-echo -e "${GREEN}================================================================${NC}"
-echo -e "${CYAN}💡 按 Ctrl+C 可隨時終止所有後端服務${NC}\n"
-
-# Keep the script running to hold the foreground process and trap signals
-wait
+# Interactive Loop for Reloading / Stopping
+while true; do
+    read -r -p "👉 請輸入指令 [r: 重啟所有服務 / q: 退出]: " cmd || true
+    case "${cmd:-}" in
+        [rR])
+            echo -e "\n${YELLOW}🔄 正在重新啟動所有服務...${NC}"
+            stop_services
+            sleep 1
+            if ! start_services; then
+                echo -e "${RED}❌ 重啟服務失敗！請檢查日誌。${NC}"
+            fi
+            ;;
+        [qQ])
+            stop_all
+            ;;
+        *)
+            ;;
+    esac
+done

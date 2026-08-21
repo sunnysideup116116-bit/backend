@@ -20,4 +20,4 @@ if command -v ss >/dev/null 2>&1 && ss -ltn "sport = :$port" | tail -n +2 | grep
 fi
 
 cd "$service_root"
-exec "$python_bin" -m uvicorn main:app --host 127.0.0.1 --port "$port"
+exec "$python_bin" -m uvicorn main:app --host 127.0.0.1 --port "$port" --reload
