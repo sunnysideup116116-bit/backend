@@ -47,6 +47,9 @@ class DirectChatRequest(BaseModel):
     # public chat adapter cannot turn arbitrary client values into commands.
     assessment_action: Literal["cancel"] | None = None
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+    # Appwrite storage file id for image messages. When present, the message
+    # is treated as an image and the text risk gate is skipped.
+    file_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def _validate_assessment_action_scope(self):
