@@ -14,8 +14,8 @@ from pathlib import Path
 SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills"
 
 
-@lru_cache(maxsize=8)
-def load_profile_skill(name: str) -> dict[str, str]:
+@lru_cache(maxsize=16)
+def load_skill(name: str) -> dict[str, str]:
     path = SKILLS_ROOT / name / "SKILL.md"
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
@@ -29,3 +29,8 @@ def load_profile_skill(name: str) -> dict[str, str]:
     if fields.get("name") != name or not fields.get("version") or not body.strip():
         raise ValueError(f"invalid {name} SKILL.md")
     return {"name": name, "version": fields["version"], "instructions": body.strip()}
+
+
+# Preserve the original cached loader surface while allowing Event skills to
+# share the same trusted local parser.
+load_profile_skill = load_skill

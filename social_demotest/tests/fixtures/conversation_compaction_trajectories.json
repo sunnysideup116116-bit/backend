@@ -1,0 +1,81 @@
+[
+  {
+    "name": "all_continuity_retained",
+    "decision": {
+      "retention": {
+        "active_topics": true,
+        "owner_goals": true,
+        "known_continuity": true,
+        "unresolved_questions": true,
+        "ayue_commitments": true,
+        "recent_decisions": true
+      },
+      "unsupported_content": false,
+      "role_confusion": false,
+      "canonical_state_leak": false,
+      "confidence": 0.95
+    },
+    "expected_status": "pass",
+    "expected_issue_codes": []
+  },
+  {
+    "name": "unresolved_question_and_commitment_dropped",
+    "decision": {
+      "retention": {
+        "active_topics": true,
+        "owner_goals": true,
+        "known_continuity": true,
+        "unresolved_questions": false,
+        "ayue_commitments": false,
+        "recent_decisions": true
+      },
+      "unsupported_content": false,
+      "role_confusion": false,
+      "canonical_state_leak": false,
+      "confidence": 0.92
+    },
+    "expected_status": "review",
+    "expected_issue_codes": [
+      "omitted_unresolved_questions",
+      "omitted_ayue_commitments"
+    ]
+  },
+  {
+    "name": "hallucinated_and_role_reversed",
+    "decision": {
+      "retention": {
+        "active_topics": true,
+        "owner_goals": true,
+        "known_continuity": true,
+        "unresolved_questions": true,
+        "ayue_commitments": true,
+        "recent_decisions": true
+      },
+      "unsupported_content": true,
+      "role_confusion": true,
+      "canonical_state_leak": false,
+      "confidence": 0.9
+    },
+    "expected_status": "review",
+    "expected_issue_codes": ["unsupported_content", "role_confusion"]
+  },
+  {
+    "name": "canonical_state_leak_and_low_confidence",
+    "decision": {
+      "retention": {
+        "active_topics": true,
+        "owner_goals": true,
+        "known_continuity": true,
+        "unresolved_questions": true,
+        "ayue_commitments": true,
+        "recent_decisions": true
+      },
+      "unsupported_content": false,
+      "role_confusion": false,
+      "canonical_state_leak": true,
+      "confidence": 0.65
+    },
+    "expected_status": "review",
+    "expected_issue_codes": ["canonical_state_leak", "low_confidence"]
+  }
+]

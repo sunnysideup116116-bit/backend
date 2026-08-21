@@ -12,6 +12,8 @@ from services.ayue_agent.proactive_care import consume_proactive_delivery
 from services.chat_service import generate_room_id, save_message
 from services.mediator_event_service import claim_next_mediator_event
 from services.match_reason_service import reason_for_viewer
+from services.event_card_projection import public_event_card
+from services.proposal_namespace import namespace_for_document
 from services.relationship_engagement_service import (
     find_accepted_match,
     generate_mediator_private_room_id,
@@ -79,6 +81,7 @@ def _metadata(event: dict) -> dict:
         "event_id": event.get("event_id"), "event_type": event.get("type", "mediator_message"),
         "match_id": event.get("match_id"), "other_id": event.get("other_id"),
         "probe_id": event.get("probe_id"), "proposal_role": event.get("proposal_role"),
+        "proposal_namespace": event.get("proposal_namespace"),
         "matches": event.get("matches", []), "actions": event.get("actions", []),
         "media": event.get("media"),
     }
@@ -192,7 +195,12 @@ def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> 
             "match_id": str(live_match["_id"]),
             "viewer_reason": viewer_reason,
             "reason_version": str(live_match.get("reason_version") or "legacy"),
+            "proposal_namespace": namespace_for_document(live_match),
+            "proposal_revision": int(live_match.get("proposal_revision", 0) or 0),
         }
+        event_card = public_event_card(live_match)
+        if event_card:
+            public_match["event"] = event_card
         # Rebuild proposal metadata from the canonical match at delivery time.
         # Queued events cannot smuggle stale profile snippets, the opposite
         # direction reason, or participant identifiers into the public card.

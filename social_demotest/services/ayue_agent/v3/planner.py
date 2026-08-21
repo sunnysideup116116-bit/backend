@@ -184,7 +184,7 @@ def _normalize_provider_plan_arguments(
         if not isinstance(task, dict):
             continue
         agent = task.get("agent")
-        if agent not in _KNOWN_PLANNER_AGENTS:
+        if not isinstance(agent, str) or agent not in _KNOWN_PLANNER_AGENTS:
             continue
         empty_placeholder_removed = False
         if task.get("evidence_policy") == "":
@@ -198,7 +198,8 @@ def _normalize_provider_plan_arguments(
             empty_placeholder_removed = True
         if empty_placeholder_removed and "empty_optional_task_fields_removed" not in repair_codes:
             repair_codes.append("empty_optional_task_fields_removed")
-        if agent != "web" and task.get("evidence_policy") in {
+        evidence_policy = task.get("evidence_policy")
+        if agent != "web" and isinstance(evidence_policy, str) and evidence_policy in {
             "casual_discovery", "strict_verification",
         }:
             task.pop("evidence_policy", None)
@@ -467,6 +468,10 @@ def _planner_prompt(turn_ctx: PublicAgentTurnContext) -> str:
     recent_messages = _planner_recent_messages(turn_ctx)
     if recent_messages:
         payload["recent_messages"] = recent_messages
+    if turn_ctx.conversation_continuity is not None:
+        payload["conversation_continuity"] = turn_ctx.conversation_continuity.model_dump(
+            mode="json", exclude_none=True,
+        )
 
     active = turn_ctx.active_proposal
     if isinstance(active, dict):
@@ -477,6 +482,16 @@ def _planner_prompt(turn_ctx: PublicAgentTurnContext) -> str:
         }
         if active_projection:
             payload["active_proposal"] = active_projection
+
+    event_active = turn_ctx.active_event_invitation
+    if isinstance(event_active, dict):
+        event_projection = {
+            key: event_active[key]
+            for key in ("status", "event_title", "user_can_decide")
+            if event_active.get(key) not in (None, "")
+        }
+        if event_projection:
+            payload["active_event_invitation"] = event_projection
 
     optional_fields = (
         "calendar_draft",

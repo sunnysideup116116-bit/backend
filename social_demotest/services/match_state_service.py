@@ -6,6 +6,11 @@ import time
 from typing import Any
 
 from database import matches_coll, profiles_coll
+from services.proposal_namespace import (
+    RELATIONSHIP_MATCH_NAMESPACE,
+    live_proposal_query,
+    namespace_clause,
+)
 
 
 LIVE_MATCH_STATUSES = {"draft", "pending"}
@@ -80,6 +85,7 @@ def verified_accepted_match_query(
             {"status": "accepted"},
             participants,
             acceptance_evidence,
+            {"relationship_establishing": {"$ne": False}},
         ]
     }
 
@@ -101,17 +107,9 @@ def _display_name(user_id: str | None) -> str:
 
 
 def _live_match_query(user_id: str, status: str | None = None) -> dict[str, Any]:
-    query: dict[str, Any] = {
-        "status": status or {"$in": list(LIVE_MATCH_STATUSES)},
-        "$or": [
-            {"live_participants": user_id},
-            {
-                "live_participants": {"$exists": False},
-                "$or": [{"from_user": user_id}, {"to_user": user_id}],
-            },
-        ],
-    }
-    return query
+    return live_proposal_query(
+        user_id, RELATIONSHIP_MATCH_NAMESPACE, status=status,
+    )
 
 
 def reconcile_live_match(user_id: str) -> dict[str, Any] | None:
@@ -119,10 +117,18 @@ def reconcile_live_match(user_id: str) -> dict[str, Any] | None:
     now = time.time()
     for status, ttl in (("draft", DRAFT_TTL_SECONDS), ("pending", PENDING_TTL_SECONDS)):
         expiry_query = _live_match_query(user_id, status)
-        expiry_query["created_at"] = {"$lt": now - ttl}
+        expiry_query["$and"].append({"created_at": {"$lt": now - ttl}})
+        transition = {
+            "from": status, "to": "expired", "actor": "system",
+            "action": "proposal_expired", "reason": f"{status}_timeout", "at": now,
+        }
         matches_coll.update_many(
             expiry_query,
-            {"$set": {"status": "expired", "expired_at": now, "expired_reason": f"{status}_timeout"},
+            {"$set": {
+                "status": "expired", "updated_at": now, "expired_at": now,
+                "expired_reason": f"{status}_timeout", "last_decision": transition,
+             }, "$inc": {"proposal_revision": 1},
+             "$push": {"state_history": transition},
              "$unset": {"live_participants": ""}},
         )
     profiles_coll.update_many(
@@ -226,6 +232,12 @@ def get_match_status_snapshot(user_id: str) -> dict[str, Any]:
                 {
                     "$or": [
                         {"status": {"$in": ["declined", "expired"]}},
+                        verified_accepted_match_query(user_id),
+                    ]
+                },
+                {
+                    "$or": [
+                        namespace_clause(RELATIONSHIP_MATCH_NAMESPACE),
                         verified_accepted_match_query(user_id),
                     ]
                 },

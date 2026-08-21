@@ -63,11 +63,11 @@ Hermes ContextEngine concept
 | 狀態 | 目前 owner | 用途 | 不可混入 |
 | --- | --- | --- | --- |
 | 本人近期情境 | Mongo profile 的 `recent_context_state`／`current_context` | 最近、正在或預計進行的本人現實活動 | 配對操作、他人狀態、長期人格判定 |
-| 本人長期記憶 | Neo4j `User-[:HAS_PREFERENCE]->Trait` | 明確且可持續的本人偏好／限制 | 系統建議、一次性活動、對方特徵 |
+| 本人長期記憶 | Neo4j `User-[:PREFERS|AVOIDS|CURRENTLY_WANTS]->Concept` | 明確且可持續的本人偏好、排斥地雷與最新想要活動 | 系統建議、一次性活動、對方特徵 |
 | 雙人關係語意 | Mongo `semantic_plans` 與 room-scoped KG triples | 已接受關係中的共同話題、互動節奏與 mediator strategy | 任一方私人悄悄話、跨房間資料 |
 | Agent 每回合 context | `AgentTurnContextV2` | 讓 Planner 在有限 token 與隱私邊界內做當回合決策 | raw Mongo／Neo4j document、內部 ID、對方私人資料 |
 
-「長期建議」是系統推導出的 recommendation，不是使用者記憶。即使建議來自 Graph Memory，也必須保存到獨立 read model，並保留來源、版本、有效期與可撤銷狀態；禁止寫成 `HAS_PREFERENCE`。
+「長期建議」是系統推導出的 recommendation，不是使用者記憶。即使建議來自 Graph Memory，也必須保存到獨立 read model，並保留來源、版本、有效期與可撤銷狀態；禁止寫成 `PREFERS`。
 
 ## 2. 現有資料流與 source of truth
 
@@ -88,7 +88,7 @@ Saved owner message
 - 只接受 owner 已保存的原始訊息；assistant reply、history、tool result 與 match state 都不是寫入證據。
 - 每個 evidence span 必須是該 owner message 的連續原文子字串。
 
-### 2.2 長期偏好記憶
+### 2.2 長期偏好記憶（Concept 與 PREFERS / AVOIDS / CURRENTLY_WANTS）
 
 ```text
 Saved owner message
@@ -96,16 +96,26 @@ Saved owner message
 → typed validation
 → memory_service.apply_profile_memory_proposals
 → port 9001 /api/memory/apply
-→ Neo4j owner-scoped relationship
-→ Mongo profile_memory_preview read projection
-→ memory.search_my_profile / Context Builder
+→ Neo4j (:User)-[:PREFERS|AVOIDS|CURRENTLY_WANTS]->(:Concept)
+→ Mongo profile_memory_preview read projection & realtime sync
+→ context_slicer.py (user_preferences) → Synthesizer prompt
 ```
 
-- Neo4j 是 durable preference 的 source of truth。
-- Mongo `profile_memory_preview`／`profile_memory_summary` 是 bounded read projection，不是另一份可獨立修改的真相。
+- Neo4j 是 durable preference 的 source of truth，節點型別為 `Concept`（屬性 `{key, label, kind}`），廢除舊版 `Trait`。
+- 關係類型：
+  - 正向偏好：`(:User)-[:PREFERS]->(:Concept)`
+  - 負向地雷：`(:User)-[:AVOIDS]->(:Concept)`
+  - 短期意圖：`(:User)-[:CURRENTLY_WANTS {expires_at}]->(:Concept)`（寫入新意圖時自動清除舊有 `CURRENTLY_WANTS`，維持最新單一意圖，預設 30 天過期）。
+- Mongo `profile_memory_preview`／`profile_memory_summary` 是 bounded read projection；前端「阿月記住的事」在開啟與載入時會即時與 Neo4j Concept 同步。
 - `message_id` 是 observation idempotency key；同一 owner message 不得增加兩次 evidence count。
 - `profile_memory_outbox` 只保存已驗證的 typed proposals 與 error code，不保存 raw chat。
-- 使用者在設定中 disable／restore／correct 後，必須同步更新 Mongo projection。
+- 使用者在設定中 disable／restore／correct 後，同步更新 Mongo projection。
+
+### 2.3 對話壓縮與延續性（Compaction 機制）
+
+- **觸發條件**：單一聊天室累積訊息超過 **30 句** 時觸發。
+- **壓縮策略**：壓縮最舊 **10~11 句** 訊息為 6 大維度的結構化摘要（`active_topics`, `owner_goals`, `known_continuity`, `unresolved_questions`, `ayue_commitments`, `recent_decisions`），保留最新 **20 句** 未壓縮原始訊息作為即時上下文。
+- **儲存位置**：MongoDB `conversation_compactions`，並帶有 `covered_through_message_id` watermark。
 
 舊版 `/api/memory/observe`、主服務直接 Neo4j fallback 與自由文字 extractor 已移除；`profile_skills.py → /api/memory/apply` 是唯一 owner-memory extraction/write flow。不要再新增另一個自由文字 extractor。
 
