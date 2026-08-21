@@ -1,5 +1,7 @@
-﻿import json
+import json
 import os
+import hashlib
+import math
 import re
 import sys
 import time
@@ -119,6 +121,67 @@ class MatchRequest(BaseModel):
     candidates: list
     target_deep_profile: dict = {}
 
+class ProactiveEventMatchRequest(BaseModel):
+    user_id: str
+    excluded_user_ids: list[str] = []
+
+class EventIngestRequest(BaseModel):
+    region: str = "高雄"
+    window_days: int = 30
+    max_events: int = 6
+    search_results: list[dict] = []
+
+class EventInventoryReconcileRequest(BaseModel):
+    categories: list[str] = []
+    max_per_category: int = 6
+
+class EventRelevanceProjectionRequest(BaseModel):
+    event_ids: list[str] = []
+    links: list[dict] = []
+    model: str = ""
+    generated_at: float = 0.0
+
+class ConceptEmbeddingProjectionRequest(BaseModel):
+    concepts: list[dict] = []
+
+
+def ingest_event_search_results(req: EventIngestRequest):
+    safe_region = re.sub(r"\s+", " ", str(req.region or "").strip())[:40] or "高雄"
+    bounded_results = []
+    for item in (req.search_results or [])[:20]:
+        if not isinstance(item, dict):
+            continue
+        bounded_results.append({
+            "title": re.sub(r"\s+", " ", str(item.get("title") or "").strip())[:180],
+            "snippet": re.sub(r"\s+", " ", str(item.get("snippet") or "").strip())[:1500],
+            "source_url": str(item.get("source_url") or "").strip()[:500],
+            "discovery_category": re.sub(
+                r"\s+", " ", str(item.get("discovery_category") or "").strip()
+            )[:30],
+            "skill_name": re.sub(r"[^a-z0-9-]", "", str(item.get("skill_name") or "").lower())[:60],
+            "skill_version": re.sub(r"[^0-9.]", "", str(item.get("skill_version") or ""))[:20],
+            "region": safe_region,
+        })
+    if not bounded_results:
+        return {"status": "empty", "region": safe_region, "ingested_count": 0, "events": []}
+    # Expiry deletion belongs to the lifecycle worker. Running cleanup before
+    # every category batch can make one discovery run mutate earlier batches.
+    result = agent.extract_and_ingest_search_results(
+        bounded_results,
+        region=safe_region,
+        window_days=max(1, min(int(req.window_days or 30), 60)),
+        max_events=max(1, min(int(req.max_events or 6), 6)),
+    )
+    return {
+        "status": "success",
+        "region": safe_region,
+        "search_count": len(bounded_results),
+        "ingested_count": result.get("ingested_count", 0),
+        "validation_counts": result.get("validation_counts", {}),
+        "events": result.get("events", []),
+    }
+
+
 def get_user_graph_memory(user_id: str) -> str:
     """Read one user preference memory from Neo4j."""
     step_start = time.perf_counter()
@@ -132,15 +195,14 @@ def get_user_graph_memory(user_id: str) -> str:
             with driver.session(database=database) as session:
                 result = session.run(
                     """
-                    MATCH (u:User {id: $user_id})-[r:HAS_PREFERENCE]->(t:Trait)
-                    WHERE coalesce(r.active, true) = true
-                    RETURN coalesce(r.type, CASE WHEN r.stance IN ['dislike','avoid'] THEN 'DISLIKES_TRAIT' ELSE 'LIKES_TRAIT' END) AS type,
-                           t.name AS trait, coalesce(r.reason, '') AS reason
+                    MATCH (u:User {id: $user_id})-[r:PREFERS|AVOIDS]->(c:Concept)
+                    RETURN CASE type(r) WHEN 'AVOIDS' THEN 'DISLIKES_TRAIT' ELSE 'LIKES_TRAIT' END AS type,
+                           coalesce(c.label, c.key) AS trait, '' AS reason
                     """,
                     user_id=user_id,
                 )
                 memory_lines = [
-                    f"[{record['type']}] 遇到特質「{record['trait']}」的對象。原因：{record['reason']}"
+                    f"[{record['type']}] 偏好/地雷「{record['trait']}」"
                     for record in result
                 ]
         elapsed = time.perf_counter() - step_start
@@ -285,6 +347,549 @@ async def match_endpoint(req: MatchRequest):
 
 # ??agent_api.py 銝剜憓挾
 
+@app.post("/api/proactive_event_match")
+def proactive_event_match(req: ProactiveEventMatchRequest):
+    user_id = re.sub(r"\s+", "", str(req.user_id or ""))[:80]
+    if not user_id:
+        return {"status": "error", "message": "user_id is required"}
+    started = time.perf_counter()
+    try:
+        deleted = agent.clean_expired_events()
+        excluded_user_ids = list(dict.fromkeys(
+            re.sub(r"\s+", "", str(value or ""))[:80]
+            for value in req.excluded_user_ids[:100]
+            if str(value or "").strip()
+        ))
+        matches = agent.find_event_matches(user_id, excluded_user_ids=excluded_user_ids)
+        if not matches:
+            return {
+                "status": "no_match",
+                "user_id": user_id,
+                "expired_events_deleted": deleted,
+                "message": "目前沒有同時通過活動連結與地雷過濾的人選。",
+            }
+        selected = matches[0]
+        invitation_order = agent.choose_event_invitation_order(selected)
+        first_user_id = (
+            selected.get("user_id")
+            if invitation_order.get("first") == "target"
+            else selected.get("candidate_id")
+        )
+        hook_match = selected
+        if invitation_order.get("first") == "candidate":
+            hook_match = {
+                **selected,
+                "user_id": selected.get("candidate_id"),
+                "user_name": selected.get("candidate_name"),
+                "candidate_id": selected.get("user_id"),
+                "candidate_name": selected.get("user_name"),
+                "target_links": selected.get("candidate_links") or [],
+                "candidate_links": selected.get("target_links") or [],
+                "target_user_concepts": selected.get("candidate_user_concepts") or [],
+                "candidate_user_concepts": selected.get("target_user_concepts") or [],
+                "target_source_kinds": selected.get("candidate_source_kinds") or [],
+                "candidate_source_kinds": selected.get("target_source_kinds") or [],
+            }
+        hook = agent.generate_proactive_event_hook(first_user_id, hook_match)
+        second_user_id = (
+            selected.get("candidate_id")
+            if first_user_id == selected.get("user_id")
+            else selected.get("user_id")
+        )
+        second_hook_match = selected
+        if second_user_id == selected.get("candidate_id"):
+            second_hook_match = {
+                **selected,
+                "user_id": selected.get("candidate_id"),
+                "user_name": selected.get("candidate_name"),
+                "candidate_id": selected.get("user_id"),
+                "candidate_name": selected.get("user_name"),
+                "target_links": selected.get("candidate_links") or [],
+                "candidate_links": selected.get("target_links") or [],
+                "target_user_concepts": selected.get("candidate_user_concepts") or [],
+                "candidate_user_concepts": selected.get("target_user_concepts") or [],
+                "target_source_kinds": selected.get("candidate_source_kinds") or [],
+                "candidate_source_kinds": selected.get("target_source_kinds") or [],
+            }
+        second_hook = agent.generate_proactive_event_hook(second_user_id, second_hook_match)
+        print(
+            f"[TIMING][9001 /api/proactive_event_match] total="
+            f"{time.perf_counter() - started:.3f}s user={user_id}"
+        )
+        return {
+            "status": "success",
+            "user_id": user_id,
+            "expired_events_deleted": deleted,
+            "match": selected,
+            "first_user_id": first_user_id,
+            "second_user_id": second_user_id,
+            "invitation_order": invitation_order,
+            "hook": hook,
+            "first_hook": hook,
+            "second_hook": second_hook,
+        }
+    except Exception as exc:
+        print(f"[PROACTIVE_EVENT] match failed user={user_id} error={exc}")
+        return {"status": "error", "user_id": user_id, "message": str(exc)}
+
+
+@app.post("/api/events/lifecycle/cleanup")
+def cleanup_event_lifecycle():
+    """Internal bounded cleanup; consent state remains owned by port 8000."""
+    try:
+        result = agent.clean_expired_events(include_ids=True)
+        return {"status": "success", **result}
+    except Exception as exc:
+        print(f"[EVENT_LIFECYCLE] cleanup failed error={type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="Event lifecycle cleanup unavailable") from exc
+
+
+@app.post("/api/events/ingest")
+def ingest_events(req: EventIngestRequest):
+    try:
+        return ingest_event_search_results(req)
+    except Exception as exc:
+        print(f"[PROACTIVE_EVENT] event ingestion failed error={type(exc).__name__}")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "error",
+                "error_code": type(exc).__name__,
+                "message": "event_ingestion_failed",
+            },
+        ) from exc
+
+
+@app.post("/api/events/reconcile")
+def reconcile_event_inventory(req: EventInventoryReconcileRequest):
+    """Internal Event-only reconciliation; User and preference nodes are untouched."""
+    try:
+        return agent.reconcile_event_inventory(
+            categories=req.categories,
+            max_per_category=req.max_per_category,
+        )
+    except Exception as exc:
+        print(f"[PROACTIVE_EVENT] inventory reconcile failed error={type(exc).__name__}")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "error",
+                "error_code": type(exc).__name__,
+                "message": "event_inventory_reconcile_failed",
+            },
+        ) from exc
+
+
+@app.get("/api/events/active")
+def list_active_events_for_relevance(limit: int = 20):
+    """Internal typed projection used to rebuild disposable semantic links."""
+    URI, AUTH, DATABASE = _neo4j_config()
+    safe_limit = max(1, min(int(limit or 20), 100))
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH) as driver:
+            with driver.session(database=DATABASE) as session:
+                rows = session.run("""
+                    MATCH (event:Event)
+                    WHERE event.status = 'active' AND event.expires_at > $now
+                    RETURN event.id AS event_id,
+                           event.title AS title,
+                           event.summary AS summary,
+                           event.category AS category,
+                           event.starts_at AS starts_at,
+                           event.ends_at AS ends_at,
+                           coalesce(event.session_starts, []) AS session_starts,
+                           [(event)-[:HAS_TAG]->(tag:Concept) | coalesce(tag.label, tag.key)] AS tags,
+                           [(event)-[:HAS_VIBE]->(vibe:Concept) | coalesce(vibe.label, vibe.key)] AS vibes
+                    ORDER BY event.starts_at ASC
+                    LIMIT $limit
+                """, now=time.time(), limit=safe_limit)
+                events = [dict(row) for row in rows]
+                user_record = session.run(
+                    "MATCH (user:User) RETURN count(user) AS count"
+                ).single()
+                user_count = int(user_record["count"] if user_record else 0)
+        return {
+            "status": "success", "events": events,
+            "event_count": len(events), "user_count": user_count,
+        }
+    except Exception as exc:
+        print(f"[EVENT_RELEVANCE] active event read failed error={type(exc).__name__}")
+        return {"status": "error", "events": [], "event_count": 0}
+
+
+@app.post("/api/events/reset")
+def reset_event_graph(confirm: bool = False):
+    """Demo-only scoped reset for Event nodes and newly orphaned Concepts."""
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true is required")
+    URI, AUTH, DATABASE = _neo4j_config()
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH) as driver:
+            with driver.session(database=DATABASE) as session:
+                event_record = session.run(
+                    "MATCH (event:Event) RETURN count(event) AS count"
+                ).single()
+                event_count = int(event_record["count"] if event_record else 0)
+                event_id_record = session.run("""
+                    MATCH (event:Event)
+                    RETURN collect(DISTINCT event.id)[0..500] AS event_ids
+                """).single()
+                event_ids = [
+                    str(value)[:80]
+                    for value in list((event_id_record or {}).get("event_ids") or [])
+                    if str(value or "").strip()
+                ]
+                concept_record = session.run("""
+                    MATCH (:Event)-[:HAS_TAG|HAS_VIBE]->(concept:Concept)
+                    RETURN collect(DISTINCT elementId(concept)) AS concept_ids
+                """).single()
+                event_concept_ids = list(
+                    (concept_record or {}).get("concept_ids") or []
+                )
+                session.run("MATCH (event:Event) DETACH DELETE event").consume()
+                orphan_record = session.run("""
+                    MATCH (concept:Concept)
+                    WHERE elementId(concept) IN $concept_ids
+                      AND NOT (concept)--()
+                    RETURN count(concept) AS count
+                """, concept_ids=event_concept_ids).single()
+                orphan_count = int(orphan_record["count"] if orphan_record else 0)
+                session.run("""
+                    MATCH (concept:Concept)
+                    WHERE elementId(concept) IN $concept_ids
+                      AND NOT (concept)--()
+                    DELETE concept
+                """, concept_ids=event_concept_ids).consume()
+        result = {
+            "status": "success",
+            "events_deleted": event_count,
+            "orphan_concepts_deleted": orphan_count,
+            "event_ids": event_ids,
+        }
+        print(f"[EVENT RESET] scoped graph reset complete result={result}")
+        return result
+    except Exception as exc:
+        print(f"[EVENT RESET] failed error={type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="Event graph reset failed") from exc
+
+
+def _event_relevance_limit() -> int:
+    try:
+        value = int(os.getenv("EVENT_RELEVANCE_MAX_PER_USER", "3") or 3)
+    except (TypeError, ValueError):
+        value = 3
+    return max(1, min(value, 10))
+
+
+def _prune_event_relevance(session) -> int:
+    """Keep only each user's strongest bounded Event retrieval set."""
+    record = session.run("""
+        MATCH (user:User)-[link:EVENT_RELEVANCE]->(event:Event)
+        WITH user, link, event,
+             CASE WHEN 'recent' IN coalesce(link.source_kinds, []) THEN 0 ELSE 1 END AS recent_rank
+        ORDER BY user.id, recent_rank ASC,
+                 coalesce(link.max_similarity, 0.0) DESC,
+                 coalesce(event.starts_at, 0) ASC,
+                 event.id ASC
+        WITH user, collect(link) AS ranked_links
+        UNWIND ranked_links[$limit..] AS extra
+        DELETE extra
+        RETURN count(extra) AS deleted
+    """, limit=_event_relevance_limit()).single()
+    return int(record["deleted"] if record else 0)
+
+
+@app.post("/api/events/relevance/project")
+def project_event_relevance(req: EventRelevanceProjectionRequest):
+    """Replace derived Event relevance links without mutating user preferences."""
+    event_ids = list(dict.fromkeys(
+        re.sub(r"[^a-zA-Z0-9_-]", "", str(value or ""))[:80]
+        for value in req.event_ids[:100]
+        if str(value or "").strip()
+    ))
+    allowed_event_ids = set(event_ids)
+    generated_at = min(max(float(req.generated_at or time.time()), 0.0), time.time() + 300)
+    grouped: dict[tuple[str, str, str], list[dict]] = {}
+    for raw in req.links[:5000]:
+        if not isinstance(raw, dict):
+            continue
+        user_id = re.sub(r"\s+", "", str(raw.get("user_id") or ""))[:80]
+        event_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(raw.get("event_id") or ""))[:80]
+        relation = str(raw.get("relation") or "").lower()
+        if not user_id or event_id not in allowed_event_ids or relation not in {"relevance", "avoidance"}:
+            continue
+        evidence: list[dict] = []
+        for item in list(raw.get("evidence") or [])[:3]:
+            if not isinstance(item, dict):
+                continue
+            user_concept = re.sub(r"\s+", " ", str(item.get("user_concept") or "").strip())[:60]
+            event_signal = re.sub(r"\s+", " ", str(item.get("event_signal") or "").strip())[:60]
+            similarity = max(0.0, min(float(item.get("similarity") or 0.0), 1.0))
+            signal_type = str(item.get("signal_type") or "")
+            source_kind = str(item.get("source_kind") or "")
+            if user_concept and event_signal and signal_type in {"tag", "vibe"} and source_kind in {"recent", "durable"}:
+                evidence.append({
+                    "user_concept": user_concept,
+                    "event_signal": event_signal,
+                    "similarity": similarity,
+                    "signal_type": signal_type,
+                    "source_kind": source_kind,
+                })
+        if evidence:
+            grouped[(user_id, event_id, relation)] = evidence
+
+    relevance_rows, avoidance_rows = [], []
+    for (user_id, event_id, relation), evidence in grouped.items():
+        row = {
+            "user_id": user_id,
+            "event_id": event_id,
+            "user_concepts": [item["user_concept"] for item in evidence],
+            "event_signals": [item["event_signal"] for item in evidence],
+            "similarities": [item["similarity"] for item in evidence],
+            "signal_types": [item["signal_type"] for item in evidence],
+            "source_kinds": [item["source_kind"] for item in evidence],
+            "max_similarity": max(item["similarity"] for item in evidence),
+        }
+        (avoidance_rows if relation == "avoidance" else relevance_rows).append(row)
+    avoidance_keys = {
+        (row["user_id"], row["event_id"]) for row in avoidance_rows
+    }
+    relevance_rows = [
+        row for row in relevance_rows
+        if (row["user_id"], row["event_id"]) not in avoidance_keys
+    ]
+
+    URI, AUTH, DATABASE = _neo4j_config()
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH) as driver:
+            with driver.session(database=DATABASE) as session:
+                session.run("""
+                    MATCH ()-[old:EVENT_RELEVANCE|EVENT_AVOIDANCE]->(event:Event)
+                    WHERE event.id IN $event_ids
+                    DELETE old
+                """, event_ids=event_ids).consume()
+                session.run("""
+                    UNWIND $rows AS item
+                    MATCH (user:User {id:item.user_id}), (event:Event {id:item.event_id})
+                    MERGE (user)-[link:EVENT_RELEVANCE]->(event)
+                    SET link.user_concepts=item.user_concepts,
+                        link.event_signals=item.event_signals,
+                        link.similarities=item.similarities,
+                        link.signal_types=item.signal_types,
+                        link.source_kinds=item.source_kinds,
+                        link.max_similarity=item.max_similarity,
+                        link.updated_at=$generated_at
+                """, rows=relevance_rows, generated_at=generated_at).consume()
+                session.run("""
+                    UNWIND $rows AS item
+                    MATCH (user:User {id:item.user_id}), (event:Event {id:item.event_id})
+                    MERGE (user)-[link:EVENT_AVOIDANCE]->(event)
+                    SET link.user_concepts=item.user_concepts,
+                        link.event_signals=item.event_signals,
+                        link.similarities=item.similarities,
+                        link.signal_types=item.signal_types,
+                        link.source_kinds=item.source_kinds,
+                        link.max_similarity=item.max_similarity,
+                        link.updated_at=$generated_at
+                """, rows=avoidance_rows, generated_at=generated_at).consume()
+                _prune_event_relevance(session)
+                final_relevance = session.run("""
+                    MATCH ()-[link:EVENT_RELEVANCE]->(event:Event)
+                    WHERE event.id IN $event_ids
+                    RETURN count(link) AS count
+                """, event_ids=event_ids).single()
+                final_avoidance = session.run("""
+                    MATCH ()-[link:EVENT_AVOIDANCE]->(event:Event)
+                    WHERE event.id IN $event_ids
+                    RETURN count(link) AS count
+                """, event_ids=event_ids).single()
+                relevance_count = int(
+                    final_relevance["count"] if final_relevance else len(relevance_rows)
+                )
+                avoidance_count = int(
+                    final_avoidance["count"] if final_avoidance else len(avoidance_rows)
+                )
+        return {
+            "status": "success",
+            "event_count": len(event_ids),
+            "relevance_count": relevance_count,
+            "avoidance_count": avoidance_count,
+            "link_count": relevance_count + avoidance_count,
+        }
+    except Exception as exc:
+        print(f"[EVENT_RELEVANCE] graph projection failed error={type(exc).__name__}")
+        return {"status": "error", "event_count": len(event_ids), "link_count": 0}
+
+
+def _refresh_semantic_event_links(session) -> dict[str, int]:
+    relevance_threshold = max(0.0, min(
+        float(os.getenv("EVENT_RELEVANCE_MIN_SIMILARITY", "0.68")), 1.0,
+    ))
+    avoidance_threshold = max(0.0, min(
+        float(os.getenv("EVENT_AVOIDANCE_MIN_SIMILARITY", "0.74")), 1.0,
+    ))
+    now = time.time()
+    session.run("""
+        MATCH ()-[old:EVENT_RELEVANCE|EVENT_AVOIDANCE]->(event:Event)
+        WHERE event.status = 'active' AND event.expires_at > $now
+        DELETE old
+    """, now=now).consume()
+    avoidance = session.run("""
+        MATCH (user:User)-[:AVOIDS]->(user_concept:Concept)
+        MATCH (event:Event)-[signal_relation:HAS_TAG|HAS_VIBE]->(event_concept:Concept)
+        WHERE event.status = 'active' AND event.expires_at > $now
+          AND user_concept.embedding IS NOT NULL
+          AND event_concept.embedding IS NOT NULL
+          AND user_concept.kind = 'activity'
+          AND type(signal_relation) = 'HAS_TAG'
+        WITH user, event, user_concept, event_concept,
+             vector.similarity.cosine(user_concept.embedding, event_concept.embedding) AS score
+        WHERE score >= $threshold
+        WITH user, event, user_concept, event_concept, score ORDER BY score DESC
+        WITH user, event, collect({user_concept:user_concept.label,
+             event_signal:event_concept.label, similarity:score})[0..3] AS evidence
+        MERGE (user)-[link:EVENT_AVOIDANCE]->(event)
+        SET link.user_concepts=[item IN evidence | item.user_concept],
+            link.event_signals=[item IN evidence | item.event_signal],
+            link.similarities=[item IN evidence | item.similarity],
+            link.source_kinds=['durable'],
+            link.max_similarity=reduce(best=0.0, item IN evidence |
+                CASE WHEN item.similarity > best THEN item.similarity ELSE best END),
+            link.updated_at=$now
+        RETURN count(link) AS written
+    """, now=now, threshold=avoidance_threshold).single()
+    relevance = session.run("""
+        MATCH (user:User)-[preference:PREFERS|CURRENTLY_WANTS]->(user_concept:Concept)
+        MATCH (event:Event)-[signal_relation:HAS_TAG|HAS_VIBE]->(event_concept:Concept)
+        WHERE event.status = 'active' AND event.expires_at > $now
+          AND NOT (user)-[:EVENT_AVOIDANCE]->(event)
+          AND user_concept.embedding IS NOT NULL
+          AND event_concept.embedding IS NOT NULL
+          AND ((user_concept.kind = 'activity' AND type(signal_relation) = 'HAS_TAG')
+            OR user_concept.kind = 'interest')
+        WITH user, event, preference, user_concept, event_concept,
+             vector.similarity.cosine(user_concept.embedding, event_concept.embedding) AS score
+        WHERE score >= $threshold
+        WITH user, event, preference, user_concept, event_concept, score ORDER BY score DESC
+        WITH user, event, collect({user_concept:user_concept.label,
+             event_signal:event_concept.label, similarity:score,
+             source_kind:CASE WHEN type(preference)='CURRENTLY_WANTS'
+                THEN 'recent' ELSE 'durable' END})[0..3] AS evidence
+        MERGE (user)-[link:EVENT_RELEVANCE]->(event)
+        SET link.user_concepts=[item IN evidence | item.user_concept],
+            link.event_signals=[item IN evidence | item.event_signal],
+            link.similarities=[item IN evidence | item.similarity],
+            link.source_kinds=[item IN evidence | item.source_kind],
+            link.max_similarity=reduce(best=0.0, item IN evidence |
+                CASE WHEN item.similarity > best THEN item.similarity ELSE best END),
+            link.updated_at=$now
+        RETURN count(link) AS written
+    """, now=now, threshold=relevance_threshold).single()
+    _prune_event_relevance(session)
+    final_relevance = session.run("""
+        MATCH ()-[link:EVENT_RELEVANCE]->(event:Event)
+        WHERE event.status = 'active' AND event.expires_at > $now
+        RETURN count(link) AS count
+    """, now=now).single()
+    return {
+        "relevance_count": int(
+            final_relevance["count"] if final_relevance
+            else (relevance["written"] if relevance else 0)
+        ),
+        "avoidance_count": int(avoidance["written"] if avoidance else 0),
+    }
+
+
+@app.get("/api/concepts/missing-embeddings")
+def list_missing_concept_embeddings(limit: int = 20):
+    URI, AUTH, DATABASE = _neo4j_config()
+    safe_limit = max(1, min(int(limit or 20), 50))
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH) as driver:
+            with driver.session(database=DATABASE) as session:
+                rows = session.run("""
+                    MATCH (concept:Concept)
+                    WHERE (concept)<-[:PREFERS|AVOIDS|CURRENTLY_WANTS]-(:User)
+                       OR (concept)<-[:HAS_TAG|HAS_VIBE]-(:Event)
+                    WITH DISTINCT concept, CASE
+                      WHEN EXISTS { MATCH (:Event)-[:HAS_TAG]->(concept) } THEN 'activity'
+                      WHEN EXISTS { MATCH (:Event)-[:HAS_VIBE]->(concept) } THEN 'vibe'
+                      WHEN EXISTS { MATCH (:User)-[:CURRENTLY_WANTS]->(concept) } THEN 'activity'
+                      ELSE coalesce(concept.kind, 'unknown') END AS suggested_kind
+                    WHERE concept.embedding IS NULL OR size(concept.embedding) <> 768
+                    RETURN concept.key AS key, concept.label AS label, suggested_kind
+                    ORDER BY concept.label LIMIT $limit
+                """, limit=safe_limit)
+                concepts = [dict(row) for row in rows]
+        return {"status": "success", "concepts": concepts, "count": len(concepts)}
+    except Exception as exc:
+        print(f"[CONCEPT_EMBEDDING] pending read failed error={type(exc).__name__}")
+        return {"status": "error", "concepts": [], "count": 0}
+
+
+@app.post("/api/concepts/embeddings/project")
+def project_concept_embeddings(req: ConceptEmbeddingProjectionRequest):
+    valid_kinds = {"activity", "interest", "vibe", "partner_trait", "value", "unknown"}
+    clean = []
+    for item in req.concepts[:50]:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()[:100]
+        label = re.sub(r"\s+", " ", str(item.get("label") or "").strip())[:60]
+        kind = str(item.get("kind") or "unknown")
+        vector = item.get("embedding")
+        if not key or not label or kind not in valid_kinds or not isinstance(vector, list) or len(vector) != 768:
+            continue
+        try:
+            embedding = [float(value) for value in vector]
+        except (TypeError, ValueError):
+            continue
+        if all(math.isfinite(value) for value in embedding):
+            clean.append({"key": key, "label": label, "kind": kind, "embedding": embedding})
+
+    URI, AUTH, DATABASE = _neo4j_config()
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH) as driver:
+            with driver.session(database=DATABASE) as session:
+                session.run("""
+                    CREATE VECTOR INDEX concept_embedding_index IF NOT EXISTS
+                    FOR (concept:Concept) ON (concept.embedding)
+                    OPTIONS {indexConfig: {`vector.dimensions`: 768,
+                        `vector.similarity_function`: 'cosine'}}
+                """).consume()
+                session.run("""
+                    UNWIND $concepts AS item
+                    MATCH (concept:Concept {key:item.key})
+                    SET concept.label=item.label,
+                        concept.kind=CASE WHEN item.kind <> 'unknown' THEN item.kind
+                            ELSE coalesce(concept.kind, 'unknown') END,
+                        concept.embedding=item.embedding,
+                        concept.embedded_at=$now
+                """, concepts=clean, now=time.time()).consume()
+                relation_counts = _refresh_semantic_event_links(session)
+                pending = session.run("""
+                    MATCH (concept:Concept)
+                    WHERE ((concept)<-[:PREFERS|AVOIDS|CURRENTLY_WANTS]-(:User)
+                       OR (concept)<-[:HAS_TAG|HAS_VIBE]-(:Event))
+                      AND (concept.embedding IS NULL OR size(concept.embedding) <> 768)
+                    RETURN count(DISTINCT concept) AS count
+                """).single()
+        return {"status": "success", "embedded_count": len(clean),
+            "pending_count": int(pending["count"] if pending else 0), **relation_counts}
+    except Exception as exc:
+        print(f"[CONCEPT_EMBEDDING] projection failed error={type(exc).__name__}: {exc}")
+        return {"status": "error", "embedded_count": 0, "error_code": type(exc).__name__}
+
+
+@app.post("/api/trigger_daily_search", include_in_schema=False)
+def deprecated_trigger_daily_search():
+    raise HTTPException(
+        status_code=410,
+        detail="Event discovery moved to the port 8000 Tavily adapter.",
+    )
+
+
+
 class FeedbackRequest(BaseModel):
     user_id: str
     target_id: str # noqa
@@ -333,25 +938,43 @@ async def receive_feedback(req: FeedbackRequest):
             print("✅ [Neo4j Feedback 寫入] 連線驗證成功")
             with driver.session(database=database) as session:
                 for rel in relationships:
-                    trait_value = rel.get("trait")
+                    trait_value = str(rel.get("trait") or "").strip()
                     rel_type_value = rel.get("relation_type")
-                    reason_value = rel.get("reason", "")
                     if not trait_value or not rel_type_value:
                         print(f"⚠️ Skip invalid graph relationship: {rel}")
                         continue
-                    session.run(
-                        """
-                        MERGE (u:User {id: $user_id})
-                        MERGE (t:Trait {name: $trait})
-                        MERGE (u)-[r:HAS_PREFERENCE {type: $rel_type}]->(t)
-                        SET r.reason = $reason, r.active = true, r.updated_at = timestamp()
-                        """,
-                        user_id=req.user_id,
-                        trait=trait_value,
-                        rel_type=rel_type_value,
-                        reason=reason_value,
-                    )
-                    print(f"✅ Neo4j saved: {req.user_id} -[{rel_type_value}]-> {trait_value}")
+                    key_value = "concept_" + hashlib.sha256(trait_value.lower().encode("utf-8")).hexdigest()[:16]
+                    if rel_type_value == "DISLIKES_TRAIT":
+                        session.run(
+                            """
+                            MERGE (u:User {id: $user_id})
+                            MERGE (c:Concept {key: $key})
+                            ON CREATE SET c.label = $trait, c.kind = 'preference'
+                            WITH u, c
+                            OPTIONAL MATCH (u)-[old:PREFERS]->(c)
+                            DELETE old
+                            MERGE (u)-[:AVOIDS]->(c)
+                            """,
+                            user_id=req.user_id,
+                            key=key_value,
+                            trait=trait_value,
+                        )
+                    else:
+                        session.run(
+                            """
+                            MERGE (u:User {id: $user_id})
+                            MERGE (c:Concept {key: $key})
+                            ON CREATE SET c.label = $trait, c.kind = 'preference'
+                            WITH u, c
+                            OPTIONAL MATCH (u)-[old:AVOIDS]->(c)
+                            DELETE old
+                            MERGE (u)-[:PREFERS]->(c)
+                            """,
+                            user_id=req.user_id,
+                            key=key_value,
+                            trait=trait_value,
+                        )
+                    print(f"✅ Neo4j saved: {req.user_id} -[{rel_type_value}]-> Concept({trait_value})")
 
         agent_memory_db[req.user_id]["history"] = []
     except json.JSONDecodeError as json_err:
@@ -464,6 +1087,12 @@ class MemoryActionRequest(BaseModel):
     action: str
     value: str | None = None
 
+class ContextProjectionRequest(BaseModel):
+    user_id: str
+    concepts: list[dict] = []
+    expires_at: float
+    revision: int = 0
+
 class ChatTripleRequest(BaseModel):
     session_id: str
     match_id: str | None = None
@@ -474,6 +1103,74 @@ class ChatTripleRequest(BaseModel):
 
 def _neo4j_config():
     return (os.getenv("NEO4J_URI"), (os.getenv("NEO4J_USERNAME"), os.getenv("NEO4J_PASSWORD")), os.getenv("NEO4J_DATABASE", "neo4j"))
+
+
+def _concept_key(label: str) -> str:
+    normalized = re.sub(r"\s+", "", str(label or "").strip().lower())
+    return "concept_" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+@app.post("/api/context/project")
+async def project_current_context(req: ContextProjectionRequest):
+    """Replace one user's short-lived intent projection without storing raw context."""
+    now = time.time()
+    expires_at = max(now + 60, min(float(req.expires_at), now + 45 * 86400))
+    clean: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in req.concepts[:4]:
+        label = re.sub(r"\s+", " ", str(item.get("label") or "").strip())[:40]
+        if not label:
+            continue
+        normalized = re.sub(r"\s+", "", label.lower())
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        key = str(item.get("key") or "").strip().lower()
+        if not re.fullmatch(r"[a-z][a-z0-9_]{1,50}", key):
+            key = _concept_key(label)
+        clean.append({"key": key, "label": label})
+
+    URI, AUTH, DATABASE = _neo4j_config()
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH) as driver:
+            with driver.session(database=DATABASE) as session:
+                session.run("""
+                    MATCH ()-[expired:CURRENTLY_WANTS]->()
+                    WHERE expired.expires_at < $now
+                    DELETE expired
+                """, now=now).consume()
+                session.run("""
+                    MERGE (u:User {id:$user_id})
+                    WITH u
+                    OPTIONAL MATCH (u)-[old:CURRENTLY_WANTS]->()
+                    DELETE old
+                """, user_id=req.user_id).consume()
+                for item in clean:
+                    existing = session.run("""
+                        MATCH (c:Concept)
+                        WHERE toLower(c.label)=toLower($label)
+                        RETURN c.key AS key LIMIT 1
+                    """, label=item["label"]).single()
+                    key = str(existing["key"] if existing else item["key"])
+                    session.run("""
+                        MATCH (u:User {id:$user_id})
+                        MERGE (c:Concept {key:$key})
+                        SET c.label=$label, c.kind='activity'
+                        MERGE (u)-[r:CURRENTLY_WANTS]->(c)
+                        SET r.expires_at=$expires_at
+                    """, user_id=req.user_id, key=key, label=item["label"],
+                         expires_at=expires_at).consume()
+        return {
+            "status": "success",
+            "user_id": req.user_id,
+            "concept_count": len(clean),
+            "expires_at": expires_at,
+            "revision": req.revision,
+        }
+    except Exception as exc:
+        print(f"[CONTEXT_GRAPH][9001] projection failed user={req.user_id} error={exc}")
+        return {"status": "error", "message": type(exc).__name__}
+
 
 @app.post("/api/clear_graph")
 async def clear_graph_endpoint():
@@ -534,21 +1231,32 @@ async def apply_memory(req: MemoryApplyRequest):
                     confidence = float(item.get("confidence", 0))
                     if not key_re.match(key) or not label or protected.search(label) or stance not in allowed_stances or confidence < 0.75:
                         continue
-                    category = str(item.get("category", "lifestyle"))[:30]
+                    if stance in ["want", "currently_wants"]:
+                        session.run("""
+                            MATCH (u:User {id:$user_id})-[old_w:CURRENTLY_WANTS]->()
+                            DELETE old_w
+                        """, user_id=req.user_id).consume()
                     session.run("""
-                        MERGE (u:User {id:$user_id}) MERGE (t:Trait {key:$key})
-                        ON CREATE SET t.name=$label,t.category=$category
-                        ON MATCH SET t.category=coalesce(t.category,$category)
-                        MERGE (u)-[r:HAS_PREFERENCE]->(t)
-                        ON CREATE SET r.first_seen_at=$now,r.evidence_count=0
-                        SET r.stance=$stance,
-                            r.type=CASE WHEN $stance IN ['dislike','avoid'] THEN 'DISLIKES_TRAIT' ELSE 'LIKES_TRAIT' END,
-                            r.confidence=CASE WHEN coalesce(r.confidence,0)>$confidence THEN r.confidence ELSE $confidence END,
-                            r.evidence_count=coalesce(r.evidence_count,0)+1,r.last_seen_at=$now,
-                            r.active=true,r.source=$surface,r.match_id=$match_id,r.display_label_zh_tw=$label
-                    """, user_id=req.user_id,key=key,label=label,category=category,stance=stance,
-                         confidence=confidence,now=now,surface=req.surface,match_id=req.match_id).consume()
-                    clean.append({"key":key,"label":label,"stance":stance,"category":category,"confidence":confidence,"last_seen_at":now})
+                        MERGE (u:User {id:$user_id})
+                        MERGE (c:Concept {key:$key})
+                        ON CREATE SET c.label=$label, c.kind='preference'
+                        ON MATCH SET c.label=coalesce(c.label,$label)
+                        WITH u, c
+                        OPTIONAL MATCH (u)-[old:PREFERS|AVOIDS|CURRENTLY_WANTS]->(c)
+                        DELETE old
+                        WITH u, c
+                        FOREACH (_ IN CASE WHEN $stance IN ['dislike','avoid'] THEN [1] ELSE [] END |
+                            MERGE (u)-[:AVOIDS]->(c)
+                        )
+                        FOREACH (_ IN CASE WHEN $stance IN ['like','require','prefer'] THEN [1] ELSE [] END |
+                            MERGE (u)-[:PREFERS]->(c)
+                        )
+                        FOREACH (_ IN CASE WHEN $stance IN ['want','currently_wants'] THEN [1] ELSE [] END |
+                            MERGE (u)-[w:CURRENTLY_WANTS]->(c)
+                            SET w.expires_at = $now + 30 * 86400
+                        )
+                    """, user_id=req.user_id, key=key, label=label, stance=stance, now=now).consume()
+                    clean.append({"key":key,"label":label,"stance":stance,"category":"preference","confidence":confidence,"last_seen_at":now})
         return {"memories": clean, "status": "success"}
     except Exception as exc:
         print(f"[MEMORY][9001 apply] graph_write_failed user={req.user_id} error={exc}")
@@ -560,14 +1268,19 @@ async def list_memories(user_id: str, limit: int = 12):
         with GraphDatabase.driver(URI, auth=AUTH) as driver:
             with driver.session(database=DATABASE) as session:
                 rows = session.run("""
-                    MATCH (u:User {id:$user_id})-[r:HAS_PREFERENCE]->(t:Trait)
-                    WHERE coalesce(r.active,true)=true
-                    RETURN coalesce(t.key,toLower(replace(t.name,' ','_'))) AS key,
-                           coalesce(r.display_label_zh_tw,t.name) AS label,
-                           coalesce(r.stance,CASE WHEN r.type='DISLIKES_TRAIT' THEN 'dislike' ELSE 'like' END) AS stance,
-                           t.category AS category, coalesce(r.confidence,0.7) AS confidence,
-                           coalesce(r.last_seen_at,0) AS last_seen_at
-                    ORDER BY confidence DESC,last_seen_at DESC LIMIT $limit
+                    MATCH (u:User {id:$user_id})-[r:PREFERS|AVOIDS|CURRENTLY_WANTS]->(c:Concept)
+                    RETURN c.key AS key,
+                           coalesce(c.label, c.key) AS label,
+                           CASE type(r)
+                               WHEN 'AVOIDS' THEN 'dislike'
+                               WHEN 'PREFERS' THEN 'like'
+                               WHEN 'CURRENTLY_WANTS' THEN 'want'
+                               ELSE 'like'
+                           END AS stance,
+                           coalesce(c.kind, 'preference') AS category,
+                           1.0 AS confidence,
+                           coalesce(r.last_seen_at, 0) AS last_seen_at
+                    LIMIT $limit
                 """, user_id=user_id, limit=max(1,min(limit,30)))
                 return {"memories": [dict(row) for row in rows]}
     except Exception as exc:
@@ -581,14 +1294,19 @@ async def memory_action(req: MemoryActionRequest):
     URI, AUTH, DATABASE = _neo4j_config()
     with GraphDatabase.driver(URI, auth=AUTH) as driver:
         with driver.session(database=DATABASE) as session:
-            row = session.run("""
-                MATCH (u:User {id:$user_id})-[r:HAS_PREFERENCE]->(t:Trait {key:$key})
-                SET r.active=$active,r.last_seen_at=$now,
-                    r.display_label_zh_tw=CASE WHEN $value IS NULL OR $value='' THEN coalesce(r.display_label_zh_tw,t.name) ELSE $value END
-                RETURN t.key AS key,coalesce(r.display_label_zh_tw,t.name) AS label,r.stance AS stance,
-                       t.category AS category,r.confidence AS confidence,r.last_seen_at AS last_seen_at
-            """, user_id=req.user_id,key=req.key,active=req.action!='disable',now=time.time(),value=req.value).single()
-            return {"status":"success","memory":dict(row) if row else None}
+            if req.action == "disable":
+                session.run("""
+                    MATCH (u:User {id:$user_id})-[r:PREFERS|AVOIDS|CURRENTLY_WANTS]->(c:Concept {key:$key})
+                    DELETE r
+                """, user_id=req.user_id, key=req.key).consume()
+                return {"status":"success"}
+            elif req.action == "restore":
+                session.run("""
+                    MATCH (u:User {id:$user_id}), (c:Concept {key:$key})
+                    MERGE (u)-[:PREFERS]->(c)
+                """, user_id=req.user_id, key=req.key).consume()
+                return {"status":"success"}
+            return {"status":"success"}
 @app.post("/api/chat_triples")
 async def receive_chat_triples(req: ChatTripleRequest):
     allowed = {

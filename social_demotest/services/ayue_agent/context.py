@@ -6,9 +6,18 @@ import re
 import time
 from typing import Any
 
+from bson.objectid import ObjectId
+
 from database import matches_coll, profiles_coll
+from services.conversation_compaction_service import load_validated_conversation_continuity
 from services.profile_projection import safe_recent_context
 from services.profile_location import safe_profile_location
+from services.proposal_namespace import (
+    EVENT_INVITATION_NAMESPACE,
+    RELATIONSHIP_MATCH_NAMESPACE,
+    live_proposal_query,
+    namespace_clause,
+)
 
 from .contracts import AgentTurnContext, PublicAgentTurnContext, TurnClockV1
 from .capabilities import CAPABILITY_MANIFEST_VERSION
@@ -17,8 +26,8 @@ from .time_context import build_turn_clock
 
 
 INTERNAL_ID_RE = re.compile(r"(?:@?seed_user_[\w-]+|@?demo_user|@?user[_-]?\d+)", re.IGNORECASE)
-MAX_HISTORY_MESSAGES = 12
-MAX_HISTORY_CHARS = 6000
+MAX_HISTORY_MESSAGES = 20
+MAX_HISTORY_CHARS = 8000
 RECENT_CONTEXT_DRAFT_TTL_SECONDS = 30 * 60
 
 
@@ -40,11 +49,33 @@ def _other_id(match: dict[str, Any], user_id: str) -> str | None:
     return match.get("to_user") if match.get("from_user") == user_id else match.get("from_user")
 
 
-def _history(ctx: AgentTurnContext) -> tuple[list[dict[str, str]], str]:
+def _message_is_after_watermark(item: dict[str, Any], watermark: dict[str, Any] | None) -> bool:
+    if not watermark:
+        return True
+    try:
+        timestamp = float(item.get("timestamp", 0) or 0)
+        covered_timestamp = float(watermark.get("covered_through_timestamp", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if timestamp != covered_timestamp:
+        return timestamp > covered_timestamp
+    message_id = str(item.get("_id") or item.get("message_id") or "")
+    covered_id = str(watermark.get("covered_through_message_id") or "")
+    try:
+        return ObjectId(message_id) > ObjectId(covered_id)
+    except Exception:
+        return False
+
+
+def _history(
+    ctx: AgentTurnContext, *, watermark: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, str]], str]:
     history: list[dict[str, str]] = []
     previous_assistant = ""
     used = 0
     for item in reversed((ctx.recent_history or [])[-MAX_HISTORY_MESSAGES:]):
+        if not _message_is_after_watermark(item, watermark):
+            continue
         sender = item.get("sender_id") or item.get("role") or "assistant"
         role = "user" if sender == ctx.user_id or sender == "user" else "assistant"
         content = _clean_text(item.get("content") or item.get("message"), 900)
@@ -69,11 +100,14 @@ def build_public_context(ctx: AgentTurnContext) -> dict[str, Any]:
     profile = ctx.user_profile or profiles_coll.find_one({"user_id": ctx.user_id}, {"_id": 0}) or {}
     history, previous_assistant = _history(ctx)
     active = matches_coll.find_one(
-        {"status": {"$in": ["draft", "pending"]}, "$or": [{"from_user": ctx.user_id}, {"to_user": ctx.user_id}]},
+        live_proposal_query(ctx.user_id, RELATIONSHIP_MATCH_NAMESPACE),
         sort=[("created_at", -1)],
     )
     latest_declined = matches_coll.find_one(
-        {"status": "declined", "$or": [{"from_user": ctx.user_id}, {"to_user": ctx.user_id}]},
+        {"$and": [
+            {"status": "declined", "$or": [{"from_user": ctx.user_id}, {"to_user": ctx.user_id}]},
+            namespace_clause(RELATIONSHIP_MATCH_NAMESPACE),
+        ]},
         sort=[("updated_at", -1), ("created_at", -1)],
     )
     active_prompt = None
@@ -120,15 +154,22 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     """
     turn_clock = clock or build_turn_clock(ctx.message)
     profile = ctx.user_profile or profiles_coll.find_one({"user_id": ctx.user_id}, {"_id": 0}) or {}
-    history, _ = _history(ctx)
+    continuity = load_validated_conversation_continuity(ctx.user_id, ctx.room_id)
+    watermark = None
+    if continuity:
+        watermark = {
+            "covered_through_message_id": continuity["covered_through_message_id"],
+            "covered_through_timestamp": continuity["covered_through_timestamp"],
+        }
+    history, _ = _history(ctx, watermark=watermark)
     active = matches_coll.find_one(
-        {"status": {"$in": ["draft", "pending"]}, "$or": [{"from_user": ctx.user_id}, {"to_user": ctx.user_id}]},
+        live_proposal_query(ctx.user_id, RELATIONSHIP_MATCH_NAMESPACE),
         sort=[("created_at", -1)],
     )
     # Only one active proposal is actionable. If old data has duplicates, expose
     # none rather than letting a model choose an arbitrary one.
     active_count = matches_coll.count_documents(
-        {"status": {"$in": ["draft", "pending"]}, "$or": [{"from_user": ctx.user_id}, {"to_user": ctx.user_id}]}
+        live_proposal_query(ctx.user_id, RELATIONSHIP_MATCH_NAMESPACE)
     )
     active_prompt = None
     if active and active_count == 1:
@@ -142,6 +183,29 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
             "counterparty": _public_label(other),
             "user_can_decide": can_decide,
             "proposal_revision": int(active.get("proposal_revision", 0)),
+        }
+    event_active = matches_coll.find_one(
+        live_proposal_query(ctx.user_id, EVENT_INVITATION_NAMESPACE),
+        sort=[("created_at", -1)],
+    )
+    event_active_count = matches_coll.count_documents(
+        live_proposal_query(ctx.user_id, EVENT_INVITATION_NAMESPACE)
+    )
+    event_prompt = None
+    if event_active and event_active_count == 1:
+        event_status = str(event_active.get("status") or "")
+        event_can_decide = (
+            event_status == "draft" and event_active.get("from_user") == ctx.user_id
+        ) or (
+            event_status == "pending" and event_active.get("to_user") == ctx.user_id
+        )
+        event_prompt = {
+            "status": event_status,
+            "event_title": _clean_text(
+                (event_active.get("event_snapshot") or {}).get("title"), 120,
+            ),
+            "user_can_decide": event_can_decide,
+            "proposal_revision": int(event_active.get("proposal_revision", 0) or 0),
         }
     # Terminal match outcomes are intentionally not preloaded into every
     # conversational turn.  They used to make an unrelated "why" look like a
@@ -181,9 +245,12 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     mentioned_ids, validation_overflow = validated_mentioned_contact_ids(ctx.user_id, ctx.mentioned_ids)
     return PublicAgentTurnContext(
         user_id=ctx.user_id, room_id=ctx.room_id, message=_clean_text(ctx.message, 1600),
-        recent_messages=history, recent_context=safe_recent_context(profile.get("current_context"), ""),
+        recent_messages=history,
+        conversation_continuity=continuity["summary"] if continuity else None,
+        recent_context=safe_recent_context(profile.get("current_context"), ""),
         user_location=safe_profile_location(profile).get("display_name", ""),
         relevant_memories=memories, active_proposal=active_prompt,
+        active_event_invitation=event_prompt,
         latest_match_outcome=outcome, clock=turn_clock,
         calendar_draft=calendar_draft, calendar_recent_reference=calendar_recent_reference,
         calendar_recent_mutation=calendar_recent_mutation,
