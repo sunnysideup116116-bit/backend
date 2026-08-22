@@ -123,6 +123,8 @@
 | `trend_score` | Float | |
 | `sender_feedback` | String (Enum) | comfortable / uncomfortable / null |
 | `receiver_feedback` | String (Enum) | comfortable / uncomfortable / null |
+| `sender_feedback_detail` | String | sender 回饋詳細說明（供人工稽核，不進演算法） |
+| `receiver_feedback_detail` | String | receiver 回饋詳細說明（供人工稽核，不進演算法） |
 | `cooldown_seconds` | Integer | default 0, min 0 |
 
 ### 7. `conversation_summaries`
