@@ -25,6 +25,9 @@ from services.event_opportunity_service import ensure_event_opportunity_indexes
 from services.event_lifecycle_service import (
     start_event_lifecycle_worker, stop_event_lifecycle_worker,
 )
+from event_worker import (
+    start_event_discovery_worker, stop_event_discovery_worker,
+)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -60,6 +63,7 @@ def setup_calendar_indexes():
     start_context_graph_worker()
     start_concept_embedding_worker()
     start_event_lifecycle_worker()
+    start_event_discovery_worker()
 
 
 @app.on_event("shutdown")
@@ -69,6 +73,7 @@ def stop_background_services():
     stop_context_graph_worker()
     stop_concept_embedding_worker()
     stop_event_lifecycle_worker()
+    stop_event_discovery_worker()
 
 if __name__ == "__main__":
     import uvicorn
