@@ -752,12 +752,14 @@ cd .\matchmaker_agent
 ..\.project-venv\Scripts\python.exe agent_api.py
 ```
 
-### 17.2 啟動 8000
+### 17.2 啟動 8000 (已內建 Event Worker)
 
 ```powershell
 cd .\social_demotest
 ..\.project-venv\Scripts\python.exe main.py
 ```
+
+> **注意**：`event_worker`（活動探索與週排程 Worker）已直接整合至 `main.py` 的 FastAPI startup/shutdown 生命週期中。啟動 `main.py` 即會自動在背景啟動 Discovery Worker，無需手動開啟第三個視窗；若在獨立容器或特殊生產環境，亦可單獨執行 `python event_worker.py`。
 
 ### 17.3 健康檢查
 

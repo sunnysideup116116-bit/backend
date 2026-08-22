@@ -1,7 +1,9 @@
 r"""Dedicated low-priority Event discovery worker.
 
-Run from social_demotest with:
+Can be run standalone:
     ..\.project-venv\Scripts\python.exe event_worker.py
+
+Or embedded in FastAPI lifecycle via start_event_discovery_worker() / stop_event_discovery_worker().
 """
 
 from __future__ import annotations
@@ -26,6 +28,10 @@ from services.event_discovery_job_service import (
 )
 from services.event_cycle_service import run_weekly_event_cycle
 from services.event_discovery_service import discover_and_ingest_events
+
+_worker_thread: threading.Thread | None = None
+_stop_event = threading.Event()
+_worker_lock = threading.Lock()
 
 
 def _keep_job_lease_alive(
@@ -61,9 +67,14 @@ def _open_wakeup_stream(reconcile_seconds: float):
         return None
 
 
-def _wait_for_work(stream, reconcile_seconds: float):
+def _wait_for_work(stream, reconcile_seconds: float, stop_event: threading.Event | None = None):
+    if stop_event and stop_event.is_set():
+        return None
     if stream is None:
-        time.sleep(reconcile_seconds)
+        if stop_event:
+            stop_event.wait(reconcile_seconds)
+        else:
+            time.sleep(reconcile_seconds)
         return None
     try:
         stream.try_next()
@@ -78,7 +89,10 @@ def _wait_for_work(stream, reconcile_seconds: float):
             stream.close()
         except Exception:
             pass
-        time.sleep(reconcile_seconds)
+        if stop_event:
+            stop_event.wait(reconcile_seconds)
+        else:
+            time.sleep(reconcile_seconds)
         return None
 
 
@@ -101,22 +115,22 @@ def _execute_job(job: dict, worker_id: str) -> dict:
     return result
 
 
-def run_worker() -> None:
+def run_worker(stop_event: threading.Event | None = None) -> None:
     worker_id = f"event-worker-{uuid.uuid4().hex[:10]}"
     reconcile_seconds = _reconcile_seconds()
     ensure_event_discovery_job_indexes()
     print(f"[EVENT_WORKER] started worker={worker_id}", flush=True)
     wakeup_stream = _open_wakeup_stream(reconcile_seconds)
     try:
-        while True:
+        while stop_event is None or not stop_event.is_set():
             if os.getenv("EVENT_WEEKLY_CYCLE_ENABLED", "off").strip().lower() in {
                 "1", "true", "on",
             }:
                 enqueue_weekly_event_discovery_if_due()
             job = claim_event_discovery_job(worker_id)
             if not job:
-                wakeup_stream = _wait_for_work(wakeup_stream, reconcile_seconds)
-                if wakeup_stream is None:
+                wakeup_stream = _wait_for_work(wakeup_stream, reconcile_seconds, stop_event)
+                if wakeup_stream is None and (stop_event is None or not stop_event.is_set()):
                     wakeup_stream = _open_wakeup_stream(reconcile_seconds)
                 continue
             heartbeat_stop = threading.Event()
@@ -143,7 +157,38 @@ def run_worker() -> None:
                 heartbeat.join(timeout=2.0)
     finally:
         if wakeup_stream is not None:
-            wakeup_stream.close()
+            try:
+                wakeup_stream.close()
+            except Exception:
+                pass
+        print(f"[EVENT_WORKER] stopped worker={worker_id}", flush=True)
+
+
+def start_event_discovery_worker() -> None:
+    global _worker_thread
+    with _worker_lock:
+        if _worker_thread and _worker_thread.is_alive():
+            return
+        _stop_event.clear()
+        _worker_thread = threading.Thread(
+            target=run_worker,
+            args=(_stop_event,),
+            name="event-discovery-worker",
+            daemon=True,
+        )
+        _worker_thread.start()
+        print("[EVENT_WORKER] background worker thread started", flush=True)
+
+
+def stop_event_discovery_worker() -> None:
+    global _worker_thread
+    with _worker_lock:
+        if not _worker_thread or not _worker_thread.is_alive():
+            return
+        _stop_event.set()
+        _worker_thread.join(timeout=3.0)
+        _worker_thread = None
+        print("[EVENT_WORKER] background worker thread stopped", flush=True)
 
 
 if __name__ == "__main__":
