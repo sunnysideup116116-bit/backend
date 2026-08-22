@@ -16,6 +16,7 @@ _KNOWN_LEVELS = _DELIVERABLE_LEVELS | {"blocked"}
 class PairMessageRiskDecision(NamedTuple):
     level: str
     delivery: str
+    triggered_by_msg_id: str | None = None
 
     @property
     def may_persist(self) -> bool:
@@ -23,11 +24,16 @@ class PairMessageRiskDecision(NamedTuple):
 
     def public_projection(self) -> dict[str, str]:
         priority = "risk" if self.level in {"warning", "restricted", "blocked"} else "coach"
-        return {
+        projection = {
             "level": self.level,
             "ui_priority": priority,
             "delivery": self.delivery,
         }
+        # 讓前端可以針對同一則訊息提交 receiver 回饋 / sender 申訴。
+        # 只有風險服務明確回傳 intervention_command 時才帶上。
+        if self.triggered_by_msg_id:
+            projection["triggered_by_msg_id"] = self.triggered_by_msg_id
+        return projection
 
 
 class PairMessageRiskGate:
@@ -77,12 +83,13 @@ class PairMessageRiskGate:
         try:
             raw = self._transport(payload)
             level = str(raw.get("risk_level") or "").strip().lower()
+            triggered_by_msg_id = self._extract_triggered_by_msg_id(raw)
             if level == "blocked":
-                decision = PairMessageRiskDecision("blocked", "blocked")
+                decision = PairMessageRiskDecision("blocked", "blocked", triggered_by_msg_id)
             elif level in _DELIVERABLE_LEVELS:
-                decision = PairMessageRiskDecision(level, "delivered")
+                decision = PairMessageRiskDecision(level, "delivered", triggered_by_msg_id)
             else:
-                decision = PairMessageRiskDecision("unavailable", "delivered")
+                decision = PairMessageRiskDecision("unavailable", "delivered", triggered_by_msg_id)
         except Exception:
             # Risk is an advisory safety dependency, not a chat availability
             # dependency. Only an explicit `blocked` decision may prevent the
@@ -93,6 +100,24 @@ class PairMessageRiskGate:
         while len(self._cache) > self._cache_size:
             self._cache.popitem(last=False)
         return decision
+
+    @staticmethod
+    def _extract_triggered_by_msg_id(raw: dict) -> str | None:
+        """從風險服務回應的 intervention_command 取出該則訊息的 ID。
+
+        前端需要 `triggered_by_msg_id` 才能針對同一則訊息送出 receiver 回饋
+        或 sender 申訴。風險服務的 detect 回應結構為
+        ``intervention_command.triggered_by_msg_id``（blocked 與非 blocked 一致）。
+        """
+        try:
+            command = raw.get("intervention_command")
+            if isinstance(command, dict):
+                value = command.get("triggered_by_msg_id")
+                if value:
+                    return str(value)[:128] or None
+        except Exception:
+            pass
+        return None
 
     def _http_transport(self, payload: dict) -> dict:
         response = requests.post(
