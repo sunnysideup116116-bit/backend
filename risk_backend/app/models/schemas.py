@@ -125,6 +125,10 @@ class FeedbackRequest(BaseModel):
     triggered_by_msg_id: str
     role: str
     feedback: str
+    detail: Optional[str] = Field(
+        None, max_length=2000,
+        description="接收方對此次介入的詳細說明（可選）。僅供人工稽核與審計，不影響 feedback_signal 的計算。"
+    )
 
 class SenderAppealRequest(BaseModel):
     """寄件方對某次介入的文字申訴。

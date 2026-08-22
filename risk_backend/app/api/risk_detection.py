@@ -377,17 +377,20 @@ async def submit_feedback(req: FeedbackRequest):
     ok = await chat_log_service.update_intervention_feedback(
         msg_id=req.triggered_by_msg_id,
         role=req.role,
-        feedback=req.feedback
+        feedback=req.feedback,
+        detail=req.detail,
     )
     if not ok:
         raise HTTPException(status_code=404, detail="intervention log not found")
 
-    print(f"   [ Feedback ] {req.role}={req.feedback} for msg {req.triggered_by_msg_id}")
+    print(f"   [ Feedback ] {req.role}={req.feedback} for msg {req.triggered_by_msg_id}"
+          + (f"（詳述 {len(req.detail)} 字）" if req.detail else ""))
     return {
         "status": "ok",
         "msg_id": req.triggered_by_msg_id,
         "role": req.role,
-        "feedback": req.feedback
+        "feedback": req.feedback,
+        "detail": req.detail,
     }
 
 

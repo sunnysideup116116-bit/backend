@@ -39,6 +39,44 @@ def test_update_feedback_success(chat_service):
     assert call_args[0][3] == {"receiver_feedback": "comfortable"}
 
 
+def test_update_feedback_with_detail_writes_detail_column(chat_service):
+    """Detail text is persisted to the role-specific detail column."""
+    mock_doc = MagicMock()
+    mock_doc.id = "log_123"
+    mock_response = MagicMock()
+    mock_response.documents = [mock_doc]
+    chat_service.db.list_documents.return_value = mock_response
+
+    ok = asyncio.run(chat_service.update_intervention_feedback(
+        msg_id="msg_abc", role="receiver", feedback="uncomfortable",
+        detail="他連續傳了很多訊息，讓我有點壓力。",
+    ))
+
+    assert ok is True
+    call_args = chat_service.db.update_document.call_args
+    assert call_args[0][3] == {
+        "receiver_feedback": "uncomfortable",
+        "receiver_feedback_detail": "他連續傳了很多訊息，讓我有點壓力。",
+    }
+
+
+def test_update_feedback_blank_detail_skips_detail_column(chat_service):
+    """Whitespace-only detail must not create an empty detail column."""
+    mock_doc = MagicMock()
+    mock_doc.id = "log_123"
+    mock_response = MagicMock()
+    mock_response.documents = [mock_doc]
+    chat_service.db.list_documents.return_value = mock_response
+
+    ok = asyncio.run(chat_service.update_intervention_feedback(
+        msg_id="msg_abc", role="sender", feedback="comfortable", detail="   ",
+    ))
+
+    assert ok is True
+    call_args = chat_service.db.update_document.call_args
+    assert call_args[0][3] == {"sender_feedback": "comfortable"}
+
+
 def test_update_feedback_invalid_role(chat_service):
     """Invalid role should return False without querying DB."""
     ok = asyncio.run(chat_service.update_intervention_feedback(

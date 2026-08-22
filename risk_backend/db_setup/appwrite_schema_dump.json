@@ -1134,6 +1134,19 @@
           "encrypt": false
         },
         {
+          "key": "sender_feedback_detail",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-08-21T00:00:00.000+00:00",
+          "$updatedAt": "2026-08-21T00:00:00.000+00:00",
+          "size": 2000,
+          "default": null,
+          "encrypt": false
+        },
+        {
           "key": "receiver_feedback",
           "type": "string",
           "status": "available",
@@ -1143,6 +1156,19 @@
           "$createdAt": "2026-03-31T13:23:25.705+00:00",
           "$updatedAt": "2026-03-31T13:23:25.723+00:00",
           "size": 50,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "receiver_feedback_detail",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-08-21T00:00:00.000+00:00",
+          "$updatedAt": "2026-08-21T00:00:00.000+00:00",
+          "size": 2000,
           "default": null,
           "encrypt": false
         },
