@@ -14,12 +14,12 @@ from unittest.mock import ANY, patch
 from fastapi import BackgroundTasks, HTTPException
 
 from models import DirectChatRequest, MediatorPrivateRequest
-
 # Offline suite injects a minimal config module before discovery.
 if "config" in sys.modules and not hasattr(sys.modules["config"], "OLLAMA_FAST_CHAT_MODEL"):
     setattr(sys.modules["config"], "OLLAMA_FAST_CHAT_MODEL", "test")
 
 from routers.chat import router
+from routers.risk_actions import RiskFeedbackRequest, SenderAppealProxyRequest
 from services import proactive_delivery_service
 
 
@@ -45,6 +45,8 @@ EXPECTED_ROUTES = {
     ("POST", "/api/public-ayue/onboarding/complete"): ("ClearRequest", ()),
     ("POST", "/api/mediator/private"): ("MediatorPrivateRequest", ()),
     ("POST", "/api/mediator/private/stream"): ("MediatorPrivateRequest", ()),
+    ("POST", "/api/pair/risk_appeal"): ("SenderAppealProxyRequest", ()),
+    ("POST", "/api/pair/risk_feedback"): ("RiskFeedbackRequest", ()),
     ("POST", "/api/presence"): ("ClearRequest", ()),
     ("POST", "/api/relationship/date/cancel"): ("CalendarActionRequest", ("other_id", "coordination_id")),
     ("POST", "/api/relationship/date/confirm"): ("DateConfirmRequest", ()),

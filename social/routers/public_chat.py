@@ -38,6 +38,7 @@ from services.chat_service import (
     generate_room_id,
     save_message,
     save_pair_owner_message_once,
+    save_system_message_once,
 )
 from services.profile_skills import profile_skills_mode_for_user
 from services.profile_task_service import queue_profile_skills as _queue_profile_skills
@@ -479,6 +480,15 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
     )
     risk_projection = risk_decision.public_projection()
     if not risk_decision.may_persist:
+        # 被攔截的訊息不會以 receiver 可見的訊息儲存；改寫一則系統通知卡，
+        # 讓 receiver 知道系統攔截了一則可能造成不適的訊息，並可回報感受。
+        save_system_message_once(
+            room_id,
+            "系統攔截了一則可能讓你感到不適的訊息，你可以繼續或結束這段對話。",
+            message_type="system",
+            metadata={"event_type": "blocked_notice", "risk": dict(risk_projection)},
+            event_key=f"blocked-notice:{client_message_id}",
+        )
         return {
             "reply": "",
             "is_blocked": True,
