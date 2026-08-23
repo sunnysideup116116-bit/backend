@@ -660,6 +660,19 @@
           "size": 200,
           "default": null,
           "encrypt": false
+        },
+        {
+          "key": "detected_features",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-08-04T01:35:30.756+00:00",
+          "$updatedAt": "2026-08-04T01:35:30.772+00:00",
+          "size": 1000,
+          "default": null,
+          "encrypt": false
         }
       ],
       "indexes": [
@@ -1121,6 +1134,19 @@
           "encrypt": false
         },
         {
+          "key": "sender_feedback_detail",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-08-21T00:00:00.000+00:00",
+          "$updatedAt": "2026-08-21T00:00:00.000+00:00",
+          "size": 2000,
+          "default": null,
+          "encrypt": false
+        },
+        {
           "key": "receiver_feedback",
           "type": "string",
           "status": "available",
@@ -1132,6 +1158,45 @@
           "size": 50,
           "default": null,
           "encrypt": false
+        },
+        {
+          "key": "receiver_feedback_detail",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-08-21T00:00:00.000+00:00",
+          "$updatedAt": "2026-08-21T00:00:00.000+00:00",
+          "size": 2000,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "sender_appeal_text",
+          "type": "string",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-08-04T01:22:45.244+00:00",
+          "$updatedAt": "2026-08-04T01:22:45.271+00:00",
+          "size": 2000,
+          "default": null,
+          "encrypt": false
+        },
+        {
+          "key": "cooldown_seconds",
+          "type": "integer",
+          "status": "available",
+          "error": "",
+          "required": false,
+          "array": false,
+          "$createdAt": "2026-08-04T01:34:25.282+00:00",
+          "$updatedAt": "2026-08-04T01:34:25.300+00:00",
+          "min": -9223372036854775808,
+          "max": 9223372036854775807,
+          "default": 0
         }
       ],
       "indexes": [

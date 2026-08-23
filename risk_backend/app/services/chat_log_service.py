@@ -194,7 +194,7 @@ class ChatLogService:
                 "guardrail_flagged_words": json.dumps(flagged_words or []),
                 "guardrail_classifier_flag": json.dumps(classifier_flag or {}),
             }
-            self.db.create_document(self.db_id, "risk_analysis_logs", ID.unique(), data)
+            self.db.create_document(self.db_id, "risk_analysis_logs_", ID.unique(), data)
         except Exception as e:
             print(f"log_analysis_detail failed: {e}")
 
@@ -405,10 +405,12 @@ class ChatLogService:
             print(f"get_last_displayed_intervention failed: {e}")
             return None
 
-    async def update_intervention_feedback(self, msg_id: str, role: str, feedback: str) -> bool:
+    async def update_intervention_feedback(self, msg_id: str, role: str, feedback: str, detail: Optional[str] = None) -> bool:
         """
         更新 intervention_logs 內某則訊息的 sender_feedback 或 receiver_feedback 欄位。
         role 必須是 'sender' 或 'receiver'；feedback 必須是 'comfortable' 或 'uncomfortable'。
+        detail 為選填的詳細說明，僅寫入 receiver_feedback_detail / sender_feedback_detail，
+        不參與任何風險計算。
         """
         if role not in ("sender", "receiver"):
             return False
@@ -430,10 +432,12 @@ class ChatLogService:
             doc = response.documents[0]
             doc_id = doc.id if hasattr(doc, 'id') else doc['$id']
 
-            field_name = f"{role}_feedback"
+            update_data = {f"{role}_feedback": feedback}
+            if detail and detail.strip():
+                update_data[f"{role}_feedback_detail"] = detail.strip()[:2000]
             self.db.update_document(
                 self.db_id, "intervention_logs", doc_id,
-                {field_name: feedback}
+                update_data
             )
             return True
         except Exception as e:

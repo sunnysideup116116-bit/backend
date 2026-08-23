@@ -72,6 +72,7 @@ class GuardrailEngine:
                         "is_blocked": True,
                         "reason": f"Hard-Block: {keyword}",
                         "flagged_words": flagged_words,
+                        "degraded": False,
                     }
 
         # 2. 走 provider 對應的第二道
@@ -81,14 +82,16 @@ class GuardrailEngine:
             result = self._check_via_openai_moderation(text)
 
         result["flagged_words"] = flagged_words
+        result.setdefault("degraded", False)
         return result
 
     def _check_via_openai_moderation(self, text: str) -> dict:
         if not self._openai_mod_client:
             return {
                 "is_blocked": False,
-                "reason": "Moderation skipped (no client)",
+                "reason": "Degraded (moderation skipped: no client)",
                 "classifier_flagged": False,
+                "degraded": True,
             }
         try:
             response = self._openai_mod_client.moderations.create(input=text)
@@ -108,6 +111,12 @@ class GuardrailEngine:
                 self._openai_mod_client = None
             else:
                 print(f"   [ Guardrail Warning ] OpenAI Mod Error: {e}")
+            return {
+                "is_blocked": False,
+                "reason": f"Degraded (moderation error: {type(e).__name__})",
+                "classifier_flagged": False,
+                "degraded": True,
+            }
         return {
             "is_blocked": False,
             "reason": "Passed (openai_moderation)",
@@ -120,7 +129,12 @@ class GuardrailEngine:
             resp = self._classifier_adapter.generate(prompt, model=self._classifier_model)
             lines = [ln.strip() for ln in (resp or "").splitlines() if ln.strip()]
             if not lines:
-                return {"is_blocked": False, "reason": "Classifier empty response"}
+                return {
+                    "is_blocked": False,
+                    "reason": "Degraded (classifier empty response)",
+                    "classifier_flagged": False,
+                    "degraded": True,
+                }
             verdict = lines[0].lower()
             if verdict.startswith("unsafe"):
                 categories = lines[1] if len(lines) > 1 else "unknown"
@@ -132,6 +146,12 @@ class GuardrailEngine:
                 }
         except Exception as e:
             print(f"   [ Guardrail Warning ] Classifier Error: {e}")
+            return {
+                "is_blocked": False,
+                "reason": f"Degraded (classifier error: {type(e).__name__})",
+                "classifier_flagged": False,
+                "degraded": True,
+            }
         return {
             "is_blocked": False,
             "reason": "Passed (llm_classifier)",

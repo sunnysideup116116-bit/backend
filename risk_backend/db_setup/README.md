@@ -67,6 +67,18 @@ python db_setup/setup_kb_appwrite.py
 
 完整 attribute 規格見 `APPWRITE_SCHEMA.md`，`appwrite_schema_dump.json` 為 live Appwrite 的 JSON 備份對照。
 
+既有環境如果是舊 Schema，不要直接刪除 required attribute。改用非破壞式遷移：
+
+```bash
+# 預覽：不寫入 Appwrite
+python db_setup/migrate_appwrite_schema.py
+
+# 建立新 DB、套用 Schema、搬移相容文件並驗證
+python db_setup/migrate_appwrite_schema.py --apply
+```
+
+預設目標是 `chat_logs_v2_20260815`。腳本對來源 DB 只讀，不含 delete/update；驗證通過後才將 `APPWRITE_DB_ID` 切換到新 DB。`risk_analysis_logs_` 的尾端底線是 collection ID 的一部分。
+
 ---
 
 ## 環境變數（`.env`）

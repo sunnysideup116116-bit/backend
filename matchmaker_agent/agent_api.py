@@ -8,31 +8,31 @@ from neo4j import GraphDatabase
 from pathlib import Path
 from dotenv import load_dotenv
 
-project_env = Path(__file__).resolve().parents[1] / ".env"
-local_env = Path(__file__).resolve().parent / ".env"
-if project_env.exists():
-    load_dotenv(dotenv_path=project_env)
-if local_env.exists():
-    load_dotenv(dotenv_path=local_env, override=True)
-
-try:
-    import certifi
-
-    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
-except Exception as exc:
-    print(f"certifi CA bundle unavailable: {exc}")
+# 撘瑕?? agent_api.py ??函????.env 瑼?
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from matchmaker import MatchmakerAgent
 
 # ????FastAPI ?蝔? (撠望????銝?鈭?)
 app = FastAPI()
+
+
+@app.get("/health")
+def health_check():
+    """Process-level readiness endpoint; does not read profiles or Neo4j."""
+    return {"status": "ok", "service": "matchmaker"}
+
+
+def destructive_tools_enabled() -> bool:
+    return os.getenv("DEMO_DESTRUCTIVE_TOOLS_ENABLED", "off").strip().lower() in {"1", "true", "on"}
 
 # ??????慦?憭扯
 agent = MatchmakerAgent()
@@ -42,10 +42,6 @@ GLOBAL_RULE_CHAR_LIMIT = max(10, min(int(os.getenv("MATCH_GLOBAL_RULE_CHAR_LIMIT
 GLOBAL_RULE_SIMILARITY_THRESHOLD = max(
     0.0, min(float(os.getenv("MATCH_GLOBAL_RULE_SIMILARITY_THRESHOLD", "0.38")), 1.0)
 )
-ALLOWED_CHAT_TRIPLE_PREDICATES = {
-    "IS_A", "HAS", "LIKES", "DISLIKES", "WANTS", "FEELS", "KNOWS",
-    "USES", "BELIEVES", "AGREES_WITH", "DISAGREES_WITH", "MENTIONED",
-}
 
 
 def compact_global_rule(text: str) -> str:
@@ -117,26 +113,6 @@ def parse_json_object_from_text(raw_text: str) -> dict:
         if start >= 0 and end > start:
             return json.loads(raw[start:end + 1])
         raise
-
-
-def sanitize_chat_triples(triples) -> list[dict]:
-    clean = []
-    for item in (triples or [])[:16]:
-        if not isinstance(item, dict):
-            continue
-        subject = str(item.get("subject") or "").strip()[:80]
-        predicate = str(item.get("predicate") or "").strip().upper()
-        obj = str(item.get("object") or "").strip()[:80]
-        if subject and obj and predicate in ALLOWED_CHAT_TRIPLE_PREDICATES:
-            clean.append(
-                {"subject": subject, "predicate": predicate, "object": obj}
-            )
-    return clean
-
-
-def graph_entity_key(session_id: str, entity: str) -> str:
-    return f"{session_id.strip()}::{entity.strip().casefold()}"
-
 
 class MatchRequest(BaseModel):
     target_user: dict
@@ -266,43 +242,44 @@ async def match_endpoint(req: MatchRequest):
             clean_response = clean_response[4:].strip()
             
         parsed_data = json.loads(clean_response)
+
+        if not isinstance(parsed_data, dict):
+            raise HTTPException(status_code=502, detail={"code": "matchmaker_invalid_response"})
+        if parsed_data.get("error"):
+            # A provider/runtime failure is not evidence that no candidate is
+            # suitable.  Surface a service failure so the caller can preserve
+            # the distinction in match state and user messaging.
+            raise HTTPException(status_code=502, detail={"code": "matchmaker_provider_error"})
         
         # ?? ?????舀 matches ????澆?
+        if parsed_data.get("outcome") == "no_suitable_candidate":
+            return {"outcome": "no_suitable_candidate", "matches": []}
         if "matches" in parsed_data and isinstance(parsed_data["matches"], list):
             parsed_data["matches"] = parsed_data["matches"][:1]
+            if not parsed_data["matches"]:
+                raise HTTPException(status_code=502, detail={"code": "matchmaker_invalid_response"})
+            if any(
+                not isinstance(item, dict) or not isinstance(item.get("matched_user_id"), str)
+                or not item.get("matched_user_id", "").strip()
+                for item in parsed_data["matches"]
+            ):
+                raise HTTPException(status_code=502, detail={"code": "matchmaker_invalid_response"})
+            parsed_data["outcome"] = "selected"
             match_ids = [m.get("matched_user_id", "?") for m in parsed_data["matches"]]
             print(f"Agent matched ids: {match_ids}")
             print(f"[TIMING][9001 /api/match] parse/return matches: {time.perf_counter() - step_start:.3f}s")
             print(f"[TIMING][9001 /api/match] total: {time.perf_counter() - total_start:.3f}s")
             return parsed_data
         else:
-            print("⚠️ LLM output did not include matches; wrapping single-match fallback.")
-            single_match = {
-                "matched_user_id": parsed_data.get("matched_user_id", "unknown"),
-                "contrast_label": "候選對象",
-                "recommendation_reason": parsed_data.get("recommendation_reason", ""),
-                "receiver_reason": parsed_data.get("receiver_reason", parsed_data.get("recommendation_reason", "")),
-                "distinctive_tags": parsed_data.get("distinctive_tags", [])
-            }
-            print(f"[TIMING][9001 /api/match] parse/return single fallback: {time.perf_counter() - step_start:.3f}s")
-            print(f"[TIMING][9001 /api/match] total: {time.perf_counter() - total_start:.3f}s")
-            return {"matches": [single_match]}
+            print("⚠️ LLM output did not include a valid match.")
+            raise HTTPException(status_code=502, detail={"code": "matchmaker_invalid_response"})
         
     except json.JSONDecodeError:
         print("⚠️ 媒婆沒有照格式輸出 JSON，啟動防呆機制！")
         print(f"原始回覆: {raw_response}")
         
-        fallback_matches = []
-        for i, c in enumerate(req.candidates[:1]):
-            fallback_matches.append({
-                "matched_user_id": c.get("user_id", f"unknown_{i}"),
-                "contrast_label": f"候選對象{chr(65+i)}",
-                "recommendation_reason": raw_response,
-                "receiver_reason": raw_response,
-                "distinctive_tags": []
-            })
-        print(f"[TIMING][9001 /api/match] parse failed fallback total: {time.perf_counter() - total_start:.3f}s")
-        return {"matches": fallback_matches}
+        print(f"[TIMING][9001 /api/match] parse failed; no fallback candidate is created. total: {time.perf_counter() - total_start:.3f}s")
+        raise HTTPException(status_code=502, detail="Invalid matchmaker response")
 
 
 
@@ -474,11 +451,12 @@ async def global_reflection_endpoint(req: GlobalReflectionRequest):
 
 # === Conversation-derived preference memory ===
 
-class MemoryObserveRequest(BaseModel):
+class MemoryApplyRequest(BaseModel):
     user_id: str
-    text: str
+    memories: list[dict] = []
     surface: str = "global"
     match_id: str | None = None
+    message_id: str | None = None
 
 class MemoryActionRequest(BaseModel):
     user_id: str
@@ -486,13 +464,12 @@ class MemoryActionRequest(BaseModel):
     action: str
     value: str | None = None
 
-
 class ChatTripleRequest(BaseModel):
     session_id: str
     match_id: str | None = None
-    participants: list[str] = Field(default_factory=list)
-    triples: list[dict] = Field(default_factory=list)
-    evidence_messages: list[dict] = Field(default_factory=list)
+    participants: list[str] = []
+    triples: list[dict] = []
+    evidence_messages: list[dict] = []
 
 
 def _neo4j_config():
@@ -501,235 +478,206 @@ def _neo4j_config():
 @app.post("/api/clear_graph")
 async def clear_graph_endpoint():
     print("🧹 收到清空 Neo4j Graph 請求")
+    if not destructive_tools_enabled():
+        raise HTTPException(status_code=403, detail={"code": "demo_tools_disabled"})
     URI, AUTH, DATABASE = _neo4j_config()
     try:
         with GraphDatabase.driver(URI, auth=AUTH) as driver:
             driver.verify_connectivity()
             with driver.session(database=DATABASE) as session:
                 session.run("MATCH (n) DETACH DELETE n").consume()
+        agent_memory_db.clear()
         print("✅ Neo4j Graph 已清空")
         return {"status": "success", "message": "Neo4j Graph 已清空"}
     except Exception as e:
-        print(f"❌ 清空 Neo4j Graph 失敗: {e}")
-        return {"status": "error", "message": str(e)}
+        print(f"❌ 清空 Neo4j Graph 失敗: {type(e).__name__}")
+        raise HTTPException(status_code=503, detail={"code": "graph_cleanup_failed"}) from e
 
-@app.post("/api/memory/observe")
-async def observe_memory(req: MemoryObserveRequest):
-    print(
-        f"[MEMORY][9001 observe] start user={req.user_id} surface={req.surface} "
-        f"match_id={req.match_id or '-'} text_chars={len(req.text or '')}"
-    )
-    prompt = f"""
-請從使用者訊息中萃取可長期記憶的偏好或地雷。
-只輸出 JSON：
-{{"memories":[{{"key":"snake_case_key","label":"2-8字中文標籤","stance":"like|dislike|require|avoid","category":"lifestyle|habit|personality|relationship|activity","confidence":0.0}}]}}
 
-規則：
-- 只保留 confidence >= 0.85 的明確偏好。
-- 一般寒暄、單次無意義語助詞不要記。
-- label 不要加「喜歡：」「討厭：」「近期情境：」等前綴。
-
-使用者訊息：{req.text}
-"""
+@app.get("/api/graph/health")
+async def graph_health_endpoint():
+    URI, AUTH, DATABASE = _neo4j_config()
+    if not URI:
+        return {"status": "not_configured"}
     try:
-        response = agent.client.chat.completions.create(model=agent.model, messages=[
-            {"role": "system", "content": "你是偏好記憶萃取器，只輸出 JSON。"},
-            {"role": "user", "content": prompt}], temperature=0.0)
-        raw = response.choices[0].message.content or ""
-        items = parse_json_object_from_text(raw).get("memories", [])
-        print(f"[MEMORY][9001 observe] extracted_raw_count={len(items)} user={req.user_id}")
+        with GraphDatabase.driver(URI, auth=AUTH) as driver:
+            driver.verify_connectivity()
+        return {"status": "available"}
     except Exception as exc:
-        raw_excerpt = locals().get("raw", "")
-        print(
-            f"[MEMORY][9001 observe] extraction_failed user={req.user_id} "
-            f"error={exc} raw={raw_excerpt[:180]!r}"
-        )
-        return {"memories": []}
+        print(f"⚠️ Graph health check failed: {type(exc).__name__}")
+        return {"status": "unavailable"}
+
+@app.post("/api/memory/apply")
+async def apply_memory(req: MemoryApplyRequest):
+    """Write trusted, already-validated profile-memory proposals without model extraction."""
     allowed_stances = {"like", "dislike", "require", "avoid"}
-    clean, now = [], time.time()
+    protected = re.compile(r"(?:黑人|白人|黃種人|種族|族裔|宗教|信仰|穆斯林|基督教|同性戀|性傾向|性別認同|跨性別|殘障|身心障礙|疾病|政治立場|國籍|公民身分)", re.I)
+    key_re = re.compile(r"^[a-z][a-z0-9_]{1,50}$")
+    now, clean = time.time(), []
     URI, AUTH, DATABASE = _neo4j_config()
     try:
         with GraphDatabase.driver(URI, auth=AUTH) as driver:
             with driver.session(database=DATABASE) as session:
-                for item in items[:3]:
+                session.run("CREATE CONSTRAINT memory_observation_message_id IF NOT EXISTS FOR (o:MemoryObservation) REQUIRE o.message_id IS UNIQUE").consume()
+                if req.message_id:
+                    observed = session.run("""
+                        MERGE (o:MemoryObservation {message_id:$message_id})
+                        ON CREATE SET o.owner_user_id=$user_id,o.created_at=$now
+                        RETURN o.created_at=$now AS created
+                    """, message_id=req.message_id, user_id=req.user_id, now=now).single()
+                    if not observed or not observed["created"]:
+                        return {"memories": [], "status": "duplicate"}
+                for item in req.memories[:3]:
                     key = str(item.get("key", "")).strip().lower().replace(" ", "_")
-                    label = re.sub(
-                        r"^(?:喜歡|討厭|不喜歡|偏好|近期情境)\s*[:：,，]?\s*",
-                        "", str(item.get("label", "")).strip()
-                    )[:40]
-                    stance = item.get("stance")
+                    label = re.sub(r"^(?:喜歡|討厭|不喜歡|偏好|近期情境)\s*[:：,，]?\s*", "", str(item.get("label") or item.get("label_zh_tw") or "").strip())[:40]
+                    stance = str(item.get("stance", ""))
                     confidence = float(item.get("confidence", 0))
-                    if not key or not label or stance not in allowed_stances or confidence < 0.85:
+                    if not key_re.match(key) or not label or protected.search(label) or stance not in allowed_stances or confidence < 0.75:
                         continue
                     category = str(item.get("category", "lifestyle"))[:30]
                     session.run("""
-                        MERGE (u:User {id: $user_id}) MERGE (t:Trait {key: $key})
-                        ON CREATE SET t.name=$label, t.category=$category
-                        ON MATCH SET t.name=$label, t.category=$category
+                        MERGE (u:User {id:$user_id}) MERGE (t:Trait {key:$key})
+                        ON CREATE SET t.name=$label,t.category=$category
+                        ON MATCH SET t.category=coalesce(t.category,$category)
                         MERGE (u)-[r:HAS_PREFERENCE]->(t)
-                        ON CREATE SET r.first_seen_at=$now, r.evidence_count=0
+                        ON CREATE SET r.first_seen_at=$now,r.evidence_count=0
                         SET r.stance=$stance,
                             r.type=CASE WHEN $stance IN ['dislike','avoid'] THEN 'DISLIKES_TRAIT' ELSE 'LIKES_TRAIT' END,
                             r.confidence=CASE WHEN coalesce(r.confidence,0)>$confidence THEN r.confidence ELSE $confidence END,
-                            r.evidence_count=coalesce(r.evidence_count,0)+1,
-                            r.last_seen_at=$now, r.active=true, r.source=$surface
-                    """, user_id=req.user_id, key=key, label=label, category=category, stance=stance,
-                         confidence=confidence, now=now, surface=req.surface).consume()
+                            r.evidence_count=coalesce(r.evidence_count,0)+1,r.last_seen_at=$now,
+                            r.active=true,r.source=$surface,r.match_id=$match_id,r.display_label_zh_tw=$label
+                    """, user_id=req.user_id,key=key,label=label,category=category,stance=stance,
+                         confidence=confidence,now=now,surface=req.surface,match_id=req.match_id).consume()
                     clean.append({"key":key,"label":label,"stance":stance,"category":category,"confidence":confidence,"last_seen_at":now})
-                    print(
-                        f"[MEMORY][9001 observe] saved user={req.user_id} "
-                        f"key={key} stance={stance} confidence={confidence:.2f}"
-                    )
-        print(f"[MEMORY][9001 observe] saved_count={len(clean)} user={req.user_id}")
-        return {"memories": clean}
+        return {"memories": clean, "status": "success"}
     except Exception as exc:
-        print(f"[MEMORY][9001 observe] graph_write_failed user={req.user_id} error={exc}")
-        return {"memories": []}
-
+        print(f"[MEMORY][9001 apply] graph_write_failed user={req.user_id} error={exc}")
+        return {"memories": [], "status": "error", "error_code": type(exc).__name__}
 @app.get("/api/memory/{user_id}")
 async def list_memories(user_id: str, limit: int = 12):
-    URI, AUTH, DATABASE = _neo4j_config()
     try:
+        URI, AUTH, DATABASE = _neo4j_config()
         with GraphDatabase.driver(URI, auth=AUTH) as driver:
             with driver.session(database=DATABASE) as session:
                 rows = session.run("""
                     MATCH (u:User {id:$user_id})-[r:HAS_PREFERENCE]->(t:Trait)
                     WHERE coalesce(r.active,true)=true
-                    RETURN coalesce(t.key,toLower(replace(t.name,' ','_'))) AS key, t.name AS label,
+                    RETURN coalesce(t.key,toLower(replace(t.name,' ','_'))) AS key,
+                           coalesce(r.display_label_zh_tw,t.name) AS label,
                            coalesce(r.stance,CASE WHEN r.type='DISLIKES_TRAIT' THEN 'dislike' ELSE 'like' END) AS stance,
                            t.category AS category, coalesce(r.confidence,0.7) AS confidence,
                            coalesce(r.last_seen_at,0) AS last_seen_at
                     ORDER BY confidence DESC,last_seen_at DESC LIMIT $limit
                 """, user_id=user_id, limit=max(1,min(limit,30)))
-                return {"memories":[dict(row) for row in rows]}
+                return {"memories": [dict(row) for row in rows]}
     except Exception as exc:
-        print(f"[MEMORY][9001 list] graph_read_failed user={user_id} error={exc}")
-        return {"memories": [], "graph_unavailable": True}
+        print(f"[MEMORY][9001] graph_read_failed user={user_id} error={exc}")
+        return {"memories": []}
 
 @app.post("/api/memory/action")
 async def memory_action(req: MemoryActionRequest):
     if req.action not in {"disable","restore","correct"}:
         return {"status":"error","message":"unsupported action"}
     URI, AUTH, DATABASE = _neo4j_config()
-    try:
-        with GraphDatabase.driver(URI, auth=AUTH) as driver:
-            with driver.session(database=DATABASE) as session:
-                row = session.run("""
-                    MATCH (u:User {id:$user_id})-[r:HAS_PREFERENCE]->(t:Trait {key:$key})
-                    SET r.active=$active,r.last_seen_at=$now,
-                        t.name=CASE WHEN $value IS NULL OR $value='' THEN t.name ELSE $value END
-                    RETURN t.key AS key,t.name AS label,r.stance AS stance,t.category AS category,
-                           r.confidence AS confidence,r.last_seen_at AS last_seen_at
-                """, user_id=req.user_id,key=req.key,active=req.action!='disable',now=time.time(),value=req.value).single()
-                return {"status":"success","memory":dict(row) if row else None}
-    except Exception as exc:
-        print(
-            f"[MEMORY][9001 action] graph_write_failed user={req.user_id} "
-            f"key={req.key} action={req.action} error={exc}"
-        )
-        return {"status":"graph_unavailable","memory":None,"message":str(exc)}
-
-
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        with driver.session(database=DATABASE) as session:
+            row = session.run("""
+                MATCH (u:User {id:$user_id})-[r:HAS_PREFERENCE]->(t:Trait {key:$key})
+                SET r.active=$active,r.last_seen_at=$now,
+                    r.display_label_zh_tw=CASE WHEN $value IS NULL OR $value='' THEN coalesce(r.display_label_zh_tw,t.name) ELSE $value END
+                RETURN t.key AS key,coalesce(r.display_label_zh_tw,t.name) AS label,r.stance AS stance,
+                       t.category AS category,r.confidence AS confidence,r.last_seen_at AS last_seen_at
+            """, user_id=req.user_id,key=req.key,active=req.action!='disable',now=time.time(),value=req.value).single()
+            return {"status":"success","memory":dict(row) if row else None}
 @app.post("/api/chat_triples")
 async def receive_chat_triples(req: ChatTripleRequest):
-    clean = sanitize_chat_triples(req.triples)
+    allowed = {
+        "IS_A", "HAS", "LIKES", "DISLIKES", "WANTS", "FEELS", "KNOWS",
+        "USES", "BELIEVES", "AGREES_WITH", "DISAGREES_WITH", "MENTIONED",
+    }
+    clean = []
+    for item in (req.triples or [])[:16]:
+        subject = str(item.get("subject", "")).strip()[:80]
+        predicate = str(item.get("predicate", "")).strip().upper()
+        obj = str(item.get("object", "")).strip()[:80]
+        if subject and obj and predicate in allowed:
+            clean.append({"subject": subject, "predicate": predicate, "object": obj})
     if not clean:
         return {"status": "skipped", "written": 0}
 
-    uri, auth, database = _neo4j_config()
+    URI, AUTH, DATABASE = _neo4j_config()
     now = time.time()
-    participants = [
-        str(user_id) for user_id in req.participants if user_id
-    ][:2]
     evidence = [
         {
-            "sender_id": str(message.get("sender_id") or ""),
-            "content": str(message.get("content") or "")[:240],
+            "sender_id": str(message.get("sender_id", "")),
+            "content": str(message.get("content", ""))[:240],
             "timestamp": message.get("timestamp"),
         }
-        for message in req.evidence_messages[-12:]
-        if isinstance(message, dict)
+        for message in (req.evidence_messages or [])[-12:]
     ]
-    try:
-        with GraphDatabase.driver(uri, auth=auth) as driver:
-            with driver.session(database=database) as session:
-                for user_id in participants:
-                    session.run(
-                        "MERGE (:User {id:$user_id})", user_id=user_id
-                    ).consume()
-                for triple in clean:
-                    relationship_type = triple["predicate"]
-                    session.run(
-                        f"""
-                        MERGE (subject:ChatEntity {{key:$subject_key}})
-                        SET subject.name=$subject, subject.updated_at=$now
-                        MERGE (object:ChatEntity {{key:$object_key}})
-                        SET object.name=$object, object.updated_at=$now
-                        MERGE (subject)-[relation:{relationship_type}]->(object)
-                        ON CREATE SET relation.first_seen_at=$now,
-                                      relation.evidence_count=0
-                        SET relation.session_id=$session_id,
-                            relation.match_id=$match_id,
-                            relation.participants=$participants,
-                            relation.evidence=$evidence,
-                            relation.evidence_count=
-                                coalesce(relation.evidence_count, 0) + 1,
-                            relation.last_seen_at=$now
-                        """,
-                        subject_key=graph_entity_key(
-                            req.session_id, triple["subject"]
-                        ),
-                        subject=triple["subject"],
-                        object_key=graph_entity_key(
-                            req.session_id, triple["object"]
-                        ),
-                        object=triple["object"],
-                        session_id=req.session_id,
-                        match_id=req.match_id,
-                        participants=participants,
-                        evidence=evidence,
-                        now=now,
-                    ).consume()
-        return {"status": "success", "written": len(clean)}
-    except Exception as exc:
-        print(
-            f"[CHAT_TRIPLES] graph_write_failed "
-            f"session={req.session_id} error={exc}"
-        )
-        return {"status": "graph_unavailable", "written": 0}
-
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        with driver.session(database=DATABASE) as session:
+            for user_id in req.participants or []:
+                if user_id:
+                    session.run("MERGE (:User {id:$user_id})", user_id=user_id).consume()
+            for triple in clean:
+                rel_type = triple["predicate"]
+                session.run(
+                    f"""
+                    MERGE (s:ChatEntity {{key:$subject_key}})
+                    ON CREATE SET s.name=$subject
+                    SET s.name=$subject, s.updated_at=$now
+                    MERGE (o:ChatEntity {{key:$object_key}})
+                    ON CREATE SET o.name=$object
+                    SET o.name=$object, o.updated_at=$now
+                    MERGE (s)-[r:{rel_type}]->(o)
+                    ON CREATE SET r.first_seen_at=$now, r.evidence_count=0
+                    SET r.session_id=$session_id,
+                        r.match_id=$match_id,
+                        r.participants=$participants,
+                        r.evidence=$evidence,
+                        r.evidence_count=coalesce(r.evidence_count, 0) + 1,
+                        r.last_seen_at=$now
+                    """,
+                    subject_key=triple["subject"].lower(),
+                    subject=triple["subject"],
+                    object_key=triple["object"].lower(),
+                    object=triple["object"],
+                    session_id=req.session_id,
+                    match_id=req.match_id,
+                    participants=[str(user_id) for user_id in (req.participants or []) if user_id],
+                    evidence=evidence,
+                    now=now,
+                ).consume()
+    print(f"[CHAT_TRIPLES] wrote {len(clean)} triples session={req.session_id}")
+    return {"status": "success", "written": len(clean)}
 
 @app.get("/api/chat_triples")
 async def list_chat_triples(session_id: str, limit: int = 20):
-    uri, auth, database = _neo4j_config()
-    try:
-        with GraphDatabase.driver(uri, auth=auth) as driver:
-            with driver.session(database=database) as session:
-                rows = session.run(
-                    """
-                    MATCH (subject:ChatEntity)-[relation]->(object:ChatEntity)
-                    WHERE relation.session_id = $session_id
-                    RETURN subject.name AS subject,
-                           type(relation) AS predicate,
-                           object.name AS object,
-                           coalesce(relation.evidence_count, 0) AS evidence_count,
-                           coalesce(relation.last_seen_at, 0) AS last_seen_at
-                    ORDER BY last_seen_at DESC
-                    LIMIT $limit
-                    """,
-                    session_id=session_id,
-                    limit=max(1, min(limit, 50)),
-                )
-                return {"triples": [dict(row) for row in rows]}
-    except Exception as exc:
-        print(
-            f"[CHAT_TRIPLES] graph_read_failed "
-            f"session={session_id} error={exc}"
-        )
-        return {"triples": [], "graph_unavailable": True}
+    URI, AUTH, DATABASE = _neo4j_config()
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        with driver.session(database=DATABASE) as session:
+            rows = session.run(
+                """
+                MATCH (s:ChatEntity)-[r]->(o:ChatEntity)
+                WHERE r.session_id = $session_id
+                RETURN s.name AS subject,
+                       type(r) AS predicate,
+                       o.name AS object,
+                       coalesce(r.evidence_count, 0) AS evidence_count,
+                       coalesce(r.last_seen_at, 0) AS last_seen_at
+                ORDER BY last_seen_at DESC
+                LIMIT $limit
+                """,
+                session_id=session_id,
+                limit=max(1, min(limit, 50)),
+            )
+            triples = [dict(row) for row in rows]
+    return {"triples": triples}
 
 
 if __name__ == "__main__":
     import uvicorn
     # 霈?憍???9001 皜臬
     uvicorn.run(app, host="127.0.0.1", port=9001)
+

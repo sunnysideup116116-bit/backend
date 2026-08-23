@@ -22,7 +22,7 @@
 
 ### 1.3 `main_app/services/risk_client.py`
 - HTTP 客戶端，由 chat.py 呼叫去打 :8001
-- 含 timeout（1.5s）+ 失敗 fallback（:8001 掛掉時 return None 不擋主流程）
+- 含 timeout（20s）+ fail-open fallback（:8001 掛掉時 return None，訊息仍正常寫入）
 
 ---
 
@@ -41,7 +41,7 @@
 加 2 行：
 ```
 RISK_SERVICE_URL=http://localhost:8001
-RISK_TIMEOUT_SEC=1.5
+RISK_TIMEOUT_SEC=20
 ```
 
 ### 2.3 `main_app/requirements.txt`
@@ -75,7 +75,7 @@ Browser
 
 - :8001 必須在運作中，整合才有完整功能
 - 若 :8001 掛掉：response 的 `risk_assessment` 會是 `null`，前端 fallback 到原本的 coach UI
-- 連線超時上限 1.5 秒，超過視為服務不可用
+- 連線超時上限 20 秒，超過視為服務不可用；只有明確的 `blocked` 回應會阻止投遞
 
 ---
 

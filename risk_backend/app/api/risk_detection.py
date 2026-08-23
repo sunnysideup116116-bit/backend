@@ -313,6 +313,7 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
             # NLP 失敗時 _fallback_result() 回傳全 0 的 delta，其結果與「模型判定無風險」
             # 完全無法區分。必須向呼叫端揭露，否則降級判斷會被當成正常的 safe。
             nlp_degraded=str(nlp_result.get('reasoning', '')).startswith('Fallback:'),
+            guardrail_degraded=gr_result.get('degraded', False),
         )
         print("="*70 + "\n")
         return response
@@ -376,17 +377,20 @@ async def submit_feedback(req: FeedbackRequest):
     ok = await chat_log_service.update_intervention_feedback(
         msg_id=req.triggered_by_msg_id,
         role=req.role,
-        feedback=req.feedback
+        feedback=req.feedback,
+        detail=req.detail,
     )
     if not ok:
         raise HTTPException(status_code=404, detail="intervention log not found")
 
-    print(f"   [ Feedback ] {req.role}={req.feedback} for msg {req.triggered_by_msg_id}")
+    print(f"   [ Feedback ] {req.role}={req.feedback} for msg {req.triggered_by_msg_id}"
+          + (f"（詳述 {len(req.detail)} 字）" if req.detail else ""))
     return {
         "status": "ok",
         "msg_id": req.triggered_by_msg_id,
         "role": req.role,
-        "feedback": req.feedback
+        "feedback": req.feedback,
+        "detail": req.detail,
     }
 
 

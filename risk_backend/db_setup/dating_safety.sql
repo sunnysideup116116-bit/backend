@@ -149,17 +149,17 @@ CREATE TABLE `kb_interventions` (
 --
 
 INSERT INTO `kb_interventions` (`template_id`, `risk_level`, `primary_risk_type`, `action_type`, `message_template`, `ui_behavior`, `created_at`) VALUES
-('block_receiver_notice', 'blocked', 'any', 'show_blocked_notice', '{\"body\": \"系統攔截了一則可能對你造成不適的訊息，你可以選擇繼續或結束這段對話\"}', '{\"show_options\": true}', '2026-03-31 14:14:58'),
-('block_sender_final', 'blocked', 'any', 'block_message', '{\"title\": \"訊息未送出\", \"body\": \"這則訊息因為安全考量暫時無法送出，你的帳號功能已暫時限制\"}', '{\"cooldown\": 1800, \"require_ack\": true}', '2026-03-31 14:14:58'),
-('obs_receiver_ambient', 'observation', 'any', 'show_ambient_icon', '{\"body\": \"你可以隨時封鎖或檢舉對方\"}', '{\"show_options\": false}', '2026-03-31 14:14:58'),
-('receiver_info_warning', 'warning', 'any', 'show_safety_info_card', '{\"body\": \"系統偵測到對話中可能有不當模式，已對對方啟動提醒\"}', '{\"show_options\": false}', '2026-03-31 13:49:35'),
-('restrict_receiver_options', 'restricted', 'any', 'show_safety_info_card', '{\"title\":\"已加強保護這段對話\",\"body\":\"系統偵測到對話中可能存在讓你不舒服的互動模式。你可以選擇繼續觀察、封鎖、檢舉，或暫時停止這段對話。\"}', '{\"show_options\":true,\"cooldown\":0,\"require_ack\":false}', '2026-05-25 03:26:19'),
-('restrict_sender_general', 'restricted', 'any', 'show_modal_warning', '{\"title\": \"請暫停一下\", \"body\": \"系統偵測到對話中可能存在讓對方不舒適的模式，建議給對方一些空間\"}', '{\"cooldown\": 60, \"require_ack\": true}', '2026-03-31 13:49:35'),
-('warn_sender_coercion', 'warning', 'coercion', 'show_reflection_banner', '{\"body\": \"好的對話建立在雙方都舒適的節奏上\"}', '{\"cooldown\": 0, \"require_ack\": false}', '2026-03-31 14:14:58'),
-('warn_sender_emotional', 'warning', 'emotional_pressure', 'show_reflection_banner', '{\"body\": \"給彼此一些回覆的空間，有助於建立更好的連結\"}', '{\"cooldown\": 0, \"require_ack\": false}', '2026-03-31 13:49:35'),
-('warn_sender_harassment', 'warning', 'harassment', 'show_reflection_banner', '{\"body\": \"頻繁的訊息有時會讓對方感到不舒服\"}', '{\"cooldown\": 0, \"require_ack\": false}', '2026-03-31 14:14:58'),
-('warn_sender_manipulation', 'warning', 'manipulation', 'show_reflection_banner', '{\"body\": \"真誠的互動比快速建立好感更能讓關係長久\"}', '{\"cooldown\": 0, \"require_ack\": false}', '2026-03-31 13:49:35'),
-('warn_sender_sexual', 'warning', 'sexual_boundary', 'show_reflection_banner', '{\"body\": \"尊重對方的邊界是建立信任的基礎\"}', '{\"cooldown\": 0, \"require_ack\": false}', '2026-03-31 13:49:35');
+('block_receiver_notice', 'blocked', 'any', 'show_blocked_notice', '{\"body\": \"系統攔截了一則可能對你造成不適的訊息，你可以選擇繼續或結束這段對話\"}', '{\"show_options\": true, \"show_feedback_buttons\": false, \"allow_report_text\": true, \"mascot\": \"heart\", \"display_throttle_seconds\": 0, \"cooldown\": 0, \"require_ack\": false}', '2026-03-31 14:14:58'),
+('block_sender_final', 'blocked', 'any', 'block_message', '{\"title\": \"訊息未送出\", \"body\": \"這則訊息因為安全考量暫時無法送出，你的帳號功能已暫時限制\"}', '{\"cooldown\": 1800, \"require_ack\": true, \"allow_report_text\": true, \"display_throttle_seconds\": 0}', '2026-03-31 14:14:58'),
+('obs_receiver_ambient', 'observation', 'any', 'show_ambient_icon', '{\"body\": \"你可以隨時封鎖或檢舉對方\"}', '{\"show_options\": false, \"show_feedback_buttons\": false, \"allow_report_text\": false, \"display_throttle_seconds\": 1800, \"cooldown\": 0, \"require_ack\": false}', '2026-03-31 14:14:58'),
+('receiver_info_warning', 'warning', 'any', 'show_safety_info_card', '{\"body\": \"系統偵測到對話中可能有不當模式，已對對方啟動提醒\"}', '{\"show_options\": false, \"show_feedback_buttons\": true, \"allow_report_text\": true, \"mascot\": \"heart\", \"display_throttle_seconds\": 300, \"cooldown\": 0, \"require_ack\": false}', '2026-03-31 13:49:35'),
+('restrict_receiver_options', 'restricted', 'any', 'show_safety_info_card', '{\"title\":\"已加強保護這段對話\",\"body\":\"系統偵測到對話中可能存在讓你不舒服的互動模式。你可以選擇繼續觀察、封鎖、檢舉，或暫時停止這段對話。\"}', '{\"show_options\":true,\"show_feedback_buttons\":true,\"allow_report_text\":true,\"mascot\":\"heart\",\"display_throttle_seconds\":120,\"cooldown\":0,\"require_ack\":false}', '2026-05-25 03:26:19'),
+('restrict_sender_general', 'restricted', 'any', 'show_modal_warning', '{\"title\": \"請暫停一下\", \"body\": \"系統偵測到對話中可能存在讓對方不舒適的模式，建議給對方一些空間\"}', '{\"cooldown\": 60, \"require_ack\": true, \"mascot\": \"danger\", \"allow_report_text\": true, \"display_throttle_seconds\": 120}', '2026-03-31 13:49:35'),
+('warn_sender_coercion', 'warning', 'coercion', 'show_reflection_banner', '{\"body\": \"好的對話建立在雙方都舒適的節奏上\"}', '{\"cooldown\": 0, \"require_ack\": false, \"mascot\": \"warning_sign\", \"display_throttle_seconds\": 300}', '2026-03-31 14:14:58'),
+('warn_sender_emotional', 'warning', 'emotional_pressure', 'show_reflection_banner', '{\"body\": \"給彼此一些回覆的空間，有助於建立更好的連結\"}', '{\"cooldown\": 0, \"require_ack\": false, \"mascot\": \"warning_sign\", \"display_throttle_seconds\": 300}', '2026-03-31 13:49:35'),
+('warn_sender_harassment', 'warning', 'harassment', 'show_reflection_banner', '{\"body\": \"頻繁的訊息有時會讓對方感到不舒服\"}', '{\"cooldown\": 0, \"require_ack\": false, \"mascot\": \"warning_sign\", \"display_throttle_seconds\": 300}', '2026-03-31 14:14:58'),
+('warn_sender_manipulation', 'warning', 'manipulation', 'show_reflection_banner', '{\"body\": \"真誠的互動比快速建立好感更能讓關係長久\"}', '{\"cooldown\": 0, \"require_ack\": false, \"mascot\": \"warning_sign\", \"display_throttle_seconds\": 300}', '2026-03-31 13:49:35'),
+('warn_sender_sexual', 'warning', 'sexual_boundary', 'show_reflection_banner', '{\"body\": \"尊重對方的邊界是建立信任的基礎\"}', '{\"cooldown\": 0, \"require_ack\": false, \"mascot\": \"warning_sign\", \"display_throttle_seconds\": 300}', '2026-03-31 13:49:35');
 
 -- --------------------------------------------------------
 
