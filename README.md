@@ -186,7 +186,7 @@ cd Server
 |------|------|------|
 | 跨服務契約 | `Server/tests/` | `Server/venv/bin/python -m pytest tests/`（49 個） |
 | social | `social/tests/` | `.local-venv/social/bin/python -m pytest tests/`（800+ 個） |
-| risk_backend | `risk_backend/tests/` | `Server/venv/bin/python -m pytest risk_backend/tests/`（98 個） |
+| risk_backend | `risk_backend/tests/` | `Server/venv/bin/python -m pytest risk_backend/tests/`（102 個） |
 
 > `social/tests/test_profile_skills.py` 有 17 個既有失敗（profile_skills 功能問題），與檔案結構無關。
 

@@ -1,5 +1,9 @@
 # 0726-new 阿月前後端整合紀錄
 
+> [!NOTE]
+> **歷史紀錄說明 (Historical Archive Notice)**
+> 本文件記錄 2026-07-26 完成之階段性整合紀錄。請注意：後續提交（`fd8d1ca`）已將原本的 `main_app` 與 `ai_gen` 重構平鋪為 **`social`**（主服務目錄為 `Server/social/`）；現行開發與系統架構請以 [`AYUE_V3_ARCHITECTURE.md`](./AYUE_V3_ARCHITECTURE.md) 與 [`README.md`](../README.md) 為主。
+
 ## 1. 文件目的
 
 本文件記錄 2026-07-26 完成的 Revision 阿月後端與 Flutter 前端整合，包括：
@@ -30,9 +34,8 @@ Flutter DatingApp
     |
     | HTTP: http://127.0.0.1:8000
     v
-Main FastAPI Server :8000
-    |-- main_app API
-    |-- ai_gen API
+Main FastAPI Server :8000 (social API, 舊稱 main_app / ai_gen)
+    |-- social API
     |
     |-- Risk Backend :8001
     |
