@@ -17,14 +17,53 @@ class PairMessageRiskDecision(NamedTuple):
     level: str
     delivery: str
     triggered_by_msg_id: str | None = None
+    sender_directive: dict | None = None
+    receiver_directive: dict | None = None
 
     @property
     def may_persist(self) -> bool:
         return self.delivery == "delivered"
 
-    def public_projection(self) -> dict[str, str]:
+    @staticmethod
+    def _sanitize_directive(directive: dict | None) -> dict | None:
+        """整包 passthrough 後端指令；None 或 action=='none' 時不投影。
+
+        只保留 dict 結構與前端需要的純資料欄位，異常值一律丟棄，
+        讓新增旗標成為純資料變更（前端缺旗標時以安全預設渲染）。
+        """
+        if not isinstance(directive, dict):
+            return None
+        action = str(directive.get("action") or "").strip()
+        if not action or action == "none":
+            return None
+        clean: dict = {"action": action}
+        for key in (
+            "cooldown_seconds",
+            "require_acknowledgment",
+            "show_options",
+            "show_feedback_buttons",
+            "allow_report_text",
+            "display_throttle_seconds",
+            "sanction_exempted",
+            "mascot",
+        ):
+            if key in directive and directive[key] is not None:
+                clean[key] = directive[key]
+        content = directive.get("content")
+        if isinstance(content, dict):
+            clean["content"] = {
+                k: content.get(k)
+                for k in ("title", "body", "primary_risk_type")
+                if content.get(k) is not None
+            }
+        throttled = directive.get("throttled")
+        if isinstance(throttled, dict):
+            clean["throttled"] = dict(throttled)
+        return clean
+
+    def public_projection(self) -> dict:
         priority = "risk" if self.level in {"warning", "restricted", "blocked"} else "coach"
-        projection = {
+        projection: dict = {
             "level": self.level,
             "ui_priority": priority,
             "delivery": self.delivery,
@@ -33,7 +72,19 @@ class PairMessageRiskDecision(NamedTuple):
         # 只有風險服務明確回傳 intervention_command 時才帶上。
         if self.triggered_by_msg_id:
             projection["triggered_by_msg_id"] = self.triggered_by_msg_id
+        sender = self._sanitize_directive(self.sender_directive)
+        if sender:
+            projection["sender_directive"] = sender
+        receiver = self._sanitize_directive(self.receiver_directive)
+        if receiver:
+            projection["receiver_directive"] = receiver
+        if self._directive_exempted(sender) or self._directive_exempted(receiver):
+            projection["sanction_exempted"] = True
         return projection
+
+    @staticmethod
+    def _directive_exempted(directive: dict | None) -> bool:
+        return isinstance(directive, dict) and directive.get("sanction_exempted") is True
 
 
 class PairMessageRiskGate:
@@ -84,12 +135,19 @@ class PairMessageRiskGate:
             raw = self._transport(payload)
             level = str(raw.get("risk_level") or "").strip().lower()
             triggered_by_msg_id = self._extract_triggered_by_msg_id(raw)
+            sender_d, receiver_d = self._extract_directives(raw)
             if level == "blocked":
-                decision = PairMessageRiskDecision("blocked", "blocked", triggered_by_msg_id)
+                decision = PairMessageRiskDecision(
+                    "blocked", "blocked", triggered_by_msg_id, sender_d, receiver_d
+                )
             elif level in _DELIVERABLE_LEVELS:
-                decision = PairMessageRiskDecision(level, "delivered", triggered_by_msg_id)
+                decision = PairMessageRiskDecision(
+                    level, "delivered", triggered_by_msg_id, sender_d, receiver_d
+                )
             else:
-                decision = PairMessageRiskDecision("unavailable", "delivered", triggered_by_msg_id)
+                decision = PairMessageRiskDecision(
+                    "unavailable", "delivered", triggered_by_msg_id, sender_d, receiver_d
+                )
         except Exception:
             # Risk is an advisory safety dependency, not a chat availability
             # dependency. Only an explicit `blocked` decision may prevent the
@@ -118,6 +176,27 @@ class PairMessageRiskGate:
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _extract_directives(raw: dict) -> tuple[dict | None, dict | None]:
+        """從 intervention_command 取出 sender / receiver 指令（整包帶上）。
+
+        與 _extract_triggered_by_msg_id 同層；風險服務結構為
+        ``intervention_command.sender_directive`` /
+        ``intervention_command.receiver_directive``。
+        """
+        try:
+            command = raw.get("intervention_command")
+            if isinstance(command, dict):
+                sender = command.get("sender_directive")
+                receiver = command.get("receiver_directive")
+                return (
+                    dict(sender) if isinstance(sender, dict) else None,
+                    dict(receiver) if isinstance(receiver, dict) else None,
+                )
+        except Exception:
+            pass
+        return None, None
 
     def _http_transport(self, payload: dict) -> dict:
         response = requests.post(

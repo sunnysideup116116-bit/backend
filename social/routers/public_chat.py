@@ -482,11 +482,15 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
     if not risk_decision.may_persist:
         # 被攔截的訊息不會以 receiver 可見的訊息儲存；改寫一則系統通知卡，
         # 讓 receiver 知道系統攔截了一則可能造成不適的訊息，並可回報感受。
+        # metadata 內帶上 receiver_directive，使收件端從歷史訊息也能依指令渲染。
+        notice_metadata = {"event_type": "blocked_notice", "risk": dict(risk_projection)}
+        if risk_projection.get("receiver_directive"):
+            notice_metadata["receiver_directive"] = dict(risk_projection["receiver_directive"])
         save_system_message_once(
             room_id,
             "系統攔截了一則可能讓你感到不適的訊息，你可以繼續或結束這段對話。",
             message_type="system",
-            metadata={"event_type": "blocked_notice", "risk": dict(risk_projection)},
+            metadata=notice_metadata,
             event_key=f"blocked-notice:{client_message_id}",
         )
         return {

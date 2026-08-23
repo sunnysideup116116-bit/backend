@@ -110,6 +110,127 @@ def test_risk_gate_projection_omits_trigger_id_when_absent():
     projection = decision.public_projection()
 
     assert "triggered_by_msg_id" not in projection
+    assert "sender_directive" not in projection
+    assert "receiver_directive" not in projection
+
+
+def test_risk_gate_passes_through_directives():
+    from services.risk_policy_service import PairMessageRiskGate
+
+    gate = PairMessageRiskGate(
+        transport=lambda payload: {
+            "risk_level": "restricted",
+            "intervention_command": {
+                "triggered_by_msg_id": "real-msg-7",
+                "sender_directive": {
+                    "action": "show_modal_warning",
+                    "cooldown_seconds": 60,
+                    "require_acknowledgment": True,
+                    "mascot": "danger",
+                    "allow_report_text": True,
+                    "display_throttle_seconds": 120,
+                    "content": {"title": "請暫停一下", "body": "系統偵測到…", "primary_risk_type": "coercion"},
+                },
+                "receiver_directive": {
+                    "action": "show_safety_info_card",
+                    "show_options": True,
+                    "show_feedback_buttons": True,
+                    "allow_report_text": True,
+                    "mascot": "heart",
+                    "display_throttle_seconds": 120,
+                    "content": {"body": "已加強保護這段對話", "primary_risk_type": "any"},
+                    "unexpected_field_should_drop": "x",
+                },
+            },
+        }
+    )
+    decision = gate.evaluate(
+        conversation_id="a_b",
+        sender_id="a",
+        receiver_id="b",
+        content="哪裡",
+        idempotency_key="k-dir",
+    )
+    projection = decision.public_projection()
+
+    assert projection["triggered_by_msg_id"] == "real-msg-7"
+    sender = projection["sender_directive"]
+    assert sender["action"] == "show_modal_warning"
+    assert sender["cooldown_seconds"] == 60
+    assert sender["require_acknowledgment"] is True
+    assert sender["mascot"] == "danger"
+    assert sender["content"]["title"] == "請暫停一下"
+    receiver = projection["receiver_directive"]
+    assert receiver["action"] == "show_safety_info_card"
+    assert receiver["show_options"] is True
+    assert "unexpected_field_should_drop" not in receiver
+
+
+def test_risk_gate_suppressed_directive_kept_for_frontend():
+    from services.risk_policy_service import PairMessageRiskGate
+
+    gate = PairMessageRiskGate(
+        transport=lambda payload: {
+            "risk_level": "warning",
+            "intervention_command": {
+                "triggered_by_msg_id": "real-msg-8",
+                "sender_directive": {
+                    "action": "suppressed",
+                    "throttled": {"reason": "display_throttle", "window_seconds": 300},
+                },
+                "receiver_directive": {"action": "none", "content": None},
+            },
+        }
+    )
+    decision = gate.evaluate(
+        conversation_id="a_b",
+        sender_id="a",
+        receiver_id="b",
+        content="嗨",
+        idempotency_key="k-thr",
+    )
+    projection = decision.public_projection()
+
+    sender = projection["sender_directive"]
+    assert sender["action"] == "suppressed"
+    assert sender["throttled"]["reason"] == "display_throttle"
+    # action == "none" 的 directive 不投影給前端
+    assert "receiver_directive" not in projection
+
+
+def test_risk_gate_projection_marks_sanction_exempted():
+    from services.risk_policy_service import PairMessageRiskGate
+
+    gate = PairMessageRiskGate(
+        transport=lambda payload: {
+            "risk_level": "blocked",
+            "intervention_command": {
+                "triggered_by_msg_id": "real-msg-9",
+                "sender_directive": {
+                    "action": "show_reflection_banner",
+                    "sanction_exempted": True,
+                    "content": {"body": "這段對話仍在觀察中", "primary_risk_type": "any"},
+                },
+                "receiver_directive": {
+                    "action": "show_safety_info_card",
+                    "sanction_exempted": True,
+                    "content": {"body": "這段對話仍在加強保護中", "primary_risk_type": "any"},
+                },
+                "admin_directive": None,
+            },
+        }
+    )
+    decision = gate.evaluate(
+        conversation_id="a_b",
+        sender_id="a",
+        receiver_id="b",
+        content="嗨",
+        idempotency_key="k-ex",
+    )
+    projection = decision.public_projection()
+
+    assert projection.get("sanction_exempted") is True
+    assert projection["sender_directive"]["sanction_exempted"] is True
 
 
 def test_risk_gate_omits_trigger_id_for_unavailable():
