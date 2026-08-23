@@ -20,31 +20,31 @@
 - `README.md` — 新環境部署步驟教學
 - 既有環境 huangchunming 在維護，當文件參考即可
 
-### 1.3 `main_app/services/risk_client.py`
-- HTTP 客戶端，由 chat.py 呼叫去打 :8001
+### 1.3 `social/services/risk_policy_service.py`
+- HTTP 客戶端，由 public_chat.py 呼叫去打 :8001
 - 含 timeout（20s）+ fail-open fallback（:8001 掛掉時 return None，訊息仍正常寫入）
 
 ---
 
 ## 2. 改的東西
 
-### 2.1 `main_app/routers/chat.py`
+### 2.1 `social/routers/public_chat.py`
 `direct_chat()` 函式內加 4 處：
-- 開頭呼叫 `risk_client.check_risk(...)` 取得風險評估
+- 開頭呼叫 `risk_policy_service.check_risk(...)` 取得風險評估
 - 若 `risk_level == "blocked"` 直接 return（訊息不存進 MongoDB）
-- 3 個 `return res_data` 點各加一行 `risk_client.attach_to_response()`，讓 response 多出兩個欄位給前端用：
+- 3 個 `return res_data` 點各加一行 `risk_policy_service.attach_to_response()`，讓 response 多出兩個欄位給前端用：
   - `ui_priority`: `"coach"` 或 `"risk"`
   - `risk_assessment`: 完整風險評估物件
 - 其他既有邏輯都沒動；degraded 模式（:8001 掛掉時）會 fallback 回原本的 `check_boundary_guard`
 
-### 2.2 `main_app/.env`
+### 2.2 `social/.env`
 加 2 行：
 ```
 RISK_SERVICE_URL=http://localhost:8001
 RISK_TIMEOUT_SEC=20
 ```
 
-### 2.3 `main_app/requirements.txt`
+### 2.3 `social/requirements.txt`
 加 `httpx>=0.27`
 
 ---
@@ -52,9 +52,13 @@ RISK_TIMEOUT_SEC=20
 ## 3. Demo 啟動順序
 
 ```bash
-Terminal 1: cd risk_backend && python -m uvicorn app.main:app --port 8001
-Terminal 2: cd main_app && python main.py     # :8000
-Browser:    localhost:8000
+# 統一啟動（推薦）
+./start_all.sh
+
+# 或分開啟動
+Terminal 1: ./scripts/run_ayue_risk.sh      # :8001
+Terminal 2: ./scripts/run_ayue_social.sh    # :8000
+Browser:    http://localhost:8000
 ```
 
 兩個服務獨立跑，任一邊掛了另一邊仍可運作（risk service 掛 → 自動 fallback 回原本的 boundary guard）。
@@ -67,7 +71,7 @@ Browser:    localhost:8000
 Browser
    │
    ▼
-:8000  Unified Server (main_app)
+:8000  Ayue Social Service (social)
    │
    ▼  HTTP call (server-to-server)
 :8001  Risk Detection Service (risk_backend)
@@ -259,6 +263,6 @@ Content-Type: application/json
 
 - ✅ risk service `:8001` 跑得起來、回應格式正確
 - ⏳ 尚未做端到端 `:8000 → :8001` 串接驗證
-- ⏳ 尚未驗證 chat.py patch 在 main_app 啟動時不會 import error
+- ⏳ 尚未驗證 public_chat.py patch 在 social 啟動時不會 import error
 
 任何 import error / 啟動失敗 / response 怪怪的，貼我
