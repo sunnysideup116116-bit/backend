@@ -50,6 +50,19 @@ class InterventionEngine:
         # 3. 取得接收方指令 (確保 template_id 包含 'receiver')
         receiver_d = self._get_specific_directive(all_templates, "any", "receiver")
 
+        # 規格 §5 吉祥物梯度 fallback：線上 KB 若還是舊資料（缺 mascot 旗標），
+        # 依等級補上；寄件方 blocked 刻意無圖。
+        if "mascot" not in sender_d:
+            sender_default = {
+                "warning": "warning_sign",
+                "restricted": "danger",
+                "blocked": None,
+            }.get(risk_level)
+            if sender_default is not None:
+                sender_d["mascot"] = sender_default
+        if "mascot" not in receiver_d and receiver_d.get("action") != "none":
+            receiver_d["mascot"] = "heart"
+
         # 3.5 顯示節流：寄件方與收件方分別判定
         if chat_log_service is not None:
             sender_d = await self._apply_throttle(
@@ -158,9 +171,12 @@ class InterventionEngine:
                 "primary_risk_type": risk_type
             }
         }
-        # 節流窗可由模板覆寫；未設定則於 _apply_throttle 使用該等級的預設值
-        if 'display_throttle_seconds' in ui:
-            directive['display_throttle_seconds'] = ui['display_throttle_seconds']
+        # 規格 §6：整包 passthrough。新增旗標是純資料變更，
+        # 不再白名單（2026-08-15 前白名單曾使 mascot / show_options 從未送達前端）。
+        for key, value in ui.items():
+            if key in ("cooldown", "require_ack"):
+                continue
+            directive[key] = value
         return directive
 
     def _build_empty_command(self, conv_id, msg_id):
