@@ -313,6 +313,25 @@ class _DecomposeTasksArguments(BaseModel):
                 "provider task mode cannot contain only a synthesizer; use direct_chat "
                 "for ordinary conversation or include every required domain task"
             )
+        availability_ids = {
+            task.id
+            for task in self.tasks
+            if task.agent == "calendar"
+            and task.outcome_contract == "calendar.availability.v1"
+        }
+        consumed_availability_ids = {
+            task.run_if.source_task_id
+            for task in self.tasks
+            if task.run_if is not None
+            and task.run_if.source_task_id in availability_ids
+        }
+        orphan_availability_ids = availability_ids - consumed_availability_ids
+        for task in self.tasks:
+            if task.id in orphan_availability_ids:
+                # An unconsumed outcome cannot control the graph. Treat it as
+                # provider compatibility noise so the Calendar Agent retains
+                # normal READ/WRITE ownership instead of failing the whole turn.
+                task.outcome_contract = None
         return self
 
 

@@ -10,11 +10,11 @@ path. The app keeps its polling fallback, so a failed mirror only degrades
 delivery latency, never availability.
 """
 
+import hashlib
 import json
 import os
 import threading
 import time
-import uuid
 from pathlib import Path
 
 import requests
@@ -61,8 +61,12 @@ def mirror_message_to_appwrite(msg: dict) -> None:
         return
     room_id = str(msg.get("room_id") or "")
     sender_id = str(msg.get("sender_id") or "")
-    if not room_id or not sender_id:
+    message_id = str(msg.get("message_id") or "")
+    if not room_id or not sender_id or not message_id:
         return
+    document_id = hashlib.sha256(
+        f"mongo-message:{message_id}".encode("utf-8")
+    ).hexdigest()[:32]
     receiver_id = _other_participant(room_id, sender_id)
     data = {
         "room_id": room_id,
@@ -85,7 +89,7 @@ def mirror_message_to_appwrite(msg: dict) -> None:
             f"{_ENDPOINT}/databases/{_DB_ID}/collections/{_COLLECTION_ID}/documents",
             headers=_HEADERS,
             json={
-                "documentId": uuid.uuid4().hex,
+                "documentId": document_id,
                 "data": data,
                 "permissions": permissions,
             },

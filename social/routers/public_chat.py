@@ -40,6 +40,11 @@ from services.chat_service import (
     save_pair_owner_message_once,
     save_system_message_once,
 )
+from services.ai_room_service import (
+    ensure_room_title,
+    get_room as get_ai_room,
+    mark_first_message_for_title,
+)
 from services.profile_skills import profile_skills_mode_for_user
 from services.profile_task_service import queue_profile_skills as _queue_profile_skills
 from services.relationship_engagement_service import (
@@ -53,6 +58,31 @@ from services.risk_policy_service import pair_message_risk_gate
 
 router = APIRouter()
 MATCH_READINESS_THRESHOLD = 75
+
+
+def _resolve_ai_room_id(req: DirectChatRequest) -> str:
+    """Resolve the room id for a Public Ayue turn.
+
+    When the client supplies ``ai_room_id`` it must belong to ``req.user_id``
+    (enforced via :func:`get_ai_room`); otherwise we fall back to the legacy
+    deterministic AI room. Invalid/foreign room ids are rejected with 403.
+    """
+    if req.ai_room_id:
+        if not get_ai_room(req.ai_room_id, req.user_id):
+            raise HTTPException(status_code=403, detail="無權存取此聊天室")
+        return req.ai_room_id
+    return generate_room_id(req.user_id, req.contact_id)
+
+_PUBLIC_PROGRESS_STAGE_BY_AGENT = {
+    "calendar": ("checking_calendar", "阿月正在確認你的行事曆…"),
+    "places": ("finding_places", "阿月正在整理地點資訊…"),
+    "web": ("checking_web", "阿月正在查證公開資訊…"),
+    "match": ("checking_match", "阿月正在確認配對狀態…"),
+    "relationship": ("checking_relationship", "阿月正在確認關係資訊…"),
+    "profile": ("checking_profile", "阿月正在整理你的資料…"),
+    "product_info": ("checking_product", "阿月正在確認產品資訊…"),
+    "synthesizer": ("composing", "阿月正在整理回覆…"),
+}
 
 
 def queue_profile_skills(
@@ -241,7 +271,7 @@ def _run_public_stream_turn(
     *, on_token=None, debug_enabled: bool = False,
 ) -> dict:
     """Public-only stream path; mirrors the V3 branch of direct_chat exactly once."""
-    room_id = generate_room_id(req.user_id, req.contact_id)
+    room_id = _resolve_ai_room_id(req)
     requested_mentions, mention_overflow = _validated_requested_mentions(req)
     request_message = _public_request_message(req)
     display_message = request_message
@@ -258,6 +288,16 @@ def _run_public_stream_turn(
         room_id, req.user_id, display_message,
         metadata=user_metadata or None,
     )
+    # Multi-room AI surface: generate a title from the first user message via
+    # one extra LLM call. Runs in a daemon thread so it never blocks the agent
+    # turn; the room stays needs_title=True until a title lands.
+    if req.ai_room_id and mark_first_message_for_title(room_id, req.user_id):
+        threading.Thread(
+            target=ensure_room_title,
+            args=(room_id, req.user_id, request_message),
+            name="ayue-room-title",
+            daemon=True,
+        ).start()
     profiles_coll.update_one(
         {"user_id": req.user_id}, {"$set": {"last_user_activity_at": time.time()}}, upsert=True,
     )
@@ -292,6 +332,17 @@ def _sanitize_public_stream_event(event: dict) -> dict | None:
     run_id = str(event.get("agent_run_id") or "")[:128]
     if event_type == "run_started" and run_id:
         return {"type": "run_started", "agent_run_id": run_id}
+    if event_type == "subagent_started" and run_id:
+        stage = _PUBLIC_PROGRESS_STAGE_BY_AGENT.get(str(event.get("agent") or ""))
+        if stage is None:
+            return None
+        stage_name, text = stage
+        return {
+            "type": "stage",
+            "agent_run_id": run_id,
+            "stage": stage_name,
+            "text": text,
+        }
     if event_type == "tool_started" and run_id:
         return {
             "type": "tool_started",
@@ -335,6 +386,10 @@ def direct_chat_stream(
     fallback_run_id = uuid.uuid4().hex
     state = {"agent_run_id": fallback_run_id}
     debug_enabled = _is_loopback_debug_request(request)
+    token_stream_enabled = bool(
+        request
+        and request.headers.get("x-ayue-stream-tokens", "").strip().lower() == "v1"
+    )
 
     def enqueue(item: dict | None, *, terminal: bool = False) -> bool:
         while True:
@@ -368,11 +423,13 @@ def direct_chat_stream(
                 if debug_enabled:
                     response = _run_public_stream_turn(
                         req, worker_background_tasks, emit,
-                        on_token=emit_token, debug_enabled=True,
+                        on_token=emit_token if token_stream_enabled else None,
+                        debug_enabled=True,
                     )
                 else:
                     response = _run_public_stream_turn(
-                        req, worker_background_tasks, emit, on_token=emit_token,
+                        req, worker_background_tasks, emit,
+                        on_token=emit_token if token_stream_enabled else None,
                     )
             else:
                 # Stream is intentionally optional for legacy/private contacts;
@@ -407,7 +464,6 @@ def direct_chat_stream(
 @router.post("/direct_chat")
 def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
     """Handle Public Ayue with V3, or preserve the existing pair-chat adapter."""
-    room_id = generate_room_id(req.user_id, req.contact_id)
     requested_mentions, mention_overflow = _validated_requested_mentions(req)
     request_message = _public_request_message(req)
     display_message = request_message
@@ -421,9 +477,17 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
     if mention_labels:
         user_metadata["mention_labels"] = mention_labels
     if req.contact_id == "ai_assistant":
+        room_id = _resolve_ai_room_id(req)
         user_message = save_message(
             room_id, req.user_id, display_message, metadata=user_metadata or None,
         )
+        if req.ai_room_id and mark_first_message_for_title(room_id, req.user_id):
+            threading.Thread(
+                target=ensure_room_title,
+                args=(room_id, req.user_id, request_message),
+                name="ayue-room-title",
+                daemon=True,
+            ).start()
         record_proactive_activity(req.user_id)
         return _complete_public_turn(
             req, room_id, requested_mentions, mention_overflow,
@@ -431,6 +495,7 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
             user_message_id=user_message.get("message_id"),
         )
 
+    room_id = generate_room_id(req.user_id, req.contact_id)
     match_doc = find_accepted_match(req.user_id, req.contact_id)
     if not match_doc:
         raise HTTPException(status_code=403, detail="只能傳送訊息給已接受的配對")

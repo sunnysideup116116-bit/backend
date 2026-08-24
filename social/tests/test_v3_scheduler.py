@@ -145,6 +145,26 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertEqual(trace["llm_call_count"], 1)
         synth.assert_not_called()
 
+    def test_stream_tokens_replay_only_the_normalized_final_reply(self):
+        ctx = self._ctx("哈囉")
+        plan = Plan(mode="direct_chat", tasks=[], direct_reply="这是簡體中文。")
+        tokens: list[str] = []
+        with patch.dict("os.environ", {"AYUE_V3_SIMPLE_CHAT_FAST_PATH": "on"}), \
+             patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
+                   return_value=self._direct_turn()), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.active_assessment_session", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.time.sleep"), \
+             patch("services.ayue_agent.v3.scheduler._persist_trace"):
+            result = run_public_agent_turn_v3(ctx, on_token=tokens.append)
+        self.assertEqual(result.reply, "這是簡體中文。")
+        self.assertTrue(tokens)
+        self.assertEqual("".join(tokens), result.reply)
+        self.assertTrue(all(len(fragment) <= 120 for fragment in tokens))
+
     def test_matching_principles_product_info_answers_without_generic_identity_copy(self):
         ctx = self._ctx("你們到底怎麼配對的？")
         plan = Plan(mode="product_info", tasks=[], product_info_topics=["matching_principles"])
@@ -1504,6 +1524,88 @@ class V3SchedulerWriteTests(unittest.TestCase):
         self.assertTrue(result.handled)
         exec_write.assert_called_once()
         self.assertEqual(exec_write.call_args.kwargs["payload"]["_confirmation_id"], "c1")
+
+    def test_confirm_without_pending_calendar_draft_fails_closed(self):
+        ctx = self._ctx("對")
+        turn = self._direct_turn_with_calendar_draft()
+        with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", return_value=turn), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.execute_write") as execute_write, \
+             patch("services.ayue_agent.v3.scheduler.plan_turn") as plan_turn, \
+             patch("services.ayue_agent.v3.scheduler.synthesizer.synthesize") as synthesize:
+            result = run_public_agent_turn_v3(ctx)
+
+        self.assertIn("還缺開始與結束時間", result.reply)
+        self.assertIn("行事曆尚未變更", result.reply)
+        self.assertEqual(result.conversation_intent, "calendar_clarification")
+        self.assertFalse(result.calendar_state_changed)
+        execute_write.assert_not_called()
+        plan_turn.assert_not_called()
+        synthesize.assert_not_called()
+
+    def test_confirm_without_any_pending_operation_fails_closed(self):
+        ctx = self._ctx("確認")
+        turn = MagicMock(calendar_draft=None)
+        with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", return_value=turn), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.execute_write") as execute_write, \
+             patch("services.ayue_agent.v3.scheduler.plan_turn") as plan_turn, \
+             patch("services.ayue_agent.v3.scheduler.synthesizer.synthesize") as synthesize:
+            result = run_public_agent_turn_v3(ctx)
+
+        self.assertIn("沒有待確認的操作", result.reply)
+        self.assertIn("沒有執行任何變更", result.reply)
+        execute_write.assert_not_called()
+        plan_turn.assert_not_called()
+        synthesize.assert_not_called()
+
+    def test_cancel_without_any_pending_operation_fails_closed(self):
+        ctx = self._ctx("取消")
+        turn = MagicMock(calendar_draft=None)
+        with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", return_value=turn), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.list_active", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.cancel_all") as cancel_all, \
+             patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.plan_turn") as plan_turn, \
+             patch("services.ayue_agent.v3.scheduler.synthesizer.synthesize") as synthesize:
+            result = run_public_agent_turn_v3(ctx)
+
+        self.assertIn("沒有待取消的操作", result.reply)
+        self.assertIn("沒有執行任何變更", result.reply)
+        cancel_all.assert_not_called()
+        plan_turn.assert_not_called()
+        synthesize.assert_not_called()
+
+    def test_confirm_claim_lost_does_not_synthesize_success(self):
+        ctx = self._ctx("確認")
+        pending = {"_id": "c1", "tool_name": "calendar.create_event"}
+        turn = MagicMock(calendar_draft=None)
+        with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", return_value=turn), \
+             patch(
+                 "services.ayue_agent.v3.scheduler.ConfirmationManager.list_active",
+                 side_effect=[[pending], []],
+             ), \
+             patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.execute_write") as execute_write, \
+             patch("services.ayue_agent.v3.scheduler.synthesizer.synthesize") as synthesize:
+            result = run_public_agent_turn_v3(ctx)
+
+        self.assertIn("沒有執行新的變更", result.reply)
+        self.assertIn("另一個請求處理或已失效", result.reply)
+        execute_write.assert_not_called()
+        synthesize.assert_not_called()
+
+    @staticmethod
+    def _direct_turn_with_calendar_draft():
+        turn = MagicMock()
+        turn.calendar_draft = {
+            "action": "create",
+            "missing_fields": ["start_time", "end_time"],
+        }
+        return turn
+
 
 class V3SchedulerTraceTests(unittest.TestCase):
     def test_local_debug_trace_exposes_planner_failure_and_total_calls(self):

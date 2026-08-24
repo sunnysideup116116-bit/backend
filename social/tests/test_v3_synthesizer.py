@@ -236,10 +236,8 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIsNone(card_decision)
         self.assertEqual(metrics.presentation_blocks, [])
 
-    def test_disabled_cards_expose_no_compose_tool_and_stream_tokens(self):
-        """With public cards off, places turns must not wait for a compose
-        tool call: no compose_public_reply is exposed and on_token streaming
-        is forwarded to the provider."""
+    def test_disabled_cards_keep_compose_contract_without_raw_token_streaming(self):
+        """Cards-off changes rendering only, not grounded composition safety."""
         slc = self._slice([{
             "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
             "result": {"places": [{"name": "候選店"}]},
@@ -263,8 +261,10 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIn("候選店", reply)
         self.assertIsNone(card_decision)
         self.assertEqual(metrics.presentation_blocks, [])
-        self.assertEqual(provider.call_args.args[1], [])
-        self.assertIs(provider.call_args.kwargs["on_token"], _collect)
+        tools = provider.call_args.args[1]
+        self.assertEqual(tools[0]["function"]["name"], "compose_public_reply")
+        self.assertIsNone(provider.call_args.kwargs["on_token"])
+        self.assertEqual(tokens, [])
 
     def test_itinerary_card_intent_none_does_not_render_candidates(self):
         slc = self._slice([{
@@ -319,6 +319,31 @@ class V3SynthesizerTests(unittest.TestCase):
             synthesize(slc)
         self.assertIn("grounded_result", call.call_args.kwargs["system_prompt"])
         self.assertNotIn("clarification_policy", call.call_args.args[0])
+
+    def test_calendar_read_cannot_be_synthesized_as_completed_write_or_reminder_offer(self):
+        slc = self._slice([{
+            "task_id": "t1", "status": "ok", "tool": "calendar.list_my_events",
+            "result": {
+                "events": [{
+                    "title": "牙醫", "date": "2026-08-26",
+                    "start_time": "15:00", "end_time": "17:00",
+                }],
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(
+                content="好，8/26 下午 3 點到 5 點牙醫，我幫你記進行事曆。要設提醒嗎？",
+            ),
+        ):
+            reply, card_decision, metrics = synthesize(slc)
+
+        self.assertIn("牙醫", reply)
+        self.assertNotIn("幫你記進行事曆", reply)
+        self.assertNotIn("提醒", reply)
+        self.assertIsNone(card_decision)
+        self.assertEqual(metrics.reply_source, "observation_fallback")
+        self.assertEqual(metrics.fallback_reason, "unsupported_claim")
 
     def test_invalid_calendar_command_cannot_supply_a_missing_field_to_synthesizer(self):
         slc = self._slice([{
@@ -505,16 +530,21 @@ class V3SynthesizerTests(unittest.TestCase):
         ]))
 
     def test_no_candidates_no_tool_exposed(self):
-        """Without candidates the tool must not be exposed; no tool call is expected."""
+        """Plain replies use no tool, and forward raw tokens to the provider."""
         slc = self._slice([])
+        tokens: list[str] = []
+        on_token = tokens.append
         with patch(
             "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
             return_value=_fc_result(content="沒有候選"),
         ) as mock_call:
-            reply, card_decision, _metrics = synthesize(slc, candidate_cards=None)
+            reply, card_decision, _metrics = synthesize(
+                slc, candidate_cards=None, on_token=on_token,
+            )
         self.assertIsNone(card_decision)
         called_tools = mock_call.call_args[0][1] if mock_call.call_args else []
         self.assertEqual(called_tools, [])
+        self.assertIs(mock_call.call_args.kwargs["on_token"], on_token)
 
     def test_provider_failure_uses_observation_fallback_not_canned_line(self):
         """When the LLM fails, the fallback must answer from observations,
@@ -582,6 +612,16 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertNotIn("###", reply)
         self.assertNotIn("目前已確認", reply)
         self.assertNotIn("尚未確認", reply)
+
+    def test_unavailable_web_fallback_does_not_repeat_the_same_limitation(self):
+        reply = _web_research_fallback(self._web_result(
+            status="insufficient_evidence",
+            execution_status="unavailable",
+            findings=[],
+            limitations=["目前沒有找到能直接支援使用者原始問題的公開證據。"],
+        ))
+        self.assertEqual(reply, "這次 Web 查證沒有完成，目前無法確認你問的資訊。")
+        self.assertNotIn("目前沒有找到能直接支援", reply)
 
     def test_answered_web_only_result_reaches_synthesizer(self):
         slc = self._slice([{

@@ -129,6 +129,67 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(metrics.retry_reason, "invalid_arguments")
         self.assertTrue(provider.call_args.kwargs["prefer_fast_model"])
 
+    def test_orphan_calendar_availability_contract_retries_as_ordinary_calendar_task(self):
+        turn = self._turn("幫我把 8/26 下午 3 點到 5 點牙醫加到行事曆")
+        orphan_availability = _fc_result(tool_calls=[{
+            "name": "decompose_tasks",
+            "arguments": {
+                "mode": "tasks",
+                "tasks": [
+                    {
+                        "id": "c1", "agent": "calendar", "depends_on": [],
+                        "task_brief": "處理使用者的行事曆要求",
+                        "outcome_contract": "calendar.availability.v1",
+                    },
+                    {
+                        "id": "s1", "agent": "synthesizer", "depends_on": ["c1"],
+                        "task_brief": "回覆使用者",
+                    },
+                ],
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=orphan_availability,
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(metrics.retry_count, 0)
+        calendar_task = next(task for task in plan.tasks if task.agent == "calendar")
+        self.assertIsNone(calendar_task.outcome_contract)
+
+    def test_orphan_calendar_availability_contract_does_not_block_calendar_read(self):
+        turn = self._turn("我行事曆有啥活動")
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "decompose_tasks",
+                "arguments": {
+                    "mode": "tasks",
+                    "tasks": [
+                        {
+                            "id": "c1", "agent": "calendar", "depends_on": [],
+                            "task_brief": "列出使用者行事曆上的活動",
+                            "outcome_contract": "calendar.availability.v1",
+                        },
+                        {
+                            "id": "s1", "agent": "synthesizer", "depends_on": ["c1"],
+                            "task_brief": "回覆行事曆查詢結果",
+                        },
+                    ],
+                },
+            }]),
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(metrics.retry_count, 0)
+        calendar_task = next(task for task in plan.tasks if task.agent == "calendar")
+        self.assertIsNone(calendar_task.outcome_contract)
+
     def test_known_contact_activity_dinner_plan_keeps_all_four_domains(self):
         turn = self._turn(
             "這週六我想約目前認識的人出去，幫我挑一個適合的，找高雄中山大學附近最近的新活動，再安排附近晚餐；只給建議，不要新增行程。"
