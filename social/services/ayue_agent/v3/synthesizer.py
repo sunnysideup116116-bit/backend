@@ -75,6 +75,17 @@ class SynthesizerMetrics:
 
 _WEB_URL_RE = re.compile(r"https?://[^\s<>\"']+")
 _WEB_SOURCE_REF_RE = re.compile(r"\bweb_source_[A-Za-z0-9_-]+\b")
+_CALENDAR_MUTATION_CLAIM_RE = re.compile(
+    r"(?:我|阿月)?(?:已經?|剛剛)?(?:替|幫|為)你.{0,6}"
+    r"(?:新增|加入|加到|記到|記進|寫入|修改|更新|取消|刪除)"
+    r"|(?:已|已經|剛剛).{0,8}"
+    r"(?:新增|加入|加到|記到|記進|寫入|修改|更新|取消|刪除)"
+    r".{0,20}(?:行事曆|日曆)"
+)
+_CALENDAR_REMINDER_OFFER_RE = re.compile(
+    r"(?:要不要|需不需要|需要|是否|要).{0,8}"
+    r"(?:幫你)?(?:設(?:定)?|加(?:上)?|新增)?(?:一個)?提醒"
+)
 
 
 class _ComposePublicReplyCoreArguments(BaseModel):
@@ -211,6 +222,7 @@ def _synthesizer_system_prompt(
 - Contact cardinality contract：`match.get_status` 與 `match.get_counterparty_summary` 是 singleton observations，只能回答單一 proposal、單一對象或單一狀態；不得從 `counterparty`、`display_name` 或 current match 推導已接受聯絡人總數或 aggregate 清單。Aggregate 清單、總數、比較與既有對象推薦必須有成功的 `relationship.list_accepted_contacts` observation；沒有時要誠實說目前無法確認，不可猜數量。
 - `relationship.list_accepted_contacts` 若 `truncated=true`，`total_count` 有值時只能用來回答精確總數；推薦只能說是返回清單中的結果，不能宣稱是全部 accepted contacts 中的最佳人選。
 - Calendar clarification 只依 clarification.missing_fields、safe candidates、query 回覆；不可固定要求開始與結束時間，也不可宣稱 mutation 已完成。若 code 是 invalid_command，missing_fields 視為空，不得點名任何特定缺漏欄位，因為 schema validation 沒有建立 authoritative missing field。
+- Calendar event 若 all_day=true，必須用「全天」呈現；date 到 end_date 是使用者涵蓋的日期範圍，不可改寫成 00:00、23:59 或自行補時段。all_day=false 的跨日事件才使用 date/start_time 到 end_date/end_time。
 - confirmed reply 或 pending confirmation preview若已由 runtime提供，直接忠實呈現，不自行改寫成另一個結果。
 - Calendar observation若有行程，要清楚告知活動與時間；Places card的完整地址、map URL、provider與每個距離不必機械重複，但可根據 verified observations 討論候選名稱、理由與取捨。
 - match_opportunity_offer只是溫和提議，不代表搜尋已開始或已有 pending confirmation。
@@ -687,6 +699,24 @@ def _web_reply_has_grounded_links(reply: str, result: dict[str, Any]) -> bool:
     return True
 
 
+def _calendar_reply_has_unsupported_action(
+    reply: str,
+    payload: dict[str, Any],
+) -> bool:
+    """Reject Calendar action claims that lack a server-owned write result."""
+    has_calendar_observation = any(
+        isinstance(item, dict)
+        and str(item.get("tool") or "").startswith("calendar.")
+        for item in payload.get("observations") or []
+    )
+    if not has_calendar_observation:
+        return False
+    return bool(
+        _CALENDAR_MUTATION_CLAIM_RE.search(reply)
+        or _CALENDAR_REMINDER_OFFER_RE.search(reply)
+    )
+
+
 def _web_research_fallback(result: dict[str, Any]) -> str:
     """Return a minimal honest Web degradation reply.
 
@@ -727,7 +757,7 @@ def _web_research_fallback(result: dict[str, Any]) -> str:
             else "目前沒有足夠的公開資訊確認你問的內容。"
         )
 
-    if limitation and limitation not in reply:
+    if execution_status != "unavailable" and limitation and limitation not in reply:
         reply += f" {limitation}。"
     if execution_status == "degraded" and "完整完成" not in reply:
         reply += "這次查證只完成一部分。"
@@ -992,6 +1022,10 @@ def synthesize(
 
     Returns (reply, card_decision, metrics). Card decisions are resolved from
     server-owned candidate refs before they leave the Synthesizer boundary.
+    ``on_token`` is forwarded to the provider for raw token streaming only when
+    no compose tool is exposed (ordinary conversation); tooled grounded
+    composition never forwards raw provider tokens, and the Scheduler replays
+    only the validated, normalized final reply across the public stream boundary.
     """
     metrics = SynthesizerMetrics()
     original_payload = context_slice.payload
@@ -1079,7 +1113,7 @@ def synthesize(
         return reply, card_decision, metrics
     tools = [
         _compose_public_reply_tool_schema(place_cards_enabled=cards_enabled)
-    ] if cards_enabled and (candidate_summaries or direct_finding_count >= 2) else []
+    ] if candidate_summaries or direct_finding_count >= 2 else []
     metrics.tools_raw = tools
     try:
         prompt_payload = payload
@@ -1144,13 +1178,18 @@ def synthesize(
             if not cards_enabled:
                 card_decision = None
                 presentation_blocks = []
-            if not web_only_mode or all(
+            composed_fragments = (
+                list(composed_messages)
+                + [str(block.get("markdown") or "") for block in presentation_blocks]
+            )
+            web_claims_grounded = not web_only_mode or all(
                 _web_reply_has_grounded_links(message, web_research)
-                for message in (
-                    list(composed_messages)
-                    + [str(block.get("markdown") or "") for block in presentation_blocks]
-                )
-            ):
+                for message in composed_fragments
+            )
+            calendar_claims_grounded = not _calendar_reply_has_unsupported_action(
+                "\n".join(composed_fragments), payload,
+            )
+            if web_claims_grounded and calendar_claims_grounded:
                 metrics.reply_source = "llm"
                 metrics.presentation_messages = composed_messages
                 metrics.presentation_blocks = presentation_blocks
@@ -1187,6 +1226,8 @@ def synthesize(
                     "internal_meta_reply": "internal_meta_reply",
                 }.get(validation.reason or "", "internal_meta_reply")
             elif web_only_mode and not _web_reply_has_grounded_links(reply, web_research):
+                metrics.fallback_reason = "unsupported_claim"
+            elif _calendar_reply_has_unsupported_action(reply, payload):
                 metrics.fallback_reason = "unsupported_claim"
             else:
                 has_opportunity = any(
