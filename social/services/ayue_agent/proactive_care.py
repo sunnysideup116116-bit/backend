@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from database import messages_coll, profiles_coll
 from services.ai_service import generate_chat_completion
 from services.chat_service import generate_room_id
+from services.ai_room_service import most_recent_ai_room
 from services.profile_projection import safe_recent_context
 from services.ayue_agent.product_identity import AYUE_MISSION_SHORT, AYUE_VOICE_SHORT
 
@@ -106,7 +107,7 @@ def record_proactive_activity(user_id: str, *, now: float | None = None) -> floa
 
 
 def build_proactive_care_context(user_id: str, user_doc: dict, *, now: datetime | None = None) -> ProactiveCareContext:
-    room_id = generate_room_id(user_id, "ai_assistant")
+    room_id = most_recent_ai_room(user_id)
     history = list(messages_coll.find(
         {"room_id": room_id}, {"_id": 0, "sender_id": 1, "content": 1},
     ).sort("timestamp", -1).limit(12))
