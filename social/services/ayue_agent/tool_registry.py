@@ -157,6 +157,8 @@ class _PlacesResolveArguments(BaseModel):
 class _CalendarEventOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     date: str
+    end_date: str = ""
+    all_day: bool = False
     start_time: str
     end_time: str
     activity: str
@@ -182,6 +184,8 @@ class _CalendarEventCandidateOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     activity: str
     date: str
+    end_date: str = ""
+    all_day: bool = False
     start_time: str
     end_time: str
     location: str = ""
@@ -197,6 +201,8 @@ class _CalendarFindOutput(BaseModel):
     ] = ""
     activity: str = ""
     date: str = ""
+    end_date: str = ""
+    all_day: bool = False
     start_time: str = ""
     end_time: str = ""
     location: str = ""

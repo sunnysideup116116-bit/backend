@@ -41,7 +41,7 @@ _OPAQUE_TARGET_REFERENCES = frozenset({
 # accepted merely because a provider nested them.
 _CALENDAR_COMMAND_FIELDS = frozenset({
     "action", "target_hint", "target_reference", "target_selector", "target_hints", "title", "date",
-    "start_time", "end_time", "duration_minutes", "time_shift_minutes", "timezone",
+    "end_date", "all_day", "start_time", "end_time", "duration_minutes", "time_shift_minutes", "timezone",
     "location", "notes", "draft_mode",
 })
 _CALENDAR_FIELD_ALIASES = {
@@ -173,6 +173,18 @@ class CalendarCommand(BaseModel):
     target_hints: list[str] = Field(default_factory=list, max_length=10, description="cancel_selected 的 2–10 個自然語言行程描述")
     title: str | None = Field(default=None, max_length=120, description="活動名稱，例如「去日本」；不要包含日期或時間")
     date: str | None = Field(default=None, max_length=32, description="優先使用 YYYY-MM-DD；今天／明天／後天也可由 server 依 authoritative clock 轉換")
+    end_date: str | None = Field(
+        default=None,
+        max_length=32,
+        description=(
+            "結束日期。timed event 表示實際結束日；all_day=true 時表示使用者涵蓋的最後一天（inclusive）。"
+            "單日全天可省略。"
+        ),
+    )
+    all_day: bool | None = Field(
+        default=None,
+        description="使用者明確說全天、整天或一整天時設 true；全天事件不要填開始／結束時間。",
+    )
     start_time: str | None = Field(default=None, max_length=16, description="開始時間，使用 HH:MM")
     end_time: str | None = Field(default=None, max_length=16, description="結束時間，使用 HH:MM；若使用 duration_minutes 可省略")
     duration_minutes: int | None = Field(
@@ -237,20 +249,26 @@ class CalendarCommand(BaseModel):
         ):
             raise ValueError("target_reference is mutually exclusive with target_hint/target_selector")
         if self.action == "cancel" and any(value is not None for value in (
-            self.title, self.date, self.start_time, self.end_time, self.duration_minutes,
+            self.title, self.date, self.end_date, self.all_day,
+            self.start_time, self.end_time, self.duration_minutes,
             self.time_shift_minutes, self.timezone, self.location, self.notes,
         )):
             raise ValueError("cancel accepts only a target selector")
+        if self.all_day is True and any(value is not None for value in (
+            self.start_time, self.end_time, self.duration_minutes, self.time_shift_minutes,
+        )):
+            raise ValueError("all_day cannot be combined with clock times, duration or time shift")
         if self.time_shift_minutes is not None:
             if self.action != "update":
                 raise ValueError("time_shift_minutes is only valid for update")
             if self.time_shift_minutes == 0:
                 raise ValueError("time_shift_minutes cannot be zero")
             if any(value is not None for value in (
-                self.date, self.start_time, self.end_time, self.duration_minutes,
+                self.date, self.end_date, self.all_day,
+                self.start_time, self.end_time, self.duration_minutes,
             )):
                 raise ValueError(
-                    "time_shift_minutes cannot be combined with date, start_time, end_time or duration_minutes"
+                    "time_shift_minutes cannot be combined with date range, all_day, clock times or duration"
                 )
         return self
 
@@ -332,7 +350,31 @@ def _event_label(event: dict[str, Any]) -> str:
     start = as_utc(value_start).astimezone(zone)
     end = as_utc(value_end).astimezone(zone)
     title = str(event.get("activity") or event.get("title") or "這筆行程").strip()
+    if event.get("all_day"):
+        inclusive_end = end.date() - timedelta(days=1)
+        if inclusive_end == start.date():
+            interval = f"{start.month}/{start.day} 全天"
+        else:
+            interval = f"{start.month}/{start.day}–{inclusive_end.month}/{inclusive_end.day} 全天"
+        return f"{interval} {title}"
+    if end.date() != start.date():
+        return f"{start.month}/{start.day} {start:%H:%M}–{end.month}/{end.day} {end:%H:%M} {title}"
     return f"{start.month}/{start.day} {start:%H:%M}–{end:%H:%M} {title}"
+
+
+def _form_interval_label(form: dict[str, Any]) -> str:
+    """Render one canonical form without changing its interval semantics."""
+    start_date = str(form.get("date") or "")
+    end_date = str(form.get("end_date") or start_date)
+    start_label = start_date[5:].replace("-", "/")
+    end_label = end_date[5:].replace("-", "/")
+    if form.get("all_day"):
+        return f"{start_label} 全天" if end_date == start_date else f"{start_label}–{end_label} 全天"
+    start_time = str(form.get("start_time") or "")
+    end_time = str(form.get("end_time") or "")
+    if end_date != start_date:
+        return f"{start_label} {start_time}–{end_label} {end_time}"
+    return f"{start_label} {start_time}–{end_time}"
 
 
 def _resolved_target(event: dict[str, Any], user_id: str = "") -> CalendarResolvedTarget:
@@ -394,25 +436,32 @@ def _required_create_fields(command: CalendarCommand) -> list[str]:
     }
     generic_titles = {"行事曆", "日曆", "行程", "這筆行程", "一筆行程"}
     missing: list[str] = []
-    for key in ("title", "date", "start_time"):
+    required = ("title", "date") if command.all_day is True else ("title", "date", "start_time")
+    for key in required:
         value = str(getattr(command, key) or "").strip()
         if not value or (key == "title" and value in generic_titles):
             missing.append(key)
-    if not str(command.end_time or "").strip() and command.duration_minutes is None:
+    if command.all_day is not True and not str(command.end_time or "").strip() and command.duration_minutes is None:
         missing.append("end_time")
     return missing
 
 
-def _base_current_form(event: dict[str, Any]) -> dict[str, str]:
+def _base_current_form(event: dict[str, Any]) -> dict[str, Any]:
     zone = get_timezone(event.get("timezone") or "Asia/Taipei")
     start = as_utc(event["start_at"]).astimezone(zone)
     end = as_utc(event["end_at"]).astimezone(zone)
+    all_day = bool(event.get("all_day", False))
     return {
         "title": str(event.get("activity") if event.get("source_type") == "date" else event.get("title") or event.get("activity") or "行程"),
         "activity": str(event.get("activity") or event.get("title") or "共同約會"),
         "date": start.date().isoformat(),
-        "start_time": start.strftime("%H:%M"),
-        "end_time": end.strftime("%H:%M"),
+        "end_date": (
+            (end.date() - timedelta(days=1)).isoformat()
+            if all_day else end.date().isoformat()
+        ),
+        "all_day": all_day,
+        "start_time": "" if all_day else start.strftime("%H:%M"),
+        "end_time": "" if all_day else end.strftime("%H:%M"),
         "timezone": event.get("timezone") or "Asia/Taipei",
         "location": str(event.get("location") or ""),
         "notes": str(event.get("notes") or ""),
@@ -425,6 +474,8 @@ def _command_changes(command: CalendarCommand) -> dict[str, Any]:
         key: value for key, value in {
             "title": command.title,
             "date": command.date,
+            "end_date": command.end_date,
+            "all_day": command.all_day,
             "start_time": command.start_time,
             "end_time": command.end_time,
             "timezone": command.timezone,
@@ -455,17 +506,20 @@ def _apply_duration_to_form(command: CalendarCommand, form: dict[str, Any]) -> t
         derived_end = start + timedelta(minutes=int(duration))
     except (TypeError, ValueError, HTTPException):
         return form, "日期、開始時間或持續時間格式不正確。"
-    if derived_end.date() != start.date():
-        return form, "行程持續時間不能跨日，請補上明確的結束時間。"
     derived_end_text = derived_end.strftime("%H:%M")
+    derived_end_date = derived_end.date().isoformat()
     # For an update, ``form`` contains the event's current end_time even when
     # the user supplied only a duration.  Only the command's own end_time is
     # an explicit competing value; an inherited value must be replaced.
     explicit_end = str(form.get("end_time") or "").strip() if command.end_time is not None else ""
     if explicit_end and explicit_end != derived_end_text:
         return form, "結束時間與持續時間不一致，請確認其中一個即可。"
+    explicit_end_date = str(form.get("end_date") or "").strip() if command.end_date is not None else ""
+    if explicit_end_date and explicit_end_date != derived_end_date:
+        return form, "結束日期與持續時間不一致，請確認其中一個即可。"
     updated = dict(form)
     updated["end_time"] = derived_end_text
+    updated["end_date"] = derived_end_date
     return updated, None
 
 
@@ -478,6 +532,7 @@ def _apply_time_shift_to_form(
     if shift is None:
         return form, None
     date_text = str(form.get("date") or "").strip()
+    end_date_text = str(form.get("end_date") or date_text).strip()
     start_text = str(form.get("start_time") or "").strip()
     end_text = str(form.get("end_time") or "").strip()
     if not date_text or not start_text or not end_text:
@@ -485,14 +540,14 @@ def _apply_time_shift_to_form(
     try:
         zone = get_timezone(str(form.get("timezone") or "Asia/Taipei"))
         start = datetime.fromisoformat(f"{date_text}T{start_text}").replace(tzinfo=zone)
-        end = datetime.fromisoformat(f"{date_text}T{end_text}").replace(tzinfo=zone)
+        end = datetime.fromisoformat(f"{end_date_text}T{end_text}").replace(tzinfo=zone)
         shifted_start = start + timedelta(minutes=int(shift))
         shifted_end = end + timedelta(minutes=int(shift))
     except (TypeError, ValueError, HTTPException):
         return form, "原行程的日期或時間格式不正確，暫時無法平移。"
-    if shifted_start.date() != start.date() or shifted_end.date() != start.date():
-        return form, "平移後會跨日，請直接提供新的日期與完整時間。"
     updated = dict(form)
+    updated["date"] = shifted_start.date().isoformat()
+    updated["end_date"] = shifted_end.date().isoformat()
     updated["start_time"] = shifted_start.strftime("%H:%M")
     updated["end_time"] = shifted_end.strftime("%H:%M")
     return updated, None
@@ -661,12 +716,15 @@ def canonicalize_calendar_command(
     resolvable date never remains as authority-free natural language state.
     """
     updates: dict[str, Any] = {}
-    if command.date:
-        canonical_date, date_error = _canonicalize_date(ctx, command.date)
+    for field_name in ("date", "end_date"):
+        raw_date = getattr(command, field_name)
+        if not raw_date:
+            continue
+        canonical_date, date_error = _canonicalize_date(ctx, raw_date)
         if date_error:
             return command, date_error
-        if canonical_date != command.date:
-            updates["date"] = canonical_date
+        if canonical_date != raw_date:
+            updates[field_name] = canonical_date
     if command.target_selector is not None:
         selector, selector_error = _canonicalize_target_selector(ctx, command.target_selector)
         if selector_error:
@@ -685,6 +743,14 @@ def _plan_for_event(
     user_id = ctx.user_id
     action = "cancel" if command.action == "cancel" else "update"
     source_type = str(event.get("source_type") or "personal")
+    if action == "update" and source_type == "date" and (
+        command.all_day is True or command.end_date is not None
+    ):
+        return None, _with_resolved_target(_clarification(
+            "invalid_interval",
+            "共同約會目前只支援單日且有明確開始、結束時間的改期。",
+            index,
+        ), event, user_id)
     if action == "update" and source_type == "date" and event.get("status") != "confirmed":
         return None, _with_resolved_target(_clarification(
             "invalid_interval",
@@ -702,6 +768,18 @@ def _plan_for_event(
     proposed_form: dict[str, Any] = {}
     if action == "update":
         current = _base_current_form(event)
+        if "date" in changes and "end_date" not in changes:
+            try:
+                current_start_date = date_value.fromisoformat(str(current["date"]))
+                current_end_date = date_value.fromisoformat(str(current["end_date"]))
+                new_start_date = date_value.fromisoformat(str(changes["date"]))
+                changes["end_date"] = (
+                    new_start_date + (current_end_date - current_start_date)
+                ).isoformat()
+            except (KeyError, TypeError, ValueError):
+                # Canonical interval validation below owns the user-facing
+                # error if a legacy event contains malformed dates.
+                pass
         if source_type == "date" and "title" in changes:
             changes = {**changes, "activity": changes.pop("title")}
         proposed_form = normalize_form({**current, **changes})
@@ -714,12 +792,15 @@ def _plan_for_event(
             # The executor receives the canonical derived end_time, never a
             # free-form duration that it would have to interpret again.
             changes["end_time"] = proposed_form["end_time"]
+            changes["end_date"] = proposed_form["end_date"]
         proposed_form, shift_error = _apply_time_shift_to_form(command, proposed_form)
         if shift_error:
             return None, _with_resolved_target(
                 _clarification("invalid_interval", shift_error, index), event, user_id,
             )
         if command.time_shift_minutes is not None:
+            changes["date"] = proposed_form["date"]
+            changes["end_date"] = proposed_form["end_date"]
             changes["start_time"] = proposed_form["start_time"]
             changes["end_time"] = proposed_form["end_time"]
         try:
@@ -730,6 +811,13 @@ def _plan_for_event(
             )
         participants = list(event.get("participants") or [user_id]) if source_type == "date" else [user_id]
         conflicts = conflicts_for_viewer(user_id, participants, start_at, end_at, event.get("event_id"))
+        if source_type == "date":
+            # Shared date coordination remains on its existing timed, same-day
+            # contract.  Do not leak personal-Calendar extension fields into
+            # its stored form or App payload.
+            proposed_form.pop("all_day", None)
+            if proposed_form.get("end_date") == proposed_form.get("date"):
+                proposed_form.pop("end_date", None)
     else:
         conflicts = []
 
@@ -753,8 +841,8 @@ def _plan_for_event(
     else:
         title = proposed_form.get("activity") if plan.source_type == "date" else proposed_form.get("title")
         preview = (
-            f"要把「{plan.safe_label}」改成 {proposed_form['date'][5:].replace('-', '/')} "
-            f"{proposed_form['start_time']}–{proposed_form['end_time']}「{title or '行程'}」嗎？"
+            f"要把「{plan.safe_label}」改成 {_form_interval_label(proposed_form)}"
+            f"「{title or '行程'}」嗎？"
         )
         if plan.source_type == "date":
             preview += " 對方會收到改期通知，重新確認後才會正式變更。"
@@ -794,6 +882,8 @@ def _preflight_one(
             )
         form = normalize_form({
             "title": command.title, "date": command.date,
+            "end_date": command.end_date,
+            "all_day": command.all_day is True,
             "start_time": command.start_time, "end_time": command.end_time,
             "timezone": command.timezone or "Asia/Taipei",
             "location": command.location or "", "notes": command.notes or "",
@@ -806,10 +896,15 @@ def _preflight_one(
         except HTTPException as exc:
             return _clarification("invalid_interval", str(exc.detail), index)
         conflicts = conflicts_for_viewer(ctx.user_id, [ctx.user_id], start_at, end_at)
-        plan = CalendarMutationPlan(action="create", form=form, safe_label=(
-            f"{form['date'][5:].replace('-', '/')} {form['start_time']}–{form['end_time']} {form['title']}"
-        ))
-        preview = f"要新增 {form['date'][5:].replace('-', '/')} {form['start_time']}–{form['end_time']}「{form['title']}」嗎？"
+        if form.get("all_day") and not form.get("end_date"):
+            form["end_date"] = form["date"]
+        interval_label = _form_interval_label(form)
+        plan = CalendarMutationPlan(
+            action="create",
+            form=form,
+            safe_label=f"{interval_label} {form['title']}",
+        )
+        preview = f"要新增 {interval_label}「{form['title']}」嗎？"
         if conflicts:
             preview += f" 這會和你現有的 {len(conflicts)} 筆行程重疊；仍要這樣安排嗎？"
         return CalendarPreflightResult(status="ready", plans=[plan], preview=preview)

@@ -126,22 +126,43 @@ class CalendarEventCreateRequest(BaseModel):
     user_id: str
     title: str = Field(min_length=1, max_length=120)
     date: str
-    start_time: str
-    end_time: str
+    end_date: str | None = None
+    all_day: bool = False
+    start_time: str | None = None
+    end_time: str | None = None
     timezone: str = "Asia/Taipei"
     location: str = ""
     notes: str = ""
+
+    @model_validator(mode="after")
+    def validate_interval_shape(self):
+        if self.all_day:
+            if self.start_time is not None or self.end_time is not None:
+                raise ValueError("all-day event cannot include start_time or end_time")
+        elif not self.start_time or not self.end_time:
+            raise ValueError("timed event requires start_time and end_time")
+        return self
 
 class CalendarEventUpdateRequest(BaseModel):
     user_id: str
     title: str | None = Field(default=None, min_length=1, max_length=120)
     date: str | None = None
+    end_date: str | None = None
+    all_day: bool | None = None
     start_time: str | None = None
     end_time: str | None = None
     timezone: str | None = None
     location: str | None = None
     notes: str | None = None
     expected_revision: int | None = None
+
+    @model_validator(mode="after")
+    def validate_interval_shape(self):
+        if self.all_day is True and (
+            self.start_time is not None or self.end_time is not None
+        ):
+            raise ValueError("all-day event cannot include start_time or end_time")
+        return self
 
 class CalendarRescheduleRequest(BaseModel):
     user_id: str

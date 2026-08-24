@@ -56,23 +56,41 @@ def ensure_calendar_indexes() -> None:
 
 def _parse_local_interval(form: dict) -> tuple[datetime, datetime, str]:
     form = normalize_form(form)
-    required = ("date", "start_time", "end_time")
+    all_day = bool(form.get("all_day"))
+    required = ("date",) if all_day else ("date", "start_time", "end_time")
     missing = [key for key in required if not str(form.get(key, "")).strip()]
     if missing:
         labels = {"date": "日期", "start_time": "開始時間", "end_time": "結束時間"}
         raise HTTPException(status_code=400, detail=f"請填寫：{'、'.join(labels[key] for key in missing)}")
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", form["date"]):
         raise HTTPException(status_code=400, detail="日期格式需為 YYYY-MM-DD")
-    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", form["start_time"]):
-        raise HTTPException(status_code=400, detail="開始時間格式需為 HH:MM")
-    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", form["end_time"]):
-        raise HTTPException(status_code=400, detail="結束時間格式需為 HH:MM")
+    end_date_text = str(form.get("end_date") or form["date"]).strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_date_text):
+        raise HTTPException(status_code=400, detail="結束日期格式需為 YYYY-MM-DD")
+    if not all_day:
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", form["start_time"]):
+            raise HTTPException(status_code=400, detail="開始時間格式需為 HH:MM")
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", form["end_time"]):
+            raise HTTPException(status_code=400, detail="結束時間格式需為 HH:MM")
     zone_name = form.get("timezone") or "Asia/Taipei"
     try:
-        date_value.fromisoformat(form["date"])
+        start_date = date_value.fromisoformat(form["date"])
+        end_date = date_value.fromisoformat(end_date_text)
+        if end_date < start_date:
+            raise ValueError("end date precedes start date")
+        if (end_date - start_date).days > 366:
+            raise HTTPException(status_code=400, detail="行程日期範圍不能超過 367 天")
         zone = get_timezone(zone_name)
-        start = datetime.fromisoformat(f"{form['date']}T{form['start_time']}").replace(tzinfo=zone)
-        end = datetime.fromisoformat(f"{form['date']}T{form['end_time']}").replace(tzinfo=zone)
+        if all_day:
+            start = datetime.combine(start_date, datetime.min.time(), zone)
+            # ``end_date`` is inclusive in the natural-language/API contract;
+            # storage uses the standard exclusive boundary.
+            end = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), zone)
+        else:
+            start = datetime.fromisoformat(f"{start_date.isoformat()}T{form['start_time']}").replace(tzinfo=zone)
+            end = datetime.fromisoformat(f"{end_date.isoformat()}T{form['end_time']}").replace(tzinfo=zone)
+    except HTTPException:
+        raise
     except (ValueError, TypeError, KeyError) as exc:
         raise HTTPException(status_code=400, detail="日期或時間格式不正確") from exc
     if end <= start:
@@ -91,6 +109,16 @@ def normalize_form(form: dict) -> dict:
     date_match = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw_date)
     if date_match:
         raw_date = f"{int(date_match.group(1)):04d}-{int(date_match.group(2)):02d}-{int(date_match.group(3)):02d}"
+    raw_end_date = str(form.get("end_date") or "").strip()
+    raw_end_date = raw_end_date.split("T", 1)[0].replace("/", "-").replace(".", "-")
+    end_date_match = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw_end_date)
+    if end_date_match:
+        raw_end_date = (
+            f"{int(end_date_match.group(1)):04d}-"
+            f"{int(end_date_match.group(2)):02d}-"
+            f"{int(end_date_match.group(3)):02d}"
+        )
+    all_day = form.get("all_day") is True
 
     def normalize_time(value: object) -> str:
         raw = str(value or "").strip()
@@ -105,21 +133,26 @@ def normalize_form(form: dict) -> dict:
             return raw
         return f"{hour:02d}:{minute:02d}"
 
-    return {
+    normalized = {
         # ``title`` is the canonical label for personal events.  Retain it
         # through normalization so an agent confirmation can accurately show
         # both a new event and an edited event without falling back to an
         # unrelated activity field.
         "title": str(form.get("title") or form.get("activity") or "").strip(),
         "date": raw_date,
-        "start_time": normalize_time(form.get("start_time")),
-        "end_time": normalize_time(form.get("end_time")),
+        "start_time": "" if all_day else normalize_time(form.get("start_time")),
+        "end_time": "" if all_day else normalize_time(form.get("end_time")),
         "timezone": str(form.get("timezone") or "Asia/Taipei").strip(),
         "activity": str(form.get("activity") or "").strip(),
         "location": str(form.get("location") or "").strip(),
         "budget": str(form.get("budget") or "").strip(),
         "notes": str(form.get("notes") or "").strip(),
     }
+    if raw_end_date:
+        normalized["end_date"] = raw_end_date
+    if "all_day" in form:
+        normalized["all_day"] = all_day
+    return normalized
 
 
 def serialize_event(event: dict, viewer_id: str | None = None, include_private: bool = True) -> dict:
@@ -131,6 +164,7 @@ def serialize_event(event: dict, viewer_id: str | None = None, include_private: 
         "title": event.get("title", ""),
         "start_at": iso_utc(event.get("start_at")),
         "end_at": iso_utc(event.get("end_at")),
+        "all_day": bool(event.get("all_day", False)),
         "timezone": event.get("timezone", "Asia/Taipei"),
         "location": event.get("location", ""),
         "notes": event.get("notes", ""),
@@ -204,12 +238,13 @@ def create_personal_event(user_id: str, payload: dict, *, agent_action_key: str 
         "event_id": uuid4().hex,
         "source_type": "personal",
         "participants": [user_id],
-        "title": payload["title"].strip(),
+        "title": form["title"],
         "start_at": start_at,
         "end_at": end_at,
+        "all_day": bool(form.get("all_day")),
         "timezone": zone_name,
-        "location": payload.get("location", "").strip(),
-        "notes": payload.get("notes", "").strip(),
+        "location": form.get("location", ""),
+        "notes": form.get("notes", ""),
         "status": "confirmed",
         "revision": 1,
         "created_at": now,
@@ -240,17 +275,38 @@ def update_personal_event(
     if agent_action_key and event.get("last_agent_action_key") == agent_action_key:
         return serialize_event(event, user_id)
     zone = get_timezone(event.get("timezone", "Asia/Taipei"))
+    local_start = as_utc(event["start_at"]).astimezone(zone)
+    local_end = as_utc(event["end_at"]).astimezone(zone)
+    event_all_day = bool(event.get("all_day", False))
     merged = {
-        "date": as_utc(event["start_at"]).astimezone(zone).date().isoformat(),
-        "start_time": as_utc(event["start_at"]).astimezone(zone).strftime("%H:%M"),
-        "end_time": as_utc(event["end_at"]).astimezone(zone).strftime("%H:%M"),
+        "date": local_start.date().isoformat(),
+        "end_date": (
+            (local_end.date() - timedelta(days=1)).isoformat()
+            if event_all_day else local_end.date().isoformat()
+        ),
+        "all_day": event_all_day,
+        "start_time": "" if event_all_day else local_start.strftime("%H:%M"),
+        "end_time": "" if event_all_day else local_end.strftime("%H:%M"),
         "timezone": event.get("timezone", "Asia/Taipei"),
     }
+    if changes.get("date") is not None and changes.get("end_date") is None:
+        try:
+            normalized_new_date = normalize_form({"date": changes["date"]})["date"]
+            current_start_date = date_value.fromisoformat(merged["date"])
+            current_end_date = date_value.fromisoformat(merged["end_date"])
+            new_start_date = date_value.fromisoformat(normalized_new_date)
+            merged["end_date"] = (
+                new_start_date + (current_end_date - current_start_date)
+            ).isoformat()
+        except (KeyError, TypeError, ValueError):
+            # The canonical parser below returns the public validation error.
+            pass
     merged.update({key: value for key, value in changes.items() if value is not None})
     form = normalize_form(merged)
     start_at, end_at, zone_name = _parse_local_interval(form)
     update = {
         "start_at": start_at, "end_at": end_at, "timezone": zone_name,
+        "all_day": bool(form.get("all_day")),
         "updated_at": datetime.now(timezone.utc), "revision": int(event.get("revision", 1)) + 1,
     }
     for key in ("title", "location", "notes"):
