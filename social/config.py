@@ -20,6 +20,7 @@ OLLAMA_REQUEST_TIMEOUT_SECONDS = max(
 )
 GOOGLE_EMBEDDING_MODEL = os.getenv("GOOGLE_EMBEDDING_MODEL", "models/gemini-embedding-2")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+TAVILY_API_KEYS = os.getenv("TAVILY_API_KEYS")
 TAVILY_PROJECT = os.getenv("TAVILY_PROJECT")
 GIPHY_API_KEY = os.getenv("GIPHY_API_KEY")
 GIPHY_GIF_ENABLED = os.getenv("GIPHY_GIF_ENABLED", "on").strip().lower() == "on"
@@ -35,6 +36,8 @@ AYUE_MAPS_MONGO_CACHE = os.getenv("AYUE_MAPS_MONGO_CACHE", "off").strip().lower(
 GOOGLE_PLACES_SERVER_API_KEY = os.getenv("GOOGLE_PLACES_SERVER_API_KEY", "").strip()
 GOOGLE_MAPS_BROWSER_API_KEY = os.getenv("GOOGLE_MAPS_BROWSER_API_KEY", "").strip()
 AYUE_GOOGLE_PLACE_CARDS_ENABLED = os.getenv("AYUE_GOOGLE_PLACE_CARDS_ENABLED", "off").strip().lower() == "on"
+# Enterprise place enrichments (rating, opening hours, price level/range). Default off.
+AYUE_GOOGLE_PLACE_ENRICHMENTS_ENABLED = os.getenv("AYUE_GOOGLE_PLACE_ENRICHMENTS_ENABLED", "off").strip().lower() in {"1", "true", "on"}
 # Public place-card rendering is off for the current demo.  The server-side
 # candidate projection, refs, IDs, and map URLs remain available internally.
 AYUE_PUBLIC_PLACE_CARDS_ENABLED = os.getenv("AYUE_PUBLIC_PLACE_CARDS_ENABLED", "off").strip().lower() == "on"
