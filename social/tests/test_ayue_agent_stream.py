@@ -15,7 +15,13 @@ from models import DirectChatRequest
 if "config" in sys.modules and not hasattr(sys.modules["config"], "OLLAMA_FAST_CHAT_MODEL"):
     setattr(sys.modules["config"], "OLLAMA_FAST_CHAT_MODEL", "test")
 
-from routers.public_chat import _run_public_stream_turn, direct_chat, direct_chat_stream, queue_profile_skills
+from routers.public_chat import (
+    _run_public_stream_turn,
+    _sanitize_public_stream_event,
+    direct_chat,
+    direct_chat_stream,
+    queue_profile_skills,
+)
 from services.ayue_agent.contracts import AgentResult
 
 
@@ -23,11 +29,14 @@ async def _collect(response):
     return [chunk async for chunk in response.body_iterator]
 
 
-def _request(host: str = "testclient") -> Request:
+def _request(host: str = "testclient", *, token_stream: bool = False) -> Request:
+    headers = [(b"host", host.encode("ascii"))]
+    if token_stream:
+        headers.append((b"x-ayue-stream-tokens", b"v1"))
     return Request({
         "type": "http", "method": "POST", "scheme": "http",
         "path": "/api/direct_chat/stream", "raw_path": b"/api/direct_chat/stream",
-        "query_string": b"", "headers": [(b"host", host.encode("ascii"))],
+        "query_string": b"", "headers": headers,
         "client": (host, 12345), "server": (host, 80),
     })
 
@@ -387,6 +396,15 @@ class AyueAgentStreamTests(unittest.TestCase):
                 "plan": [{"task_brief": "private brief"}],
             })
             emit({
+                "type": "subagent_started", "agent_run_id": "run-1",
+                "agent": "calendar", "prompt_raw": "private calendar prompt",
+                "task_brief": "private calendar brief",
+            })
+            emit({
+                "type": "subagent_started", "agent_run_id": "run-1",
+                "agent": "synthesizer", "prompt_raw": "private synth prompt",
+            })
+            emit({
                 "type": "subagent_finished", "agent_run_id": "run-1",
                 "prompt_raw": "private prompt",
                 "tool_calls_raw": [{"arguments": {"event_id": "secret"}}],
@@ -405,36 +423,64 @@ class AyueAgentStreamTests(unittest.TestCase):
             response = direct_chat_stream(req, BackgroundTasks(), _request())
             chunks = asyncio.run(_collect(response))
         events = [json.loads(chunk) for chunk in chunks]
-        self.assertEqual([event["type"] for event in events], ["run_started", "tool_started", "tool_finished", "final"])
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["run_started", "stage", "stage", "tool_started", "tool_finished", "final"],
+        )
+        self.assertEqual(events[1]["stage"], "checking_calendar")
+        self.assertEqual(events[1]["text"], "阿月正在確認你的行事曆…")
+        self.assertEqual(events[2]["stage"], "composing")
+        self.assertEqual(events[2]["text"], "阿月正在整理回覆…")
         self.assertEqual(events[-1]["response"]["reply"], "今天是 2026-07-30。")
         public_text = json.dumps(events, ensure_ascii=False)
         for forbidden in (
             "arguments", "revision", "seed_user_", "prompt", "result_summary",
-            "plan_created", "subagent_finished", "step_id", "tool_name",
+            "plan_created", "subagent_started", "subagent_finished", "task_brief",
+            "step_id", "tool_name",
         ):
             self.assertNotIn(forbidden, public_text)
 
     def test_public_stream_publishes_bounded_token_fragments(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="說點什麼")
-        received: list[str] = []
+        callback_seen = threading.Event()
+        callbacks = []
 
         def fake_turn(_req, _tasks, emit, on_token=None):
-            emit({"type": "run_started", "agent_run_id": "run-tok"})
-            if on_token:
-                on_token("你")
-                on_token("好")
-                on_token("，很高興認識你。" * 300)
+            callbacks.append(on_token)
+            callback_seen.set()
             return {"reply": "你好，很高興認識你。", "agent_version": "v3", "agent_run_id": "run-tok"}
 
         with             patch("routers.public_chat._run_public_stream_turn", side_effect=fake_turn):
-            response = direct_chat_stream(req, BackgroundTasks(), _request())
-            chunks = asyncio.run(_collect(response))
-        events = [json.loads(chunk) for chunk in chunks]
-        self.assertEqual([event["type"] for event in events], ["run_started", "token", "token", "token", "final"])
-        self.assertEqual("".join(event["text"] for event in events if event["type"] == "token")[:2], "你好")
-        for event in events:
-            if event["type"] == "token":
-                self.assertLessEqual(len(event["text"]), 600)
+            direct_chat_stream(
+                req, BackgroundTasks(), _request(token_stream=True),
+            )
+            self.assertTrue(callback_seen.wait(1))
+
+        self.assertEqual(len(callbacks), 1)
+        self.assertIsNotNone(callbacks[0])
+        token = _sanitize_public_stream_event({
+            "type": "token", "agent_run_id": "run-tok", "text": "字" * 900,
+        })
+        self.assertEqual(len(token["text"]), 600)
+
+    def test_public_stream_does_not_publish_tokens_without_opt_in(self):
+        req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="說點什麼")
+        callback_seen = threading.Event()
+        callbacks = []
+
+        def fake_turn(_req, _tasks, emit, on_token=None):
+            callbacks.append(on_token)
+            callback_seen.set()
+            return {
+                "reply": "你好。", "agent_version": "v3",
+                "agent_run_id": "run-default",
+            }
+
+        with patch("routers.public_chat._run_public_stream_turn", side_effect=fake_turn):
+            direct_chat_stream(req, BackgroundTasks(), _request())
+            self.assertTrue(callback_seen.wait(1))
+
+        self.assertEqual(callbacks, [None])
 
     def test_stream_hides_raw_exception_details(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="幫我查一下")
