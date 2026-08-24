@@ -145,21 +145,30 @@ def _calendar_events(user_id: str, clock: TurnClockV1 | None = None, arguments: 
         zone = get_timezone(event.get("timezone") or "Asia/Taipei")
         start = datetime.fromisoformat(str(event["start_at"]).replace("Z", "+00:00")).astimezone(zone)
         end = datetime.fromisoformat(str(event["end_at"]).replace("Z", "+00:00")).astimezone(zone)
+        all_day = bool(event.get("all_day", False))
+        end_date = end.date() - timedelta(days=1) if all_day else end.date()
         safe_events.append({
             "date": start.date().isoformat(),
-            "start_time": start.strftime("%H:%M"),
-            "end_time": end.strftime("%H:%M"),
+            "end_date": end_date.isoformat(),
+            "all_day": all_day,
+            "start_time": "" if all_day else start.strftime("%H:%M"),
+            "end_time": "" if all_day else end.strftime("%H:%M"),
             "activity": event.get("activity") or event.get("title") or "行程",
             "status": event.get("status", "confirmed"),
         })
     private_data: dict[str, Any] = {}
     if len(safe_events) == 1 and len(active_events) == 1:
+        only_event = safe_events[0]
+        interval_label = (
+            "全天"
+            if only_event["all_day"]
+            else f"{only_event['start_time']}–{only_event['end_time']}"
+        )
         private_data["calendar_event_reference"] = {
             "event": active_events[0],
             "safe_label": (
-                f"{safe_events[0]['date'][5:].replace('-', '/')} "
-                f"{safe_events[0]['start_time']}–{safe_events[0]['end_time']} "
-                f"{safe_events[0]['activity']}"
+                f"{only_event['date'][5:].replace('-', '/')} "
+                f"{interval_label} {only_event['activity']}"
             ),
         }
     return ToolResult(ok=True, data={"events": safe_events, "range": range_label}, private_data=private_data)
@@ -181,7 +190,7 @@ def _calendar_next_event(user_id: str, clock: TurnClockV1 | None = None) -> Tool
     )
 
 
-def _calendar_event_fields(event: dict) -> dict[str, str]:
+def _calendar_event_fields(event: dict) -> dict[str, object]:
     zone = get_timezone(event.get("timezone") or "Asia/Taipei")
     start_value = event["start_at"]
     end_value = event["end_at"]
@@ -191,11 +200,15 @@ def _calendar_event_fields(event: dict) -> dict[str, str]:
         end_value = datetime.fromisoformat(end_value.replace("Z", "+00:00"))
     start = as_utc(start_value).astimezone(zone)
     end = as_utc(end_value).astimezone(zone)
+    all_day = bool(event.get("all_day", False))
+    end_date = end.date() - timedelta(days=1) if all_day else end.date()
     return {
         "activity": str(event.get("activity") or event.get("title") or "行程")[:120],
         "date": start.date().isoformat(),
-        "start_time": start.strftime("%H:%M"),
-        "end_time": end.strftime("%H:%M"),
+        "end_date": end_date.isoformat(),
+        "all_day": all_day,
+        "start_time": "" if all_day else start.strftime("%H:%M"),
+        "end_time": "" if all_day else end.strftime("%H:%M"),
         "location": str(event.get("location") or "")[:160],
         "notes": str(event.get("notes") or "")[:200],
         "event_kind": "shared_date" if event.get("source_type") == "date" else "personal",
@@ -853,4 +866,3 @@ def execute_tool(
                 return ToolResult(ok=False, error_code="invalid_tool_output", user_message="我現在無法安全地整理這項資訊。")
         return result
     return ToolResult(ok=False, error_code="tool_not_allowed", user_message="這個請求目前不能由阿月直接執行。")
-

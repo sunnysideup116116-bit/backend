@@ -271,7 +271,7 @@ def _start_date_coordination(
 
 
 def _calendar_event_label(event: dict) -> str:
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from services.calendar_service import as_utc, get_timezone
     zone = get_timezone(event.get("timezone") or "Asia/Taipei")
     start_value = event["start_at"]
@@ -286,6 +286,13 @@ def _calendar_event_label(event: dict) -> str:
         title = str(event.get("activity") or event.get("title") or "共同約會").strip()
     else:
         title = str(event.get("title") or event.get("activity") or "這筆行程").strip()
+    if event.get("all_day"):
+        inclusive_end = end.date() - timedelta(days=1)
+        if inclusive_end == start.date():
+            return f"{start.month}/{start.day} 全天 {title}"
+        return f"{start.month}/{start.day}–{inclusive_end.month}/{inclusive_end.day} 全天 {title}"
+    if end.date() != start.date():
+        return f"{start.month}/{start.day} {start:%H:%M}–{end.month}/{end.day} {end:%H:%M} {title}"
     return f"{start.month}/{start.day} {start:%H:%M}–{end:%H:%M} {title}"
 
 

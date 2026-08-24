@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from services.calendar_service import as_utc, get_timezone
@@ -63,6 +63,13 @@ def _event_label(event: dict[str, Any]) -> str:
     start = as_utc(start_value).astimezone(zone)
     end = as_utc(end_value).astimezone(zone)
     title = str(event.get("activity") or event.get("title") or "這筆行程").strip()
+    if event.get("all_day"):
+        inclusive_end = end.date() - timedelta(days=1)
+        if inclusive_end == start.date():
+            return f"{start.month}/{start.day} 全天 {title}"
+        return f"{start.month}/{start.day}–{inclusive_end.month}/{inclusive_end.day} 全天 {title}"
+    if end.date() != start.date():
+        return f"{start.month}/{start.day} {start:%H:%M}–{end.month}/{end.day} {end:%H:%M} {title}"
     return f"{start.month}/{start.day} {start:%H:%M}–{end:%H:%M} {title}"
 
 

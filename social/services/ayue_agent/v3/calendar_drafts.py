@@ -160,7 +160,10 @@ def public_projection(record: dict[str, Any] | None) -> dict[str, Any] | None:
         "action": command.get("action"),
         "fields": {
             key: value for key, value in command.items()
-            if key in {"title", "date", "start_time", "end_time", "duration_minutes", "timezone", "location", "notes"}
+            if key in {
+                "title", "date", "end_date", "all_day", "start_time", "end_time",
+                "duration_minutes", "timezone", "location", "notes",
+            }
         },
         "missing_fields": list(record.get("missing_fields") or [])[:8],
         "storage_backend": str(record.get("storage_backend") or "unknown"),
@@ -209,7 +212,7 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
             # ones to identify as copied; a genuinely different new value is
             # retained for the new request.
             for key in (
-                "start_time", "end_time", "duration_minutes", "timezone",
+                "end_date", "all_day", "start_time", "end_time", "duration_minutes", "timezone",
                 "location", "notes",
             ):
                 if key in values and key in prior and values[key] == prior[key]:
@@ -252,6 +255,8 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
     effective_provided_fields = set(provided_fields)
     if "duration_minutes" in effective_provided_fields and "end_time" not in effective_provided_fields:
         effective_provided_fields.add("end_time")
+    if values.get("all_day") is True:
+        effective_provided_fields.update({"start_time", "end_time"})
     # draft_mode is model-produced guidance, not authority to discard a clear
     # missing-field continuation.  Preserve the draft when the new command
     # supplies only fields it previously reported missing, or those fields
@@ -260,7 +265,9 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
         effective_provided_fields <= missing_fields
         or (
             effective_provided_fields & missing_fields
-            and (effective_provided_fields - missing_fields) <= set(prior) | {"duration_minutes"}
+            and (effective_provided_fields - missing_fields) <= set(prior) | {
+                "duration_minutes", "all_day", "end_date",
+            }
         )
     )
     # Once preflight has uniquely resolved an update/cancel target, a
@@ -270,7 +277,13 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
         clear_continuation = True
     if (
         str(getattr(command, "action", "")) == "create"
-        and {"title", "date", "start_time", "end_time"} <= effective_provided_fields
+        and (
+            {"title", "date", "start_time", "end_time"} <= effective_provided_fields
+            or (
+                values.get("all_day") is True
+                and {"title", "date"} <= effective_provided_fields
+            )
+        )
     ):
         # A complete command is a genuinely actionable replacement, even if
         # its fields happen to overlap the old draft.
@@ -279,7 +292,11 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
         return command
     effective_mode = "continue" if clear_continuation else mode
     if effective_mode != "continue":
-        required = {"title", "date", "start_time", "end_time"}
+        required = (
+            {"title", "date"}
+            if values.get("all_day") is True
+            else {"title", "date", "start_time", "end_time"}
+        )
         if str(getattr(command, "action", "")) == "create" and required <= set(values):
             return command
     if clear_continuation:
@@ -290,6 +307,12 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
         if has_resolved_target and not explicit_new_target:
             values.pop("target_hint", None)
             values.pop("target_reference", None)
+    if values.get("all_day") is True:
+        # A typed all-day continuation replaces an incomplete timed interval;
+        # stale clock fields must not be inherited from the draft.
+        values.pop("start_time", None)
+        values.pop("end_time", None)
+        values.pop("duration_minutes", None)
     for key, value in prior.items():
         if key in {"action", "draft_mode"}:
             continue
@@ -302,6 +325,10 @@ def merge_command(command: Any, record: dict[str, Any] | None) -> Any:
         if key == "target_reference" and (values.get("target_hint") or values.get("target_selector")):
             continue
         if key == "target_selector" and values.get("target_reference"):
+            continue
+        if values.get("all_day") is True and key in {
+            "start_time", "end_time", "duration_minutes",
+        }:
             continue
         if key not in values or values.get(key) in (None, "", []):
             values[key] = value
