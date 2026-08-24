@@ -50,6 +50,11 @@ class DirectChatRequest(BaseModel):
     # Appwrite storage file id for image messages. When present, the message
     # is treated as an image and the text risk gate is skipped.
     file_id: str | None = Field(default=None, min_length=1, max_length=128)
+    # Optional AI room id for the multi-room AI chat surface. When provided
+    # with contact_id == "ai_assistant", the message is routed to that room
+    # (which must be owned by user_id) instead of the legacy single AI room.
+    # Omit it to preserve the original single-room behavior.
+    ai_room_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def _validate_assessment_action_scope(self):
