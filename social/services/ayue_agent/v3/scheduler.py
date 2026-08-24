@@ -1057,10 +1057,13 @@ def run_public_agent_turn_v3(
         if on_token is None or token_state["emitted"] or not reply_text:
             return
         token_state["emitted"] = True
-        chunk_size = 6
+        # The reply is already validated and normalized at this boundary. Keep
+        # fragments comfortably below the HTTP sanitizer's 600-char cap without
+        # adding seconds of artificial latency to long grounded answers.
+        chunk_size = 120
         for start in range(0, len(reply_text), chunk_size):
             on_token(reply_text[start:start + chunk_size])
-            time.sleep(0.035)
+            time.sleep(0.01)
 
     _print_separator("V3 RUN START")
     print(f"  run_id={run_id}")
@@ -1254,6 +1257,38 @@ def run_public_agent_turn_v3(
             ))
     if choice == "none" and _assessment_start_confirmation_requested(ctx.message, pending_records):
         choice = "confirm"
+    if choice in {"confirm", "cancel"} and not pending_records:
+        calendar_draft = getattr(turn, "calendar_draft", None)
+        missing_fields = {
+            str(field)
+            for field in (
+                calendar_draft.get("missing_fields", [])
+                if isinstance(calendar_draft, dict)
+                else []
+            )
+        }
+        if choice == "confirm" and {"start_time", "end_time"} & missing_fields:
+            reply = (
+                "這筆行程還缺開始與結束時間，目前沒有可確認的新增操作，"
+                "行事曆尚未變更。請告訴我開始和結束時間，例如「上午 9 點到下午 5 點」。"
+            )
+            conversation_intent = "calendar_clarification"
+        elif choice == "confirm":
+            reply = "目前沒有待確認的操作，因此沒有執行任何變更。請重新告訴我你要處理的內容。"
+            conversation_intent = "confirmation_missing"
+        else:
+            reply = "目前沒有待取消的操作，因此沒有執行任何變更。"
+            conversation_intent = "confirmation_missing"
+        print(f"\n  [entry] confirmation={choice} → no active pending confirmation")
+        _print_separator("V3 RUN END")
+        return _finalize_debug(AgentResult(
+            handled=True,
+            reply=reply,
+            presentation_class="transaction",
+            conversation_intent=conversation_intent,
+            agent_run_id=run_id,
+            agent_mode="v3",
+        ))
     if choice == "confirm":
         print("\n  [entry] confirmation=confirm → executing preview-bound pending confirmation")
         results = mgr.execute_confirmed(
@@ -1263,6 +1298,19 @@ def run_public_agent_turn_v3(
                 confirmation_id=None, payload=payload,
             ),
         )
+        if not results:
+            _print_separator("V3 RUN END")
+            return _finalize_debug(AgentResult(
+                handled=True,
+                reply=(
+                    "這次沒有執行新的變更；待確認操作可能已被另一個請求處理或已失效。"
+                    "請先查看目前狀態，再重新提出需要的變更。"
+                ),
+                presentation_class="transaction",
+                conversation_intent="confirmation_missing",
+                agent_run_id=run_id,
+                agent_mode="v3",
+            ))
         synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{"task_id":"confirm","status":"ok","tool":None,"result":results,"error_code":None,"skip_reason":None}])
         reply, _card_decision, synth_metrics = synthesizer.synthesize(synth_slice, on_token=emit_token_fragment)
         server_reply = _server_owned_confirmed_date_reply(results)

@@ -31,7 +31,7 @@
 
 ## Public Ayue stream
 
-Allowed public event types are `run_started`, `tool_started`, `tool_finished`, `final`, and `error`. Flutter must decode arbitrary byte chunks with a stateful UTF-8 decoder, buffer partial lines, ignore blank lines, and parse every complete line independently.
+Without capability negotiation, allowed public event types are `run_started`, `tool_started`, `tool_finished`, `final`, and `error`. A client that explicitly sends `X-Ayue-Stream-Tokens: v1` additionally opts in to bounded `token` events before the terminal event; clients that omit the header retain the five-event contract. Flutter must decode arbitrary byte chunks with a stateful UTF-8 decoder, buffer partial lines, ignore blank lines, and parse every complete line independently.
 
 Only one progress bubble may exist. `run_started` uses the default thinking copy; `tool_started` may replace it with the bounded server text. `tool_finished` updates diagnostics only and does not create a second bubble. A terminal event, EOF, timeout, navigation, or exception always clears the bubble.
 

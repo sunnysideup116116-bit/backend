@@ -84,6 +84,8 @@ Public stream 只接受以下 event：
 run_started | tool_started | tool_finished | final | error
 ```
 
+上述為預設五事件 contract。若 App 要顯示逐字輸出，request 必須明確帶 `X-Ayue-Stream-Tokens: v1`，此時 parser 也需接受 terminal event 前的 bounded `token` events；沒有帶 header 的 client 不會收到 token。
+
 Flutter 的 parser 應以 UTF-8 + line splitter 逐行 decode JSON，不可當 SSE，也不可等整個 body 結束後才 parse。處理規則：
 
 - `run_started`：保存本次 opaque `agent_run_id`，不顯示 internal debug。

@@ -54,6 +54,17 @@ from services.risk_policy_service import pair_message_risk_gate
 router = APIRouter()
 MATCH_READINESS_THRESHOLD = 75
 
+_PUBLIC_PROGRESS_STAGE_BY_AGENT = {
+    "calendar": ("checking_calendar", "阿月正在確認你的行事曆…"),
+    "places": ("finding_places", "阿月正在整理地點資訊…"),
+    "web": ("checking_web", "阿月正在查證公開資訊…"),
+    "match": ("checking_match", "阿月正在確認配對狀態…"),
+    "relationship": ("checking_relationship", "阿月正在確認關係資訊…"),
+    "profile": ("checking_profile", "阿月正在整理你的資料…"),
+    "product_info": ("checking_product", "阿月正在確認產品資訊…"),
+    "synthesizer": ("composing", "阿月正在整理回覆…"),
+}
+
 
 def queue_profile_skills(
     background_tasks, user_id: str, message: str, message_id: str | None,
@@ -292,6 +303,17 @@ def _sanitize_public_stream_event(event: dict) -> dict | None:
     run_id = str(event.get("agent_run_id") or "")[:128]
     if event_type == "run_started" and run_id:
         return {"type": "run_started", "agent_run_id": run_id}
+    if event_type == "subagent_started" and run_id:
+        stage = _PUBLIC_PROGRESS_STAGE_BY_AGENT.get(str(event.get("agent") or ""))
+        if stage is None:
+            return None
+        stage_name, text = stage
+        return {
+            "type": "stage",
+            "agent_run_id": run_id,
+            "stage": stage_name,
+            "text": text,
+        }
     if event_type == "tool_started" and run_id:
         return {
             "type": "tool_started",
@@ -335,6 +357,10 @@ def direct_chat_stream(
     fallback_run_id = uuid.uuid4().hex
     state = {"agent_run_id": fallback_run_id}
     debug_enabled = _is_loopback_debug_request(request)
+    token_stream_enabled = bool(
+        request
+        and request.headers.get("x-ayue-stream-tokens", "").strip().lower() == "v1"
+    )
 
     def enqueue(item: dict | None, *, terminal: bool = False) -> bool:
         while True:
@@ -368,11 +394,13 @@ def direct_chat_stream(
                 if debug_enabled:
                     response = _run_public_stream_turn(
                         req, worker_background_tasks, emit,
-                        on_token=emit_token, debug_enabled=True,
+                        on_token=emit_token if token_stream_enabled else None,
+                        debug_enabled=True,
                     )
                 else:
                     response = _run_public_stream_turn(
-                        req, worker_background_tasks, emit, on_token=emit_token,
+                        req, worker_background_tasks, emit,
+                        on_token=emit_token if token_stream_enabled else None,
                     )
             else:
                 # Stream is intentionally optional for legacy/private contacts;
