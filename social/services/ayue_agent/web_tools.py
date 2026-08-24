@@ -18,20 +18,41 @@ MAX_EXTRACT_URLS = 2
 MAX_EXTRACT_CHARS_PER_PAGE = 8_000
 
 
+import threading
+
+_KEY_LOCK = threading.Lock()
+_CURRENT_KEY_INDEX = 0
+
+
+def get_tavily_api_keys() -> list[str]:
+    raw = getattr(config, "TAVILY_API_KEYS", None) or getattr(config, "TAVILY_API_KEY", None)
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(k).strip() for k in raw if str(k).strip()]
+    return [k.strip() for k in str(raw).split(",") if k.strip()]
+
+
 def web_enabled() -> bool:
-    return bool(getattr(config, "TAVILY_API_KEY", None))
+    return bool(get_tavily_api_keys())
 
 
 def _clean_text(value: Any, limit: int) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
 
 
-def _headers() -> dict[str, str]:
-    headers = {"Authorization": f"Bearer {getattr(config, 'TAVILY_API_KEY', '')}", "Content-Type": "application/json"}
+def _headers_for_key(key: str) -> dict[str, str]:
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     project = str(getattr(config, "TAVILY_PROJECT", "") or "").strip()
     if project:
         headers["X-Project-ID"] = project
     return headers
+
+
+def _headers() -> dict[str, str]:
+    keys = get_tavily_api_keys()
+    key = keys[_CURRENT_KEY_INDEX % len(keys)] if keys else ""
+    return _headers_for_key(key)
 
 
 def is_safe_public_url(value: Any) -> bool:
@@ -56,7 +77,52 @@ def _error_code(response: requests.Response) -> str:
         return "web_auth_error"
     if response.status_code == 429:
         return "web_rate_limited"
+    if 400 <= response.status_code < 500:
+        return "web_bad_request"
+    if response.status_code >= 500:
+        return "web_provider_error"
     return "web_unavailable"
+
+
+def _post_tavily_with_rotation(url: str, payload: dict[str, Any], timeout: tuple[int, int]) -> tuple[requests.Response | None, str | None]:
+    global _CURRENT_KEY_INDEX
+    keys = get_tavily_api_keys()
+    if not keys:
+        return None, "web_not_configured"
+
+    attempts = 0
+    max_attempts = len(keys)
+    last_error_code = "web_unavailable"
+
+    while attempts < max_attempts:
+        with _KEY_LOCK:
+            key_idx = _CURRENT_KEY_INDEX % len(keys)
+            key = keys[key_idx]
+
+        headers = _headers_for_key(key)
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        except requests.Timeout:
+            return None, "web_timeout"
+        except requests.RequestException:
+            return None, "web_network_error"
+
+        if response.ok:
+            return response, None
+
+        err_code = _error_code(response)
+        last_error_code = err_code
+
+        if err_code in {"web_auth_error", "web_rate_limited", "web_bad_request"} or response.status_code in {400, 401, 402, 403, 429}:
+            with _KEY_LOCK:
+                if _CURRENT_KEY_INDEX % len(keys) == key_idx:
+                    _CURRENT_KEY_INDEX = (_CURRENT_KEY_INDEX + 1) % len(keys)
+            attempts += 1
+            continue
+
+        return None, err_code
+
+    return None, last_error_code
 
 
 def search_web(query: str, *, recency: str = "none", location: str = "") -> tuple[dict[str, Any] | None, str | None]:
@@ -77,14 +143,9 @@ def search_web(query: str, *, recency: str = "none", location: str = "") -> tupl
     }
     if recency and recency != "none":
         payload["time_range"] = recency
-    try:
-        response = requests.post(TAVILY_SEARCH_URL, headers=_headers(), json=payload, timeout=(3, 15))
-    except requests.Timeout:
-        return None, "web_timeout"
-    except requests.RequestException:
-        return None, "web_unavailable"
-    if not response.ok:
-        return None, _error_code(response)
+    response, error_code = _post_tavily_with_rotation(TAVILY_SEARCH_URL, payload, (3, 15))
+    if error_code or response is None:
+        return None, error_code
     try:
         raw_results = response.json().get("results") or []
     except ValueError:
@@ -116,14 +177,9 @@ def extract_web(urls: list[str], *, query: str = "") -> tuple[dict[str, Any] | N
     if query:
         payload["query"] = _clean_text(query, 300)
         payload["chunks_per_source"] = 3
-    try:
-        response = requests.post(TAVILY_EXTRACT_URL, headers=_headers(), json=payload, timeout=(3, 20))
-    except requests.Timeout:
-        return None, "web_timeout"
-    except requests.RequestException:
-        return None, "web_unavailable"
-    if not response.ok:
-        return None, _error_code(response)
+    response, error_code = _post_tavily_with_rotation(TAVILY_EXTRACT_URL, payload, (3, 20))
+    if error_code or response is None:
+        return None, error_code
     try:
         raw_results = response.json().get("results") or []
     except ValueError:

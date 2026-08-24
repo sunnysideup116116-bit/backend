@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext, ToolCall
 from services.ayue_agent.v3.scheduler import _public_sources, _web_extract_urls_allowed
 from services.ayue_agent.tools import execute_tool
@@ -40,6 +42,42 @@ class AyueWebToolsTests(unittest.TestCase):
         self.assertEqual(payload["search_depth"], "advanced")
         self.assertFalse(payload["include_answer"])
         self.assertFalse(payload["include_raw_content"])
+
+    def test_search_preserves_http_failure_classification(self):
+        cases = [
+            (400, "web_bad_request"),
+            (401, "web_auth_error"),
+            (429, "web_rate_limited"),
+            (503, "web_provider_error"),
+        ]
+        for status_code, expected_error in cases:
+            with self.subTest(status_code=status_code):
+                response = Mock(ok=False, status_code=status_code)
+                with patch(
+                    "services.ayue_agent.web_tools.config.TAVILY_API_KEY",
+                    "test-key", create=True,
+                ), patch(
+                    "services.ayue_agent.web_tools.requests.post",
+                    return_value=response,
+                ):
+                    data, error = search_web("explicit lookup")
+                self.assertIsNone(data)
+                self.assertEqual(error, expected_error)
+
+    def test_search_and_extract_preserve_network_failure(self):
+        with patch(
+            "services.ayue_agent.web_tools.config.TAVILY_API_KEY",
+            "test-key", create=True,
+        ), patch(
+            "services.ayue_agent.web_tools.requests.post",
+            side_effect=requests.ConnectionError("offline"),
+        ):
+            search_data, search_error = search_web("explicit lookup")
+            extract_data, extract_error = extract_web(["https://example.com/article"])
+        self.assertIsNone(search_data)
+        self.assertEqual(search_error, "web_network_error")
+        self.assertIsNone(extract_data)
+        self.assertEqual(extract_error, "web_network_error")
 
     def test_extract_projects_up_to_8000_chars_per_page(self):
         response = Mock(ok=True, status_code=200)
@@ -93,6 +131,25 @@ class AyueWebToolsTests(unittest.TestCase):
         self.assertEqual(location["display_name"], "高雄市鹽埕區")
         self.assertEqual(safe_profile_location({"profile_location": location}), location)
         self.assertEqual(normalize_profile_location("https://bad", ""), {})
+
+
+    def test_search_rotates_tavily_key_on_429_or_401(self):
+        resp_429 = Mock(ok=False, status_code=429)
+        resp_200 = Mock(ok=True, status_code=200)
+        resp_200.json.return_value = {"results": [{"title": "Success", "url": "https://example.com/ok", "content": "data"}]}
+
+        with patch("services.ayue_agent.web_tools.config.TAVILY_API_KEYS", "key1,key2", create=True), \
+             patch("services.ayue_agent.web_tools.config.TAVILY_API_KEY", "", create=True), \
+             patch("services.ayue_agent.web_tools.requests.post", side_effect=[resp_429, resp_200]) as post:
+            data, error = search_web("key rotation test")
+
+        self.assertIsNone(error)
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(post.call_count, 2)
+        headers1 = post.call_args_list[0].kwargs["headers"]
+        headers2 = post.call_args_list[1].kwargs["headers"]
+        self.assertEqual(headers1["Authorization"], "Bearer key1")
+        self.assertEqual(headers2["Authorization"], "Bearer key2")
 
 
 if __name__ == "__main__":

@@ -25,11 +25,24 @@ class GooglePlacesCuisineTests(unittest.TestCase):
         from services.ayue_agent.google_places_client import _MEMORY_CACHE
         _MEMORY_CACHE.clear()
 
-    def _enabled(self):
-        return patch(
+    def _enabled(self, enrichments: bool = True):
+        p1 = patch(
             "services.ayue_agent.google_places_client.google_place_cards_enabled",
             return_value=True,
         )
+        p2 = patch(
+            "services.ayue_agent.google_places_client.google_place_enrichments_enabled",
+            return_value=enrichments,
+        )
+        class _CombinedCtx:
+            def __enter__(self):
+                p1.__enter__()
+                p2.__enter__()
+                return self
+            def __exit__(self, *args):
+                p2.__exit__(*args)
+                p1.__exit__(*args)
+        return _CombinedCtx()
 
     def test_routes_capability_does_not_require_browser_card_configuration(self):
         import config
@@ -405,6 +418,21 @@ class GooglePlacesCuisineTests(unittest.TestCase):
         self.assertIn("places/ChIJabc/photos/ref1/media", places[0]["photo_url"])
         self.assertIn("browser-test-key", places[0]["photo_url"])
         self.assertNotIn("server-secret-key", places[0]["photo_url"])
+
+    def test_enrichments_disabled_by_default_strips_enterprise_fields(self):
+        payload = {"places": [{
+            "id": "ChIJabc", "displayName": {"text": "示範餐廳"},
+            "formattedAddress": "高雄市鹽埕區", "location": {"latitude": 22.62, "longitude": 120.28},
+            "types": ["restaurant"], "googleMapsUri": "https://www.google.com/maps/place/x",
+        }]}
+        with self._enabled(enrichments=False), \
+             patch("services.ayue_agent.google_places_client.requests.post",
+                   return_value=_FakeResponse(payload)) as post:
+            search_nearby_places("Anchor", 22.62, 120.28, ["restaurant"], limit=3, enrichments=["price", "rating", "hours"])
+        mask = post.call_args.kwargs["headers"]["X-Goog-FieldMask"]
+        self.assertNotIn("places.rating", mask)
+        self.assertNotIn("places.currentOpeningHours", mask)
+        self.assertNotIn("places.priceLevel", mask)
 
 
 if __name__ == "__main__":

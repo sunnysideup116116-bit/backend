@@ -72,6 +72,10 @@ def google_routes_enabled() -> bool:
     )
 
 
+def google_place_enrichments_enabled() -> bool:
+    return bool(getattr(config, "AYUE_GOOGLE_PLACE_ENRICHMENTS_ENABLED", False))
+
+
 def _clean(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
@@ -85,7 +89,10 @@ def _normalize_enrichments(
     unsupported = {value for value in values if value not in allowed}
     if unsupported:
         raise GooglePlacesError("invalid_place_enrichment")
-    return tuple(sorted(set(values)))
+    normalized = tuple(sorted(set(values)))
+    if not google_place_enrichments_enabled():
+        return tuple(item for item in normalized if item not in _PLACE_FIELD_ENRICHMENTS)
+    return normalized
 
 
 def _places_field_mask(enrichments: tuple[str, ...]) -> str:

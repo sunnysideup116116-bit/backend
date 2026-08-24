@@ -22,6 +22,8 @@ Web task 的 `task_brief` 必須保留使用者真正要找的 proposition、地
 
 省略 policy 時 typed contract 預設為 `casual_discovery`。這是 Planner 的語意判斷，不是 keyword router。
 
+Tavily adapter 會保留可診斷的失敗類別：未設定、認證、限流、timeout、network、4xx request、5xx provider 與 invalid response 不再全部折疊成 `web_unavailable`。Public fallback 仍只顯示一段安全的 unavailable 說明，不把內部錯誤碼或重複 limitation 洩漏給使用者。
+
 ## 3. Bounded observation loop
 
 Scheduler 只 dispatch `agent="web"` 的 registered runtime，並收集一個
