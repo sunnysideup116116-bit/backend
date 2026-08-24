@@ -8,6 +8,7 @@ from typing import Any
 
 from database import profiles_coll
 from services.chat_service import generate_room_id, save_message
+from services.ai_room_service import most_recent_ai_room
 
 from .proactive_care import (
     build_proactive_care_context,
@@ -52,7 +53,7 @@ def run_due_proactive_care_once(*, now: float | None = None, limit: int = 40) ->
             decision, outcome = generate_proactive_care_outcome(build_proactive_care_context(user_id, user_doc))
             if decision and proactive_care_claim_is_current(user_id, claim_id, last_activity):
                 message = save_message(
-                    generate_room_id(user_id, "ai_assistant"), "ai_assistant", decision.message,
+                    most_recent_ai_room(user_id), "ai_assistant", decision.message,
                     metadata={
                         "event_type": "proactive_care", "agent_run_id": claim_id,
                         "grounding_source": decision.focus,

@@ -10,6 +10,7 @@ from pymongo import ReturnDocument
 from database import matches_coll, messages_coll, profiles_coll
 from services.ayue_agent.proactive_care import consume_proactive_delivery
 from services.chat_service import generate_room_id, save_message
+from services.ai_room_service import most_recent_ai_room
 from services.mediator_event_service import claim_next_mediator_event
 from services.match_reason_service import reason_for_viewer
 from services.relationship_engagement_service import (
@@ -171,7 +172,7 @@ def _deliver_relationship_event(
 
 def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> dict:
     event_type = event.get("type", "mediator_message")
-    room_id = generate_room_id(user_id, "ai_assistant")
+    room_id = most_recent_ai_room(user_id)
     message_type = "mediator_card" if event_type in {"match_proposal", "incoming_match_interest"} else "text"
     if event_type in PROPOSAL_EVENT_TYPES:
         live_match = None
