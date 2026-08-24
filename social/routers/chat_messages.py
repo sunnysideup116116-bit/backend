@@ -1,9 +1,18 @@
 """Message history and contact-list HTTP adapters for the chat surface."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from database import matches_coll, messages_coll, profiles_coll
 from models import ClearRequest
+from services.ai_room_service import (
+    create_room as create_ai_room,
+    delete_room as delete_ai_room,
+    get_room as get_ai_room,
+    list_rooms as list_ai_rooms,
+    maybe_backfill_title,
+    rename_room as rename_ai_room,
+)
 from services.ayue_agent.onboarding import (
     complete_public_ayue_onboarding, public_ayue_onboarding_state,
 )
@@ -21,8 +30,20 @@ def _find_accepted_match(user_id: str, other_id: str):
 
 
 @router.get("/messages/{contact_id}")
-def get_messages(contact_id: str, user_id: str):
-    room_id = generate_room_id(user_id, contact_id)
+def get_messages(contact_id: str, user_id: str, ai_room_id: str | None = None):
+    # Multi-room AI surface: an explicit AI room id overrides the derived
+    # legacy room. Ownership is enforced; only AI rooms take this path.
+    if ai_room_id:
+        room = get_ai_room(ai_room_id, user_id)
+        if not room:
+            raise HTTPException(status_code=403, detail="無權存取此聊天室")
+        room_id = ai_room_id
+        # Retry pending title generation when the user reopens the room.
+        maybe_backfill_title(room_id, user_id)
+    else:
+        room_id = generate_room_id(user_id, contact_id)
+
+    is_ai_contact = contact_id == "ai_assistant"
     messages = list(messages_coll.find(
         {"room_id": room_id, "is_blocked": {"$ne": True}}, {"_id": 0},
     ).sort("timestamp", 1))
@@ -30,7 +51,7 @@ def get_messages(contact_id: str, user_id: str):
     active_proposal_id = (user_doc or {}).get("active_match_proposal_id")
     date_coordination = None
     established_dates = []
-    if contact_id != "ai_assistant":
+    if not is_ai_contact:
         match_doc = _find_accepted_match(user_id, contact_id)
         if match_doc:
             date_coordination = match_doc.get("date_coordination")
@@ -38,14 +59,21 @@ def get_messages(contact_id: str, user_id: str):
     payload = {
         "messages": messages,
         "public_ayue_onboarding": (
-            public_ayue_onboarding_state(user_id) if contact_id == "ai_assistant" else None
+            public_ayue_onboarding_state(user_id)
+            if is_ai_contact and not ai_room_id  # onboarding only in legacy room
+            else None
         ),
         "active_match_proposal_id": active_proposal_id,
         "date_coordination": date_coordination,
         "established_dates": established_dates,
     }
-    if contact_id == "ai_assistant":
+    if is_ai_contact and not ai_room_id:
+        # Assessment state is a global user journey; only surfaced in the
+        # legacy room to avoid re-triggering flows in topic rooms.
         payload.update(assessment_public_state(user_doc or {}))
+    if ai_room_id:
+        room = get_ai_room(room_id, user_id) or {}
+        payload["ai_room"] = room
     return payload
 
 
@@ -94,3 +122,45 @@ def get_contacts(user_id: str):
             "latest_message": latest_by_room.get(generate_room_id(user_id, other_id), ""),
         })
     return {"contacts": contacts}
+
+
+# --- AI multi-room surface ---
+
+class CreateAiRoomRequest(BaseModel):
+    user_id: str
+
+
+class RenameAiRoomRequest(BaseModel):
+    user_id: str
+    title: str = Field(min_length=1, max_length=60)
+
+
+class DeleteAiRoomRequest(BaseModel):
+    user_id: str
+
+
+@router.get("/ai_rooms")
+def list_ai_rooms_route(user_id: str):
+    return {"rooms": list_ai_rooms(user_id)}
+
+
+@router.post("/ai_rooms")
+def create_ai_room_route(req: CreateAiRoomRequest):
+    room = create_ai_room(req.user_id)
+    return {"room": room}
+
+
+@router.patch("/ai_rooms/{room_id}")
+def rename_ai_room_route(room_id: str, req: RenameAiRoomRequest):
+    room = rename_ai_room(room_id, req.user_id, req.title)
+    if not room:
+        raise HTTPException(status_code=403, detail="無法重新命名此聊天室")
+    return {"room": room}
+
+
+@router.delete("/ai_rooms/{room_id}")
+def delete_ai_room_route(room_id: str, user_id: str):
+    ok = delete_ai_room(room_id, user_id)
+    if not ok:
+        raise HTTPException(status_code=403, detail="無法刪除此聊天室")
+    return {"status": "ok"}
