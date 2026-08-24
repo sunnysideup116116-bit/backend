@@ -29,12 +29,14 @@ async def _collect(response):
 
 EXPECTED_ROUTES = {
     # (method, path): (request body model, ordered query parameters)
+    ("GET", "/api/ai_rooms"): (None, ("user_id",)),
     ("GET", "/api/contacts"): (None, ("user_id",)),
     ("GET", "/api/mediator/private/{other_id}"): (None, ("user_id",)),
-    ("GET", "/api/messages/{contact_id}"): (None, ("user_id",)),
+    ("GET", "/api/messages/{contact_id}"): (None, ("user_id", "ai_room_id")),
     ("GET", "/api/proactive_check"): (None, ("user_id", "conversation_active")),
     ("GET", "/api/relationship/date/state"): (None, ("user_id", "other_id")),
     ("GET", "/api/relationship/fun/{other_id}"): (None, ("user_id",)),
+    ("POST", "/api/ai_rooms"): ("CreateAiRoomRequest", ()),
     ("POST", "/api/chat"): ("ChatRequest", ()),
     ("POST", "/api/chat/reset"): ("ResetRequest", ()),
     ("POST", "/api/demo/reset_db_state"): (None, ()),
@@ -55,6 +57,8 @@ EXPECTED_ROUTES = {
     ("POST", "/api/relationship/quiz/answer"): ("RelationshipQuizAnswerRequest", ()),
     ("POST", "/api/relationship/quiz/cancel"): ("RelationshipGameRequest", ()),
     ("POST", "/api/relationship/quiz/start"): ("RelationshipGameRequest", ()),
+    ("PATCH", "/api/ai_rooms/{room_id}"): ("RenameAiRoomRequest", ()),
+    ("DELETE", "/api/ai_rooms/{room_id}"): (None, ("user_id",)),
 }
 
 EXPECTED_EXTRACTED_ROUTE_MODULES = {
@@ -62,6 +66,10 @@ EXPECTED_EXTRACTED_ROUTE_MODULES = {
     ("POST", "/api/chat/reset"): "routers.chat_onboarding",
     ("GET", "/api/messages/{contact_id}"): "routers.chat_messages",
     ("GET", "/api/contacts"): "routers.chat_messages",
+    ("GET", "/api/ai_rooms"): "routers.chat_messages",
+    ("POST", "/api/ai_rooms"): "routers.chat_messages",
+    ("PATCH", "/api/ai_rooms/{room_id}"): "routers.chat_messages",
+    ("DELETE", "/api/ai_rooms/{room_id}"): "routers.chat_messages",
     ("GET", "/api/mediator/private/{other_id}"): "routers.private_mediator",
     ("POST", "/api/mediator/private"): "routers.private_mediator",
     ("POST", "/api/mediator/private/stream"): "routers.private_mediator",
