@@ -159,7 +159,9 @@ INSERT INTO `kb_interventions` (`template_id`, `risk_level`, `primary_risk_type`
 ('warn_sender_emotional', 'warning', 'emotional_pressure', 'show_reflection_banner', '{\"body\": \"給彼此一些回覆的空間，有助於建立更好的連結\"}', '{\"cooldown\": 0, \"require_ack\": false, \"mascot\": \"warning_sign\", \"display_throttle_seconds\": 300}', '2026-03-31 13:49:35'),
 ('warn_sender_harassment', 'warning', 'harassment', 'show_reflection_banner', '{\"body\": \"頻繁的訊息有時會讓對方感到不舒服\"}', '{\"cooldown\": 0, \"require_ack\": false, \"mascot\": \"warning_sign\", \"display_throttle_seconds\": 300}', '2026-03-31 14:14:58'),
 ('warn_sender_manipulation', 'warning', 'manipulation', 'show_reflection_banner', '{\"body\": \"真誠的互動比快速建立好感更能讓關係長久\"}', '{\"cooldown\": 0, \"require_ack\": false, \"mascot\": \"warning_sign\", \"display_throttle_seconds\": 300}', '2026-03-31 13:49:35'),
-('warn_sender_sexual', 'warning', 'sexual_boundary', 'show_reflection_banner', '{\"body\": \"尊重對方的邊界是建立信任的基礎\"}', '{\"cooldown\": 0, \"require_ack\": false, \"mascot\": \"warning_sign\", \"display_throttle_seconds\": 300}', '2026-03-31 13:49:35');
+('warn_sender_sexual', 'warning', 'sexual_boundary', 'show_reflection_banner', '{\"body\": \"尊重對方的邊界是建立信任的基礎\"}', '{\"cooldown\": 0, \"require_ack\": false, \"mascot\": \"warning_sign\", \"display_throttle_seconds\": 300}', '2026-03-31 13:49:35'),
+('sender_state_notice', 'exempt', 'any', 'show_reflection_banner', '{\"body\": \"你先前的訊息已處置過，目前對話仍在觀察中，請保持尊重的互動節奏\"}', '{\"cooldown\": 0, \"require_ack\": false, \"mascot\": \"warning_sign\", \"display_throttle_seconds\": 0}', '2026-08-23 00:00:00'),
+('receiver_state_notice', 'exempt', 'any', 'show_ambient_icon', '{\"body\": \"這段對話仍在安全觀察中，你可以隨時封鎖或檢舉對方\"}', '{\"show_options\": true, \"show_feedback_buttons\": true, \"allow_report_text\": true, \"mascot\": \"heart\", \"display_throttle_seconds\": 0, \"cooldown\": 0, \"require_ack\": false}', '2026-08-23 00:00:00');
 
 -- --------------------------------------------------------
 

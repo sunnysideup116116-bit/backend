@@ -190,3 +190,47 @@ def test_transient_covers_common_sdk_exception_names():
         assert la._is_transient(_transient(name)()) is True, name
     for name in ("PermissionDenied", "InvalidArgument", "NotFound"):
         assert la._is_transient(_transient(name)()) is False, name
+
+
+# --- guardrail classifier 緊縮預算（整合進度確認 2026-08-23 第 7 項）---
+# B5 的緊縮預算（GUARDRAIL_TIMEOUT_SECONDS=3, GUARDRAIL_MAX_ATTEMPTS=1）原本只在
+# openai_compat 路徑生效；OllamaAdapter 分支沒吃 timeout/max_attempts，會退回
+# 3 次 × 30s 的寬鬆預算——8/9 事故把 /detect 拖慢的原因。
+
+def test_guardrail_classifier_uses_tight_budget_ollama(monkeypatch):
+    """GUARDRAIL_BASE_URL 指向 Ollama 時，adapter 應帶緊縮的 timeout/max_attempts。"""
+    monkeypatch.setenv("GUARDRAIL_BASE_URL", "http://localhost:11434/v1")
+    from app.core import llm_adapters as la
+
+    adapter = la.get_guardrail_classifier_adapter()
+
+    assert isinstance(adapter, la.OllamaAdapter)
+    assert adapter._timeout == la.GUARDRAIL_TIMEOUT_SECONDS
+    assert adapter._max_attempts == la.GUARDRAIL_MAX_ATTEMPTS
+
+
+def test_guardrail_classifier_uses_tight_budget_openai_compat(monkeypatch):
+    """openai_compat 路徑同樣應帶緊縮重試預算（既有行為，確保未回退）。
+
+    OpenAICompatAdapter 將 timeout 傳入 OpenAI SDK client（內部屬性），
+    故這裡只驗 _max_attempts（重試次數）——這是 8/9 事故拖慢 /detect 的
+    主因：3 次 × 30s vs 緊縮的 1 次。
+    """
+    monkeypatch.setenv("GUARDRAIL_BASE_URL", "http://test/v1")
+    monkeypatch.setenv("GUARDRAIL_API_KEY", "test-key")
+    from app.core import llm_adapters as la
+
+    adapter = la.get_guardrail_classifier_adapter()
+
+    assert isinstance(adapter, la.OpenAICompatAdapter)
+    assert adapter._max_attempts == la.GUARDRAIL_MAX_ATTEMPTS
+
+
+def test_ollama_adapter_defaults_to_global_budget(monkeypatch):
+    """未傳 timeout/max_attempts 時退回全域預設（30s / 3 次），不炸既有 5 個 import 處。"""
+    from app.core import llm_adapters as la
+
+    adapter = la.OllamaAdapter("http://localhost:11434/v1")
+
+    assert adapter._timeout == la.LLM_TIMEOUT_SECONDS
+    assert adapter._max_attempts is None  # call_with_retry 會退回 LLM_MAX_ATTEMPTS

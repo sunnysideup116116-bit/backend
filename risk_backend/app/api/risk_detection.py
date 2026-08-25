@@ -5,7 +5,7 @@
 import warnings
 import os
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from app.models.schemas import FeedbackRequest, RiskDetectionRequest, RiskDetectionResponse, RiskState, SenderAppealRequest
+from app.models.schemas import FeedbackRequest, RiskDetectionRequest, RiskDetectionResponse, RiskState, SenderAppealRequest, ReceiverReportRequest
 from app.core.rule_engine import RuleBasedEngine
 from app.core.nlp_engine import NLPEngine
 from app.core.risk_fusion import RiskFusionLayer
@@ -240,15 +240,21 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
         # ---------------------------------------------------------
         # STEP 9: 產生介入指令
         # ---------------------------------------------------------
-        is_msg_blocked = (risk_level == "blocked")
-        final_delivery_status = "blocked" if is_msg_blocked else "delivered"
-        
+        # 已處置豁免條件④需要「本則 delta 的 max」（不是累積後的 max_score）。
+        # final_delta 是本則訊息的風險增量，把它 max 後附進 diag 給 intervention_engine。
+        diag["delta_max"] = max(final_delta.model_dump().values()) if final_delta else 0.0
+
         intervention_cmd = await intervention_engine.execute(
             risk_level=risk_level, risk_state=new_state.model_dump(), diagnosis=diag,
             conv_id=req.conversation_id, sender_id=req.sender_id, receiver_id=req.receiver_id,
             msg_id=real_msg_id, decision_reason=diag.get('reason', 'normal'),
             chat_log_service=chat_log_service
         )
+
+        # 豁免時不鎖訊息：blocked 但已處置過同一件事 → 照送，累積狀態仍留著。
+        is_msg_blocked = (risk_level == "blocked"
+                          and not intervention_cmd.get("sanction_exempted", False))
+        final_delivery_status = "blocked" if is_msg_blocked else "delivered"
 
         # ---------------------------------------------------------
         # 效能優化：背景執行更新
@@ -423,6 +429,42 @@ async def submit_sender_appeal(req: SenderAppealRequest):
         raise HTTPException(status_code=500, detail="failed to save appeal")
 
     print(f"   [ Appeal ] sender={req.sender_id} 對 msg {req.triggered_by_msg_id} 提出申訴（{len(req.appeal_text)} 字）")
+    return {
+        "status": "ok",
+        "msg_id": req.triggered_by_msg_id,
+        "note": "已記錄，供人工稽核；不影響風險判斷"
+    }
+
+
+@router.post("/report")
+async def submit_receiver_report(req: ReceiverReportRequest):
+    """收件方對某次介入／該則訊息提出文字回報（供人工稽核）。
+
+    與 /appeal 角色相反、稽核意義相反：/appeal 是被警告者自辯，/report 是被保護者
+    陳述。刻意分成兩個端點兩個欄位，混用會使後台無從分辨該次介入是否恰當。
+
+    **此內容不進入任何演算法**，不影響風險分數、不影響 feedback_signal。
+    """
+    result = await chat_log_service.save_receiver_report(
+        msg_id=req.triggered_by_msg_id,
+        receiver_id=req.receiver_id,
+        report_text=req.report_text,
+    )
+
+    if not result["ok"]:
+        err = result["error"]
+        if err == "not_found":
+            raise HTTPException(status_code=404, detail="intervention log not found")
+        if err == "receiver_mismatch":
+            raise HTTPException(status_code=403, detail="only the message receiver may report")
+        if err == "attribute_missing":
+            raise HTTPException(
+                status_code=503,
+                detail="Appwrite intervention_logs 尚未建立 receiver_report_text 屬性（String, size 2000）"
+            )
+        raise HTTPException(status_code=500, detail="failed to save report")
+
+    print(f"   [ Report ] receiver={req.receiver_id} 對 msg {req.triggered_by_msg_id} 提出回報（{len(req.report_text)} 字）")
     return {
         "status": "ok",
         "msg_id": req.triggered_by_msg_id,

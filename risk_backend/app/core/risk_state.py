@@ -157,8 +157,9 @@ class RiskStateMachine:
         """
         n = len(values) or 1
         if mode == 'effdim':
-            s1 = sum(values)
-            s2 = sum(v * v for v in values)
+            active = [v for v in values if v > noise_floor]
+            s1 = sum(active)
+            s2 = sum(v * v for v in active)
             return (s1 * s1 / s2) / n if s2 > 0 else 0.0
         # 預設 count：維持原始行為，未同步設定的部署不受影響
         return sum(1 for v in values if v > noise_floor) / n

@@ -14,7 +14,7 @@ Proxy design:
 import os
 
 import requests
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 router = APIRouter()
@@ -36,6 +36,12 @@ class SenderAppealProxyRequest(BaseModel):
     triggered_by_msg_id: str = Field(min_length=1, max_length=128)
     sender_id: str = Field(min_length=1, max_length=128)
     appeal_text: str = Field(min_length=1, max_length=2000)
+
+
+class ReceiverReportProxyRequest(BaseModel):
+    triggered_by_msg_id: str = Field(min_length=1, max_length=128)
+    receiver_id: str = Field(min_length=1, max_length=128)
+    report_text: str = Field(min_length=1, max_length=2000)
 
 
 @router.post("/pair/risk_feedback")
@@ -81,7 +87,54 @@ def submit_sender_appeal(req: SenderAppealProxyRequest):
     return response.json()
 
 
-def _error_detail(response: requests.Response) -> str:
+@router.post("/pair/risk_report")
+def submit_receiver_report(req: ReceiverReportProxyRequest):
+    """Forward a receiver report to the risk backend for manual review.
+
+    Symmetric to /pair/risk_appeal but from the protected party's side:
+    one is the warned party's self-defense, the other is the protected
+    party's statement. Kept as separate endpoints/attributes so the audit
+    trail can distinguish them. The report text never enters any risk
+    algorithm on the backend side.
+    """
+    try:
+        response = requests.post(
+            f"{_RISK_SERVICE_URL}/api/v1/risk/report",
+            json=req.model_dump(),
+            timeout=_RISK_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        print(f"[risk_actions] risk backend unreachable: {type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="風險服務暫時無法連線，請稍後再試") from exc
+    if response.status_code >= 400:
+        detail = _error_detail(response)
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    return response.json()
+
+
+@router.get("/pair/risk_state")
+def get_risk_state(request: Request):
+    """Forward a risk-state query to the risk backend.
+
+    The Flutter app uses this when re-entering a chat room to restore the
+    cooldown countdown. Without it, closing and reopening the app makes the
+    cooldown appear to vanish even though the server has not lifted it.
+    The risk backend's GET /api/v1/risk/state returns remaining_cooldown;
+    this proxy is a thin transport that forwards the query string verbatim.
+    """
+    query = request.url.query
+    target = f"{_RISK_SERVICE_URL}/api/v1/risk/state"
+    if query:
+        target = f"{target}?{query}"
+    try:
+        response = requests.get(target, timeout=_RISK_TIMEOUT)
+    except requests.RequestException as exc:
+        print(f"[risk_actions] risk backend unreachable: {type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="風險服務暫時無法連線，請稍後再試") from exc
+    if response.status_code >= 400:
+        detail = _error_detail(response)
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    return response.json()
     try:
         body = response.json()
         if isinstance(body, dict) and body.get("detail"):
