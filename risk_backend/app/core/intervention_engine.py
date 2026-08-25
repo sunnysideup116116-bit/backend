@@ -79,6 +79,24 @@ class InterventionEngine:
                 "requires_review_within_hours": 24
             }
 
+        # 5. 已處置豁免判定：四條件全部成立時，標記本則不為同一件事再罰第二次。
+        #    累積狀態全程不動（風險等級、directive action 都不變），只在 directive 上
+        #    附加 sanction_exempted=True，讓 risk_detection 的攔截判定改為不鎖訊息，
+        #    並讓前端可隱藏 mascot（intervention_widgets.dart:360 已就緒）。
+        exempted = False
+        if chat_log_service is not None and risk_level in LEVEL_ORDER:
+            exempted = await self._check_sanction_exempted(
+                risk_level, diagnosis, conv_id, sender_id, chat_log_service)
+        if exempted:
+            sender_d["sanction_exempted"] = True
+            receiver_d["sanction_exempted"] = True
+            # 豁免時改用陳述目前狀態的文案（*_state_notice），而非回應「這則訊息」
+            # 的文案。原始文案如「頻繁的訊息會讓對方不舒服」在豁免時是假的——
+            # 本則沒問題，只是還在觀察期。state_notice 的 risk_level='exempt'，
+            # 不會被 get_interventions_by_level(真實等級) 誤抓。
+            sender_d = self._apply_state_notice(sender_d, "sender")
+            receiver_d = self._apply_state_notice(receiver_d, "receiver")
+
         intervention_id = f"int_{uuid.uuid4().hex[:8]}"
         command = {
             "intervention_id": intervention_id,
@@ -87,10 +105,90 @@ class InterventionEngine:
             "risk_level": risk_level,
             "sender_directive": sender_d,
             "receiver_directive": receiver_d,
-            "admin_directive": admin_d
+            "admin_directive": admin_d,
+            "sanction_exempted": exempted,
         }
 
         return command
+
+    async def _check_sanction_exempted(self, risk_level: str, diagnosis: dict,
+                                       conv_id: str, sender_id: str, chat_log_service) -> bool:
+        """已處置豁免：四條件「全部」成立才豁免，否則照罰。
+
+        設計目的：避免同一件事在冷卻期內被重複處罰。累積風險狀態與名聲留著，
+        只是「不為同一件事處罰第二次」——所以條件必須能區分「還在為同一件事」
+        與「服完刑又違規／風險升高」。
+
+        ① 上一次介入存在
+            首次累積到該等級一律照罰，累積機制不受影響。
+        ② 上次等級 ≥ 本次等級
+            風險升高即失效，不會變成保護傘。
+        ③ 剩餘冷卻 = 0
+            確認真的服完刑；冷卻中代表仍在服刑，不豁免。
+        ④ 本則 max(delta) < 0.05
+            服完又違規則照罰，且從高狀態起跳罰得更重。delta_max 由呼叫端
+            （risk_detection.py）以 diagnosis["delta_max"] 傳入；未提供時
+            視為 0（保守，不擋豁免）。
+
+        任一條件不成立即回 False。
+        """
+        try:
+            # ① 上一次介入存在
+            last = await chat_log_service.get_last_displayed_intervention(conv_id, sender_id, "sender")
+            if not last or not last.get("risk_level"):
+                return False
+
+            # ② 上次等級 ≥ 本次等級
+            last_level = LEVEL_ORDER.get(last["risk_level"], 0)
+            curr_level = LEVEL_ORDER.get(risk_level, 0)
+            if last_level < curr_level:
+                return False
+
+            # ③ 剩餘冷卻 = 0
+            remaining = await chat_log_service.get_remaining_cooldown(conv_id, sender_id)
+            if remaining > 0:
+                return False
+
+            # ④ 本則 max(delta) < 0.05
+            delta_max = float(diagnosis.get("delta_max", 0.0) or 0.0)
+            if delta_max >= 0.05:
+                return False
+
+            return True
+        except Exception as e:
+            print(f"   [ Exempt Warning ] 豁免判定失敗，保守不豁免: {e}")
+            return False
+
+    @staticmethod
+    def _apply_state_notice(directive: dict, role: str) -> dict:
+        """豁免時以陳述狀態的文案（*_state_notice）取代回應本則訊息的文案。
+
+        state_notice 模板存於 kb_interventions 的 risk_level='exempt'，以 template_id
+        結尾 '_state_notice' 區分。此處只換 content（文案），其餘 directive 旗標
+        （action / cooldown / mascot / show_options 等）維持原樣——豁免只改「說什麼」，
+        不改「做什麼」。找不到模板時保守保留原文案。
+        """
+        try:
+            templates = KBService.get_interventions_by_level("exempt")
+            target_id = f"{role}_state_notice"
+            target = next((t for t in templates if t.get("template_id") == target_id), None)
+            if not target:
+                return directive
+            msg_tpl = target.get("message_template", {})
+            if isinstance(msg_tpl, str):
+                import json as _json
+                msg_tpl = _json.loads(msg_tpl)
+            new_content = {
+                "title": msg_tpl.get("title"),
+                "body": msg_tpl.get("body"),
+                "primary_risk_type": directive.get("content", {}).get("primary_risk_type"),
+            }
+            updated = dict(directive)
+            updated["content"] = new_content
+            return updated
+        except Exception as e:
+            print(f"   [ State Notice ] 取用失敗，保留原文案: {e}")
+            return directive
 
     async def _apply_throttle(self, directive: dict, risk_level: str, conv_id: str,
                               user_id: str, role: str, chat_log_service) -> dict:

@@ -565,3 +565,46 @@ class ChatLogService:
                 return {"ok": False, "error": "attribute_missing"}
             print(f"save_sender_appeal failed: {e}")
             return {"ok": False, "error": "unknown"}
+
+    async def save_receiver_report(self, msg_id: str, receiver_id: str, report_text: str) -> dict:
+        """寫入收件方對某次介入／該則訊息的文字回報，供人工稽核。
+
+        與 save_sender_appeal 對稱但角色相反：一個是被警告者自辯、一個是被保護者
+        陳述，混用會使後台無從分辨。**此內容不進入任何演算法**。
+
+        回傳 {"ok": bool, "error": str|None}。
+        需 Appwrite 的 intervention_logs collection 具備 `receiver_report_text` 屬性
+        （String，建議 size 2000）；屬性未建立時回傳明確錯誤而非靜默失敗。
+        """
+        try:
+            response = self.db.list_documents(
+                self.db_id, "intervention_logs",
+                queries=[
+                    Query.equal("triggered_by_msg_id", msg_id),
+                    Query.order_desc("timestamp"),
+                    Query.limit(1)
+                ]
+            )
+            if not response.documents:
+                return {"ok": False, "error": "not_found"}
+
+            doc = response.documents[0]
+            data = doc.data if hasattr(doc, 'data') else doc
+            doc_id = doc.id if hasattr(doc, 'id') else doc['$id']
+
+            # 僅允許該則訊息的收件方本人提出回報
+            if data.get("receiver_id") != receiver_id:
+                return {"ok": False, "error": "receiver_mismatch"}
+
+            self.db.update_document(
+                self.db_id, "intervention_logs", doc_id,
+                {"receiver_report_text": report_text}
+            )
+            return {"ok": True, "error": None}
+        except Exception as e:
+            msg = str(e)
+            if "receiver_report_text" in msg or "Unknown attribute" in msg or "Invalid document structure" in msg:
+                print("save_receiver_report failed: Appwrite intervention_logs 尚未建立 receiver_report_text 屬性")
+                return {"ok": False, "error": "attribute_missing"}
+            print(f"save_receiver_report failed: {e}")
+            return {"ok": False, "error": "unknown"}

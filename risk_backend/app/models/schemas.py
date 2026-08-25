@@ -140,3 +140,16 @@ class SenderAppealRequest(BaseModel):
     sender_id: str
     appeal_text: str = Field(..., min_length=1, max_length=2000,
                              description="寄件方對此次介入的說明或異議")
+
+
+class ReceiverReportRequest(BaseModel):
+    """收件方對某次介入的文字回報。
+
+    與 SenderAppealRequest 角色相反、稽核意義相反：一個是被警告者自辯、
+    一個是被保護者陳述。刻意分成兩個端點兩個欄位，混用會使後台無從分辨。
+    **此內容不進入任何演算法**，僅寫入 intervention_logs 供人工稽核。
+    """
+    triggered_by_msg_id: str
+    receiver_id: str
+    report_text: str = Field(..., min_length=1, max_length=2000,
+                            description="收件方對此次介入／該則訊息的陳述")

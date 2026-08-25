@@ -186,9 +186,15 @@ class OpenAICompatAdapter:
 class OllamaAdapter:
     """直接使用 Ollama 的原生 /api/chat 端點，效能極高（解決 OpenAI 相容端點解析與推論卡頓問題）"""
 
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, timeout: Optional[float] = None, max_attempts: Optional[int] = None):
         # 將 /v1 端點轉換為原生 Ollama REST 端點
         self._url = base_url.replace("/v1", "").rstrip("/") + "/api/chat"
+        # 預設退回全域 LLM_TIMEOUT_SECONDS（30s）與 call_with_retry 的全域預設（3 次）。
+        # guardrail classifier 走此類別時，呼叫端應傳入緊縮預算
+        # （GUARDRAIL_TIMEOUT_SECONDS=3, GUARDRAIL_MAX_ATTEMPTS=1），否則會回到
+        # 3 次 × 30s 的寬鬆預算——正是 8/9 事故把 /detect 拖慢的原因。
+        self._timeout = LLM_TIMEOUT_SECONDS if timeout is None else timeout
+        self._max_attempts = max_attempts
 
     def generate(self, prompt: str, model: str) -> str:
         import requests
@@ -205,11 +211,11 @@ class OllamaAdapter:
                     "temperature": 0.0
                 }
             }
-            resp = requests.post(self._url, json=data, timeout=LLM_TIMEOUT_SECONDS)
+            resp = requests.post(self._url, json=data, timeout=self._timeout)
             resp.raise_for_status()
             return resp.json()["message"]["content"]
 
-        return call_with_retry(_once, label="Ollama")
+        return call_with_retry(_once, label="Ollama", max_attempts=self._max_attempts)
 
 
 def _make_openai_compat(
@@ -274,7 +280,11 @@ def get_guardrail_classifier_adapter() -> LLMAdapter:
     """只在 GUARDRAIL_PROVIDER=llm_classifier 時被呼叫"""
     base_url = os.getenv("GUARDRAIL_BASE_URL")
     if base_url and ("11434" in base_url or "ollama" in base_url.lower()):
-        return OllamaAdapter(base_url)
+        return OllamaAdapter(
+            base_url,
+            timeout=GUARDRAIL_TIMEOUT_SECONDS,
+            max_attempts=GUARDRAIL_MAX_ATTEMPTS,
+        )
     return _make_openai_compat(
         base_url,
         os.getenv("GUARDRAIL_API_KEY"),

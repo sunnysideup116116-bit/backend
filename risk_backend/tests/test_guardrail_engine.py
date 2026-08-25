@@ -181,3 +181,98 @@ def test_mysql_block_still_blocks_even_if_classifier_safe(guardrail):
     assert result["is_blocked"] is True
     assert "殺死你" in result["reason"]
     assert "classifier_flagged" not in result or result.get("classifier_flagged") is None
+
+
+# --- 降級標記完整覆蓋（整合進度確認 2026-08-23 第 5 項 / B4）---
+# guardrail_engine 有 5 處 degraded=True 路徑；既有測試已覆蓋 clean result
+# （無 provider）與 classifier error。以下補齊其餘降級路徑，並驗證正常路徑
+# degraded=False 不被誤標。
+
+def test_openai_moderation_no_client_marks_degraded(monkeypatch):
+    """openai_moderation provider 但無 OPENAI_API_KEY → degraded=True。"""
+    monkeypatch.delenv("GUARDRAIL_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    with patch("app.core.guardrail_engine.KBService.get_hard_block_records", return_value=[]):
+        from app.core.guardrail_engine import GuardrailEngine
+
+        g = GuardrailEngine()
+        assert g._openai_mod_client is None
+        result = asyncio.run(g.check("普通閒聊"))
+
+    assert result["is_blocked"] is False
+    assert result["degraded"] is True
+    assert "no client" in result["reason"]
+
+
+def test_openai_moderation_transient_error_marks_degraded(monkeypatch):
+    """openai_moderation 呼叫拋例外 → degraded=True，不 block。"""
+    monkeypatch.delenv("GUARDRAIL_PROVIDER", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
+
+    with patch("app.core.guardrail_engine.KBService.get_hard_block_records", return_value=[]):
+        from app.core.guardrail_engine import GuardrailEngine
+
+        g = GuardrailEngine()
+        # 用 MagicMock 替換真實 OpenAI client，讓 moderations.create 拋暫時性例外
+        g._openai_mod_client = MagicMock()
+        g._openai_mod_client.moderations.create.side_effect = ConnectionError("timeout")
+        result = asyncio.run(g.check("普通閒聊"))
+
+    assert result["is_blocked"] is False
+    assert result["degraded"] is True
+    assert "moderation error" in result["reason"]
+
+
+def test_classifier_empty_response_marks_degraded(monkeypatch):
+    """llm_classifier 回傳空字串 → degraded=True。"""
+    monkeypatch.setenv("GUARDRAIL_PROVIDER", "llm_classifier")
+    monkeypatch.setenv("GUARDRAIL_BASE_URL", "http://test/v1")
+    monkeypatch.setenv("GUARDRAIL_API_KEY", "test")
+    monkeypatch.setenv("GUARDRAIL_MODEL", "test-model")
+
+    mock_adapter = MagicMock()
+    mock_adapter.generate.return_value = ""
+
+    with patch("app.core.guardrail_engine.KBService.get_hard_block_records", return_value=[]):
+        from app.core.guardrail_engine import GuardrailEngine
+
+        g = GuardrailEngine()
+        g._classifier_adapter = mock_adapter
+        g._classifier_model = "test"
+        result = asyncio.run(g.check("普通閒聊"))
+
+    assert result["is_blocked"] is False
+    assert result["classifier_flagged"] is False
+    assert result["degraded"] is True
+    assert "empty response" in result["reason"]
+
+
+def test_block_mode_not_degraded(guardrail):
+    """命中 block 禁詞 → 攔截，但 degraded 必須是 False（這是可靠路徑）。"""
+    result = asyncio.run(guardrail.check("我要殺死你"))
+    assert result["is_blocked"] is True
+    assert result["degraded"] is False
+
+
+def test_classifier_safe_not_degraded(monkeypatch):
+    """llm_classifier 判 safe → 正常路徑，degraded=False。"""
+    monkeypatch.setenv("GUARDRAIL_PROVIDER", "llm_classifier")
+    monkeypatch.setenv("GUARDRAIL_BASE_URL", "http://test/v1")
+    monkeypatch.setenv("GUARDRAIL_API_KEY", "test")
+    monkeypatch.setenv("GUARDRAIL_MODEL", "test-model")
+
+    mock_adapter = MagicMock()
+    mock_adapter.generate.return_value = "safe"
+
+    with patch("app.core.guardrail_engine.KBService.get_hard_block_records", return_value=[]):
+        from app.core.guardrail_engine import GuardrailEngine
+
+        g = GuardrailEngine()
+        g._classifier_adapter = mock_adapter
+        g._classifier_model = "test"
+        result = asyncio.run(g.check("普通閒聊"))
+
+    assert result["is_blocked"] is False
+    assert result["classifier_flagged"] is False
+    assert result["degraded"] is False

@@ -29,7 +29,7 @@ python db_setup/setup_kb_appwrite.py
 
 # 3. 驗證
 #    透過 Appwrite Console 檢查 kb database 內各 collection 的 document 數量：
-#      kb_configs: 2, kb_features: 26, kb_hard_blocks: 11, kb_interventions: 11,
+#      kb_configs: 2, kb_features: 26, kb_hard_blocks: 11, kb_interventions: 13,
 #      kb_prompts: 2, kb_rules: 4, kb_scenario_rules: 14
 ```
 
