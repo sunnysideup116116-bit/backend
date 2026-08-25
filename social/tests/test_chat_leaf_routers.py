@@ -18,8 +18,16 @@ from routers.frontend import serve_frontend_image
 
 
 class _Cursor(list):
-    def sort(self, *_args):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sort_calls = []
+
+    def sort(self, *args):
+        self.sort_calls.append(args)
         return self
+
+    def limit(self, count):
+        return _Cursor(self[:count])
 
 
 class ChatLeafRouterTests(unittest.TestCase):
@@ -102,22 +110,47 @@ class ChatLeafRouterTests(unittest.TestCase):
         messages = _Cursor([{"sender_id": "ai_assistant", "content": "哈囉"}])
         with patch("routers.chat_messages.generate_room_id", return_value="room"), \
              patch("routers.chat_messages.messages_coll.count_documents", return_value=0), \
-             patch("routers.chat_messages.save_message") as save, \
              patch("routers.chat_messages.messages_coll.find", return_value=messages), \
              patch("routers.chat_messages.profiles_coll.find_one", return_value={
                  "active_match_proposal_id": "proposal-visible-id",
              }):
             response = get_messages("ai_assistant", "owner")
 
-        self.assertEqual(response, {
-            "messages": list(messages),
-            "active_match_proposal_id": "proposal-visible-id",
-            "date_coordination": None,
-            "established_dates": [],
-        })
-        save.assert_called_once_with(
-            "room", "ai_assistant", "嗨，我是阿月。先跟我聊聊你最近的事；需要時，我再陪你一起牽線。",
-        )
+        self.assertEqual(response["messages"], list(messages))
+        self.assertFalse(response["has_more"])
+        self.assertEqual(response["active_match_proposal_id"], "proposal-visible-id")
+        self.assertIsNone(response["date_coordination"])
+        self.assertEqual(response["established_dates"], [])
+        self.assertEqual(response["public_ayue_onboarding"]["version"], 1)
+        self.assertIn("嗨，我是阿月。", response["public_ayue_onboarding"]["messages"][0])
+
+    def test_ai_history_pagination_returns_has_more_when_older_messages_exist(self):
+        messages = _Cursor([{"sender_id": "ai_assistant", "content": f"msg-{i}"} for i in range(31)])
+        with patch("routers.chat_messages.generate_room_id", return_value="room"), \
+             patch("routers.chat_messages.messages_coll.count_documents", return_value=0), \
+             patch("routers.chat_messages.messages_coll.find", return_value=messages) as find, \
+             patch("routers.chat_messages.profiles_coll.find_one", return_value={}):
+            response = get_messages("ai_assistant", "owner", limit=30)
+
+        self.assertEqual(len(response["messages"]), 30)
+        self.assertTrue(response["has_more"])
+        query = find.call_args.args[0]
+        self.assertEqual(query["room_id"], "room")
+        self.assertNotIn("timestamp", query)
+
+    def test_ai_history_pagination_before_filters_by_timestamp(self):
+        messages = _Cursor([{"sender_id": "ai_assistant", "content": "older"}])
+        with patch("routers.chat_messages.generate_room_id", return_value="room"), \
+             patch("routers.chat_messages.messages_coll.count_documents", return_value=0), \
+             patch("routers.chat_messages.messages_coll.find", return_value=messages) as find, \
+             patch("routers.chat_messages.profiles_coll.find_one", return_value={}):
+            response = get_messages("ai_assistant", "owner", limit=30, before=1234.5)
+
+        self.assertEqual(len(response["messages"]), 1)
+        self.assertFalse(response["has_more"])
+        query = find.call_args.args[0]
+        self.assertEqual(query["timestamp"], {"$lt": 1234.5})
+        self.assertEqual(messages.sort_calls, [("timestamp", 1)])
 
     def test_date_cancel_remains_a_thin_domain_service_adapter(self):
         expected = {"status": "cancelled"}
