@@ -17,6 +17,7 @@ from services.calendar_service import (
 from services.chat_service import generate_room_id, save_message
 from services.match_state_service import verified_accepted_match_query
 from services.mediator_event_service import queue_mediator_event
+from services.ayue_agent.public_relationship_projection import display_name, other_id
 
 
 LIVE_STATUSES = {"pending_partner", "active"}
@@ -52,7 +53,49 @@ def public_coordination(coordination: dict | None) -> dict | None:
     }
 
 
-def _card_metadata(coordination: dict, event_type: str = "date_coordination_form") -> dict:
+def list_pending_for_user(user_id: str) -> list[dict]:
+    """List date coordinations across the user's accepted matches that still
+    need this user's action:
+
+    * ``pending_partner`` — the user is the invitee and has not accepted/declined.
+    * ``active`` — the shared form is being coordinated and the user has not
+      confirmed the current revision.
+
+    Terminal/cancelled/declined coordinations and chats without a live date are
+    excluded, so the result is a focused "needs your attention" feed.
+    """
+    if not user_id:
+        return []
+    items: list[dict] = []
+    for match in matches_coll.find(
+        verified_accepted_match_query(user_id),
+        {"_id": 1, "from_user": 1, "to_user": 1, "date_coordination": 1},
+    ):
+        coordination = match.get("date_coordination") or {}
+        status = coordination.get("status")
+        if status not in LIVE_STATUSES:
+            continue
+        # pending_partner: only the invitee owes a response.
+        if status == "pending_partner" and coordination.get("invitee_id") != user_id:
+            continue
+        # active: only surface when this user has not confirmed the current revision.
+        confirmations = coordination.get("confirmations", {}) or {}
+        if status == "active" and confirmations.get(user_id) is True:
+            continue
+        other = other_id(match, user_id)
+        form = normalize_form(coordination.get("form", {}))
+        items.append({
+            "coordination_id": coordination.get("coordination_id"),
+            "other_id": other,
+            "other_name": display_name(other),
+            "status": status,
+            "revision": coordination.get("revision", 1),
+            "initiator_id": coordination.get("initiator_id"),
+            "invitee_id": coordination.get("invitee_id"),
+            "form": form,
+            "confirmations": confirmations,
+        })
+    return items
     return {
         "event_type": event_type,
         "coordination_id": coordination["coordination_id"],

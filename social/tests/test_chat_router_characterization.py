@@ -75,6 +75,7 @@ EXPECTED_EXTRACTED_ROUTE_MODULES = {
     ("POST", "/api/mediator/private/stream"): "routers.private_mediator",
     ("POST", "/api/relationship/date/invite/respond"): "routers.relationship_dates",
     ("GET", "/api/relationship/date/state"): "routers.relationship_dates",
+    ("GET", "/api/relationship/date/pending"): "routers.relationship_dates",
     ("POST", "/api/relationship/date/update"): "routers.relationship_dates",
     ("POST", "/api/relationship/date/confirm"): "routers.relationship_dates",
     ("POST", "/api/relationship/date/cancel"): "routers.relationship_dates",
