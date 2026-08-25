@@ -21,12 +21,15 @@ from database import ai_rooms_coll, messages_coll
 from services.chat_service import (
     ai_room_owner,
     generate_ai_room_id,
+    generate_proposal_ai_room_id,
     generate_room_id,
     is_ai_room,
 )
+from services.chat_service import save_system_message_once
 
 
 LEGACY_AI_ROOM_TITLE = "找阿月配對"
+PROPOSAL_AI_ROOM_TITLE = "牽線提案"
 
 # Title generation budget: each LLM call may take at most TITLE_CALL_TIMEOUT
 # seconds; we retry up to TITLE_MAX_ATTEMPTS times so a transient empty reply
@@ -56,6 +59,73 @@ def create_room(user_id: str) -> dict:
     }
     ai_rooms_coll.insert_one(doc)
     return _project(doc)
+
+
+def create_proposal_room(
+    user_id: str,
+    match_id: str,
+    message: str,
+    *,
+    metadata: dict | None = None,
+    event_key: str = "",
+) -> dict:
+    """Create (or reuse) the deterministic AI room for one match proposal.
+
+    The room id is derived from ``user_id`` and ``match_id`` so follow-up
+    events for the same match land in the same room. The proposal card is
+    persisted with :func:`save_system_message_once`, so redelivering the same
+    event never duplicates the card. The room starts titled ``牽線提案`` and
+    flagged ``is_new`` until the user opens it.
+    """
+    room_id = generate_proposal_ai_room_id(user_id, match_id)
+    now = time.time()
+    ai_rooms_coll.update_one(
+        {"room_id": room_id, "user_id": user_id},
+        {
+            "$setOnInsert": {
+                "_id": room_id,
+                "room_id": room_id,
+                "user_id": user_id,
+                "title": PROPOSAL_AI_ROOM_TITLE,
+                "needs_title": False,
+                "created_at": now,
+                "is_legacy": False,
+                "is_proposal_room": True,
+                "match_id": match_id,
+            },
+            "$set": {"updated_at": now, "is_new": True},
+        },
+        upsert=True,
+    )
+    save_system_message_once(
+        room_id,
+        message,
+        message_type="mediator_card",
+        metadata=metadata or {},
+        event_key=event_key or f"proposal:{match_id}",
+    )
+    return get_room(room_id, user_id) or _project(
+        {
+            "room_id": room_id,
+            "user_id": user_id,
+            "title": PROPOSAL_AI_ROOM_TITLE,
+            "needs_title": False,
+            "is_legacy": False,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+
+
+def mark_room_read(room_id: str, user_id: str) -> bool:
+    """Clear the NEW flag on a non-legacy AI room when the user opens it."""
+    if room_id == legacy_ai_room_id(user_id) or ai_room_owner(room_id) != user_id:
+        return False
+    result = ai_rooms_coll.update_one(
+        {"room_id": room_id, "user_id": user_id},
+        {"$unset": {"is_new": 1}},
+    )
+    return bool(getattr(result, "modified_count", 0))
 
 
 def get_room(room_id: str, user_id: str) -> dict | None:
@@ -92,6 +162,7 @@ def list_rooms(user_id: str) -> list[dict]:
         "title": LEGACY_AI_ROOM_TITLE,
         "needs_title": False,
         "is_legacy": True,
+        "is_new": False,
         "created_at": 0.0,
         "updated_at": legacy_latest or now,
         "latest_message": legacy_latest,
@@ -282,6 +353,7 @@ def _project(doc: dict) -> dict:
         "title": doc.get("title"),
         "needs_title": bool(doc.get("needs_title")),
         "is_legacy": bool(doc.get("is_legacy", False)),
+        "is_new": bool(doc.get("is_new", False)),
         "created_at": float(doc.get("created_at") or 0),
         "updated_at": float(doc.get("updated_at") or 0),
         "latest_message": 0.0,

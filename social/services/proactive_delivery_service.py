@@ -9,8 +9,8 @@ from pymongo import ReturnDocument
 
 from database import matches_coll, messages_coll, profiles_coll
 from services.ayue_agent.proactive_care import consume_proactive_delivery
-from services.chat_service import generate_room_id, save_message
-from services.ai_room_service import most_recent_ai_room
+from services.chat_service import generate_proposal_ai_room_id, generate_room_id, save_message
+from services.ai_room_service import create_proposal_room, most_recent_ai_room
 from services.mediator_event_service import claim_next_mediator_event
 from services.match_reason_service import reason_for_viewer
 from services.relationship_engagement_service import (
@@ -172,8 +172,6 @@ def _deliver_relationship_event(
 
 def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> dict:
     event_type = event.get("type", "mediator_message")
-    room_id = most_recent_ai_room(user_id)
-    message_type = "mediator_card" if event_type in {"match_proposal", "incoming_match_interest"} else "text"
     if event_type in PROPOSAL_EVENT_TYPES:
         live_match = None
         if event.get("match_id"):
@@ -200,9 +198,26 @@ def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> 
         if event_type != "incoming_match_intro":
             message_metadata["other_id"] = None
             message_metadata["matches"] = [public_match]
+        match_id = str(live_match["_id"])
+        # Proposals get their own dedicated AI room so the default 找阿月配對
+        # room is never interrupted by incoming matchmaking events.
+        create_proposal_room(
+            user_id,
+            match_id,
+            event.get("message", "阿月有一則新的媒合消息。"),
+            metadata=message_metadata,
+            event_key=event.get("event_key") or f"delivery:{event.get('event_id') or event_type}:{match_id}",
+        )
+        return {
+            "has_new": True, "surface": "global_mediator", "message": event.get("message"),
+            "type": event_type, "matches": message_metadata.get("matches", []),
+            "metadata": message_metadata, "proposal_room_id": generate_proposal_ai_room_id(user_id, match_id),
+            "debug_info": event.get("debug_info", []),
+        }
+    room_id = most_recent_ai_room(user_id)
     save_message(
         room_id, "ai_assistant", event.get("message", "阿月有一則新的媒合消息。"),
-        message_type=message_type, metadata=message_metadata,
+        message_type="text", metadata=message_metadata,
     )
     return {
         "has_new": True, "surface": "global_mediator", "message": event.get("message"),

@@ -10,6 +10,7 @@ from services.ai_room_service import (
     delete_room as delete_ai_room,
     get_room as get_ai_room,
     list_rooms as list_ai_rooms,
+    mark_room_read,
     maybe_backfill_title,
     rename_room as rename_ai_room,
 )
@@ -30,7 +31,13 @@ def _find_accepted_match(user_id: str, other_id: str):
 
 
 @router.get("/messages/{contact_id}")
-def get_messages(contact_id: str, user_id: str, ai_room_id: str | None = None):
+def get_messages(
+    contact_id: str,
+    user_id: str,
+    ai_room_id: str | None = None,
+    limit: int | None = None,
+    before: float | None = None,
+):
     # Multi-room AI surface: an explicit AI room id overrides the derived
     # legacy room. Ownership is enforced; only AI rooms take this path.
     if ai_room_id:
@@ -40,13 +47,24 @@ def get_messages(contact_id: str, user_id: str, ai_room_id: str | None = None):
         room_id = ai_room_id
         # Retry pending title generation when the user reopens the room.
         maybe_backfill_title(room_id, user_id)
+        # Opening the room clears its NEW flag so the badge disappears.
+        mark_room_read(room_id, user_id)
     else:
         room_id = generate_room_id(user_id, contact_id)
 
     is_ai_contact = contact_id == "ai_assistant"
-    messages = list(messages_coll.find(
-        {"room_id": room_id, "is_blocked": {"$ne": True}}, {"_id": 0},
-    ).sort("timestamp", 1))
+    query: dict = {"room_id": room_id, "is_blocked": {"$ne": True}}
+    if before is not None:
+        query["timestamp"] = {"$lt": before}
+    cursor = messages_coll.find(query, {"_id": 0}).sort("timestamp", 1)
+    if limit is not None and limit > 0:
+        # Fetch one extra message to detect whether older history exists.
+        fetched = list(cursor.limit(limit + 1))
+        has_more = len(fetched) > limit
+        messages = fetched[:limit]
+    else:
+        messages = list(cursor)
+        has_more = False
     user_doc = profiles_coll.find_one({"user_id": user_id})
     active_proposal_id = (user_doc or {}).get("active_match_proposal_id")
     date_coordination = None
@@ -58,6 +76,7 @@ def get_messages(contact_id: str, user_id: str, ai_room_id: str | None = None):
             established_dates = match_doc.get("established_dates", [])
     payload = {
         "messages": messages,
+        "has_more": has_more,
         "public_ayue_onboarding": (
             public_ayue_onboarding_state(user_id)
             if is_ai_contact and not ai_room_id  # onboarding only in legacy room

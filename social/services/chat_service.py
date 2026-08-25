@@ -40,6 +40,15 @@ def ai_room_owner(room_id: str | None) -> str | None:
     return body.split("::", 1)[0]
 
 
+def generate_proposal_ai_room_id(user_id: str, match_id: str) -> str:
+    """Return the deterministic AI room id for one match proposal.
+
+    Proposals for the same match always land in the same room (idempotent
+    without a lookup), so follow-up events for one match share one surface.
+    """
+    return f"{_AI_ROOM_PREFIX}{user_id}::proposal::{match_id}"
+
+
 def save_message(room_id, sender_id, content, message_type="text", metadata=None):
     msg = {
         "room_id": room_id,
