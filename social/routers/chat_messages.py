@@ -17,7 +17,7 @@ from services.ai_room_service import (
 from services.ayue_agent.onboarding import (
     complete_public_ayue_onboarding, public_ayue_onboarding_state,
 )
-from services.assessment_session_service import assessment_public_state
+from services.assessment_session_service import assessment_public_state_for_room
 from services.ayue_agent.public_relationship_projection import mentioned_contact_refs
 from services.chat_service import generate_room_id
 from services.match_state_service import verified_accepted_match_query
@@ -86,10 +86,10 @@ def get_messages(
         "date_coordination": date_coordination,
         "established_dates": established_dates,
     }
-    if is_ai_contact and not ai_room_id:
-        # Assessment state is a global user journey; only surfaced in the
-        # legacy room to avoid re-triggering flows in topic rooms.
-        payload.update(assessment_public_state(user_doc or {}))
+    if is_ai_contact:
+        payload.update(assessment_public_state_for_room(
+            user_doc or {}, room_id, include_unscoped=not bool(ai_room_id),
+        ))
     if ai_room_id:
         room = get_ai_room(room_id, user_id) or {}
         payload["ai_room"] = room
@@ -160,7 +160,10 @@ class DeleteAiRoomRequest(BaseModel):
 
 @router.get("/ai_rooms")
 def list_ai_rooms_route(user_id: str):
-    return {"rooms": list_ai_rooms(user_id)}
+    profile = profiles_coll.find_one(
+        {"user_id": user_id}, {"_id": 0, "agentic_assessment_session": 1},
+    ) or {}
+    return {"rooms": list_ai_rooms(user_id, assessment_profile=profile)}
 
 
 @router.post("/ai_rooms")

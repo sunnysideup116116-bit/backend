@@ -12,7 +12,7 @@ import time
 import uuid
 from typing import Any, Literal
 
-from database import profiles_coll
+from database import db, profiles_coll
 from services.ai_service import analyze_big_five, analyze_deep_profile
 from services.language_service import normalize_zh_tw
 
@@ -24,6 +24,11 @@ ASSESSMENT_SESSION_TTL_SECONDS = 24 * 60 * 60
 
 _CANCEL_CHOICES = frozenset({"取消", "退出", "結束測驗", "先停止", "不做了"})
 _CONFIRM_CHOICES = frozenset({"好", "好的", "可以", "確認", "確定", "要", "yes", "ok"})
+_ASSESSMENT_START_KEY_RE = re.compile(
+    r"^confirmation:([^:]+):(?:big_five|deep_profile)$",
+)
+_CONFIRMATIONS_COLL = db["v3_pending_confirmations"]
+_AGENT_RUNS_COLL = db["agent_runs"]
 
 
 def _compact(message: str) -> str:
@@ -95,6 +100,114 @@ def assessment_public_state(profile: dict[str, Any] | None) -> dict[str, Any]:
         "assessment_kind": str(session.get("kind") or ""),
         "assessment_revision": _safe_revision(session.get("revision")),
     }
+
+
+def _origin_room_for_unscoped_session(session: dict[str, Any]) -> str:
+    """Recover a pre-room-scoping session's trusted origin, if still traceable."""
+    user_id = str(session.get("user_id") or "").strip()
+    key = str(session.get("start_idempotency_key") or "").strip()
+    match = _ASSESSMENT_START_KEY_RE.fullmatch(key)
+    if not user_id or match is None:
+        return ""
+    try:
+        confirmation = _CONFIRMATIONS_COLL.find_one(
+            {
+                "_id": match.group(1),
+                "user_id": user_id,
+                "tool_name": "profile.start_assessment",
+            },
+            {"_id": 0, "origin_run_id": 1},
+        ) or {}
+        origin_run_id = str(confirmation.get("origin_run_id") or "").strip()
+        if not origin_run_id:
+            return ""
+        run = _AGENT_RUNS_COLL.find_one(
+            {"run_id": origin_run_id, "user_id": user_id},
+            {"_id": 0, "room_id": 1},
+        ) or {}
+        return str(run.get("room_id") or "").strip()
+    except Exception:
+        return ""
+
+
+def _bind_unscoped_session_to_origin_room(session: dict[str, Any]) -> dict[str, Any]:
+    """Atomically backfill room ownership for a verifiable legacy session."""
+    room_id = _origin_room_for_unscoped_session(session)
+    user_id = str(session.get("user_id") or "").strip()
+    session_id = str(session.get("session_id") or "").strip()
+    if not room_id or not user_id or not session_id:
+        return session
+    try:
+        result = profiles_coll.update_one(
+            {
+                "user_id": user_id,
+                "agentic_assessment_session.session_id": session_id,
+                "$or": [
+                    {"agentic_assessment_session.room_id": {"$exists": False}},
+                    {"agentic_assessment_session.room_id": None},
+                    {"agentic_assessment_session.room_id": ""},
+                ],
+            },
+            {"$set": {"agentic_assessment_session.room_id": room_id}},
+        )
+    except Exception:
+        return session
+    if getattr(result, "modified_count", 0) == 1:
+        session["room_id"] = room_id
+        return session
+    try:
+        latest = profiles_coll.find_one(
+            {"user_id": user_id},
+            {"_id": 0, "agentic_assessment_session": 1},
+        )
+    except Exception:
+        return session
+    latest_session = _session(latest)
+    if (
+        latest_session
+        and str(latest_session.get("session_id") or "") == session_id
+        and str(latest_session.get("room_id") or "").strip()
+    ):
+        return latest_session
+    return session
+
+
+def assessment_session_for_room(
+    profile: dict[str, Any] | None,
+    room_id: str,
+    *,
+    include_unscoped: bool = False,
+) -> dict[str, Any] | None:
+    """Return the assessment owned by one AI room.
+
+    Sessions created before room scoping have no ``room_id``. Their origin is
+    recovered only from a same-user confirmation and agent-run trace. If that
+    proof is unavailable, only the legacy room opts into the unscoped record.
+    """
+    session = _session(profile)
+    if not session:
+        return None
+    session_room_id = str(session.get("room_id") or "").strip()
+    if not session_room_id:
+        session = _bind_unscoped_session_to_origin_room(session)
+        session_room_id = str(session.get("room_id") or "").strip()
+    target_room_id = str(room_id or "").strip()
+    if session_room_id:
+        return session if session_room_id == target_room_id else None
+    return session if include_unscoped else None
+
+
+def assessment_public_state_for_room(
+    profile: dict[str, Any] | None,
+    room_id: str,
+    *,
+    include_unscoped: bool = False,
+) -> dict[str, Any]:
+    """Project assessment metadata only for the room that owns the session."""
+    session = assessment_session_for_room(
+        profile, room_id, include_unscoped=include_unscoped,
+    )
+    return assessment_public_state({"agentic_assessment_session": session} if session else None)
 
 
 def assessment_ui_projection(profile: dict[str, Any] | None, kind: AssessmentKind) -> dict[str, Any]:
@@ -241,7 +354,13 @@ def _terminal_update(
     return bool(getattr(result, "modified_count", 0))
 
 
-def start_assessment_session(user_id: str, kind: AssessmentKind, *, idempotency_key: str) -> dict[str, Any]:
+def start_assessment_session(
+    user_id: str,
+    kind: AssessmentKind,
+    *,
+    idempotency_key: str,
+    room_id: str | None = None,
+) -> dict[str, Any]:
     """Create exactly one active draft session; completed profile stays untouched."""
     if kind not in ASSESSMENT_KINDS:
         return {"status": "invalid_kind", "reply": "我沒有找到這種探索方式。"}
@@ -263,6 +382,9 @@ def start_assessment_session(user_id: str, kind: AssessmentKind, *, idempotency_
         "expires_at": now + ASSESSMENT_SESSION_TTL_SECONDS,
         "start_idempotency_key": idempotency_key,
     }
+    normalized_room_id = str(room_id or "").strip()
+    if normalized_room_id:
+        session["room_id"] = normalized_room_id
     if profile is None:
         profiles_coll.update_one({"user_id": user_id}, {"$setOnInsert": {"user_id": user_id}}, upsert=True)
     result = profiles_coll.update_one(

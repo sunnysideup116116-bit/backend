@@ -22,7 +22,10 @@ from models import DirectChatRequest
 from services.ai_service import generate_chat_completion
 from services.ayue_agent import run_public_agent_turn_v3
 from services.ayue_agent.contracts import AgentTurnContext
-from services.assessment_session_service import assessment_public_state
+from services.assessment_session_service import (
+    assessment_public_state_for_room,
+    assessment_session_for_room,
+)
 from services.ayue_agent.proactive_care import record_proactive_activity
 from services.ayue_agent.onboarding import complete_public_ayue_onboarding
 from services.ayue_agent.product_identity import PUBLIC_RETRY_REPLY, PUBLIC_RUNTIME_ERROR_REPLY
@@ -172,7 +175,13 @@ def _complete_public_turn(
 ) -> dict:
     """Run and persist one V3 turn after the owner message has been saved."""
     history = list(messages_coll.find({"room_id": room_id}).sort("timestamp", -1).limit(12))[::-1]
-    user_doc = profiles_coll.find_one({"user_id": req.user_id})
+    user_doc = profiles_coll.find_one({"user_id": req.user_id}) or {}
+    room_session = assessment_session_for_room(
+        user_doc, room_id, include_unscoped=not bool(req.ai_room_id),
+    )
+    agent_profile = dict(user_doc)
+    if room_session is None:
+        agent_profile.pop("agentic_assessment_session", None)
     agent_ctx = AgentTurnContext(
         user_id=req.user_id,
         room_id=room_id,
@@ -181,7 +190,7 @@ def _complete_public_turn(
         message_id=user_message_id,
         mentioned_ids=requested_mentions,
         mention_overflow=mention_overflow,
-        user_profile=user_doc or {},
+        user_profile=agent_profile,
         recent_history=history,
     )
     agent_result = run_public_agent_turn_v3(
@@ -192,7 +201,9 @@ def _complete_public_turn(
     latest_profile = profiles_coll.find_one(
         {"user_id": req.user_id}, {"_id": 0, "agentic_assessment_session": 1},
     ) or {}
-    assessment_state = assessment_public_state(latest_profile)
+    assessment_state = assessment_public_state_for_room(
+        latest_profile, room_id, include_unscoped=not bool(req.ai_room_id),
+    )
     ai_reply = agent_result.reply or PUBLIC_RETRY_REPLY
     reply_messages = [str(item).strip() for item in (agent_result.messages or []) if str(item).strip()][:3]
     if not reply_messages:

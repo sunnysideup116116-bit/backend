@@ -103,6 +103,21 @@ class V3WriteExecutorsTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(start.call_args.args[1], "big_five")
 
+    def test_start_assessment_binds_the_confirmed_room(self):
+        ctx = self._ctx()
+        with patch("services.ayue_agent.v3.write_executors.start_assessment_session",
+                   return_value={"status": "started", "reply": "我們開始吧"}) as start, \
+             patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.find_one_and_update",
+                   return_value=None), \
+             patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.update_one"):
+            ok, _reply, _code = execute_write(
+                "profile.start_assessment", {"kind": "deep"}, ctx, MagicMock(), "run1", 0,
+                confirmation_id="c-room",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(start.call_args.kwargs["room_id"], "room")
+
     def test_start_assessment_uses_confirmation_id_from_manager_payload(self):
         ctx = self._ctx()
         with patch("services.ayue_agent.v3.write_executors.start_assessment_session",

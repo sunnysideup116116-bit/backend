@@ -7,8 +7,8 @@ agent context (memories, match state, profile) stays user-global.
 Room ids are namespaced and self-validating (``ai_room::{user_id}::{nonce}``)
 so ownership can be checked without a lookup. The legacy single room
 (``generate_room_id(user_id, "ai_assistant")``) is preserved permanently: it
-keeps onboarding, assessment, proactive care, and old clients working, and it
-always appears in the room list.
+keeps onboarding, proactive care, old unscoped assessment drafts, and old
+clients working, and it always appears in the room list.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from services.chat_service import (
     is_ai_room,
 )
 from services.chat_service import save_system_message_once
+from services.assessment_session_service import assessment_public_state_for_room
 
 
 LEGACY_AI_ROOM_TITLE = "找阿月配對"
@@ -144,7 +145,11 @@ def get_room(room_id: str, user_id: str) -> dict | None:
     return _project(doc)
 
 
-def list_rooms(user_id: str) -> list[dict]:
+def list_rooms(
+    user_id: str,
+    *,
+    assessment_profile: dict | None = None,
+) -> list[dict]:
     """All AI rooms for ``user_id`` ordered by most recent activity.
 
     Activity is derived from the room's latest message timestamp, falling back
@@ -174,6 +179,14 @@ def list_rooms(user_id: str) -> list[dict]:
         proj["updated_at"] = latest or doc.get("updated_at") or doc.get("created_at") or now
         proj["latest_message"] = latest
         rooms.append(proj)
+
+    if assessment_profile is not None:
+        for room in rooms:
+            room.update(assessment_public_state_for_room(
+                assessment_profile,
+                str(room.get("room_id") or ""),
+                include_unscoped=bool(room.get("is_legacy")),
+            ))
 
     rooms.sort(key=lambda r: r.get("updated_at") or 0, reverse=True)
     return rooms

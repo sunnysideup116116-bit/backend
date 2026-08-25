@@ -133,6 +133,30 @@ class AiRoomServiceTests(unittest.TestCase):
             room_id = ai_room_service.most_recent_ai_room("owner")
         self.assertEqual(room_id, ai_room_service.legacy_ai_room_id("owner"))
 
+    def test_room_list_projects_active_assessment_only_onto_its_owner_room(self):
+        rooms_p, messages_p, rooms, messages = self._patch_colls()
+        with rooms_p, messages_p:
+            rooms.find.return_value = iter([{
+                "room_id": "ai_room::owner::a", "user_id": "owner",
+                "title": "價值觀", "needs_title": False,
+                "created_at": 1.0, "updated_at": 2.0,
+            }])
+            messages.find_one.return_value = None
+            projected = ai_room_service.list_rooms(
+                "owner",
+                assessment_profile={"agentic_assessment_session": {
+                    "session_id": "assessment-a", "kind": "deep_profile",
+                    "status": "active", "revision": 3,
+                    "room_id": "ai_room::owner::a",
+                }},
+            )
+
+        by_id = {room["room_id"]: room for room in projected}
+        self.assertEqual(by_id["ai_room::owner::a"]["assessment_kind"], "deep_profile")
+        self.assertEqual(by_id["ai_room::owner::a"]["assessment_state"], "active")
+        legacy = by_id[ai_room_service.legacy_ai_room_id("owner")]
+        self.assertIsNone(legacy["assessment_state"])
+
     def test_create_proposal_room_upserts_deterministic_room_with_title(self):
         rooms_p, messages_p, rooms, messages = self._patch_colls()
         with rooms_p, messages_p, patch.object(ai_room_service, "save_system_message_once") as save:
