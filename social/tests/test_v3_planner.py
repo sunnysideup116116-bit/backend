@@ -711,7 +711,7 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(metrics.failure_code, "invalid_arguments")
 
     def test_blank_invite_prompt_version_is_explicit_and_budgeted(self):
-        self.assertEqual(_PLANNER_PROMPT_VERSION, "compact_v3_write_intent_v1")
+        self.assertEqual(_PLANNER_PROMPT_VERSION, "compact_v3_write_intent_v2")
         self.assertIn("write_intent 必填", _PLANNER_SYSTEM)
         self.assertIn("relationship.date_invitation.v1", _PLANNER_SYSTEM)
         self.assertNotIn("HIGH-PRIORITY DATE INVITATION ROUTING", _PLANNER_SYSTEM)
@@ -860,6 +860,30 @@ class V3PlannerTests(unittest.TestCase):
         ):
             plan, _metrics = plan_turn(turn)
         self.assertIsNotNone(plan)
+        self.assertEqual([task.agent for task in plan.tasks], ["profile", "synthesizer"])
+
+    def test_better_know_me_intent_offers_basic_assessment(self):
+        turn = self._turn("我想要你更認識我")
+        expected = {
+            "tasks": [
+                {"id": "p1", "agent": "profile", "depends_on": [],
+                 "task_brief": "開啟基本性格探索，呼叫 profile.start_assessment(kind=basic)"},
+                {"id": "s1", "agent": "synthesizer", "depends_on": ["p1"],
+                 "task_brief": "詢問使用者是否確認開始基本性格探索"},
+            ]
+        }
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[
+                {"name": "decompose_tasks", "arguments": expected},
+            ]),
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+
+        system_prompt = provider.call_args.kwargs["system_prompt"]
+        self.assertIn("更認識我／更了解我／多了解我一點", system_prompt)
+        self.assertIn("profile.start_assessment(kind=basic)", system_prompt)
+        self.assertEqual(metrics.prompt_version, "compact_v3_write_intent_v2")
         self.assertEqual([task.agent for task in plan.tasks], ["profile", "synthesizer"])
 
     def test_inaccurate_existing_personality_profile_can_produce_basic_assessment_task(self):
