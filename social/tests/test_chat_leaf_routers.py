@@ -6,7 +6,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from models import CalendarActionRequest, ChatRequest, RelationshipGameRequest
-from routers.chat_messages import get_messages
+from routers.chat_messages import get_messages, list_ai_rooms_route
 from routers.chat_onboarding import chat_endpoint
 from routers.demo import reset_db_state
 from routers.proactive import proactive_check
@@ -151,6 +151,58 @@ class ChatLeafRouterTests(unittest.TestCase):
         query = find.call_args.args[0]
         self.assertEqual(query["timestamp"], {"$lt": 1234.5})
         self.assertEqual(messages.sort_calls, [("timestamp", 1)])
+
+    def test_topic_room_history_restores_only_its_own_deep_assessment(self):
+        messages = _Cursor([])
+        profile = {"agentic_assessment_session": {
+            "session_id": "assessment-a", "kind": "deep_profile",
+            "status": "active", "revision": 2,
+            "room_id": "ai_room::owner::a",
+        }}
+        with patch("routers.chat_messages.get_ai_room", return_value={"room_id": "ai_room::owner::a"}), \
+             patch("routers.chat_messages.maybe_backfill_title"), \
+             patch("routers.chat_messages.mark_room_read"), \
+             patch("routers.chat_messages.messages_coll.find", return_value=messages), \
+             patch("routers.chat_messages.profiles_coll.find_one", return_value=profile):
+            response = get_messages(
+                "ai_assistant", "owner", ai_room_id="ai_room::owner::a",
+            )
+
+        self.assertEqual(response["assessment_state"], "active")
+        self.assertEqual(response["assessment_kind"], "deep_profile")
+        self.assertEqual(response["assessment_revision"], 2)
+
+    def test_other_topic_room_does_not_restore_someone_elses_assessment(self):
+        messages = _Cursor([])
+        profile = {"agentic_assessment_session": {
+            "session_id": "assessment-a", "kind": "deep_profile",
+            "status": "active", "revision": 2,
+            "room_id": "ai_room::owner::a",
+        }}
+        with patch("routers.chat_messages.get_ai_room", return_value={"room_id": "ai_room::owner::b"}), \
+             patch("routers.chat_messages.maybe_backfill_title"), \
+             patch("routers.chat_messages.mark_room_read"), \
+             patch("routers.chat_messages.messages_coll.find", return_value=messages), \
+             patch("routers.chat_messages.profiles_coll.find_one", return_value=profile):
+            response = get_messages(
+                "ai_assistant", "owner", ai_room_id="ai_room::owner::b",
+            )
+
+        self.assertIsNone(response["assessment_state"])
+        self.assertIsNone(response["assessment_kind"])
+
+    def test_room_list_receives_the_profile_assessment_projection(self):
+        profile = {"agentic_assessment_session": {
+            "session_id": "assessment-a", "kind": "deep_profile",
+            "status": "active", "revision": 2,
+            "room_id": "ai_room::owner::a",
+        }}
+        with patch("routers.chat_messages.profiles_coll.find_one", return_value=profile), \
+             patch("routers.chat_messages.list_ai_rooms", return_value=[]) as list_rooms:
+            response = list_ai_rooms_route("owner")
+
+        self.assertEqual(response, {"rooms": []})
+        self.assertEqual(list_rooms.call_args.kwargs["assessment_profile"], profile)
 
     def test_date_cancel_remains_a_thin_domain_service_adapter(self):
         expected = {"status": "cancelled"}

@@ -118,7 +118,12 @@ def _start_assessment(ctx: Any, arguments: dict[str, Any], *, confirmation_id: s
     if not _claim_once(key):
         return True, "這個探索確認正在處理，我不會重複開始。", None
     try:
-        outcome = start_assessment_session(ctx.user_id, kind, idempotency_key=key)
+        outcome = start_assessment_session(
+            ctx.user_id,
+            kind,
+            idempotency_key=key,
+            room_id=str(ctx.room_id or "").strip() or None,
+        )
     except Exception as exc:
         return False, "剛剛沒有成功開始，我沒有改動原本的資料。你想再試一次時跟我說。", type(exc).__name__
     ok = outcome.get("status") in {"started", "already_started"}
