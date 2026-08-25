@@ -56,14 +56,17 @@ def get_messages(
     query: dict = {"room_id": room_id, "is_blocked": {"$ne": True}}
     if before is not None:
         query["timestamp"] = {"$lt": before}
-    cursor = messages_coll.find(query, {"_id": 0}).sort("timestamp", 1)
+    cursor = messages_coll.find(query, {"_id": 0}).sort("timestamp", -1)
     if limit is not None and limit > 0:
         # Fetch one extra message to detect whether older history exists.
         fetched = list(cursor.limit(limit + 1))
         has_more = len(fetched) > limit
-        messages = fetched[:limit]
+        # Sort is descending (newest first); re-reverse so the client always
+        # receives messages in chronological (oldest → newest) order.
+        messages = list(reversed(fetched[:limit]))
     else:
-        messages = list(cursor)
+        # Legacy clients expect ascending order without a limit.
+        messages = list(cursor)[::-1]
         has_more = False
     user_doc = profiles_coll.find_one({"user_id": user_id})
     active_proposal_id = (user_doc or {}).get("active_match_proposal_id")

@@ -22,8 +22,10 @@ class _Cursor(list):
         super().__init__(*args, **kwargs)
         self.sort_calls = []
 
-    def sort(self, *args):
-        self.sort_calls.append(args)
+    def sort(self, key=None, direction=None):
+        self.sort_calls.append((key, direction))
+        if direction == -1 and key:
+            list.sort(self, key=lambda item: item.get(key, 0) or 0, reverse=True)
         return self
 
     def limit(self, count):
@@ -137,6 +139,21 @@ class ChatLeafRouterTests(unittest.TestCase):
         query = find.call_args.args[0]
         self.assertEqual(query["room_id"], "room")
         self.assertNotIn("timestamp", query)
+        self.assertEqual(messages.sort_calls, [("timestamp", -1)])
+
+    def test_ai_history_pagination_returns_newest_messages_in_chronological_order(self):
+        messages = _Cursor([{"sender_id": "ai_assistant", "content": f"msg-{i}", "timestamp": i} for i in range(31)])
+        with patch("routers.chat_messages.generate_room_id", return_value="room"), \
+             patch("routers.chat_messages.messages_coll.count_documents", return_value=0), \
+             patch("routers.chat_messages.messages_coll.find", return_value=messages), \
+             patch("routers.chat_messages.profiles_coll.find_one", return_value={}):
+            response = get_messages("ai_assistant", "owner", limit=30)
+
+        # The last page holds the newest messages, oldest → newest.
+        contents = [m["content"] for m in response["messages"]]
+        self.assertEqual(contents[0], "msg-1")
+        self.assertEqual(contents[-1], "msg-30")
+        self.assertTrue(response["has_more"])
 
     def test_ai_history_pagination_before_filters_by_timestamp(self):
         messages = _Cursor([{"sender_id": "ai_assistant", "content": "older"}])
@@ -150,7 +167,7 @@ class ChatLeafRouterTests(unittest.TestCase):
         self.assertFalse(response["has_more"])
         query = find.call_args.args[0]
         self.assertEqual(query["timestamp"], {"$lt": 1234.5})
-        self.assertEqual(messages.sort_calls, [("timestamp", 1)])
+        self.assertEqual(messages.sort_calls, [("timestamp", -1)])
 
     def test_topic_room_history_restores_only_its_own_deep_assessment(self):
         messages = _Cursor([])
