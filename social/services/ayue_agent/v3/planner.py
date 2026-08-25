@@ -374,7 +374,7 @@ def _decompose_tool_schema() -> dict[str, Any]:
     }
 
 
-_PLANNER_PROMPT_VERSION = "compact_v3_write_intent_v1"
+_PLANNER_PROMPT_VERSION = "compact_v3_write_intent_v2"
 _PLANNER_MAX_RECENT_MESSAGES = 4
 _PLANNER_MAX_RECENT_CHARS = 2000
 _PLANNER_MAX_SYSTEM_CHARS = 6000
@@ -417,7 +417,7 @@ synthesizer=只根據本回合 verified observations 與 bounded context 組最�
 - 找一個有直接證據的新活動並排整天，固定使用 Web、Places 與 terminal Synthesizer；若同時有具體日期的個人外出安排，依 Calendar availability policy 先做唯讀檢查。除非使用者要求保存，不建立 calendar mutation；活動研究排除 recent_messages 與 recent calendar mutation 已出現的活動。
 - 外部探索使用 casual_discovery；明確官方查證或醫療／法律／金融／安全風險使用 strict_verification。
 - calendar_draft 的 missing_fields、candidates 補充、修正或選擇用 calendar。`calendar_recent_mutation` 的成功與否只交 calendar 做唯讀驗證，不自行猜測。
-- 明確開始／重做 assessment 用 profile；產品問題用正常 product_info -> synthesizer DAG，不選內部 knowledge section，也不產生舊的 task-free ProductInfo envelope。
+- 明確開始／重做 assessment 用 profile。使用者表示希望阿月「更認識我／更了解我／多了解我一點」時，也代表希望開啟基本性格探索：固定使用 profile -> synthesizer，讓 profile 提出 profile.start_assessment(kind=basic) 的確認預覽；不得降成 direct_chat，也不得改成只讀既有 profile。產品問題用正常 product_info -> synthesizer DAG，不選內部 knowledge section，也不產生舊的 task-free ProductInfo envelope。
 - opportunity.signal="social_opening" 只用於間接表達想找人一起參與、尚未要求從既有聯絡人挑選或開始找新人的情況；evidence_span 必須是 current message 的連續原文，confidence >= 0.8。從既有聯絡人挑選用 relationship；找新的人用 match；單純寒暄、孤單或負面情緒使用 signal="none"。
 - Web task brief 必須保留原始 proposition、地點／日期限制與 evidence class；不可把背景資料改成新的答案目標。
 
