@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 from services.date_coordination_service import (
+    _append_reschedule_card,
     cancel_coordination_or_event,
     list_pending_for_user,
     request_reschedule,
@@ -84,7 +85,7 @@ class DateCoordinationDomainTests(unittest.TestCase):
              ), \
              patch("services.date_coordination_service.calendar_events_coll.update_one", return_value=event_write) as write, \
              patch("services.date_coordination_service.matches_coll.find_one_and_update", return_value=updated_match), \
-             patch("services.date_coordination_service._sync_card") as sync, \
+             patch("services.date_coordination_service._append_reschedule_card") as append_card, \
              patch("services.date_coordination_service.queue_mediator_event") as notify:
             coordination, event = request_reschedule(
                 "owner", "other", "event",
@@ -100,10 +101,44 @@ class DateCoordinationDomainTests(unittest.TestCase):
         self.assertEqual(coordination["confirmations"], {})
         self.assertEqual(event["status"], "pending_reconfirmation")
         write.assert_called_once()
-        sync.assert_called_once()
+        append_card.assert_called_once_with(updated_match, updated_match["date_coordination"])
         notify.assert_called_once()
         self.assertEqual(notify.call_args.args[0], "other")
         self.assertEqual(notify.call_args.args[2], "date_coordination_result")
+
+    def test_reschedule_card_is_appended_and_becomes_the_active_card(self):
+        match = self._match(status="active", revision=4)
+        coordination = match["date_coordination"]
+        coordination["card_message_id"] = "old-card"
+        match_write = Mock(modified_count=1)
+
+        with patch(
+            "services.date_coordination_service.generate_room_id",
+            return_value="pair-room",
+        ), patch(
+            "services.date_coordination_service.save_message",
+            return_value={"message_id": "new-card"},
+        ) as save, patch(
+            "services.date_coordination_service.matches_coll.update_one",
+            return_value=match_write,
+        ) as update_match:
+            _append_reschedule_card(match, coordination)
+
+        self.assertEqual(save.call_args.args[:4], (
+            "pair-room",
+            "ai_assistant",
+            "阿月幫你們重新開了一張改期確認卡；請雙方確認新的時間。",
+            "mediator_card",
+        ))
+        self.assertEqual(
+            save.call_args.args[4]["event_type"],
+            "date_coordination_form",
+        )
+        self.assertEqual(
+            update_match.call_args.args[1]["$set"]["date_coordination.card_message_id"],
+            "new-card",
+        )
+        self.assertEqual(coordination["card_message_id"], "new-card")
 
     def test_reschedule_losing_coordination_cas_never_mutates_calendar_projection(self):
         match = self._match()

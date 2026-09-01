@@ -71,9 +71,8 @@ def probe_policy(user_id: str) -> tuple[str, int, int, int]:
 
 
 def trigger_proactive_match(user_id: str, source: str = "automatic", force_new: bool = False) -> None:
-    from services.match_action_service import start_match_search
-
-    start_match_search(user_id, source=source, force_new=force_new)
+    """Retained for old imports, but post-chat activity must never start matching."""
+    return None
 
 
 def choose_probe_kind(match_doc: dict, requested_kind: str | None = None) -> str:

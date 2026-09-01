@@ -5,6 +5,7 @@ healthy/concerning/unclear judgment that the next state update can use for
 feedback recalibration.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -130,7 +131,11 @@ class BackgroundJudgeService:
         try:
             adapter = self._get_adapter()
             prompt = self._build_prompt(sender_id, current_message, recent_messages, flagged_words, classifier_flag)
-            response_text = adapter.generate(prompt, model=model)
+            response_text = await asyncio.to_thread(
+                adapter.generate,
+                prompt,
+                model=model,
+            )
             parsed = self._parse_response(response_text)
         except Exception as e:
             print(f"   [ Background Judge Warning ] {e}")

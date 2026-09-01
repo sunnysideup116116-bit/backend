@@ -17,6 +17,14 @@ DEFAULT_THROTTLE_SECONDS = {
 }
 
 LEVEL_ORDER = {"safe": 0, "observation": 1, "warning": 2, "restricted": 3, "blocked": 4}
+EXEMPT_DELTA_EPSILON = 0.10
+_NO_OPTIONS_ON_EXEMPT = {"warning"}
+_ALLOWED_ACTION_OPTIONS = {
+    "dismiss",
+    "leave_conversation",
+    "block_user",
+    "report_user",
+}
 
 
 class InterventionEngine:
@@ -30,7 +38,8 @@ class InterventionEngine:
 
     async def execute(self, risk_level: str, risk_state: dict, diagnosis: dict,
                       conv_id: str, sender_id: str, receiver_id: str,
-                      msg_id: str, decision_reason: str, chat_log_service=None) -> dict:
+                      msg_id: str, decision_reason: str, chat_log_service=None,
+                      message_delta: dict | None = None) -> dict:
         """產生介入指令。
 
         chat_log_service: 提供則啟用顯示節流（查詢上次實際顯示的介入）。
@@ -63,39 +72,42 @@ class InterventionEngine:
         if "mascot" not in receiver_d and receiver_d.get("action") != "none":
             receiver_d["mascot"] = "heart"
 
-        # 3.5 顯示節流：寄件方與收件方分別判定
+        # 3.5 已處置豁免判定。只有呼叫端提供本則 delta（或舊版 diagnosis
+        # 明確帶 delta_max）時才啟用，避免缺資料被誤判為零風險。
+        exempted = False
+        if chat_log_service is not None and risk_level in LEVEL_ORDER:
+            exempted = await self._check_sanction_exempted(
+                risk_level,
+                diagnosis,
+                conv_id,
+                sender_id,
+                chat_log_service,
+                message_delta=message_delta,
+            )
+        if exempted:
+            sender_d = self._apply_state_notice(sender_d, "sender", risk_level)
+            receiver_d = self._apply_state_notice(receiver_d, "receiver", risk_level)
+
+        # 4. 顯示節流：狀態式通知也使用自己的 300 秒節流設定。
         if chat_log_service is not None:
             sender_d = await self._apply_throttle(
                 sender_d, risk_level, conv_id, sender_id, "sender", chat_log_service)
             receiver_d = await self._apply_throttle(
                 receiver_d, risk_level, conv_id, sender_id, "receiver", chat_log_service)
 
-        # 4. 管理員通報
+        # 5. 管理員通報。本則若已處置豁免，沒有新的違規事實，不重複排入審核。
         admin_d = None
-        if risk_level == "blocked":
+        if risk_level == "blocked" and not exempted:
             admin_d = {
                 "type": "human_review_queue",
                 "priority": "high" if decision_reason == "critical_override" else "normal",
                 "requires_review_within_hours": 24
             }
 
-        # 5. 已處置豁免判定：四條件全部成立時，標記本則不為同一件事再罰第二次。
-        #    累積狀態全程不動（風險等級、directive action 都不變），只在 directive 上
-        #    附加 sanction_exempted=True，讓 risk_detection 的攔截判定改為不鎖訊息，
-        #    並讓前端可隱藏 mascot（intervention_widgets.dart:360 已就緒）。
-        exempted = False
-        if chat_log_service is not None and risk_level in LEVEL_ORDER:
-            exempted = await self._check_sanction_exempted(
-                risk_level, diagnosis, conv_id, sender_id, chat_log_service)
-        if exempted:
-            sender_d["sanction_exempted"] = True
-            receiver_d["sanction_exempted"] = True
-            # 豁免時改用陳述目前狀態的文案（*_state_notice），而非回應「這則訊息」
-            # 的文案。原始文案如「頻繁的訊息會讓對方不舒服」在豁免時是假的——
-            # 本則沒問題，只是還在觀察期。state_notice 的 risk_level='exempt'，
-            # 不會被 get_interventions_by_level(真實等級) 誤抓。
-            sender_d = self._apply_state_notice(sender_d, "sender")
-            receiver_d = self._apply_state_notice(receiver_d, "receiver")
+        if sender_d.get("action") not in (None, "none", "suppressed"):
+            sender_d["target_user_id"] = sender_id
+        if receiver_d.get("action") not in (None, "none", "suppressed"):
+            receiver_d["target_user_id"] = receiver_id
 
         intervention_id = f"int_{uuid.uuid4().hex[:8]}"
         command = {
@@ -112,7 +124,8 @@ class InterventionEngine:
         return command
 
     async def _check_sanction_exempted(self, risk_level: str, diagnosis: dict,
-                                       conv_id: str, sender_id: str, chat_log_service) -> bool:
+                                       conv_id: str, sender_id: str, chat_log_service,
+                                       message_delta: dict | None = None) -> bool:
         """已處置豁免：四條件「全部」成立才豁免，否則照罰。
 
         設計目的：避免同一件事在冷卻期內被重複處罰。累積風險狀態與名聲留著，
@@ -125,10 +138,10 @@ class InterventionEngine:
             風險升高即失效，不會變成保護傘。
         ③ 剩餘冷卻 = 0
             確認真的服完刑；冷卻中代表仍在服刑，不豁免。
-        ④ 本則 max(delta) < 0.05
+        ④ 本則 max(delta) < 0.10
             服完又違規則照罰，且從高狀態起跳罰得更重。delta_max 由呼叫端
-            （risk_detection.py）以 diagnosis["delta_max"] 傳入；未提供時
-            視為 0（保守，不擋豁免）。
+            （risk_detection.py）以 message_delta 傳入；舊呼叫端也可明確帶
+            diagnosis["delta_max"]。兩者都未提供時保守不豁免。
 
         任一條件不成立即回 False。
         """
@@ -149,9 +162,15 @@ class InterventionEngine:
             if remaining > 0:
                 return False
 
-            # ④ 本則 max(delta) < 0.05
-            delta_max = float(diagnosis.get("delta_max", 0.0) or 0.0)
-            if delta_max >= 0.05:
+            # ④ 本則 max(delta) < epsilon。沒有 delta 資料時不啟用豁免。
+            if message_delta is not None:
+                values = [float(value or 0.0) for value in message_delta.values()]
+                delta_max = max(values, default=0.0)
+            elif "delta_max" in diagnosis:
+                delta_max = float(diagnosis.get("delta_max") or 0.0)
+            else:
+                return False
+            if delta_max >= EXEMPT_DELTA_EPSILON:
                 return False
 
             return True
@@ -159,33 +178,54 @@ class InterventionEngine:
             print(f"   [ Exempt Warning ] 豁免判定失敗，保守不豁免: {e}")
             return False
 
-    @staticmethod
-    def _apply_state_notice(directive: dict, role: str) -> dict:
+    def _apply_state_notice(self, directive: dict, role: str, risk_level: str) -> dict:
         """豁免時以陳述狀態的文案（*_state_notice）取代回應本則訊息的文案。
 
-        state_notice 模板存於 kb_interventions 的 risk_level='exempt'，以 template_id
-        結尾 '_state_notice' 區分。此處只換 content（文案），其餘 directive 旗標
-        （action / cooldown / mascot / show_options 等）維持原樣——豁免只改「說什麼」，
-        不改「做什麼」。找不到模板時保守保留原文案。
+        state_notice 模板存於 kb_interventions 的 risk_level='exempt'。豁免解除
+        原本的 modal／block sanction，因此 action 與 UI 行為也必須改用狀態模板。
         """
         try:
             templates = KBService.get_interventions_by_level("exempt")
             target_id = f"{role}_state_notice"
             target = next((t for t in templates if t.get("template_id") == target_id), None)
             if not target:
-                return directive
-            msg_tpl = target.get("message_template", {})
-            if isinstance(msg_tpl, str):
-                import json as _json
-                msg_tpl = _json.loads(msg_tpl)
-            new_content = {
-                "title": msg_tpl.get("title"),
-                "body": msg_tpl.get("body"),
-                "primary_risk_type": directive.get("content", {}).get("primary_risk_type"),
-            }
-            updated = dict(directive)
-            updated["content"] = new_content
-            return updated
+                fallback = dict(directive)
+                old_content = directive.get("content") or {}
+                fallback["cooldown_seconds"] = 0
+                fallback["require_acknowledgment"] = False
+                fallback["sanction_exempted"] = True
+                fallback["show_feedback_buttons"] = False
+                fallback["display_throttle_seconds"] = 300
+                if role == "sender":
+                    fallback["action"] = "show_reflection_banner"
+                    fallback["allow_report_text"] = False
+                    fallback.pop("action_options", None)
+                    fallback["show_options"] = False
+                    body = "先前的處置已完成，目前對話仍在安全觀察中。"
+                else:
+                    fallback["action"] = "show_safety_info_card"
+                    body = "這段對話仍在安全觀察中，你可以隨時封鎖或檢舉對方。"
+                    if risk_level in _NO_OPTIONS_ON_EXEMPT:
+                        fallback.pop("action_options", None)
+                        fallback["show_options"] = False
+                    else:
+                        fallback["show_options"] = bool(fallback.get("action_options"))
+                fallback["content"] = {
+                    "title": None,
+                    "body": body,
+                    "primary_risk_type": old_content.get("primary_risk_type", "any"),
+                }
+                return fallback
+
+            out = self._get_specific_directive([target], "any", role)
+            out["sanction_exempted"] = True
+            out["cooldown_seconds"] = 0
+            out["require_acknowledgment"] = False
+            out["show_feedback_buttons"] = False
+            if risk_level in _NO_OPTIONS_ON_EXEMPT:
+                out.pop("action_options", None)
+                out["show_options"] = False
+            return out
         except Exception as e:
             print(f"   [ State Notice ] 取用失敗，保留原文案: {e}")
             return directive
@@ -275,7 +315,35 @@ class InterventionEngine:
             if key in ("cooldown", "require_ack"):
                 continue
             directive[key] = value
+        options = self._parse_action_options(target.get("action_options"))
+        if options:
+            directive["action_options"] = options
         return directive
+
+    @staticmethod
+    def _parse_action_options(raw) -> list:
+        """Normalize the optional KB action list into a bounded UI contract."""
+        if not raw:
+            return []
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                return []
+        if not isinstance(raw, list):
+            return []
+        result = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            action = str(item.get("action") or "").strip()
+            label = str(item.get("label") or "").strip()
+            if action not in _ALLOWED_ACTION_OPTIONS or not label:
+                continue
+            result.append({"action": action, "label": label[:40]})
+            if len(result) == 4:
+                break
+        return result
 
     def _build_empty_command(self, conv_id, msg_id):
         return {

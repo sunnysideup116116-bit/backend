@@ -82,9 +82,9 @@ def test_not_exempt_cooldown_active(engine):
 
 
 def test_not_exempt_high_delta(engine):
-    """條件④失敗：本則 delta ≥ 0.05（服完又違規）→ 照罰，且從高狀態起跳罰得更重。"""
+    """條件④失敗：本則 delta ≥ 0.10（服完又違規）→ 照罰。"""
     fake = FakeLogService(last_level="blocked", seconds_ago=4000, remaining=0)
-    diag = {"delta_max": 0.08}
+    diag = {"delta_max": 0.11}
     assert _check(engine, "blocked", diag, fake) is False
 
 
@@ -105,9 +105,9 @@ def test_exempt_zero_delta(engine):
 
 
 def test_exempt_delta_just_below_threshold(engine):
-    """delta_max = 0.049 < 0.05 → 條件④成立，豁免（邊界）。"""
+    """delta_max = 0.099 < 0.10 → 條件④成立，豁免（邊界）。"""
     fake = FakeLogService(last_level="blocked", seconds_ago=4000, remaining=0)
-    diag = {"delta_max": 0.049}
+    diag = {"delta_max": 0.099}
     assert _check(engine, "blocked", diag, fake) is True
 
 

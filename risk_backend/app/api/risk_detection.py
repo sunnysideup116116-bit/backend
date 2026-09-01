@@ -2,10 +2,21 @@
 風險檢測 API 路由 - Phase 2 修正版 (Guardrail 審計強化)
 """
 
+import asyncio
 import warnings
 import os
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from app.models.schemas import FeedbackRequest, RiskDetectionRequest, RiskDetectionResponse, RiskState, SenderAppealRequest, ReceiverReportRequest
+from app.models.schemas import (
+    BlockUserRequest,
+    FeedbackRequest,
+    ReceiverReportRequest,
+    ReportUserRequest,
+    RiskDetectionRequest,
+    RiskDetectionResponse,
+    RiskState,
+    SenderAppealRequest,
+    UnblockUserRequest,
+)
 from app.core.rule_engine import RuleBasedEngine
 from app.core.nlp_engine import NLPEngine
 from app.core.risk_fusion import RiskFusionLayer
@@ -192,7 +203,8 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
         if rule_result.get('triggered_rules'):
             print(f"      |-- Triggered           : {rule_result['triggered_rules']}")
 
-        nlp_result = nlp_engine.analyze(
+        nlp_result = await asyncio.to_thread(
+            nlp_engine.analyze,
             req.current_message, delivered_history, computed_features,
             sender_id=req.sender_id, prior_risk_state=prior_state,
             relationship_memory=relationship_memory, last_summary=last_summary
@@ -224,7 +236,15 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
         final_delta = fusion.apply_scenario_bonus(initial_delta, bonus_delta)
         print(_pretty_format_risk("Step 6: Total Message Delta", final_delta.model_dump()))
 
-        new_state, risk_level = await state_machine.update(req.conversation_id, req.sender_id, real_msg_id, final_delta)
+        nlp_is_degraded = str(nlp_result.get('reasoning', '')).startswith('Fallback:')
+        degraded_with_flags = nlp_is_degraded and bool(gr_result.get('flagged_words'))
+        new_state, risk_level = await state_machine.update(
+            req.conversation_id,
+            req.sender_id,
+            real_msg_id,
+            final_delta,
+            degraded_with_flags=degraded_with_flags,
+        )
         diag = getattr(state_machine, 'last_diagnostic', {})
         print(_pretty_format_risk("Step 7: Updated Cumulative State", new_state.model_dump()))
         recal = diag.get('feedback_signal', 'neutral')
@@ -248,7 +268,8 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
             risk_level=risk_level, risk_state=new_state.model_dump(), diagnosis=diag,
             conv_id=req.conversation_id, sender_id=req.sender_id, receiver_id=req.receiver_id,
             msg_id=real_msg_id, decision_reason=diag.get('reason', 'normal'),
-            chat_log_service=chat_log_service
+            chat_log_service=chat_log_service,
+            message_delta=final_delta.model_dump(),
         )
 
         # 豁免時不鎖訊息：blocked 但已處置過同一件事 → 照送，累積狀態仍留著。
@@ -318,7 +339,7 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
             nlp_confidence=nlp_result.get('confidence', 0.0),
             # NLP 失敗時 _fallback_result() 回傳全 0 的 delta，其結果與「模型判定無風險」
             # 完全無法區分。必須向呼叫端揭露，否則降級判斷會被當成正常的 safe。
-            nlp_degraded=str(nlp_result.get('reasoning', '')).startswith('Fallback:'),
+            nlp_degraded=nlp_is_degraded,
             guardrail_degraded=gr_result.get('degraded', False),
         )
         print("="*70 + "\n")
@@ -469,4 +490,94 @@ async def submit_receiver_report(req: ReceiverReportRequest):
         "status": "ok",
         "msg_id": req.triggered_by_msg_id,
         "note": "已記錄，供人工稽核；不影響風險判斷"
+    }
+
+
+REPORT_REASON_CATEGORIES = {
+    "sexual_boundary",
+    "coercion",
+    "manipulation",
+    "harassment",
+    "emotional_pressure",
+    "other",
+}
+
+
+@router.post("/block")
+async def block_user(req: BlockUserRequest):
+    result = await chat_log_service.save_user_block(
+        blocker_id=req.blocker_id,
+        blocked_id=req.blocked_id,
+        conversation_id=req.conversation_id,
+        source=req.source,
+    )
+    if not result["ok"]:
+        if result["error"] == "self_block":
+            raise HTTPException(status_code=400, detail="cannot block yourself")
+        if result["error"] == "collection_missing":
+            raise HTTPException(status_code=503, detail="user_blocks collection is unavailable")
+        raise HTTPException(status_code=503, detail="block store is unavailable")
+    return {
+        "status": "ok",
+        "already": result["already"],
+        "blocker_id": req.blocker_id,
+        "blocked_id": req.blocked_id,
+    }
+
+
+@router.post("/unblock")
+async def unblock_user(req: UnblockUserRequest):
+    result = await chat_log_service.remove_user_block(req.blocker_id, req.blocked_id)
+    if not result["ok"]:
+        if result["error"] == "not_found":
+            raise HTTPException(status_code=404, detail="block record not found")
+        if result["error"] == "collection_missing":
+            raise HTTPException(status_code=503, detail="user_blocks collection is unavailable")
+        raise HTTPException(status_code=503, detail="block store is unavailable")
+    return {
+        "status": "ok",
+        "blocker_id": req.blocker_id,
+        "blocked_id": req.blocked_id,
+    }
+
+
+@router.get("/blocks")
+async def list_blocked_users(user_id: str):
+    result = await chat_log_service.get_user_block_sets(user_id)
+    if not result["ok"]:
+        raise HTTPException(status_code=503, detail="block store is unavailable")
+    return {
+        "user_id": user_id,
+        "excluded_user_ids": result["excluded_user_ids"],
+        "blocked_user_ids": result["blocked_user_ids"],
+        "count": len(result["excluded_user_ids"]),
+    }
+
+
+@router.post("/report-user")
+async def report_user(req: ReportUserRequest):
+    if req.reason_category not in REPORT_REASON_CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"reason_category must be one of {sorted(REPORT_REASON_CATEGORIES)}",
+        )
+    result = await chat_log_service.save_user_report(
+        reporter_id=req.reporter_id,
+        reported_id=req.reported_id,
+        conversation_id=req.conversation_id,
+        reason_category=req.reason_category,
+        detail_text=req.detail_text,
+        triggered_by_msg_id=req.triggered_by_msg_id,
+    )
+    if not result["ok"]:
+        if result["error"] == "self_report":
+            raise HTTPException(status_code=400, detail="cannot report yourself")
+        if result["error"] == "collection_missing":
+            raise HTTPException(status_code=503, detail="user_reports collection is unavailable")
+        raise HTTPException(status_code=503, detail="report store is unavailable")
+    return {
+        "status": "ok",
+        "report_id": result["report_id"],
+        "review_status": "pending",
+        "note": "已進入人工審核佇列；不影響風險判斷",
     }

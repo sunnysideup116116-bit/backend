@@ -57,6 +57,10 @@ from services.proposal_namespace import (
 )
 from services.profile_projection import safe_recent_context
 from services.language_service import normalize_zh_tw
+from services.risk_block_service import (
+    RiskBlockServiceUnavailable,
+    risk_block_service,
+)
 from services.ayue_agent.public_relationship_projection import (
     anonymize_counterparty_text,
     display_name as public_display_name,
@@ -890,7 +894,14 @@ def generate_matches_for_user(
     
     step_start = time.perf_counter()
     existing_matches = list(matches_coll.find({"$or": [{"from_user": req.user_id}, {"to_user": req.user_id}]}))
-    excluded_users = {req.user_id}
+    try:
+        block_exclusions = risk_block_service.excluded_user_ids(req.user_id)
+    except RiskBlockServiceUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="安全關係狀態暫時無法確認，配對搜尋未執行",
+        ) from exc
+    excluded_users = {req.user_id, *block_exclusions}
     current_revision = int(user_doc.get("current_context_revision", 0))
     for m in existing_matches:
         status = m.get("status")
@@ -1166,7 +1177,7 @@ def generate_matches_for_user(
             },
             "status": "draft",
             "delivery_channel": "mediator_chat",
-            "proposal_source": "user_search",
+            "proposal_source": str(source or "manual")[:40],
             "participant_pair_key": participant_pair_key(req.user_id, matched_id),
             "relationship_establishing": True,
             "context_revision": int(user_doc.get("current_context_revision", 0)),
@@ -1228,11 +1239,8 @@ def _queue_match_event(user_id: str, event_type: str, message: str, **extra):
 
 
 def create_proactive_match_proposal(user_id: str, source: str = "automatic", force_new: bool = False):
-    """Legacy callable kept as a queueing compatibility facade."""
-    return start_match_search(
-        user_id, source=source, force_new=force_new,
-        idempotency_key=f"legacy-proactive:{uuid.uuid4().hex}",
-    )
+    """Retired compatibility facade; matching now requires an explicit action."""
+    return {"status": "disabled", "reason_code": "explicit_match_action_required"}
 
 
 # Candidate ranking is still this module's legacy implementation. The durable

@@ -29,6 +29,16 @@ def agent_payload(first_user="owner", second_user="candidate"):
 
 
 class EventOpportunityServiceTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        blocker = patch.object(
+            service.risk_block_service,
+            "excluded_user_ids",
+            return_value=set(),
+        )
+        blocker.start()
+        self.addCleanup(blocker.stop)
+
     def _profiles(self):
         profiles = MagicMock()
         profiles.find.return_value = [

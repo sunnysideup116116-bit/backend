@@ -96,6 +96,9 @@ def list_pending_for_user(user_id: str) -> list[dict]:
             "confirmations": confirmations,
         })
     return items
+
+
+def _card_metadata(coordination: dict, event_type: str) -> dict:
     return {
         "event_type": event_type,
         "coordination_id": coordination["coordination_id"],
@@ -132,6 +135,36 @@ def _sync_card(match: dict, coordination: dict) -> None:
         )
     except Exception as exc:
         print(f"Date card sync skipped: {exc}")
+
+
+def _append_reschedule_card(match: dict, coordination: dict) -> None:
+    """Put the new revision at the end of the shared chat timeline."""
+    room_id = generate_room_id(match["from_user"], match["to_user"])
+    content = "阿月幫你們重新開了一張改期確認卡；請雙方確認新的時間。"
+    try:
+        card = save_message(
+            room_id,
+            "ai_assistant",
+            content,
+            "mediator_card",
+            _card_metadata(coordination, "date_coordination_form"),
+        )
+        card_message_id = card.get("message_id")
+        if not card_message_id:
+            return
+        updated = matches_coll.update_one(
+            {
+                "_id": match["_id"],
+                "date_coordination.coordination_id": coordination["coordination_id"],
+                "date_coordination.revision": coordination.get("revision", 1),
+                "date_coordination.status": "active",
+            },
+            {"$set": {"date_coordination.card_message_id": card_message_id}},
+        )
+        if getattr(updated, "modified_count", 0):
+            coordination["card_message_id"] = card_message_id
+    except Exception as exc:
+        print(f"Date reschedule card append skipped: {type(exc).__name__}")
 
 
 def _other_participant(match: dict, user_id: str) -> str:
@@ -424,7 +457,7 @@ def request_reschedule(
         )
         raise HTTPException(status_code=409, detail="約會剛剛已變更，請重新確認")
 
-    _sync_card(updated_match, updated_coordination)
+    _append_reschedule_card(updated_match, updated_coordination)
     _notify_date_change(
         updated_match,
         user_id,

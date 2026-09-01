@@ -141,6 +141,7 @@ CREATE TABLE `kb_interventions` (
   `action_type` varchar(100) DEFAULT NULL,
   `message_template` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`message_template`)),
   `ui_behavior` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`ui_behavior`)),
+  `action_options` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (`action_options` IS NULL OR json_valid(`action_options`)),
   `created_at` timestamp NOT NULL DEFAULT current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
@@ -162,6 +163,20 @@ INSERT INTO `kb_interventions` (`template_id`, `risk_level`, `primary_risk_type`
 ('warn_sender_sexual', 'warning', 'sexual_boundary', 'show_reflection_banner', '{\"body\": \"尊重對方的邊界是建立信任的基礎\"}', '{\"cooldown\": 0, \"require_ack\": false, \"mascot\": \"warning_sign\", \"display_throttle_seconds\": 300}', '2026-03-31 13:49:35'),
 ('sender_state_notice', 'exempt', 'any', 'show_reflection_banner', '{\"body\": \"你先前的訊息已處置過，目前對話仍在觀察中，請保持尊重的互動節奏\"}', '{\"cooldown\": 0, \"require_ack\": false, \"mascot\": \"warning_sign\", \"display_throttle_seconds\": 0}', '2026-08-23 00:00:00'),
 ('receiver_state_notice', 'exempt', 'any', 'show_ambient_icon', '{\"body\": \"這段對話仍在安全觀察中，你可以隨時封鎖或檢舉對方\"}', '{\"show_options\": true, \"show_feedback_buttons\": true, \"allow_report_text\": true, \"mascot\": \"heart\", \"display_throttle_seconds\": 0, \"cooldown\": 0, \"require_ack\": false}', '2026-08-23 00:00:00');
+
+UPDATE `kb_interventions`
+SET `action_options` = '[{"action":"block_user","label":"封鎖"},{"action":"report_user","label":"檢舉"},{"action":"leave_conversation","label":"停止對話"}]'
+WHERE `template_id` = 'restrict_receiver_options';
+
+UPDATE `kb_interventions`
+SET `action_options` = '[{"action":"dismiss","label":"繼續對話"},{"action":"block_user","label":"封鎖"},{"action":"report_user","label":"檢舉"},{"action":"leave_conversation","label":"結束對話"}]'
+WHERE `template_id` = 'block_receiver_notice';
+
+UPDATE `kb_interventions`
+SET `action_type` = 'show_safety_info_card',
+    `ui_behavior` = '{"show_options":true,"show_feedback_buttons":false,"allow_report_text":true,"mascot":"heart","display_throttle_seconds":300,"cooldown":0,"require_ack":false}',
+    `action_options` = '[{"action":"block_user","label":"封鎖"},{"action":"report_user","label":"檢舉"},{"action":"leave_conversation","label":"停止對話"}]'
+WHERE `template_id` = 'receiver_state_notice';
 
 -- --------------------------------------------------------
 

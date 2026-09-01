@@ -23,6 +23,10 @@ from services.proposal_namespace import (
     namespace_clause,
     participant_pair_key,
 )
+from services.risk_block_service import (
+    RiskBlockServiceUnavailable,
+    risk_block_service,
+)
 
 
 AGENT_EVENT_OPPORTUNITY_URL = "http://127.0.0.1:9001/api/proactive_event_match"
@@ -296,14 +300,20 @@ def create_event_opportunity(
         return {"status": "already_active"}
     now = time.time()
     recent_declined = _recent_declined_counterparties(safe_user_id, now)
+    try:
+        risk_exclusions = risk_block_service.excluded_user_ids(safe_user_id)
+    except RiskBlockServiceUnavailable:
+        return {"status": "risk_block_unavailable"}
+    requested_exclusions = {
+        str(value)[:80]
+        for value in (excluded_user_ids or [])
+        if str(value or "").strip() and str(value) != safe_user_id
+    } | recent_declined | risk_exclusions
     response = requests.post(
         AGENT_EVENT_OPPORTUNITY_URL,
         json={
             "user_id": safe_user_id,
-            "excluded_user_ids": sorted({
-                str(value)[:80] for value in (excluded_user_ids or [])
-                if str(value or "").strip() and str(value) != safe_user_id
-            } | recent_declined)[:100],
+            "excluded_user_ids": sorted(requested_exclusions)[:500],
         },
         timeout=(3, 90),
     )
@@ -327,6 +337,8 @@ def create_event_opportunity(
         or not event_id or not candidate_id or candidate_id == target_id
     ):
         return {"status": "invalid_agent_projection"}
+    if candidate_id in requested_exclusions:
+        return {"status": "excluded_candidate"}
 
     profiles = {
         str(row.get("user_id") or ""): row

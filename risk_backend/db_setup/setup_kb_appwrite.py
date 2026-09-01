@@ -21,14 +21,24 @@ from datetime import datetime, timezone
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
+RISK_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SERVER_ROOT = os.path.dirname(RISK_ROOT)
+if RISK_ROOT not in sys.path:
+    sys.path.insert(0, RISK_ROOT)
+
+from db_setup.safety_action_contract import (  # noqa: E402
+    ACTION_OPTIONS_ATTRIBUTE,
+    SAFETY_ACTION_UPDATES,
+)
+
+load_dotenv(os.path.join(SERVER_ROOT, ".env"))
 
 ENDPOINT = os.getenv("APPWRITE_ENDPOINT")
 PROJECT_ID = os.getenv("APPWRITE_PROJECT_ID")
 API_KEY = os.getenv("APPWRITE_API_KEY")
 KB_DB_ID = os.getenv("APPWRITE_KB_DB_ID", "kb")
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = RISK_ROOT
 SQL_PATH = os.path.join(BASE_DIR, "db_setup", "dating_safety.sql")
 
 HEADERS = {
@@ -107,6 +117,7 @@ SCHEMA = {
             {"key": "action_type", "type": "string", "size": 100, "required": False},
             {"key": "message_template", "type": "string", "size": 100000, "required": False},
             {"key": "ui_behavior", "type": "string", "size": 100000, "required": False},
+            ACTION_OPTIONS_ATTRIBUTE,
             {"key": "created_at", "type": "datetime", "required": False},
         ],
         "indexes": [
@@ -539,6 +550,39 @@ def seed_regex_patterns():
     print(f"    [+] regex patterns updated: {updated}")
 
 
+def seed_safety_action_contract():
+    """Upsert the bounded action contract after the legacy SQL seed is parsed."""
+    print("\n[*] Seeding safety action options into kb_interventions ...")
+    existing = _list_existing_documents("kb_interventions")
+    updated = skipped = 0
+    for template_id, expected in SAFETY_ACTION_UPDATES.items():
+        document = existing.get(template_id)
+        if not document:
+            print(f"    [!] missing kb_interventions/{template_id}")
+            continue
+        patch = {
+            key: value
+            for key, value in expected.items()
+            if document.get(key) != value
+        }
+        if not patch:
+            skipped += 1
+            continue
+        response = requests.patch(
+            f"{ENDPOINT}/databases/{KB_DB_ID}/collections/kb_interventions/documents/{template_id}",
+            json={"data": patch},
+            headers=HEADERS,
+        )
+        if response.status_code in (200, 201):
+            updated += 1
+        else:
+            print(
+                f"    [!] update safety action {template_id} -> "
+                f"{response.status_code} {response.text[:120]}"
+            )
+    print(f"    [+] safety actions: updated={updated} unchanged={skipped}")
+
+
 def main():
     if not (ENDPOINT and PROJECT_ID and API_KEY):
         print("[!] Missing Appwrite env vars (APPWRITE_ENDPOINT/PROJECT_ID/API_KEY)")
@@ -578,6 +622,9 @@ def main():
 
     # 4. regex patterns
     seed_regex_patterns()
+
+    # 5. 2026-08-31 bounded receiver actions
+    seed_safety_action_contract()
 
     print("\n[+] KB Appwrite setup completed.")
 
