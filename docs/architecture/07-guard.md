@@ -1,6 +1,6 @@
 # 07. Central Guard：審核什麼、怎麼運作
 
-> 本篇專門說明 V3 架構中的 Central Guard：它是誰、它**審核**哪些部分、它**不**做什麼，以及被拒絕後會發生什麼。程式碼真相在 `social_demotest/services/ayue_agent/v3/guard.py`。
+> 本篇專門說明 V3 架構中的 Central Guard：它是誰、它**審核**哪些部分、它**不**做什麼，以及被拒絕後會發生什麼。程式碼真相在 `social/services/ayue_agent/v3/guard.py`。
 
 ## 1. Guard 是什麼
 

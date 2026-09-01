@@ -1,7 +1,7 @@
 # Event-Driven Proactive Matchmaker Guide
 
 本文件是「事件驅動主動媒人」功能的完整技術與操作指南。閱讀者不需要先理解
-`matchmaker_new`；正式實作已整合在 `social_demotest` 與
+`matchmaker_new`；正式實作已整合在 `social` 與
 `matchmaker_agent`。
 
 ## 1. 功能目標
@@ -36,7 +36,7 @@
 
 | 元件 | Owner | 責任 |
 | --- | --- | --- |
-| `social_demotest` port 8000 | Product backend | 排程、Tavily 搜尋、網頁抽取、embedding、Mongo proposal、API 與 UI |
+| `social` port 8000 | Product backend | 排程、Tavily 搜尋、網頁抽取、embedding、Mongo proposal、API 與 UI |
 | `matchmaker_agent` port 9001 | Graph/Matchmaker service | LLM 活動驗證、Neo4j 寫入、Graph traversal、主動邀請文案 |
 | Neo4j Aura | Graph projection | Event、Concept、使用者到活動的可重建關聯 |
 | MongoDB | Workflow source of truth | proposal namespace、`draft/pending/accepted/declined/expired`、pair cooldown 與 Event snapshot |
@@ -127,7 +127,7 @@ POST /api/match/events/discover
 ```
 
 API 只會把工作寫入 MongoDB 的 singleton queue，不會在 port 8000 request 內執行長時間搜尋。
-獨立的 `social_demotest/event_worker.py` 會領取工作、定期續租並執行搜尋；worker 中斷後，租約到期的
+獨立的 `social/event_worker.py` 會領取工作、定期續租並執行搜尋；worker 中斷後，租約到期的
 工作可由下一個 worker 安全接手。
 
 Worker 是常駐的 background consumer，但不會每 2 秒查詢 MongoDB。正式喚醒路徑是
@@ -140,7 +140,7 @@ Event 與 Public Ayue 可以並行，Event queue 不會接管或解析聊天訊�
 generic error 是 Planner provider 回傳非字串 optional 欄位，使舊 normalization 發生 `TypeError`；
 該欄位現在會交給 strict schema validation 與 bounded retry，與 Event Worker 並行本身無關。
 
-從 `social_demotest` 啟動 worker：
+從 `social` 啟動 worker：
 
 ```powershell
 ..\.project-venv\Scripts\python.exe event_worker.py
@@ -705,7 +705,7 @@ POST /api/match/events/lifecycle/run
 既有 Mongo proposal 必須先 dry-run，再於 namespace-aware backend 已部署、但尚未開放新 Event scan 時執行：
 
 ```powershell
-cd .\social_demotest
+cd .\social
 ..\.project-venv\Scripts\python.exe scripts\migrate_proposal_namespaces.py
 ..\.project-venv\Scripts\python.exe scripts\migrate_proposal_namespaces.py --apply
 ```
@@ -755,7 +755,7 @@ cd .\matchmaker_agent
 ### 17.2 啟動 8000 (已內建 Event Worker)
 
 ```powershell
-cd .\social_demotest
+cd .\social
 ..\.project-venv\Scripts\python.exe main.py
 ```
 
@@ -886,7 +886,7 @@ LIMIT 30
 ### Product backend
 
 ```powershell
-cd .\social_demotest
+cd .\social
 $env:AYUE_SKIP_DOTENV='1'
 $env:MONGO_URI='mongodb://127.0.0.1:27017'
 ..\.project-venv\Scripts\python.exe -m unittest discover -s tests -p 'test_*.py'

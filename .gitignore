@@ -6,12 +6,11 @@ __pycache__/
 # Virtual environments
 venv/
 .venv/
-.local-venv/
-.project-venv/
 env/
 ENV/
 agent_env/
 matchmaker_agent/agent_env/
+.local-venv/
 
 # Local secrets / config
 .env
@@ -20,10 +19,10 @@ matchmaker_agent/agent_env/
 
 # Logs / scratch output
 *.log
-.runlogs/
 ping_out.txt
 test_out.txt
 chat_resp.txt
+.runtime-logs/
 
 # OS / editor
 .DS_Store
@@ -35,14 +34,3 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
-
-# Agent / tooling working dirs (machine-local, not part of the product)
-.superpowers/
-.claude/
-
-# Test / coverage caches
-.pytest_cache/
-.coverage
-htmlcov/
-.ruff_cache/
-.mypy_cache/

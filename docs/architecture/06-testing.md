@@ -1,10 +1,10 @@
 # 06. 測試策略
 
-> 所有行為修改都必須有 deterministic test；自動測試不得連線或修改正式 MongoDB Atlas、Neo4j、Tavily 或 Google APIs。測試檔清單以 `social_demotest/tests/test_*.py` 為準，不在文件固定容易過期的檔案數量。
+> 所有行為修改都必須有 deterministic test；自動測試不得連線或修改正式 MongoDB Atlas、Neo4j、Tavily 或 Google APIs。測試檔清單以 `social/tests/test_*.py` 為準，不在文件固定容易過期的檔案數量。
 
 ## 1. 基本指令
 
-在 `social_demotest/` 下執行：
+在 `social/` 下執行：
 
 ```powershell
 $env:AYUE_SKIP_DOTENV = "1"
@@ -46,7 +46,7 @@ rg --files tests -g "test_*.py" | Sort-Object
 - Profile／Memory：`test_profile_*`、`test_memory_service.py`、`test_assessment_session_service.py`，特別驗證 owner evidence span 與 message-id idempotency。
 - Private Ayue：`test_private_v2.py`、`test_private_context_projection.py`、`test_private_mediator_extraction.py`、`test_private_redirect.py`、`test_semantic_plan_service_fixes.py`；覆蓋 relationship semantic projection、600 字元單位更新門檻與 raw Graph 欄位隔離，且不得和 Public V3 混用 context 或 runtime。
 - 主動關心：`test_proactive_*`；驗證 atomic claim、grounding 與不重複投遞。
-- HTTP／相容性：`test_chat_leaf_routers.py`、`test_chat_router_characterization.py`、`test_start_ayue_launcher.py`；保護 JSON contract、NDJSON final 與 health identity。
+- HTTP／相容性：`test_chat_leaf_routers.py`、`test_chat_router_characterization.py`（launcher 測試已隨 start_ayue 移除）；保護 JSON contract、NDJSON final 與 health identity。
 - 外部工具：`test_ayue_agent_web_tools.py`、`test_ayue_agent_maps_tools.py`、`test_google_places_client.py`；一律 stub provider，驗證 timeout、URL／位置安全與 bounded output。
 
 ## 4. 必覆蓋的不變量
