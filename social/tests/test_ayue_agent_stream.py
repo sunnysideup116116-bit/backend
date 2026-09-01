@@ -16,6 +16,7 @@ if "config" in sys.modules and not hasattr(sys.modules["config"], "OLLAMA_FAST_C
     setattr(sys.modules["config"], "OLLAMA_FAST_CHAT_MODEL", "test")
 
 from routers.public_chat import (
+    _complete_public_turn,
     _run_public_stream_turn,
     _sanitize_public_stream_event,
     direct_chat,
@@ -42,6 +43,35 @@ def _request(host: str = "testclient", *, token_stream: bool = False) -> Request
 
 
 class AyueAgentStreamTests(unittest.TestCase):
+    def test_assessment_from_another_room_is_removed_before_scheduler(self):
+        req = DirectChatRequest(
+            user_id="owner", contact_id="ai_assistant", message="普通聊天",
+            ai_room_id="ai_room::owner::b",
+        )
+        history_cursor = MagicMock()
+        history_cursor.sort.return_value.limit.return_value = []
+        profile = {"user_id": "owner", "agentic_assessment_session": {
+            "session_id": "assessment-a", "kind": "deep_profile",
+            "status": "active", "revision": 2,
+            "room_id": "ai_room::owner::a",
+        }}
+        with patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
+             patch("routers.public_chat.profiles_coll.find_one", return_value=profile), \
+             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
+                 handled=True, reply="我們聊別的。", agent_mode="v3",
+             )) as run, \
+             patch("routers.public_chat.complete_public_ayue_onboarding"), \
+             patch("routers.public_chat.save_message"):
+            response = _complete_public_turn(
+                req, "ai_room::owner::b", [], background_tasks=None,
+            )
+
+        self.assertNotIn(
+            "agentic_assessment_session", run.call_args.args[0].user_profile,
+        )
+        self.assertIsNone(response["assessment_state"])
+        self.assertIsNone(response["assessment_kind"])
+
     def test_json_direct_chat_v3_does_not_load_removed_public_runtime(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="你好")
         real_import = builtins.__import__

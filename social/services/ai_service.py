@@ -123,6 +123,43 @@ def get_embedding(text: str) -> list:
         raise HTTPException(status_code=500, detail=f"Google Embedding 錯誤: {e}")
 
 
+def get_embeddings(
+    texts: list[str], *, task_type: str = "retrieval_document",
+    output_dimensionality: int | None = None,
+) -> list[list[float]]:
+    """Return one bounded provider batch for graph projection workers."""
+    safe_texts = [str(text or "")[:500] for text in list(texts or [])[:20]]
+    if not safe_texts:
+        return []
+    try:
+        if not GOOGLE_API_KEY:
+            raise RuntimeError("缺少 GOOGLE_AI_STUDIO_API_KEY（或 GOOGLE_API_KEY）")
+        model_name = GOOGLE_EMBEDDING_MODEL.rsplit("/", 1)[-1]
+        request = {"model": GOOGLE_EMBEDDING_MODEL, "content": safe_texts}
+        if model_name == "gemini-embedding-2":
+            prefixes = {
+                "retrieval_query": "task: search result | query: ",
+                "retrieval_document": "title: none | text: ",
+                "semantic_similarity": "task: sentence similarity | query: ",
+            }
+            prefix = prefixes.get(task_type, "")
+            request["content"] = [f"{prefix}{text}" for text in safe_texts]
+            if output_dimensionality:
+                request["output_dimensionality"] = int(output_dimensionality)
+        else:
+            request["task_type"] = task_type
+            if output_dimensionality:
+                request["output_dimensionality"] = int(output_dimensionality)
+        result = genai.embed_content(**request)
+        embeddings = result.get("embedding", [])
+        if len(safe_texts) == 1 and embeddings and isinstance(embeddings[0], (int, float)):
+            return [embeddings]
+        return embeddings
+    except Exception as exc:
+        print(f"Embedding error: {exc}")
+        raise HTTPException(status_code=500, detail=f"Google Embedding 錯誤: {exc}") from exc
+
+
 def _chat_messages(prompt: str, system_prompt: str | None = None) -> list[dict[str, str]]:
     """Build provider messages while preserving the legacy single-user path."""
     user_message = str(prompt or "")

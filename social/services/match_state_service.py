@@ -5,15 +5,21 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from pymongo import ReturnDocument
+
 from database import matches_coll, profiles_coll
+from services.proposal_namespace import (
+    RELATIONSHIP_MATCH_NAMESPACE,
+    live_proposal_query,
+    namespace_clause,
+    participant_clause,
+)
 
 
 LIVE_MATCH_STATUSES = {"draft", "pending"}
 SEARCHING_STATUSES = {"queued", "running", "searching", "loading_profile", "vector_search", "graph_check", "writing_reason"}
 SEARCH_RESULT_STATUSES = {"no_candidates", "failed", "cancelled"}
 TERMINAL_MATCH_STATUSES = {"accepted", "declined", "expired"}
-DRAFT_TTL_SECONDS = 24 * 3600
-PENDING_TTL_SECONDS = 72 * 3600
 SEARCH_LOCK_TTL_SECONDS = 5 * 60
 
 
@@ -80,6 +86,7 @@ def verified_accepted_match_query(
             {"status": "accepted"},
             participants,
             acceptance_evidence,
+            {"relationship_establishing": {"$ne": False}},
         ]
     }
 
@@ -101,30 +108,61 @@ def _display_name(user_id: str | None) -> str:
 
 
 def _live_match_query(user_id: str, status: str | None = None) -> dict[str, Any]:
-    query: dict[str, Any] = {
-        "status": status or {"$in": list(LIVE_MATCH_STATUSES)},
-        "$or": [
-            {"live_participants": user_id},
-            {
-                "live_participants": {"$exists": False},
-                "$or": [{"from_user": user_id}, {"to_user": user_id}],
-            },
-        ],
+    return live_proposal_query(
+        user_id, RELATIONSHIP_MATCH_NAMESPACE, status=status,
+    )
+
+
+def _restore_latest_timeout_proposal(user_id: str) -> dict[str, Any] | None:
+    """Undo the retired 24/72-hour rule when no newer live proposal exists."""
+    expired = matches_coll.find_one(
+        {
+            "$and": [
+                {"status": "expired"},
+                {"expired_reason": {"$in": ["draft_timeout", "pending_timeout"]}},
+                {"proposal_suppressed": {"$ne": True}},
+                namespace_clause(RELATIONSHIP_MATCH_NAMESPACE),
+                participant_clause(user_id),
+            ]
+        },
+        sort=[("updated_at", -1), ("created_at", -1)],
+    )
+    if (
+        not expired
+        or expired.get("status") != "expired"
+        or expired.get("expired_reason") not in {"draft_timeout", "pending_timeout"}
+        or "_id" not in expired
+    ):
+        return None
+    reason = str(expired.get("expired_reason") or "")
+    restored_status = "draft" if reason == "draft_timeout" else "pending"
+    now = time.time()
+    transition = {
+        "from": "expired", "to": restored_status, "actor": "system",
+        "action": "proposal_timeout_reverted", "at": now,
     }
-    return query
+    return matches_coll.find_one_and_update(
+        {
+            "_id": expired["_id"], "status": "expired",
+            "expired_reason": reason,
+        },
+        {
+            "$set": {
+                "status": restored_status, "updated_at": now,
+                "last_decision": transition,
+                "live_participants": [expired.get("from_user"), expired.get("to_user")],
+            },
+            "$inc": {"proposal_revision": 1},
+            "$push": {"state_history": transition},
+            "$unset": {"expired_at": "", "expired_reason": ""},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
 
 
 def reconcile_live_match(user_id: str) -> dict[str, Any] | None:
-    """Expire stale live records and return the one allowed live proposal."""
+    """Return the one live proposal; proposals wait for an explicit decision."""
     now = time.time()
-    for status, ttl in (("draft", DRAFT_TTL_SECONDS), ("pending", PENDING_TTL_SECONDS)):
-        expiry_query = _live_match_query(user_id, status)
-        expiry_query["created_at"] = {"$lt": now - ttl}
-        matches_coll.update_many(
-            expiry_query,
-            {"$set": {"status": "expired", "expired_at": now, "expired_reason": f"{status}_timeout"},
-             "$unset": {"live_participants": ""}},
-        )
     profiles_coll.update_many(
         {"user_id": user_id, "matchmaking_in_progress": True,
          "matchmaking_started_at": {"$lt": now - SEARCH_LOCK_TTL_SECONDS}},
@@ -134,6 +172,10 @@ def reconcile_live_match(user_id: str) -> dict[str, Any] | None:
         _live_match_query(user_id),
         {"_id": 1, "from_user": 1, "to_user": 1, "status": 1, "proposal_revision": 1, "updated_at": 1, "created_at": 1},
     ).sort([("created_at", -1)]).limit(2))
+    if not live:
+        restored = _restore_latest_timeout_proposal(user_id)
+        if restored:
+            return restored
     return live[0] if len(live) == 1 else None
 
 
@@ -226,6 +268,12 @@ def get_match_status_snapshot(user_id: str) -> dict[str, Any]:
                 {
                     "$or": [
                         {"status": {"$in": ["declined", "expired"]}},
+                        verified_accepted_match_query(user_id),
+                    ]
+                },
+                {
+                    "$or": [
+                        namespace_clause(RELATIONSHIP_MATCH_NAMESPACE),
                         verified_accepted_match_query(user_id),
                     ]
                 },

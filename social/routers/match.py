@@ -6,12 +6,17 @@ import os
 import uuid
 from typing import Callable
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from models import MatchRequest, AcceptRequest, MatchDecisionRequest
+from models import (
+    MatchRequest, AcceptRequest, MatchDecisionRequest, ProactiveEventRequest,
+    EventDiscoveryRequest, EventOpportunityScanRequest,
+)
 from database import profiles_coll, matches_coll
 from services.ai_service import get_embedding, generate_chat_completion
 from services.memory_service import get_user_graph_memories
 from services.mediator_event_service import queue_mediator_event
-from services.match_state_service import get_match_status_snapshot, has_verified_acceptance
+from services.match_state_service import (
+    get_match_status_snapshot, has_verified_acceptance, reconcile_live_match,
+)
 from services.match_reason_service import (
     FRIEND_COPY_VERSION,
     MATCH_PROPOSAL_FEW_SHOTS,
@@ -38,8 +43,24 @@ from services.match_search_job_service import (
     public_match_search_status,
     register_match_search_pipeline,
 )
+from services.event_discovery_service import discover_and_ingest_events
+from services.event_relevance_service import rebuild_all_event_relevance
+from services.event_opportunity_service import create_event_opportunity, scan_event_opportunities
+from services.event_lifecycle_service import run_event_lifecycle_once
+from services.event_card_projection import public_event_card
+from services.proposal_namespace import (
+    EVENT_INVITATION_NAMESPACE,
+    RELATIONSHIP_MATCH_NAMESPACE,
+    live_proposal_query,
+    namespace_for_document,
+    participant_pair_key,
+)
 from services.profile_projection import safe_recent_context
 from services.language_service import normalize_zh_tw
+from services.risk_block_service import (
+    RiskBlockServiceUnavailable,
+    risk_block_service,
+)
 from services.ayue_agent.public_relationship_projection import (
     anonymize_counterparty_text,
     display_name as public_display_name,
@@ -56,13 +77,13 @@ LIVE_MATCH_STATUSES = {"draft", "pending"}
 
 
 def ensure_match_indexes():
-    """Keep one unresolved proposal per participant at the database boundary."""
+    """Keep one unresolved proposal per participant in each namespace."""
     try:
         matches_coll.create_index(
-            [("live_participants", 1)],
+            [("proposal_namespace", 1), ("live_participants", 1)],
             unique=True,
             partialFilterExpression={"status": {"$in": ["draft", "pending"]}},
-            name="one_live_match_per_participant",
+            name="one_live_proposal_per_namespace_participant",
         )
     except Exception as exc:
         # A legacy duplicate must be migrated before Atlas can create this index.
@@ -95,25 +116,8 @@ def _set_match_search(user_id: str, status: str, source: str, **extra):
 
 
 def reconcile_match_state(user_id: str):
-    """Expire stale proposals; matches are the canonical live-match state."""
-    now = time.time()
-    for status, ttl in (("draft", DRAFT_TTL_SECONDS), ("pending", PENDING_TTL_SECONDS)):
-        matches_coll.update_many(
-            {"status": status, "created_at": {"$lt": now - ttl}, "live_participants": user_id},
-            {"$set": {"status": "expired", "expired_at": now, "expired_reason": f"{status}_timeout"},
-             "$unset": {"live_participants": ""}},
-        )
-    profile = profiles_coll.find_one(
-        {"user_id": user_id}, {"matchmaking_in_progress": 1, "matchmaking_started_at": 1},
-    ) or {}
-    if profile.get("matchmaking_in_progress") and float(profile.get("matchmaking_started_at", 0)) < now - SEARCH_LOCK_TTL_SECONDS:
-        profiles_coll.update_one({"user_id": user_id}, {
-            "$set": {"matchmaking_in_progress": False}, "$unset": {"matchmaking_started_at": ""}
-        })
-    return matches_coll.find_one(
-        {"status": {"$in": list(LIVE_MATCH_STATUSES)}, "$or": [{"live_participants": user_id}, {"live_participants": {"$exists": False}, "$or": [{"from_user": user_id}, {"to_user": user_id}]}]},
-        sort=[("created_at", -1)],
-    )
+    """Compatibility facade; canonical reconciliation lives in the state service."""
+    return reconcile_live_match(user_id)
 
 def derive_match_stage(match_doc: dict, user_id: str) -> str:
     if not match_doc:
@@ -189,7 +193,12 @@ def build_active_proposal_card(match_doc: dict, user_id: str):
             viewer_reason, other_id, 180, counterparty_name=other_name,
         ),
         "reason_version": str(match_doc.get("reason_version") or "legacy"),
+        "proposal_namespace": namespace_for_document(match_doc),
+        "proposal_revision": int(match_doc.get("proposal_revision", 0) or 0),
     }
+    event_card = public_event_card(match_doc)
+    if event_card:
+        card["event"] = event_card
     # V4 exposes exactly one reason: the projection bound to this viewer.
     # Keep legacy aliases only for old records whose API shape cannot change.
     if not is_v4:
@@ -216,9 +225,18 @@ def build_status_proposal_card(match_doc: dict, user_id: str):
         for key in (
             "other_label", "stage", "event_type", "opening", "your_context",
             "other_context", "reasons", "score", "viewer_reason",
+            "event", "proposal_namespace", "proposal_revision",
         )
         if key in card
     }
+
+
+def _single_live_namespace_proposal(user_id: str, namespace: str) -> dict | None:
+    """Return one live namespace slot, failing closed on legacy duplicates."""
+    rows = list(matches_coll.find(
+        live_proposal_query(user_id, namespace),
+    ).sort([("created_at", -1)]).limit(2))
+    return rows[0] if len(rows) == 1 else None
 def _short_text(value, limit: int) -> str:
     text = re.sub(r"\s+", " ", normalize_zh_tw(str(value or ""))).strip()
     return text[:limit].rstrip()
@@ -876,7 +894,14 @@ def generate_matches_for_user(
     
     step_start = time.perf_counter()
     existing_matches = list(matches_coll.find({"$or": [{"from_user": req.user_id}, {"to_user": req.user_id}]}))
-    excluded_users = {req.user_id}
+    try:
+        block_exclusions = risk_block_service.excluded_user_ids(req.user_id)
+    except RiskBlockServiceUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="安全關係狀態暫時無法確認，配對搜尋未執行",
+        ) from exc
+    excluded_users = {req.user_id, *block_exclusions}
     current_revision = int(user_doc.get("current_context_revision", 0))
     for m in existing_matches:
         status = m.get("status")
@@ -1123,6 +1148,7 @@ def generate_matches_for_user(
             "reason": ai_recommendation_reason,
             "receiver_reason": ai_receiver_reason,
             "reason_version": V4_REASON_VERSION,
+            "proposal_namespace": RELATIONSHIP_MATCH_NAMESPACE,
             "reason_copy_version": FRIEND_COPY_VERSION,
             "friend_intro_v4": friend_intro_v4,
             "contrast_label": contrast_label,
@@ -1151,6 +1177,9 @@ def generate_matches_for_user(
             },
             "status": "draft",
             "delivery_channel": "mediator_chat",
+            "proposal_source": str(source or "manual")[:40],
+            "participant_pair_key": participant_pair_key(req.user_id, matched_id),
+            "relationship_establishing": True,
             "context_revision": int(user_doc.get("current_context_revision", 0)),
             "proposal_revision": 0,
             "created_at": time.time(),
@@ -1210,11 +1239,8 @@ def _queue_match_event(user_id: str, event_type: str, message: str, **extra):
 
 
 def create_proactive_match_proposal(user_id: str, source: str = "automatic", force_new: bool = False):
-    """Legacy callable kept as a queueing compatibility facade."""
-    return start_match_search(
-        user_id, source=source, force_new=force_new,
-        idempotency_key=f"legacy-proactive:{uuid.uuid4().hex}",
-    )
+    """Retired compatibility facade; matching now requires an explicit action."""
+    return {"status": "disabled", "reason_code": "explicit_match_action_required"}
 
 
 # Candidate ranking is still this module's legacy implementation. The durable
@@ -1249,17 +1275,35 @@ def cancel_match_request(req: MatchRequest):
 
 @router.get("/status")
 def get_match_status(user_id: str):
-    active = reconcile_match_state(user_id)
+    relationship_active = reconcile_match_state(user_id)
+    event_active = _single_live_namespace_proposal(
+        user_id, EVENT_INVITATION_NAMESPACE,
+    )
+    relationship_card = (
+        build_status_proposal_card(relationship_active, user_id)
+        if relationship_active else None
+    )
+    event_card = (
+        build_status_proposal_card(event_active, user_id)
+        if event_active else None
+    )
     search = public_match_search_status(user_id)
     snapshot = get_match_status_snapshot(user_id)
     public_snapshot = {
         key: snapshot.get(key)
         for key in ("state", "scope", "is_terminal", "chat_opened", "counterparty", "reason_code")
     }
-    return {"search": search, "match_search": search,
-            "active_proposal_card": build_status_proposal_card(active, user_id) if active else None,
-            "status_snapshot": public_snapshot,
-            "search_reason_code": search.get("reason_code") or None}
+    return {
+        "search": search,
+        "match_search": search,
+        "active_proposal_card": relationship_card,
+        "active_proposals": {
+            RELATIONSHIP_MATCH_NAMESPACE: relationship_card,
+            EVENT_INVITATION_NAMESPACE: event_card,
+        },
+        "status_snapshot": public_snapshot,
+        "search_reason_code": search.get("reason_code") or None,
+    }
 
 @router.get("/state")
 def get_single_match_state(user_id: str, match_id: str):
@@ -1271,10 +1315,18 @@ def get_single_match_state(user_id: str, match_id: str):
         raise HTTPException(status_code=404, detail="Match not found")
     if user_id not in {match_doc.get("from_user"), match_doc.get("to_user")}:
         raise HTTPException(status_code=403, detail="Only a match participant may read this state")
+    proposal_namespace = namespace_for_document(match_doc)
     response = {
         "match_id": match_id,
         "status": match_doc.get("status"),
         "stage": derive_match_stage(match_doc, user_id),
+        "proposal_namespace": proposal_namespace,
+        "proposal_revision": int(match_doc.get("proposal_revision", 0) or 0),
+        "chat_reused": bool(
+            match_doc.get("status") == "accepted"
+            and proposal_namespace == EVENT_INVITATION_NAMESPACE
+            and match_doc.get("relationship_establishing") is False
+        ),
     }
     # While a proposal is still actionable, hydrate its saved chat card from
     # the canonical viewer-bound projection.  This lets old cards receive copy
@@ -1282,6 +1334,8 @@ def get_single_match_state(user_id: str, match_id: str):
     active_card = build_active_proposal_card(match_doc, user_id)
     if active_card:
         response["viewer_reason"] = active_card.get("viewer_reason", "")
+        if active_card.get("event"):
+            response["event"] = active_card["event"]
     return response
 
 @router.post("")
@@ -1295,11 +1349,17 @@ def _apply_match_decision(req: MatchDecisionRequest, background_tasks: Backgroun
     result = decide_match_action(
         user_id=req.user_id, match_id=req.match_id, action=req.action,
         expected_status=req.expected_status, expected_revision=req.expected_revision,
+        expected_namespace=req.proposal_namespace,
         explicit_reasons=req.explicit_reasons,
         schedule_task=background_tasks.add_task,
     )
     if result.get("stale"):
-        raise HTTPException(status_code=409, detail={"message": "配對狀態已變更", "current_status": result.get("current_status"), "current_revision": result.get("current_revision")})
+        raise HTTPException(status_code=409, detail={
+            "message": "配對狀態已變更",
+            "current_status": result.get("current_status"),
+            "current_revision": result.get("current_revision"),
+            "current_namespace": result.get("current_namespace"),
+        })
     return result
 
 
@@ -1318,13 +1378,73 @@ def decide_match(req: MatchDecisionRequest, background_tasks: BackgroundTasks):
     return _apply_match_decision(req, background_tasks)
 
 
+@router.post("/proactive_event")
+@router.post("/proactive-event", include_in_schema=False)
+def proactive_event_match(req: ProactiveEventRequest):
+    try:
+        return create_event_opportunity(req.user_id)
+    except HTTPException:
+        raise
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"主動活動媒合 Agent (port 9001) 無法連線: {type(exc).__name__}",
+        ) from exc
+    except Exception as exc:
+        print(f"[event-opportunity] create failed: {type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="主動活動媒合暫時無法建立") from exc
+
+
+@router.post("/events/discover")
+def discover_public_events(req: EventDiscoveryRequest):
+    """Manual demo trigger for the same bounded pipeline used by the scheduler."""
+    result = discover_and_ingest_events(
+        region=req.region, window_days=req.window_days, categories=req.categories,
+    )
+    if result.get("status") in {"ingest_timeout", "ingest_unavailable"}:
+        raise HTTPException(status_code=503, detail=result)
+    return result
+
+
+@router.post("/events/relevance/rebuild")
+def rebuild_public_event_relevance():
+    """Manual demo backfill; internal event/user identifiers are never returned."""
+    result = rebuild_all_event_relevance(limit=20)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=503, detail=result)
+    return {
+        "status": "success",
+        "event_count": int(result.get("event_count", 0) or 0),
+        "relevance_count": int(result.get("relevance_count", 0) or 0),
+        "avoidance_count": int(result.get("avoidance_count", 0) or 0),
+        "link_count": int(result.get("link_count", 0) or 0),
+        "embedded_count": int(result.get("embedded_count", 0) or 0),
+        "pending_count": int(result.get("pending_count", 0) or 0),
+        "deferred": result.get("status") == "deferred",
+        "retry_after": result.get("retry_after"),
+    }
+
+
+@router.post("/events/opportunities/scan")
+def scan_public_event_opportunities(req: EventOpportunityScanRequest):
+    """Run the bounded opportunity scan used after discovery."""
+    return scan_event_opportunities(max_proposals=req.max_proposals)
+
+
+@router.post("/events/lifecycle/run")
+def run_public_event_lifecycle():
+    """Run bounded Event and unresolved-proposal cleanup."""
+    return run_event_lifecycle_once()
+
+
 @router.post("/accept")
 def accept_match(req: AcceptRequest, background_tasks: BackgroundTasks):
     match_doc = matches_coll.find_one({"_id": ObjectId(req.match_id)})
     if not match_doc:
         raise HTTPException(status_code=404, detail="Match not found")
     return _apply_match_decision(MatchDecisionRequest(
-        **req.model_dump(), action="accept", expected_status=match_doc.get("status", "")
+        **req.model_dump(), action="accept", expected_status=match_doc.get("status", ""),
+        proposal_namespace=namespace_for_document(match_doc),
     ), background_tasks)
 
 
@@ -1335,5 +1455,6 @@ def decline_match(req: AcceptRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=404, detail="Match not found")
     action = "cancel" if match_doc.get("status") == "pending" and match_doc.get("from_user") == req.user_id else "decline"
     return _apply_match_decision(MatchDecisionRequest(
-        **req.model_dump(), action=action, expected_status=match_doc.get("status", "")
+        **req.model_dump(), action=action, expected_status=match_doc.get("status", ""),
+        proposal_namespace=namespace_for_document(match_doc),
     ), background_tasks)

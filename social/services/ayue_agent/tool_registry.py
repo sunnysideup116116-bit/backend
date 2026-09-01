@@ -616,6 +616,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         executor_arguments_model=_ProposalDecisionArguments,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
+    "match.decide_active_event_invitation": ToolSpec(
+        "match.decide_active_event_invitation", ToolRisk.WRITE,
+        "decide_active_event_invitation",
+        "對唯一可操作的活動牽線邀請表達有興趣或婉拒；Runtime 注入 Event proposal revision。",
+        "我正在更新這張活動牽線邀請…",
+        requires_confirmation=True,
+        planner_arguments_model=_ProposalDecisionArguments,
+        executor_arguments_model=_ProposalDecisionArguments,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
+    ),
     "profile.start_assessment": ToolSpec(
         "profile.start_assessment", ToolRisk.WRITE, "assessment_start",
         "開始或重新開始本人的基本／深層探索；kind=basic 或 deep，必須先取得確認，完成後仍需再次確認才會覆寫對應正式資料。",

@@ -9,4 +9,10 @@ def run_public_agent_turn_v3(*args, **kwargs):
     return _run_v3(*args, **kwargs)
 
 
-__all__ = ["run_public_agent_turn_v3"]
+def mark_public_confirmation_presented(**kwargs):
+    """Lazy facade for the persisted-public-preview confirmation boundary."""
+    from .v3.scheduler import mark_public_confirmation_presented as _mark_presented
+    return _mark_presented(**kwargs)
+
+
+__all__ = ["run_public_agent_turn_v3", "mark_public_confirmation_presented"]

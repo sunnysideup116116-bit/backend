@@ -71,6 +71,43 @@ class GooglePlacesCuisineTests(unittest.TestCase):
         self.assertEqual(len(places), 1)
         self.assertEqual(places[0]["name"], "示範火鍋店")
 
+    def test_seo_suffix_is_removed_but_provider_name_is_retained_internally(self):
+        provider_name = "不二 TEA&NO.1｜高雄飲料推薦｜官方菜單與外送"
+        payload = {"places": [{
+            "id": "ChIJseo", "displayName": {"text": provider_name},
+            "formattedAddress": "高雄市鹽埕區",
+            "location": {"latitude": 22.62, "longitude": 120.28},
+            "types": ["cafe"],
+            "googleMapsUri": "https://www.google.com/maps/place/seo",
+        }]}
+        with self._enabled(), patch(
+            "services.ayue_agent.google_places_client.requests.post",
+            return_value=_FakeResponse(payload),
+        ):
+            places = search_nearby_places(
+                "高雄市鹽埕區", 22.62, 120.28, ["cafe"], limit=3,
+            )
+        self.assertEqual(places[0]["name"], "不二 TEA&NO.1")
+        self.assertEqual(places[0]["provider_name"], provider_name)
+
+    def test_legitimate_mixed_language_business_name_is_not_rewritten(self):
+        payload = {"places": [{
+            "id": "ChIJbrand", "displayName": {"text": "不二 TEA&NO.1"},
+            "formattedAddress": "高雄市鹽埕區",
+            "location": {"latitude": 22.62, "longitude": 120.28},
+            "types": ["cafe"],
+            "googleMapsUri": "https://www.google.com/maps/place/brand",
+        }]}
+        with self._enabled(), patch(
+            "services.ayue_agent.google_places_client.requests.post",
+            return_value=_FakeResponse(payload),
+        ):
+            places = search_nearby_places(
+                "高雄市鹽埕區", 22.62, 120.28, ["cafe"], limit=3,
+            )
+        self.assertEqual(places[0]["name"], "不二 TEA&NO.1")
+        self.assertEqual(places[0]["provider_name"], "不二 TEA&NO.1")
+
     def test_cuisine_omitted_when_empty(self):
         payload = {"places": []}
         with self._enabled(), \

@@ -2,6 +2,7 @@
 NLP 檢測引擎 - 支援多 provider adapter
 """
 
+import asyncio
 import json
 import re
 from datetime import datetime
@@ -168,7 +169,11 @@ class NLPEngine:
             return "{}"
 
         try:
-            text = adapter.generate(prompt, model=model_name)
+            text = await asyncio.to_thread(
+                adapter.generate,
+                prompt,
+                model=model_name,
+            )
             match = re.search(r"(\{.*\})", text, re.DOTALL)
             return match.group(1) if match else text.strip()
         except Exception as e:

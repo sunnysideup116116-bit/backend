@@ -7,12 +7,18 @@ from services.date_coordination_service import (
     cancel_coordination_or_event,
     confirm_form,
     get_state,
+    list_pending_for_user,
     respond_to_invite,
     update_form,
 )
 
 
 router = APIRouter()
+
+
+@router.get("/relationship/date/pending")
+def list_pending_dates(user_id: str):
+    return {"items": list_pending_for_user(user_id)}
 
 
 @router.post("/relationship/date/invite/respond")

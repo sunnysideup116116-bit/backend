@@ -185,7 +185,7 @@ def _normalize_provider_plan_arguments(
         if not isinstance(task, dict):
             continue
         agent = task.get("agent")
-        if agent not in _KNOWN_PLANNER_AGENTS:
+        if not isinstance(agent, str) or agent not in _KNOWN_PLANNER_AGENTS:
             continue
         empty_placeholder_removed = False
         if task.get("evidence_policy") == "":
@@ -199,7 +199,8 @@ def _normalize_provider_plan_arguments(
             empty_placeholder_removed = True
         if empty_placeholder_removed and "empty_optional_task_fields_removed" not in repair_codes:
             repair_codes.append("empty_optional_task_fields_removed")
-        if agent != "web" and task.get("evidence_policy") in {
+        evidence_policy = task.get("evidence_policy")
+        if agent != "web" and isinstance(evidence_policy, str) and evidence_policy in {
             "casual_discovery", "strict_verification",
         }:
             task.pop("evidence_policy", None)
@@ -374,7 +375,7 @@ def _decompose_tool_schema() -> dict[str, Any]:
     }
 
 
-_PLANNER_PROMPT_VERSION = "compact_v3_write_intent_v1"
+_PLANNER_PROMPT_VERSION = "compact_v3_write_intent_v2"
 _PLANNER_MAX_RECENT_MESSAGES = 4
 _PLANNER_MAX_RECENT_CHARS = 2000
 _PLANNER_MAX_SYSTEM_CHARS = 6000
@@ -417,7 +418,10 @@ synthesizer=只根據本回合 verified observations 與 bounded context 組最�
 - 找一個有直接證據的新活動並排整天，固定使用 Web、Places 與 terminal Synthesizer；若同時有具體日期的個人外出安排，依 Calendar availability policy 先做唯讀檢查。除非使用者要求保存，不建立 calendar mutation；活動研究排除 recent_messages 與 recent calendar mutation 已出現的活動。
 - 外部探索使用 casual_discovery；明確官方查證或醫療／法律／金融／安全風險使用 strict_verification。
 - calendar_draft 的 missing_fields、candidates 補充、修正或選擇用 calendar。`calendar_recent_mutation` 的成功與否只交 calendar 做唯讀驗證，不自行猜測。
-- 明確開始／重做 assessment 用 profile；產品問題用正常 product_info -> synthesizer DAG，不選內部 knowledge section，也不產生舊的 task-free ProductInfo envelope。
+- Calendar 寫入依完整語意判斷：清楚要求系統保存可辨識活動，如「幫我安排」、「幫我排一下」、「幫我記進行程」，用 calendar -> synthesizer mutation flow，不得降成 availability read。「我明天五點想去健身」不必然授權寫入；「幫我排明天五點去健身」才是明確 create。
+- current message 用「第二個」延續地點候選時，只信 server 的 `place_reference_resolution`；有綁定就沿用 label，建行程走 calendar -> synthesizer。沒有綁定由 server 澄清，不重新搜尋 Places、猜文字或改 ref。
+- 簡短肯定語接唯讀地點重試提議時，依語意建立 Places read -> synthesizer；不得當 Calendar confirmation；無提議則 direct_chat／澄清。
+- 明確開始／重做 assessment 用 profile。使用者表示希望阿月「更認識我／更了解我／多了解我一點」時，也代表希望開啟基本性格探索：固定使用 profile -> synthesizer，讓 profile 提出 profile.start_assessment(kind=basic) 的確認預覽；不得降成 direct_chat，也不得改成只讀既有 profile。產品問題用正常 product_info -> synthesizer DAG，不選內部 knowledge section，也不產生舊的 task-free ProductInfo envelope。
 - opportunity.signal="social_opening" 只用於間接表達想找人一起參與、尚未要求從既有聯絡人挑選或開始找新人的情況；evidence_span 必須是 current message 的連續原文，confidence >= 0.8。從既有聯絡人挑選用 relationship；找新的人用 match；單純寒暄、孤單或負面情緒使用 signal="none"。
 - Web task brief 必須保留原始 proposition、地點／日期限制與 evidence class；不可把背景資料改成新的答案目標。
 
@@ -426,6 +430,9 @@ synthesizer=只根據本回合 verified observations 與 bounded context 組最�
 _PLANNER_SYSTEM += """
 
 Calendar availability policy (must follow for every concrete date):
+- This policy is for advice/discovery without persistence. An explicit Calendar create/update/cancel
+  request takes precedence: use a normal mutation task,
+  not `calendar.availability.v1`; preflight checks conflicts.
 - If the user asks for a personal outing/date/itinerary on a concrete or
   resolvable date, create a read-only Calendar task first, even when the user
   explicitly says not to add an event.  Do not create a mutation task unless
@@ -499,15 +506,46 @@ def _planner_clock(turn_ctx: PublicAgentTurnContext) -> dict[str, Any]:
         projected["temporal_references"] = references
     return projected
 
+
+def _prompt_json_value(value: Any, *, depth: int = 0) -> Any:
+    """Keep optional context JSON-safe without serializing mock/object reprs."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if depth > 5:
+        return None
+    if isinstance(value, dict):
+        return {
+            str(key): safe
+            for key, item in value.items()
+            if (safe := _prompt_json_value(item, depth=depth + 1)) is not None
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            safe for item in value
+            if (safe := _prompt_json_value(item, depth=depth + 1)) is not None
+        ]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _prompt_json_value(model_dump(), depth=depth + 1)
+        except Exception:
+            return None
+    return None
+
+
 def _planner_prompt(turn_ctx: PublicAgentTurnContext) -> str:
     """Build a compact, privacy-safe user/context message for the Planner."""
     payload: dict[str, Any] = {
-        "message": turn_ctx.message,
+        "message": _prompt_json_value(turn_ctx.message) or "",
         "clock": _planner_clock(turn_ctx),
     }
     recent_messages = _planner_recent_messages(turn_ctx)
     if recent_messages:
         payload["recent_messages"] = recent_messages
+    if turn_ctx.conversation_continuity is not None:
+        payload["conversation_continuity"] = turn_ctx.conversation_continuity.model_dump(
+            mode="json", exclude_none=True,
+        )
 
     active = turn_ctx.active_proposal
     if isinstance(active, dict):
@@ -519,17 +557,30 @@ def _planner_prompt(turn_ctx: PublicAgentTurnContext) -> str:
         if active_projection:
             payload["active_proposal"] = active_projection
 
+    event_active = turn_ctx.active_event_invitation
+    if isinstance(event_active, dict):
+        event_projection = {
+            key: event_active[key]
+            for key in ("status", "event_title", "user_can_decide")
+            if event_active.get(key) not in (None, "")
+        }
+        if event_projection:
+            payload["active_event_invitation"] = event_projection
+
     optional_fields = (
         "calendar_draft",
         "calendar_recent_reference",
         "calendar_recent_mutation",
         "mentioned_contacts",
         "recent_contact_reference",
+        "recent_place_candidates",
+        "place_reference_resolution",
     )
     for field_name in optional_fields:
         value = getattr(turn_ctx, field_name, None)
-        if value not in (None, "", [], {}):
-            payload[field_name] = value
+        safe_value = _prompt_json_value(value)
+        if safe_value not in (None, "", [], {}):
+            payload[field_name] = safe_value
 
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 

@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
 import time
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
@@ -72,6 +74,14 @@ from .sub_agents.product_info_agent import (
     before_run as product_info_before_run,
     run as run_product_info,
 )
+from .place_references import (
+    clarification_message as place_reference_clarification,
+    get_candidate_set as get_place_candidate_set,
+    public_projection as place_candidate_projection,
+    public_resolution as public_place_resolution,
+    replace_presented_candidates,
+    resolve_message_reference,
+)
 from .place_projection import (
     MAX_PLACE_CARDS, MAX_PLACE_CARDS_PER_CATEGORY, _PLACE_CATEGORIES, _distance_label,
     _google_embed_url, _osm_embed_url, _place_candidate_ref,
@@ -88,6 +98,7 @@ from .debug_trace import (
 
 
 ProgressCallback = Callable[[dict[str, Any]], Any]
+_LOGGER = logging.getLogger(__name__)
 MAX_READS = max(1, min(int(os.getenv("AYUE_SUBAGENT_MAX_READS", "3") or "3"), 3))
 MAX_PARALLEL = max(1, min(int(os.getenv("AYUE_SUBAGENT_MAX_PARALLEL", "2") or "2"), 2))
 # Four bounded domain tasks may now follow a Calendar precheck.  Preserve the
@@ -136,6 +147,8 @@ def _direct_chat_block_reason(
         return "active_match_guidance"
     if getattr(turn, "mentioned_contact_overflow", False):
         return "mentioned_contact_overflow"
+    if getattr(turn, "place_reference_resolution", None):
+        return "place_reference_resolution"
     if plan.opportunity is not None and plan.opportunity.signal != "none":
         return "opportunity"
     return None
@@ -319,6 +332,18 @@ def has_active_public_confirmation(user_id: str) -> bool:
         return bool(ConfirmationManager(_CONFIRMATIONS).list_active(user_id=user_id))
     except Exception:
         return False
+
+
+def mark_public_confirmation_presented(
+    *, user_id: str, origin_run_id: str, message_id: str, persisted_content: str,
+) -> bool:
+    """Activate a prepared confirmation only after Public Chat persisted it."""
+    return ConfirmationManager(_CONFIRMATIONS).mark_presented(
+        user_id=user_id,
+        origin_run_id=origin_run_id,
+        message_id=message_id,
+        persisted_content=persisted_content,
+    )
 
 
 def _topological_layers(plan: Plan) -> list[list[SubTask]]:
@@ -709,6 +734,9 @@ def _run_sub_task(
         print_llm_metrics=_print_llm_metrics,
     )
     guarded_executor.runtime_state["planner_write_intent"] = planner_write_intent
+    guarded_executor.supersede_confirmation = lambda **kwargs: ConfirmationManager(
+        _CONFIRMATIONS
+    ).supersede_active(**kwargs)
     guarded_executor.step_prefix = registration.step_prefix
     # Keep the existing Scheduler test/provider seam while the guarded
     # adapter remains the single execution boundary for every runtime.
@@ -1089,6 +1117,13 @@ def run_public_agent_turn_v3(
             messages = presentation.messages
             normalized_reply = "\n\n".join(messages)
         result = result.model_copy(update={"reply": normalized_reply, "messages": messages})
+        # Confirmation preview hashes must bind the exact text that the HTTP
+        # layer will persist, after this final normalization boundary.
+        ConfirmationManager(_CONFIRMATIONS).bind_final_preview(
+            user_id=ctx.user_id,
+            origin_run_id=run_id,
+            final_content=normalized_reply,
+        )
         if debug_enabled:
             finish_debug_run(
                 run_id, status="completed",
@@ -1190,6 +1225,40 @@ def run_public_agent_turn_v3(
         _print_separator("V3 RUN END")
         return _finalize_debug(_assessment_result(outcome, active, run_id))
 
+    # Resolve only a closed ordinal/deictic place reference here. Intent still
+    # belongs to Planner/Calendar; this gate only binds identity and fails
+    # closed before an invalid referent can reach a write flow. Calendar draft
+    # candidates retain precedence for their own same-domain ordinal follow-up.
+    calendar_draft_candidates = (
+        list((turn.calendar_draft or {}).get("candidates") or [])
+        if isinstance(turn.calendar_draft, dict)
+        else []
+    )
+    if not calendar_draft_candidates:
+        place_resolution = resolve_message_reference(
+            ctx.user_id, ctx.room_id, turn.message,
+        )
+        if place_resolution.get("status") == "resolved":
+            turn = turn.model_copy(update={
+                "recent_place_candidates": place_candidate_projection(
+                    get_place_candidate_set(ctx.user_id, ctx.room_id)
+                ),
+                "place_reference_resolution": public_place_resolution(place_resolution),
+            })
+            turn._raw_ctx = ctx  # type: ignore[attr-defined]
+            turn._mentioned_ids = mentioned_ids  # type: ignore[attr-defined]
+        elif place_resolution.get("status") != "none":
+            return _finalize_debug(AgentResult(
+                handled=True,
+                reply=place_reference_clarification(place_resolution),
+                presentation_class="fallback",
+                conversation_intent="place_reference_clarification",
+                agent_run_id=run_id,
+                agent_mode="v3",
+                profile_write_allowed=False,
+                profile_write_reason="place_reference_clarification",
+            ))
+
     choice = confirmation_choice(ctx.message)
     mgr = ConfirmationManager(_CONFIRMATIONS)
     pending_records = mgr.list_active(user_id=ctx.user_id)
@@ -1258,37 +1327,24 @@ def run_public_agent_turn_v3(
     if choice == "none" and _assessment_start_confirmation_requested(ctx.message, pending_records):
         choice = "confirm"
     if choice in {"confirm", "cancel"} and not pending_records:
-        calendar_draft = getattr(turn, "calendar_draft", None)
-        missing_fields = {
-            str(field)
-            for field in (
-                calendar_draft.get("missing_fields", [])
-                if isinstance(calendar_draft, dict)
-                else []
-            )
-        }
-        if choice == "confirm" and {"start_time", "end_time"} & missing_fields:
-            reply = (
-                "這筆行程還缺開始與結束時間，目前沒有可確認的新增操作，"
-                "行事曆尚未變更。請告訴我開始和結束時間，例如「上午 9 點到下午 5 點」。"
-            )
-            conversation_intent = "calendar_clarification"
-        elif choice == "confirm":
-            reply = "目前沒有待確認的操作，因此沒有執行任何變更。請重新告訴我你要處理的內容。"
-            conversation_intent = "confirmation_missing"
-        else:
-            reply = "目前沒有待取消的操作，因此沒有執行任何變更。"
-            conversation_intent = "confirmation_missing"
-        print(f"\n  [entry] confirmation={choice} → no active pending confirmation")
-        _print_separator("V3 RUN END")
-        return _finalize_debug(AgentResult(
-            handled=True,
-            reply=reply,
-            presentation_class="transaction",
-            conversation_intent=conversation_intent,
-            agent_run_id=run_id,
-            agent_mode="v3",
-        ))
+        if choice == "cancel":
+            _print_separator("V3 RUN END")
+            return _finalize_debug(AgentResult(
+                handled=True,
+                reply="目前沒有待取消的操作，因此沒有執行任何變更。",
+                presentation_class="transaction",
+                conversation_intent="confirmation_missing",
+                agent_run_id=run_id,
+                agent_mode="v3",
+            ))
+        # A confirmation token has authority only when ConfirmationManager
+        # returned an active, persisted preview.  With no active state, even a
+        # calendar draft is merely bounded context; let Planner interpret the
+        # current acknowledgement (for example, accepting a prior read-only
+        # Places retry offer) or ask for clarification. This deliberately
+        # avoids a second keyword-based intent router.
+        print(f"\n  [entry] confirmation={choice} → no typed pending state; defer to Planner")
+        choice = "none"
     if choice == "confirm":
         print("\n  [entry] confirmation=confirm → executing preview-bound pending confirmation")
         results = mgr.execute_confirmed(
@@ -1351,9 +1407,32 @@ def run_public_agent_turn_v3(
     _print_separator("PLANNER")
     if debug_enabled:
         append_debug_event(run_id, "stage_started", stage="planner", label="Planner 正在拆解任務")
-    plan, planner_metrics = plan_turn(
-        turn,
-    )
+    planner_started = time.perf_counter()
+    try:
+        plan, planner_metrics = plan_turn(turn)
+    except Exception as exc:
+        # Planner is an interpretation boundary, not an authority boundary.
+        # An unexpected prompt/provider-shape bug must fail closed before any
+        # domain tool (especially a write) can run.  Keep the public reply
+        # generic while retaining a run-correlated, locals-free stack trace.
+        _LOGGER.error(
+            "V3 Planner escaped its failure contract run_id=%s error_type=%s\n%s",
+            run_id,
+            type(exc).__name__,
+            "".join(traceback.format_tb(exc.__traceback__)),
+        )
+        planner_metrics = PlannerMetrics(
+            duration_ms=round((time.perf_counter() - planner_started) * 1000),
+            failure_code="planner_internal_error",
+            error=type(exc).__name__,
+            attempts=[{
+                "attempt": 0,
+                "status": "internal_error",
+                "failure_code": "planner_internal_error",
+                "error": type(exc).__name__,
+            }],
+        )
+        plan = None
     _print_llm_metrics("planner", planner_metrics)
     total_input_tokens += planner_metrics.input_tokens
     total_output_tokens += planner_metrics.output_tokens
@@ -1819,6 +1898,71 @@ def run_public_agent_turn_v3(
         _apply_card_decision(candidate_cards, card_decision)
         if public_cards_enabled else []
     )
+    has_new_place_result = any(
+        result.status is SubTaskStatus.OK
+        and result.tool_name in {"places.search_nearby", "places.resolve_place"}
+        for results in task_results.values()
+        for result in results
+    )
+    if has_new_place_result:
+        cards_by_ref = {
+            str(card.get("candidate_ref") or ""): card
+            for card in candidate_cards
+            if str(card.get("candidate_ref") or "")
+        }
+        explicit_bindings = getattr(synth_metrics, "presented_candidate_bindings", None)
+        presented_refs: list[str] = []
+        presented_ordinals: dict[str, int] = {}
+        if explicit_bindings is None:
+            # Compatibility seam for older provider doubles/tests. Real
+            # Synthesizer responses always set [] or explicit bindings, so
+            # plain-text name matches cannot become production authority.
+            for ordinal, reference in enumerate(synth_metrics.presented_candidate_refs, start=1):
+                reference = str(reference or "")
+                if reference in cards_by_ref and reference not in presented_ordinals:
+                    presented_refs.append(reference)
+                    presented_ordinals[reference] = ordinal
+        else:
+            seen_refs: set[str] = set()
+            seen_ordinals: set[int] = set()
+            valid = True
+            for item in explicit_bindings:
+                if not isinstance(item, dict):
+                    valid = False
+                    break
+                reference = str(item.get("candidate_ref") or "")
+                ordinal = item.get("presented_ordinal")
+                if (
+                    reference not in cards_by_ref
+                    or isinstance(ordinal, bool)
+                    or not isinstance(ordinal, int)
+                    or not 1 <= ordinal <= len(candidate_cards)
+                    or reference in seen_refs
+                    or ordinal in seen_ordinals
+                ):
+                    valid = False
+                    break
+                seen_refs.add(reference)
+                seen_ordinals.add(ordinal)
+                presented_ordinals[reference] = ordinal
+            if valid and set(seen_ordinals) != set(range(1, len(seen_ordinals) + 1)):
+                valid = False
+            if valid:
+                presented_refs = [
+                    reference
+                    for reference, _ordinal in sorted(
+                        presented_ordinals.items(), key=lambda pair: pair[1],
+                    )
+                ]
+            else:
+                presented_refs = []
+                presented_ordinals = {}
+        replace_presented_candidates(
+            ctx.user_id,
+            ctx.room_id,
+            [cards_by_ref[reference] for reference in presented_refs],
+            presented_ordinals=presented_ordinals,
+        )
     presentation_messages = synth_metrics.presentation_messages or [reply]
     presentation_blocks = _resolve_presentation_blocks(
         synth_metrics.presentation_blocks,

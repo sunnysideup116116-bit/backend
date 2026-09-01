@@ -95,6 +95,7 @@ class GuardedReadExecutor:
     global_read_count: dict[str, int] | None = None
     global_max_reads: int | None = None
     create_confirmation: Callable[..., Any] | None = None
+    supersede_confirmation: Callable[..., Any] | None = None
     print_llm_metrics: Callable[[str, Any], Any] | None = None
     semantic_runner_override: Callable[..., Any] | None = None
     runtime_state: dict[str, Any] = field(default_factory=dict)

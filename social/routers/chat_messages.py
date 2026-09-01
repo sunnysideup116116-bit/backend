@@ -10,16 +10,21 @@ from services.ai_room_service import (
     delete_room as delete_ai_room,
     get_room as get_ai_room,
     list_rooms as list_ai_rooms,
+    mark_room_read,
     maybe_backfill_title,
     rename_room as rename_ai_room,
 )
 from services.ayue_agent.onboarding import (
     complete_public_ayue_onboarding, public_ayue_onboarding_state,
 )
-from services.assessment_session_service import assessment_public_state
+from services.assessment_session_service import assessment_public_state_for_room
 from services.ayue_agent.public_relationship_projection import mentioned_contact_refs
 from services.chat_service import generate_room_id
 from services.match_state_service import verified_accepted_match_query
+from services.risk_block_service import (
+    RiskBlockServiceUnavailable,
+    risk_block_service,
+)
 
 
 router = APIRouter()
@@ -30,7 +35,13 @@ def _find_accepted_match(user_id: str, other_id: str):
 
 
 @router.get("/messages/{contact_id}")
-def get_messages(contact_id: str, user_id: str, ai_room_id: str | None = None):
+def get_messages(
+    contact_id: str,
+    user_id: str,
+    ai_room_id: str | None = None,
+    limit: int | None = None,
+    before: float | None = None,
+):
     # Multi-room AI surface: an explicit AI room id overrides the derived
     # legacy room. Ownership is enforced; only AI rooms take this path.
     if ai_room_id:
@@ -40,13 +51,27 @@ def get_messages(contact_id: str, user_id: str, ai_room_id: str | None = None):
         room_id = ai_room_id
         # Retry pending title generation when the user reopens the room.
         maybe_backfill_title(room_id, user_id)
+        # Opening the room clears its NEW flag so the badge disappears.
+        mark_room_read(room_id, user_id)
     else:
         room_id = generate_room_id(user_id, contact_id)
 
     is_ai_contact = contact_id == "ai_assistant"
-    messages = list(messages_coll.find(
-        {"room_id": room_id, "is_blocked": {"$ne": True}}, {"_id": 0},
-    ).sort("timestamp", 1))
+    query: dict = {"room_id": room_id, "is_blocked": {"$ne": True}}
+    if before is not None:
+        query["timestamp"] = {"$lt": before}
+    cursor = messages_coll.find(query, {"_id": 0}).sort("timestamp", -1)
+    if limit is not None and limit > 0:
+        # Fetch one extra message to detect whether older history exists.
+        fetched = list(cursor.limit(limit + 1))
+        has_more = len(fetched) > limit
+        # Sort is descending (newest first); re-reverse so the client always
+        # receives messages in chronological (oldest → newest) order.
+        messages = list(reversed(fetched[:limit]))
+    else:
+        # Legacy clients expect ascending order without a limit.
+        messages = list(cursor)[::-1]
+        has_more = False
     user_doc = profiles_coll.find_one({"user_id": user_id})
     active_proposal_id = (user_doc or {}).get("active_match_proposal_id")
     date_coordination = None
@@ -58,6 +83,7 @@ def get_messages(contact_id: str, user_id: str, ai_room_id: str | None = None):
             established_dates = match_doc.get("established_dates", [])
     payload = {
         "messages": messages,
+        "has_more": has_more,
         "public_ayue_onboarding": (
             public_ayue_onboarding_state(user_id)
             if is_ai_contact and not ai_room_id  # onboarding only in legacy room
@@ -67,10 +93,10 @@ def get_messages(contact_id: str, user_id: str, ai_room_id: str | None = None):
         "date_coordination": date_coordination,
         "established_dates": established_dates,
     }
-    if is_ai_contact and not ai_room_id:
-        # Assessment state is a global user journey; only surfaced in the
-        # legacy room to avoid re-triggering flows in topic rooms.
-        payload.update(assessment_public_state(user_doc or {}))
+    if is_ai_contact:
+        payload.update(assessment_public_state_for_room(
+            user_doc or {}, room_id, include_unscoped=not bool(ai_room_id),
+        ))
     if ai_room_id:
         room = get_ai_room(room_id, user_id) or {}
         payload["ai_room"] = room
@@ -85,9 +111,24 @@ def complete_public_ayue_onboarding_route(req: ClearRequest):
 
 @router.get("/contacts")
 def get_contacts(user_id: str):
+    try:
+        excluded_user_ids = risk_block_service.excluded_user_ids(user_id)
+    except RiskBlockServiceUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="安全關係狀態暫時無法確認",
+        ) from exc
     user_doc = profiles_coll.find_one({"user_id": user_id})
     ai_locked = user_doc.get("ai_chat_locked", False) if user_doc else False
-    matches = list(matches_coll.find(verified_accepted_match_query(user_id)))
+    matches = [
+        match_doc
+        for match_doc in matches_coll.find(verified_accepted_match_query(user_id))
+        if (
+            match_doc["to_user"]
+            if match_doc["from_user"] == user_id
+            else match_doc["from_user"]
+        ) not in excluded_user_ids
+    ]
     contacts = [{
         "id": "ai_assistant",
         "name": "阿月",
@@ -141,7 +182,10 @@ class DeleteAiRoomRequest(BaseModel):
 
 @router.get("/ai_rooms")
 def list_ai_rooms_route(user_id: str):
-    return {"rooms": list_ai_rooms(user_id)}
+    profile = profiles_coll.find_one(
+        {"user_id": user_id}, {"_id": 0, "agentic_assessment_session": 1},
+    ) or {}
+    return {"rooms": list_ai_rooms(user_id, assessment_profile=profile)}
 
 
 @router.post("/ai_rooms")

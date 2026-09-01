@@ -115,7 +115,8 @@ class AyueMapsToolsTests(unittest.TestCase):
         payload = {
             "anchor_label": "高雄市鹽埕區", "distance_basis": "straight_line",
             "attribution": "Google Maps", "attribution_url": "https://www.google.com/maps",
-            "places": [{"name": "示範火鍋店", "category": "restaurant", "distance_m": 350,
+            "places": [{"name": "示範火鍋店", "provider_name": "示範火鍋店｜高雄美食推薦",
+                        "category": "restaurant", "distance_m": 350,
                         "address_summary": "鹽埕區", "map_url": "https://www.google.com/maps/place/x",
                         "provider": "google", "place_id": "ChIJabc"}],
         }
@@ -131,6 +132,7 @@ class AyueMapsToolsTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(google.call_args.kwargs["cuisine"], "火鍋")
         self.assertEqual(google.call_args.kwargs["radius_m"], 1500)
+        self.assertNotIn("provider_name", result.data["places"][0])
 
     def test_nearby_forwards_only_requested_enrichments_to_google_search(self):
         ctx = AgentTurnContext(
@@ -297,7 +299,8 @@ class AyueMapsToolsTests(unittest.TestCase):
 
     def test_explicit_place_resolution_uses_google_when_enabled(self):
         payload = {
-            "name": "示範餐廳", "category": "restaurant", "distance_m": 0,
+            "name": "示範餐廳", "provider_name": "示範餐廳｜高雄美食推薦",
+            "category": "restaurant", "distance_m": 0,
             "address_summary": "鹽埕區", "map_url": "https://www.google.com/maps/place/example",
             "provider": "google", "place_id": "ChIJexample",
         }
@@ -308,6 +311,7 @@ class AyueMapsToolsTests(unittest.TestCase):
             ))
         self.assertTrue(result.ok)
         self.assertEqual(result.data["place"]["place_id"], "ChIJexample")
+        self.assertNotIn("provider_name", result.data["place"])
         self.assertNotIn("raw", str(result.data))
 
     def test_nearby_google_results_can_carry_photo_url_without_extra_requests(self):

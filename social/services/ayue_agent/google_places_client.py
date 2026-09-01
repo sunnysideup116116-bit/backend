@@ -7,6 +7,7 @@ import math
 import re
 import threading
 import time
+import unicodedata
 from typing import Any, Iterable
 from urllib.parse import urlencode, urlsplit
 
@@ -78,6 +79,53 @@ def google_place_enrichments_enabled() -> bool:
 
 def _clean(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+_PUBLIC_NAME_LINK_RE = re.compile(
+    r"(?:https?://|www\.|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,})",
+    re.IGNORECASE,
+)
+_PUBLIC_NAME_SEO_SUFFIX_RE = re.compile(
+    r"(?:推薦|外送|菜單|訂位|官方|優惠|美食|必吃|best|official|menu|delivery)",
+    re.IGNORECASE,
+)
+
+
+def _public_display_name(value: Any) -> str:
+    """Derive a bounded public label without replacing the provider name.
+
+    Google business names are normally used verbatim. Only clear structural
+    pollution is removed: URL/e-mail metadata or a pipe suffix carrying an
+    obvious discovery/marketing label.
+    The caller retains the separately cleaned canonical provider name.
+    """
+    text = unicodedata.normalize("NFKC", _clean(value, 200))
+    text = "".join(
+        " " if unicodedata.category(char).startswith("C") else char
+        for char in text
+    )
+    text = " ".join(text.split()).strip()
+    if not text:
+        return ""
+
+    segments = [segment.strip(" -–—·•") for segment in re.split(r"[|｜]", text)]
+    segments = [segment for segment in segments if segment]
+    suffix = " ".join(segments[1:])
+    structurally_polluted = bool(
+        _PUBLIC_NAME_LINK_RE.search(text)
+        or (
+            len(segments) >= 2
+            and _PUBLIC_NAME_SEO_SUFFIX_RE.search(suffix)
+        )
+    )
+    if structurally_polluted and segments and not _PUBLIC_NAME_LINK_RE.search(segments[0]):
+        text = segments[0]
+    if _PUBLIC_NAME_LINK_RE.search(text):
+        return ""
+    text = text.strip(" |｜-–—·•")[:80].strip()
+    if not text or not any(char.isalnum() for char in text):
+        return ""
+    return text
 
 
 def _normalize_enrichments(
@@ -373,7 +421,11 @@ def search_nearby_places(
         for item in raw_places[:10]:
             place_id = _clean(item.get("id"), 180)
             display = item.get("displayName") or {}
-            name = _clean(display.get("text") if isinstance(display, dict) else display, 80)
+            provider_name = _clean(
+                display.get("text") if isinstance(display, dict) else display,
+                200,
+            )
+            name = _public_display_name(provider_name)
             location = item.get("location") or {}
             try:
                 item_lat, item_lon = float(location["latitude"]), float(location["longitude"])
@@ -393,6 +445,7 @@ def search_nearby_places(
                 continue
             places.append({
                 "name": name,
+                "provider_name": provider_name,
                 "category": _category(item.get("types") or [], requested),
                 "distance_m": distance_m,
                 "address_summary": _clean(item.get("formattedAddress"), 120),
@@ -465,7 +518,11 @@ def resolve_place(
     item = rows[0] or {}
     place_id = _clean(item.get("id"), 180)
     display = item.get("displayName") or {}
-    name = _clean(display.get("text") if isinstance(display, dict) else display, 80)
+    provider_name = _clean(
+        display.get("text") if isinstance(display, dict) else display,
+        200,
+    )
+    name = _public_display_name(provider_name)
     map_url = _safe_google_maps_url(item.get("googleMapsUri"))
     if not place_id or not name or not map_url:
         _cache_put(cache_key, None, TEXT_SEARCH_TTL_SECONDS)
@@ -473,7 +530,8 @@ def resolve_place(
     types = [str(value) for value in (item.get("types") or [])]
     category = _category(types, ["restaurant", "cafe", "bar", "attraction", "park"])
     place = {
-        "name": name, "category": category, "distance_m": 0,
+        "name": name, "provider_name": provider_name,
+        "category": category, "distance_m": 0,
         "address_summary": _clean(item.get("formattedAddress"), 120), "map_url": map_url,
         "provider": "google", "place_id": place_id, "photo_url": _photo_url(item),
         **_place_enrichment(item, place_enrichments),

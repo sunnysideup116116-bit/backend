@@ -19,7 +19,7 @@ from services.ayue_agent.v3.calendar_drafts import (
     candidate_reference_allowed, clear_draft, get_draft, merge_command,
     public_projection, resolved_target_replaced, save_draft,
 )
-from services.ayue_agent.v3.sub_agents.calendar_agent import _tools_schema
+from services.ayue_agent.v3.sub_agents.calendar_agent import _SYSTEM, _tools_schema
 from services.ayue_agent.v3.sub_agents.calendar_agent import CalendarAgentResult
 from services.ayue_agent.v3.sub_agents.calendar_agent import run as run_calendar_agent
 from services.ayue_agent.v3.contracts import SubTask
@@ -588,6 +588,46 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertEqual(proposals.commands[0].action, "create")
         self.assertNotIn("event_id", proposals.commands[0].model_dump())
 
+    def test_calendar_agent_contract_maps_explicit_arrange_continuation_to_create(self):
+        context = AgentContextSlice(agent="calendar", payload={
+            "message": "第二個好了，幫我安排明天早上五點到六點",
+            "place_reference_resolution": {
+                "reference": "place_ref_0123456789abcdef01234567",
+                "ordinal": 2,
+                "label": "不二 TEA&NO.1",
+                "category": "cafe",
+            },
+            "recent_messages": [{
+                "role": "assistant",
+                "content": "1. 樺達奶茶\n2. 不二 TEA&NO.1\n3. 鹽埕小熊奶茶",
+            }],
+        })
+        result = ToolCallResult(content="", tool_calls=[{
+            "name": "calendar.submit_commands",
+            "arguments": {"commands": [{
+                "action": "create", "title": "不二 TEA&NO.1", "date": "明天",
+                "start_time": "05:00", "end_time": "06:00",
+            }]},
+        }])
+        with patch(
+            "services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools",
+            return_value=result,
+        ) as provider:
+            proposals, _metrics = run_calendar_agent(
+                context, task_brief="解讀上一則候選並建立行程",
+            )
+        self.assertEqual(len(proposals), 0)
+        self.assertEqual(len(proposals.commands), 1)
+        command = proposals.commands[0]
+        self.assertEqual(command.action, "create")
+        self.assertEqual(command.title, "不二 TEA&NO.1")
+        self.assertEqual(command.start_time, "05:00")
+        self.assertEqual(command.end_time, "06:00")
+        system_prompt = provider.call_args.kwargs["system_prompt"]
+        self.assertIn("幫我安排", system_prompt)
+        self.assertIn("只是說「我明天五點想去健身」不代表要寫入", system_prompt)
+        self.assertIn("第一個／第二個／最後一個", _SYSTEM)
+
     def test_calendar_agent_reports_invalid_command_instead_of_silent_no_proposal(self):
         context = AgentContextSlice(agent="calendar", payload={"message": "新增去日本"})
         result = ToolCallResult(content="", tool_calls=[{
@@ -849,6 +889,46 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertEqual(result.plans[0].form["date"], "2026-08-10")
         self.assertEqual(result.plans[0].form["start_time"], "08:00")
         self.assertEqual(result.plans[0].form["end_time"], "10:00")
+
+    def test_create_relative_and_explicit_conflicting_dates_fail_closed(self):
+        """A conflicting date pair must not be silently canonicalized."""
+        ctx = SimpleNamespace(
+            user_id="owner",
+            message="明天（2026/08/28）17:00 到 18:00 幫我安排",
+            clock=SimpleNamespace(
+                local_date="2026-08-28",
+                temporal_references={"明天": "2026-08-29"},
+            ),
+        )
+        command = CalendarCommand(
+            action="create", title="晚餐", date="明天",
+            start_time="17:00", end_time="18:00",
+        )
+        canonical, error = canonicalize_calendar_command(ctx, command)
+        self.assertEqual(canonical.date, "明天")
+        self.assertIn("相對日期與明確日期", error or "")
+        self.assertIn("2026-08-29", error or "")
+        self.assertIn("2026-08-28", error or "")
+
+    def test_create_two_relative_dates_can_form_explicit_typed_range(self):
+        ctx = SimpleNamespace(
+            user_id="owner",
+            message="明天到後天安排旅行",
+            clock=SimpleNamespace(
+                local_date="2026-08-28",
+                temporal_references={
+                    "明天": "2026-08-29", "後天": "2026-08-30",
+                },
+            ),
+        )
+        command = CalendarCommand(
+            action="create", title="旅行", date="明天", end_date="後天",
+            start_time="09:00", end_time="18:00",
+        )
+        canonical, error = canonicalize_calendar_command(ctx, command)
+        self.assertIsNone(error)
+        self.assertEqual(canonical.date, "2026-08-29")
+        self.assertEqual(canonical.end_date, "2026-08-30")
 
     def test_numeric_dates_use_closed_grammar_and_authoritative_clock(self):
         ctx = SimpleNamespace(

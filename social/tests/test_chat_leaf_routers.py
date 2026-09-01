@@ -6,7 +6,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from models import CalendarActionRequest, ChatRequest, RelationshipGameRequest
-from routers.chat_messages import get_messages
+from routers.chat_messages import get_messages, list_ai_rooms_route
 from routers.chat_onboarding import chat_endpoint
 from routers.demo import reset_db_state
 from routers.proactive import proactive_check
@@ -18,8 +18,18 @@ from routers.frontend import serve_frontend_image
 
 
 class _Cursor(list):
-    def sort(self, *_args):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sort_calls = []
+
+    def sort(self, key=None, direction=None):
+        self.sort_calls.append((key, direction))
+        if direction == -1 and key:
+            list.sort(self, key=lambda item: item.get(key, 0) or 0, reverse=True)
         return self
+
+    def limit(self, count):
+        return _Cursor(self[:count])
 
 
 class ChatLeafRouterTests(unittest.TestCase):
@@ -102,22 +112,114 @@ class ChatLeafRouterTests(unittest.TestCase):
         messages = _Cursor([{"sender_id": "ai_assistant", "content": "哈囉"}])
         with patch("routers.chat_messages.generate_room_id", return_value="room"), \
              patch("routers.chat_messages.messages_coll.count_documents", return_value=0), \
-             patch("routers.chat_messages.save_message") as save, \
              patch("routers.chat_messages.messages_coll.find", return_value=messages), \
              patch("routers.chat_messages.profiles_coll.find_one", return_value={
                  "active_match_proposal_id": "proposal-visible-id",
              }):
             response = get_messages("ai_assistant", "owner")
 
-        self.assertEqual(response, {
-            "messages": list(messages),
-            "active_match_proposal_id": "proposal-visible-id",
-            "date_coordination": None,
-            "established_dates": [],
-        })
-        save.assert_called_once_with(
-            "room", "ai_assistant", "嗨，我是阿月。先跟我聊聊你最近的事；需要時，我再陪你一起牽線。",
-        )
+        self.assertEqual(response["messages"], list(messages))
+        self.assertFalse(response["has_more"])
+        self.assertEqual(response["active_match_proposal_id"], "proposal-visible-id")
+        self.assertIsNone(response["date_coordination"])
+        self.assertEqual(response["established_dates"], [])
+        self.assertEqual(response["public_ayue_onboarding"]["version"], 1)
+        self.assertIn("嗨，我是阿月。", response["public_ayue_onboarding"]["messages"][0])
+
+    def test_ai_history_pagination_returns_has_more_when_older_messages_exist(self):
+        messages = _Cursor([{"sender_id": "ai_assistant", "content": f"msg-{i}"} for i in range(31)])
+        with patch("routers.chat_messages.generate_room_id", return_value="room"), \
+             patch("routers.chat_messages.messages_coll.count_documents", return_value=0), \
+             patch("routers.chat_messages.messages_coll.find", return_value=messages) as find, \
+             patch("routers.chat_messages.profiles_coll.find_one", return_value={}):
+            response = get_messages("ai_assistant", "owner", limit=30)
+
+        self.assertEqual(len(response["messages"]), 30)
+        self.assertTrue(response["has_more"])
+        query = find.call_args.args[0]
+        self.assertEqual(query["room_id"], "room")
+        self.assertNotIn("timestamp", query)
+        self.assertEqual(messages.sort_calls, [("timestamp", -1)])
+
+    def test_ai_history_pagination_returns_newest_messages_in_chronological_order(self):
+        messages = _Cursor([{"sender_id": "ai_assistant", "content": f"msg-{i}", "timestamp": i} for i in range(31)])
+        with patch("routers.chat_messages.generate_room_id", return_value="room"), \
+             patch("routers.chat_messages.messages_coll.count_documents", return_value=0), \
+             patch("routers.chat_messages.messages_coll.find", return_value=messages), \
+             patch("routers.chat_messages.profiles_coll.find_one", return_value={}):
+            response = get_messages("ai_assistant", "owner", limit=30)
+
+        # The last page holds the newest messages, oldest → newest.
+        contents = [m["content"] for m in response["messages"]]
+        self.assertEqual(contents[0], "msg-1")
+        self.assertEqual(contents[-1], "msg-30")
+        self.assertTrue(response["has_more"])
+
+    def test_ai_history_pagination_before_filters_by_timestamp(self):
+        messages = _Cursor([{"sender_id": "ai_assistant", "content": "older"}])
+        with patch("routers.chat_messages.generate_room_id", return_value="room"), \
+             patch("routers.chat_messages.messages_coll.count_documents", return_value=0), \
+             patch("routers.chat_messages.messages_coll.find", return_value=messages) as find, \
+             patch("routers.chat_messages.profiles_coll.find_one", return_value={}):
+            response = get_messages("ai_assistant", "owner", limit=30, before=1234.5)
+
+        self.assertEqual(len(response["messages"]), 1)
+        self.assertFalse(response["has_more"])
+        query = find.call_args.args[0]
+        self.assertEqual(query["timestamp"], {"$lt": 1234.5})
+        self.assertEqual(messages.sort_calls, [("timestamp", -1)])
+
+    def test_topic_room_history_restores_only_its_own_deep_assessment(self):
+        messages = _Cursor([])
+        profile = {"agentic_assessment_session": {
+            "session_id": "assessment-a", "kind": "deep_profile",
+            "status": "active", "revision": 2,
+            "room_id": "ai_room::owner::a",
+        }}
+        with patch("routers.chat_messages.get_ai_room", return_value={"room_id": "ai_room::owner::a"}), \
+             patch("routers.chat_messages.maybe_backfill_title"), \
+             patch("routers.chat_messages.mark_room_read"), \
+             patch("routers.chat_messages.messages_coll.find", return_value=messages), \
+             patch("routers.chat_messages.profiles_coll.find_one", return_value=profile):
+            response = get_messages(
+                "ai_assistant", "owner", ai_room_id="ai_room::owner::a",
+            )
+
+        self.assertEqual(response["assessment_state"], "active")
+        self.assertEqual(response["assessment_kind"], "deep_profile")
+        self.assertEqual(response["assessment_revision"], 2)
+
+    def test_other_topic_room_does_not_restore_someone_elses_assessment(self):
+        messages = _Cursor([])
+        profile = {"agentic_assessment_session": {
+            "session_id": "assessment-a", "kind": "deep_profile",
+            "status": "active", "revision": 2,
+            "room_id": "ai_room::owner::a",
+        }}
+        with patch("routers.chat_messages.get_ai_room", return_value={"room_id": "ai_room::owner::b"}), \
+             patch("routers.chat_messages.maybe_backfill_title"), \
+             patch("routers.chat_messages.mark_room_read"), \
+             patch("routers.chat_messages.messages_coll.find", return_value=messages), \
+             patch("routers.chat_messages.profiles_coll.find_one", return_value=profile):
+            response = get_messages(
+                "ai_assistant", "owner", ai_room_id="ai_room::owner::b",
+            )
+
+        self.assertIsNone(response["assessment_state"])
+        self.assertIsNone(response["assessment_kind"])
+
+    def test_room_list_receives_the_profile_assessment_projection(self):
+        profile = {"agentic_assessment_session": {
+            "session_id": "assessment-a", "kind": "deep_profile",
+            "status": "active", "revision": 2,
+            "room_id": "ai_room::owner::a",
+        }}
+        with patch("routers.chat_messages.profiles_coll.find_one", return_value=profile), \
+             patch("routers.chat_messages.list_ai_rooms", return_value=[]) as list_rooms:
+            response = list_ai_rooms_route("owner")
+
+        self.assertEqual(response, {"rooms": []})
+        self.assertEqual(list_rooms.call_args.kwargs["assessment_profile"], profile)
 
     def test_date_cancel_remains_a_thin_domain_service_adapter(self):
         expected = {"status": "cancelled"}

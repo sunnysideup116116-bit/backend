@@ -585,6 +585,9 @@ _FULL_NUMERIC_DATE_RE = re.compile(
 _YEARLESS_NUMERIC_DATE_RE = re.compile(
     r"(?P<month>\d{1,2})(?P<separator>[-/])(?P<day>\d{1,2})"
 )
+_ABSOLUTE_DATE_IN_MESSAGE_RE = re.compile(
+    r"(?<!\d)(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2})(?!\d)"
+)
 
 
 def _clock_local_date(ctx: Any) -> date_value | None:
@@ -664,6 +667,92 @@ def _canonicalize_date(ctx: Any, value: Any) -> tuple[str, str | None]:
     return raw, None
 
 
+def _message_create_date_consistency(
+    ctx: Any, command: CalendarCommand,
+) -> tuple[CalendarCommand, str | None]:
+    """Validate create dates against relative and explicit dates in the turn.
+
+    The clock resolver is server authority for a lone relative expression. If
+    the user writes both a relative and an absolute date, conflicting values
+    are never silently repaired.
+    """
+    if str(getattr(command, "action", "")) != "create":
+        return command, None
+    message = str(getattr(ctx, "message", "") or "")
+    # Some internal callers provide only the clock and typed command. In that
+    # case the command's relative date is the only bounded date evidence
+    # available; production turns always carry the current message.
+    if not message.strip():
+        message = str(getattr(command, "date", "") or "")
+    references = _clock_temporal_references(ctx)
+    absolute_dates: list[str] = []
+    for match in _ABSOLUTE_DATE_IN_MESSAGE_RE.finditer(message):
+        canonical, error = _canonicalize_numeric_date(ctx, match.group(0))
+        if error:
+            return command, error
+        if canonical not in absolute_dates:
+            absolute_dates.append(canonical)
+    # ``TurnClockV1.temporal_references`` contains a bounded vocabulary, not
+    # only expressions that appeared in this message (for example both
+    # ``下週`` and ``下週三`` may be present).  Bind only keys actually present
+    # in the current message, preferring the longest expression so a weekday
+    # is not mistaken for its shorter week prefix.
+    relative_keys = [
+        key for key in references
+        if key and key in message
+    ]
+    relative_keys.sort(key=len, reverse=True)
+    selected_relative_keys: list[str] = []
+    for key in relative_keys:
+        if any(key in selected for selected in selected_relative_keys):
+            continue
+        selected_relative_keys.append(key)
+    relative_dates = list(dict.fromkeys(
+        references[key] for key in selected_relative_keys
+    ))
+    if not relative_dates and not absolute_dates:
+        return command, None
+    if len(relative_dates) > 1:
+        # A bounded multi-day create is valid when the typed command carries
+        # both ends of the range. Otherwise do not guess which relative date
+        # should win.
+        command_dates: list[str] = []
+        for field_name in ("date", "end_date"):
+            raw_date = str(getattr(command, field_name, "") or "").strip()
+            if not raw_date:
+                continue
+            canonical_date, date_error = _canonicalize_date(ctx, raw_date)
+            if date_error:
+                return command, date_error
+            command_dates.append(canonical_date)
+        if len(command_dates) >= 2 and all(value in relative_dates for value in command_dates):
+            return command, None
+        return command, "這次訊息包含多個不同日期，請只提供一個明確日期或日期範圍。"
+    if relative_dates and absolute_dates and any(
+        relative_dates[0] != value for value in absolute_dates
+    ):
+        return command, (
+            f"你同時提供了相對日期與明確日期，但兩者不一致（"
+            f"{relative_dates[0]} 與 {absolute_dates[0]}）；請確認要安排哪一天。"
+        )
+    # Multiple absolute dates can be a legitimate explicit range. The normal
+    # ``date``/``end_date`` command fields remain authoritative for that case;
+    # this consistency check only guards relative-vs-absolute disagreement.
+    if len(absolute_dates) > 1:
+        return command, None
+    expected = absolute_dates[0] if absolute_dates else relative_dates[0]
+    current = str(getattr(command, "date", "") or "").strip()
+    if not current or (not absolute_dates and current != expected):
+        return command.model_copy(update={"date": expected}), None
+    if absolute_dates and current:
+        canonical_current, current_error = _canonicalize_date(ctx, current)
+        if current_error:
+            return command, current_error
+        if canonical_current != expected:
+            return command.model_copy(update={"date": expected}), None
+    return command, None
+
+
 _SELECTOR_TIME_RE = re.compile(r"^(?P<hour>\d{1,2}):(?P<minute>\d{2})$")
 
 
@@ -715,6 +804,13 @@ def canonicalize_calendar_command(
     This helper is shared by Scheduler draft persistence and preflight so a
     resolvable date never remains as authority-free natural language state.
     """
+    # Check the raw command before canonicalizing it so a relative/absolute
+    # conflict returns both user-supplied values untouched. Silent repair is
+    # forbidden for a conflicting create request.
+    original_command, consistency_error = _message_create_date_consistency(ctx, command)
+    if consistency_error:
+        return original_command, consistency_error
+    command = original_command
     updates: dict[str, Any] = {}
     for field_name in ("date", "end_date"):
         raw_date = getattr(command, field_name)
@@ -731,9 +827,9 @@ def canonicalize_calendar_command(
             return command, selector_error
         if selector != command.target_selector:
             updates["target_selector"] = selector
-    if not updates:
-        return command, None
-    return command.model_copy(update=updates), None
+    if updates:
+        command = command.model_copy(update=updates)
+    return command, None
 
 
 def _plan_for_event(

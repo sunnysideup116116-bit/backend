@@ -80,6 +80,36 @@ class V3WriteExecutorsTests(unittest.TestCase):
         self.assertIn("互相接受", reply)
         self.assertEqual(code, "stale_revision")
 
+    def test_decide_active_event_invitation_uses_server_bound_revision(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        turn.active_event_invitation = {
+            "user_can_decide": True, "proposal_revision": 7, "event_title": "港邊市集",
+        }
+        with patch("services.ayue_agent.v3.write_executors.decide_active_event_invitation",
+                   return_value={"status": "success"}) as decide:
+            ok, reply, code = execute_write(
+                "match.decide_active_event_invitation", {"decision": "interested"},
+                ctx, turn, "run1", 0, payload={"proposal_revision": 7},
+            )
+        self.assertTrue(ok)
+        self.assertIsNone(code)
+        self.assertEqual(decide.call_args.kwargs["user_id"], "owner")
+        self.assertEqual(decide.call_args.kwargs["expected_revision"], 7)
+
+    def test_decide_active_event_invitation_rejects_stale_payload_before_write(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        turn.active_event_invitation = {"user_can_decide": True, "proposal_revision": 8}
+        with patch("services.ayue_agent.v3.write_executors.decide_active_event_invitation") as decide:
+            ok, reply, code = execute_write(
+                "match.decide_active_event_invitation", {"decision": "declined"},
+                ctx, turn, "run1", 0, payload={"proposal_revision": 7},
+            )
+        self.assertFalse(ok)
+        self.assertEqual(code, "event_decision_not_actionable")
+        decide.assert_not_called()
+
     def test_start_assessment_unknown_kind(self):
         ctx = self._ctx()
         ok, reply, code = execute_write(
@@ -102,6 +132,21 @@ class V3WriteExecutorsTests(unittest.TestCase):
             )
         self.assertTrue(ok)
         self.assertEqual(start.call_args.args[1], "big_five")
+
+    def test_start_assessment_binds_the_confirmed_room(self):
+        ctx = self._ctx()
+        with patch("services.ayue_agent.v3.write_executors.start_assessment_session",
+                   return_value={"status": "started", "reply": "我們開始吧"}) as start, \
+             patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.find_one_and_update",
+                   return_value=None), \
+             patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.update_one"):
+            ok, _reply, _code = execute_write(
+                "profile.start_assessment", {"kind": "deep"}, ctx, MagicMock(), "run1", 0,
+                confirmation_id="c-room",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(start.call_args.kwargs["room_id"], "room")
 
     def test_start_assessment_uses_confirmation_id_from_manager_payload(self):
         ctx = self._ctx()
@@ -184,6 +229,21 @@ class V3WritePreflightTests(unittest.TestCase):
         )
         self.assertEqual(payload["data"]["proposal_revision"], 4)
         self.assertIn("小安", reply)
+
+    def test_event_decision_preview_binds_title_and_revision(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        turn.active_event_invitation = {
+            "user_can_decide": True,
+            "proposal_revision": 5,
+            "event_title": "港邊市集",
+        }
+        payload, reply = prepare_write_confirmation(
+            "match.decide_active_event_invitation",
+            {"decision": "interested"}, ctx, turn,
+        )
+        self.assertEqual(payload["data"]["proposal_revision"], 5)
+        self.assertIn("港邊市集", reply)
 
     def test_assessment_unknown_kind_returns_error(self):
         ctx = self._ctx()

@@ -15,7 +15,7 @@ from services.ayue_agent.tools import execute_tool
 
 class AyueAgentRegistryTests(unittest.TestCase):
     def test_every_write_tool_declares_confirmation(self):
-        self.assertEqual(len(SIDE_EFFECT_TOOLS), 5)
+        self.assertEqual(len(SIDE_EFFECT_TOOLS), 6)
         for tool_name in SIDE_EFFECT_TOOLS:
             spec = TOOL_REGISTRY[tool_name]
             self.assertEqual(spec.risk, ToolRisk.WRITE)
@@ -54,6 +54,17 @@ class AyueAgentRegistryTests(unittest.TestCase):
         self.assertEqual(arguments, {"decision": "interested"})
         with self.assertRaises(Exception):
             executor_arguments_for_turn(spec, [], {"decision": "interested", "proposal_id": "nope"})
+
+    def test_event_invitation_decision_has_no_planner_owned_identity_fields(self):
+        spec = TOOL_REGISTRY["match.decide_active_event_invitation"]
+        self.assertEqual(spec.risk, ToolRisk.WRITE)
+        self.assertTrue(spec.requires_confirmation)
+        arguments = executor_arguments_for_turn(spec, [], {"decision": "declined"})
+        self.assertEqual(arguments, {"decision": "declined"})
+        with self.assertRaises(Exception):
+            executor_arguments_for_turn(spec, [], {
+                "decision": "declined", "match_id": "planner-must-not-own-this"
+            })
 
     def test_calendar_find_accepts_an_omitted_or_null_date_hint(self):
         spec = TOOL_REGISTRY["calendar.find_my_event"]

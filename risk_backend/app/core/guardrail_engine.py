@@ -4,6 +4,7 @@ Guardrail 檢測引擎 - 支援多 provider
 - llm_classifier：用 Llama Guard 風格 prompt 餵任何 OpenAI 相容 endpoint
 """
 
+import asyncio
 import os
 
 from dotenv import load_dotenv
@@ -77,9 +78,9 @@ class GuardrailEngine:
 
         # 2. 走 provider 對應的第二道
         if self._provider == "llm_classifier" and self._classifier_adapter:
-            result = self._check_via_classifier(text)
+            result = await asyncio.to_thread(self._check_via_classifier, text)
         else:
-            result = self._check_via_openai_moderation(text)
+            result = await asyncio.to_thread(self._check_via_openai_moderation, text)
 
         result["flagged_words"] = flagged_words
         result.setdefault("degraded", False)

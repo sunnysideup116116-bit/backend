@@ -5,11 +5,64 @@ from __future__ import annotations
 import re
 import time
 
-from database import profiles_coll
-from services.profile_skills import process_profile_message, profile_skills_mode_for_user
+from bson.objectid import ObjectId
+
+from database import messages_coll, profiles_coll
+from services.profile_skills import PROFILE_RUNS, process_profile_message, profile_skills_mode_for_user
 
 
 PROFILE_PROCESS_TTL_SECONDS = 30
+
+
+def queue_profile_coverage(
+    background_tasks, user_id: str, room_id: str, message_ids: list[str],
+) -> dict:
+    """Queue only unclaimed owner messages before compaction hides old turns."""
+    mode = profile_skills_mode_for_user(user_id)
+    result = {
+        "version": "profile-coverage-v1", "status": "ok", "requeued_count": 0,
+    }
+    if mode == "off":
+        return {**result, "status": "disabled"}
+    expected_room = "_".join(sorted([str(user_id), "ai_assistant"]))
+    if str(room_id) != expected_room:
+        return {**result, "status": "invalid_scope"}
+    safe_ids: list[ObjectId] = []
+    for value in list(message_ids or [])[:20]:
+        try:
+            safe_ids.append(ObjectId(str(value)))
+        except Exception:
+            continue
+    if not safe_ids:
+        return result
+    try:
+        sources = list(messages_coll.find(
+            {"_id": {"$in": safe_ids}, "room_id": expected_room, "sender_id": user_id},
+            {"content": 1, "metadata.owner_raw_content": 1},
+        ))
+        claimed = {
+            str(row.get("message_id") or "")
+            for row in PROFILE_RUNS.find(
+                {"message_id": {"$in": [str(value) for value in safe_ids]}, "user_id": user_id},
+                {"message_id": 1},
+            )
+        }
+    except Exception:
+        return {**result, "status": "storage_unavailable"}
+    requeued = 0
+    for source in sources:
+        message_id = str(source.get("_id") or "")
+        if not message_id or message_id in claimed:
+            continue
+        owner_message = ((source.get("metadata") or {}).get("owner_raw_content"))
+        owner_message = owner_message if isinstance(owner_message, str) else source.get("content")
+        if not isinstance(owner_message, str):
+            continue
+        background_tasks.add_task(
+            process_profile_message, user_id, owner_message, message_id, "global", None,
+        )
+        requeued += 1
+    return {**result, "requeued_count": requeued}
 
 
 def _safe_progress_token(value: str | None) -> str | None:

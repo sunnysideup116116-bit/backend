@@ -344,3 +344,45 @@ def test_spread_unknown_mode_falls_back_to_count(spread):
 def test_spread_all_zero_is_safe(spread):
     assert spread([0.0] * 5, 'effdim') == 0.0
     assert spread([0.0] * 5, 'count', 0.10) == 0.0
+
+
+# --- effdim 先套 noise_floor（整合進度確認 2026-08-23 第 1 項）---
+# 參與比是尺度不變的：所有維度等比衰退時 spread 完全不動，於是 composite 被鎖在
+# W_SPREAD × spread 的地板上，任何曾經多維分散的對話永遠回不到 safe。
+# 修正：effdim 分支先以 noise_floor 過濾掉衰退殘影，再算參與比。
+
+def test_spread_effdim_applies_noise_floor(spread):
+    """effdim 應先濾掉低於 noise_floor 的維度，只算活躍訊號。
+
+    [0.70, 0.30, 0.20, 0.10, 0.05] 全部 ×0.9 五次後，殘影會被 noise_floor
+    清掉，只留真正活躍的訊號——避免衰退殘影把 spread 鎖在地板上。
+    """
+    # 全部 0.01（等於沒風險）不過 noise_floor=0.05 → active 空 → spread=0
+    assert spread([0.01] * 5, 'effdim', 0.05) == 0.0
+    # 只有一個 0.30 過門檻 → spread = 0.2（集中）
+    assert spread([0.30, 0.01, 0.01, 0.01, 0.01], 'effdim', 0.05) == pytest.approx(0.2)
+    # 兩個過門檻 → 參與比對應 2 個有效維度
+    assert spread([0.30, 0.25, 0.01, 0.01, 0.01], 'effdim', 0.05) == pytest.approx(0.4, abs=0.01)
+
+
+def test_spread_effdim_noise_floor_clears_decay_residue(spread):
+    """五個維度全部只有 0.01 時，未套 noise_floor 的 spread=1.000 會判 warning；
+    套了之後 spread=0，等同無風險——修正後同一組值在 count 模式下也是 safe。
+    """
+    tiny = [0.01] * 5
+    # 不過門檻（noise_floor=0）時，參與比=1.000，會拿滿 W_SPREAD 權重
+    assert spread(tiny, 'effdim', 0.0) == pytest.approx(1.0)
+    # 過門檻後殘影被清掉
+    assert spread(tiny, 'effdim', 0.05) == 0.0
+
+
+def test_spread_effdim_preserves_real_signal(spread):
+    """真實訊號幾乎不變：0.576 → 0.537，只有衰退殘影被清掉，不傷真實分散。"""
+    real = [0.70, 0.30, 0.20, 0.10, 0.05]
+    # 不過門檻（全部都算）
+    without_floor = spread(real, 'effdim', 0.0)
+    # 過 0.05 門檻（0.05 不 > 0.05，被濾掉）→ 只剩 4 個維度
+    with_floor = spread(real, 'effdim', 0.05)
+    # 真實訊號的 spread 只微降，不會被錯誤清零
+    assert with_floor > 0
+    assert abs(without_floor - with_floor) < 0.05  # 變動在 5% 以內

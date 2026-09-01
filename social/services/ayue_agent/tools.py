@@ -737,6 +737,12 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
                 radius_m=int(arguments.get("radius_m") or 1500),
                 enrichments=arguments.get("enrichments") or [],
             )
+            # Keep Google's canonical business name inside the provider adapter;
+            # only the bounded public label crosses the typed tool boundary.
+            google_places = [
+                {key: value for key, value in place.items() if key != "provider_name"}
+                for place in google_places
+            ]
             data = {
                 "anchor_label": str(point.get("label") or anchor),
                 "distance_basis": "straight_line",
@@ -815,8 +821,12 @@ def _places_resolve(arguments: dict[str, Any]) -> ToolResult:
     # Google resolve carries optional enrichments directly from the same
     # bounded Text Search call; no per-place Details request is added.
     provider = str((place or {}).get("provider") or "openstreetmap")
+    public_place = (
+        {key: value for key, value in place.items() if key != "provider_name"}
+        if isinstance(place, dict) else place
+    )
     return ToolResult(ok=True, data={
-        "found": bool(place), "place": place,
+        "found": bool(public_place), "place": public_place,
         "attribution": "Google Maps" if provider == "google" else "© OpenStreetMap contributors",
         "attribution_url": "https://www.google.com/maps" if provider == "google" else "https://www.openstreetmap.org/copyright",
     })

@@ -46,7 +46,10 @@ def ensure_calendar_indexes() -> None:
         calendar_events_coll.create_index("event_id", unique=True)
         calendar_events_coll.create_index(
             "coordination_id", unique=True,
-            partialFilterExpression={"source_type": "date"},
+            partialFilterExpression={
+                "source_type": "date",
+                "coordination_id": {"$type": "string"},
+            },
         )
         calendar_events_coll.create_index([("participants", 1), ("start_at", 1), ("status", 1)])
         calendar_events_coll.create_index("agent_action_key", unique=True, sparse=True)

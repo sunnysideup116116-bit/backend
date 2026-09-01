@@ -7,12 +7,14 @@ import time
 from bson.objectid import ObjectId
 from pymongo import ReturnDocument
 
-from database import matches_coll, messages_coll, profiles_coll
+from database import db, matches_coll, messages_coll, profiles_coll
 from services.ayue_agent.proactive_care import consume_proactive_delivery
-from services.chat_service import generate_room_id, save_message
-from services.ai_room_service import most_recent_ai_room
+from services.chat_service import generate_proposal_ai_room_id, generate_room_id, save_message
+from services.ai_room_service import create_proposal_room, most_recent_ai_room
 from services.mediator_event_service import claim_next_mediator_event
 from services.match_reason_service import reason_for_viewer
+from services.event_card_projection import public_event_card
+from services.proposal_namespace import namespace_for_document
 from services.relationship_engagement_service import (
     find_accepted_match,
     generate_mediator_private_room_id,
@@ -28,6 +30,37 @@ RELATIONSHIP_EVENT_TYPES = {
     "mutual_interest", "probe_question", "date_coordination_request", "date_coordination_result",
 }
 PROPOSAL_EVENT_TYPES = {"incoming_match_intro", "match_proposal", "incoming_match_interest"}
+AUTOMATIC_PROPOSAL_SOURCES = {
+    "automatic", "legacy_automatic", "legacy-proactive", "post_chat", "three_message",
+}
+
+
+def _proposal_source(match: dict) -> str:
+    source = str(match.get("proposal_source") or "").strip().lower()
+    search_job_id = str(match.get("search_job_id") or "").strip()
+    if search_job_id:
+        job = db["match_search_jobs"].find_one(
+            {"job_id": search_job_id}, {"_id": 0, "source": 1},
+        ) or {}
+        job_source = str(job.get("source") or "").strip().lower()
+        if job_source:
+            return job_source
+    return source
+
+
+def _expire_automatic_proposal(match: dict) -> None:
+    """Hide legacy automatic proposals without expiring an actionable proposal."""
+    matches_coll.update_one(
+        {"_id": match["_id"], "status": {"$in": ["draft", "pending"]}},
+        {
+            "$set": {
+                "proposal_suppressed": True,
+                "suppressed_at": time.time(),
+                "suppressed_reason": "legacy_automatic_source",
+            },
+            "$unset": {"live_participants": ""},
+        },
+    )
 
 
 def proactive_check(user_id: str, conversation_active: bool = False) -> dict:
@@ -80,6 +113,7 @@ def _metadata(event: dict) -> dict:
         "event_id": event.get("event_id"), "event_type": event.get("type", "mediator_message"),
         "match_id": event.get("match_id"), "other_id": event.get("other_id"),
         "probe_id": event.get("probe_id"), "proposal_role": event.get("proposal_role"),
+        "proposal_namespace": event.get("proposal_namespace"),
         "matches": event.get("matches", []), "actions": event.get("actions", []),
         "media": event.get("media"),
     }
@@ -172,8 +206,6 @@ def _deliver_relationship_event(
 
 def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> dict:
     event_type = event.get("type", "mediator_message")
-    room_id = most_recent_ai_room(user_id)
-    message_type = "mediator_card" if event_type in {"match_proposal", "incoming_match_interest"} else "text"
     if event_type in PROPOSAL_EVENT_TYPES:
         live_match = None
         if event.get("match_id"):
@@ -186,6 +218,9 @@ def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> 
                 pass
         if not live_match:
             return {"has_new": False, "stale": True}
+        if _proposal_source(live_match) in AUTOMATIC_PROPOSAL_SOURCES:
+            _expire_automatic_proposal(live_match)
+            return {"has_new": False, "stale": True, "automatic_proposal_suppressed": True}
         viewer_reason = reason_for_viewer(live_match, user_id)
         if not viewer_reason:
             viewer_reason = "我找到一位可能適合你的人，想先問問你願不願意認識對方。"
@@ -193,16 +228,38 @@ def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> 
             "match_id": str(live_match["_id"]),
             "viewer_reason": viewer_reason,
             "reason_version": str(live_match.get("reason_version") or "legacy"),
+            "proposal_namespace": namespace_for_document(live_match),
+            "proposal_revision": int(live_match.get("proposal_revision", 0) or 0),
         }
+        event_card = public_event_card(live_match)
+        if event_card:
+            public_match["event"] = event_card
         # Rebuild proposal metadata from the canonical match at delivery time.
         # Queued events cannot smuggle stale profile snippets, the opposite
         # direction reason, or participant identifiers into the public card.
         if event_type != "incoming_match_intro":
             message_metadata["other_id"] = None
             message_metadata["matches"] = [public_match]
+        match_id = str(live_match["_id"])
+        # Proposals get their own dedicated AI room so the default 找阿月配對
+        # room is never interrupted by incoming matchmaking events.
+        create_proposal_room(
+            user_id,
+            match_id,
+            event.get("message", "阿月有一則新的媒合消息。"),
+            metadata=message_metadata,
+            event_key=event.get("event_key") or f"delivery:{event.get('event_id') or event_type}:{match_id}",
+        )
+        return {
+            "has_new": True, "surface": "global_mediator", "message": event.get("message"),
+            "type": event_type, "matches": message_metadata.get("matches", []),
+            "metadata": message_metadata, "proposal_room_id": generate_proposal_ai_room_id(user_id, match_id),
+            "debug_info": event.get("debug_info", []),
+        }
+    room_id = most_recent_ai_room(user_id)
     save_message(
         room_id, "ai_assistant", event.get("message", "阿月有一則新的媒合消息。"),
-        message_type=message_type, metadata=message_metadata,
+        message_type="text", metadata=message_metadata,
     )
     return {
         "has_new": True, "surface": "global_mediator", "message": event.get("message"),

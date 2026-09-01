@@ -1,4 +1,5 @@
 .env
+db_setup/backups/
 __pycache__/
 venv/
 *.pyc

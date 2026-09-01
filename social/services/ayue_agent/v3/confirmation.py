@@ -17,12 +17,15 @@ class ConfirmationRecord(BaseModel):
     agent_name: str
     tool_name: str
     arguments: dict[str, Any]
-    status: str = "pending"
+    status: str = "prepared"
     created_at: float
     expires_at: float
     origin_run_id: str
     request_fingerprint: str
-    preview_fingerprint: str
+    preview_fingerprint: str = ""
+    expected_persisted_fingerprint: str = ""
+    presented_message_id: str | None = None
+    presented_at: float | None = None
 
 
 class ConfirmationManager:
@@ -50,10 +53,11 @@ class ConfirmationManager:
             origin_run_id=origin_run_id,
         )
         preview_fingerprint = hashlib.sha256(preview.encode("utf-8")).hexdigest()
+        calendar_confirmation = str(tool_name or "").startswith("calendar.")
         # A plain "confirm" reply must have exactly one visible target.  A new
         # preview therefore supersedes every older pending preview for the user.
         self._coll.update_many(
-            {"user_id": user_id, "status": "pending"},
+            {"user_id": user_id, "status": {"$in": ["prepared", "pending"]}},
             {"$set": {"status": "superseded", "superseded_at": now}},
         )
         self._coll.insert_one({
@@ -63,14 +67,78 @@ class ConfirmationManager:
             "tool_name": tool_name,
             "arguments": arguments,
             "payload": safe_payload,
-            "status": "pending",
+            # Calendar previews must pass through the persisted-message
+            # presentation gate. Other confirmation domains retain the
+            # historical create->pending behavior and therefore do not depend
+            # on the Public Chat persistence callback.
+            "status": "prepared" if calendar_confirmation else "pending",
             "created_at": now,
             "expires_at": now + ttl_seconds,
             "origin_run_id": origin_run_id,
             "request_fingerprint": request_fingerprint,
-            "preview_fingerprint": preview_fingerprint,
+            # This is only the server preview source digest.  The public
+            # preview fingerprint is assigned from persisted assistant text
+            # by mark_presented after final normalization.
+            "preview_source_fingerprint": preview_fingerprint,
+            "preview_fingerprint": "" if calendar_confirmation else preview_fingerprint,
+            "expected_persisted_fingerprint": "",
+            "presented_message_id": None,
+            "presented_at": None,
         })
         return confirmation_id
+
+    def bind_final_preview(
+        self, *, user_id: str, origin_run_id: str, final_content: str,
+    ) -> bool:
+        """Bind the normalized final reply before it is persisted."""
+        content = str(final_content or "")
+        if not origin_run_id.strip() or not content.strip():
+            return False
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        try:
+            result = self._coll.update_one(
+                {
+                    "user_id": user_id,
+                    "origin_run_id": origin_run_id,
+                    "status": "prepared",
+                },
+                {"$set": {"expected_persisted_fingerprint": digest}},
+            )
+        except Exception:
+            return False
+        return getattr(result, "modified_count", 0) == 1
+
+    def mark_presented(
+        self, *, user_id: str, origin_run_id: str, message_id: str,
+        persisted_content: str,
+    ) -> bool:
+        """Activate a prepared confirmation only for saved final text."""
+        content = str(persisted_content or "")
+        message_key = str(message_id or "").strip()
+        if not origin_run_id.strip() or not message_key or not content.strip():
+            return False
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        now = time.time()
+        try:
+            result = self._coll.update_one(
+                {
+                    "user_id": user_id,
+                    "origin_run_id": origin_run_id,
+                    "status": "prepared",
+                    "expected_persisted_fingerprint": digest,
+                },
+                {
+                    "$set": {
+                        "status": "pending",
+                        "preview_fingerprint": digest,
+                        "presented_message_id": message_key,
+                        "presented_at": now,
+                    }
+                },
+            )
+        except Exception:
+            return False
+        return getattr(result, "modified_count", 0) == 1
 
     @staticmethod
     def _request_fingerprint(
@@ -98,7 +166,22 @@ class ConfirmationManager:
                 "status": "pending",
                 "expires_at": {"$gt": now},
             })
-            return list(cursor)
+            return [
+                record for record in cursor
+                if str(record.get("preview_fingerprint") or "")
+                and (
+                    # Calendar confirmations use the persisted-message
+                    # binding. Existing non-Calendar flows may have been
+                    # created before that marker existed; keep those records
+                    # active so assessment and relationship confirmations are
+                    # not silently broken during rollout.
+                    not str(record.get("tool_name") or "").startswith("calendar.")
+                    or (
+                        str(record.get("presented_message_id") or "")
+                        and record.get("presented_at") is not None
+                    )
+                )
+            ]
         except Exception:
             # Confirmation lookup is safety-critical.  On storage failure, an
             # empty projection prevents both stale execution and planner leaks.
@@ -120,9 +203,58 @@ class ConfirmationManager:
             ),
         }]
 
+    def supersede_active(
+        self, *, user_id: str, tool_name: str | None = None,
+        reason: str = "replacement_attempt",
+    ) -> dict[str, Any]:
+        """CAS-supersede one non-executing confirmation.
+
+        Confirmation and correction race on the same status predicate. If the
+        confirmer wins the pending -> executing CAS, this method reports the
+        observed state and never claims that an executing mutation was undone.
+        """
+        query: dict[str, Any] = {
+            "user_id": user_id,
+            # Include executing only to report the non-cancellable race
+            # outcome; the CAS below still permits supersession solely from
+            # prepared/pending states.
+            "status": {"$in": ["prepared", "pending", "executing"]},
+        }
+        if tool_name:
+            query["tool_name"] = tool_name
+        try:
+            candidates = list(self._coll.find(query))
+        except Exception:
+            return {"status": "storage_unavailable"}
+        if not candidates:
+            return {"status": "none"}
+        candidates.sort(key=lambda rec: float(rec.get("created_at", 0) or 0), reverse=True)
+        record = candidates[0]
+        cid = record.get("_id")
+        claim = self._coll.update_one(
+            {
+                "_id": cid,
+                "user_id": user_id,
+                "status": {"$in": ["prepared", "pending"]},
+            },
+            {"$set": {"status": "superseded", "superseded_at": time.time(), "superseded_reason": reason}},
+        )
+        if getattr(claim, "modified_count", 0) == 1:
+            return {"status": "superseded", "confirmation_id": cid}
+        try:
+            latest = list(self._coll.find({"_id": cid, "user_id": user_id}))
+        except Exception:
+            latest = []
+        current_status = str((latest[0] if latest else record).get("status") or "unknown")
+        if current_status == "executing":
+            return {"status": "already_executing", "confirmation_id": cid}
+        if current_status in {"completed", "failed"}:
+            return {"status": "already_completed", "confirmation_id": cid}
+        return {"status": current_status, "confirmation_id": cid}
+
     def cancel_all(self, *, user_id: str) -> int:
         result = self._coll.update_many(
-            {"user_id": user_id, "status": "pending"},
+            {"user_id": user_id, "status": {"$in": ["prepared", "pending"]}},
             {"$set": {"status": "cancelled"}},
         )
         return getattr(result, "modified_count", 0)
@@ -144,6 +276,9 @@ class ConfirmationManager:
         origin_run_id = str(rec.get("origin_run_id") or "")
         stored_fingerprint = str(rec.get("request_fingerprint") or "")
         preview_fingerprint = str(rec.get("preview_fingerprint") or "")
+        presented_message_id = str(rec.get("presented_message_id") or "")
+        presented_at = rec.get("presented_at")
+        requires_persisted_message = tool_name.startswith("calendar.")
         expected_fingerprint = self._request_fingerprint(
             tool_name=tool_name,
             arguments=arguments,
@@ -153,6 +288,10 @@ class ConfirmationManager:
         if (
             not origin_run_id
             or not preview_fingerprint
+            or (
+                requires_persisted_message
+                and (not presented_message_id or presented_at is None)
+            )
             or not stored_fingerprint
             or stored_fingerprint != expected_fingerprint
         ):

@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from services.conversation_compaction_contracts import ConversationSummaryV1
 
 
 class DecisionKind(str, Enum):
@@ -79,14 +80,20 @@ class PublicAgentTurnContext(BaseModel):
     room_id: str
     message: str
     recent_messages: list[dict[str, str]] = Field(default_factory=list)
+    conversation_continuity: ConversationSummaryV1 | None = None
     recent_context: str = ""
     user_location: str = ""
     relevant_memories: list[str] = Field(default_factory=list)
     active_proposal: dict[str, Any] | None = None
+    active_event_invitation: dict[str, Any] | None = None
     latest_match_outcome: dict[str, Any] | None = None
     calendar_draft: dict[str, Any] | None = None
     calendar_recent_reference: dict[str, Any] | None = None
     calendar_recent_mutation: dict[str, Any] | None = None
+    # Only opaque refs and bounded public labels are projected here. Provider
+    # identity remains in the server-owned place reference store.
+    recent_place_candidates: dict[str, Any] | None = None
+    place_reference_resolution: dict[str, Any] | None = None
     recent_context_draft: dict[str, Any] | None = None
     # Public references only. Their executor-side IDs remain on AgentTurnContext.
     mentioned_contacts: list[dict[str, str]] = Field(default_factory=list)
@@ -172,4 +179,3 @@ class AgentResult(BaseModel):
     place_cards: list[dict[str, str]] = Field(default_factory=list)
     presentation_blocks: list[PresentationBlock] = Field(default_factory=list, max_length=12)
     llm_call_metrics: list[dict[str, Any]] = Field(default_factory=list)
-

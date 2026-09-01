@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
@@ -67,6 +68,14 @@ class SynthesizerMetrics:
     llm_requests: list[dict[str, Any]] = field(default_factory=list)
     presentation_messages: list[str] | None = None
     presentation_blocks: list[dict[str, Any]] | None = None
+    # Internal-only ephemeral refs identifying candidates actually presented
+    # in this reply, in public order. Scheduler converts them to persistent
+    # opaque refs; they never enter AgentResult.
+    presented_candidate_refs: list[str] = field(default_factory=list)
+    # ``None`` means a legacy/test provider omitted the explicit binding
+    # channel. A real response uses [] when no safe binding exists; Scheduler
+    # must never infer identity from plain-text names in that case.
+    presented_candidate_bindings: list[dict[str, Any]] | None = None
     presentation_class: Literal[
         "conversation", "social_opportunity", "product_info", "transaction",
         "capability", "fallback", "onboarding", "grounded_recommendation",
@@ -75,6 +84,9 @@ class SynthesizerMetrics:
 
 _WEB_URL_RE = re.compile(r"https?://[^\s<>\"']+")
 _WEB_SOURCE_REF_RE = re.compile(r"\bweb_source_[A-Za-z0-9_-]+\b")
+_PERSISTENT_PLACE_REF_RE = re.compile(
+    r"\b(?:place_ref|place_candidate)_[A-Za-z0-9_-]+\b"
+)
 _CALENDAR_MUTATION_CLAIM_RE = re.compile(
     r"(?:我|阿月)?(?:已經?|剛剛)?(?:替|幫|為)你.{0,6}"
     r"(?:新增|加入|加到|記到|記進|寫入|修改|更新|取消|刪除)"
@@ -88,6 +100,12 @@ _CALENDAR_REMINDER_OFFER_RE = re.compile(
 )
 
 
+class _PresentedCandidateBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    candidate_ref: str = Field(min_length=1, max_length=80)
+    presented_ordinal: int = Field(ge=1, le=8)
+
+
 class _ComposePublicReplyCoreArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     messages: list[str] = Field(max_length=3)
@@ -99,6 +117,7 @@ class _ComposePublicReplyCoreArguments(BaseModel):
     selected_candidate_refs: list[str] = Field(default_factory=list, max_length=8)
     recommended_candidate_refs: list[str] = Field(default_factory=list, max_length=8)
     discussed_candidate_refs: list[str] = Field(default_factory=list, max_length=8)
+    presented_candidates: list[_PresentedCandidateBinding] = Field(default_factory=list, max_length=8)
 
 
 def _candidate_card_summaries(candidate_cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -120,7 +139,7 @@ def _candidate_card_summaries(candidate_cards: list[dict[str, Any]]) -> list[dic
 
 
 _PLACE_INTERNAL_FIELDS = frozenset({
-    "address_summary", "map_url", "provider", "place_id", "photo_url",
+    "address_summary", "map_url", "provider", "place_id", "provider_name", "photo_url",
     "candidate_ref", "distance_m",
 })
 
@@ -193,7 +212,10 @@ def _synthesizer_system_prompt(
         if has_cards and place_cards_enabled else
         (
             "candidate_cards 是內部的 bounded evidence pool；本回合只輸出文字或輕量 Markdown，"
-            "card_intent 固定使用 none，不建立公開地點卡片。候選 refs 仍可留在 server-owned 內部綁定與查證流程。"
+            "card_intent 固定使用 none，selected_candidate_refs 與 recommended_candidate_refs 固定為空，"
+            "不建立公開地點卡片。以 presented_candidates 明確回傳每個公開候選的 candidate_ref 與 presented_ordinal；"
+            "candidate_ref + presented_ordinal 是 server-owned ordinal authority。若 messages 以「1. A、2. B」呈現，"
+            "就用 A 的 supplied ref/1、B 的 supplied ref/2；discussed_candidate_refs 僅作內容佐證，也可為空。"
         )
         if has_cards else
         "本回合沒有地點候選，不要呼叫卡片決策工具。"
@@ -256,6 +278,9 @@ Editorial grounded recommendation contract:
   "對方" when a public name is available. A pending match/proposal is a separate state and must not be presented
   as an accepted contact.
 
+User preferences contract:
+- When user_preferences are provided in the context data (e.g. food tastes, dietary restrictions, favorite activities), naturally respect and incorporate them when making suggestions or chatting. Do not mechanically recite them as a bulleted checklist.
+
 Web research grounding contract:
 - When an observation contains schema_version=web_research.v1, use its research_question and answer_target as the question authority.
 - For Web-only `web_research.v1` results in any valid status (`answered`, `partial`, `insufficient_evidence`, `degraded`, or `unavailable`), compose a natural answer from that typed result first; preserve its limitation or unavailable status and do not require fixed headings or list formatting.
@@ -273,11 +298,16 @@ Web research grounding contract:
 - When a public card presentation is enabled, card_intent=browse means show_all for broad browsing; card_intent=curated selects 1-4 refs (normally 2-3); explicit_set honors the requested set up to 8.
 - selected_candidate_refs must be the cards that the prose uses. recommended_candidate_refs must be a subset of selected refs, and selected refs must be a subset of discussed refs.
 - Use candidate_ref values exactly as supplied. Never invent refs, URLs, map links, or unsupported atmosphere/quality claims.
+- candidate_ref 與 place_ref_* 只用於 typed fields／內部綁定，絕對不可寫進 public messages。
 - Optional cards are rendered only from validated candidate refs; itinerary is never a separate rendering schema.
 """
     elif has_cards:
         prompt += """
-- Public place-card rendering is disabled for this demo. Keep candidate refs as internal evidence bindings and use card_intent=none; do not request or describe a card presentation.
+- Public place-card rendering is disabled for this demo. Keep card_intent=none;
+  selected/recommended refs empty and discussed refs as evidence only. If the
+  reply presents candidates for ordinal follow-up, emit presented_candidates
+  with the supplied candidate_ref and explicit presented_ordinal; never infer
+  identity from names alone.
 """
     return prompt + "\n\n口吻參考（只學語氣，不把例句當成事實）：" + "；".join(
         f"{question} → {reply}" for question, reply in PUBLIC_VOICE_FEW_SHOTS
@@ -313,7 +343,9 @@ def _build_prompt(slice_payload: dict[str, Any], candidate_summaries: list[dict[
             ),
         },
         "recent_messages": slice_payload.get("recent_messages") or [],
+        "conversation_continuity": slice_payload.get("conversation_continuity") or None,
         "background_memory": str(slice_payload.get("recent_context") or "").strip()[:300],
+        "user_preferences": list(slice_payload.get("user_preferences") or []),
         "user_location": slice_payload.get("user_location") or "",
         "clock": slice_payload.get("clock") or {},
         "candidate_cards": candidate_summaries,
@@ -336,6 +368,8 @@ def _compose_public_reply_tool_schema(place_cards_enabled: bool | None = None) -
             "enum": ["none"],
             "default": "none",
         }
+        for field_name in ("selected_candidate_refs", "recommended_candidate_refs"):
+            schema["properties"][field_name]["maxItems"] = 0
     description = (
         "Return public reply strings in messages, not chat-message objects such as {role, content}. "
         "Never return user/system/tool transcript content. "
@@ -343,8 +377,10 @@ def _compose_public_reply_tool_schema(place_cards_enabled: bool | None = None) -
             "Use card_intent and only the supplied server-owned candidate refs for optional card presentation; "
             "do not return blocks or card_mode."
             if place_cards_enabled else
-            "Keep card_intent=none for this demo; candidate refs are internal evidence bindings, "
-            "and do not return UI blocks."
+            "Keep card_intent=none with empty selected/recommended refs for this demo; "
+            "discussed refs are content evidence only. If a follow-up ordinal must be bound, "
+            "return presented_candidates with the supplied candidate_ref and its explicit presented_ordinal. "
+            "Do not return UI blocks."
         )
     )
     return {
@@ -360,7 +396,7 @@ def _compose_public_reply_tool_schema(place_cards_enabled: bool | None = None) -
 _ORDINARY_COMPOSE_FIELDS = frozenset({
     "messages", "presentation_class", "card_intent",
     "selected_candidate_refs", "recommended_candidate_refs",
-    "discussed_candidate_refs",
+    "discussed_candidate_refs", "presented_candidates",
 })
 _ORDINARY_COMPATIBILITY_FIELDS = frozenset({"blocks"})
 _SUPPORTED_PRESENTATION_CLASSES = frozenset({
@@ -435,11 +471,122 @@ def _ordinary_compose_failure_reason(
     return "unsupported_claim"
 
 
+def _exact_presented_candidate_refs(
+    reply_text: str,
+    candidate_summaries: list[dict[str, Any]],
+    eligible_refs: list[str] | None = None,
+) -> list[str]:
+    """Bind only uniquely named candidates that appear in public prose.
+
+    Cards-off composition may be returned as ordinary provider content rather
+    than a compose tool call.  Keep the binding server-owned by deriving refs
+    from the bounded public labels only; never fuzzy-match or trust a model-
+    authored reference.
+    """
+    ref_to_index = {
+        str(item.get("candidate_ref")): index
+        for index, item in enumerate(candidate_summaries)
+        if str(item.get("candidate_ref") or "")
+    }
+    references = eligible_refs or list(ref_to_index)
+    name_counts: dict[str, int] = {}
+    for item in candidate_summaries:
+        name = str(item.get("name") or "").strip()
+        if name:
+            name_counts[name] = name_counts.get(name, 0) + 1
+    exact_positions: list[tuple[int, str]] = []
+    for reference in references:
+        index = ref_to_index.get(reference)
+        if index is None:
+            continue
+        name = str(candidate_summaries[index].get("name") or "").strip()
+        position = (
+            reply_text.find(name)
+            if name and name_counts.get(name) == 1
+            else -1
+        )
+        if position >= 0:
+            exact_positions.append((position, reference))
+    exact_positions.sort(key=lambda pair: pair[0])
+    return [reference for _, reference in exact_positions]
+
+
+def _public_name_key(value: Any) -> str:
+    """Conservatively normalize a public label for consistency checks only."""
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = re.sub(r"[\*_`]+", "", text)
+    text = re.sub(r"\s+", "", text)
+    return text.translate(str.maketrans({
+        "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "－": "-",
+    }))
+
+
+def _validated_presented_bindings(
+    raw_bindings: Any,
+    messages: list[str],
+    candidate_summaries: list[dict[str, Any]],
+) -> list[dict[str, int | str]] | None:
+    """Validate the explicit ref/ordinal channel without deriving identity.
+
+    Names are consulted only to ensure that a ref the model supplied is
+    visibly represented in the persisted prose. They never select a ref.
+    """
+    if raw_bindings in (None, [], ()):
+        return []
+    if not isinstance(raw_bindings, list):
+        return None
+    ref_to_summary = {
+        str(item.get("candidate_ref") or ""): item
+        for item in candidate_summaries
+        if str(item.get("candidate_ref") or "")
+    }
+    public_text = _public_name_key("\n".join(messages))
+    seen_refs: set[str] = set()
+    seen_ordinals: set[int] = set()
+    seen_names: set[str] = set()
+    bindings: list[dict[str, int | str]] = []
+    for item in raw_bindings:
+        if isinstance(item, BaseModel):
+            item = item.model_dump()
+        if not isinstance(item, dict):
+            return None
+        reference = str(item.get("candidate_ref") or "").strip()
+        ordinal = item.get("presented_ordinal")
+        if (
+            not reference
+            or reference not in ref_to_summary
+            or isinstance(ordinal, bool)
+            or not isinstance(ordinal, int)
+            or not 1 <= ordinal <= len(candidate_summaries)
+            or reference in seen_refs
+            or ordinal in seen_ordinals
+        ):
+            return None
+        public_name = _public_name_key(ref_to_summary[reference].get("name"))
+        if not public_name or public_name in seen_names or public_name not in public_text:
+            return None
+        seen_refs.add(reference)
+        seen_ordinals.add(ordinal)
+        seen_names.add(public_name)
+        bindings.append({
+            "candidate_ref": reference,
+            "presented_ordinal": ordinal,
+        })
+    if set(seen_ordinals) != set(range(1, len(bindings) + 1)):
+        return None
+    return sorted(bindings, key=lambda item: int(item["presented_ordinal"]))
+
+
 def _parse_composed_reply(
     result,
     candidate_summaries: list[dict[str, Any]] | None = None,
     web_research: dict[str, Any] | None = None,
-) -> tuple[list[str], dict[str, Any] | None, str, list[dict[str, Any]]] | None:
+    *,
+    place_cards_enabled: bool | None = None,
+) -> tuple[
+    list[str], dict[str, Any] | None, str, list[dict[str, Any]], list[str],
+    list[dict[str, int | str]],
+] | None:
     if not result.tool_calls:
         return None
     tc = result.tool_calls[0]
@@ -448,10 +595,14 @@ def _parse_composed_reply(
     validated = _parse_ordinary_compose_arguments(tc.get("arguments") or {})
     if validated is None:
         return None
+    if any(_PERSISTENT_PLACE_REF_RE.search(message) for message in validated.messages):
+        return None
     presentation = build_presentation(validated.messages, validated.presentation_class)
     if presentation is None:
         return None
     summaries = candidate_summaries or []
+    if place_cards_enabled is None:
+        place_cards_enabled = public_place_cards_enabled()
     ref_to_index = {
         str(item.get("candidate_ref")): index
         for index, item in enumerate(summaries)
@@ -460,6 +611,11 @@ def _parse_composed_reply(
     selected_refs = list(validated.selected_candidate_refs)
     discussed_refs = list(validated.discussed_candidate_refs)
     recommended_refs = list(validated.recommended_candidate_refs)
+    explicit_bindings = _validated_presented_bindings(
+        validated.presented_candidates, presentation.messages, summaries,
+    )
+    if explicit_bindings is None:
+        return None
     if len(set(selected_refs)) != len(selected_refs):
         return None
     if len(set(discussed_refs)) != len(discussed_refs):
@@ -492,10 +648,18 @@ def _parse_composed_reply(
         if not 1 <= len(selected_refs) <= 8:
             return None
         card_mode = "select"
-    elif selected_refs or recommended_refs or discussed_refs:
-        return None
-    else:
+    elif intent == "none":
+        # Cards-off still uses the ordinary compose tool for grounded prose.
+        # Discussed refs are validated evidence bindings, not a request to
+        # render cards. Selected/recommended refs would imply presentation and
+        # therefore remain invalid with card_intent=none.
+        if selected_refs or recommended_refs:
+            return None
+        if place_cards_enabled and discussed_refs:
+            return None
         card_mode = "none"
+    else:
+        return None
 
     # Ordinary cards are rendered from server-owned refs. These are internal
     # UI projections, not model-authored presentation blocks.
@@ -519,7 +683,28 @@ def _parse_composed_reply(
         "recommended_candidate_refs": recommended_refs,
         "discussed_candidate_refs": discussed_refs,
     }
-    return presentation.messages, card_decision, validated.presentation_class, presentation_blocks
+    if card_mode != "none":
+        # Public cards have an exact server-rendered order. Prefer it over the
+        # prose's discussion order when presentation is enabled.
+        presented_refs = list(visible_refs)
+        presented_bindings = [
+            {"candidate_ref": reference, "presented_ordinal": ordinal}
+            for ordinal, reference in enumerate(presented_refs, start=1)
+        ]
+    else:
+        # Cards-off ordinal binding is authoritative only when the model emits
+        # the typed ref/ordinal channel. Name matching below is retained solely
+        # as a compatibility metric and is never persisted by Scheduler.
+        presented_bindings = explicit_bindings
+        presented_refs = [str(item["candidate_ref"]) for item in presented_bindings]
+    return (
+        presentation.messages,
+        card_decision,
+        validated.presentation_class,
+        presentation_blocks,
+        presented_refs,
+        presented_bindings,
+    )
 
 
 def _observation_fallback(payload: dict[str, Any]) -> str:
@@ -815,10 +1000,10 @@ def _web_only_payload(payload: dict[str, Any]) -> bool:
 
 def _places_only_fallback(
     payload: dict[str, Any], candidate_summaries: list[dict[str, Any]],
-) -> tuple[str, None, list[dict[str, Any]]]:
+) -> tuple[str, None, list[dict[str, Any]], list[str]]:
     """Return a short Places recovery sentence without rendering cards."""
     if not candidate_summaries:
-        return "目前沒有找到符合條件的地點，換個範圍或條件再試一次吧。", None, []
+        return "目前沒有找到符合條件的地點，換個範圍或條件再試一次吧。", None, [], []
     requested_limit = 3
     ordering = "distance"
     for observation in payload.get("observations") or []:
@@ -832,7 +1017,7 @@ def _places_only_fallback(
         if result.get("ordering") in {"distance", "balanced"}:
             ordering = result["ordering"]
         if result.get("places") == []:
-            return "目前在指定範圍內沒有找到符合類型的地點，換個範圍或條件再試一次吧。", None, []
+            return "目前在指定範圍內沒有找到符合類型的地點，換個範圍或條件再試一次吧。", None, [], []
     indexed = list(enumerate(candidate_summaries))
     if ordering == "distance":
         indexed.sort(key=lambda pair: (
@@ -847,15 +1032,21 @@ def _places_only_fallback(
         distance = str(item.get("distance_label") or "").strip()
         names.append(f"{name[:100]}（{distance[:60]}）" if distance else name[:100])
     if not names:
-        return "我目前找到地點資料，但還沒能整理成可靠回覆，請再試一次。", None, []
-    order_hint = "，距離較近" if ordering == "distance" else ""
-    return f"目前先找到{'、'.join(names)}這些候選{order_hint}；我還沒能完成完整比較，請稍後再試一次。", None, []
+        return "我目前找到地點資料，但還沒能整理成可靠回覆，請再試一次。", None, [], []
+    refs = [
+        str(item.get("candidate_ref") or "")
+        for _, item in selected
+        if str(item.get("candidate_ref") or "")
+    ]
+    if ordering == "distance":
+        return f"附近先找到{'、'.join(names)}，已依距離由近到遠整理。", None, [], refs
+    return f"附近先找到{'、'.join(names)}，可以先從這些候選挑選。", None, [], refs
 
 
 def _place_research_fallback(
     result: dict[str, Any],
     candidate_summaries: list[dict[str, Any]],
-) -> tuple[str, None, list[dict[str, Any]]]:
+) -> tuple[str, None, list[dict[str, Any]], list[str]]:
     """Return a short Places/Web recovery sentence without cards."""
     direct_findings = [
         item for item in (result.get("findings") or [])
@@ -873,8 +1064,17 @@ def _place_research_fallback(
         "",
     )
     direct_claim = ""
+    presented_refs: list[str] = []
+    allowed_refs = {
+        str(item.get("candidate_ref") or "")
+        for item in candidate_summaries
+        if str(item.get("candidate_ref") or "")
+    }
     if direct_findings:
         direct_claim = str(direct_findings[0].get("claim") or "").strip().rstrip("。.!！?？；;， ")[:500]
+        subject_ref = str(direct_findings[0].get("subject_ref") or "")
+        if subject_ref in allowed_refs:
+            presented_refs.append(subject_ref)
     if direct_claim:
         reply = direct_claim + "。"
     elif execution_status == "unavailable":
@@ -905,15 +1105,21 @@ def _place_research_fallback(
         ]
         if names:
             reply = f"我先找到{'、'.join(names)}，不過" + reply
-    return reply[:900], None, []
+            presented_refs = [
+                str(item.get("candidate_ref") or "")
+                for item in candidate_summaries[:2]
+                if str(item.get("candidate_ref") or "") in allowed_refs
+            ]
+    return reply[:900], None, [], presented_refs
 
 
 def _server_owned_reply_from_result(result: dict[str, Any]) -> str | None:
     """Extract only replies explicitly owned by a completed runtime.
 
     Arbitrary observation text is intentionally not accepted here. The
-    server-owned boundary is limited to mutation verification and pending
-    confirmation previews.
+    server-owned boundary includes mutation verification, pending previews and
+    typed mutation clarifications. A clarification must never be paraphrased
+    into a new confirmation offer.
     """
     verification = result.get("calendar_mutation_verification")
     if isinstance(verification, dict):
@@ -942,6 +1148,12 @@ def _server_owned_reply_from_result(result: dict[str, Any]) -> str | None:
         preview = str(result.get("preview") or "").strip()
         if preview:
             return preview
+    typed = result.get("calendar_command_result")
+    if isinstance(typed, dict) and typed.get("status") == "needs_clarification":
+        clarification = typed.get("clarification") or {}
+        message = str(clarification.get("message") or "").strip()
+        if message:
+            return message[:600]
     return None
 
 
@@ -1004,10 +1216,9 @@ def _partition_server_owned_replies(
 def _verified_observation_reply(payload: dict[str, Any]) -> str | None:
     """Return replies that must not be paraphrased by the Synthesizer.
 
-    Confirmation execution and pending previews carry server-owned replies.
-    Typed clarification is intentionally left to the Synthesizer so the model
-    can ask for the actual missing fields and present bounded candidates in
-    natural language; it must not claim that a mutation happened.
+    Confirmation execution, pending previews and typed clarifications carry
+    server-owned replies. This prevents a clarification from becoming a
+    model-authored confirmation offer.
     """
     locked, _remaining = _partition_server_owned_replies(payload)
     return "、".join(locked) if locked else None
@@ -1168,13 +1379,32 @@ def synthesize(
             })
         except Exception:
             pass
-        composed = _parse_composed_reply(result, candidate_summaries, web_research)
+        composed = _parse_composed_reply(
+            result, candidate_summaries, web_research,
+            place_cards_enabled=cards_enabled,
+        )
+        # Candidate-bearing Places turns must use the typed composition
+        # channel even when public cards are disabled.  A plain provider
+        # content response has no authoritative ref/ordinal channel and must
+        # degrade to the server-owned grounded presentation below.
+        # Cards-enabled turns require the typed compose channel so card refs
+        # remain authoritative. Cards-off turns may safely accept ordinary
+        # grounded prose; without an explicit presented_candidates channel the
+        # Scheduler simply clears old bindings instead of deriving identity
+        # from names in model text.
         composition_required = bool(
-            cards_enabled and candidate_summaries and has_place_observation
+            candidate_summaries and has_place_observation and cards_enabled
         )
         composition_failed = False
         if composed is not None:
-            composed_messages, card_decision, presentation_class, presentation_blocks = composed
+            (
+                composed_messages,
+                card_decision,
+                presentation_class,
+                presentation_blocks,
+                presented_candidate_refs,
+                presented_candidate_bindings,
+            ) = composed
             if not cards_enabled:
                 card_decision = None
                 presentation_blocks = []
@@ -1190,10 +1420,12 @@ def synthesize(
                 "\n".join(composed_fragments), payload,
             )
             if web_claims_grounded and calendar_claims_grounded:
+                metrics.presented_candidate_refs = presented_candidate_refs
                 metrics.reply_source = "llm"
                 metrics.presentation_messages = composed_messages
                 metrics.presentation_blocks = presentation_blocks
                 metrics.presentation_class = presentation_class
+                metrics.presented_candidate_bindings = presented_candidate_bindings
                 reply, card_decision = _finish_with_locked_reply(
                     "\n\n".join(composed_messages), card_decision,
                 )
@@ -1229,6 +1461,8 @@ def synthesize(
                 metrics.fallback_reason = "unsupported_claim"
             elif _calendar_reply_has_unsupported_action(reply, payload):
                 metrics.fallback_reason = "unsupported_claim"
+            elif _PERSISTENT_PLACE_REF_RE.search(reply):
+                metrics.fallback_reason = "internal_meta_reply"
             else:
                 has_opportunity = any(
                     isinstance(item, dict)
@@ -1248,6 +1482,9 @@ def synthesize(
                     metrics.reply_source = "llm"
                     metrics.presentation_messages = presentation.messages
                     metrics.presentation_class = presentation.presentation_class
+                    if candidate_summaries and not cards_enabled:
+                        metrics.presented_candidate_refs = []
+                        metrics.presented_candidate_bindings = []
                     reply, card_decision = _finish_with_locked_reply(
                         "\n\n".join(presentation.messages), card_decision,
                     )
@@ -1287,13 +1524,20 @@ def synthesize(
             )
             return reply, card_decision, metrics
     if _places_only_payload(payload):
-        fallback, card_decision, fallback_blocks = _places_only_fallback(payload, candidate_summaries)
+        fallback, card_decision, fallback_blocks, fallback_refs = _places_only_fallback(
+            payload, candidate_summaries,
+        )
         presentation = build_presentation([fallback], "grounded_recommendation")
         if presentation is not None:
             metrics.reply_source = "observation_fallback"
             metrics.fallback_reason = metrics.fallback_reason or "places_deterministic_presentation"
             metrics.presentation_messages = presentation.messages
             metrics.presentation_blocks = fallback_blocks
+            metrics.presented_candidate_refs = fallback_refs
+            metrics.presented_candidate_bindings = [
+                {"candidate_ref": reference, "presented_ordinal": ordinal}
+                for ordinal, reference in enumerate(fallback_refs, start=1)
+            ]
             metrics.presentation_class = "grounded_recommendation"
             reply, card_decision = _finish_with_locked_reply(fallback, card_decision)
             return reply, card_decision, metrics
@@ -1302,7 +1546,7 @@ def synthesize(
         and candidate_summaries
         and _places_and_web_only_payload(payload)
     ):
-        fallback, card_decision, fallback_blocks = _place_research_fallback(
+        fallback, card_decision, fallback_blocks, fallback_refs = _place_research_fallback(
             web_research, candidate_summaries,
         )
         presentation = build_presentation([fallback], "grounded_recommendation")
@@ -1311,6 +1555,11 @@ def synthesize(
             metrics.fallback_reason = metrics.fallback_reason or "web_research_fallback"
             metrics.presentation_messages = presentation.messages
             metrics.presentation_blocks = fallback_blocks
+            metrics.presented_candidate_refs = fallback_refs
+            metrics.presented_candidate_bindings = [
+                {"candidate_ref": reference, "presented_ordinal": ordinal}
+                for ordinal, reference in enumerate(fallback_refs, start=1)
+            ]
             metrics.presentation_class = "grounded_recommendation"
             reply, card_decision = _finish_with_locked_reply(fallback, card_decision)
             return reply, card_decision, metrics

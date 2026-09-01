@@ -51,6 +51,10 @@ AgentContextSlice（每個 specialist 的最小視圖）
 
 固定 budget：最近 12 則訊息、合計 6,000 字元、記憶最多 8 筆。Context Builder 不得輸出 raw Mongo/Neo4j document、內部 ID、對方私人記憶或對方行事曆。
 
+Public conversation compaction 使用 `ConversationSummaryV1` 的 bounded owner-scoped projection。Context Builder 只載入通過 evaluation、source hash 與 room/owner 驗證的最新摘要，並以 watermark 排除已涵蓋的舊訊息。這份 continuity 只協助延續話題；Match、Profile、Calendar、accepted relationship 與 durable memory 一律重新讀 canonical domain state。
+
+Match slice 可同時包含兩份互不覆蓋的最小狀態：`active_proposal` 對應一般 `relationship_match`，`active_event_invitation` 對應活動牽線。兩份 projection 只提供 stage、公開對象稱呼、是否可決定、活動標題等必要資訊；ID 與 revision 僅留在 server-side turn context / confirmation payload，不由 Planner 提供。
+
 Planner 在取得 `PublicAgentTurnContext` 後另做 bounded prompt projection：最多最近 4 則、合計 2,000 字元，若最新 history item 就是本回合 `message` 則只保留一份；clock 只送 timezone、local date/time、weekday 與實際存在的 temporal references。Optional state 為空時省略；active proposal 只送公開 status、counterparty、user_can_decide，不送 proposal revision。此 projection 不改全域 Context Builder budget，也不改其他 sub-agent slice。
 
 每個 sub-agent 只能收到 `context_slicer.py` 對該 agent 明確列出的欄位。新增 agent 時，必須新增獨立 slice 與 privacy test；不得把整個 `PublicAgentTurnContext` 直接交給 agent。
@@ -196,6 +200,8 @@ ToolProposal(WRITE)
 ```
 
 Calendar 的唯一公開 mutation capability 是 `calendar.submit_commands`。Calendar Runtime 擁有 clarification、draft/reference、command validation、preflight 與 confirmation preparation；舊的 create/update/cancel tool names 不是可用 interface。
+
+`match.decide_active_event_invitation` 是 Match-owned confirmed write。Planner 只能提出 `decision=interested|declined`；pending confirmation 由 server 綁定當下 `event_invitation` revision，確認後才呼叫 namespace-aware match domain service。一般配對與活動邀請使用獨立 live namespace，因此可同時存在；同一 pair 的明確婉拒仍共用 pair cooldown，避免短期重複推薦。
 
 ### 7.1 Relationship date-card write
 

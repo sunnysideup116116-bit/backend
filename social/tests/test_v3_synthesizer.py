@@ -211,7 +211,7 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIn("card_intent 固定使用 none", prompt)
         self.assertNotIn("card_intent=browse", prompt)
         self.assertNotIn("card_intent=curated", prompt)
-        self.assertIn("candidate refs", prompt)
+        self.assertIn("candidate_ref", prompt)
         disabled_schema = _compose_public_reply_tool_schema(place_cards_enabled=False)
         self.assertEqual(
             disabled_schema["function"]["parameters"]["properties"]["card_intent"]["enum"],
@@ -265,6 +265,184 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertEqual(tools[0]["function"]["name"], "compose_public_reply")
         self.assertIsNone(provider.call_args.kwargs["on_token"])
         self.assertEqual(tokens, [])
+
+    def test_cards_off_accepts_grounded_compose_with_discussed_refs(self):
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{"name": "A 店"}, {"name": "B 店"}]},
+        }])
+        cards = [
+            {"candidate_ref": "place_a", "name": "A 店", "category": "restaurant"},
+            {"candidate_ref": "place_b", "name": "B 店", "category": "cafe"},
+        ]
+        composed = _fc_result(tool_calls=[{
+            "name": "compose_public_reply",
+            "arguments": {
+                "messages": ["A 店和 B 店都在附近，A 店的距離更近。"],
+                "presentation_class": "grounded_recommendation",
+                "card_intent": "none",
+                "selected_candidate_refs": [],
+                "recommended_candidate_refs": [],
+                "discussed_candidate_refs": ["place_a", "place_b"],
+                "presented_candidates": [
+                    {"candidate_ref": "place_a", "presented_ordinal": 1},
+                    {"candidate_ref": "place_b", "presented_ordinal": 2},
+                ],
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=composed,
+        ):
+            reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
+        self.assertEqual(reply, "A 店和 B 店都在附近,A 店的距離更近。")
+        self.assertEqual(metrics.reply_source, "llm")
+        self.assertIsNone(metrics.fallback_reason)
+        self.assertIsNone(card_decision)
+        self.assertEqual(metrics.presentation_blocks, [])
+        self.assertEqual(metrics.presented_candidate_refs, ["place_a", "place_b"])
+        self.assertNotIn("我還沒能完成完整比較", reply)
+
+    def test_cards_off_still_rejects_unknown_discussed_candidate_ref(self):
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"requested_limit": 1, "places": [{"name": "A 店"}]},
+        }])
+        cards = [{"candidate_ref": "place_a", "name": "A 店", "category": "restaurant"}]
+        composed = _fc_result(tool_calls=[{
+            "name": "compose_public_reply",
+            "arguments": {
+                "messages": ["我找到了候選。"],
+                "presentation_class": "grounded_recommendation",
+                "card_intent": "none",
+                "discussed_candidate_refs": ["place_invented"],
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=composed,
+        ):
+            reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
+        self.assertEqual(metrics.reply_source, "observation_fallback")
+        self.assertEqual(metrics.fallback_reason, "empty_content")
+        self.assertIsNone(card_decision)
+        self.assertNotIn("place_invented", reply)
+        self.assertNotIn("我還沒能完成完整比較", reply)
+
+    def test_cards_off_derives_presented_order_from_exact_unique_labels(self):
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{"name": "A 店"}, {"name": "B 店"}]},
+        }])
+        cards = [
+            {"candidate_ref": "place_a", "name": "A 店", "category": "restaurant"},
+            {"candidate_ref": "place_b", "name": "B 店", "category": "cafe"},
+        ]
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "compose_public_reply",
+                "arguments": {
+                    "messages": ["1. B 店\n2. A 店"],
+                    "presentation_class": "grounded_recommendation",
+                    "card_intent": "none",
+                    "presented_candidates": [
+                        {"candidate_ref": "place_b", "presented_ordinal": 1},
+                        {"candidate_ref": "place_a", "presented_ordinal": 2},
+                    ],
+                },
+            }]),
+        ):
+            _reply, _decision, metrics = synthesize(slc, candidate_cards=cards)
+        self.assertEqual(metrics.presented_candidate_refs, ["place_b", "place_a"])
+
+    def test_cards_off_plain_content_derives_presented_refs(self):
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{"name": "A 店"}, {"name": "B 店"}, {"name": "C 店"}]},
+        }])
+        cards = [
+            {"candidate_ref": "place_a", "name": "A 店", "category": "restaurant"},
+            {"candidate_ref": "place_b", "name": "B 店", "category": "cafe"},
+            {"candidate_ref": "place_c", "name": "C 店", "category": "bar"},
+        ]
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="附近有 B 店、A 店和 C 店，都可以先參考。"),
+        ):
+            reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
+        self.assertEqual(reply, "附近有 B 店、A 店和 C 店,都可以先參考。")
+        self.assertIsNone(card_decision)
+        self.assertEqual(
+            metrics.presented_candidate_refs,
+            [],
+        )
+
+    def test_cards_off_plain_content_does_not_bind_duplicate_names(self):
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{"name": "同名店"}, {"name": "同名店"}]},
+        }])
+        cards = [
+            {"candidate_ref": "place_a", "name": "同名店", "category": "restaurant"},
+            {"candidate_ref": "place_b", "name": "同名店", "category": "cafe"},
+        ]
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="我找到同名店，請再指定一間。"),
+        ):
+            _reply, _card_decision, metrics = synthesize(slc, candidate_cards=cards)
+        self.assertEqual(metrics.presented_candidate_refs, [])
+
+    def test_cards_off_presented_binding_requires_supplied_ref_and_contiguous_ordinal(self):
+        cards = [
+            {"candidate_ref": "place_a", "name": "A 店", "category": "cafe"},
+            {"candidate_ref": "place_b", "name": "B 店", "category": "cafe"},
+        ]
+        for bindings in (
+            [{"candidate_ref": "place_unknown", "presented_ordinal": 1}],
+            [{"candidate_ref": "place_a", "presented_ordinal": 2}],
+        ):
+            parsed = _parse_composed_reply(_fc_result(tool_calls=[{
+                "name": "compose_public_reply",
+                "arguments": {
+                    "messages": ["1. A 店"],
+                    "presentation_class": "grounded_recommendation",
+                    "card_intent": "none",
+                    "presented_candidates": bindings,
+                },
+            }]), cards)
+            self.assertIsNone(parsed)
+
+    def test_persistent_place_reference_cannot_leak_into_public_message(self):
+        parsed = _parse_composed_reply(
+            _fc_result(tool_calls=[{
+                "name": "compose_public_reply",
+                "arguments": {
+                    "messages": ["就選 place_ref_0123456789abcdef01234567。"],
+                    "presentation_class": "grounded_recommendation",
+                    "card_intent": "none",
+                    "discussed_candidate_refs": ["place_a"],
+                },
+            }]),
+            [{"candidate_ref": "place_a", "name": "A 店"}],
+        )
+        self.assertIsNone(parsed)
 
     def test_itinerary_card_intent_none_does_not_render_candidates(self):
         slc = self._slice([{
@@ -360,8 +538,10 @@ class V3SynthesizerTests(unittest.TestCase):
             "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
             return_value=_fc_result(content="請重新描述需求。"),
         ) as call:
-            synthesize(slc)
-        self.assertIn("schema validation 沒有建立 authoritative missing field", call.call_args.kwargs["system_prompt"])
+            reply, _decision, metrics = synthesize(slc)
+        self.assertEqual(reply, "這次行程指令格式無法驗證，請重新描述需求。")
+        self.assertEqual(metrics.reply_source, "verified_observation")
+        call.assert_not_called()
 
     def test_recent_calendar_mutation_verification_is_server_owned_reply(self):
         slc = self._slice([{
@@ -1628,7 +1808,7 @@ class V3SynthesizerTests(unittest.TestCase):
         ) as mock_call:
             reply, _card_decision, _metrics = synthesize(slc)
         self.assertTrue(reply)
-        mock_call.assert_called_once()
+        mock_call.assert_not_called()
 
     def test_confirmed_domain_reply_is_returned_without_llm_rewrite(self):
         slc = self._slice([

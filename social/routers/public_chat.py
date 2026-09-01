@@ -12,7 +12,9 @@ import queue
 import re
 import threading
 import time
+import traceback
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -20,16 +22,18 @@ from fastapi.responses import StreamingResponse
 from database import matches_coll, messages_coll, profiles_coll
 from models import DirectChatRequest
 from services.ai_service import generate_chat_completion
-from services.ayue_agent import run_public_agent_turn_v3
+from services.ayue_agent import (
+    mark_public_confirmation_presented,
+    run_public_agent_turn_v3,
+)
 from services.ayue_agent.contracts import AgentTurnContext
-from services.assessment_session_service import assessment_public_state
+from services.assessment_session_service import (
+    assessment_public_state_for_room,
+    assessment_session_for_room,
+)
 from services.ayue_agent.proactive_care import record_proactive_activity
 from services.ayue_agent.onboarding import complete_public_ayue_onboarding
 from services.ayue_agent.product_identity import PUBLIC_RETRY_REPLY, PUBLIC_RUNTIME_ERROR_REPLY
-from services.ayue_agent.public_relationship_projection import (
-    mentioned_contact_refs,
-    validated_mentioned_contact_ids,
-)
 from services.ayue_agent.v3.debug_trace import (
     finish_run as finish_debug_run,
     local_debug_enabled,
@@ -45,6 +49,9 @@ from services.ai_room_service import (
     get_room as get_ai_room,
     mark_first_message_for_title,
 )
+from services.conversation_compaction_service import (
+    queue_conversation_compaction_shadow as _queue_conversation_compaction_shadow,
+)
 from services.profile_skills import profile_skills_mode_for_user
 from services.profile_task_service import queue_profile_skills as _queue_profile_skills
 from services.relationship_engagement_service import (
@@ -52,8 +59,31 @@ from services.relationship_engagement_service import (
     mark_post_chat_activity,
     summarize_relationship,
 )
+from services.ayue_agent.public_relationship_projection import (
+    mentioned_contact_refs,
+    validated_mentioned_contact_ids,
+)
 from services.semantic_plan_service import process_relationship_semantic_plan, track_message_metrics
 from services.risk_policy_service import pair_message_risk_gate
+from services.risk_block_service import (
+    RiskBlockServiceUnavailable,
+    risk_block_service,
+)
+
+
+def _log_public_stream_exception(exc: Exception) -> None:
+    """Log only diagnostic structure; never include prompts or user content."""
+    frames = traceback.extract_tb(exc.__traceback__)[-6:]
+    location = " > ".join(
+        f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+        for frame in frames
+    )
+    status_code = int(getattr(exc, "status_code", 0) or 0)
+    print(
+        f"[PUBLIC_CHAT_ERROR] type={type(exc).__name__} "
+        f"status={status_code or '-'} location={location or '-'}",
+        flush=True,
+    )
 
 
 router = APIRouter()
@@ -95,6 +125,13 @@ def queue_profile_skills(
         mode_resolver=profile_skills_mode_for_user,
         progress_token=progress_token,
     )
+
+
+def queue_conversation_compaction_shadow(
+    background_tasks, user_id: str, room_id: str,
+) -> dict:
+    """Queue continuity maintenance without changing the originating turn."""
+    return _queue_conversation_compaction_shadow(background_tasks, user_id, room_id)
 
 def check_and_trigger_date_activation(room_id: str, user_id: str, contact_id: str, message: str, match_doc: dict):
     """A proposal creates one invitation; it never opens a form without the partner."""
@@ -172,7 +209,13 @@ def _complete_public_turn(
 ) -> dict:
     """Run and persist one V3 turn after the owner message has been saved."""
     history = list(messages_coll.find({"room_id": room_id}).sort("timestamp", -1).limit(12))[::-1]
-    user_doc = profiles_coll.find_one({"user_id": req.user_id})
+    user_doc = profiles_coll.find_one({"user_id": req.user_id}) or {}
+    room_session = assessment_session_for_room(
+        user_doc, room_id, include_unscoped=not bool(req.ai_room_id),
+    )
+    agent_profile = dict(user_doc)
+    if room_session is None:
+        agent_profile.pop("agentic_assessment_session", None)
     agent_ctx = AgentTurnContext(
         user_id=req.user_id,
         room_id=room_id,
@@ -181,7 +224,7 @@ def _complete_public_turn(
         message_id=user_message_id,
         mentioned_ids=requested_mentions,
         mention_overflow=mention_overflow,
-        user_profile=user_doc or {},
+        user_profile=agent_profile,
         recent_history=history,
     )
     agent_result = run_public_agent_turn_v3(
@@ -192,7 +235,9 @@ def _complete_public_turn(
     latest_profile = profiles_coll.find_one(
         {"user_id": req.user_id}, {"_id": 0, "agentic_assessment_session": 1},
     ) or {}
-    assessment_state = assessment_public_state(latest_profile)
+    assessment_state = assessment_public_state_for_room(
+        latest_profile, room_id, include_unscoped=not bool(req.ai_room_id),
+    )
     ai_reply = agent_result.reply or PUBLIC_RETRY_REPLY
     reply_messages = [str(item).strip() for item in (agent_result.messages or []) if str(item).strip()][:3]
     if not reply_messages:
@@ -217,9 +262,16 @@ def _complete_public_turn(
     if len(reply_messages) > 1:
         metadata["presentation_messages"] = reply_messages
     if metadata:
-        save_message(room_id, "ai_assistant", ai_reply, metadata=metadata)
+        saved_reply = save_message(room_id, "ai_assistant", ai_reply, metadata=metadata)
     else:
-        save_message(room_id, "ai_assistant", ai_reply)
+        saved_reply = save_message(room_id, "ai_assistant", ai_reply)
+    if run_id and isinstance(saved_reply, dict) and saved_reply.get("message_id"):
+        mark_public_confirmation_presented(
+            user_id=req.user_id,
+            origin_run_id=run_id,
+            message_id=str(saved_reply["message_id"]),
+            persisted_content=str(saved_reply.get("content") or ""),
+        )
     # Assessment answers are a separate, owner-scoped workflow. They must not
     # become recent-context or durable-memory evidence. Other saved public
     # messages still reach the isolated extractor.
@@ -237,6 +289,8 @@ def _complete_public_turn(
         )
         if profile_skill_mode in {"on", "shadow"}:
             profile_process_run_key = candidate_run_key
+    if background_tasks is not None:
+        queue_conversation_compaction_shadow(background_tasks, req.user_id, room_id)
     return {
         "reply": ai_reply,
         "messages": reply_messages,
@@ -436,7 +490,8 @@ def direct_chat_stream(
                 # preserve their established direct-chat behavior as one final event.
                 response = direct_chat(req, worker_background_tasks)
             emit({"type": "final", "response": response})
-        except Exception:
+        except Exception as exc:
+            _log_public_stream_exception(exc)
             if debug_enabled:
                 finish_debug_run(state["agent_run_id"], status="error")
             emit({
@@ -499,6 +554,21 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
     match_doc = find_accepted_match(req.user_id, req.contact_id)
     if not match_doc:
         raise HTTPException(status_code=403, detail="只能傳送訊息給已接受的配對")
+
+    # Relationship blocks are an availability gate, unlike advisory message
+    # risk analysis. Check before both image/text persistence and all side effects.
+    try:
+        pair_is_blocked = risk_block_service.is_pair_blocked(
+            req.user_id,
+            req.contact_id,
+        )
+    except RiskBlockServiceUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="安全關係狀態暫時無法確認，訊息未送出",
+        ) from exc
+    if pair_is_blocked:
+        raise HTTPException(status_code=403, detail="目前無法傳送訊息給此聯絡人")
 
     client_message_id = req.client_message_id or uuid.uuid4().hex
 

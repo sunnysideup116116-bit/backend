@@ -8,6 +8,8 @@ from services.assessment_session_service import (
     advance_assessment_session,
     assessment_cancel_choice,
     assessment_commit_choice,
+    assessment_public_state_for_room,
+    assessment_session_for_room,
     assessment_ui_projection,
     awaiting_assessment_commit,
     cancel_assessment_session,
@@ -27,6 +29,80 @@ def _active_session(kind="big_five", revision=0, **extra):
 
 
 class AssessmentSessionServiceTests(unittest.TestCase):
+    def test_room_scoped_session_stays_with_the_room_that_started_it(self):
+        with patch("services.assessment_session_service.time.time", return_value=100), \
+             patch("services.assessment_session_service.profiles_coll.find_one", return_value={}), \
+             patch("services.assessment_session_service.profiles_coll.update_one", return_value=SimpleNamespace(modified_count=1)) as update:
+            outcome = start_assessment_session(
+                "owner", "deep_profile", idempotency_key="confirm-room-a",
+                room_id="ai_room::owner::a",
+            )
+
+        self.assertEqual(outcome["status"], "started")
+        session = update.call_args.args[1]["$set"]["agentic_assessment_session"]
+        self.assertEqual(session["room_id"], "ai_room::owner::a")
+        profile = {"agentic_assessment_session": session}
+        self.assertIsNotNone(assessment_session_for_room(profile, "ai_room::owner::a"))
+        self.assertIsNone(assessment_session_for_room(profile, "ai_room::owner::b"))
+        self.assertEqual(
+            assessment_public_state_for_room(profile, "ai_room::owner::a")["assessment_kind"],
+            "deep_profile",
+        )
+        self.assertIsNone(
+            assessment_public_state_for_room(profile, "ai_room::owner::b")["assessment_state"],
+        )
+
+    def test_unscoped_legacy_session_never_appears_in_a_topic_room(self):
+        profile = {"agentic_assessment_session": _active_session(kind="deep_profile")}
+        self.assertIsNone(
+            assessment_public_state_for_room(profile, "ai_room::owner::a")["assessment_state"],
+        )
+        self.assertEqual(
+            assessment_public_state_for_room(
+                profile, "owner_ai_assistant", include_unscoped=True,
+            )["assessment_kind"],
+            "deep_profile",
+        )
+
+    def test_pre_room_scoping_session_recovers_its_verified_origin_room(self):
+        profile = {"agentic_assessment_session": _active_session(
+            kind="deep_profile",
+            start_idempotency_key="confirmation:confirmation-1:deep_profile",
+        )}
+        with patch(
+            "services.assessment_session_service._CONFIRMATIONS_COLL.find_one",
+            return_value={"origin_run_id": "run-1"},
+        ) as find_confirmation, patch(
+            "services.assessment_session_service._AGENT_RUNS_COLL.find_one",
+            return_value={"room_id": "ai_room::owner::a"},
+        ) as find_run, patch(
+            "services.assessment_session_service.profiles_coll.update_one",
+            return_value=SimpleNamespace(modified_count=1),
+        ) as update:
+            session = assessment_session_for_room(profile, "ai_room::owner::a")
+            legacy_session = assessment_session_for_room(
+                profile, "owner_ai_assistant", include_unscoped=True,
+            )
+
+        self.assertEqual(session["room_id"], "ai_room::owner::a")
+        self.assertIsNone(legacy_session)
+        find_confirmation.assert_called_once_with(
+            {
+                "_id": "confirmation-1",
+                "user_id": "owner",
+                "tool_name": "profile.start_assessment",
+            },
+            {"_id": 0, "origin_run_id": 1},
+        )
+        find_run.assert_called_once_with(
+            {"run_id": "run-1", "user_id": "owner"},
+            {"_id": 0, "room_id": 1},
+        )
+        self.assertEqual(
+            update.call_args.args[1]["$set"]["agentic_assessment_session.room_id"],
+            "ai_room::owner::a",
+        )
+
     def test_start_creates_24_hour_bounded_draft_without_touching_completed_profile(self):
         profile = {"big_five": {"summary": "原本的性格資料"}}
         with patch("services.assessment_session_service.time.time", return_value=100), \

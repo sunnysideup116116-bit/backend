@@ -31,6 +31,8 @@ class V3ConfirmationTests(unittest.TestCase):
                 origin_run_id=origin_run_id,
             ),
             "preview_fingerprint": "preview-digest",
+            "presented_message_id": "message-1",
+            "presented_at": created_at + 0.5,
         }
 
     @patch("services.ayue_agent.v3.confirmation.time.time", return_value=100.0)
@@ -46,14 +48,15 @@ class V3ConfirmationTests(unittest.TestCase):
             preview="Cancel tomorrow's event?",
         )
         self.coll.update_many.assert_called_once_with(
-            {"user_id": "owner", "status": "pending"},
+            {"user_id": "owner", "status": {"$in": ["prepared", "pending"]}},
             {"$set": {"status": "superseded", "superseded_at": 100.0}},
         )
         doc = self.coll.insert_one.call_args[0][0]
-        self.assertEqual(doc["status"], "pending")
+        self.assertEqual(doc["status"], "prepared")
         self.assertEqual(doc["origin_run_id"], "run-preview")
         self.assertTrue(doc["request_fingerprint"])
-        self.assertTrue(doc["preview_fingerprint"])
+        self.assertFalse(doc["preview_fingerprint"])
+        self.assertTrue(doc["preview_source_fingerprint"])
         self.assertNotIn("preview", doc)
 
     @patch("services.ayue_agent.v3.confirmation.time.time", return_value=100.0)
@@ -121,6 +124,93 @@ class V3ConfirmationTests(unittest.TestCase):
 
         self.assertEqual(results, [])
         executor.assert_not_called()
+
+    @patch("services.ayue_agent.v3.confirmation.time.time", return_value=100.0)
+    def test_calendar_confirmation_stays_prepared_until_persisted_preview_is_marked(self, _now):
+        self.coll.update_one.return_value = MagicMock(modified_count=1)
+        self.mgr.create_confirmation(
+            user_id="owner", agent_name="calendar", tool_name="calendar.submit_commands",
+            arguments={}, payload={"plans": []}, origin_run_id="run-preview",
+            preview="要新增行程嗎？",
+        )
+        self.coll.find.return_value = []
+        self.assertEqual(self.mgr.list_active(user_id="owner"), [])
+        executed = []
+        self.assertEqual(
+            self.mgr.execute_confirmed(
+                user_id="owner",
+                executor=lambda *args: executed.append(args) or (True, "done", None),
+            ),
+            [],
+        )
+        self.assertEqual(executed, [])
+        self.assertTrue(self.mgr.bind_final_preview(
+            user_id="owner", origin_run_id="run-preview", final_content="要新增行程嗎？",
+        ))
+        self.assertTrue(self.mgr.mark_presented(
+            user_id="owner", origin_run_id="run-preview", message_id="message-1",
+            persisted_content="要新增行程嗎？",
+        ))
+
+    def test_non_calendar_confirmation_keeps_existing_pending_lifecycle(self):
+        from services.ayue_agent.v3.test_store import MemoryCollection
+
+        manager = ConfirmationManager(MemoryCollection())
+        manager.create_confirmation(
+            user_id="owner", agent_name="relationship",
+            tool_name="relationship.start_date_coordination",
+            arguments={}, payload={}, origin_run_id="run-relationship",
+            preview="要建立約會邀請嗎？",
+        )
+        active = manager.list_active(user_id="owner")
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["status"], "pending")
+
+    def test_preview_fingerprint_is_bound_to_exact_persisted_content(self):
+        from services.ayue_agent.v3.test_store import MemoryCollection
+
+        manager = ConfirmationManager(MemoryCollection())
+        manager.create_confirmation(
+            user_id="owner", agent_name="calendar", tool_name="calendar.submit_commands",
+            arguments={}, payload={"plans": []}, origin_run_id="run-preview",
+            preview="原始預覽",
+        )
+        self.assertTrue(manager.bind_final_preview(
+            user_id="owner", origin_run_id="run-preview", final_content="最終預覽",
+        ))
+        self.assertFalse(manager.mark_presented(
+            user_id="owner", origin_run_id="run-preview", message_id="message-1",
+            persisted_content="原始預覽",
+        ))
+        self.assertTrue(manager.mark_presented(
+            user_id="owner", origin_run_id="run-preview", message_id="message-1",
+            persisted_content="最終預覽",
+        ))
+
+    def test_supersede_and_confirm_race_never_cancels_executing_mutation(self):
+        from services.ayue_agent.v3.test_store import MemoryCollection
+
+        manager = ConfirmationManager(MemoryCollection())
+        manager.create_confirmation(
+            user_id="owner", agent_name="calendar", tool_name="calendar.submit_commands",
+            arguments={}, payload={"plans": []}, origin_run_id="run-preview",
+            preview="預覽",
+        )
+        manager.bind_final_preview(
+            user_id="owner", origin_run_id="run-preview", final_content="預覽",
+        )
+        manager.mark_presented(
+            user_id="owner", origin_run_id="run-preview", message_id="message-1",
+            persisted_content="預覽",
+        )
+        record = manager.list_active(user_id="owner")[0]
+        manager._coll.update_one(
+            {"_id": record["_id"], "status": "pending"},
+            {"$set": {"status": "executing"}},
+        )
+        result = manager.supersede_active(user_id="owner", tool_name="calendar.submit_commands")
+        self.assertEqual(result["status"], "already_executing")
+        self.assertEqual(manager._coll.find({"_id": record["_id"]})[0]["status"], "executing")
 
     def test_tuple_failure_preserves_stale_revision_code(self):
         self.coll.find.return_value = [self._record()]

@@ -29,6 +29,7 @@ from .calendar_references import (
     remember_resolved_target,
     public_projection,
 )
+from .place_references import get_candidate as get_place_candidate
 from .contracts import SubTask, SubTaskResult, SubTaskStatus
 from .debug_trace import append_event as append_debug_event
 from .guard import guard_calendar_commands
@@ -45,6 +46,7 @@ _CALENDAR_READ_TOOLS = frozenset(
 )
 
 ConfirmationCreator = Callable[..., Any]
+SupersedeConfirmation = Callable[..., dict[str, Any]]
 RunnerInvoker = Callable[..., Any]
 MetricsPrinter = Callable[[str, Any], Any]
 
@@ -131,6 +133,11 @@ def run(
         # runtimes; avoid printing Calendar metrics twice at this boundary.
         print_llm_metrics=lambda _label, _metrics: None,
         create_confirmation=getattr(services, "create_confirmation", None) or (lambda **_kwargs: None),
+        supersede_confirmation=(
+            getattr(services, "supersede_confirmation", None)
+            if callable(getattr(services, "supersede_confirmation", None))
+            else None
+        ),
     )
     return TaskRunnerResult.from_completed(results), metrics
 
@@ -204,6 +211,54 @@ def _invalid_command_result(task_id: str, clarification: Any) -> SubTaskResult:
     )
 
 
+def _bind_resolved_place_to_create(
+    turn_ctx: Any,
+    command: Any,
+) -> tuple[Any | None, dict[str, Any] | None]:
+    """Bind one server-resolved place to an authority-free create command."""
+    resolution = getattr(turn_ctx, "place_reference_resolution", None)
+    if not isinstance(resolution, dict) or str(getattr(command, "action", "")) != "create":
+        return command, None
+    reference = str(resolution.get("reference") or "")
+    candidate = get_place_candidate(
+        turn_ctx.user_id,
+        turn_ctx.room_id,
+        reference,
+    )
+    if not candidate:
+        return None, {
+            "code": "not_found",
+            "message": "剛才選定的地點已失效，請重新搜尋並選擇後再安排。",
+        }
+
+    label = str(candidate.get("label") or "").strip()[:80]
+    if not label:
+        return None, {
+            "code": "not_found",
+            "message": "剛才選定的地點目前不可用，請重新選擇。",
+        }
+    values = command.model_dump(exclude_none=True)
+    candidate_labels = {
+        str(item.get("label") or "").strip()
+        for item in ((getattr(turn_ctx, "recent_place_candidates", None) or {}).get("candidates") or [])
+        if isinstance(item, dict) and str(item.get("label") or "").strip()
+    }
+    generic_titles = {"地點", "餐廳", "店家", "這間店", "那間店", "行程", "一筆行程"}
+    current_title = str(values.get("title") or "").strip()
+    if not current_title or current_title in generic_titles or current_title in candidate_labels:
+        values["title"] = label
+    # The public label, not provider identity, is the only value allowed into
+    # the Calendar form. This also overrides a model-guessed different place.
+    values["location"] = label
+    try:
+        return command.__class__.model_validate(values), None
+    except Exception:
+        return None, {
+            "code": "invalid_command",
+            "message": "這次地點行程的格式無法安全驗證，請重新描述。",
+        }
+
+
 def _run_calendar_reads(
     *,
     task: SubTask,
@@ -272,6 +327,7 @@ def run_task(
     debug_enabled: bool,
     print_llm_metrics: MetricsPrinter,
     create_confirmation: ConfirmationCreator,
+    supersede_confirmation: SupersedeConfirmation | None = None,
 ) -> tuple[list[SubTaskResult], SubAgentMetrics | None]:
     """Run one Calendar task while keeping authority in server code."""
     try:
@@ -401,11 +457,37 @@ def run_task(
             except Exception:
                 clear_draft(turn_ctx.user_id)
 
+        place_bound_commands = []
+        for command in calendar_commands:
+            bound_command, binding_error = _bind_resolved_place_to_create(
+                turn_ctx, command,
+            )
+            if binding_error:
+                results.append(_invalid_command_result(task.id, binding_error))
+                continue
+            place_bound_commands.append(bound_command)
+        calendar_commands = place_bound_commands
+        if not calendar_commands:
+            return results, agent_metrics
+
         canonical_commands = []
         for command in calendar_commands:
-            canonical_command, _date_error = canonicalize_calendar_command(turn_ctx, command)
+            canonical_command, date_error = canonicalize_calendar_command(turn_ctx, command)
+            if date_error:
+                error_code = (
+                    "invalid_interval"
+                    if str(date_error).startswith("target_selector_time:")
+                    else "invalid_date"
+                )
+                results.append(_invalid_command_result(task.id, {
+                    "code": error_code,
+                    "message": date_error,
+                }))
+                continue
             canonical_commands.append(canonical_command)
         calendar_commands = canonical_commands
+        if not calendar_commands:
+            return results, agent_metrics
 
         recent_reference = None
         if len(calendar_commands) == 1:
@@ -455,6 +537,24 @@ def run_task(
                 guard_code=command_guard.code,
             ))
         else:
+            if supersede_confirmation is not None:
+                supersession = supersede_confirmation(
+                    user_id=turn_ctx.user_id,
+                    tool_name="calendar.submit_commands",
+                    reason="calendar_replacement_attempt",
+                )
+                supersession_status = str(supersession.get("status") or "none")
+                if supersession_status in {"already_executing", "already_completed", "storage_unavailable"}:
+                    message = {
+                        "already_executing": "上一筆行事曆操作已開始執行，目前不能回溯取消；請稍後確認目前狀態。",
+                        "already_completed": "上一筆行事曆操作已經完成，無法回溯取消；請先確認目前狀態，再重新提出安排。",
+                        "storage_unavailable": "目前無法安全更新待確認操作，行事曆尚未變更；請稍後再試。",
+                    }[supersession_status]
+                    results.append(_invalid_command_result(task.id, {
+                        "code": f"confirmation_{supersession_status}",
+                        "message": message,
+                    }))
+                    return results, agent_metrics
             preflight = preflight_calendar_commands(
                 turn_ctx,
                 calendar_commands,

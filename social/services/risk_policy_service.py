@@ -11,6 +11,12 @@ import requests
 
 _DELIVERABLE_LEVELS = {"safe", "observation", "warning", "restricted"}
 _KNOWN_LEVELS = _DELIVERABLE_LEVELS | {"blocked"}
+_ALLOWED_ACTION_OPTIONS = {
+    "dismiss",
+    "leave_conversation",
+    "block_user",
+    "report_user",
+}
 
 
 class PairMessageRiskDecision(NamedTuple):
@@ -37,6 +43,9 @@ class PairMessageRiskDecision(NamedTuple):
         if not action or action == "none":
             return None
         clean: dict = {"action": action}
+        target_user_id = str(directive.get("target_user_id") or "").strip()
+        if target_user_id:
+            clean["target_user_id"] = target_user_id[:128]
         for key in (
             "cooldown_seconds",
             "require_acknowledgment",
@@ -59,6 +68,26 @@ class PairMessageRiskDecision(NamedTuple):
         throttled = directive.get("throttled")
         if isinstance(throttled, dict):
             clean["throttled"] = dict(throttled)
+        options = directive.get("action_options")
+        if isinstance(options, list):
+            clean_options = []
+            for item in options[:4]:
+                if not isinstance(item, dict):
+                    continue
+                option_action = str(item.get("action") or "").strip()
+                label = item.get("label")
+                if (
+                    option_action not in _ALLOWED_ACTION_OPTIONS
+                    or not isinstance(label, str)
+                    or not label.strip()
+                ):
+                    continue
+                clean_options.append({
+                    "action": option_action,
+                    "label": label[:40],
+                })
+            if clean_options:
+                clean["action_options"] = clean_options
         return clean
 
     def public_projection(self) -> dict:

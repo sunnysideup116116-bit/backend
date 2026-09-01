@@ -13,12 +13,19 @@ from typing import Any, Callable
 
 import requests
 
-from database import profiles_coll
+from database import matches_coll, profiles_coll
 from services.giphy_service import schedule_match_celebration_gifs
 from services.match_decision_service import apply_match_decision
 from services.match_reason_service import accepted_opening_for_viewer
 from services.match_state_service import derive_match_stage, reconcile_live_match
 from services.mediator_event_service import queue_mediator_event
+from services.preference_store import upsert_preference_facts
+from services.proposal_namespace import (
+    EVENT_INVITATION_NAMESPACE,
+    RELATIONSHIP_MATCH_NAMESPACE,
+    live_proposal_query,
+    namespace_for_document,
+)
 
 
 TaskScheduler = Callable[..., Any]
@@ -73,6 +80,7 @@ def apply_transition_effects(
     from_id, to_id = match_doc["from_user"], match_doc["to_user"]
     match_id = str(match_doc["_id"])
     status = match_doc["status"]
+    namespace = namespace_for_document(match_doc)
     if status == "pending":
         receiver_doc = profiles_coll.find_one({"user_id": to_id}) or {}
         try:
@@ -87,9 +95,27 @@ def apply_transition_effects(
             to_id, "欸，有位人選想認識你，我先來問你本人。", "incoming_match_interest",
             event_key=f"match:{match_id}:pending-proposal:{to_id}", match_id=match_id,
             proposal_role="receiver",
+            proposal_namespace=namespace,
         )
         return
     if status == "accepted":
+        if (
+            namespace == EVENT_INVITATION_NAMESPACE
+            and match_doc.get("relationship_establishing") is False
+        ):
+            event_title = str(
+                (match_doc.get("event_snapshot") or {}).get("title") or "這個活動"
+            )[:80]
+            for user_id in (from_id, to_id):
+                queue_mediator_event(
+                    user_id,
+                    f"你們都對「{event_title}」有興趣；原本的聊天室可以直接接著聊。",
+                    "event_invitation_accepted",
+                    event_key=f"event-invitation:{match_id}:accepted:{user_id}",
+                    match_id=match_id,
+                    proposal_namespace=namespace,
+                )
+            return
         initiator_doc = profiles_coll.find_one({"user_id": from_id}) or {}
         target_doc = profiles_coll.find_one({"user_id": to_id}) or {}
         for user_id, other_id in ((from_id, to_id), (to_id, from_id)):
@@ -124,11 +150,21 @@ def apply_transition_effects(
 
     def notify_decline_feedback() -> None:
         try:
-            requests.post("http://127.0.0.1:9001/api/feedback", json={
+            response = requests.post("http://127.0.0.1:9001/api/feedback", json={
                 "user_id": actor, "target_id": other_id, "action": "decline",
                 "target_traits": target_doc.get("big_five", {}),
                 "explicit_reasons": explicit_reasons,
-            }, timeout=15).raise_for_status()
+            }, timeout=15)
+            response.raise_for_status()
+            memories = response.json().get("memories", [])
+            if memories:
+                upsert_preference_facts(
+                    actor,
+                    memories,
+                    source="match_feedback",
+                    message_id=f"feedback:{match_id}:{actor}",
+                    match_id=match_id,
+                )
         except Exception as exc:
             print(f"[match] feedback forwarding failed: {exc}")
 
@@ -156,6 +192,7 @@ def decide_match(
     action: str,
     expected_status: str,
     expected_revision: int | None,
+    expected_namespace: str | None = None,
     explicit_reasons: list[str] | None = None,
     idempotency_key: str | None = None,
     schedule_task: TaskScheduler | None = None,
@@ -177,6 +214,7 @@ def decide_match(
         action=action,
         expected_status=expected_status,
         expected_revision=expected_revision,
+        expected_namespace=expected_namespace,
         explicit_reasons=explicit_reasons,
         idempotency_key=idempotency_key,
         after_transition=after_transition,
@@ -202,6 +240,41 @@ def decide_active_proposal(
         action="accept" if decision == "interested" else "decline",
         expected_status=str(active.get("status") or ""),
         expected_revision=expected_revision,
+        expected_namespace=RELATIONSHIP_MATCH_NAMESPACE,
+        idempotency_key=idempotency_key,
+        schedule_task=schedule_task,
+    )
+
+
+def decide_active_event_invitation(
+    *, user_id: str, decision: str, expected_revision: int, idempotency_key: str,
+    schedule_task: TaskScheduler | None = None,
+) -> dict[str, Any]:
+    """Decide the sole Event invitation without touching the match namespace."""
+    if decision not in {"interested", "declined"}:
+        return {"status": "invalid", "invalid": True}
+    live = list(matches_coll.find(
+        live_proposal_query(user_id, EVENT_INVITATION_NAMESPACE),
+        {
+            "_id": 1, "from_user": 1, "to_user": 1, "status": 1,
+            "proposal_revision": 1, "proposal_namespace": 1,
+            "proposal_source": 1,
+        },
+    ).sort([("created_at", -1)]).limit(2))
+    if len(live) != 1:
+        return {"status": "stale", "stale": True}
+    active = live[0]
+    status = str(active.get("status") or "")
+    actor = active.get("from_user") if status == "draft" else active.get("to_user")
+    if status not in {"draft", "pending"} or actor != user_id:
+        return {"status": "stale", "stale": True, "current_status": status}
+    return decide_match(
+        user_id=user_id,
+        match_id=str(active["_id"]),
+        action="accept" if decision == "interested" else "decline",
+        expected_status=status,
+        expected_revision=expected_revision,
+        expected_namespace=EVENT_INVITATION_NAMESPACE,
         idempotency_key=idempotency_key,
         schedule_task=schedule_task,
     )

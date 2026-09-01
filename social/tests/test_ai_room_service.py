@@ -133,6 +133,77 @@ class AiRoomServiceTests(unittest.TestCase):
             room_id = ai_room_service.most_recent_ai_room("owner")
         self.assertEqual(room_id, ai_room_service.legacy_ai_room_id("owner"))
 
+    def test_room_list_projects_active_assessment_only_onto_its_owner_room(self):
+        rooms_p, messages_p, rooms, messages = self._patch_colls()
+        with rooms_p, messages_p:
+            rooms.find.return_value = iter([{
+                "room_id": "ai_room::owner::a", "user_id": "owner",
+                "title": "價值觀", "needs_title": False,
+                "created_at": 1.0, "updated_at": 2.0,
+            }])
+            messages.find_one.return_value = None
+            projected = ai_room_service.list_rooms(
+                "owner",
+                assessment_profile={"agentic_assessment_session": {
+                    "session_id": "assessment-a", "kind": "deep_profile",
+                    "status": "active", "revision": 3,
+                    "room_id": "ai_room::owner::a",
+                }},
+            )
+
+        by_id = {room["room_id"]: room for room in projected}
+        self.assertEqual(by_id["ai_room::owner::a"]["assessment_kind"], "deep_profile")
+        self.assertEqual(by_id["ai_room::owner::a"]["assessment_state"], "active")
+        legacy = by_id[ai_room_service.legacy_ai_room_id("owner")]
+        self.assertIsNone(legacy["assessment_state"])
+
+    def test_create_proposal_room_upserts_deterministic_room_with_title(self):
+        rooms_p, messages_p, rooms, messages = self._patch_colls()
+        with rooms_p, messages_p, patch.object(ai_room_service, "save_system_message_once") as save:
+            rooms.find_one.return_value = {
+                "room_id": "ai_room::owner::proposal::match-1", "title": "牽線提案",
+                "needs_title": False, "is_legacy": False, "is_new": True,
+                "created_at": 1.0, "updated_at": 1.0,
+            }
+            room = ai_room_service.create_proposal_room(
+                "owner", "match-1", "有位人選想認識你。",
+                metadata={"event_type": "incoming_match_interest"},
+            )
+        self.assertEqual(room["room_id"], "ai_room::owner::proposal::match-1")
+        self.assertEqual(room["title"], ai_room_service.PROPOSAL_AI_ROOM_TITLE)
+        rooms.update_one.assert_called_once()
+        set_on_insert = rooms.update_one.call_args.args[1]["$setOnInsert"]
+        self.assertEqual(set_on_insert["match_id"], "match-1")
+        self.assertTrue(set_on_insert["is_proposal_room"])
+        self.assertFalse(set_on_insert["is_legacy"])
+        self.assertEqual(rooms.update_one.call_args.args[1]["$set"]["is_new"], True)
+        save.assert_called_once()
+        self.assertEqual(save.call_args.args[0], "ai_room::owner::proposal::match-1")
+        self.assertEqual(save.call_args.args[1], "有位人選想認識你。")
+        self.assertEqual(save.call_args.kwargs["message_type"], "mediator_card")
+
+    def test_create_proposal_room_uses_same_room_for_same_match(self):
+        from services.chat_service import generate_proposal_ai_room_id
+
+        room_id = generate_proposal_ai_room_id("owner", "match-1")
+        self.assertTrue(room_id.startswith("ai_room::owner::proposal::"))
+        self.assertIn("match-1", room_id)
+        self.assertEqual(generate_proposal_ai_room_id("owner", "match-1"), room_id)
+        self.assertNotEqual(generate_proposal_ai_room_id("owner", "match-2"), room_id)
+
+    def test_mark_room_read_clears_new_flag_for_owned_room_only(self):
+        rooms_p, messages_p, rooms, _ = self._patch_colls()
+        with rooms_p, messages_p:
+            rooms.update_one.return_value = MagicMock(modified_count=1)
+            self.assertTrue(ai_room_service.mark_room_read("ai_room::owner::x", "owner"))
+            self.assertEqual(
+                rooms.update_one.call_args.args[1]["$unset"],
+                {"is_new": 1},
+            )
+            # Legacy room and foreign rooms are never touched.
+            self.assertFalse(ai_room_service.mark_room_read(ai_room_service.legacy_ai_room_id("owner"), "owner"))
+            self.assertFalse(ai_room_service.mark_room_read("ai_room::intruder::x", "owner"))
+
 
 if __name__ == "__main__":
     unittest.main()

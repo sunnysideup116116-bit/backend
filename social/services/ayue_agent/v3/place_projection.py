@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import config
+from services.ayue_agent.google_places_client import _public_display_name
 from services.ayue_agent.web_tools import is_safe_public_url
 
 from .contracts import SubTaskStatus
@@ -134,7 +135,9 @@ def public_place_cards(
             card = {
                 "provider": provider,
                 "place_id": place_id if provider == "google" else "",
-                "name": re.sub(r"\s+", " ", str(item.get("name") or "地點")).strip()[:80],
+                # Keep a final public-boundary check even when a provider
+                # double or cached observation bypasses the Google adapter.
+                "name": _public_display_name(item.get("name")) or "地點",
                 "category": category,
                 "address_summary": re.sub(r"\s+", " ", str(item.get("address_summary") or "")).strip()[:180],
                 "distance_label": _distance_label(item.get("distance_m")),
@@ -177,4 +180,3 @@ def public_place_cards(
                 next_active.append(category)
         active = next_active
     return balanced
-

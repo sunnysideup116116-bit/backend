@@ -103,9 +103,16 @@ class PairChatRiskWiringTests(unittest.TestCase):
     def test_router_orders_risk_before_pair_persistence_and_history_filters(self):
         router = ROUTER_PATH.read_text(encoding="utf-8")
         pair_branch = router[router.index("match_doc = find_accepted_match"):]
+        block_gate = pair_branch.index("risk_block_service.is_pair_blocked")
+        first_save = pair_branch.index("save_pair_owner_message_once")
+        second_save = pair_branch.index("save_pair_owner_message_once", first_save + 1)
+        self.assertLess(
+            block_gate,
+            first_save,
+        )
         self.assertLess(
             pair_branch.index("pair_message_risk_gate.evaluate"),
-            pair_branch.index("save_pair_owner_message_once"),
+            second_save,
         )
         history = HISTORY_PATH.read_text(encoding="utf-8")
         self.assertIn('"is_blocked": {"$ne": True}', history)

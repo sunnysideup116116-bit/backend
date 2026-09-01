@@ -267,6 +267,7 @@ def test_blocked_message_writes_receiver_notice_card():
         },
     )
     with patch.object(public_chat, "find_accepted_match", return_value={"_id": "m1"}), \
+         patch.object(public_chat.risk_block_service, "is_pair_blocked", return_value=False), \
          patch.object(public_chat.pair_message_risk_gate, "evaluate", return_value=risk_decision), \
          patch.object(public_chat, "save_system_message_once") as save_system, \
          patch("routers.public_chat.generate_room_id", return_value="a_b"):

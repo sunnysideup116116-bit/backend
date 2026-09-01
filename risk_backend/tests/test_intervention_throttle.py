@@ -8,6 +8,7 @@
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
 
@@ -114,3 +115,52 @@ def test_execute_without_log_service_does_not_throttle():
         decision_reason="normal",
     ))
     assert cmd["risk_level"] == "safe"
+
+
+def test_ui_behavior_keys_pass_through_to_directive():
+    """B3：ui_behavior 內所有鍵應整包 passthrough 到 directive，不再白名單。
+
+    2026-08-15 前白名單曾使 mascot / show_options 從未送達前端。現行實作
+    （intervention_engine._get_specific_directive）對 ui_behavior 迴圈倒進
+    directive，只跳過 cooldown / require_ack（已有獨立鍵）。任何新增的
+    UI 旗標應自動出現在 directive，不需改引擎。
+    """
+    engine = InterventionEngine()
+
+    fake_templates = [{
+        "template_id": "receiver_test_notice",
+        "risk_level": "warning",
+        "primary_risk_type": "any",
+        "action_type": "show_safety_info_card",
+        "message_template": {"title": "T", "body": "B"},
+        "ui_behavior": {
+            "show_options": True,
+            "show_feedback_buttons": True,
+            "allow_report_text": True,
+            "mascot": "heart",
+            "display_throttle_seconds": 120,
+            "cooldown": 0,        # 應映射到 cooldown_seconds，不直接 passthrough
+            "require_ack": False,  # 應映射到 require_acknowledgment，不直接 passthrough
+            # 一個引擎不認識的新旗標——應原樣送達前端
+            "future_flag": True,
+        },
+    }]
+
+    with patch("app.core.intervention_engine.KBService.get_interventions_by_level", return_value=fake_templates):
+        directive = engine._get_specific_directive(fake_templates, "any", "receiver")
+
+    # 已知鍵映射正確
+    assert directive["action"] == "show_safety_info_card"
+    assert directive["cooldown_seconds"] == 0
+    assert directive["require_acknowledgment"] is False
+    # 整包 passthrough 的鍵
+    assert directive["show_options"] is True
+    assert directive["show_feedback_buttons"] is True
+    assert directive["allow_report_text"] is True
+    assert directive["mascot"] == "heart"
+    assert directive["display_throttle_seconds"] == 120
+    # 新旗標原樣送達
+    assert directive["future_flag"] is True
+    # 不應殘留原始鍵名
+    assert "cooldown" not in directive
+    assert "require_ack" not in directive

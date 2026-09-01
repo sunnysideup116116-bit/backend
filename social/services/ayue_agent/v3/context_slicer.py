@@ -32,6 +32,8 @@ def slice_for_agent(
             "calendar_draft": getattr(turn_ctx, "calendar_draft", None),
             "calendar_recent_reference": getattr(turn_ctx, "calendar_recent_reference", None),
             "calendar_recent_mutation": getattr(turn_ctx, "calendar_recent_mutation", None),
+            "recent_place_candidates": getattr(turn_ctx, "recent_place_candidates", None),
+            "place_reference_resolution": getattr(turn_ctx, "place_reference_resolution", None),
             "prior_observations": prior_observations,
         })
 
@@ -42,6 +44,7 @@ def slice_for_agent(
             "user_location": turn_ctx.user_location,
             "clock": clock_dump,
             "prior_observations": prior_observations,
+            "place_reference_resolution": getattr(turn_ctx, "place_reference_resolution", None),
         })
 
     if agent_name == "web":
@@ -72,10 +75,25 @@ def slice_for_agent(
         })
 
     if agent_name == "match":
+        active_proposal = turn_ctx.active_proposal or {}
+        active_event = turn_ctx.active_event_invitation or {}
         return AgentContextSlice(agent="match", payload={
             "message": turn_ctx.message,
             "recent_messages": turn_ctx.recent_messages,
-            "active_proposal": turn_ctx.active_proposal,
+            "conversation_continuity": (
+                turn_ctx.conversation_continuity.model_dump(mode="json")
+                if turn_ctx.conversation_continuity else None
+            ),
+            "active_proposal": {
+                key: active_proposal[key]
+                for key in ("status", "counterparty", "user_can_decide")
+                if active_proposal.get(key) not in (None, "")
+            } or None,
+            "active_event_invitation": {
+                key: active_event[key]
+                for key in ("status", "event_title", "counterparty", "user_can_decide")
+                if active_event.get(key) not in (None, "")
+            } or None,
             "latest_match_outcome": turn_ctx.latest_match_outcome,
             "clock": clock_dump,
             "prior_observations": prior_observations,
@@ -116,10 +134,16 @@ def slice_for_agent(
         return AgentContextSlice(agent="synthesizer", payload={
             "message": turn_ctx.message,
             "recent_messages": turn_ctx.recent_messages,
+            "conversation_continuity": (
+                turn_ctx.conversation_continuity.model_dump(mode="json")
+                if turn_ctx.conversation_continuity else None
+            ),
             "recent_context": turn_ctx.recent_context,
+            "user_preferences": list(turn_ctx.relevant_memories or []),
             "user_location": turn_ctx.user_location,
             "clock": clock_dump,
             "observations": prior_observations,
+            "place_reference_resolution": getattr(turn_ctx, "place_reference_resolution", None),
         })
 
     raise ValueError(f"unknown agent: {agent_name}")

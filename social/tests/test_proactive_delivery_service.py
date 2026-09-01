@@ -122,11 +122,13 @@ class ProactiveDeliveryServiceTests(unittest.TestCase):
             "match_id": "0123456789abcdef01234567", "message": "小葵小葵～先看看我整理的提案。",
         }
         with patch.object(delivery.matches_coll, "find_one", return_value=None), \
+             patch.object(delivery, "create_proposal_room") as create_room, \
              patch.object(delivery, "save_message") as save:
             response = delivery._deliver_global_event("owner", event, delivery._metadata(event))
 
         self.assertEqual(response, {"has_new": False, "stale": True})
         save.assert_not_called()
+        create_room.assert_not_called()
 
     def test_v4_proposal_delivery_rebuilds_only_the_viewer_projection(self):
         event = {
@@ -154,7 +156,7 @@ class ProactiveDeliveryServiceTests(unittest.TestCase):
             },
         }
         with patch.object(delivery.matches_coll, "find_one", return_value=match), \
-             patch.object(delivery, "save_message") as save:
+             patch.object(delivery, "create_proposal_room") as create_room:
             response = delivery._deliver_global_event("owner", event, delivery._metadata(event))
 
         projected = response["matches"][0]
@@ -166,8 +168,77 @@ class ProactiveDeliveryServiceTests(unittest.TestCase):
         serialized = json.dumps(response, ensure_ascii=False)
         self.assertNotIn("seed_user", serialized)
         self.assertNotIn("給另一方向看的文字", serialized)
-        saved_metadata = save.call_args.kwargs["metadata"]
+        saved_metadata = create_room.call_args.kwargs["metadata"]
         self.assertIsNone(saved_metadata["other_id"])
+        self.assertEqual(create_room.call_args.args[:2], ("owner", "0123456789abcdef01234567"))
+        self.assertEqual(response["proposal_room_id"], "ai_room::owner::proposal::0123456789abcdef01234567")
+        self.assertEqual(response["surface"], "global_mediator")
+        self.assertEqual(response["type"], "incoming_match_interest")
+
+    def test_proposal_delivery_creates_dedicated_room_with_card_message(self):
+        event = {
+            "event_id": "event-proposal", "type": "match_proposal",
+            "match_id": "0123456789abcdef01234567", "message": "找到一位人選。",
+        }
+        match = {
+            "_id": "0123456789abcdef01234567", "from_user": "owner", "to_user": "seed_user_01",
+            "status": "pending", "reason_version": "legacy",
+        }
+        with patch.object(delivery.matches_coll, "find_one", return_value=match), \
+             patch.object(delivery, "reason_for_viewer", return_value="小晴和你都喜歡爬山。"), \
+             patch.object(delivery, "create_proposal_room") as create_room:
+            response = delivery._deliver_global_event("owner", event, delivery._metadata(event))
+
+        self.assertTrue(response["has_new"])
+        self.assertEqual(response["proposal_room_id"], "ai_room::owner::proposal::0123456789abcdef01234567")
+        call_args = create_room.call_args
+        self.assertEqual(call_args.args[0], "owner")
+        self.assertEqual(call_args.args[1], "0123456789abcdef01234567")
+        self.assertEqual(call_args.args[2], "找到一位人選。")
+        card_metadata = call_args.kwargs["metadata"]
+        self.assertEqual(card_metadata["event_type"], "match_proposal")
+        self.assertEqual(card_metadata["matches"][0]["match_id"], "0123456789abcdef01234567")
+        self.assertEqual(card_metadata["matches"][0]["viewer_reason"], "小晴和你都喜歡爬山。")
+        self.assertNotIn("seed_user_01", json.dumps(response))
+
+    def test_legacy_automatic_proposal_is_suppressed_without_expiring(self):
+        event = {
+            "event_id": "event-auto", "type": "match_proposal",
+            "match_id": "0123456789abcdef01234567", "message": "舊的自動配對。",
+        }
+        match = {
+            "_id": "0123456789abcdef01234567", "from_user": "owner",
+            "to_user": "other", "status": "draft", "proposal_source": "automatic",
+        }
+        with patch.object(delivery.matches_coll, "find_one", return_value=match), \
+             patch.object(delivery.matches_coll, "update_one") as suppress, \
+             patch.object(delivery, "create_proposal_room") as create_room:
+            response = delivery._deliver_global_event(
+                "owner", event, delivery._metadata(event),
+            )
+
+        self.assertTrue(response["automatic_proposal_suppressed"])
+        create_room.assert_not_called()
+        update = suppress.call_args.args[1]
+        self.assertTrue(update["$set"]["proposal_suppressed"])
+        self.assertNotIn("status", update["$set"])
+        self.assertNotIn("expired_at", update["$set"])
+
+    def test_proposal_delivery_keeps_legacy_room_path_for_non_proposal_events(self):
+        event = {
+            "event_id": "event-care", "type": "proactive_care",
+            "message": "最近過得如何？",
+        }
+        with patch.object(delivery, "most_recent_ai_room", return_value="ai_room::owner::legacy") as most_recent, \
+             patch.object(delivery, "save_message") as save, \
+             patch.object(delivery, "create_proposal_room") as create_room:
+            response = delivery._deliver_global_event("owner", event, delivery._metadata(event))
+
+        self.assertTrue(response["has_new"])
+        self.assertNotIn("proposal_room_id", response)
+        save.assert_called_once()
+        most_recent.assert_called_once_with("owner")
+        create_room.assert_not_called()
 
     def test_memory_notice_precedes_claimed_event_and_care_delivery(self):
         notice_doc = {
