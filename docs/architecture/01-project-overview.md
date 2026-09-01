@@ -30,7 +30,7 @@ Context Builder
 
 | 服務 | 目錄 | 執行 | 責任 |
 | --- | --- | --- | --- |
-| 主服務（social_demotest） | `social_demotest/` | FastAPI，port 8000 | 產品後端：使用者、聊天、配對狀態、行事曆、地點、記憶、公開阿月 V3 runtime、Web Demo |
+| 主服務（social） | `social/` | FastAPI，port 8000 | 產品後端：使用者、聊天、配對狀態、行事曆、地點、記憶、公開阿月 V3 runtime、Web Demo |
 | 媒婆服務（matchmaker_agent） | `matchmaker_agent/` | FastAPI，port 9001 | 候選人排序（LLM 評估）、Neo4j 圖記憶讀寫、feedback 反思、全域法則歸納 |
 
 兩者透過 HTTP 互動：
@@ -45,17 +45,16 @@ Neo4j 只在需要完整媒婆記憶功能時設定；沒有 Neo4j 時媒婆仍�
 
 | 路徑 | 責任 |
 | --- | --- |
-| `social_demotest/main.py` | FastAPI app、routers 註冊、startup 時啟動 background workers |
-| `social_demotest/frontend.html` | 現行 Web UI（單檔 HTML + JS），消費 NDJSON stream 與卡片 API |
-| `social_demotest/routers/` | HTTP adapters：`chat.py` 是 `/api` aggregate，leaf routers 各管一類端點 |
-| `social_demotest/services/` | Domain services：配對、行事曆、記憶、profile、媒人、悄悄話等 |
-| `social_demotest/services/ayue_agent/v3/` | 公開阿月 V3 runtime：scheduler、planner、runtime registry、domain runtimes、guard、sub-agents、synthesizer、confirmation、write executors |
-| `social_demotest/services/ayue_agent/` | V3 之外的公開阿月元件：context builder、tool registry、tools facade、web/maps clients、proactive care、private runtimes |
-| `social_demotest/tests/` | 離線 deterministic contract／trajectory／state／privacy tests |
+| `social/main.py` | FastAPI app、routers 註冊、startup 時啟動 background workers |
+| `social/frontend.html` | 現行 Web UI（單檔 HTML + JS），消費 NDJSON stream 與卡片 API |
+| `social/routers/` | HTTP adapters：`chat.py` 是 `/api` aggregate，leaf routers 各管一類端點 |
+| `social/services/` | Domain services：配對、行事曆、記憶、profile、媒人、悄悄話等 |
+| `social/services/ayue_agent/v3/` | 公開阿月 V3 runtime：scheduler、planner、runtime registry、domain runtimes、guard、sub-agents、synthesizer、confirmation、write executors |
+| `social/services/ayue_agent/` | V3 之外的公開阿月元件：context builder、tool registry、tools facade、web/maps clients、proactive care、private runtimes |
+| `social/tests/` | 離線 deterministic contract／trajectory／state／privacy tests |
 | `matchmaker_agent/` | 媒婆服務：`agent_api.py`（FastAPI adapters）、`matchmaker.py`（LLM 評估 agent） |
 | `docs/` | 設計與變更文件；本目錄 `docs/architecture/` 是架構導覽 |
 | `skills/` | 近期情境、記憶、性格探索的 versioned prompt policy |
-| `start_ayue.ps1` / `start_ayue.cmd` | Windows 啟動與 health check |
 
 ## 4. 公開阿月 vs 阿月悄悄話
 

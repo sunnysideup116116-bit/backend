@@ -1,162 +1,202 @@
-# 阿月交友 Demo
+# 阿月交友平台 — Server 後端
 
-這個 repository 是目前 Demo 使用的阿月 V3。公開阿月採用 sub-agent 架構：Planner 拆解任務 DAG、Sub-agents 以 function calling 執行工具、Synthesizer 彙整回覆；程式端負責權限、確認、狀態轉移、隱私與冪等性。
+交友平台「阿月」的 Python FastAPI 後端，由 **主 API（social）**、**媒婆 Agent（matchmaker_agent）**、**風險偵測（risk_backend）** 與可選的 **Guardrail（llama.cpp）** 四個服務組成。
 
 ```text
-Context Builder
-→ Planner (decompose DAG)
-→ Sub-agents (Guard + Typed Tool)
-→ Verified Observations
-→ Synthesizer
-→ Final Reply
+┌──────────────┐   HTTP    ┌────────────────────────────────────────┐        ┌────────────────┐
+│  DatingApp   │ ─────────▶│          social  (FastAPI :8000)       │◀──────▶│  MongoDB Atlas │
+│  (Flutter)   │           │  前端 HTML + Public/Private 阿月 + 配對 │ pymongo│  (雲端 Cluster) │
+└──────────────┘           └───────────────────┬────────────────────┘        └────────────────┘
+                                               │ HTTP (localhost)
+              ┌────────────────────────────────┼───────────────────────────────┐
+              ▼                                ▼                                ▼
+   ┌────────────────────┐           ┌────────────────────┐           ┌────────────────────┐
+   │  matchmaker_agent  │           │    risk_backend    │           │  guardrail (可選)   │
+   │      (Neo4j)       │           │  (Appwrite KB)     │           │  llama.cpp :8081    │
+   │        :9001       │           │        :8001       │           │  llama-guard-3-1b   │
+   └────────────────────┘           └────────────────────┘           └────────────────────┘
 ```
 
-目前包含：
+## Port 總覽
 
-- 公開阿月 V3 sub-agent runtime 與 NDJSON progress streaming
-- 配對搜尋、提案、接受／婉拒與 revision CAS
-- 本人行事曆 CRUD、共同約會改期／取消
-- 本人近期情境與長期記憶 extraction
-- 主動關心 scheduler
-- `@` 已接受聯絡人的公開資訊查詢
-- 公開阿月替已接受聯絡人建立空白約會邀請卡（確認後才建立）
-- Tavily 網路搜尋，以及 OpenStreetMap／Overpass 附近地點、距離與可預覽的地點卡
-- 與公開阿月隔離的阿月悄悄話
-- 離線 deterministic contract／trajectory／state／privacy tests
+| Port | 服務 | 入口 | 說明 |
+|------|------|------|------|
+| **8000** | social 主 API | `social/main.py` | 前端頁面 `/`、核心 API `/api/*`、健康檢查 `/api/health` |
+| **8001** | risk_backend 風險偵測 | `risk_backend/main.py` | `/api/v1/risk/detect`、`/api/v1/risk/feedback`、`/api/v1/risk/state` |
+| **9001** | matchmaker_agent 媒婆 | `matchmaker_agent/agent_api.py` | `/api/match`、`/api/feedback`、`/api/global_reflection`、`/api/memory/*`、`/api/chat_triples`、`/api/clear_graph` |
+| **8081** | guardrail（可選） | `scripts/run_ayue_guardrail.sh` | llama.cpp server + llama-guard-3-1b，供 risk_backend 的 `llm_classifier` 使用 |
 
-## 架構文件（docs/architecture/）
+## 檔案架構
 
-| 文件 | 內容 |
-| --- | --- |
-| [01-project-overview.md](./docs/architecture/01-project-overview.md) | 系統定位、兩個服務、公開阿月 vs 悄悄話、主要資料流 |
-| [02-python-modules.md](./docs/architecture/02-python-modules.md) | 每個 Python 模組在做什麼（routers / services 對照表） |
-| [03-v3-runtime-lifecycle.md](./docs/architecture/03-v3-runtime-lifecycle.md) | 一回合完整生命週期：Planner → Guard → 工具 → Synthesizer、確認流程、trace |
-| [04-tool-registry.md](./docs/architecture/04-tool-registry.md) | 23 個現行工具的契約、執行流程與新增工具檢查清單 |
-| [05-matchmaker-and-memory.md](./docs/architecture/05-matchmaker-and-memory.md) | port 9001 媒婆、Neo4j 圖記憶、profile pipeline、配對狀態真相 |
-| [06-testing.md](./docs/architecture/06-testing.md) | 測試指令、分類與必覆蓋面向 |
-| [07-guard.md](./docs/architecture/07-guard.md) | Central Guard：審核什麼、GuardResultCode 全表、被拒絕後的處理 |
-| [08-planner.md](./docs/architecture/08-planner.md) | Planner：decompose_tasks 契約、拆解規則、fail closed、與 sub-agents 分工 |
-| [09-runtime-interfaces.md](./docs/architecture/09-runtime-interfaces.md) | HTTP、Context、Planner、RuntimeRegistration、Tool/Guard、Observation 與寫入介面 |
-| [subagent-calendar.md](./docs/architecture/subagent-calendar.md) | 行事曆子代理：能做什麼、呼叫哪些 function、端到端範例 |
-| [subagent-match.md](./docs/architecture/subagent-match.md) | 配對子代理：狀態查詢、搜尋 job、提案 CAS、主動牽線 |
-| [subagent-places.md](./docs/architecture/subagent-places.md) | 地點子代理：附近地點、距離、地點卡、OSM/Google provider |
-| [subagent-web.md](./docs/architecture/subagent-web.md) | Web 子代理：Tavily 查詢、證據等級、活動探索與 Places 串接 |
-| [subagent-relationship.md](./docs/architecture/subagent-relationship.md) | 關係子代理：@ 驗證、已接受聯絡人、可驗證互動摘要與空白約會邀請卡 |
-| [subagent-profile.md](./docs/architecture/subagent-profile.md) | 個人檔案子代理：self summary、記憶、性格探索 session |
-| [subagent-product-info.md](./docs/architecture/subagent-product-info.md) | 產品資訊子代理：bounded knowledge retrieval、`product_info.v1` observation 與 progress/debug |
-
-其他規範文件：
-
-- [AYUE_V3_ARCHITECTURE.md](./AYUE_V3_ARCHITECTURE.md)：實際 runtime、tool、state、API 與 App 遷移方式（內容為 V3 sub-agent 架構）
-- [AGENTS.md](./AGENTS.md)：後續 coding agent 必須遵守的邊界與擴充規則
-- [MEMORY_CONTEXT_ENGINE_GUIDE.md](./MEMORY_CONTEXT_ENGINE_GUIDE.md)：長期建議、Neo4j Graph Memory 與 Context Engine 的資料邊界、Hermes Agent 參考方式和實作順序
-- [FLUTTER_V1_TO_V3_AGENT_GUIDE.md](./docs/FLUTTER_V1_TO_V3_AGENT_GUIDE.md)：從舊 V1 Demo 搬到目前 V3 時，給 Flutter 整合 agent 的替換策略、API 差異與驗收清單
-- [docs/architecture/](./docs/architecture/)：以現行程式為準的架構與 sub-agent 文件；已完成的 migration／Phase 計畫不保留為現況文件
-
-版本名稱約定：`Public V3` 是目前公開阿月架構；`Private V2` 是仍在使用且隔離的悄悄話 runtime。`public-v1`、`web_research.v1`、`product_info.v1` 等名稱是 typed payload 的 schema version，不代表舊 Public runtime。已移除的 Public V1/V2 文件與 prompt 範例不再保留；需要理解層與層之間的 contract 時，以 [09-runtime-interfaces.md](./docs/architecture/09-runtime-interfaces.md) 為入口。
-
-## 專案結構
-
-| 路徑 | 用途 |
-| --- | --- |
-| `social_demotest/` | FastAPI 主服務、Web Demo、Public/Private Ayue 與測試（port 8000） |
-| `matchmaker_agent/` | 候選排序、Neo4j 記憶與 feedback service（port 9001） |
-| `docs/architecture/` | 架構導覽與 sub-agent 流程文件（本文檔） |
-| `docs/` | 現行架構與技術契約文件 |
-| `skills/` | 近期情境、長期記憶與性格探索的 versioned policy |
-| `start_ayue.ps1` | Windows 啟動與 health check |
-| `start_ayue.cmd` | PowerShell 啟動腳本的 cmd wrapper |
-
-## 本機設定
-
-需求：
-
-- Python 3.11+
-- 可使用的 MongoDB
-- Ollama 相容 Chat API 或專案既有 LLM 設定
-- Google AI Studio API key（embedding）
-- Neo4j 僅在需要完整 matchmaker 記憶功能時設定
-- Tavily 僅在需要即時網路搜尋時設定
-
-附近地點預設使用 OpenStreetMap／Overpass，不需要 Google API key。`AYUE_GOOGLE_PLACE_CARDS_ENABLED=on` 只啟用 Google Places／Routes 後端資料來源；對 Public 回傳 `place_cards`／`presentation_blocks` 還必須另外開啟 `AYUE_PUBLIC_PLACE_CARDS_ENABLED=on`。目前 Demo 的 public card 開關預設關閉，因此 Flutter 應先以文字／Markdown 回覆為正式介面，不能假設一定會收到卡片。未設定 Google keys 或 provider 失敗時，地點查詢仍可回退 OSM。
-
-建立專案虛擬環境並安裝兩個服務的依賴：
-
-```powershell
-py -3.11 -m venv .project-venv
-.\.project-venv\Scripts\python.exe -m pip install -r .\social_demotest\requirements.txt
-.\.project-venv\Scripts\python.exe -m pip install -r .\matchmaker_agent\requirements.txt
+```
+Server/
+├── start_all.sh               # 統一啟動入口（guardrail → risk → matchmaker → social）
+├── .env                       # 共用環境變數（所有服務共用）
+├── .gitignore
+│
+├── social/                    # ★ 主 API（port 8000）
+│   ├── main.py                #   FastAPI app：router 掛載 + startup index 建立 + 背景 worker
+│   ├── config.py              #   環境變數讀取（Mongo/Ollama/Google/Tavily/Giphy…）
+│   ├── database.py            #   MongoDB 連線（profiles / matches / messages）
+│   ├── models.py              #   Pydantic request models
+│   ├── frontend.html          #   Web Demo 前端（視覺參考實作）
+│   ├── images/                #   前端靜態圖檔（已 gitignore）
+│   ├── routers/               #   HTTP 層（thin adapter，邏輯在 services）
+│   │   ├── chat.py            #     /api/* 聚合 router（leaf routers 組合成一個 Chat tag）
+│   │   ├── chat_onboarding.py #     個性測驗（big_five / deep_profile）
+│   │   ├── chat_messages.py   #     訊息讀取
+│   │   ├── public_chat.py     #     公開阿月 V3（direct_chat / NDJSON stream）+ 風險閘道
+│   │   ├── private_mediator.py#     私聊媒人 Private V2
+│   │   ├── match.py           #     配對搜尋/提案/接受/婉拒（CAS revision）
+│   │   ├── calendar.py        #     本人行事曆 CRUD
+│   │   ├── relationship_dates.py #  共同約會協調
+│   │   ├── relationship_quiz.py  #  默契測驗
+│   │   ├── proactive.py       #     主動關心
+│   │   ├── demo.py            #     Demo 工具
+│   │   ├── system.py          #     健康檢查/init/seed/設定/通知
+│   │   └── frontend.py        #     前端頁面路由
+│   ├── services/              #   領域邏輯
+│   │   ├── ayue_agent/        #     阿月 V3 sub-agent runtime
+│   │   │   ├── v3/            #       scheduler / planner / sub_agents / synthesizer / guard…
+│   │   │   ├── router.py      #       runtime 註冊
+│   │   │   ├── tools.py / tool_registry.py
+│   │   │   ├── maps_client.py / google_places_client.py / web_tools.py
+│   │   │   ├── private_v2.py  #       Private V2 協調
+│   │   │   └── proactive_scheduler.py / proactive_care.py
+│   │   ├── ai_service.py      #   LLM 呼叫（Ollama / Gemini）、測驗分析、約會協調
+│   │   ├── risk_policy_service.py # 配對訊息風險閘道（HTTP → risk_backend :8001）
+│   │   ├── semantic_plan_service.py # 關係語意計畫 + chat triples（→ matchmaker :9001）
+│   │   ├── memory_service.py  #   阿月記憶（→ matchmaker :9001 /api/memory/*）
+│   │   ├── match_*_service.py #   配對決策 / 理由 / 狀態 / 搜尋 worker
+│   │   ├── calendar_service.py / date_coordination_service.py
+│   │   ├── profile_skills.py / skill_loader.py / profile_task_service.py
+│   │   ├── mediator_event_service.py / mediator_context_service.py
+│   │   ├── chat_service.py / demo_cleanup_service.py / giphy_service.py
+│   │   └── …
+│   ├── scripts/               #   一次性維護腳本（migrate / audit / cleanup）
+│   ├── migrate_*.py           #   資料遷移工具
+│   ├── requirements.txt
+│   └── tests/                 #   social 單元/契約測試（64 檔）
+│
+├── matchmaker_agent/          # ★ 媒婆 Agent（port 9001）
+│   ├── agent_api.py           #   FastAPI：配對決策、回饋反思、全域法則、記憶、chat triples
+│   ├── matchmaker.py          #   LLM 媒婆邏輯（Neo4j 圖譜）
+│   ├── test.py / requirements.txt
+│   └── .env                   #   NEO4J_* / LLM_*（provision 腳本產生）
+│
+├── risk_backend/              # ★ 風險偵測（port 8001）
+│   ├── main.py                #   uvicorn 啟動
+│   ├── app/
+│   │   ├── main.py            #   FastAPI app + CORS
+│   │   ├── api/risk_detection.py # /detect /state /feedback /reset
+│   │   ├── core/              #   rule_engine / nlp_engine / risk_fusion / scenario_risk_layer
+│   │   │                      #   risk_state / intervention_engine / guardrail_engine / llm_adapters
+│   │   ├── services/          #   kb_service / chat_log_service / relationship_service / …
+│   │   ├── models/ utils/
+│   │   └── config.py
+│   ├── db_setup/              #   部署用 DB 資源（Appwrite schema / MySQL 歷史）
+│   ├── tests/                 #   98 個測試
+│   └── RISK_INTEGRATION.md
+│
+├── skills/                    # 技能指令包（profile_skills 動態載入）
+│   ├── recent-context/        #   ✅ runtime 載入
+│   ├── memory/                #   ✅ runtime 載入
+│   ├── basic-profile-assessment/   # 契約文件（未載入）
+│   └── deep-profile-assessment/    # 契約文件（未載入）
+│
+├── scripts/                   # 啟動/驗證/環境腳本
+│   ├── run_ayue_social.sh     #   啟動 social（:8000）
+│   ├── run_ayue_risk.sh       #   啟動 risk_backend（:8001）
+│   ├── run_ayue_matchmaker.sh #   啟動 matchmaker_agent（:9001）
+│   ├── run_ayue_guardrail.sh  #   啟動 llama.cpp guardrail（:8081）
+│   ├── start_ayue_services.sh #   一次啟動全部 + health check
+│   ├── check_ayue_services.sh #   健康檢查 4 服務
+│   ├── provision_ayue_v3_env.sh    #   產生 social/matchmaker 的 .env
+│   └── validate_ayue_v3_environment.py
+│
+├── tests/                     # 跨服務契約測試（contracts/）
+│   ├── conftest.py            #   social 加入 sys.path
+│   ├── contracts/             #   UI/API/風險契約（fixtures/ 放參考實作）
+│   └── test_*.py              #   launch scripts / chat triples / UI contract / env validator
+│
+├── docs/                      # 文件
+│   ├── AGENTS.md              #   開發規則
+│   ├── AYUE_V3_ARCHITECTURE.md
+│   ├── MEMORY_CONTEXT_ENGINE_GUIDE.md
+│   ├── architecture/          #   子系統文件（01-project-overview … subagent-*）
+│   ├── api/                   #   JSON schema + 契約文件
+│   ├── ayue-v3-*.md           #   環境矩陣 / UI 契約 / 匯入紀錄
+│   └── superpowers/           #   開發計畫紀錄
+│
+├── venv/                      # risk_backend / tests 用（Python 3.12）
+└── .local-venv/               # social（:8000）與 matchmaker_agent（:9001）用（已 gitignore）
 ```
 
-分別複製兩個服務的環境範例後填入自己的值：
+## 快速啟動
 
-```powershell
-Copy-Item .\social_demotest\.env.example .\social_demotest\.env
-Copy-Item .\matchmaker_agent\.env.example .\matchmaker_agent\.env
+```bash
+cd Server
+./start_all.sh          # 依序啟動：guardrail → risk → matchmaker → social（前景，Ctrl+C 停止）
 ```
 
-`.env`、虛擬環境、log、cache 與真實 trace 都不會進 Git。不要把 API key 寫進 Python、HTML、Markdown 或測試 fixture。
+個別啟動：
 
-## 啟動
-
-Windows：
-
-```powershell
-.\start_ayue.ps1 -Background
+```bash
+./scripts/run_ayue_guardrail.sh    # :8081（可選，llama.cpp）
+./scripts/run_ayue_risk.sh         # :8001
+./scripts/run_ayue_matchmaker.sh   # :9001
+./scripts/run_ayue_social.sh       # :8000
+./scripts/check_ayue_services.sh   # 健康檢查
 ```
 
-或：
+啟動後：
+- 前端頁面：`http://localhost:8000/`
+- 主 API：`http://localhost:8000/api/`
+- 媒婆 Agent：`http://localhost:9001/health`
+- 風險偵測：`http://localhost:8001/health`
+- Guardrail：`http://localhost:8081/v1/models`
 
-```bat
-start_ayue.cmd -Background
-```
+## 服務間連線
 
-啟動腳本會啟動並檢查：
+| 來源 | → 目標 | 用途 |
+|------|--------|------|
+| social | risk_backend (:8001) | `risk_policy_service.py` 配對訊息風險閘道（public_chat 保存前） |
+| social | matchmaker (:9001) | `/api/match` 配對決策、`/api/memory/*` 記憶、`/api/chat_triples` 語意三元組、`/api/clear_graph`、`/api/feedback` |
+| risk_backend | guardrail (:8081) | `GUARDRAIL_PROVIDER=llm_classifier` 時呼叫 llama.cpp（llama-guard-3-1b） |
 
-- Web Demo：<http://127.0.0.1:8000/>
-- Web Demo health：<http://127.0.0.1:8000/api/health>
-- Matchmaker API 文件：<http://127.0.0.1:9001/docs>
-- Matchmaker health：<http://127.0.0.1:9001/health>
+## 環境變數（`.env`）
 
-`9001/docs` 是後端 API 文件，不是 App 畫面。
-冷啟動健康檢查預設等待 90 秒；較慢的本機環境可用
-`-StartupTimeoutSeconds 120` 調整。健康檢查使用固定 JSON service identity，
-不依賴首頁標題或畫面文字。
+頂層 `Server/.env` 為共用設定；`social/.env` 與 `matchmaker_agent/.env` 由 `scripts/provision_ayue_v3_env.sh` 產生。
+
+重點變數：
+
+| 類別 | 變數 |
+|------|------|
+| MongoDB | `MONGO_URI`、`MONGO_DB_NAME`（Atlas 雲端，含 `$vectorSearch`） |
+| Neo4j | `NEO4J_URI`、`NEO4J_USERNAME`、`NEO4J_PASSWORD`、`NEO4J_DATABASE` |
+| LLM | `OLLAMA_HOST`、`OLLAMA_API_KEY`、`OLLAMA_CHAT_MODEL`、`OLLAMA_FAST_CHAT_MODEL`、`GOOGLE_AI_STUDIO_API_KEY`、`GOOGLE_EMBEDDING_MODEL` |
+| 工具 | `TAVILY_API_KEY`、`TAVILY_PROJECT`、`GIPHY_API_KEY`、`GOOGLE_PLACES_SERVER_API_KEY`、`GOOGLE_MAPS_BROWSER_API_KEY` |
+| 風險 | `RISK_SERVICE_URL`、`RISK_TIMEOUT_SEC`、`GUARDRAIL_PROVIDER`、`GUARDRAIL_BASE_URL`、`GUARDRAIL_MODEL_PATH`、`GUARDRAIL_SERVER_BIN`、`GUARDRAIL_PORT` |
+| 媒婆 | `MATCH_AGENT_CANDIDATE_LIMIT`、`MATCH_VECTOR_QUALIFICATION_MIN` |
+| 行為開關 | `AYUE_V3_SIMPLE_CHAT_FAST_PATH`、`AYUE_MAPS_ENABLED`、`AYUE_GOOGLE_PLACE_CARDS_ENABLED`、`AYUE_PROFILE_SKILLS_MODE` … |
 
 ## 測試
 
-離線 deterministic tests 不應連線或修改正式 MongoDB Atlas／Neo4j：
+| 套件 | 位置 | 執行 |
+|------|------|------|
+| 跨服務契約 | `Server/tests/` | `Server/venv/bin/python -m pytest tests/`（49 個） |
+| social | `social/tests/` | `.local-venv/social/bin/python -m pytest tests/`（800+ 個） |
+| risk_backend | `risk_backend/tests/` | `Server/venv/bin/python -m pytest risk_backend/tests/`（102 個） |
 
-```powershell
-Set-Location .\social_demotest
-$env:AYUE_SKIP_DOTENV = "1"
-$env:MONGO_URI = "mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=50&connectTimeoutMS=50"
-..\.project-venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
-```
+> `social/tests/test_profile_skills.py` 有 17 個既有失敗（profile_skills 功能問題），與檔案結構無關。
 
-Python compile：
+## 資料層
 
-```powershell
-Set-Location .\social_demotest
-..\.project-venv\Scripts\python.exe -m compileall -q .
-```
+| 資料 | 儲存 |
+|------|------|
+| 配對 profile / matches / messages / context_embedding | MongoDB Atlas `profiling_db` |
+| 使用者身份 / 個人資料 / 大頭照 / 風險知識庫 | Appwrite cloud |
+| 偏好圖譜 / 全域法則 / chat triples | Neo4j |
+| 風險狀態 / 介入 log / 訊息 log | Appwrite KB database |
 
-正式資料修復腳本預設只做 dry-run。未經 review 不要加 `--apply`：
-
-```powershell
-Set-Location .\social_demotest
-..\.project-venv\Scripts\python.exe scripts\cleanup_invalid_current_context.py
-..\.project-venv\Scripts\python.exe scripts\repair_directional_match_reasons.py
-```
-
-## 開發原則
-
-- Public V3 只有 `services/ayue_agent/v3/scheduler.py` 一個 orchestrator。
-- Scheduler 只透過 `RuntimeRegistration`／`TaskRunnerResult` dispatch sub-agent；domain loop、clarification 與 typed assembly 留在擁有它的 runtime。
-- LLM 做語意判斷；Guard 只做安全、schema、狀態與權限驗證。
-- 新能力必須先進 typed tool registry；寫入必須走 canonical domain service。
-- 模型不得提供 user、proposal、match、event ID 或 revision。
-- 所有寫入預設需要 confirmation、ownership、CAS 與 idempotency。
-- V3 失敗必須 fail closed，不得自動掉回 legacy。
-- 修真實失敗案例時先加入對應 owner 的匿名 deterministic trajectory test，再修 contract、projection 或 prompt；不要堆疊中文 keyword regex。
-- 多輪地點推薦由 Public V3 直接依當回合 bounded context 判斷；條件已足夠或使用者把選擇交給阿月時，必須直接查詢，不能重複追問料理類型。
+> 專案不使用 MySQL / SQLite；本地 MongoDB（`docker/local-mongo`）已移除。

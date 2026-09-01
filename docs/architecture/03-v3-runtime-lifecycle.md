@@ -1,6 +1,6 @@
 # 03. 公開阿月 V3 Runtime 生命週期
 
-> 本篇說明「使用者送出一句話到阿月回覆」之間發生的一切：每個階段的 owner、產物與失敗行為。程式碼真相在 `social_demotest/services/ayue_agent/v3/`。
+> 本篇說明「使用者送出一句話到阿月回覆」之間發生的一切：每個階段的 owner、產物與失敗行為。程式碼真相在 `social/services/ayue_agent/v3/`。
 
 ## 1. 入口與 HTTP 契約
 

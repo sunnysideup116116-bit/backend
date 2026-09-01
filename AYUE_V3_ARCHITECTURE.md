@@ -4,8 +4,8 @@
 
 ## 1. Current baseline
 
-- Public Ayue 永遠走 V3 sub-agent runtime；唯一 orchestrator 是 `social_demotest/services/ayue_agent/v3/scheduler.py`。
-- Event discovery 不在 Public Ayue request 內執行：8000 只寫入 Mongo singleton job，`social_demotest/event_worker.py` 獨立處理。Worker 以 MongoDB Change Stream 即時接收 queued transition，並以低頻 reconciliation 恢復漏失通知、斷線或租約到期工作，不做固定 2 秒 polling。手動 `discovery` job 只搜尋與建圖；`EVENT_WEEKLY_CYCLE_ENABLED=on` 時，每週一的 `weekly_cycle` job 由同一 Worker 依序執行 scoped Event reset、未來 30 天 discovery（每類最低 4、目標與上限 6）、等待 Concept embedding/relevance ready，再執行 invitation scan。Event identity 由 9001 以 Unicode NFKC 正規化的類別／標題／場地／日期管理，來源 URL 只作證據；全部批次完成後執行 Event-only reconciliation 與每類上限收斂，不碰 User。等待逾時時 fail closed 為 partial 並跳過邀請。Reset 只刪 Event 與因此孤立的 Concept，將未決定活動邀請轉為 expired，保留 User、一般配對及 accepted/declined 歷史。Event worker 在獨立背景進程執行，不阻塞也不依賴使用者聊天。
+- Public Ayue 永遠走 V3 sub-agent runtime；唯一 orchestrator 是 `social/services/ayue_agent/v3/scheduler.py`。
+- Event discovery 不在 Public Ayue request 內執行：8000 只寫入 Mongo singleton job，`social/event_worker.py` 獨立處理。Worker 以 MongoDB Change Stream 即時接收 queued transition，並以低頻 reconciliation 恢復漏失通知、斷線或租約到期工作，不做固定 2 秒 polling。手動 `discovery` job 只搜尋與建圖；`EVENT_WEEKLY_CYCLE_ENABLED=on` 時，每週一的 `weekly_cycle` job 由同一 Worker 依序執行 scoped Event reset、未來 30 天 discovery（每類最低 4、目標與上限 6）、等待 Concept embedding/relevance ready，再執行 invitation scan。Event identity 由 9001 以 Unicode NFKC 正規化的類別／標題／場地／日期管理，來源 URL 只作證據；全部批次完成後執行 Event-only reconciliation 與每類上限收斂，不碰 User。等待逾時時 fail closed 為 partial 並跳過邀請。Reset 只刪 Event 與因此孤立的 Concept，將未決定活動邀請轉為 expired，保留 User、一般配對及 accepted/declined 歷史。Event worker 在獨立背景進程執行，不阻塞也不依賴使用者聊天。
 - Public 失敗時 fail closed。Rollback 只能透過 deployment／commit rollback，不存在 request-level legacy fallback、rollout allowlist 或第二套 public router。
 - Private Ayue 是仍在使用、與 Public 隔離的 current V2 runtime，由 `routers/private_mediator.py`、`services/ayue_agent/private_v2.py` 與 `private_calendar.py` 擁有。
 - `public-v1`、`web_research.v1`、`product_info.v1`、`TurnClockV1` 等名稱是 typed payload/schema version，不是 Public V1 runtime。
@@ -37,7 +37,7 @@ HTTP adapter
 
 | Owner | 路徑 | 責任 |
 | --- | --- | --- |
-| Public HTTP | `social_demotest/routers/public_chat.py` | JSON/NDJSON adapter、訊息唯一保存、mention 驗證、呼叫 V3 |
+| Public HTTP | `social/routers/public_chat.py` | JSON/NDJSON adapter、訊息唯一保存、mention 驗證、呼叫 V3 |
 | Context | `services/ayue_agent/context.py` | 建立唯一 prompt-safe `PublicAgentTurnContext` |
 | Planner | `services/ayue_agent/v3/planner.py` | `decompose_tasks` function calling，輸出 direct chat 或靜態 DAG |
 | Contracts | `services/ayue_agent/v3/contracts.py` | `Plan`、`SubTask`、`ToolProposal`、`SubTaskResult` |

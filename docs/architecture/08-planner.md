@@ -1,6 +1,6 @@
 # 08. Planner：任務拆解器
 
-> 程式碼真相：`social_demotest/services/ayue_agent/v3/planner.py` 與 `v3/contracts.py`。Planner 只做語意 routing 與靜態 DAG 拆解，不執行工具、不審核、不保存 domain state，也不直接回答需要產品或 domain 真相的問題。
+> 程式碼真相：`social/services/ayue_agent/v3/planner.py` 與 `v3/contracts.py`。Planner 只做語意 routing 與靜態 DAG 拆解，不執行工具、不審核、不保存 domain state，也不直接回答需要產品或 domain 真相的問題。
 
 ## 1. 唯一 function interface：`decompose_tasks`
 

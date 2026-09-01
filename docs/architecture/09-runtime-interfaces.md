@@ -26,6 +26,8 @@ Public stream 對外只允許：
 run_started | tool_started | tool_finished | final | error
 ```
 
+這是未協商能力時的預設 contract。只有明確送出 `X-Ayue-Stream-Tokens: v1` 的 client 會另外收到 bounded `token` event；未送 header 的既有 client 不受影響。
+
 `subagent_started`、prompt、tool arguments、tool result、raw exception 與 debug payload 都不是 public HTTP interface。它們不得被前端保存成聊天訊息。
 
 Final response 使用 `AgentResult`：
@@ -95,7 +97,7 @@ Provider-facing schema 將 `write_intent` 設為 required；一般請求必須�
 
 未使用的 optional task 欄位應省略；不可用空字串代替 enum，也不可送出不完整的 `{}` `run_if`。Provider boundary 只會把 known agent 的精確空 placeholder 視為省略；空白字串、非空無效值、不完整 condition 與 graph／DAG drift 仍由 canonical validator 拒絕，最多 retry once 後 fail closed。
 
-只有 Web task 可帶 `evidence_policy=casual_discovery|strict_verification`。Calendar availability task 可帶 `outcome_contract="calendar.availability.v1"`；`run_if` 是控制 edge，必要欄位為 `source_task_id` 與 `required_outcome`（`task.finished` 或 allowlisted Calendar outcome）。Planner 不選 tool arguments、不選 ProductInfo section、不執行工具，也不寫 final domain answer。
+只有 Web task 可帶 `evidence_policy=casual_discovery|strict_verification`。Calendar availability task 可帶 `outcome_contract="calendar.availability.v1"`，但它只有在 graph 中至少有一個下游 `run_if` consumer 時才有控制意義；若 provider 把它放在沒有 consumer 的普通 Calendar 查詢或 mutation task，contract normalization 會移除這個無效 metadata，而不是拒絕整張 plan。`run_if` 是控制 edge，必要欄位為 `source_task_id` 與 `required_outcome`（`task.finished` 或 allowlisted Calendar outcome）。這是 DAG 結構 normalization，不是 Calendar intent parser：Planner 不選 command、tool arguments、event ID 或 confirmation，也不選 ProductInfo section、不執行工具、不寫 final domain answer。
 
 Planner 只有在下游會消費上游的 typed observation、candidate ref 或其他明確 contract 時才建立 `depends_on`；獨立的 domain request 放在同一層平行執行。這個規則是 DAG 的資料依賴，不是為了排列顯示順序。只需等待、不需傳遞上游資料時使用 `run_if`；Scheduler 只在來源完成後評估它。
 
