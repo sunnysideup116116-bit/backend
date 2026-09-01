@@ -37,6 +37,7 @@ python db_setup/setup_kb_appwrite.py
 1. 建立 `kb` database 與 7 個 KB collections（含 attributes / indexes）。
 2. 解析 `dating_safety.sql` 中的 INSERT 語句，將資料寫入對應 collections。
 3. 補寫高擬真 regex patterns 至 `kb_features.regex_pattern`（對齊舊版 `init_sqlite.py` 的行為）。
+4. 補寫 `kb_interventions.action_options` 與三組安全行動模板。
 
 腳本為 idempotent：重複執行會以 PK 為 documentId 進行 upsert，已存在的 database / collection / attribute / index 會被跳過。
 
@@ -48,6 +49,19 @@ python db_setup/setup_kb_appwrite.py
 - `kb_prompts` — risk_analysis_v2 + memory_summary_v1
 - `kb_rules` — Rule engine 行為規則
 - `kb_scenario_rules` — 14 條情境規則
+
+既有 Appwrite 環境套用 2026-08-31 安全功能時，使用統一 migration：
+
+```bash
+# 預覽，不寫入
+python db_setup/apply_20260831_appwrite.py
+
+# 先備份目標 schema/KB templates，再套用 Chat Logs 與 KB migration
+python db_setup/apply_20260831_appwrite.py --apply
+```
+
+腳本不刪除文件；它會建立 `user_blocks`、`user_reports`、
+`receiver_report_text`、`action_options`，並更新三筆 `kb_interventions`。
 
 ---
 

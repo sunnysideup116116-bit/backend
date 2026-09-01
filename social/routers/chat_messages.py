@@ -21,6 +21,10 @@ from services.assessment_session_service import assessment_public_state_for_room
 from services.ayue_agent.public_relationship_projection import mentioned_contact_refs
 from services.chat_service import generate_room_id
 from services.match_state_service import verified_accepted_match_query
+from services.risk_block_service import (
+    RiskBlockServiceUnavailable,
+    risk_block_service,
+)
 
 
 router = APIRouter()
@@ -107,9 +111,24 @@ def complete_public_ayue_onboarding_route(req: ClearRequest):
 
 @router.get("/contacts")
 def get_contacts(user_id: str):
+    try:
+        excluded_user_ids = risk_block_service.excluded_user_ids(user_id)
+    except RiskBlockServiceUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="安全關係狀態暫時無法確認",
+        ) from exc
     user_doc = profiles_coll.find_one({"user_id": user_id})
     ai_locked = user_doc.get("ai_chat_locked", False) if user_doc else False
-    matches = list(matches_coll.find(verified_accepted_match_query(user_id)))
+    matches = [
+        match_doc
+        for match_doc in matches_coll.find(verified_accepted_match_query(user_id))
+        if (
+            match_doc["to_user"]
+            if match_doc["from_user"] == user_id
+            else match_doc["from_user"]
+        ) not in excluded_user_ids
+    ]
     contacts = [{
         "id": "ai_assistant",
         "name": "阿月",

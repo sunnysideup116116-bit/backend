@@ -65,6 +65,10 @@ from services.ayue_agent.public_relationship_projection import (
 )
 from services.semantic_plan_service import process_relationship_semantic_plan, track_message_metrics
 from services.risk_policy_service import pair_message_risk_gate
+from services.risk_block_service import (
+    RiskBlockServiceUnavailable,
+    risk_block_service,
+)
 
 
 def _log_public_stream_exception(exc: Exception) -> None:
@@ -550,6 +554,21 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
     match_doc = find_accepted_match(req.user_id, req.contact_id)
     if not match_doc:
         raise HTTPException(status_code=403, detail="只能傳送訊息給已接受的配對")
+
+    # Relationship blocks are an availability gate, unlike advisory message
+    # risk analysis. Check before both image/text persistence and all side effects.
+    try:
+        pair_is_blocked = risk_block_service.is_pair_blocked(
+            req.user_id,
+            req.contact_id,
+        )
+    except RiskBlockServiceUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="安全關係狀態暫時無法確認，訊息未送出",
+        ) from exc
+    if pair_is_blocked:
+        raise HTTPException(status_code=403, detail="目前無法傳送訊息給此聯絡人")
 
     client_message_id = req.client_message_id or uuid.uuid4().hex
 

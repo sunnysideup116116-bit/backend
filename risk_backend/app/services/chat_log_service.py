@@ -1,3 +1,4 @@
+import hashlib
 import os
 import json
 from datetime import datetime, timezone
@@ -608,3 +609,161 @@ class ChatLogService:
                 return {"ok": False, "error": "attribute_missing"}
             print(f"save_receiver_report failed: {e}")
             return {"ok": False, "error": "unknown"}
+
+    @staticmethod
+    def _block_store_error(error: Exception) -> str:
+        message = str(error).lower()
+        if "user_blocks" in message or "could not be found" in message or "not found" in message:
+            return "collection_missing"
+        return "unavailable"
+
+    async def save_user_block(
+        self,
+        blocker_id: str,
+        blocked_id: str,
+        conversation_id: str | None = None,
+        source: str = "manual",
+    ) -> dict:
+        """Persist a reversible block. Repeated calls are idempotent."""
+        if blocker_id == blocked_id:
+            return {"ok": False, "already": False, "error": "self_block"}
+        try:
+            existing = self.db.list_documents(
+                self.db_id,
+                "user_blocks",
+                queries=[
+                    Query.equal("blocker_id", blocker_id),
+                    Query.equal("blocked_id", blocked_id),
+                    Query.limit(1),
+                ],
+            )
+            if existing.documents:
+                return {"ok": True, "already": True, "error": None}
+
+            pair_digest = hashlib.sha256(
+                f"{blocker_id}\0{blocked_id}".encode("utf-8")
+            ).hexdigest()[:32]
+            try:
+                self.db.create_document(
+                    self.db_id,
+                    "user_blocks",
+                    f"block_{pair_digest}",
+                    {
+                        "blocker_id": blocker_id,
+                        "blocked_id": blocked_id,
+                        "conversation_id": conversation_id or "",
+                        "source": source,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+            except Exception as error:
+                if getattr(error, "code", None) == 409 or "already exists" in str(error).lower():
+                    return {"ok": True, "already": True, "error": None}
+                raise
+            return {"ok": True, "already": False, "error": None}
+        except Exception as error:
+            code = self._block_store_error(error)
+            print(f"save_user_block failed ({code}): {type(error).__name__}")
+            return {"ok": False, "already": False, "error": code}
+
+    async def remove_user_block(self, blocker_id: str, blocked_id: str) -> dict:
+        try:
+            existing = self.db.list_documents(
+                self.db_id,
+                "user_blocks",
+                queries=[
+                    Query.equal("blocker_id", blocker_id),
+                    Query.equal("blocked_id", blocked_id),
+                    Query.limit(25),
+                ],
+            )
+            if not existing.documents:
+                return {"ok": False, "error": "not_found"}
+            for document in existing.documents:
+                data = document.data if hasattr(document, "data") else document
+                document_id = getattr(document, "id", None) or data.get("$id")
+                self.db.delete_document(self.db_id, "user_blocks", document_id)
+            return {"ok": True, "error": None}
+        except Exception as error:
+            code = self._block_store_error(error)
+            print(f"remove_user_block failed ({code}): {type(error).__name__}")
+            return {"ok": False, "error": code}
+
+    async def get_user_block_sets(self, user_id: str) -> dict:
+        """Return outgoing blocks and the bidirectional safety exclusion set."""
+        outgoing: set[str] = set()
+        incoming: set[str] = set()
+        for field, take, target in (
+            ("blocker_id", "blocked_id", outgoing),
+            ("blocked_id", "blocker_id", incoming),
+        ):
+            try:
+                response = self.db.list_documents(
+                    self.db_id,
+                    "user_blocks",
+                    queries=[Query.equal(field, user_id), Query.limit(500)],
+                )
+                for document in response.documents:
+                    data = document.data if hasattr(document, "data") else document
+                    other = str(data.get(take) or "").strip()
+                    if other and other != user_id:
+                        target.add(other)
+            except Exception as error:
+                code = self._block_store_error(error)
+                print(f"get_user_block_sets failed ({field}, {code}): {type(error).__name__}")
+                return {
+                    "ok": False,
+                    "error": code,
+                    "blocked_user_ids": [],
+                    "excluded_user_ids": [],
+                }
+        return {
+            "ok": True,
+            "error": None,
+            "blocked_user_ids": sorted(outgoing),
+            "excluded_user_ids": sorted(outgoing | incoming),
+        }
+
+    async def get_blocked_user_ids(self, user_id: str) -> list:
+        result = await self.get_user_block_sets(user_id)
+        return result["excluded_user_ids"] if result["ok"] else []
+
+    async def save_user_report(
+        self,
+        reporter_id: str,
+        reported_id: str,
+        reason_category: str,
+        detail_text: str | None = None,
+        conversation_id: str | None = None,
+        triggered_by_msg_id: str | None = None,
+    ) -> dict:
+        if reporter_id == reported_id:
+            return {"ok": False, "error": "self_report"}
+        try:
+            document = self.db.create_document(
+                self.db_id,
+                "user_reports",
+                ID.unique(),
+                {
+                    "reporter_id": reporter_id,
+                    "reported_id": reported_id,
+                    "conversation_id": conversation_id or "",
+                    "reason_category": reason_category,
+                    "detail_text": detail_text or "",
+                    "triggered_by_msg_id": triggered_by_msg_id or "",
+                    "status": "pending",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            data = document.data if hasattr(document, "data") else document
+            report_id = getattr(document, "id", None) or data.get("$id")
+            return {"ok": True, "report_id": report_id, "error": None}
+        except Exception as error:
+            message = str(error).lower()
+            code = (
+                "collection_missing"
+                if "user_reports" in message or "could not be found" in message or "not found" in message
+                else "unavailable"
+            )
+            print(f"save_user_report failed ({code}): {type(error).__name__}")
+            return {"ok": False, "error": code}

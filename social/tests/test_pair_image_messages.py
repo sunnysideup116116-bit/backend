@@ -15,6 +15,15 @@ from models import DirectChatRequest
 
 
 class PairImageMessageTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        blocker = patch(
+            "routers.public_chat.risk_block_service.is_pair_blocked",
+            return_value=False,
+        )
+        blocker.start()
+        self.addCleanup(blocker.stop)
+
     def _request(self, **overrides):
         payload = dict(
             user_id="owner",

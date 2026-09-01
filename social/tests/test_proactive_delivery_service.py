@@ -201,6 +201,29 @@ class ProactiveDeliveryServiceTests(unittest.TestCase):
         self.assertEqual(card_metadata["matches"][0]["viewer_reason"], "小晴和你都喜歡爬山。")
         self.assertNotIn("seed_user_01", json.dumps(response))
 
+    def test_legacy_automatic_proposal_is_suppressed_without_expiring(self):
+        event = {
+            "event_id": "event-auto", "type": "match_proposal",
+            "match_id": "0123456789abcdef01234567", "message": "舊的自動配對。",
+        }
+        match = {
+            "_id": "0123456789abcdef01234567", "from_user": "owner",
+            "to_user": "other", "status": "draft", "proposal_source": "automatic",
+        }
+        with patch.object(delivery.matches_coll, "find_one", return_value=match), \
+             patch.object(delivery.matches_coll, "update_one") as suppress, \
+             patch.object(delivery, "create_proposal_room") as create_room:
+            response = delivery._deliver_global_event(
+                "owner", event, delivery._metadata(event),
+            )
+
+        self.assertTrue(response["automatic_proposal_suppressed"])
+        create_room.assert_not_called()
+        update = suppress.call_args.args[1]
+        self.assertTrue(update["$set"]["proposal_suppressed"])
+        self.assertNotIn("status", update["$set"])
+        self.assertNotIn("expired_at", update["$set"])
+
     def test_proposal_delivery_keeps_legacy_room_path_for_non_proposal_events(self):
         event = {
             "event_id": "event-care", "type": "proactive_care",

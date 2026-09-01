@@ -44,6 +44,66 @@ class ReceiverReportProxyRequest(BaseModel):
     report_text: str = Field(min_length=1, max_length=2000)
 
 
+class BlockUserProxyRequest(BaseModel):
+    blocker_id: str = Field(min_length=1, max_length=128)
+    blocked_id: str = Field(min_length=1, max_length=128)
+    conversation_id: str | None = Field(default=None, max_length=128)
+    source: str = Field(default="manual", pattern="^(manual|intervention)$")
+
+
+class UnblockUserProxyRequest(BaseModel):
+    blocker_id: str = Field(min_length=1, max_length=128)
+    blocked_id: str = Field(min_length=1, max_length=128)
+
+
+class ReportUserProxyRequest(BaseModel):
+    reporter_id: str = Field(min_length=1, max_length=128)
+    reported_id: str = Field(min_length=1, max_length=128)
+    conversation_id: str | None = Field(default=None, max_length=128)
+    reason_category: str = Field(min_length=1, max_length=30)
+    detail_text: str | None = Field(default=None, max_length=2000)
+    triggered_by_msg_id: str | None = Field(default=None, max_length=128)
+
+
+def _error_detail(response) -> str:
+    try:
+        body = response.json()
+        if isinstance(body, dict) and body.get("detail"):
+            return str(body["detail"])
+    except Exception:
+        pass
+    return "風險服務處理失敗，請稍後再試"
+
+
+def _post(path: str, payload: dict) -> dict:
+    try:
+        response = requests.post(
+            f"{_RISK_SERVICE_URL}/api/v1/risk/{path}",
+            json=payload,
+            timeout=_RISK_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        print(f"[risk_actions] risk backend unreachable: {type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="風險服務暫時無法連線，請稍後再試") from exc
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=_error_detail(response))
+    return response.json()
+
+
+def _get(path: str, *, params: dict | None = None, raw_query: str = "") -> dict:
+    target = f"{_RISK_SERVICE_URL}/api/v1/risk/{path}"
+    if raw_query:
+        target = f"{target}?{raw_query}"
+    try:
+        response = requests.get(target, params=params, timeout=_RISK_TIMEOUT)
+    except requests.RequestException as exc:
+        print(f"[risk_actions] risk backend unreachable: {type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="風險服務暫時無法連線，請稍後再試") from exc
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=_error_detail(response))
+    return response.json()
+
+
 @router.post("/pair/risk_feedback")
 def submit_risk_feedback(req: RiskFeedbackRequest):
     """Forward receiver/sender intervention feedback to the risk backend."""
@@ -51,19 +111,7 @@ def submit_risk_feedback(req: RiskFeedbackRequest):
         raise HTTPException(status_code=400, detail="role must be 'sender' or 'receiver'")
     if req.feedback not in ("comfortable", "uncomfortable"):
         raise HTTPException(status_code=400, detail="feedback must be 'comfortable' or 'uncomfortable'")
-    try:
-        response = requests.post(
-            f"{_RISK_SERVICE_URL}/api/v1/risk/feedback",
-            json=req.model_dump(exclude_none=True),
-            timeout=_RISK_TIMEOUT,
-        )
-    except requests.RequestException as exc:
-        print(f"[risk_actions] risk backend unreachable: {type(exc).__name__}")
-        raise HTTPException(status_code=503, detail="風險服務暫時無法連線，請稍後再試") from exc
-    if response.status_code >= 400:
-        detail = _error_detail(response)
-        raise HTTPException(status_code=response.status_code, detail=detail)
-    return response.json()
+    return _post("feedback", req.model_dump(exclude_none=True))
 
 
 @router.post("/pair/risk_appeal")
@@ -72,19 +120,7 @@ def submit_sender_appeal(req: SenderAppealProxyRequest):
 
     The appeal text never enters any risk algorithm on the backend side.
     """
-    try:
-        response = requests.post(
-            f"{_RISK_SERVICE_URL}/api/v1/risk/appeal",
-            json=req.model_dump(),
-            timeout=_RISK_TIMEOUT,
-        )
-    except requests.RequestException as exc:
-        print(f"[risk_actions] risk backend unreachable: {type(exc).__name__}")
-        raise HTTPException(status_code=503, detail="風險服務暫時無法連線，請稍後再試") from exc
-    if response.status_code >= 400:
-        detail = _error_detail(response)
-        raise HTTPException(status_code=response.status_code, detail=detail)
-    return response.json()
+    return _post("appeal", req.model_dump())
 
 
 @router.post("/pair/risk_report")
@@ -97,19 +133,7 @@ def submit_receiver_report(req: ReceiverReportProxyRequest):
     trail can distinguish them. The report text never enters any risk
     algorithm on the backend side.
     """
-    try:
-        response = requests.post(
-            f"{_RISK_SERVICE_URL}/api/v1/risk/report",
-            json=req.model_dump(),
-            timeout=_RISK_TIMEOUT,
-        )
-    except requests.RequestException as exc:
-        print(f"[risk_actions] risk backend unreachable: {type(exc).__name__}")
-        raise HTTPException(status_code=503, detail="風險服務暫時無法連線，請稍後再試") from exc
-    if response.status_code >= 400:
-        detail = _error_detail(response)
-        raise HTTPException(status_code=response.status_code, detail=detail)
-    return response.json()
+    return _post("report", req.model_dump())
 
 
 @router.get("/pair/risk_state")
@@ -122,23 +146,33 @@ def get_risk_state(request: Request):
     The risk backend's GET /api/v1/risk/state returns remaining_cooldown;
     this proxy is a thin transport that forwards the query string verbatim.
     """
-    query = request.url.query
-    target = f"{_RISK_SERVICE_URL}/api/v1/risk/state"
-    if query:
-        target = f"{target}?{query}"
-    try:
-        response = requests.get(target, timeout=_RISK_TIMEOUT)
-    except requests.RequestException as exc:
-        print(f"[risk_actions] risk backend unreachable: {type(exc).__name__}")
-        raise HTTPException(status_code=503, detail="風險服務暫時無法連線，請稍後再試") from exc
-    if response.status_code >= 400:
-        detail = _error_detail(response)
-        raise HTTPException(status_code=response.status_code, detail=detail)
-    return response.json()
-    try:
-        body = response.json()
-        if isinstance(body, dict) and body.get("detail"):
-            return str(body["detail"])
-    except Exception:
-        pass
-    return "風險服務處理失敗，請稍後再試"
+    return _get("state", raw_query=request.url.query)
+
+
+@router.post("/pair/risk_block")
+def block_user(req: BlockUserProxyRequest):
+    return _post("block", req.model_dump(exclude_none=True))
+
+
+@router.post("/pair/risk_unblock")
+def unblock_user(req: UnblockUserProxyRequest):
+    return _post("unblock", req.model_dump())
+
+
+@router.get("/pair/risk_blocks")
+def list_blocked_users(user_id: str):
+    payload = _get("blocks", params={"user_id": user_id})
+    outgoing = payload.get("blocked_user_ids")
+    if not isinstance(outgoing, list):
+        raise HTTPException(status_code=502, detail="風險服務回傳格式錯誤")
+    safe_ids = [str(item)[:128] for item in outgoing[:500] if str(item or "").strip()]
+    return {
+        "user_id": user_id,
+        "blocked_user_ids": safe_ids,
+        "count": len(safe_ids),
+    }
+
+
+@router.post("/pair/risk_report_user")
+def report_user(req: ReportUserProxyRequest):
+    return _post("report-user", req.model_dump(exclude_none=True))

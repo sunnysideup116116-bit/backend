@@ -28,7 +28,8 @@ class ProposalNamespaceTests(unittest.TestCase):
     def test_live_queries_use_distinct_namespace_slots(self):
         relationship = live_proposal_query("owner", RELATIONSHIP_MATCH_NAMESPACE)
         event = live_proposal_query("owner", EVENT_INVITATION_NAMESPACE)
-        self.assertNotEqual(relationship["$and"][1], event["$and"][1])
+        self.assertNotEqual(relationship["$and"][2], event["$and"][2])
+        self.assertIn({"proposal_suppressed": {"$ne": True}}, relationship["$and"])
         self.assertIn("live_participants", str(relationship))
         self.assertIn("live_participants", str(event))
 

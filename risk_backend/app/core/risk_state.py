@@ -9,6 +9,15 @@ from app.models.schemas import RiskState
 from app.services.kb_service import KBService
 from app.services.chat_log_service import ChatLogService
 
+LEVEL_ORDER = {
+    "safe": 0,
+    "observation": 1,
+    "warning": 2,
+    "restricted": 3,
+    "blocked": 4,
+}
+
+
 class RiskStateMachine:
     def __init__(self):
         self.chat_log_service = ChatLogService()
@@ -17,7 +26,20 @@ class RiskStateMachine:
     async def get_user_state(self, conversation_id: str, user_id: str) -> Tuple[RiskState, Optional[str]]:
         return await self.chat_log_service.get_latest_risk_state_with_time(conversation_id, user_id)
 
-    async def update(self, conversation_id: str, user_id: str, msg_id: str, delta: RiskState) -> Tuple[RiskState, str]:
+    async def update(
+        self,
+        conversation_id: str,
+        user_id: str,
+        msg_id: str,
+        delta: RiskState,
+        degraded_with_flags: bool = False,
+    ) -> Tuple[RiskState, str]:
+        """Update cumulative state and determine the display risk level.
+
+        ``degraded_with_flags`` only raises the current display decision to
+        ``observation``. It deliberately never changes a risk dimension, so
+        repeated dependency failures cannot accumulate into user risk state.
+        """
         prior, last_ts_str = await self.get_user_state(conversation_id, user_id)
         #！！！！改Config改這邊！！！！
         config = KBService.get_fusion_config("threshold_v2_rule_heavy")
@@ -73,6 +95,10 @@ class RiskStateMachine:
         trend_s = self._calculate_trend(new_state, history)
 
         level, composite_s, reason = self._decide_5_level(max_s, spread_s, trend_s, config, w_max, w_spread, w_trend, decrease_damping)
+
+        if degraded_with_flags and LEVEL_ORDER.get(level, 0) < LEVEL_ORDER["observation"]:
+            level = "observation"
+            reason = "degraded_floor"
 
         decay_applied = (time_decay_factor < 1.0)
 

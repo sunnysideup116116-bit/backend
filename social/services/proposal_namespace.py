@@ -76,6 +76,7 @@ def live_proposal_query(
     return {
         "$and": [
             {"status": status or {"$in": sorted(LIVE_PROPOSAL_STATUSES)}},
+            {"proposal_suppressed": {"$ne": True}},
             namespace_clause(namespace),
             participant_clause(user_id),
         ]

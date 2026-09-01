@@ -36,3 +36,32 @@ def test_remaining_cooldown_no_log(chat_service):
     resp = MagicMock(); resp.documents = []
     chat_service.db.list_documents.return_value = resp
     assert asyncio.run(chat_service.get_remaining_cooldown("c1", "s1")) == 0
+
+
+def test_blocked_30_minute_boundary_uses_a_fake_clock(chat_service, monkeypatch):
+    fixed_now = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr("app.services.chat_log_service.datetime", FixedDateTime)
+    active = MagicMock()
+    active.data = {
+        "cooldown_seconds": 1800,
+        "timestamp": (fixed_now - timedelta(seconds=1799)).isoformat(),
+    }
+    expired = MagicMock()
+    expired.data = {
+        "cooldown_seconds": 1800,
+        "timestamp": (fixed_now - timedelta(seconds=1800)).isoformat(),
+    }
+
+    response = MagicMock()
+    response.documents = [active]
+    chat_service.db.list_documents.return_value = response
+    assert asyncio.run(chat_service.get_remaining_cooldown("c1", "s1")) == 1
+
+    response.documents = [expired]
+    assert asyncio.run(chat_service.get_remaining_cooldown("c1", "s1")) == 0

@@ -153,3 +153,24 @@ class ReceiverReportRequest(BaseModel):
     receiver_id: str
     report_text: str = Field(..., min_length=1, max_length=2000,
                             description="收件方對此次介入／該則訊息的陳述")
+
+
+class BlockUserRequest(BaseModel):
+    blocker_id: str = Field(..., min_length=1, max_length=128)
+    blocked_id: str = Field(..., min_length=1, max_length=128)
+    conversation_id: Optional[str] = Field(None, max_length=128)
+    source: str = Field("manual", pattern="^(manual|intervention)$")
+
+
+class UnblockUserRequest(BaseModel):
+    blocker_id: str = Field(..., min_length=1, max_length=128)
+    blocked_id: str = Field(..., min_length=1, max_length=128)
+
+
+class ReportUserRequest(BaseModel):
+    reporter_id: str = Field(..., min_length=1, max_length=128)
+    reported_id: str = Field(..., min_length=1, max_length=128)
+    conversation_id: Optional[str] = Field(None, max_length=128)
+    reason_category: str = Field(..., min_length=1, max_length=30)
+    detail_text: Optional[str] = Field(None, max_length=2000)
+    triggered_by_msg_id: Optional[str] = Field(None, max_length=128)

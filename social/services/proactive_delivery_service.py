@@ -7,7 +7,7 @@ import time
 from bson.objectid import ObjectId
 from pymongo import ReturnDocument
 
-from database import matches_coll, messages_coll, profiles_coll
+from database import db, matches_coll, messages_coll, profiles_coll
 from services.ayue_agent.proactive_care import consume_proactive_delivery
 from services.chat_service import generate_proposal_ai_room_id, generate_room_id, save_message
 from services.ai_room_service import create_proposal_room, most_recent_ai_room
@@ -30,6 +30,37 @@ RELATIONSHIP_EVENT_TYPES = {
     "mutual_interest", "probe_question", "date_coordination_request", "date_coordination_result",
 }
 PROPOSAL_EVENT_TYPES = {"incoming_match_intro", "match_proposal", "incoming_match_interest"}
+AUTOMATIC_PROPOSAL_SOURCES = {
+    "automatic", "legacy_automatic", "legacy-proactive", "post_chat", "three_message",
+}
+
+
+def _proposal_source(match: dict) -> str:
+    source = str(match.get("proposal_source") or "").strip().lower()
+    search_job_id = str(match.get("search_job_id") or "").strip()
+    if search_job_id:
+        job = db["match_search_jobs"].find_one(
+            {"job_id": search_job_id}, {"_id": 0, "source": 1},
+        ) or {}
+        job_source = str(job.get("source") or "").strip().lower()
+        if job_source:
+            return job_source
+    return source
+
+
+def _expire_automatic_proposal(match: dict) -> None:
+    """Hide legacy automatic proposals without expiring an actionable proposal."""
+    matches_coll.update_one(
+        {"_id": match["_id"], "status": {"$in": ["draft", "pending"]}},
+        {
+            "$set": {
+                "proposal_suppressed": True,
+                "suppressed_at": time.time(),
+                "suppressed_reason": "legacy_automatic_source",
+            },
+            "$unset": {"live_participants": ""},
+        },
+    )
 
 
 def proactive_check(user_id: str, conversation_active: bool = False) -> dict:
@@ -187,6 +218,9 @@ def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> 
                 pass
         if not live_match:
             return {"has_new": False, "stale": True}
+        if _proposal_source(live_match) in AUTOMATIC_PROPOSAL_SOURCES:
+            _expire_automatic_proposal(live_match)
+            return {"has_new": False, "stale": True, "automatic_proposal_suppressed": True}
         viewer_reason = reason_for_viewer(live_match, user_id)
         if not viewer_reason:
             viewer_reason = "我找到一位可能適合你的人，想先問問你願不願意認識對方。"

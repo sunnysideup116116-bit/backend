@@ -1186,6 +1186,15 @@
           "encrypt": false
         },
         {
+          "key": "receiver_report_text",
+          "type": "string",
+          "required": false,
+          "array": false,
+          "size": 2000,
+          "default": null,
+          "encrypt": false
+        },
+        {
           "key": "cooldown_seconds",
           "type": "integer",
           "status": "available",
@@ -1910,6 +1919,40 @@
             "DESC"
           ]
         }
+      ]
+    },
+    {
+      "name": "user_blocks",
+      "id": "user_blocks",
+      "attributes": [
+        {"key": "blocker_id", "type": "string", "required": true, "array": false, "size": 128, "default": null},
+        {"key": "blocked_id", "type": "string", "required": true, "array": false, "size": 128, "default": null},
+        {"key": "conversation_id", "type": "string", "required": false, "array": false, "size": 128, "default": null},
+        {"key": "source", "type": "string", "required": false, "array": false, "size": 20, "default": null},
+        {"key": "created_at", "type": "datetime", "required": false, "array": false, "default": null}
+      ],
+      "indexes": [
+        {"key": "idx_blocker", "type": "key", "attributes": ["blocker_id"], "orders": ["ASC"]},
+        {"key": "idx_blocked", "type": "key", "attributes": ["blocked_id"], "orders": ["ASC"]},
+        {"key": "idx_blocker_blocked", "type": "unique", "attributes": ["blocker_id", "blocked_id"], "orders": ["ASC", "ASC"]}
+      ]
+    },
+    {
+      "name": "user_reports",
+      "id": "user_reports",
+      "attributes": [
+        {"key": "reporter_id", "type": "string", "required": true, "array": false, "size": 128, "default": null},
+        {"key": "reported_id", "type": "string", "required": true, "array": false, "size": 128, "default": null},
+        {"key": "conversation_id", "type": "string", "required": false, "array": false, "size": 128, "default": null},
+        {"key": "reason_category", "type": "string", "required": true, "array": false, "size": 30, "default": null},
+        {"key": "detail_text", "type": "string", "required": false, "array": false, "size": 2000, "default": null},
+        {"key": "triggered_by_msg_id", "type": "string", "required": false, "array": false, "size": 128, "default": null},
+        {"key": "status", "type": "string", "required": false, "array": false, "size": 20, "default": null},
+        {"key": "created_at", "type": "datetime", "required": false, "array": false, "default": null}
+      ],
+      "indexes": [
+        {"key": "idx_reported", "type": "key", "attributes": ["reported_id"], "orders": ["ASC"]},
+        {"key": "idx_status", "type": "key", "attributes": ["status"], "orders": ["ASC"]}
       ]
     }
   ]
