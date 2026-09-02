@@ -7,6 +7,8 @@ Knowledge Base 服務 - Appwrite 版本
 """
 import json
 import os
+import threading
+import time
 
 import requests
 from dotenv import load_dotenv
@@ -14,6 +16,12 @@ from appwrite.query import Query
 from app.core.appwrite_config import get_appwrite_config
 
 load_dotenv()
+
+# 知識庫是設定資料；避免每次 /detect 都以同步 HTTP 重抓相同內容。
+# 設為 0 可停用快取，更新 KB 後可呼叫 KBService.clear_cache() 立即失效。
+_CACHE_TTL = float(os.getenv("KB_CACHE_TTL_SECONDS", "300"))
+_cache: dict[str, tuple[float, list]] = {}
+_cache_lock = threading.Lock()
 
 
 class KBService:
@@ -43,6 +51,33 @@ class KBService:
 
     @staticmethod
     def _list(collection_id, queries=None, limit=100):
+        """從 Appwrite KB database 列出 documents（含 TTL 快取）。"""
+        if _CACHE_TTL <= 0:
+            return KBService._fetch(collection_id, queries, limit)
+
+        key = f"{collection_id}|{json.dumps(queries, sort_keys=True, default=str)}|{limit}"
+        now = time.monotonic()
+        with _cache_lock:
+            hit = _cache.get(key)
+            if hit and now - hit[0] < _CACHE_TTL:
+                return hit[1]
+
+        result = KBService._fetch(collection_id, queries, limit)
+
+        # _fetch 失敗時會回空 list；不快取失敗，讓下次請求可以立即重試。
+        if result:
+            with _cache_lock:
+                _cache[key] = (now, result)
+        return result
+
+    @classmethod
+    def clear_cache(cls):
+        """清除所有 KB 快取，讓下一次查詢重新讀取 Appwrite。"""
+        with _cache_lock:
+            _cache.clear()
+
+    @staticmethod
+    def _fetch(collection_id, queries=None, limit=100):
         """從 Appwrite KB database 列出 documents，自動分頁，回傳 list[dict]。
 
         直接走 REST API（與 setup_appwrite.py 一致），避免 SDK 對 legacy server
