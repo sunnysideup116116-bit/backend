@@ -15,10 +15,16 @@ cd "$SERVER_ROOT" || exit 1
 LOG_DIR="${AYUE_LOG_DIR:-$SERVER_ROOT/.runtime-logs}"
 mkdir -p "$LOG_DIR"
 
+# Flutter Web development uses a stable local origin. Keep any additional
+# operator-provided origins while allowing the default local development port.
+LOCAL_WEB_CORS_ORIGINS="http://127.0.0.1:4173,http://localhost:4173"
+export CORS_ORIGINS="${CORS_ORIGINS:+${CORS_ORIGINS},}${LOCAL_WEB_CORS_ORIGINS}"
+
 echo -e "${CYAN}================================================================${NC}"
 echo -e "${CYAN}🚀  Dating App Backend Full Stack Startup (Ayue V3 Architecture)${NC}"
 echo -e "${CYAN}📁  Server Root: $SERVER_ROOT${NC}"
 echo -e "${CYAN}📁  Log Directory: $LOG_DIR${NC}"
+echo -e "${CYAN}🌐  Local Web Origin: http://127.0.0.1:4173${NC}"
 echo -e "${CYAN}================================================================${NC}"
 
 # 1. Clean up Stale Network Ports (8000, 8001, 9001)

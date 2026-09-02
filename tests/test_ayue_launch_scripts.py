@@ -8,6 +8,12 @@ SCRIPTS = SERVER_ROOT / "scripts"
 
 
 class AyueLaunchScriptTests(unittest.TestCase):
+    def test_start_all_allows_fixed_flutter_web_development_origins(self):
+        source = (SERVER_ROOT / "start_all.sh").read_text(encoding="utf-8")
+        self.assertIn("http://127.0.0.1:4173", source)
+        self.assertIn("http://localhost:4173", source)
+        self.assertIn('export CORS_ORIGINS=', source)
+
     def test_social_launcher_uses_canonical_working_directory_and_venv(self):
         source = (SCRIPTS / "run_ayue_social.sh").read_text(encoding="utf-8")
         self.assertIn('social', source)
