@@ -2,6 +2,26 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from services import push_service
+from services.notification_service import NotificationEvent
+
+
+def _event() -> NotificationEvent:
+    return NotificationEvent(
+        recipient_id="other",
+        surface="pair",
+        conversation_id="owner_other",
+        other_user_id="owner",
+        title="小美",
+        body="晚上一起吃飯？",
+        data={
+            "chat_surface": "pair",
+            "chat_contact_id": "owner",
+            "chat_message_kind": "text",
+        },
+        tag="chat-abc",
+        message_id="message-1",
+        timestamp=1.0,
+    )
 
 
 class PushDispatchTests(unittest.TestCase):
@@ -12,107 +32,93 @@ class PushDispatchTests(unittest.TestCase):
     def tearDown(self):
         push_service._ENABLED = self._enabled
 
-    def test_skips_when_disabled(self):
+    @staticmethod
+    def _target_response(targets):
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"targets": targets}
+        return response
+
+    def test_disabled_still_prepares_unread_but_never_calls_appwrite(self):
         push_service._ENABLED = False
-        with patch.object(push_service, "requests") as requests:
-            push_service.send_push_notification({
-                "room_id": "owner_other",
-                "sender_id": "owner",
-                "content": "嗨",
-            })
+        with patch.object(
+            push_service, "prepare_message_notifications", return_value=[_event()],
+        ) as prepare, patch.object(push_service, "requests") as requests:
+            push_service.send_push_notification({"message_id": "message-1"})
+        prepare.assert_called_once()
+        requests.get.assert_not_called()
         requests.post.assert_not_called()
 
-    def test_skips_ai_assistant_sender(self):
-        with patch.object(push_service, "requests") as requests:
-            push_service.send_push_notification({
-                "room_id": "owner_ai_assistant",
-                "sender_id": "ai_assistant",
-                "content": "你好",
-            })
+    def test_no_prepared_event_sends_nothing(self):
+        with patch.object(
+            push_service, "prepare_message_notifications", return_value=[],
+        ), patch.object(push_service, "requests") as requests:
+            push_service.send_push_notification({})
+        requests.get.assert_not_called()
         requests.post.assert_not_called()
 
-    def test_skips_ai_assistant_receiver(self):
-        with patch.object(push_service, "requests") as requests:
-            push_service.send_push_notification({
-                "room_id": "owner_ai_assistant",
-                "sender_id": "owner",
-                "content": "你好",
-            })
+    def test_missing_push_target_is_preflighted_and_skipped(self):
+        with patch.object(
+            push_service, "prepare_message_notifications", return_value=[_event()],
+        ), patch.object(push_service, "requests") as requests:
+            requests.get.return_value = self._target_response([])
+            push_service.send_push_notification({})
+        requests.get.assert_called_once()
         requests.post.assert_not_called()
 
-    def test_skips_blocked_messages(self):
-        with patch.object(push_service, "requests") as requests:
-            push_service.send_push_notification({
-                "room_id": "owner_other",
-                "sender_id": "owner",
-                "content": "壞話",
-                "is_blocked": True,
-            })
-        requests.post.assert_not_called()
-
-    def test_skips_active_receiver(self):
-        with patch.object(push_service, "_receiver_active", return_value=True), \
-             patch.object(push_service, "requests") as requests:
-            push_service.send_push_notification({
-                "room_id": "owner_other",
-                "sender_id": "owner",
-                "content": "嗨",
-            })
-        requests.post.assert_not_called()
-
-    def test_dispatches_with_user_target_and_data(self):
-        with patch.object(push_service, "_receiver_active", return_value=False), \
-             patch.object(push_service, "_display_name", return_value="小美"), \
-             patch.object(push_service, "requests") as requests:
-            push_service.send_push_notification({
-                "room_id": "owner_other",
-                "sender_id": "owner",
-                "content": "晚上一起吃飯？",
-                "message_type": "text",
-            })
+    def test_dispatches_to_explicit_nonexpired_fcm_target(self):
+        target = {
+            "$id": "target-1",
+            "providerType": "push",
+            "providerId": push_service._FCM_PROVIDER_ID,
+            "expired": False,
+        }
+        with patch.object(
+            push_service, "prepare_message_notifications", return_value=[_event()],
+        ), patch.object(push_service, "requests") as requests:
+            requests.get.return_value = self._target_response([target])
+            requests.post.return_value = MagicMock(status_code=201, text="")
+            push_service.send_push_notification({})
         requests.post.assert_called_once()
-        args = requests.post.call_args
-        self.assertEqual(args.args[0], f"{push_service._ENDPOINT}/messaging/messages/push")
-        payload = args.kwargs["json"]
+        payload = requests.post.call_args.kwargs["json"]
+        self.assertEqual(payload["targets"], ["target-1"])
+        self.assertNotIn("users", payload)
         self.assertEqual(payload["title"], "小美")
         self.assertEqual(payload["body"], "晚上一起吃飯？")
-        self.assertEqual(payload["users"], ["other"])
+        self.assertEqual(payload["tag"], "chat-abc")
         self.assertEqual(payload["priority"], "high")
-        self.assertEqual(payload["data"]["contact_id"], "owner")
-        self.assertEqual(payload["data"]["msg_type"], "text")
+        self.assertEqual(payload["data"]["chat_message_kind"], "text")
         self.assertNotIn("message_type", payload["data"])
+        self.assertEqual(len(payload["messageId"]), 32)
 
-    def test_payload_uses_unique_message_id(self):
-        with patch.object(push_service, "_receiver_active", return_value=False), \
-             patch.object(push_service, "requests") as requests:
-            push_service.send_push_notification({
-                "room_id": "owner_other",
-                "sender_id": "owner",
-                "content": "嗨",
-            })
-        payload = requests.post.call_args.kwargs["json"]
-        self.assertEqual(payload["messageId"], "unique()")
+    def test_filters_email_expired_and_wrong_provider_targets(self):
+        targets = [
+            {"$id": "email", "providerType": "email", "expired": False},
+            {
+                "$id": "expired", "providerType": "push",
+                "providerId": push_service._FCM_PROVIDER_ID, "expired": True,
+            },
+            {
+                "$id": "wrong", "providerType": "push",
+                "providerId": "other-provider", "expired": False,
+            },
+        ]
+        with patch.object(push_service, "requests") as requests:
+            requests.get.return_value = self._target_response(targets)
+            self.assertEqual(push_service._valid_push_target_ids("other"), [])
 
-    def test_image_message_body(self):
-        with patch.object(push_service, "_receiver_active", return_value=False), \
-             patch.object(push_service, "requests") as requests:
-            push_service.send_push_notification({
-                "room_id": "owner_other",
-                "sender_id": "owner",
-                "content": "",
-                "message_type": "image",
-            })
-        payload = requests.post.call_args.kwargs["json"]
-        self.assertEqual(payload["body"], "傳了一張圖片")
-
-    def test_queue_spawns_daemon_thread(self):
-        with patch.object(push_service, "threading") as threading, \
-             patch.object(push_service, "send_push_notification"):
-            push_service.queue_push_notification({"room_id": "a_b", "sender_id": "a"})
+    def test_queue_records_before_spawning_daemon_dispatch(self):
+        events = [_event()]
+        with patch.object(
+            push_service, "prepare_message_notifications", return_value=events,
+        ) as prepare, patch.object(push_service, "threading") as threading:
+            push_service.queue_push_notification({"message_id": "message-1"})
+        prepare.assert_called_once()
         threading.Thread.assert_called_once()
         kwargs = threading.Thread.call_args.kwargs
         self.assertTrue(kwargs["daemon"])
         self.assertEqual(kwargs["name"], "push-dispatch")
+        self.assertIs(kwargs["target"], push_service._dispatch_prepared)
+        self.assertEqual(kwargs["args"], (events,))
 
 
 if __name__ == "__main__":

@@ -46,7 +46,12 @@ def get_mediator_private_messages(other_id: str, user_id: str):
 
     if messages_coll.count_documents({"room_id": room_id}) == 0:
 
-        save_message(room_id, "ai_assistant", f"這裡可以私下跟我打聽 {other_id}，我會盡量只講有根據的事。")
+        save_message(
+            room_id,
+            "ai_assistant",
+            f"這裡可以私下跟我打聽 {other_id}，我會盡量只講有根據的事。",
+            metadata={"notification_eligible": False, "event_type": "private_welcome"},
+        )
 
     unread_field = relationship_unread_field(match_doc, user_id)
 

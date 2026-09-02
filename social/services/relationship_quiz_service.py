@@ -220,7 +220,11 @@ def answer_quiz(match_doc: dict, user_id: str, answers_from_user: dict[str, str]
             save_message(
                 generate_room_id(first, second), "ai_assistant", summary,
                 message_type="mediator_card",
-                metadata={"event_type": "compatibility_quiz_result", "result": result},
+                metadata={
+                    "event_type": "compatibility_quiz_result",
+                    "result": result,
+                    "notification_recipients": [first, second],
+                },
             )
             completed_quiz = {**quiz, "status": "completed", "completed_at": completed_at, "result": result, "revision": int(quiz.get("revision", 0)) + 1}
             current_match = _local_with_quiz(current_match, completed_quiz)

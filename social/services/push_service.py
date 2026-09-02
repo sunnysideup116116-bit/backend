@@ -1,39 +1,46 @@
-"""Fire-and-forget push notification dispatch via Appwrite Messaging.
+"""Fire-and-forget Appwrite Messaging delivery for prepared chat events."""
 
-Pair-chat messages are persisted in MongoDB and mirrored to Appwrite for
-Realtime (``appwrite_mirror``). When the receiver is not actively using the
-app, we additionally dispatch a push notification through the Appwrite
-Messaging FCM provider, which forwards it to the receiver's devices.
-
-Dispatch is best-effort: failures are logged and never block the message
-save path. The ``APPWRITE_PUSH_ENABLED`` flag lets the deployment disable
-push delivery while the FCM provider is being set up.
-"""
-
-import json
 import os
 import threading
-import time
+import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
 
+from services.notification_service import (
+    NotificationEvent,
+    prepare_message_notifications,
+)
+
 SERVER_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(dotenv_path=SERVER_ROOT / ".env", override=False)
 
-_ENDPOINT = (
-    os.getenv("APPWRITE_ENDPOINT") or "http://appwrite.misproject.us.ci/v1"
-).rstrip("/")
+def _validated_endpoint(value: str) -> str:
+    endpoint = value.strip().rstrip("/")
+    parsed = urlparse(endpoint)
+    if parsed.scheme == "https":
+        return endpoint
+    if parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        return endpoint
+    raise ValueError("APPWRITE_ENDPOINT must use HTTPS outside loopback development")
+
+
+_CONFIG_ERROR = ""
+try:
+    _ENDPOINT = _validated_endpoint(
+        os.getenv("APPWRITE_ENDPOINT") or "https://appwrite.misproject.us.ci/v1"
+    )
+except ValueError as exc:
+    _ENDPOINT = ""
+    _CONFIG_ERROR = str(exc)
 _PROJECT_ID = os.getenv("APPWRITE_PROJECT_ID") or ""
 _API_KEY = os.getenv("APPWRITE_API_KEY") or ""
+_FCM_PROVIDER_ID = os.getenv("APPWRITE_FCM_PROVIDER_ID") or "6a81bf000036a6eaf5e0"
 _ENABLED = bool(
     os.getenv("APPWRITE_PUSH_ENABLED", "false").strip().lower() == "true"
-) and bool(_PROJECT_ID and _API_KEY)
-
-# A receiver whose last activity is within this window is considered online;
-# their app is already delivering the message via Realtime/polling.
-ACTIVE_WINDOW_SECONDS = 90.0
+) and bool(_ENDPOINT and _PROJECT_ID and _API_KEY)
 
 _HEADERS = {
     "X-Appwrite-Project": _PROJECT_ID,
@@ -41,101 +48,56 @@ _HEADERS = {
     "Content-Type": "application/json",
 }
 
-_BODY_MAX = 160
-
-
-def _other_participant(room_id: str, sender_id: str) -> str | None:
-    """Recover the other participant from a sorted ``a_b`` room id."""
-    if not room_id or not sender_id:
-        return None
-    prefix = sender_id + "_"
-    if room_id.startswith(prefix):
-        return room_id[len(prefix):]
-    suffix = "_" + sender_id
-    if room_id.endswith(suffix):
-        return room_id[: -len(suffix)]
-    return None
-
-
-def _display_name(user_id: str) -> str:
-    """Best-effort public display name; mirrors the contact-list label."""
+def _valid_push_target_ids(user_id: str) -> list[str]:
+    """Resolve non-expired FCM targets without exposing their identifiers."""
     try:
-        from database import profiles_coll
-        profile = profiles_coll.find_one(
-            {"user_id": user_id},
-            {"_id": 0, "display_name": 1, "nickname": 1, "name": 1},
-        ) or {}
-        value = str(
-            profile.get("display_name")
-            or profile.get("nickname")
-            or profile.get("name")
-            or ""
-        ).strip()
-        if value and not value.startswith(("seed_user_", "demo_user", "user_")):
-            return value[:30]
-    except Exception:
-        pass
-    return "對方"
-
-
-def _receiver_active(receiver_id: str) -> bool:
-    """True when the receiver's app reported foreground presence recently.
-
-    Uses the dedicated ``last_presence_at`` heartbeat field so push dispatch
-    never interferes with ``last_user_activity_at``, which drives the
-    proactive-care scheduler.
-    """
-    try:
-        from database import profiles_coll
-        profile = profiles_coll.find_one(
-            {"user_id": receiver_id}, {"_id": 0, "last_presence_at": 1},
+        response = requests.get(
+            f"{_ENDPOINT}/users/{user_id}", headers=_HEADERS, timeout=10,
         )
+    except Exception as exc:
+        print(f"[push_service] target lookup failed: {type(exc).__name__}: {exc}")
+        return []
+    if response.status_code >= 300:
+        print(
+            f"[push_service] target lookup failed: HTTP {response.status_code}: "
+            f"{response.text[:160]}"
+        )
+        return []
+    try:
+        targets = response.json().get("targets") or []
     except Exception:
-        return False
-    if not profile:
-        return False
-    last_active = float(profile.get("last_presence_at") or 0)
-    return last_active > 0 and (time.time() - last_active) < ACTIVE_WINDOW_SECONDS
+        return []
+    return [
+        str(item.get("$id"))
+        for item in targets
+        if item.get("$id")
+        and str(item.get("providerType") or "") == "push"
+        and not bool(item.get("expired"))
+        and (
+            not _FCM_PROVIDER_ID
+            or not item.get("providerId")
+            or str(item.get("providerId")) == _FCM_PROVIDER_ID
+        )
+    ]
 
 
-def _push_body(msg: dict) -> str:
-    if str(msg.get("message_type") or "text") == "image":
-        return "傳了一張圖片"
-    content = str(msg.get("content") or "").strip()
-    if not content:
-        return "傳了一則訊息"
-    return content[:_BODY_MAX]
-
-
-def send_push_notification(msg: dict) -> None:
-    """Dispatch one push notification through Appwrite Messaging (sync)."""
+def _send_prepared_event(event: NotificationEvent) -> None:
     if not _ENABLED:
         return
-    room_id = str(msg.get("room_id") or "")
-    sender_id = str(msg.get("sender_id") or "")
-    if not room_id or not sender_id:
-        return
-    if sender_id == "ai_assistant":
-        return
-    receiver_id = _other_participant(room_id, sender_id)
-    if not receiver_id or receiver_id == "ai_assistant":
-        return
-    if msg.get("is_blocked"):
-        return
-    if _receiver_active(receiver_id):
+    target_ids = _valid_push_target_ids(event.recipient_id)
+    if not target_ids:
+        print(
+            f"[push_service] skipped: no valid push target for "
+            f"user={event.recipient_id} surface={event.surface}"
+        )
         return
     payload = {
-        "messageId": "unique()",
-        "title": _display_name(sender_id),
-        "body": _push_body(msg),
-        "users": [receiver_id],
-        "data": {
-            "room_id": room_id,
-            "sender_id": sender_id,
-            "contact_id": sender_id,
-            "contact_name": _display_name(sender_id),
-            "msg_type": str(msg.get("message_type") or "text"),
-        },
+        "messageId": uuid.uuid4().hex,
+        "title": event.title,
+        "body": event.body,
+        "targets": target_ids,
+        "data": {key: str(value) for key, value in event.data.items()},
+        "tag": event.tag,
         "priority": "high",
     }
     try:
@@ -154,13 +116,26 @@ def send_push_notification(msg: dict) -> None:
         print(f"[push_service] push dispatch failed: {type(exc).__name__}: {exc}")
 
 
+def _dispatch_prepared(events: list[NotificationEvent]) -> None:
+    for event in events:
+        _send_prepared_event(event)
+
+
+def send_push_notification(msg: dict) -> None:
+    """Record unread state and synchronously dispatch eligible notifications."""
+    events = prepare_message_notifications(msg)
+    if _ENABLED:
+        _dispatch_prepared(events)
+
+
 def queue_push_notification(msg: dict) -> None:
-    """Queue push dispatch on a daemon thread; never blocks the caller."""
-    if not _ENABLED:
+    """Record unread state, then queue best-effort Appwrite delivery."""
+    events = prepare_message_notifications(msg)
+    if not _ENABLED or not events:
         return
     threading.Thread(
-        target=send_push_notification,
-        args=(msg,),
+        target=_dispatch_prepared,
+        args=(events,),
         name="push-dispatch",
         daemon=True,
     ).start()

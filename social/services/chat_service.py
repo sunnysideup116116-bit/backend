@@ -133,4 +133,5 @@ def save_system_message_once(room_id, content, message_type="text", metadata=Non
     msg["created"] = bool(getattr(result, "upserted_id", None))
     if msg["created"]:
         mirror_message_to_appwrite_async(msg)
+        queue_push_notification(msg)
     return msg
