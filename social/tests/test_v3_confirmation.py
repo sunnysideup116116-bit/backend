@@ -1,7 +1,11 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from services.ayue_agent.v3.confirmation import ConfirmationManager
+from services.ayue_agent.v3.confirmation import (
+    INTERACTION_BUBBLE,
+    SURFACE_PUBLIC,
+    ConfirmationManager,
+)
 
 
 class V3ConfirmationTests(unittest.TestCase):
@@ -33,6 +37,9 @@ class V3ConfirmationTests(unittest.TestCase):
             "preview_fingerprint": "preview-digest",
             "presented_message_id": "message-1",
             "presented_at": created_at + 0.5,
+            "room_id": "room",
+            "surface": SURFACE_PUBLIC,
+            "interaction_mode": INTERACTION_BUBBLE,
         }
 
     @patch("services.ayue_agent.v3.confirmation.time.time", return_value=100.0)
@@ -46,10 +53,21 @@ class V3ConfirmationTests(unittest.TestCase):
             ttl_seconds=900,
             origin_run_id="run-preview",
             preview="Cancel tomorrow's event?",
+            room_id="room",
         )
         self.coll.update_many.assert_called_once_with(
-            {"user_id": "owner", "status": {"$in": ["prepared", "pending"]}},
-            {"$set": {"status": "superseded", "superseded_at": 100.0}},
+            {
+                "user_id": "owner",
+                "status": {"$in": ["prepared", "pending"]},
+                "interaction_mode": INTERACTION_BUBBLE,
+                "surface": SURFACE_PUBLIC,
+                "room_id": "room",
+            },
+            {"$set": {
+                "status": "superseded",
+                "superseded_at": 100.0,
+                "resolution_reason": "replacement",
+            }},
         )
         doc = self.coll.insert_one.call_args[0][0]
         self.assertEqual(doc["status"], "prepared")
@@ -132,6 +150,7 @@ class V3ConfirmationTests(unittest.TestCase):
             user_id="owner", agent_name="calendar", tool_name="calendar.submit_commands",
             arguments={}, payload={"plans": []}, origin_run_id="run-preview",
             preview="要新增行程嗎？",
+            room_id="room",
         )
         self.coll.find.return_value = []
         self.assertEqual(self.mgr.list_active(user_id="owner"), [])
@@ -161,8 +180,19 @@ class V3ConfirmationTests(unittest.TestCase):
             tool_name="relationship.start_date_coordination",
             arguments={}, payload={}, origin_run_id="run-relationship",
             preview="要建立約會邀請嗎？",
+            room_id="room",
         )
-        active = manager.list_active(user_id="owner")
+        self.assertEqual(manager.list_active(user_id="owner"), [])
+        manager.bind_final_preview(
+            user_id="owner", origin_run_id="run-relationship",
+            final_content="要建立約會邀請嗎？",
+        )
+        manager.mark_presented(
+            user_id="owner", origin_run_id="run-relationship",
+            message_id="message-relationship",
+            persisted_content="要建立約會邀請嗎？",
+        )
+        active = manager.list_active(user_id="owner", room_id="room")
         self.assertEqual(len(active), 1)
         self.assertEqual(active[0]["status"], "pending")
 
@@ -174,6 +204,7 @@ class V3ConfirmationTests(unittest.TestCase):
             user_id="owner", agent_name="calendar", tool_name="calendar.submit_commands",
             arguments={}, payload={"plans": []}, origin_run_id="run-preview",
             preview="原始預覽",
+            room_id="room",
         )
         self.assertTrue(manager.bind_final_preview(
             user_id="owner", origin_run_id="run-preview", final_content="最終預覽",
@@ -195,6 +226,7 @@ class V3ConfirmationTests(unittest.TestCase):
             user_id="owner", agent_name="calendar", tool_name="calendar.submit_commands",
             arguments={}, payload={"plans": []}, origin_run_id="run-preview",
             preview="預覽",
+            room_id="room",
         )
         manager.bind_final_preview(
             user_id="owner", origin_run_id="run-preview", final_content="預覽",

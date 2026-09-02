@@ -38,7 +38,7 @@ from services.assessment_session_service import (
     awaiting_assessment_commit, cancel_assessment_session,
     commit_assessment_session, expire_assessment_session,
 )
-from database import db
+from database import db, messages_coll
 from services.ai_service import get_effective_chat_model
 
 from .contracts import (
@@ -57,7 +57,14 @@ from .public_reply import (
     validate_public_reply,
 )
 from .sub_agents.base import SubAgentMetrics
-from .confirmation import ConfirmationManager
+from .confirmation import (
+    ASSESSMENT_COMMIT_ACTION,
+    INTERACTION_BUBBLE,
+    INTERACTION_LEGACY,
+    SURFACE_PUBLIC,
+    ConfirmationManager,
+    sync_choice_message_projection,
+)
 from . import calendar_runtime
 from .runtime_registry import (
     RuntimeRegistration,
@@ -730,7 +737,11 @@ def _run_sub_task(
         global_max_reads=MAX_TOTAL_READS,
         create_confirmation=lambda **kwargs: ConfirmationManager(
             _CONFIRMATIONS
-        ).create_confirmation(**kwargs),
+        ).create_confirmation(
+            room_id=turn_ctx.room_id,
+            surface=SURFACE_PUBLIC,
+            **kwargs,
+        ),
         print_llm_metrics=_print_llm_metrics,
     )
     guarded_executor.runtime_state["planner_write_intent"] = planner_write_intent
@@ -878,6 +889,8 @@ def _run_sub_task(
                     payload=payload.get("data") or {},
                     origin_run_id=run_id,
                     preview=preview or "",
+                    room_id=turn_ctx.room_id,
+                    surface=SURFACE_PUBLIC,
                 )
                 print(f"  [{task.id}#{index}] result=OK (pending_confirmation for {proposal.tool_name})")
                 results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.OK,
@@ -1052,6 +1065,34 @@ def run_public_agent_turn_v3(
         "mentioned_ids": mentioned_ids,
         "mention_overflow": bool(ctx.mention_overflow or mention_overflow),
     })
+    mgr = ConfirmationManager(_CONFIRMATIONS)
+    continuation_resolution: dict[str, Any] | None = None
+    if ctx.choice_action is None and ctx.assessment_action is None:
+        continuation_resolution = mgr.resolve_for_continuation(
+            user_id=ctx.user_id,
+            room_id=ctx.room_id,
+            surface=SURFACE_PUBLIC,
+        )
+        if continuation_resolution:
+            sync_choice_message_projection(
+                messages_coll,
+                room_id=ctx.room_id,
+                projection=continuation_resolution,
+            )
+        # An awaiting assessment draft is itself a bubble choice. Continuing
+        # the same room cancels the draft and then lets the new text reach the
+        # ordinary planner. Pre-rollout sessions without a choice record fail
+        # closed the same way instead of retaining text-token authority.
+        awaiting = awaiting_assessment_commit(ctx.user_profile)
+        if awaiting:
+            cancel_assessment_session(
+                ctx.user_id,
+                str(awaiting.get("session_id") or ""),
+                str(awaiting.get("kind") or ""),
+            )
+            profile_without_session = dict(ctx.user_profile)
+            profile_without_session.pop("agentic_assessment_session", None)
+            ctx = ctx.model_copy(update={"user_profile": profile_without_session})
     run_id = uuid.uuid4().hex
     clock = build_turn_clock(ctx.message)
     turn = build_public_agent_turn_context(ctx, clock=clock)
@@ -1106,8 +1147,36 @@ def run_public_agent_turn_v3(
         # deterministic branches both pass through it, so model drift to
         # Simplified Chinese cannot leak to the user.  Opaque URLs/code/JSON
         # fragments are protected by normalize_public_reply.
-        normalized_reply = normalize_public_reply(result.reply)
-        messages = [str(item).strip() for item in (result.messages or []) if str(item).strip()]
+        button_choice_created = mgr.choice_for_run(
+            user_id=ctx.user_id,
+            room_id=ctx.room_id,
+            surface=SURFACE_PUBLIC,
+            origin_run_id=run_id,
+        )
+
+        def _button_copy(text: Any) -> str:
+            value = str(text or "")
+            if not button_choice_created:
+                return value
+            return (
+                value
+                .replace(" 回覆「確認」才會真的變更。", " 請選擇是否套用這次變更。")
+                .replace(
+                    "要我現在開始找就回覆「確認」；也可以先補充條件。",
+                    "要我現在開始找嗎？你也可以先補充條件。",
+                )
+                .replace(
+                    "回覆「確認」就開始，也可以回覆「取消」。",
+                    "請選擇是否開始。",
+                )
+            )
+
+        normalized_reply = normalize_public_reply(_button_copy(result.reply))
+        messages = [
+            _button_copy(item).strip()
+            for item in (result.messages or [])
+            if str(item).strip()
+        ]
         if not messages and normalized_reply:
             messages = [normalized_reply]
         presentation = build_presentation(messages, result.presentation_class) if messages else None
@@ -1119,11 +1188,36 @@ def run_public_agent_turn_v3(
         result = result.model_copy(update={"reply": normalized_reply, "messages": messages})
         # Confirmation preview hashes must bind the exact text that the HTTP
         # layer will persist, after this final normalization boundary.
-        ConfirmationManager(_CONFIRMATIONS).bind_final_preview(
+        mgr.bind_final_preview(
             user_id=ctx.user_id,
             origin_run_id=run_id,
             final_content=normalized_reply,
         )
+        choice_prompt = mgr.choice_for_run(
+            user_id=ctx.user_id,
+            room_id=ctx.room_id,
+            surface=SURFACE_PUBLIC,
+            origin_run_id=run_id,
+        )
+        resolution = result.choice_resolution or continuation_resolution
+        if choice_prompt and continuation_resolution:
+            replacement = mgr.mark_superseded(
+                user_id=ctx.user_id,
+                room_id=ctx.room_id,
+                surface=SURFACE_PUBLIC,
+                choice_id=str(continuation_resolution.get("id") or ""),
+            )
+            if replacement:
+                resolution = replacement
+                sync_choice_message_projection(
+                    messages_coll,
+                    room_id=ctx.room_id,
+                    projection=replacement,
+                )
+        result = result.model_copy(update={
+            "choice_prompt": choice_prompt or result.choice_prompt,
+            "choice_resolution": resolution,
+        })
         if debug_enabled:
             finish_debug_run(
                 run_id, status="completed",
@@ -1148,6 +1242,167 @@ def run_public_agent_turn_v3(
             assessment_kind=str(outcome.get("kind") or session.get("kind") or "") or None,
             assessment_revision=outcome.get("revision", int(session.get("revision", 0) or 0)),
         )
+
+    if ctx.choice_action is not None:
+        choice_id = str(ctx.choice_id or "")
+        record = mgr.record_for_choice(
+            user_id=ctx.user_id,
+            room_id=ctx.room_id,
+            surface=SURFACE_PUBLIC,
+            choice_id=choice_id,
+        )
+        if record is None:
+            resolution = mgr.choice_projection(
+                user_id=ctx.user_id,
+                room_id=ctx.room_id,
+                surface=SURFACE_PUBLIC,
+                choice_id=choice_id,
+            )
+            if resolution:
+                sync_choice_message_projection(
+                    messages_coll, room_id=ctx.room_id, projection=resolution,
+                )
+            return _finalize_debug(AgentResult(
+                handled=True,
+                reply=(
+                    "這個選擇已經過期或處理完成；我沒有再次執行。"
+                    if resolution
+                    else "我找不到這個待確認操作，因此沒有執行任何變更。"
+                ),
+                presentation_class="transaction",
+                conversation_intent="confirmation_missing",
+                agent_run_id=run_id,
+                agent_mode="v3",
+                choice_resolution=resolution,
+            ))
+
+        action_name = str(record.get("tool_name") or "")
+        payload = dict(record.get("payload") or {})
+        if ctx.choice_action == "cancel":
+            resolution = mgr.cancel_choice(
+                user_id=ctx.user_id,
+                room_id=ctx.room_id,
+                surface=SURFACE_PUBLIC,
+                choice_id=choice_id,
+            )
+            if resolution:
+                sync_choice_message_projection(
+                    messages_coll, room_id=ctx.room_id, projection=resolution,
+                )
+            if action_name == ASSESSMENT_COMMIT_ACTION:
+                session = {
+                    "session_id": payload.get("session_id"),
+                    "kind": payload.get("kind"),
+                    "revision": payload.get("revision"),
+                }
+                outcome = cancel_assessment_session(
+                    ctx.user_id,
+                    str(payload.get("session_id") or ""),
+                    str(payload.get("kind") or ""),
+                )
+                result = _assessment_result(outcome, session, run_id)
+                return _finalize_debug(result.model_copy(update={
+                    "choice_resolution": resolution,
+                }))
+            return _finalize_debug(AgentResult(
+                handled=True,
+                reply=PUBLIC_PENDING_CANCEL_REPLY,
+                presentation_class="transaction",
+                conversation_intent="confirmation_cancelled",
+                agent_run_id=run_id,
+                agent_mode="v3",
+                choice_resolution=resolution,
+            ))
+
+        assessment_outcome: dict[str, Any] = {}
+
+        def _button_executor(
+            tool_name: str,
+            arguments: dict[str, Any],
+            _user_id: str,
+            bound_payload: dict[str, Any],
+        ) -> tuple[bool, str, str | None]:
+            if tool_name == ASSESSMENT_COMMIT_ACTION:
+                outcome = commit_assessment_session(
+                    ctx.user_id,
+                    str(bound_payload.get("session_id") or ""),
+                    expected_revision=int(bound_payload.get("revision", 0) or 0),
+                    idempotency_key=(
+                        f"assessment-commit:{bound_payload.get('session_id')}:"
+                        f"{int(bound_payload.get('revision', 0) or 0)}"
+                    ),
+                )
+                assessment_outcome.update(outcome)
+                ok = str(outcome.get("status") or "") in {"committed", "already_committed"}
+                return ok, str(outcome.get("reply") or "這份結果沒有完成套用。"), None if ok else str(outcome.get("status") or "assessment_commit_failed")
+            return execute_write(
+                tool_name, arguments, ctx, turn, run_id, 0,
+                confirmation_id=None, payload=bound_payload,
+            )
+
+        results = mgr.execute_confirmed(
+            user_id=ctx.user_id,
+            choice_id=choice_id,
+            room_id=ctx.room_id,
+            surface=SURFACE_PUBLIC,
+            interaction_mode=INTERACTION_BUBBLE,
+            executor=_button_executor,
+        )
+        resolution = mgr.choice_projection(
+            user_id=ctx.user_id,
+            room_id=ctx.room_id,
+            surface=SURFACE_PUBLIC,
+            choice_id=choice_id,
+        )
+        if resolution:
+            sync_choice_message_projection(
+                messages_coll, room_id=ctx.room_id, projection=resolution,
+            )
+        if action_name == ASSESSMENT_COMMIT_ACTION and assessment_outcome:
+            result = _assessment_result(assessment_outcome, payload, run_id)
+            return _finalize_debug(result.model_copy(update={
+                "choice_resolution": resolution,
+            }))
+        if not results:
+            return _finalize_debug(AgentResult(
+                handled=True,
+                reply="這次沒有執行新的變更；操作可能已由另一個請求處理。",
+                presentation_class="transaction",
+                conversation_intent="confirmation_missing",
+                agent_run_id=run_id,
+                agent_mode="v3",
+                choice_resolution=resolution,
+            ))
+        synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{
+            "task_id": "confirm", "status": "ok", "tool": None,
+            "result": results, "error_code": None, "skip_reason": None,
+        }])
+        reply, _card_decision, synth_metrics = synthesizer.synthesize(
+            synth_slice, on_token=emit_token_fragment,
+        )
+        server_reply = _server_owned_confirmed_date_reply(results)
+        if server_reply:
+            reply = server_reply
+            synth_metrics.presentation_messages = [server_reply]
+            synth_metrics.presentation_class = "transaction"
+        confirmed_updates: dict[str, Any] = {}
+        for registration in _iter_runtime_registrations():
+            if registration.confirmed_result_projector is None:
+                continue
+            projection = registration.confirmed_result_projector(results)
+            if isinstance(projection, dict):
+                confirmed_updates.update(projection)
+        return _finalize_debug(AgentResult(
+            handled=True,
+            reply=reply,
+            messages=synth_metrics.presentation_messages or [reply],
+            presentation_class=synth_metrics.presentation_class,
+            conversation_intent="confirmation",
+            agent_run_id=run_id,
+            agent_mode="v3",
+            choice_resolution=resolution,
+            **confirmed_updates,
+        ))
 
     if ctx.assessment_action == "cancel":
         session = awaiting_assessment_commit(ctx.user_profile) or active_assessment_session(ctx.user_profile)
@@ -1222,8 +1477,31 @@ def run_public_agent_turn_v3(
         outcome = advance_assessment_session(
             ctx.user_id, session_id, ctx.message, message_id=ctx.message_id,
         )
+        result = _assessment_result(outcome, active, run_id)
+        if str(outcome.get("session_state") or outcome.get("status") or "") == "awaiting_commit":
+            button_reply = str(result.reply or "").replace(
+                "這是新的草稿，回覆「確認」才會套用；想保留原本資料可回覆「取消」。",
+                "這是新的草稿，請選擇是否套用。",
+            )
+            result = result.model_copy(update={"reply": button_reply})
+            mgr.create_confirmation(
+                user_id=ctx.user_id,
+                agent_name="profile",
+                tool_name=ASSESSMENT_COMMIT_ACTION,
+                arguments={},
+                payload={
+                    "session_id": session_id,
+                    "kind": kind,
+                    "revision": int(outcome.get("revision", active.get("revision", 0)) or 0),
+                },
+                origin_run_id=run_id,
+                preview=button_reply,
+                room_id=ctx.room_id,
+                surface=SURFACE_PUBLIC,
+                interaction_mode=INTERACTION_BUBBLE,
+            )
         _print_separator("V3 RUN END")
-        return _finalize_debug(_assessment_result(outcome, active, run_id))
+        return _finalize_debug(result)
 
     # Resolve only a closed ordinal/deictic place reference here. Intent still
     # belongs to Planner/Calendar; this gate only binds identity and fails
@@ -1259,9 +1537,11 @@ def run_public_agent_turn_v3(
                 profile_write_reason="place_reference_clarification",
             ))
 
-    choice = confirmation_choice(ctx.message)
-    mgr = ConfirmationManager(_CONFIRMATIONS)
-    pending_records = mgr.list_active(user_id=ctx.user_id)
+    choice = "none" if continuation_resolution else confirmation_choice(ctx.message)
+    pending_records = mgr.list_active(
+        user_id=ctx.user_id,
+        interaction_mode=INTERACTION_LEGACY,
+    )
     active_offer = active_guidance_offer(ctx.user_profile or {})
     if not pending_records and active_offer and choice in {"confirm", "cancel"}:
         fingerprint = str(active_offer.get("fingerprint") or "")
@@ -1299,6 +1579,8 @@ def run_public_agent_turn_v3(
                 payload=confirmation_payload,
                 origin_run_id=run_id,
                 preview=preview or "",
+                room_id=ctx.room_id,
+                surface=SURFACE_PUBLIC,
             )
             synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{
                 "task_id": "match_guidance",
@@ -1324,8 +1606,6 @@ def run_public_agent_turn_v3(
                 agent_mode="v3",
                 match_readiness_state="ready",
             ))
-    if choice == "none" and _assessment_start_confirmation_requested(ctx.message, pending_records):
-        choice = "confirm"
     if choice in {"confirm", "cancel"} and not pending_records:
         if choice == "cancel":
             _print_separator("V3 RUN END")
@@ -1349,6 +1629,7 @@ def run_public_agent_turn_v3(
         print("\n  [entry] confirmation=confirm → executing preview-bound pending confirmation")
         results = mgr.execute_confirmed(
             user_id=ctx.user_id,
+            interaction_mode=INTERACTION_LEGACY,
             executor=lambda tn, args, uid, payload: execute_write(
                 tn, args, ctx, turn, run_id, 0,
                 confirmation_id=None, payload=payload,
@@ -1397,7 +1678,7 @@ def run_public_agent_turn_v3(
         ))
     if choice == "cancel":
         print("\n  [entry] confirmation=cancel → clearing pending confirmations")
-        mgr.cancel_all(user_id=ctx.user_id)
+        mgr.cancel_legacy(user_id=ctx.user_id)
         _print_separator("V3 RUN END")
         return _finalize_debug(AgentResult(
             handled=True, reply=PUBLIC_PENDING_CANCEL_REPLY, agent_run_id=run_id, agent_mode="v3",

@@ -55,8 +55,8 @@ Planner 參數（`_AssessmentStartArguments`）：
 ```text
 proposal → Guard(write_requires_confirmation) → prepare_write_confirmation
   → kind 驗證 → preview:「要重新開始{基本性格|深層探索}嗎？新的結果完成前，原本的資料會保留。
-     回覆『確認』就開始，也可以回覆『取消』。」
-確認後 execute_write → _start_assessment
+     請選擇是否開始。」＋ AI 泡泡內「取消／確認」
+按鈕確認後 execute_write → _start_assessment
   → assessment_session_service.start_assessment_session(user_id, kind, idempotency_key=confirmation:{id}:{kind})
 ```
 
@@ -67,7 +67,7 @@ proposal → Guard(write_requires_confirmation) → prepare_write_confirmation
 | 狀態 | 行為 |
 | --- | --- |
 | `active`（探索進行中） | 每則訊息作為 session 答案：`advance_assessment_session`；回覆「取消」可中斷 |
-| `awaiting_commit`（探索完成） | 只接受封閉協議：「確認」→ `commit_assessment_session`（CAS revision）覆寫正式資料；「取消」→ 保留原本資料；其他 → 提示 |
+| `awaiting_commit`（探索完成） | 完成訊息泡泡提供 `choice_id` 按鈕：「確認」→ `commit_assessment_session`（CAS revision）覆寫正式資料；「取消」或繼續同房對話 → 保留原本資料 |
 | session 過期 | `expire_assessment_session` |
 
 Assessment 相關回合回傳 `assessment_state/kind/revision`；**assessment 答案不會進入 profile extraction pipeline**（`public_chat.py` 以 `profile_write_reason == "assessment"` 排除），也不會成為近期情境或 durable memory evidence。

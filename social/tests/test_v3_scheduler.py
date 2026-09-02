@@ -1715,7 +1715,10 @@ class V3SchedulerWriteTests(unittest.TestCase):
         execute_write.assert_not_called()
 
     def test_confirm_path_executes_write_and_relays_reply(self):
-        ctx = self._ctx("確認")
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="room", message="",
+            choice_id="c1", choice_action="confirm",
+        )
         seen_obs = {}
         def fake_synth(slice_payload, candidate_cards=None, on_token=None):
             seen_obs["observations"] = slice_payload.payload.get("observations", [])
@@ -1742,6 +1745,9 @@ class V3SchedulerWriteTests(unittest.TestCase):
                 "origin_run_id": origin_run_id,
                 "request_fingerprint": request_fingerprint,
                 "preview_fingerprint": "preview-digest",
+                "presented_message_id": "message-1", "presented_at": 1,
+                "room_id": "room", "surface": "public_ayue",
+                "interaction_mode": "bubble_buttons_v1",
             }]
             coll.update_one.return_value = MagicMock(modified_count=1)
             result = run_public_agent_turn_v3(ctx)
@@ -1844,21 +1850,28 @@ class V3SchedulerWriteTests(unittest.TestCase):
         synthesize.assert_not_called()
 
     def test_confirm_claim_lost_does_not_synthesize_success(self):
-        ctx = self._ctx("確認")
-        pending = {"_id": "c1", "tool_name": "calendar.create_event"}
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="room", message="",
+            choice_id="c1", choice_action="confirm",
+        )
+        pending = {
+            "_id": "c1", "tool_name": "calendar.submit_commands",
+            "arguments": {}, "payload": {},
+        }
         turn = MagicMock(calendar_draft=None)
         with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", return_value=turn), \
-             patch(
-                 "services.ayue_agent.v3.scheduler.ConfirmationManager.list_active",
-                 side_effect=[[pending], []],
-             ), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.record_for_choice", return_value=pending), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.execute_confirmed", return_value=[]), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.choice_projection", return_value={
+                 "id": "c1", "state": "pending", "selected": None, "expires_at": 1e18,
+             }), \
              patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
              patch("services.ayue_agent.v3.scheduler.execute_write") as execute_write, \
              patch("services.ayue_agent.v3.scheduler.synthesizer.synthesize") as synthesize:
             result = run_public_agent_turn_v3(ctx)
 
         self.assertIn("沒有執行新的變更", result.reply)
-        self.assertIn("另一個請求處理或已失效", result.reply)
+        self.assertIn("另一個請求處理", result.reply)
         execute_write.assert_not_called()
         synthesize.assert_not_called()
 
@@ -2225,11 +2238,29 @@ class V3SchedulerAssessmentTests(unittest.TestCase):
         plan.assert_not_called()
 
     def test_awaiting_commit_confirm_commits(self):
-        ctx = AgentTurnContext(user_id="owner", room_id="room", message="確認")
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="room", message="",
+            choice_id="assessment-choice", choice_action="confirm",
+        )
+        record = {
+            "_id": "assessment-choice",
+            "tool_name": "profile.commit_assessment",
+            "arguments": {},
+            "payload": {"session_id": "s1", "kind": "big_five", "revision": 3},
+        }
+
+        def execute_choice(**kwargs):
+            ok, reply, error = kwargs["executor"](
+                "profile.commit_assessment", {}, "owner", record["payload"],
+            )
+            return [{"ok": ok, "data": {"reply": reply}, "error_code": error}]
+
         with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
-             patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit",
-                   return_value={"session_id": "s1", "kind": "big_five", "revision": 3, "expires_at": 1e18}), \
-             patch("services.ayue_agent.v3.scheduler.assessment_commit_choice", return_value="confirm"), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.record_for_choice", return_value=record), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.execute_confirmed", side_effect=execute_choice), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.choice_projection", return_value={
+                 "id": "assessment-choice", "state": "confirmed", "selected": "confirm", "expires_at": 1e18,
+             }), \
              patch("services.ayue_agent.v3.scheduler.commit_assessment_session",
                    return_value={"status": "committed", "session_state": "completed",
                                  "kind": "big_five", "revision": 4, "reply": "已套用新的基本性格資料。"}), \

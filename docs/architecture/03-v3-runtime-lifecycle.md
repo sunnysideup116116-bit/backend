@@ -39,9 +39,9 @@ direct_chat (routers/public_chat.py)
 
 ### 階段 0：特殊入口（不跑 Planner）
 
-1. **Assessment commit**：若存在 `awaiting_assessment_commit` 的探索 session，只接受封閉的「確認／取消」協議，否則提示；逾期則 expire。
+1. **Assessment commit**：探索完成後建立 room-scoped `bubble_buttons_v1` 選擇；只有帶精確 `choice_id` 的按鈕操作可以 commit／cancel。一般文字會自動取消草稿並繼續正常對話；逾期則 expire。
 2. **Active assessment session**：存在進行中的基本／深層探索時，任何訊息都作為該 session 的答案（`advance_assessment_session`），不跑 Planner。
-3. **Confirmation**：`confirmation_choice(message)` 解析封閉確認協議；一般寫入接受「確認／好」等既有確認字串，assessment start 另接受限定的「開始／開始吧／開始啊／開始阿」。確認時由 `ConfirmationManager.execute_confirmed` 執行最新一筆 pending confirmation。Calendar Agent 的多個 typed commands 在建立時已合併為一個 server-owned plan，確認後依序執行；取消時清除該使用者全部 pending。
+3. **Confirmation**：Calendar、配對搜尋、assessment start 與卡片建立前的約會協調使用 `bubble_buttons_v1`，以 `user + surface + room + choice_id` 綁定；文字「確認／取消」不具執行權。既有配對提案與活動邀請卡的文字備援仍使用隔離的 `legacy_text` 協議。Calendar Agent 的多個 typed commands 在建立時已合併為一個 server-owned plan，按鈕確認後依序執行。
 
 ### 階段 1：Planner 拆解（LLM）
 
@@ -119,15 +119,18 @@ Calendar Agent 提出 `calendar.submit_commands` typed command batch
   → command guard（只驗 schema 與 authority-free contract）
   → Calendar Runtime: deterministic calendar preflight（resolve/衝突/preview；canonical target 只解析一次）
       → needs_clarification/denied: observation = calendar_command_result（Synthesizer 向使用者追問或說明權限）
-      → 成功: 寫入 v3_pending_confirmations {status: pending, expires_at: +900s}
-  → Synthesizer 回覆 preview + 「回覆『確認』才會真的變更」
-使用者回覆「確認」
-  → Scheduler: ConfirmationManager.execute_confirmed
+      → 成功: 寫入 v3_pending_confirmations {status: prepared, interaction_mode: bubble_buttons_v1, room_id, expires_at: +900s}
+  → 保存帶 `choice_prompt` 的 AI preview 泡泡 → mark_presented → pending
+使用者點泡泡內「確認」
+  → request 帶 `choice_id + choice_action=confirm`
+  → Scheduler: ConfirmationManager.execute_confirmed（精確 owner／room／choice CAS）
       - CAS: pending → executing（修改數 0 代表已被其他 worker 取走，跳過）
       - calendar plan 共用一個 confirmation，確認後 sequential execution、stop-on-failure、無 automatic rollback
       - execute_write(tool, args, ctx, turn, run_id, index, payload)
       - 完成後寫 completed/failed，附 result
 ```
+
+同房未選擇便送出新訊息時，pending 會改為 `auto_cancelled`，原訊息保存狀態後該文字仍進 Planner；若同回合產生新確認，舊狀態改為 `superseded`。按鈕操作不保存假的 owner 訊息，也不進 profile extraction。
 
 `execute_write`（`write_executors.py`）是**已確認寫入的唯一執行路徑**，內部呼叫 canonical domain service：
 
