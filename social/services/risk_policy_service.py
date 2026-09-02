@@ -165,11 +165,19 @@ class PairMessageRiskGate:
             level = str(raw.get("risk_level") or "").strip().lower()
             triggered_by_msg_id = self._extract_triggered_by_msg_id(raw)
             sender_d, receiver_d = self._extract_directives(raw)
-            if level == "blocked":
+            command = raw.get("intervention_command")
+            sanction_exempted = (
+                isinstance(command, dict)
+                and command.get("sanction_exempted") is True
+            )
+
+            # blocked 仍保留累積風險等級；已服完處置且本則未增加風險時，
+            # 只解除本則訊息的攔截，避免 gateway 對同一事件重複封鎖。
+            if level == "blocked" and not sanction_exempted:
                 decision = PairMessageRiskDecision(
                     "blocked", "blocked", triggered_by_msg_id, sender_d, receiver_d
                 )
-            elif level in _DELIVERABLE_LEVELS:
+            elif level in _KNOWN_LEVELS:
                 decision = PairMessageRiskDecision(
                     level, "delivered", triggered_by_msg_id, sender_d, receiver_d
                 )

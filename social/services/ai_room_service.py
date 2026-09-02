@@ -27,6 +27,7 @@ from services.chat_service import (
 )
 from services.chat_service import save_system_message_once
 from services.assessment_session_service import assessment_public_state_for_room
+from services.notification_service import PUBLIC_AYUE, notification_unread_map
 
 
 LEGACY_AI_ROOM_TITLE = "找阿月配對"
@@ -158,6 +159,7 @@ def list_rooms(
     """
     now = time.time()
     rooms: list[dict] = []
+    unread_by_room = notification_unread_map(user_id, PUBLIC_AYUE)
 
     # Legacy room (synthesized).
     legacy_id = legacy_ai_room_id(user_id)
@@ -171,6 +173,7 @@ def list_rooms(
         "created_at": 0.0,
         "updated_at": legacy_latest or now,
         "latest_message": legacy_latest,
+        "unread_count": int(unread_by_room.get(legacy_id, 0)),
     })
 
     for doc in ai_rooms_coll.find({"user_id": user_id}, {"_id": 0}):
@@ -178,6 +181,7 @@ def list_rooms(
         latest = _latest_message(doc["room_id"])
         proj["updated_at"] = latest or doc.get("updated_at") or doc.get("created_at") or now
         proj["latest_message"] = latest
+        proj["unread_count"] = int(unread_by_room.get(str(doc.get("room_id") or ""), 0))
         rooms.append(proj)
 
     if assessment_profile is not None:

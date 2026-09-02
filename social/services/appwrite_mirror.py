@@ -16,6 +16,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -23,15 +24,28 @@ from dotenv import load_dotenv
 SERVER_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(dotenv_path=SERVER_ROOT / ".env", override=False)
 
-_ENDPOINT = (
-    os.getenv("APPWRITE_ENDPOINT") or "http://appwrite.misproject.us.ci/v1"
-).rstrip("/")
+def _validated_endpoint(value: str) -> str:
+    endpoint = value.strip().rstrip("/")
+    parsed = urlparse(endpoint)
+    if parsed.scheme == "https":
+        return endpoint
+    if parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        return endpoint
+    raise ValueError("APPWRITE_ENDPOINT must use HTTPS outside loopback development")
+
+
+try:
+    _ENDPOINT = _validated_endpoint(
+        os.getenv("APPWRITE_ENDPOINT") or "https://appwrite.misproject.us.ci/v1"
+    )
+except ValueError:
+    _ENDPOINT = ""
 _PROJECT_ID = os.getenv("APPWRITE_PROJECT_ID") or ""
 _API_KEY = os.getenv("APPWRITE_API_KEY") or ""
 _DB_ID = "dating_db"
 _COLLECTION_ID = "chat_messages"
 
-_ENABLED = bool(_PROJECT_ID and _API_KEY)
+_ENABLED = bool(_ENDPOINT and _PROJECT_ID and _API_KEY)
 
 _HEADERS = {
     "X-Appwrite-Project": _PROJECT_ID,

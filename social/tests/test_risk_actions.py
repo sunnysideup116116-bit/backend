@@ -233,6 +233,81 @@ def test_risk_gate_projection_marks_sanction_exempted():
     assert projection["sender_directive"]["sanction_exempted"] is True
 
 
+def test_risk_gate_delivers_blocked_level_when_command_is_sanction_exempted():
+    from services.risk_policy_service import PairMessageRiskGate
+
+    gate = PairMessageRiskGate(
+        transport=lambda payload: {
+            "risk_level": "blocked",
+            "intervention_command": {
+                "sanction_exempted": True,
+                "triggered_by_msg_id": "real-msg-10",
+                "sender_directive": {
+                    "action": "show_reflection_banner",
+                    "content": {"body": "這段對話仍在觀察中"},
+                },
+            },
+        }
+    )
+
+    decision = gate.evaluate(
+        conversation_id="a_b",
+        sender_id="a",
+        receiver_id="b",
+        content="正常訊息",
+        idempotency_key="k-ex-delivery",
+    )
+
+    assert decision.level == "blocked"
+    assert decision.delivery == "delivered"
+    assert decision.may_persist is True
+    assert decision.public_projection()["delivery"] == "delivered"
+
+
+def test_sanction_exempted_blocked_message_reaches_pair_persistence():
+    from models import DirectChatRequest
+    from routers import public_chat
+    from services.risk_policy_service import PairMessageRiskGate
+
+    gate = PairMessageRiskGate(
+        transport=lambda payload: {
+            "risk_level": "blocked",
+            "intervention_command": {
+                "sanction_exempted": True,
+                "triggered_by_msg_id": "real-msg-11",
+                "sender_directive": {
+                    "action": "show_reflection_banner",
+                    "sanction_exempted": True,
+                },
+            },
+        }
+    )
+    req = DirectChatRequest(
+        user_id="a",
+        contact_id="b",
+        message="正常訊息",
+        client_message_id="att-exempted",
+    )
+
+    with patch.object(public_chat, "find_accepted_match", return_value={"_id": "m1"}), \
+         patch.object(public_chat.risk_block_service, "is_pair_blocked", return_value=False), \
+         patch.object(public_chat, "pair_message_risk_gate", gate), \
+         patch.object(
+             public_chat,
+             "save_pair_owner_message_once",
+             return_value={"created": False},
+         ) as save_pair, \
+         patch.object(public_chat, "save_system_message_once") as save_system, \
+         patch("routers.public_chat.generate_room_id", return_value="a_b"):
+        result = public_chat.direct_chat(req, MagicMock())
+
+    save_pair.assert_called_once()
+    save_system.assert_not_called()
+    assert result["duplicate"] is True
+    assert result["risk_assessment"]["level"] == "blocked"
+    assert result["risk_assessment"]["delivery"] == "delivered"
+
+
 def test_risk_gate_omits_trigger_id_for_unavailable():
     from services.risk_policy_service import PairMessageRiskGate
 

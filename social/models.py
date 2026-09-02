@@ -35,6 +35,40 @@ class EventDiscoveryRequest(BaseModel):
 class ClearRequest(BaseModel):
     user_id: str
 
+
+class PushPreferenceRequest(BaseModel):
+    user_id: str
+    scope: Literal["global", "peer", "mediator_private", "public_ayue"]
+    enabled: bool
+    target_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _validate_target_scope(self):
+        if self.scope in {"peer", "mediator_private"} and not self.target_id:
+            raise ValueError("target_id is required for peer notification settings")
+        return self
+
+
+class PushPresenceRequest(BaseModel):
+    user_id: str
+    session_id: str = Field(min_length=1, max_length=128)
+    visible: bool = True
+    surface: Literal["none", "pair", "mediator_private", "public_ayue"] = "none"
+    conversation_id: str = Field(default="", max_length=256)
+    other_user_id: str = Field(default="", max_length=128)
+
+    @model_validator(mode="after")
+    def _validate_visible_context(self):
+        if self.visible and self.surface != "none" and not self.conversation_id:
+            raise ValueError("conversation_id is required for a visible chat surface")
+        return self
+
+
+class PushReadRequest(BaseModel):
+    user_id: str
+    surface: Literal["pair", "mediator_private", "public_ayue"]
+    conversation_id: str = Field(min_length=1, max_length=256)
+
 class AcceptRequest(BaseModel):
     user_id: str
     match_id: str
