@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import uuid
@@ -30,15 +31,26 @@ from services.mediator_context_service import (
 from services.ayue_agent.product_identity import (
     PRIVATE_AYUE_PERSONA,
     PRIVATE_CLARIFICATION_REPLY,
-    PRIVATE_CONFIRMATION_REPLY,
     PRIVATE_REDIRECT_COPY,
     PRIVATE_RUNTIME_FALLBACK_REPLY,
 )
 from .public_relationship_projection import display_name, safe_public_profile
 from services.semantic_plan_service import get_relationship_semantic_context
+from .v3.confirmation import (
+    INTERACTION_BUBBLE,
+    SURFACE_PRIVATE,
+    ConfirmationManager,
+    sync_choice_message_projection,
+)
 
 
 PRIVATE_RUNS = db["private_agent_runs"]
+if os.getenv("AYUE_TEST_MODE", "").strip().lower() in {"1", "true", "on"}:
+    from .v3.test_store import MemoryCollection
+
+    PRIVATE_CONFIRMATIONS = MemoryCollection()
+else:
+    PRIVATE_CONFIRMATIONS = db["v3_pending_confirmations"]
 PRIVATE_CONFIRM_TTL = 15 * 60
 MAX_STEPS = 3
 YES = {"好", "好的", "可以", "確認", "確定", "要", "yes", "ok"}
@@ -282,12 +294,41 @@ def _execute_write(name: str, user_id: str, other_id: str, match_doc: dict[str, 
     return False, "tool_not_allowed"
 
 
-def _save_confirmation(ctx: PrivateAgentTurnContextV2, decision: PrivateAgentDecision) -> str:
-    profiles_coll.update_one({"user_id": ctx.user_id}, {"$set": {"private_agent_confirmation": {
-        "other_id": ctx.other_id, "action": decision.tool_name, "pair_revision": ctx.pair_revision,
-        "created_at": time.time(), "strategy": decision.strategy,
-    }}}, upsert=True)
-    return PRIVATE_CONFIRMATION_REPLY
+def _save_confirmation(
+    ctx: PrivateAgentTurnContextV2,
+    decision: PrivateAgentDecision,
+    *,
+    origin_run_id: str,
+) -> str:
+    preview = "要我現在幫你問對方願不願意一起安排約會嗎？"
+    ConfirmationManager(PRIVATE_CONFIRMATIONS).create_confirmation(
+        user_id=ctx.user_id,
+        agent_name="private_relationship",
+        tool_name=str(decision.tool_name or ""),
+        arguments={},
+        payload={
+            "other_id": ctx.other_id,
+            "pair_revision": ctx.pair_revision,
+            "strategy": decision.strategy,
+        },
+        origin_run_id=origin_run_id,
+        preview=preview,
+        room_id=ctx.room_id,
+        surface=SURFACE_PRIVATE,
+        interaction_mode=INTERACTION_BUBBLE,
+    )
+    return preview
+
+
+def mark_private_confirmation_presented(
+    *, user_id: str, origin_run_id: str, message_id: str, persisted_content: str,
+) -> bool:
+    return ConfirmationManager(PRIVATE_CONFIRMATIONS).mark_presented(
+        user_id=user_id,
+        origin_run_id=origin_run_id,
+        message_id=message_id,
+        persisted_content=persisted_content,
+    )
 
 
 def _consume_confirmation(ctx: PrivateAgentTurnContextV2, match_doc: dict[str, Any]) -> tuple[bool, str | None]:
@@ -367,9 +408,12 @@ def _trace(run_id: str, payload: dict[str, Any]) -> None:
 def run_private_agent_turn_v2(
     *, user_id: str, other_id: str, message: str, match_doc: dict[str, Any], on_progress: Callable[[dict[str, str]], None] | None = None,
     agent_run_id: str | None = None, on_token: Callable[[str], None] | None = None,
+    choice_id: str | None = None, choice_action: str | None = None,
 ) -> AgentResult:
     started = time.perf_counter()
     run_id, observations, trace = agent_run_id or uuid.uuid4().hex, [], {"visible_tools": sorted(PRIVATE_TOOL_REGISTRY), "decisions": [], "guard": [], "tools": [], "context_ms": 0, "model_ms": [], "tool_ms": []}
+    mgr = ConfirmationManager(PRIVATE_CONFIRMATIONS)
+    continuation_resolution: dict[str, Any] | None = None
     def emit(event_type: str, **payload: str) -> None:
         if on_progress:
             on_progress({"type": event_type, "agent_run_id": run_id, **payload})
@@ -377,11 +421,127 @@ def run_private_agent_turn_v2(
         context_started = time.perf_counter()
         ctx = build_private_turn_context_v2(user_id, other_id, message, match_doc)
         trace["context_ms"] = round((time.perf_counter() - context_started) * 1000)
-        consumed, reply = _consume_confirmation(ctx, match_doc)
-        if consumed:
-            result = AgentResult(handled=True, reply=reply, conversation_intent="private_confirmation", agent_run_id=run_id, agent_mode="v2")
+        result = None
+        if choice_action is not None:
+            record = mgr.record_for_choice(
+                user_id=user_id,
+                room_id=ctx.room_id,
+                surface=SURFACE_PRIVATE,
+                choice_id=str(choice_id or ""),
+            )
+            if record is None:
+                resolution = mgr.choice_projection(
+                    user_id=user_id,
+                    room_id=ctx.room_id,
+                    surface=SURFACE_PRIVATE,
+                    choice_id=str(choice_id or ""),
+                )
+                if resolution:
+                    sync_choice_message_projection(
+                        messages_coll, room_id=ctx.room_id, projection=resolution,
+                    )
+                result = AgentResult(
+                    handled=True,
+                    reply=(
+                        "這個選擇已經過期或處理完成；我沒有再次通知對方。"
+                        if resolution
+                        else "我找不到這個待確認邀請，因此沒有通知對方。"
+                    ),
+                    conversation_intent="private_confirmation",
+                    agent_run_id=run_id,
+                    agent_mode="v2",
+                    choice_resolution=resolution,
+                )
+            elif choice_action == "cancel":
+                resolution = mgr.cancel_choice(
+                    user_id=user_id,
+                    room_id=ctx.room_id,
+                    surface=SURFACE_PRIVATE,
+                    choice_id=str(choice_id or ""),
+                )
+                if resolution:
+                    sync_choice_message_projection(
+                        messages_coll, room_id=ctx.room_id, projection=resolution,
+                    )
+                result = AgentResult(
+                    handled=True,
+                    reply="好，我先不會通知對方。",
+                    conversation_intent="private_confirmation",
+                    agent_run_id=run_id,
+                    agent_mode="v2",
+                    choice_resolution=resolution,
+                )
+            else:
+                def _button_executor(
+                    tool_name: str,
+                    _arguments: dict[str, Any],
+                    _uid: str,
+                    payload: dict[str, Any],
+                ) -> tuple[bool, str, str | None]:
+                    if (
+                        str(payload.get("other_id") or "") != other_id
+                        or match_doc.get("status") != "accepted"
+                        or int(match_doc.get("proposal_revision", 0) or 0)
+                        != int(payload.get("pair_revision", -1) or -1)
+                    ):
+                        return False, "relationship_changed", "stale_relationship"
+                    return _execute_write(
+                        tool_name,
+                        user_id,
+                        other_id,
+                        match_doc,
+                    )
+
+                results = mgr.execute_confirmed(
+                    user_id=user_id,
+                    choice_id=str(choice_id or ""),
+                    room_id=ctx.room_id,
+                    surface=SURFACE_PRIVATE,
+                    interaction_mode=INTERACTION_BUBBLE,
+                    executor=_button_executor,
+                )
+                resolution = mgr.choice_projection(
+                    user_id=user_id,
+                    room_id=ctx.room_id,
+                    surface=SURFACE_PRIVATE,
+                    choice_id=str(choice_id or ""),
+                )
+                if resolution:
+                    sync_choice_message_projection(
+                        messages_coll, room_id=ctx.room_id, projection=resolution,
+                    )
+                item = results[0] if results else {}
+                code = str(item.get("data", {}).get("reply") or "")
+                ok = bool(item.get("ok"))
+                reply = (
+                    "好，我已經先問對方是否願意一起協調約會；對方同意後會到共同聊天室確認。"
+                    if ok and code == "date_invite_created"
+                    else "目前已經有一個約會協調在進行中，我先不重複通知對方。"
+                    if ok
+                    else "這個邀請目前無法送出。"
+                )
+                result = AgentResult(
+                    handled=True,
+                    reply=reply,
+                    conversation_intent="private_confirmation",
+                    agent_run_id=run_id,
+                    agent_mode="v2",
+                    choice_resolution=resolution,
+                )
         else:
-            result = None
+            continuation_resolution = mgr.resolve_for_continuation(
+                user_id=user_id,
+                room_id=ctx.room_id,
+                surface=SURFACE_PRIVATE,
+            )
+            if continuation_resolution:
+                sync_choice_message_projection(
+                    messages_coll,
+                    room_id=ctx.room_id,
+                    projection=continuation_resolution,
+                )
+
+        if result is None:
             seen: set[str] = set()
             for index in range(MAX_STEPS):
                 model_started = time.perf_counter()
@@ -410,7 +570,13 @@ def run_private_agent_turn_v2(
                     break
                 if decision.kind == "confirmation":
                     trace["guard"].append("confirmation_saved")
-                    result = AgentResult(handled=True, reply=_save_confirmation(ctx, decision), conversation_intent="private_confirmation", agent_run_id=run_id, agent_mode="v2")
+                    result = AgentResult(
+                        handled=True,
+                        reply=_save_confirmation(ctx, decision, origin_run_id=run_id),
+                        conversation_intent="private_confirmation",
+                        agent_run_id=run_id,
+                        agent_mode="v2",
+                    )
                     break
                 if decision.kind == "final":
                     reply = _planner_reply(decision)
@@ -456,6 +622,39 @@ def run_private_agent_turn_v2(
     except Exception as exc:
         trace["exception"] = type(exc).__name__
         result = AgentResult(handled=True, reply=PRIVATE_RUNTIME_FALLBACK_REPLY, conversation_intent="private_clarification", agent_run_id=run_id, agent_mode="v2", fallback_reason=type(exc).__name__)
+    mgr.bind_final_preview(
+        user_id=user_id,
+        origin_run_id=run_id,
+        final_content=str(result.reply or ""),
+    )
+    choice_prompt = None
+    try:
+        room_id = ctx.room_id
+        choice_prompt = mgr.choice_for_run(
+            user_id=user_id,
+            room_id=room_id,
+            surface=SURFACE_PRIVATE,
+            origin_run_id=run_id,
+        )
+        resolution = result.choice_resolution or continuation_resolution
+        if choice_prompt and continuation_resolution:
+            replacement = mgr.mark_superseded(
+                user_id=user_id,
+                room_id=room_id,
+                surface=SURFACE_PRIVATE,
+                choice_id=str(continuation_resolution.get("id") or ""),
+            )
+            if replacement:
+                resolution = replacement
+                sync_choice_message_projection(
+                    messages_coll, room_id=room_id, projection=replacement,
+                )
+        result = result.model_copy(update={
+            "choice_prompt": choice_prompt,
+            "choice_resolution": resolution,
+        })
+    except Exception:
+        pass
     trace["latency_ms"] = round((time.perf_counter() - started) * 1000)
     trace["result"] = {"intent": result.conversation_intent, "fallback": result.fallback_reason}
     _trace(run_id, trace)

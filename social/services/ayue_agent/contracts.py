@@ -54,6 +54,8 @@ class AgentTurnContext(BaseModel):
     # Server-owned control plane input.  Public V3 handles this before the
     # planner; it is never copied into prompt-safe context or trace payloads.
     assessment_action: Literal["cancel"] | None = None
+    choice_id: str | None = None
+    choice_action: Literal["confirm", "cancel"] | None = None
     message_id: str | None = None
     mentioned_ids: list[str] = Field(default_factory=list)
     mention_overflow: bool = False
@@ -179,3 +181,7 @@ class AgentResult(BaseModel):
     place_cards: list[dict[str, str]] = Field(default_factory=list)
     presentation_blocks: list[PresentationBlock] = Field(default_factory=list, max_length=12)
     llm_call_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    # Safe, UI-only projections. Authority-bearing arguments remain solely in
+    # the confirmation store and never enter prompts or debug traces.
+    choice_prompt: dict[str, Any] | None = None
+    choice_resolution: dict[str, Any] | None = None

@@ -50,7 +50,7 @@ class MatchDecisionRequest(AcceptRequest):
 class DirectChatRequest(BaseModel):
     user_id: str
     contact_id: str
-    message: str
+    message: str = ""
     chat_type: str = "direct"  # "direct", "deep_profile"
     mentioned_other_id: str | None = None
     mentioned_other_ids: list[str] | None = None
@@ -58,6 +58,11 @@ class DirectChatRequest(BaseModel):
     # A server-typed assessment action.  It is intentionally narrow so the
     # public chat adapter cannot turn arbitrary client values into commands.
     assessment_action: Literal["cancel"] | None = None
+    # Structured confirmation controls used only by the Public Ayue bubble UI.
+    # They are mutually exclusive with a conversational message so a button
+    # tap can never be reinterpreted as model-authored natural language.
+    choice_id: str | None = Field(default=None, min_length=1, max_length=128)
+    choice_action: Literal["confirm", "cancel"] | None = None
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
     # Appwrite storage file id for image messages. When present, the message
     # is treated as an image and the text risk gate is skipped.
@@ -72,12 +77,40 @@ class DirectChatRequest(BaseModel):
     def _validate_assessment_action_scope(self):
         if self.assessment_action is not None and self.contact_id != "ai_assistant":
             raise ValueError("assessment_action is only available for ai_assistant")
+        has_choice = self.choice_id is not None or self.choice_action is not None
+        if has_choice:
+            if self.contact_id != "ai_assistant":
+                raise ValueError("choice actions are only available for ai_assistant")
+            if self.choice_id is None or self.choice_action is None:
+                raise ValueError("choice_id and choice_action must be provided together")
+            if self.message.strip():
+                raise ValueError("choice actions cannot include a conversational message")
+            if self.assessment_action is not None:
+                raise ValueError("choice actions cannot include assessment_action")
+            if self.mentioned_other_id or self.mentioned_other_ids:
+                raise ValueError("choice actions cannot include mentions")
+        elif not self.message.strip() and self.file_id is None and self.assessment_action is None:
+            raise ValueError("message is required when no typed action is provided")
         return self
 
 class MediatorPrivateRequest(BaseModel):
     user_id: str
     other_id: str
-    message: str
+    message: str = ""
+    choice_id: str | None = Field(default=None, min_length=1, max_length=128)
+    choice_action: Literal["confirm", "cancel"] | None = None
+
+    @model_validator(mode="after")
+    def _validate_choice_shape(self):
+        has_choice = self.choice_id is not None or self.choice_action is not None
+        if has_choice:
+            if self.choice_id is None or self.choice_action is None:
+                raise ValueError("choice_id and choice_action must be provided together")
+            if self.message.strip():
+                raise ValueError("choice actions cannot include a conversational message")
+        elif not self.message.strip():
+            raise ValueError("message is required when no choice action is provided")
+        return self
 
 class RelationshipGameRequest(BaseModel):
     user_id: str

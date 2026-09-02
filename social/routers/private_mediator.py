@@ -15,7 +15,10 @@ from fastapi.responses import StreamingResponse
 from database import matches_coll, messages_coll, profiles_coll
 from models import MediatorPrivateRequest
 from services.ayue_agent.private_contracts import PrivateClientAction
-from services.ayue_agent.private_v2 import run_private_agent_turn_v2
+from services.ayue_agent.private_v2 import (
+    mark_private_confirmation_presented,
+    run_private_agent_turn_v2,
+)
 from services.ayue_agent.product_identity import PRIVATE_RUNTIME_FALLBACK_REPLY
 from services.chat_service import generate_room_id, save_message
 from services.profile_task_service import queue_profile_skills  # compatibility import; Private never invokes it
@@ -95,14 +98,23 @@ def get_mediator_private_messages(other_id: str, user_id: str):
 
 
 
-def save_private_mediator_reply(room_id: str, reply: str, event_type="text", actions=None, handoff=None):
+def save_private_mediator_reply(
+    room_id: str,
+    reply: str,
+    event_type="text",
+    actions=None,
+    handoff=None,
+    choice_prompt=None,
+):
 
     message_type = "mediator_card" if actions else "text"
     metadata = {"event_type": event_type, "actions": actions or []}
     if handoff:
         metadata["handoff"] = handoff
+    if choice_prompt:
+        metadata["choice_prompt"] = dict(choice_prompt)
 
-    save_message(
+    return save_message(
 
         room_id, "ai_assistant", reply, message_type=message_type,
 
@@ -117,6 +129,7 @@ def _run_private_v2_saved_turn(req: MediatorPrivateRequest, match_doc: dict, roo
         user_id=req.user_id, other_id=req.other_id, message=req.message,
         match_doc=match_doc, on_progress=on_progress, agent_run_id=agent_run_id,
         on_token=on_token,
+        choice_id=req.choice_id, choice_action=req.choice_action,
     )
     reply = result.reply or PRIVATE_RUNTIME_FALLBACK_REPLY
     handoff = result.handoff.model_dump() if getattr(result, "handoff", None) else None
@@ -128,12 +141,28 @@ def _run_private_v2_saved_turn(req: MediatorPrivateRequest, match_doc: dict, roo
             value=handoff["original_message"],
         ).model_dump()]
     event_type = "agentic_private_redirect" if handoff else "agentic_private_v2"
-    save_private_mediator_reply(room_id, reply, event_type, actions=actions, handoff=handoff)
+    saved_reply = save_private_mediator_reply(
+        room_id,
+        reply,
+        event_type,
+        actions=actions,
+        handoff=handoff,
+        choice_prompt=result.choice_prompt,
+    )
+    if result.choice_prompt and saved_reply.get("message_id"):
+        mark_private_confirmation_presented(
+            user_id=req.user_id,
+            origin_run_id=str(result.agent_run_id or ""),
+            message_id=str(saved_reply["message_id"]),
+            persisted_content=str(saved_reply.get("content") or ""),
+        )
     return {
         "reply": reply, "pending_step": None, "agent_run_id": result.agent_run_id,
         "agent_mode": "v2", "agent_version": "v2", "conversation_intent": result.conversation_intent,
         "handoff": handoff,
         "actions": actions,
+        "choice_prompt": result.choice_prompt,
+        "choice_resolution": result.choice_resolution,
     }
 
 
@@ -152,7 +181,8 @@ def mediator_private_chat(req: MediatorPrivateRequest, background_tasks: Backgro
 
     room_id = generate_mediator_private_room_id(req.user_id, req.other_id)
 
-    user_message = save_message(room_id, req.user_id, req.message)
+    if req.choice_action is None:
+        save_message(room_id, req.user_id, req.message)
 
     profiles_coll.update_one(
 
@@ -165,7 +195,11 @@ def mediator_private_chat(req: MediatorPrivateRequest, background_tasks: Backgro
     )
 
     user_doc = profiles_coll.find_one({"user_id": req.user_id}) or {}
-    probe_reply = consume_pending_probe_answer(match_doc, user_doc, req.user_id, req.other_id, req.message)
+    probe_reply = (
+        consume_pending_probe_answer(match_doc, user_doc, req.user_id, req.other_id, req.message)
+        if req.choice_action is None
+        else None
+    )
     if probe_reply is not None:
         save_private_mediator_reply(room_id, probe_reply)
         return {"reply": probe_reply, "pending_step": None}
@@ -182,6 +216,7 @@ def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: 
         raise HTTPException(status_code=403, detail="只能在已接受配對中私聊媒人")
     event_queue: queue.Queue[dict | None] = queue.Queue(maxsize=16)
     fallback_run_id = uuid.uuid4().hex
+    worker_done = threading.Event()
 
     def emit(event: dict) -> None:
         if event.get("type") not in {"run_started", "tool_started", "tool_finished", "token"}:
@@ -200,7 +235,8 @@ def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: 
 
         try:
             room_id = generate_mediator_private_room_id(req.user_id, req.other_id)
-            user_message = save_message(room_id, req.user_id, req.message)
+            if req.choice_action is None:
+                save_message(room_id, req.user_id, req.message)
             emit({"type": "run_started", "agent_run_id": fallback_run_id})
             response = _run_private_v2_saved_turn(req, match_doc, room_id, emit, fallback_run_id, on_token=emit_token)
             event_queue.put({"type": "final", "response": response})
@@ -211,11 +247,18 @@ def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: 
                 asyncio.run(worker_tasks())
             except Exception:
                 pass
+            worker_done.set()
             event_queue.put(None)
 
-    def event_stream():
+    async def event_stream():
         while True:
-            event = event_queue.get()
+            try:
+                event = event_queue.get_nowait()
+            except queue.Empty:
+                if worker_done.is_set():
+                    break
+                await asyncio.sleep(0.01)
+                continue
             if event is None:
                 break
             yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"

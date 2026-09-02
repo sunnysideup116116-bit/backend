@@ -71,9 +71,9 @@ Public UI 使用 `POST /api/direct_chat/stream`；`POST /api/direct_chat` 保留
 
 Scheduler 先處理：
 
-- assessment commit／active session；
+- assessment commit 的 room-scoped 泡泡按鈕／active session；
 - typed `assessment_action="cancel"`；
-- pending confirmation 的封閉「確認／取消」協議；
+- 純對話寫入的 `bubble_buttons_v1`（精確 `choice_id`）與既有媒人卡片隔離的 `legacy_text` 協議；
 - 逾期、stale 或已被其他 worker claim 的 confirmation。
 
 這些狀態不進 Planner，避免一般對話重新解讀 authority-bearing action。
@@ -180,12 +180,15 @@ Guard 檢查：
 ```text
 WRITE proposal / Calendar command batch
   -> schema + domain preflight
-  -> pending confirmation（TTL 900s，preview-bound）
-  -> owner 確認
+  -> prepared confirmation（TTL 900s，preview + room bound）
+  -> AI 訊息保存後 pending
+  -> owner 以泡泡 choice_id 或既有卡片介面確認
   -> ConfirmationManager CAS pending -> executing
   -> write_executors
   -> canonical domain service（CAS + idempotency）
 ```
+
+`calendar.submit_commands`、`match.start_search`、`profile.start_assessment`、探索結果 commit 與卡片建立前的約會協調使用一般 AI 泡泡內按鈕；`match.decide_active_proposal`／`match.decide_active_event_invitation` 已有媒人卡片，維持原卡片與文字備援。一般文字會自動取消同房泡泡選擇並繼續進 Planner，不會被當成確認權限。
 
 目前 WRITE capabilities：
 

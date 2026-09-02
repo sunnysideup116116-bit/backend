@@ -191,6 +191,8 @@ def _owner_profile_message(req: DirectChatRequest, mentioned_ids: list[str]) -> 
 
 def _public_request_message(req: DirectChatRequest) -> str:
     """Canonicalize typed UI actions before saving or entering the agent."""
+    if req.choice_action is not None:
+        return ""
     if req.assessment_action == "cancel":
         return "退出測驗"
     return str(req.message or "")
@@ -221,6 +223,8 @@ def _complete_public_turn(
         room_id=room_id,
         message=_public_request_message(req),
         assessment_action=req.assessment_action,
+        choice_id=req.choice_id,
+        choice_action=req.choice_action,
         message_id=user_message_id,
         mentioned_ids=requested_mentions,
         mention_overflow=mention_overflow,
@@ -261,6 +265,8 @@ def _complete_public_turn(
         metadata["presentation_blocks"] = presentation_blocks
     if len(reply_messages) > 1:
         metadata["presentation_messages"] = reply_messages
+    if agent_result.choice_prompt:
+        metadata["choice_prompt"] = dict(agent_result.choice_prompt)
     if metadata:
         saved_reply = save_message(room_id, "ai_assistant", ai_reply, metadata=metadata)
     else:
@@ -317,6 +323,8 @@ def _complete_public_turn(
         "place_cards": place_cards,
         "presentation_blocks": presentation_blocks,
         "llm_call_metrics": agent_result.llm_call_metrics or [],
+        "choice_prompt": agent_result.choice_prompt,
+        "choice_resolution": agent_result.choice_resolution,
     }
 
 
@@ -338,14 +346,20 @@ def _run_public_stream_turn(
     mention_labels = [item["display_name"] for item in mentioned_contact_refs(req.user_id, requested_mentions)]
     if mention_labels:
         user_metadata["mention_labels"] = mention_labels
-    user_message = save_message(
-        room_id, req.user_id, display_message,
-        metadata=user_metadata or None,
-    )
+    user_message = None
+    if req.choice_action is None:
+        user_message = save_message(
+            room_id, req.user_id, display_message,
+            metadata=user_metadata or None,
+        )
     # Multi-room AI surface: generate a title from the first user message via
     # one extra LLM call. Runs in a daemon thread so it never blocks the agent
     # turn; the room stays needs_title=True until a title lands.
-    if req.ai_room_id and mark_first_message_for_title(room_id, req.user_id):
+    if (
+        req.choice_action is None
+        and req.ai_room_id
+        and mark_first_message_for_title(room_id, req.user_id)
+    ):
         threading.Thread(
             target=ensure_room_title,
             args=(room_id, req.user_id, request_message),
@@ -358,7 +372,7 @@ def _run_public_stream_turn(
     return _complete_public_turn(
         req, room_id, requested_mentions, mention_overflow, on_progress,
         on_token=on_token, background_tasks=background_tasks,
-        user_message_id=user_message.get("message_id"),
+        user_message_id=(user_message or {}).get("message_id"),
         debug_enabled=debug_enabled,
     )
 
@@ -439,6 +453,7 @@ def direct_chat_stream(
     event_queue: queue.Queue[dict | None] = queue.Queue(maxsize=16)
     fallback_run_id = uuid.uuid4().hex
     state = {"agent_run_id": fallback_run_id}
+    worker_done = threading.Event()
     debug_enabled = _is_loopback_debug_request(request)
     token_stream_enabled = bool(
         request
@@ -499,15 +514,22 @@ def direct_chat_stream(
                 "reply": PUBLIC_RUNTIME_ERROR_REPLY,
             })
         finally:
+            worker_done.set()
             try:
                 enqueue(None, terminal=True)
                 asyncio.run(worker_background_tasks())
             except Exception:
                 pass
 
-    def event_stream():
+    async def event_stream():
         while True:
-            event = event_queue.get()
+            try:
+                event = event_queue.get_nowait()
+            except queue.Empty:
+                if worker_done.is_set():
+                    break
+                await asyncio.sleep(0.01)
+                continue
             if event is None:
                 break
             yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -533,10 +555,16 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
         user_metadata["mention_labels"] = mention_labels
     if req.contact_id == "ai_assistant":
         room_id = _resolve_ai_room_id(req)
-        user_message = save_message(
-            room_id, req.user_id, display_message, metadata=user_metadata or None,
-        )
-        if req.ai_room_id and mark_first_message_for_title(room_id, req.user_id):
+        user_message = None
+        if req.choice_action is None:
+            user_message = save_message(
+                room_id, req.user_id, display_message, metadata=user_metadata or None,
+            )
+        if (
+            req.choice_action is None
+            and req.ai_room_id
+            and mark_first_message_for_title(room_id, req.user_id)
+        ):
             threading.Thread(
                 target=ensure_room_title,
                 args=(room_id, req.user_id, request_message),
@@ -547,7 +575,7 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
         return _complete_public_turn(
             req, room_id, requested_mentions, mention_overflow,
             background_tasks=background_tasks,
-            user_message_id=user_message.get("message_id"),
+            user_message_id=(user_message or {}).get("message_id"),
         )
 
     room_id = generate_room_id(req.user_id, req.contact_id)
