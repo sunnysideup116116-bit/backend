@@ -20,6 +20,12 @@ from services.ayue_agent.onboarding import (
 from services.assessment_session_service import assessment_public_state_for_room
 from services.ayue_agent.public_relationship_projection import mentioned_contact_refs
 from services.chat_service import generate_room_id
+from services.notification_service import (
+    PAIR,
+    MEDIATOR_PRIVATE,
+    notification_unread_map,
+)
+from services.relationship_engagement_service import generate_mediator_private_room_id
 from services.match_state_service import verified_accepted_match_query
 from services.risk_block_service import (
     RiskBlockServiceUnavailable,
@@ -136,6 +142,8 @@ def get_contacts(user_id: str):
         "context": "先懂你，再在合適時機陪你牽線的媒人朋友。",
         "is_locked": ai_locked,
     }]
+    pair_unread = notification_unread_map(user_id, PAIR)
+    mediator_unread = notification_unread_map(user_id, MEDIATOR_PRIVATE)
     room_ids = [
         generate_room_id(
             user_id,
@@ -155,12 +163,26 @@ def get_contacts(user_id: str):
     for match_doc in matches:
         other_id = match_doc["to_user"] if match_doc["from_user"] == user_id else match_doc["from_user"]
         other_doc = profiles_coll.find_one({"user_id": other_id})
+        room_id = generate_room_id(user_id, other_id)
+        mediator_room_id = generate_mediator_private_room_id(user_id, other_id)
+        role = "from" if match_doc.get("from_user") == user_id else "to"
+        legacy_mediator_unread = int(
+            (match_doc.get("private_unread", {}) or {}).get(role, 0) or 0
+        )
+        pair_unread_count = int(pair_unread.get(room_id, 0))
+        mediator_unread_count = max(
+            int(mediator_unread.get(mediator_room_id, 0)),
+            legacy_mediator_unread,
+        )
         contacts.append({
             "id": other_id,
             "name": mentioned_contact_refs(user_id, [other_id])[0]["display_name"],
             "role": "user",
             "context": other_doc.get("current_context", "尚無近期情境") if other_doc else "尚無近期情境",
-            "latest_message": latest_by_room.get(generate_room_id(user_id, other_id), ""),
+            "latest_message": latest_by_room.get(room_id, ""),
+            "unread": pair_unread_count > 0,
+            "unread_count": pair_unread_count,
+            "mediator_unread_count": mediator_unread_count,
         })
     return {"contacts": contacts}
 
