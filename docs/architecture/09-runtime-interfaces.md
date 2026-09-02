@@ -187,14 +187,14 @@ Guard 只驗證 schema、註冊、重複呼叫、步數與 write-confirmation；
 
 ## 7. Write interface
 
-所有副作用先建立 `v3_pending_confirmations`，由使用者使用封閉協議確認後，才進 `write_executors.py` 與 canonical domain service。
+所有副作用先建立 `v3_pending_confirmations`，再依呈現 owner 分流：純對話確認使用 room-scoped `bubble_buttons_v1`（精確 `choice_id`），已有媒人卡片的配對／活動決策維持既有卡片與 `legacy_text` 備援。兩種協議不可互相選取或取消，確認後才進 `write_executors.py` 與 canonical domain service。
 
 ```text
 ToolProposal(WRITE)
   -> Guard: write_requires_confirmation
   -> domain preflight / authority resolution
   -> pending confirmation（preview-bound）
-  -> 使用者確認
+  -> 使用者以所屬呈現介面確認
   -> write_executors
   -> canonical domain service（CAS + idempotency）
 ```

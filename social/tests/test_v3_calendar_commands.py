@@ -1211,7 +1211,7 @@ class V3CalendarCommandTests(unittest.TestCase):
             changes={"date": "2026-08-15"}, safe_label="8/25 18:00–19:00 雞排約會",
         )
         turn_ctx = SimpleNamespace(
-            user_id="owner", message="改行程", recent_messages=[], recent_context="",
+            user_id="owner", room_id="room", message="改行程", recent_messages=[], recent_context="",
             user_location="", relevant_memories=[], active_proposal=None,
             latest_match_outcome=None, pending_confirmation=None, action_draft=None,
             place_search_draft=None, recent_context_draft=None, mentioned_contacts=[],

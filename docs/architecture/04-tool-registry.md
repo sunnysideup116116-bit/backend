@@ -58,6 +58,8 @@
 | `profile.start_assessment` | `assessment_start` | `kind`(basic/deep) | `_start_assessment` → session 啟動 |
 | `calendar.submit_commands` | `calendar_commands` | `commands`（1–10 個 authority-free `CalendarCommand`；`target_selector` 僅篩選既有 update/cancel 目標） | Calendar Runtime deterministic preflight → server-owned `CalendarMutationPlan` → `_execute_calendar_mutation_plans`，依序執行、stop-on-failure |
 
+互動呈現分流：`calendar.submit_commands`、`match.start_search`、`profile.start_assessment`、`relationship.start_date_coordination` 使用一般 AI 泡泡內的 `bubble_buttons_v1` 確認；`match.decide_active_proposal` 與 `match.decide_active_event_invitation` 已有自己的媒人卡片，維持原卡片與 `legacy_text` 備援，不加入通用確認按鈕。
+
 ## 4. 工具可見性（哪些 agent 看得到哪些工具）
 
 工具可見性由各 sub-agent 的 `_TOOLS` 決定（見各 `subagent-*.md`）：

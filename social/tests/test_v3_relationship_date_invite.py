@@ -390,14 +390,9 @@ class RelationshipSchedulerTrajectoryTests(unittest.TestCase):
         synth.assert_called_once()
 
     def test_confirmed_date_write_uses_server_reply_not_model_claim(self):
-        ctx = AgentTurnContext(
-            user_id="confirm-owner",
-            room_id="room",
-            message="對",
-            user_profile={"user_id": "confirm-owner"},
-        )
         collection = MemoryCollection()
-        ConfirmationManager(collection).create_confirmation(
+        manager = ConfirmationManager(collection)
+        choice_id = manager.create_confirmation(
             user_id="confirm-owner",
             agent_name="relationship",
             tool_name="relationship.start_date_coordination",
@@ -410,6 +405,24 @@ class RelationshipSchedulerTrajectoryTests(unittest.TestCase):
             },
             origin_run_id="origin-run",
             preview="要建立空白約會邀請卡嗎？",
+            room_id="room",
+        )
+        manager.bind_final_preview(
+            user_id="confirm-owner", origin_run_id="origin-run",
+            final_content="要建立空白約會邀請卡嗎？",
+        )
+        manager.mark_presented(
+            user_id="confirm-owner", origin_run_id="origin-run",
+            message_id="message-1",
+            persisted_content="要建立空白約會邀請卡嗎？",
+        )
+        ctx = AgentTurnContext(
+            user_id="confirm-owner",
+            room_id="room",
+            message="",
+            user_profile={"user_id": "confirm-owner"},
+            choice_id=choice_id,
+            choice_action="confirm",
         )
         turn = _turn(ctx.message).model_copy(update={"user_id": "confirm-owner"})
         with patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS", collection), \

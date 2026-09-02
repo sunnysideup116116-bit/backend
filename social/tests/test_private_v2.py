@@ -50,24 +50,26 @@ class PrivateV2Tests(unittest.TestCase):
         decision = PrivateAgentDecision(kind="confirmation", intent="date_coordination", tool_name="private.date.start_coordination", confidence=.9, evidence_span="幫我協調")
         with patch("services.ayue_agent.private_v2.build_private_turn_context_v2", return_value=ctx), \
              patch("services.ayue_agent.private_v2._plan", return_value=decision), \
-             patch("services.ayue_agent.private_v2.profiles_coll.update_one") as save, \
+             patch("services.ayue_agent.private_v2.ConfirmationManager.create_confirmation", return_value="choice-1") as save, \
              patch("services.ayue_agent.private_v2._trace"):
             result = run_private_agent_turn_v2(user_id="owner", other_id="other", message="幫我協調", match_doc={"status": "accepted", "proposal_revision": 1})
-        self.assertIn("確認", result.reply)
+        self.assertIn("安排約會", result.reply)
         self.assertTrue(save.called)
 
     def test_fun_fact_is_not_a_visible_tool_and_old_confirmation_is_safely_disabled(self):
         self.assertNotIn("private.relationship.request_fun_fact", PRIVATE_TOOL_REGISTRY)
         ctx = replace(_context(), message="確認")
-        old_pending = {"private_agent_confirmation": {
-            "other_id": "other", "action": "private.relationship.request_fun_fact",
-            "pair_revision": 1, "created_at": 9_999_999_999,
-        }}
+        decision = PrivateAgentDecision(
+            kind="final", intent="advice", confidence=.9,
+            reply="你想確認的是哪一段對話？",
+        )
         with patch("services.ayue_agent.private_v2.build_private_turn_context_v2", return_value=ctx), \
-             patch("services.ayue_agent.private_v2.profiles_coll.find_one_and_update", return_value=old_pending), \
+             patch("services.ayue_agent.private_v2._plan", return_value=decision), \
+             patch("services.ayue_agent.private_v2._execute_write") as execute, \
              patch("services.ayue_agent.private_v2._trace"):
             result = run_private_agent_turn_v2(user_id="owner", other_id="other", message="確認", match_doc={"status": "accepted", "proposal_revision": 1})
-        self.assertIn("先收起來", result.reply)
+        self.assertEqual(result.reply, "你想確認的是哪一段對話？")
+        execute.assert_not_called()
 
     def test_terminal_planner_reply_skips_private_composer(self):
         ctx = _context()
