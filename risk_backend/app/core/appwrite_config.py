@@ -39,6 +39,8 @@ def get_appwrite_config() -> AppwriteConfig:
 def configure_appwrite_client(client):
     config = get_appwrite_config()
     client.set_endpoint(config.endpoint)
+    if "127.0.0.1" in config.endpoint or "localhost" in config.endpoint:
+        client.set_self_signed(status=True)
     if config.project_id:
         client.set_project(config.project_id)
     if config.api_key:

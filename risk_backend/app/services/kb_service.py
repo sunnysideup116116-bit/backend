@@ -94,10 +94,12 @@ class KBService:
             params = {"limit": limit, "offset": offset}
             if queries:
                 params["queries[]"] = [json.dumps(q) for q in queries]
+            verify_ssl = False if ("127.0.0.1" in ep or "localhost" in ep) else True
             r = requests.get(
                 f"{ep}/databases/{kb_db_id}/collections/{collection_id}/documents",
                 headers=headers,
                 params=params,
+                verify=verify_ssl,
             )
             if r.status_code != 200:
                 print(f"[KB] list {collection_id} -> {r.status_code} {r.text[:200]}")
@@ -113,6 +115,23 @@ class KBService:
             # 避免某些 legacy server 的 offset 行為造成重複抓取。
             if len(docs) < limit or not docs or offset >= total:
                 break
+
+        # 防禦性客戶端過濾：若 Appwrite REST endpoint 未正確套用 queries 參數，在此二次過濾
+        if queries:
+            filtered = []
+            for doc in results:
+                matched = True
+                for q in queries:
+                    if isinstance(q, dict) and q.get("method") == "equal":
+                        attr = q.get("attribute")
+                        vals = q.get("values", [])
+                        if doc.get(attr) not in vals:
+                            matched = False
+                            break
+                if matched:
+                    filtered.append(doc)
+            results = filtered
+
         return results
 
     @staticmethod

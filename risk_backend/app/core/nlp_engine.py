@@ -155,7 +155,7 @@ class NLPEngine:
             print(f"   [ NLP Error ] {e}")
             return self._fallback_result(str(e))
 
-    async def get_raw_llm_response(self, prompt: str, model_name: str = "gemini-2.5-flash") -> str:
+    async def get_raw_llm_response(self, prompt: str, model_name: str = "gemini-3.1-flash-lite") -> str:
         """
         Memory summary 用。Caller 應透過 get_summary_model_name + adapter 取得 model。
         為向後相容仍保留 default model_name。

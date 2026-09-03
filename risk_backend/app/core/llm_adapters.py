@@ -101,37 +101,45 @@ def call_with_retry(
 class GeminiAdapter:
     """Google Generative AI 包裝（新版 google.genai SDK）"""
 
-    def __init__(self):
+    def __init__(self, fallback_model: Optional[str] = None):
         from google import genai
         from google.genai import types
 
         api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         self._client = genai.Client(api_key=api_key) if api_key else None
         self._types = types
+        self._fallback_model = fallback_model or os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite")
 
     def generate(self, prompt: str, model: str) -> str:
         if not self._client:
             raise RuntimeError("GeminiAdapter 缺少 GOOGLE_API_KEY / GEMINI_API_KEY")
 
-        # temperature=0（2026-08-05 新增）：原本未指定，沿用模型預設值。
-        # 實測同一則案例連跑三次，sexual_boundary 出現 0.75／0.75／0.65 的擺盪；
-        # 整個 test 集重跑一次，22 則中有 15 則（68%）NLP 分數改變，
-        # 3 則（14%）連最終等級都翻掉——大於我們想量測的多數效果量，
-        # 使「修正前 vs 修正後」的比較無法解讀（見 known-issues #23）。
-        # 設為 0 後三次結果完全相同。
-        # 這同時也是風險系統該有的性質：同樣的訊息與脈絡，應得到同樣的判斷。
-        def _once() -> str:
-            response = self._client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=self._types.GenerateContentConfig(
-                    temperature=0.0,
-                    http_options=self._types.HttpOptions(timeout=LLM_TIMEOUT_SECONDS * 1000),
-                ),
-            )
-            return response.text
+        def _call_model(target_model: str) -> str:
+            def _once() -> str:
+                response = self._client.models.generate_content(
+                    model=target_model,
+                    contents=prompt,
+                    config=self._types.GenerateContentConfig(
+                        temperature=0.0,
+                        http_options=self._types.HttpOptions(timeout=LLM_TIMEOUT_SECONDS * 1000),
+                    ),
+                )
+                return response.text
 
-        return call_with_retry(_once, label="Gemini")
+            return call_with_retry(_once, label=f"Gemini({target_model})")
+
+        try:
+            return _call_model(model)
+        except Exception as primary_err:
+            fallback = self._fallback_model
+            if fallback and fallback != model:
+                print(f"   [ GeminiAdapter ] 主要模型 {model} 呼叫失敗 ({primary_err})，啟動 Fallback 至 {fallback}...")
+                try:
+                    return _call_model(fallback)
+                except Exception as fb_err:
+                    print(f"   [ GeminiAdapter ] Fallback 模型 {fallback} 亦失敗: {fb_err}")
+                    raise fb_err
+            raise primary_err
 
 
 class OpenAICompatAdapter:
@@ -253,7 +261,7 @@ def get_nlp_model_name(kb_model_hint: Optional[str]) -> str:
         if not model:
             raise RuntimeError("openai_compat 需要 NLP_MODEL 環境變數")
         return model
-    return kb_model_hint or "gemini-2.5-flash"
+    return os.getenv("GEMINI_MODEL") or kb_model_hint or "gemini-3.1-flash-lite"
 
 
 def get_summary_adapter() -> LLMAdapter:
@@ -273,7 +281,7 @@ def get_summary_model_name(kb_model_hint: Optional[str]) -> str:
         if not model:
             raise RuntimeError("openai_compat summary 需要 SUMMARY_MODEL 或 NLP_MODEL 環境變數")
         return model
-    return kb_model_hint or "gemini-2.5-flash"
+    return os.getenv("GEMINI_MODEL") or kb_model_hint or "gemini-3.1-flash-lite"
 
 
 def get_guardrail_classifier_adapter() -> LLMAdapter:
