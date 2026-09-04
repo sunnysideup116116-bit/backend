@@ -59,6 +59,7 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.profiles_coll.find_one", return_value=profile), \
              patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
                  handled=True, reply="我們聊別的。", agent_mode="v3",
+                 match_state_changed=True,
              )) as run, \
              patch("routers.public_chat.complete_public_ayue_onboarding"), \
              patch("routers.public_chat.save_message"):
@@ -71,6 +72,7 @@ class AyueAgentStreamTests(unittest.TestCase):
         )
         self.assertIsNone(response["assessment_state"])
         self.assertIsNone(response["assessment_kind"])
+        self.assertTrue(response["match_state_changed"])
 
     def test_json_direct_chat_v3_does_not_load_removed_public_runtime(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="你好")

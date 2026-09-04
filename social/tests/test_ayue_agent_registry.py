@@ -15,7 +15,8 @@ from services.ayue_agent.tools import execute_tool
 
 class AyueAgentRegistryTests(unittest.TestCase):
     def test_every_write_tool_declares_confirmation(self):
-        self.assertEqual(len(SIDE_EFFECT_TOOLS), 6)
+        self.assertEqual(len(SIDE_EFFECT_TOOLS), 7)
+        self.assertIn("match.cancel_search", SIDE_EFFECT_TOOLS)
         for tool_name in SIDE_EFFECT_TOOLS:
             spec = TOOL_REGISTRY[tool_name]
             self.assertEqual(spec.risk, ToolRisk.WRITE)
@@ -52,6 +53,10 @@ class AyueAgentRegistryTests(unittest.TestCase):
         spec = TOOL_REGISTRY["match.decide_active_proposal"]
         arguments = executor_arguments_for_turn(spec, [], {"decision": "interested"})
         self.assertEqual(arguments, {"decision": "interested"})
+        self.assertEqual(
+            executor_arguments_for_turn(spec, [], {"decision": "cancelled"}),
+            {"decision": "cancelled"},
+        )
         with self.assertRaises(Exception):
             executor_arguments_for_turn(spec, [], {"decision": "interested", "proposal_id": "nope"})
 

@@ -43,7 +43,9 @@ from services.match_search_job_service import (
     public_match_search_status,
     register_match_search_pipeline,
 )
-from services.event_discovery_service import discover_and_ingest_events
+from services.event_discovery_job_service import (
+    enqueue_event_discovery_job, event_discovery_job_snapshot,
+)
 from services.event_relevance_service import rebuild_all_event_relevance
 from services.event_opportunity_service import create_event_opportunity, scan_event_opportunities
 from services.event_lifecycle_service import run_event_lifecycle_once
@@ -56,6 +58,10 @@ from services.proposal_namespace import (
     participant_pair_key,
 )
 from services.profile_projection import safe_recent_context
+from services.match_card_projection import (
+    proposal_card_state, proposal_counterparty_nickname,
+)
+from services.public_nickname_service import proposal_display_name
 from services.language_service import normalize_zh_tw
 from services.risk_block_service import (
     RiskBlockServiceUnavailable,
@@ -66,14 +72,18 @@ from services.ayue_agent.public_relationship_projection import (
     display_name as public_display_name,
 )
 from bson.objectid import ObjectId
+from bson.errors import InvalidId
 from pymongo import ReturnDocument
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 router = APIRouter(prefix="/api/match", tags=["Match"])
 DRAFT_TTL_SECONDS = 24 * 3600
 PENDING_TTL_SECONDS = 72 * 3600
 SEARCH_LOCK_TTL_SECONDS = 5 * 60
 LIVE_MATCH_STATUSES = {"draft", "pending"}
+MATCH_CANDIDATE_POOL_SIZE = 20
+MATCH_MAX_CANDIDATE_BATCHES = 3
+MATCH_SELECTION_TIMEOUT_SECONDS = 120.0
 
 
 def ensure_match_indexes():
@@ -168,8 +178,8 @@ def build_active_proposal_card(match_doc: dict, user_id: str):
     )
     card = {
         "match_id": str(match_doc["_id"]),
-        # A proposal may describe the anonymous person, but not identify them
-        # until both parties have accepted the relationship.
+        # Keep shared/model-facing projections anonymous. The HTTP adapter
+        # adds a public nickname separately for the proposal UI only.
         "other_label": "對方",
         "stage": stage,
         "event_type": "match_proposal" if is_initiator else "incoming_match_interest",
@@ -199,6 +209,29 @@ def build_active_proposal_card(match_doc: dict, user_id: str):
     event_card = public_event_card(match_doc)
     if event_card:
         card["event"] = event_card
+    # The old distinctive_tags field describes the candidate, not both viewers.
+    # Publish a separate, role-bound list for the optional feedback dialog. It
+    # contains only saved public proposal facts, never live/private preferences.
+    options = []
+    if is_initiator and namespace_for_document(match_doc) != EVENT_INVITATION_NAMESPACE:
+        tags = match_doc.get("distinctive_tags")
+        if isinstance(tags, list):
+            options.extend(value for value in tags if isinstance(value, str))
+    if other_snapshot.get("user_id") == other_id:
+        signals = other_snapshot.get("context_signals") or {}
+        options.extend([
+            other_snapshot.get("public_personality"),
+            signals.get("activity") if isinstance(signals, dict) else None,
+            safe_recent_context(other_snapshot.get("current_context"), ""),
+        ])
+    if event_card and event_card.get("category"):
+        options.insert(0, event_card["category"])
+    card["decline_reason_options"] = list(dict.fromkeys(
+        text for value in options if isinstance(value, str)
+        if (text := anonymize_counterparty_text(
+            value, other_id, 120, counterparty_name=other_name,
+        ).strip())
+    ))[:6]
     # V4 exposes exactly one reason: the projection bound to this viewer.
     # Keep legacy aliases only for old records whose API shape cannot change.
     if not is_v4:
@@ -841,6 +874,52 @@ def _existing_job_match_result(match_doc: dict, user_id: str, user_doc: dict) ->
         "debug_info": [],
     }
 
+def _request_matchmaker_selection(payload: dict, *, timeout: float) -> list[dict]:
+    """Evaluate one qualified batch. An empty result must be explicit, never a failure."""
+    try:
+        response = requests.post("http://127.0.0.1:9001/api/match", json=payload, timeout=timeout)
+    except requests.Timeout:
+        raise MatchSearchPipelineError("matchmaker_timeout", "matchmaker_request") from None
+    except requests.RequestException:
+        raise MatchSearchPipelineError("matchmaker_unavailable", "matchmaker_request") from None
+    try:
+        response.raise_for_status()
+    except requests.HTTPError:
+        code = "matchmaker_http_error"
+        try:
+            detail = response.json().get("detail")
+            if isinstance(detail, dict) and detail.get("code") in {
+                "matchmaker_provider_error", "matchmaker_invalid_response", "matchmaker_timeout",
+                "matchmaker_graph_timeout", "matchmaker_graph_unavailable",
+                "matchmaker_empty_response", "matchmaker_output_truncated",
+            }:
+                code = detail["code"]
+        except (ValueError, AttributeError):
+            pass
+        stage = "matchmaker_request" if code in {
+            "matchmaker_timeout", "matchmaker_graph_timeout", "matchmaker_graph_unavailable", "matchmaker_provider_error",
+        } else "matchmaker_response"
+        raise MatchSearchPipelineError(code, stage) from None
+    try:
+        data = response.json()
+    except ValueError:
+        raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response") from None
+    if not isinstance(data, dict) or not isinstance(data.get("matches"), list):
+        raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response")
+    selected = data["matches"]
+    if data.get("outcome") == "no_suitable_candidate" and not selected:
+        return []
+    # The model can only select from this batch, not a rejected/blocked person
+    # or an unreviewed later batch. Public copy is generated after selection.
+    allowed_ids = {candidate["user_id"] for candidate in payload["candidates"]}
+    if (data.get("outcome") not in {None, "selected"} or len(selected) != 1
+            or not isinstance(selected[0], dict)
+            or not isinstance(selected[0].get("matched_user_id"), str)
+            or selected[0]["matched_user_id"] not in allowed_ids):
+        raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response")
+    return selected
+
+
 def generate_matches_for_user(
     user_id: str, source: str = "manual", *,
     report_progress: Callable[[str], bool] | None = None,
@@ -923,7 +1002,7 @@ def generate_matches_for_user(
                 "path": "context_embedding",
                 "queryVector": user_embedding,
                 "numCandidates": 50,
-                "limit": 20
+                "limit": MATCH_CANDIDATE_POOL_SIZE
             }
         },
         {
@@ -935,9 +1014,6 @@ def generate_matches_for_user(
             "$addFields": {
                 "score": { "$meta": "vectorSearchScore" }
             }
-        },
-        {
-            "$limit": candidate_limit
         },
         {
             "$project": {
@@ -957,9 +1033,16 @@ def generate_matches_for_user(
         raise MatchSearchPipelineError("vector_search_unavailable", "vector_search")
 
     top_5_candidates = []
+    seen_candidates = set(excluded_users)
     for c in raw_candidates:
+        candidate_id = c.get("user_id")
+        if not candidate_id or candidate_id in seen_candidates:
+            continue
+        seen_candidates.add(candidate_id)
         score = c.get("score", 0.0)
         top_5_candidates.append((score, c))
+        if len(top_5_candidates) >= MATCH_CANDIDATE_POOL_SIZE:
+            break
     
     if not top_5_candidates:
         return {"status": "no_suitable_candidate", "matches": [], "debug_info": []}
@@ -1003,6 +1086,7 @@ def generate_matches_for_user(
     qualified_candidates = [
         candidate for candidate in clean_candidates
         if qualification_by_id.get(candidate.get("user_id"), {}).get("eligible")
+        and not reconcile_match_state(candidate["user_id"])
     ]
     if not qualified_candidates:
         return {
@@ -1016,86 +1100,32 @@ def generate_matches_for_user(
         }
     
     agent_user_doc = strip_agent_payload(user_doc)
-    agent_candidates = [strip_agent_payload(c) for c in qualified_candidates]
-    payload = {
-        "target_user": agent_user_doc,
-        "candidates": agent_candidates,
-        "target_deep_profile": target_deep_profile
-    }
-    try:
-        original_payload_chars = len(json.dumps({
-            "target_user": user_doc,
-            "candidates": qualified_candidates,
-            "target_deep_profile": target_deep_profile
-        }, ensure_ascii=False, default=str))
-        stripped_payload_chars = len(json.dumps(payload, ensure_ascii=False, default=str))
-        print(
-            "[TIMING][V1 /api/match] Agent payload stripped "
-            f"context_embedding original_chars={original_payload_chars} "
-            f"stripped_chars={stripped_payload_chars} "
-            f"saved_chars={original_payload_chars - stripped_payload_chars}"
-        )
-    except Exception as e:
-        print(f"[TIMING][V1 /api/match] Agent payload size logging failed: {e}")
-    
-    try:
-        if not report("matchmaker_request", candidate_count=len(qualified_candidates)):
+    selection_deadline = time.monotonic() + MATCH_SELECTION_TIMEOUT_SECONDS
+    agent_matches = []
+    for batch_index in range(MATCH_MAX_CANDIDATE_BATCHES):
+        batch = qualified_candidates[batch_index * candidate_limit:(batch_index + 1) * candidate_limit]
+        if not batch:
+            break
+        if not report("matchmaker_request", candidate_count=len(batch), batch=batch_index + 1):
             return {"status": "stale", "matches": [], "debug_info": []}
-        print("📞 正在打電話給 9001 港口的媒婆 Agent...")
+        remaining = selection_deadline - time.monotonic()
+        if remaining <= 0:
+            raise MatchSearchPipelineError("matchmaker_timeout", "matchmaker_request")
+        payload = {
+            "target_user": agent_user_doc,
+            "candidates": [strip_agent_payload(c) for c in batch],
+            "target_deep_profile": target_deep_profile,
+        }
         step_start = time.perf_counter()
-        agent_resp = requests.post("http://127.0.0.1:9001/api/match", json=payload, timeout=120)
-        print(f"[TIMING][V1 /api/match] 9001 Agent HTTP roundtrip: {time.perf_counter() - step_start:.3f}s status={agent_resp.status_code}")
-    except requests.Timeout:
-        print("❌ 無法連線到 9001 Agent")
-        raise MatchSearchPipelineError("matchmaker_unavailable", "matchmaker_request")
-    except requests.ConnectionError:
-        print("9001 Agent connection failed")
-        raise MatchSearchPipelineError("matchmaker_unavailable", "matchmaker_request")
-    except requests.HTTPError:
-        print("❌ 9001 Agent 回傳 HTTP 錯誤")
-        raise MatchSearchPipelineError("matchmaker_http_error", "matchmaker_request")
-    except requests.RequestException:
-        print("❌ 9001 Agent request failed")
-        raise MatchSearchPipelineError("matchmaker_unavailable", "matchmaker_request")
-    try:
-        agent_resp.raise_for_status()
-        if not report("matchmaker_response", candidate_count=len(qualified_candidates)):
-            return {"status": "stale", "matches": [], "debug_info": []}
-        step_start = time.perf_counter()
-        try:
-            agent_data = agent_resp.json()
-        except ValueError:
-            raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response")
-        print(f"[TIMING][V1 /api/match] parse Agent response JSON: {time.perf_counter() - step_start:.3f}s")
-        if not isinstance(agent_data, dict) or not isinstance(agent_data.get("matches", []), list):
-            raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response")
-        # 🥚 雙黃蛋：解析 matches 陣列
-        if agent_data.get("outcome") == "no_suitable_candidate":
-            return {"status": "no_suitable_candidate", "matches": [], "debug_info": []}
-        agent_matches = agent_data.get("matches", [])
-        if not agent_matches:
-            return {"status": "no_suitable_candidate", "matches": [], "debug_info": []}
-        if any(
-            not isinstance(item, dict)
-            or not isinstance(item.get("matched_user_id"), str)
-            or not item.get("matched_user_id", "").strip()
-            for item in agent_matches
-        ):
-            raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response")
-        print(f"✅ Agent 回應: {len(agent_matches)} 位候選人")
-    except requests.HTTPError:
-        code = "matchmaker_http_error"
-        try:
-            detail = agent_resp.json().get("detail")
-            if isinstance(detail, dict) and detail.get("code") in {"matchmaker_provider_error", "matchmaker_invalid_response"}:
-                code = detail["code"]
-        except (ValueError, AttributeError):
-            pass
-        raise MatchSearchPipelineError(code, "matchmaker_response")
-    except (TypeError, AttributeError, KeyError) as exc:
-        raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response") from exc
-    except MatchSearchPipelineError:
-        raise
+        agent_matches = _request_matchmaker_selection(payload, timeout=remaining)
+        print(f"[match-selection] batch={batch_index + 1} candidates={len(batch)} "
+              f"selected={len(agent_matches)} elapsed={time.perf_counter() - step_start:.3f}s")
+        if agent_matches:
+            break
+    if not report("matchmaker_response"):
+        return {"status": "stale", "matches": [], "debug_info": []}
+    if not agent_matches:
+        return {"status": "no_suitable_candidate", "matches": [], "debug_info": []}
     
     # 阿月一次只牽一條線，避免同時丟出候選人清單。
     if not report("proposal_write"):
@@ -1305,6 +1335,26 @@ def get_match_status(user_id: str):
         "search_reason_code": search.get("reason_code") or None,
     }
 
+def _accepted_chat_target(match_doc: dict | None, user_id: str) -> dict:
+    """Expose navigation identity only to participants after mutual consent."""
+    if not match_doc or match_doc.get("status") != "accepted":
+        return {}
+    first, second = match_doc.get("from_user"), match_doc.get("to_user")
+    if user_id not in {first, second}:
+        return {}
+    # Old imports can contain bare terminal rows without mutual consent.
+    # Share the same evidence policy as the established-contact read model.
+    try:
+        if not has_verified_acceptance(match_doc):
+            return {}
+    except (AttributeError, TypeError):
+        return {}
+    other_id = second if user_id == first else first
+    if not isinstance(other_id, str) or not other_id.strip() or other_id == user_id:
+        return {}
+    return {"other_id": other_id}
+
+
 @router.get("/state")
 def get_single_match_state(user_id: str, match_id: str):
     try:
@@ -1318,15 +1368,14 @@ def get_single_match_state(user_id: str, match_id: str):
     proposal_namespace = namespace_for_document(match_doc)
     response = {
         "match_id": match_id,
-        "status": match_doc.get("status"),
-        "stage": derive_match_stage(match_doc, user_id),
+        **proposal_card_state(match_doc, user_id),
         "proposal_namespace": proposal_namespace,
-        "proposal_revision": int(match_doc.get("proposal_revision", 0) or 0),
         "chat_reused": bool(
             match_doc.get("status") == "accepted"
             and proposal_namespace == EVENT_INVITATION_NAMESPACE
             and match_doc.get("relationship_establishing") is False
         ),
+        **_accepted_chat_target(match_doc, user_id),
     }
     # While a proposal is still actionable, hydrate its saved chat card from
     # the canonical viewer-bound projection.  This lets old cards receive copy
@@ -1334,8 +1383,13 @@ def get_single_match_state(user_id: str, match_id: str):
     active_card = build_active_proposal_card(match_doc, user_id)
     if active_card:
         response["viewer_reason"] = active_card.get("viewer_reason", "")
+        response["decline_reason_options"] = active_card.get("decline_reason_options", [])
         if active_card.get("event"):
             response["event"] = active_card["event"]
+    response["counterparty_nickname"] = proposal_counterparty_nickname(
+        match_doc, user_id,
+        lambda uid: proposal_display_name(uid, fallback_lookup=public_display_name),
+    )
     return response
 
 @router.post("")
@@ -1360,7 +1414,25 @@ def _apply_match_decision(req: MatchDecisionRequest, background_tasks: Backgroun
             "current_revision": result.get("current_revision"),
             "current_namespace": result.get("current_namespace"),
         })
-    return result
+    response = dict(result)
+    # Navigation is an HTTP-only projection, not a new tool observation or
+    # another state transition. Never trust a client-supplied counterparty ID.
+    response.pop("other_id", None)
+    response.pop("other_name", None)
+    if result.get("status") == "success" and result.get("new_status") == "accepted":
+        try:
+            accepted = matches_coll.find_one({
+                "_id": ObjectId(req.match_id),
+                "status": "accepted",
+                "$or": [{"from_user": req.user_id}, {"to_user": req.user_id}],
+            })
+        except (InvalidId, PyMongoError) as exc:
+            # Consent is already committed. A failed navigation read must not
+            # make the successful decision look like a failed write.
+            print(f"[match] accepted navigation unavailable: {type(exc).__name__}")
+            accepted = None
+        response.update(_accepted_chat_target(accepted, req.user_id))
+    return response
 
 
 def decide_active_proposal_for_agent(user_id: str, decision: str, revision: int, idempotency_key: str) -> dict:
@@ -1397,13 +1469,29 @@ def proactive_event_match(req: ProactiveEventRequest):
 
 @router.post("/events/discover")
 def discover_public_events(req: EventDiscoveryRequest):
-    """Manual demo trigger for the same bounded pipeline used by the scheduler."""
-    result = discover_and_ingest_events(
-        region=req.region, window_days=req.window_days, categories=req.categories,
-    )
-    if result.get("status") in {"ingest_timeout", "ingest_unavailable"}:
-        raise HTTPException(status_code=503, detail=result)
-    return result
+    """Queue manual discovery; only the Event worker executes the long pipeline."""
+    try:
+        return enqueue_event_discovery_job(
+            region=req.region, window_days=req.window_days,
+            categories=req.categories or [], source="api", job_kind="discovery",
+        )
+    except PyMongoError as exc:
+        raise HTTPException(status_code=503, detail={
+            "code": "event_queue_unavailable",
+            "message": "活動搜尋暫時無法排入佇列，請稍後再試。",
+        }) from exc
+
+
+@router.get("/events/discover/status")
+def get_public_event_discovery_status():
+    """Read the same bounded, secret-free singleton snapshot as the Demo UI."""
+    snapshot = event_discovery_job_snapshot()
+    if snapshot.get("state") == "unavailable":
+        raise HTTPException(status_code=503, detail={
+            "code": "event_queue_unavailable",
+            "message": "暫時無法讀取活動搜尋進度，請稍後再試。",
+        })
+    return {"status": "success", **snapshot}
 
 
 @router.post("/events/relevance/rebuild")

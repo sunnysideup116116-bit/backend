@@ -47,7 +47,11 @@ class MatchSearchPipelineError(RuntimeError):
 
 
 _FAILURE_MESSAGES = {
-    "matchmaker_timeout": "配對服務暫時沒有回應，請稍後再試。",
+    "matchmaker_timeout": "這次媒人評估逾時，搜尋已停止。可以稍後重新搜尋。",
+    "matchmaker_graph_timeout": "讀取配對依據逾時，這次搜尋沒有完成。可以稍後再試。",
+    "matchmaker_graph_unavailable": "目前無法讀取配對依據，這次搜尋沒有完成。",
+    "matchmaker_empty_response": "媒人服務沒有回傳有效結果，這次搜尋沒有完成。",
+    "matchmaker_output_truncated": "媒人評估結果不完整，這次搜尋沒有完成。",
     "matchmaker_provider_error": "配對服務目前發生錯誤，請稍後再試。",
     "proposal_write_failed": "配對結果已找到，但儲存結果時失敗，請稍後再試。",
     "pipeline_unavailable": "配對服務目前還沒準備好，請稍後再試。",
@@ -103,10 +107,19 @@ def _live_match(user_id: str) -> dict[str, Any] | None:
 
 
 def _has_live_match(user_id: str) -> bool:
-    return bool(_live_match(user_id))
+    from services.match_state_service import load_match_state
+    state = load_match_state(user_id)
+    return bool(state["active_proposal"] or state["ambiguous"])
 
 
-def enqueue_match_search(user_id: str, *, source: str, idempotency_key: str, force_new: bool = False) -> dict[str, Any]:
+def enqueue_match_search(
+    user_id: str,
+    *,
+    source: str,
+    idempotency_key: str,
+    force_new: bool = False,
+    origin_room_id: str = "",
+) -> dict[str, Any]:
     """Create one queued job. This call never runs candidate ranking inline."""
     if _has_live_match(user_id):
         return {"status": "already_active"}
@@ -123,6 +136,7 @@ def enqueue_match_search(user_id: str, *, source: str, idempotency_key: str, for
         "progress_percent": 0,
         "context_revision": _safe_revision(profile),
         "source": str(source or "automatic")[:40],
+        "origin_room_id": str(origin_room_id or "")[:240],
         "idempotency_key": str(idempotency_key)[:120],
         "lease_id": "",
         "lease_until": 0.0,
@@ -161,11 +175,36 @@ def enqueue_match_search(user_id: str, *, source: str, idempotency_key: str, for
     return {"status": "queued"}
 
 
-def cancel_match_search(user_id: str, *, source: str = "manual") -> dict[str, Any]:
+def active_match_search_job(user_id: str) -> dict[str, Any] | None:
+    """Return server-private authority for the user's one active search."""
+    return MATCH_SEARCH_JOBS.find_one(
+        {
+            "user_id": user_id,
+            "active_user_id": user_id,
+            "status": {"$in": list(JOB_ACTIVE_STATUSES)},
+        },
+        {"_id": 0, "job_id": 1, "status": 1, "origin_room_id": 1},
+        sort=[("created_at", -1)],
+    )
+
+
+def cancel_match_search(
+    user_id: str,
+    *,
+    source: str = "manual",
+    expected_job_id: str | None = None,
+) -> dict[str, Any]:
     """Cancel a queued/running job; a worker checks this before proposal writes."""
     now = time.time()
+    query: dict[str, Any] = {
+        "user_id": user_id,
+        "active_user_id": user_id,
+        "status": {"$in": list(JOB_ACTIVE_STATUSES)},
+    }
+    if expected_job_id:
+        query["job_id"] = expected_job_id
     job = MATCH_SEARCH_JOBS.find_one_and_update(
-        {"user_id": user_id, "active_user_id": user_id, "status": {"$in": list(JOB_ACTIVE_STATUSES)}},
+        query,
         {"$set": {"status": "cancelled", "updated_at": now, "completed_at": now}, "$unset": {"active_user_id": ""}},
         return_document=ReturnDocument.BEFORE,
     )
@@ -297,6 +336,7 @@ def run_one_match_search_job() -> bool:
             queue_mediator_event(
                 str(job.get("user_id") or ""), _FAILURE_MESSAGES["pipeline_unavailable"],
                 "match_search_failed", event_key=f"match-search-job:{job.get('job_id')}:failed",
+                origin_room_id=str(job.get("origin_room_id") or ""),
             )
         return True
     if not _report_progress(job, "loading_profile"):
@@ -315,6 +355,7 @@ def run_one_match_search_job() -> bool:
                 str(job.get("user_id") or ""),
                 _FAILURE_MESSAGES.get(exc.code, _FAILURE_MESSAGES["unexpected_pipeline_error"]),
                 "match_search_failed", event_key=f"match-search-job:{job.get('job_id')}:failed",
+                origin_room_id=str(job.get("origin_room_id") or ""),
             )
         return True
     except Exception as exc:
@@ -326,6 +367,7 @@ def run_one_match_search_job() -> bool:
             queue_mediator_event(
                 str(job.get("user_id") or ""), _FAILURE_MESSAGES["unexpected_pipeline_error"],
                 "match_search_failed", event_key=f"match-search-job:{job.get('job_id')}:failed",
+                origin_room_id=str(job.get("origin_room_id") or ""),
             )
         return True
     if str((result or {}).get("status") or "") == "stale":
@@ -340,6 +382,7 @@ def run_one_match_search_job() -> bool:
             queue_mediator_event(
                 str(job.get("user_id") or ""), "這輪我暫時沒看到合適的新對象，等資料多一點我再幫你看。",
                 "match_search_empty", event_key=f"match-search-job:{job.get('job_id')}:empty",
+                origin_room_id=str(job.get("origin_room_id") or ""),
             )
         return True
     # The pipeline checked ownership immediately before proposal insertion. Once
@@ -361,19 +404,35 @@ def run_one_match_search_job() -> bool:
             event_key=f"match-search-job:{job.get('job_id')}:proposal",
             match_id=first.get("match_id"), proposal_role="initiator",
             proposal_namespace=RELATIONSHIP_MATCH_NAMESPACE,
+            origin_room_id=str(job.get("origin_room_id") or ""),
         )
     return True
 
 
-def public_match_search_status(user_id: str) -> dict[str, Any]:
-    """Public status projection: no job ID, lease, context revision, or errors."""
+def match_search_snapshot(user_id: str) -> dict[str, Any]:
+    """Read-only job truth, with a bounded legacy-lock fallback when no job exists."""
     job = MATCH_SEARCH_JOBS.find_one(
+        {"user_id": user_id, "status": {"$in": sorted(JOB_ACTIVE_STATUSES)}},
+        sort=[("created_at", -1)],
+    ) or MATCH_SEARCH_JOBS.find_one(
         {"user_id": user_id},
         {"_id": 0, "status": 1, "step": 1, "progress_percent": 1, "updated_at": 1, "completed_at": 1, "error_code": 1},
         sort=[("created_at", -1)],
     ) or {}
+    if not job:
+        profile = profiles_coll.find_one(
+            {"user_id": user_id},
+            {"_id": 0, "match_search": 1, "matchmaking_in_progress": 1, "matchmaking_started_at": 1},
+        ) or {}
+        legacy = profile.get("match_search") or {}
+        started = profile.get("matchmaking_started_at") or legacy.get("started_at") or legacy.get("updated_at") or 0
+        active = bool(profile.get("matchmaking_in_progress") or legacy.get("status") in {"searching", "queued", "running"})
+        if active and float(started) > time.time() - 300:
+            job = {**legacy, "status": "searching"}
+        elif not active and legacy.get("status") in JOB_TERMINAL_STATUSES:
+            job = legacy
     status = str(job.get("status") or "idle")
-    if status not in {"idle", *JOB_ACTIVE_STATUSES, *JOB_TERMINAL_STATUSES}:
+    if status not in {"idle", "searching", *JOB_ACTIVE_STATUSES, *JOB_TERMINAL_STATUSES}:
         status = "failed"
     step = str(job.get("step") or "") if status in JOB_ACTIVE_STATUSES else ""
     if step not in JOB_STEPS:
@@ -382,20 +441,49 @@ def public_match_search_status(user_id: str) -> dict[str, Any]:
         percent = max(0, min(100, int(job.get("progress_percent", 0) or 0)))
     except (TypeError, ValueError):
         percent = 0
+    # Keep old job checkpoints for diagnostics, not public in-progress UI.
+    if status not in JOB_ACTIVE_STATUSES:
+        percent = 100 if status == "completed" else 0
     reason_code = str(job.get("error_code") or "") if status == "failed" else ""
     if reason_code not in _FAILURE_MESSAGES:
         reason_code = "unexpected_pipeline_error" if status == "failed" else ""
     return {
         "status": status, "step": step, "progress_percent": percent,
+        "cancellable": status in JOB_ACTIVE_STATUSES,
         "estimated_seconds_min": 60 if status in JOB_ACTIVE_STATUSES else None,
         "estimated_seconds_max": 180 if status in JOB_ACTIVE_STATUSES else None,
         "reason_code": reason_code,
+        "updated_at": job.get("updated_at"), "completed_at": job.get("completed_at"),
     }
 
 
+def public_match_search_status(user_id: str) -> dict[str, Any]:
+    """Public status projection: no job ID, lease or context revision."""
+    return {key: value for key, value in match_search_snapshot(user_id).items()
+            if key not in {"updated_at", "completed_at"}}
+
+
+def cleanup_legacy_search_locks() -> None:
+    """Worker-only housekeeping; status/Agent reads never mutate profile locks."""
+    cutoff = time.time() - 300
+    for profile in profiles_coll.find({
+        "matchmaking_in_progress": True, "matchmaking_started_at": {"$lt": cutoff},
+    }, {"user_id": 1, "matchmaking_started_at": 1}):
+        if active_match_search_job(str(profile.get("user_id") or "")):
+            continue
+        profiles_coll.update_one({
+            "user_id": profile["user_id"], "matchmaking_in_progress": True,
+            "matchmaking_started_at": profile["matchmaking_started_at"],
+        }, {"$set": {"matchmaking_in_progress": False}, "$unset": {"matchmaking_started_at": ""}})
+
+
 def _worker_loop() -> None:
+    next_cleanup = 0.0
     while not _stop_event.wait(POLL_SECONDS):
         try:
+            if time.monotonic() >= next_cleanup:
+                cleanup_legacy_search_locks()
+                next_cleanup = time.monotonic() + 60
             while run_one_match_search_job():
                 pass
         except Exception as exc:

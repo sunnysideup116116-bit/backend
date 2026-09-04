@@ -88,6 +88,7 @@ class PublicAgentTurnContext(BaseModel):
     relevant_memories: list[str] = Field(default_factory=list)
     active_proposal: dict[str, Any] | None = None
     active_event_invitation: dict[str, Any] | None = None
+    match_search: dict[str, Any] | None = None
     latest_match_outcome: dict[str, Any] | None = None
     calendar_draft: dict[str, Any] | None = None
     calendar_recent_reference: dict[str, Any] | None = None
@@ -167,6 +168,7 @@ class AgentResult(BaseModel):
     agent_run_id: str | None = None
     agent_mode: str = "unknown"
     fallback_reason: str | None = None
+    match_state_changed: bool = False
     match_readiness_state: str | None = None
     match_guidance_shown: bool = False
     # Compatibility metadata. The Public HTTP layer excludes assessment turns

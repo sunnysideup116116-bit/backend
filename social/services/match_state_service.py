@@ -5,8 +5,6 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from pymongo import ReturnDocument
-
 from database import matches_coll, profiles_coll
 from services.proposal_namespace import (
     RELATIONSHIP_MATCH_NAMESPACE,
@@ -113,70 +111,33 @@ def _live_match_query(user_id: str, status: str | None = None) -> dict[str, Any]
     )
 
 
-def _restore_latest_timeout_proposal(user_id: str) -> dict[str, Any] | None:
-    """Undo the retired 24/72-hour rule when no newer live proposal exists."""
-    expired = matches_coll.find_one(
-        {
-            "$and": [
-                {"status": "expired"},
-                {"expired_reason": {"$in": ["draft_timeout", "pending_timeout"]}},
-                {"proposal_suppressed": {"$ne": True}},
-                namespace_clause(RELATIONSHIP_MATCH_NAMESPACE),
-                participant_clause(user_id),
-            ]
-        },
-        sort=[("updated_at", -1), ("created_at", -1)],
-    )
-    if (
-        not expired
-        or expired.get("status") != "expired"
-        or expired.get("expired_reason") not in {"draft_timeout", "pending_timeout"}
-        or "_id" not in expired
-    ):
-        return None
-    reason = str(expired.get("expired_reason") or "")
-    restored_status = "draft" if reason == "draft_timeout" else "pending"
-    now = time.time()
-    transition = {
-        "from": "expired", "to": restored_status, "actor": "system",
-        "action": "proposal_timeout_reverted", "at": now,
-    }
-    return matches_coll.find_one_and_update(
-        {
-            "_id": expired["_id"], "status": "expired",
-            "expired_reason": reason,
-        },
-        {
-            "$set": {
-                "status": restored_status, "updated_at": now,
-                "last_decision": transition,
-                "live_participants": [expired.get("from_user"), expired.get("to_user")],
-            },
-            "$inc": {"proposal_revision": 1},
-            "$push": {"state_history": transition},
-            "$unset": {"expired_at": "", "expired_reason": ""},
-        },
-        return_document=ReturnDocument.AFTER,
-    )
-
-
 def reconcile_live_match(user_id: str) -> dict[str, Any] | None:
-    """Return the one live proposal; proposals wait for an explicit decision."""
-    now = time.time()
-    profiles_coll.update_many(
-        {"user_id": user_id, "matchmaking_in_progress": True,
-         "matchmaking_started_at": {"$lt": now - SEARCH_LOCK_TTL_SECONDS}},
-        {"$set": {"matchmaking_in_progress": False}, "$unset": {"matchmaking_started_at": ""}},
-    )
+    """Compatibility name for a pure read. Never revive a terminal proposal."""
     live = list(matches_coll.find(
         _live_match_query(user_id),
-        {"_id": 1, "from_user": 1, "to_user": 1, "status": 1, "proposal_revision": 1, "updated_at": 1, "created_at": 1},
     ).sort([("created_at", -1)]).limit(2))
-    if not live:
-        restored = _restore_latest_timeout_proposal(user_id)
-        if restored:
-            return restored
     return live[0] if len(live) == 1 else None
+
+
+def load_match_state(user_id: str) -> dict[str, Any]:
+    """Executor-only canonical snapshot shared by reads and write preflight."""
+    from services.match_search_job_service import match_search_snapshot
+
+    active = reconcile_live_match(user_id)
+    ambiguous = matches_coll.count_documents(_live_match_query(user_id)) > 1
+    search = match_search_snapshot(user_id)
+    stage = derive_match_stage(active, user_id) if not ambiguous else "ambiguous"
+    allowed = {
+        "waiting_user": ["interested", "declined"],
+        "incoming_decision": ["interested", "declined"],
+        "waiting_other": ["cancelled"],
+    }.get(stage, [])
+    return {
+        "active_proposal": active if not ambiguous else None,
+        "ambiguous": ambiguous, "stage": stage, "allowed_actions": allowed,
+        "search": search,
+        "search_blocked": bool(active or ambiguous or search["status"] in {"queued", "running", "searching"}),
+    }
 
 
 def derive_match_stage(match_doc: dict[str, Any] | None, user_id: str) -> str:
@@ -229,11 +190,9 @@ def get_match_status_snapshot(user_id: str) -> dict[str, Any]:
     is no longer a live card.  This is the distinction the old active-state
     endpoint lost when it reconciled completed searches back to ``idle``.
     """
-    # Reconcile expiry before deciding whether live state is ambiguous. Without
-    # this order, two expired legacy rows can mask the actual latest outcome.
-    live = reconcile_live_match(user_id)
-    live_count = matches_coll.count_documents(_live_match_query(user_id))
-    if live_count > 1:
+    state = load_match_state(user_id)
+    live = state["active_proposal"]
+    if state["ambiguous"]:
         return {"state": "failed", "scope": "live_match", "is_terminal": False,
                 "chat_opened": False,
                 "counterparty": "對方", "revision": None, "updated_at": None,
@@ -249,12 +208,9 @@ def get_match_status_snapshot(user_id: str) -> dict[str, Any]:
             "updated_at": live.get("updated_at") or live.get("created_at"), "reason_code": None,
         }
 
-    profile = profiles_coll.find_one(
-        {"user_id": user_id}, {"_id": 0, "match_search": 1, "matchmaking_in_progress": 1}
-    ) or {}
-    search = profile.get("match_search") or {}
+    search = state["search"]
     search_status = str(search.get("status") or "idle")
-    if profile.get("matchmaking_in_progress") or search_status in SEARCHING_STATUSES:
+    if search_status in SEARCHING_STATUSES:
         return {"state": "searching", "scope": "search", "is_terminal": False,
                 "chat_opened": False,
                 "counterparty": "對方", "revision": None, "updated_at": search.get("updated_at") or search.get("started_at"),
@@ -290,7 +246,7 @@ def get_match_status_snapshot(user_id: str) -> dict[str, Any]:
                     "chat_opened": False,
                     "counterparty": "對方", "revision": None,
                     "updated_at": search_updated,
-                    "reason_code": str(search.get("error") or search_status)[:80]}
+                    "reason_code": str(search.get("reason_code") or search_status)[:80]}
     if latest:
         state = derive_match_stage(latest, user_id)
         return {

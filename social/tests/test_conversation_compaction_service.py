@@ -9,6 +9,7 @@ from bson.objectid import ObjectId
 from pydantic import ValidationError
 
 from services import conversation_compaction_service as compaction
+from services.ai_service import ChatResult
 from services.conversation_compaction_contracts import ConversationSummaryV1
 from services.ayue_agent import context as ayue_context
 from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext
@@ -109,6 +110,21 @@ class ConversationCompactionServiceTests(unittest.TestCase):
         os.environ.pop("AYUE_CONVERSATION_CONTEXT_MODE", None)
         os.environ.pop("AYUE_CONVERSATION_CONTEXT_USER_ALLOWLIST", None)
 
+    def test_load_current_compaction_excludes_internal_mongo_id(self):
+        collection = MagicMock()
+        collection.find_one.return_value = _valid_record()
+        with patch.object(compaction, "CONVERSATION_COMPACTIONS", collection):
+            record = compaction._load_current_compaction("owner", "ai_assistant_owner")
+
+        self.assertEqual(record, _valid_record())
+        collection.find_one.assert_called_once_with({
+            "_id": compaction._record_id("owner", "ai_assistant_owner"),
+            "owner_user_id": "owner",
+            "room_id": "ai_assistant_owner",
+            "version": "conversation-compaction-v1",
+            "mode": "shadow",
+        }, {"_id": 0})
+
     def test_summary_contract_is_bounded_deduplicated_and_drops_unsafe_items(self):
         summary = ConversationSummaryV1.model_validate({
             "active_topics": ["  潛水   課程 ", "潛水 課程", "seed_user_01 的資料"] + [f"主題{i}" for i in range(10)],
@@ -150,6 +166,31 @@ class ConversationCompactionServiceTests(unittest.TestCase):
              patch.object(compaction.messages_coll, "find", return_value=cursor):
             result = compaction._select_compaction_batch("owner", "ai_assistant_owner")
         self.assertEqual(result, {"status": "below_threshold"})
+
+    def test_owned_new_ai_room_compacts_after_thirty_messages(self):
+        messages = [_message(index, "owner") for index in range(1, 32)]
+        cursor = MagicMock()
+        cursor.sort.return_value.limit.return_value = messages
+        with patch.object(compaction, "is_owned_public_ai_room", return_value=True), \
+             patch.object(compaction, "_load_current_compaction", return_value=None), \
+             patch.object(compaction.messages_coll, "find", return_value=cursor) as find_messages:
+            result = compaction._select_compaction_batch(
+                "owner", "ai_room::owner::topic",
+            )
+        self.assertEqual(result["status"], "ready")
+        find_messages.assert_called_once()
+        self.assertEqual(
+            find_messages.call_args.args[0]["room_id"], "ai_room::owner::topic",
+        )
+
+    def test_foreign_or_deleted_ai_room_fails_closed_before_message_read(self):
+        with patch.object(compaction, "is_owned_public_ai_room", return_value=False), \
+             patch.object(compaction.messages_coll, "find") as find_messages:
+            result = compaction._select_compaction_batch(
+                "owner", "ai_room::other::topic",
+            )
+        self.assertEqual(result, {"status": "invalid_scope"})
+        find_messages.assert_not_called()
 
     def test_run_rejects_batches_larger_than_the_eleven_message_selection_contract(self):
         os.environ["AYUE_CONVERSATION_COMPACTION_MODE"] = "shadow"
@@ -225,6 +266,30 @@ class ConversationCompactionServiceTests(unittest.TestCase):
         self.assertNotIn("owner_scope_hash", run_metadata)
         self.assertNotIn("room_scope_hash", run_metadata)
         self.assertEqual(run_operation["$inc"], {"attempt_count": 1})
+
+    def test_generation_and_evaluation_accept_current_chat_result_contract(self):
+        summary_payload = {
+            "active_topics": ["週末活動"], "owner_goals": [],
+            "known_continuity": [], "unresolved_questions": [],
+            "ayue_commitments": [], "recent_decisions": [],
+        }
+        with patch.object(
+            compaction, "generate_chat_completion",
+            return_value=ChatResult(content=json.dumps(summary_payload)),
+        ):
+            summary = compaction._generate_summary(None, [], "owner")
+        evaluation_payload = {
+            "retention": {field: True for field in compaction.SUMMARY_FIELDS},
+            "unsupported_content": False, "role_confusion": False,
+            "canonical_state_leak": False, "confidence": 0.96,
+        }
+        with patch.object(
+            compaction, "generate_chat_completion",
+            return_value=ChatResult(content=json.dumps(evaluation_payload)),
+        ):
+            evaluation = compaction._evaluate_summary(None, [], "owner", summary)
+        self.assertEqual(summary.active_topics, ["週末活動"])
+        self.assertEqual(evaluation.confidence, 0.96)
 
     def test_generation_uses_preserved_owner_raw_text_and_typed_prior_only(self):
         message = _message(1, "owner", "@對方 顯示內容")
@@ -597,6 +662,19 @@ class ConversationCompactionServiceTests(unittest.TestCase):
                     "owner", "ai_assistant_owner",
                 ))
 
+    def test_owned_new_ai_room_can_load_its_own_validated_continuity(self):
+        room_id = "ai_room::owner::topic"
+        record = _valid_record(room_id=room_id)
+        os.environ["AYUE_CONVERSATION_CONTEXT_MODE"] = "on"
+        os.environ["AYUE_CONVERSATION_COMPACTION_MODE"] = "shadow"
+        os.environ["AYUE_CONVERSATION_CONTEXT_USER_ALLOWLIST"] = "owner"
+        with patch.object(compaction, "is_owned_public_ai_room", return_value=True), \
+             patch.object(compaction, "_load_current_compaction", return_value=record):
+            result = compaction.load_validated_conversation_continuity(
+                "owner", room_id,
+            )
+        self.assertEqual(result["summary"].active_topics, ["週末旅行"])
+
         with patch.object(
             compaction, "_load_current_compaction", side_effect=RuntimeError("storage detail"),
         ):
@@ -611,7 +689,10 @@ class ConversationCompactionServiceTests(unittest.TestCase):
         self.assertTrue(compaction.conversation_context_enabled_for_user("owner"))
         self.assertFalse(compaction.conversation_context_enabled_for_user("other"))
         os.environ["AYUE_CONVERSATION_CONTEXT_USER_ALLOWLIST"] = "*"
-        self.assertTrue(compaction.conversation_context_enabled_for_user("other"))
+        with patch.object(compaction, "_global_context_rollout_ready", return_value=True):
+            self.assertTrue(compaction.conversation_context_enabled_for_user("other"))
+        with patch.object(compaction, "_global_context_rollout_ready", return_value=False):
+            self.assertFalse(compaction.conversation_context_enabled_for_user("other"))
 
     def test_rollout_readiness_is_aggregate_bounded_and_advisory(self):
         ready_metrics = {
@@ -681,12 +762,14 @@ class ConversationCompactionServiceTests(unittest.TestCase):
             patch.object(ayue_context, "mentioned_contact_refs", return_value=[]),
         )
         with patch.object(ayue_context, "load_validated_conversation_continuity", return_value=continuity), \
+             patch.object(ayue_context, "load_match_state", return_value={"active_proposal": None, "ambiguous": False, "search": {"status": "idle"}}), \
              common_patches[0], common_patches[1], common_patches[2], common_patches[3]:
             activated = ayue_context.build_public_agent_turn_context(ctx)
         self.assertEqual(activated.conversation_continuity.active_topics, ["週末旅行"])
         self.assertEqual(len(activated.recent_messages), 7)
 
         with patch.object(ayue_context, "load_validated_conversation_continuity", return_value=None), \
+             patch.object(ayue_context, "load_match_state", return_value={"active_proposal": None, "ambiguous": False, "search": {"status": "idle"}}), \
              patch.object(ayue_context.matches_coll, "find_one", side_effect=[None, None]), \
              patch.object(ayue_context.matches_coll, "count_documents", side_effect=[0, 0]), \
              patch.object(ayue_context, "validated_mentioned_contact_ids", return_value=([], False)), \

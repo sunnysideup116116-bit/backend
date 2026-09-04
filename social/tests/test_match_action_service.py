@@ -19,6 +19,7 @@ class MatchActionServiceTests(unittest.TestCase):
         self.assertEqual(result, {"status": "queued"})
         enqueue.assert_called_once_with(
             "owner", source="agent_v2", force_new=True, idempotency_key="run:0",
+            origin_room_id="",
         )
 
     @patch("services.match_action_service.apply_match_decision")
@@ -56,6 +57,24 @@ class MatchActionServiceTests(unittest.TestCase):
         self.assertTrue(stale["stale"])
         self.assertTrue(invalid["invalid"])
         apply.assert_not_called()
+
+    @patch("services.match_action_service.apply_match_decision")
+    @patch("services.match_action_service.reconcile_live_match")
+    def test_waiting_initiator_can_cancel_exact_bound_proposal(self, reconcile, apply):
+        reconcile.return_value = {
+            "_id": "proposal", "from_user": "owner", "to_user": "other", "status": "pending",
+        }
+        apply.return_value = {"status": "success", "new_status": "declined"}
+
+        result = match_action_service.decide_active_proposal(
+            user_id="owner", decision="cancelled", expected_revision=5,
+            expected_match_id="proposal", expected_status="pending",
+            idempotency_key="run:cancel",
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(apply.call_args.kwargs["action"], "cancel")
+        self.assertEqual(apply.call_args.kwargs["match_id"], "proposal")
 
     @patch("routers.match.decide_match_action")
     def test_match_decision_endpoint_uses_the_shared_action_boundary(self, decide):
@@ -125,6 +144,70 @@ class MatchActionServiceTests(unittest.TestCase):
         self.assertNotIn("other_id", proposal.kwargs)
         self.assertNotIn("matches", proposal.kwargs)
 
+    @patch("services.match_action_service.queue_mediator_event")
+    @patch("services.match_action_service.profiles_coll")
+    def test_pending_event_transition_queues_only_actionable_proposal(
+        self, profiles, queue,
+    ):
+        match_doc = {
+            "_id": "event-proposal", "from_user": "owner", "to_user": "other",
+            "status": "pending", "proposal_namespace": "event_invitation",
+        }
+
+        match_action_service.apply_transition_effects(
+            match_doc, "accept", "draft", [],
+        )
+
+        profiles.find_one.assert_not_called()
+        queue.assert_called_once()
+        proposal = queue.call_args
+        self.assertEqual(proposal.args[2], "incoming_match_interest")
+        self.assertEqual(proposal.kwargs["match_id"], "event-proposal")
+        self.assertEqual(proposal.kwargs["proposal_namespace"], "event_invitation")
+
+    @patch("services.match_action_service.save_system_message_once")
+    @patch("services.match_action_service.queue_mediator_event")
+    def test_accepted_event_reuses_pair_room_with_one_grounded_opening(
+        self, queue, save_system_message_once,
+    ):
+        match_doc = {
+            "_id": "event-proposal",
+            "from_user": "owner",
+            "to_user": "other",
+            "status": "accepted",
+            "proposal_namespace": "event_invitation",
+            "proposal_source": "event_opportunity",
+            "relationship_establishing": False,
+            "event_snapshot": {
+                "title": "港邊音樂市集",
+                "category": "市集",
+                "region": "高雄",
+                "venue": "駁二藝術特區",
+                "starts_at": 1786204800,
+                "ends_at": 1786212000,
+                "time_precision": "datetime",
+                "source_url": "https://example.com/event",
+            },
+        }
+
+        match_action_service.apply_transition_effects(
+            match_doc, "accept", "pending", [],
+        )
+
+        save_system_message_once.assert_called_once()
+        args = save_system_message_once.call_args.args
+        kwargs = save_system_message_once.call_args.kwargs
+        self.assertEqual(args[0], "other_owner")
+        self.assertIn("港邊音樂市集", args[1])
+        self.assertEqual(kwargs["message_type"], "system")
+        self.assertEqual(kwargs["event_key"], "event-invitation:event-proposal:pair-opening")
+        metadata = kwargs["metadata"]
+        self.assertEqual(metadata["event_type"], "event_invitation_accepted")
+        self.assertEqual(metadata["notification_recipients"], ["owner", "other"])
+        self.assertEqual(metadata["event"]["venue"], "駁二藝術特區")
+        self.assertNotIn("event_id", metadata["event"])
+        self.assertEqual(queue.call_count, 2)
+
     @patch("services.match_action_service.profiles_coll")
     @patch("services.match_action_service.queue_mediator_event")
     def test_optional_intro_failure_does_not_block_the_actionable_proposal(self, queue, profiles):
@@ -180,11 +263,18 @@ class MatchActionServiceTests(unittest.TestCase):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="有興趣")
         turn = PublicAgentTurnContext(
             user_id="owner", room_id="room", message="有興趣",
-            active_proposal={"user_can_decide": True, "proposal_revision": 3},
+            active_proposal={
+                "user_can_decide": True,
+                "allowed_actions": ["interested", "declined"],
+                "proposal_revision": 3,
+            },
         )
         ok, reply, code = _decide_active_proposal(
             ctx, turn, "run", 0, {"decision": "interested"},
-            {"proposal_revision": 3},
+            {
+                "match_id": "proposal", "expected_status": "draft",
+                "proposal_revision": 3, "proposal_namespace": "relationship_match",
+            },
         )
         self.assertTrue(ok)
         self.assertEqual(code, "stale_revision")

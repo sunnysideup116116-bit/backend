@@ -308,12 +308,16 @@ class ChatLeafRouterTests(unittest.TestCase):
             "revision": 7, "updated_at": 12345,
         }
         with patch("routers.match.reconcile_match_state", return_value=None), \
-             patch("routers.match.public_match_search_status", return_value={"status": "idle"}), \
+             patch("routers.match._single_live_namespace_proposal", return_value=None), \
+             patch("routers.match.public_match_search_status", return_value={
+                 "status": "idle", "cancellable": False,
+             }), \
              patch("routers.match.get_match_status_snapshot", return_value=snapshot):
             response = get_match_status("owner")
         public_snapshot = response["status_snapshot"]
         self.assertNotIn("revision", public_snapshot)
         self.assertNotIn("updated_at", public_snapshot)
+        self.assertFalse(response["search"]["cancellable"])
 
 
 if __name__ == "__main__":

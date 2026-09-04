@@ -25,6 +25,7 @@ class V3WriteExecutorsTests(unittest.TestCase):
         self.assertIn("1–3 分鐘", reply)
         start.assert_called_once()
         self.assertEqual(start.call_args.kwargs["idempotency_key"], "confirmation:conf1")
+        self.assertEqual(start.call_args.kwargs["origin_room_id"], "room")
 
     def test_start_search_idempotent_replay(self):
         ctx = self._ctx()
@@ -43,13 +44,20 @@ class V3WriteExecutorsTests(unittest.TestCase):
     def test_decide_active_proposal_uses_revision_cas(self):
         ctx = self._ctx()
         turn = MagicMock()
-        turn.active_proposal = {"user_can_decide": True, "proposal_revision": 2}
+        turn.active_proposal = {
+            "user_can_decide": True,
+            "allowed_actions": ["interested", "declined"],
+            "proposal_revision": 2,
+        }
         with patch("services.ayue_agent.v3.write_executors.decide_active_proposal",
                    return_value={"status": "success"}) as decide:
             ok, reply, code = execute_write(
                 "match.decide_active_proposal", {"decision": "interested"},
                 ctx, turn, "run1", 0,
-                payload={"proposal_revision": 2},
+                payload={
+                    "match_id": "match-1", "expected_status": "draft",
+                    "proposal_revision": 2, "proposal_namespace": "relationship_match",
+                },
             )
         self.assertTrue(ok)
         self.assertEqual(decide.call_args.kwargs["expected_revision"], 2)
@@ -68,17 +76,61 @@ class V3WriteExecutorsTests(unittest.TestCase):
     def test_decide_active_proposal_stale_reports_latest(self):
         ctx = self._ctx()
         turn = MagicMock()
-        turn.active_proposal = {"user_can_decide": True, "proposal_revision": 1}
+        turn.active_proposal = {
+            "user_can_decide": True,
+            "allowed_actions": ["interested", "declined"],
+            "proposal_revision": 1,
+        }
         with patch("services.ayue_agent.v3.write_executors.decide_active_proposal",
                    return_value={"stale": True, "current_status": "accepted"}):
             ok, reply, code = execute_write(
                 "match.decide_active_proposal", {"decision": "interested"},
                 ctx, turn, "run1", 0,
-                payload={"proposal_revision": 1},
+                payload={
+                    "match_id": "match-1", "expected_status": "draft",
+                    "proposal_revision": 1, "proposal_namespace": "relationship_match",
+                },
             )
         self.assertTrue(ok)
         self.assertIn("互相接受", reply)
         self.assertEqual(code, "stale_revision")
+
+    def test_cancel_waiting_other_proposal_uses_bound_authority(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        turn.active_proposal = {
+            "user_can_decide": True,
+            "allowed_actions": ["cancelled"],
+            "proposal_revision": 3,
+        }
+        with patch("services.ayue_agent.v3.write_executors.decide_active_proposal",
+                   return_value={"status": "success"}) as decide:
+            ok, reply, code = execute_write(
+                "match.decide_active_proposal", {"decision": "cancelled"},
+                ctx, turn, "run1", 0,
+                payload={
+                    "match_id": "match-3", "expected_status": "pending",
+                    "proposal_revision": 3, "proposal_namespace": "relationship_match",
+                },
+            )
+        self.assertTrue(ok)
+        self.assertIn("撤回", reply)
+        self.assertEqual(decide.call_args.kwargs["expected_match_id"], "match-3")
+
+    def test_cancel_search_uses_confirmation_bound_job(self):
+        ctx = self._ctx()
+        with patch("services.ayue_agent.v3.write_executors.cancel_match_search",
+                   return_value={"status": "cancelled"}) as cancel, \
+             patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.find_one_and_update",
+                   return_value=None), \
+             patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.update_one"):
+            ok, reply, code = execute_write(
+                "match.cancel_search", {}, ctx, MagicMock(), "run1", 0,
+                confirmation_id="cancel-1", payload={"match_search_job_id": "job-1"},
+            )
+        self.assertTrue(ok)
+        self.assertIn("已取消", reply)
+        self.assertEqual(cancel.call_args.kwargs["expected_job_id"], "job-1")
 
     def test_decide_active_event_invitation_uses_server_bound_revision(self):
         ctx = self._ctx()
@@ -218,8 +270,15 @@ class V3WritePreflightTests(unittest.TestCase):
         turn = MagicMock()
         turn.active_proposal = {
             "user_can_decide": True,
+            "allowed_actions": ["interested", "declined"],
             "proposal_revision": 4,
             "counterparty": "小安",
+        }
+        turn._active_proposal_authority = {
+            "match_id": "match-4",
+            "expected_status": "draft",
+            "proposal_revision": 4,
+            "proposal_namespace": "relationship_match",
         }
         payload, reply = prepare_write_confirmation(
             "match.decide_active_proposal",
@@ -228,7 +287,18 @@ class V3WritePreflightTests(unittest.TestCase):
             turn,
         )
         self.assertEqual(payload["data"]["proposal_revision"], 4)
+        self.assertEqual(payload["data"]["match_id"], "match-4")
         self.assertIn("小安", reply)
+
+    def test_cancel_search_preview_binds_active_job(self):
+        ctx = self._ctx()
+        with patch("services.ayue_agent.v3.write_executors.active_match_search_job",
+                   return_value={"job_id": "job-7", "status": "running"}):
+            payload, reply = prepare_write_confirmation(
+                "match.cancel_search", {}, ctx, MagicMock(),
+            )
+        self.assertEqual(payload["data"]["match_search_job_id"], "job-7")
+        self.assertIn("取消", reply)
 
     def test_event_decision_preview_binds_title_and_revision(self):
         ctx = self._ctx()

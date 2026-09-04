@@ -572,6 +572,40 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertIn("RuntimeError", repr(log_error.call_args))
         self.assertNotIn("private provider payload", repr(log_error.call_args))
 
+    def test_match_planner_failure_returns_closed_match_clarification_and_trace(self):
+        ctx = self._ctx("我要怎麼配對人？")
+        turn = PublicAgentTurnContext(
+            user_id="owner", room_id="room", message=ctx.message,
+            match_search={"status": "idle", "cancellable": False},
+        )
+        metrics = _planner_metrics()
+        metrics.failure_code = "invalid_arguments"
+        metrics.retry_count = 1
+        metrics.retry_reason = "invalid_arguments"
+        metrics.attempts = [{
+            "attempt": 2, "status": "protocol_error",
+            "failure_code": "invalid_arguments",
+            "validation_fields": ["write_intent"],
+            "repair_codes": [],
+            "raw_content": "must not persist",
+        }]
+        with patch(
+            "services.ayue_agent.v3.scheduler.plan_turn",
+            return_value=(None, metrics),
+        ), patch(
+            "services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
+            return_value=turn,
+        ), patch(
+            "services.ayue_agent.v3.scheduler._persist_trace",
+        ) as persist:
+            result = run_public_agent_turn_v3(ctx)
+
+        self.assertIn("了解配對方式", result.reply)
+        self.assertNotIn("沒接好", result.reply)
+        trace = persist.call_args.args[2]
+        self.assertEqual(trace["planner_failure"]["attempts"][0]["validation_fields"], ["write_intent"])
+        self.assertNotIn("raw_content", trace["planner_failure"]["attempts"][0])
+
     def test_calendar_two_turn_missing_time_continuation_keeps_canonical_draft(self):
         """Exercise Planner → Calendar → preflight across the real turn boundary."""
         clear_draft("owner")
@@ -1574,7 +1608,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
     def test_write_proposal_creates_confirmation_with_preview(self):
         ctx = self._ctx("幫我找人")
         plan = Plan(tasks=[
-            SubTask(id="t1", agent="match", depends_on=[], task_brief="開始找人"),
+            SubTask(id="t1", agent="match", match_intent="start_search", depends_on=[], task_brief="開始找人"),
             SubTask(id="t2", agent="synthesizer", depends_on=["t1"], task_brief="彙整"),
         ])
         seen_obs = {}
@@ -1599,10 +1633,56 @@ class V3SchedulerWriteTests(unittest.TestCase):
         self.assertTrue(result.handled)
         prepare.assert_called_once()
         insert.assert_called_once()
+        self.assertEqual(
+            insert.call_args.args[0]["interaction_mode"],
+            "bubble_buttons_v1",
+        )
         obs = seen_obs.get("observations", [])
         self.assertEqual(obs[0]["status"], "ok")
         self.assertTrue(obs[0]["result"]["pending_confirmation"])
         self.assertIn("確認", obs[0]["result"]["preview"])
+
+    def test_agent_match_decision_uses_room_scoped_button_confirmation(self):
+        ctx = self._ctx("接受此次配對")
+        plan = Plan(tasks=[
+            SubTask(id="m1", agent="match", match_intent="accept_proposal", depends_on=[], task_brief="接受目前提案"),
+            SubTask(id="s1", agent="synthesizer", depends_on=["m1"], task_brief="呈現確認"),
+        ])
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as build, \
+             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
+                 "match": MagicMock(return_value=(
+                     [ToolProposal(
+                         tool_name="match.decide_active_proposal",
+                         arguments={"decision": "interested"},
+                     )],
+                     _sub_metrics(),
+                 )),
+             }), \
+             patch("services.ayue_agent.v3.scheduler.prepare_write_confirmation", return_value=(
+                 {
+                     "action": "match.decide_active_proposal",
+                     "arguments": {"decision": "interested"},
+                     "data": {"match_id": "match-1", "proposal_revision": 1},
+                 },
+                 "要接受目前提案嗎？確認後才會送出。",
+             )), \
+             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.update_many"), \
+             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one") as insert, \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=(
+                 "要接受目前提案嗎？確認後才會送出。", None, _synth_metrics(),
+             )):
+            build.return_value = MagicMock()
+            build.return_value.clock = MagicMock(model_dump=lambda: {})
+            build.return_value._mentioned_ids = []
+            build.return_value.room_id = "room"
+            build.return_value.user_id = "owner"
+            run_public_agent_turn_v3(ctx)
+
+        record = insert.call_args.args[0]
+        self.assertEqual(record["tool_name"], "match.decide_active_proposal")
+        self.assertEqual(record["room_id"], "room")
+        self.assertEqual(record["interaction_mode"], "bubble_buttons_v1")
 
     def test_explicit_arrange_place_continuation_reaches_confirmation_without_write(self):
         message = "第二個好了，幫我安排明天早上五點到六點"
@@ -1752,6 +1832,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
             coll.update_one.return_value = MagicMock(modified_count=1)
             result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
+        self.assertTrue(result.match_state_changed)
         exec_write.assert_called_once()
         self.assertEqual(exec_write.call_args.kwargs["payload"]["_confirmation_id"], "c1")
 

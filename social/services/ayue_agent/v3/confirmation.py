@@ -10,6 +10,7 @@ import uuid
 from typing import Any, Callable
 
 from pydantic import BaseModel
+from pymongo.errors import DuplicateKeyError
 
 
 INTERACTION_BUBBLE = "bubble_buttons_v1"
@@ -24,6 +25,7 @@ ASSESSMENT_COMMIT_ACTION = "profile.commit_assessment"
 BUBBLE_BUTTON_ACTIONS = frozenset({
     "calendar.submit_commands",
     "match.start_search",
+    "match.cancel_search",
     "profile.start_assessment",
     "relationship.start_date_coordination",
     ASSESSMENT_COMMIT_ACTION,
@@ -41,6 +43,34 @@ def interaction_mode_for_action(action_name: str) -> str:
         if str(action_name or "") in BUBBLE_BUTTON_ACTIONS
         else INTERACTION_LEGACY
     )
+
+
+def match_choice_labels(record: dict[str, Any]) -> dict[str, str]:
+    """Server-owned copy only; labels never confer authority or contain IDs."""
+    action = record.get("tool_name")
+    pair = None
+    if action == "match.decide_active_proposal":
+        pair = {
+            "declined": ("保留提案", "確認放棄"),
+            "cancelled": ("繼續等待", "確認撤回"),
+            "interested": ("先不接受", "確認接受"),
+        }.get((record.get("arguments") or {}).get("decision"))
+    elif action == "match.start_search":
+        pair = ("暫不搜尋", "開始搜尋")
+    elif action == "match.cancel_search":
+        pair = ("繼續搜尋", "停止搜尋")
+    return {"cancel_label": pair[0], "confirm_label": pair[1]} if pair else {}
+
+
+def match_choice_cancel_reply(record: dict[str, Any]) -> str | None:
+    action = record.get("tool_name")
+    if action == "match.decide_active_proposal":
+        return {
+            "declined": "已取消這次放棄操作；我沒有更動提案，也沒有開始新搜尋。",
+            "cancelled": "這次沒有送出撤回，我沒有更動提案。",
+            "interested": "這次沒有送出接受，我沒有更動提案。",
+        }.get((record.get("arguments") or {}).get("decision"))
+    return {"match.start_search": "這次不開始搜尋。", "match.cancel_search": "這次沒有送出停止搜尋。"}.get(action)
 
 
 def public_choice_projection(record: dict[str, Any]) -> dict[str, Any]:
@@ -63,7 +93,41 @@ def public_choice_projection(record: dict[str, Any]) -> dict[str, Any]:
         "state": state,
         "selected": selected,
         "expires_at": float(record.get("expires_at", 0) or 0),
+        **match_choice_labels(record),
     }
+
+
+def project_match_choice_history(messages: list[dict], *, user_id: str, room_id: str, collection: Any) -> list[dict]:
+    """Read-only refresh of recent Match choices; never trust message text as action."""
+    ids = []
+    for message in messages[-200:]:
+        metadata = message.get("metadata") or {}
+        choice = metadata.get("choice_prompt") if isinstance(metadata, dict) else None
+        if isinstance(choice, dict) and isinstance(choice.get("id"), str):
+            ids.append(choice["id"])
+    if not ids:
+        return messages
+    try:
+        rows = collection.find({
+            "_id": {"$in": list(dict.fromkeys(ids))}, "user_id": user_id,
+            "room_id": room_id, "surface": SURFACE_PUBLIC, "interaction_mode": INTERACTION_BUBBLE,
+            "tool_name": {"$in": ["match.decide_active_proposal", "match.start_search", "match.cancel_search"]},
+        }, {"_id": 1, "tool_name": 1, "arguments": 1, "status": 1, "selected_choice": 1, "expires_at": 1})
+        projections = {}
+        for record in rows:
+            public = public_choice_projection(record)
+            if public["state"] == "pending" and public["expires_at"] <= time.time():
+                public["state"] = "expired"
+            projections[public["id"]] = public
+    except Exception:
+        return messages
+    output = []
+    for message in messages:
+        metadata = message.get("metadata") or {}
+        choice = metadata.get("choice_prompt") if isinstance(metadata, dict) else None
+        projection = projections.get(choice.get("id")) if isinstance(choice, dict) and isinstance(choice.get("id"), str) else None
+        output.append({**message, "metadata": {**metadata, "choice_prompt": projection}} if projection else message)
+    return output
 
 
 def sync_choice_message_projection(
@@ -130,10 +194,21 @@ class ConfirmationManager:
         room_id: str = "",
         surface: str = SURFACE_PUBLIC,
         interaction_mode: str | None = None,
+        idempotency_key: str | None = None,
     ) -> str:
         if not origin_run_id.strip() or not preview.strip():
             raise ValueError("confirmation requires an origin run and visible preview")
-        confirmation_id = uuid.uuid4().hex
+        confirmation_id = (
+            uuid.uuid5(uuid.NAMESPACE_URL, f"ayue-choice:{user_id}:{room_id}:{surface}:{idempotency_key}").hex
+            if idempotency_key else uuid.uuid4().hex
+        )
+        if idempotency_key:
+            existing = list(self._coll.find({"_id": confirmation_id, "user_id": user_id}))
+            if existing:
+                record = existing[0]
+                if record.get("tool_name") != tool_name or record.get("arguments") != arguments or record.get("payload") != (payload or {}):
+                    raise ValueError("confirmation idempotency conflict")
+                return confirmation_id
         now = time.time()
         safe_payload = payload or {}
         request_fingerprint = self._request_fingerprint(
@@ -154,6 +229,8 @@ class ConfirmationManager:
             "status": {"$in": ["prepared", "pending"]},
             "interaction_mode": mode,
         }
+        if idempotency_key:
+            supersede_query["_id"] = {"$ne": confirmation_id}
         if mode == INTERACTION_BUBBLE:
             supersede_query.update({
                 "surface": surface,
@@ -180,7 +257,7 @@ class ConfirmationManager:
                     "resolution_reason": "replacement",
                 }},
             )
-        self._coll.insert_one({
+        document = {
             "_id": confirmation_id,
             "user_id": user_id,
             "agent_name": agent_name,
@@ -206,7 +283,13 @@ class ConfirmationManager:
             "surface": str(surface or SURFACE_PUBLIC),
             "interaction_mode": mode,
             "selected_choice": None,
-        })
+            "preview_text": preview,
+        }
+        try:
+            self._coll.insert_one(document)
+        except DuplicateKeyError:
+            if not idempotency_key:
+                raise
         return confirmation_id
 
     def bind_final_preview(

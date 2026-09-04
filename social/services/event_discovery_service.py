@@ -224,9 +224,17 @@ def _post_event_ingest(
     last_error = "ingest_unavailable"
     for attempt in range(1, attempts + 1):
         try:
+            attempt_payload = {
+                **payload,
+                # A local HTTP timeout does not cancel work already executing
+                # on port 9001. Give that service a server-owned write fence so
+                # a late provider response cannot mutate Event inventory after
+                # this attempt has been reported as timed out.
+                "write_deadline": time.time() + max(1, timeout_seconds - 1),
+            }
             response = requests.post(
                 AGENT_EVENT_INGEST_URL,
-                json=payload,
+                json=attempt_payload,
                 timeout=(3, timeout_seconds),
             )
             response.raise_for_status()
@@ -835,6 +843,7 @@ def _event_identity(event: dict[str, Any]) -> str:
 def discover_and_ingest_events(
     *, region: str = DEFAULT_REGION, window_days: int = DEFAULT_WINDOW_DAYS,
     categories: list[str] | tuple[str, ...] | None = None,
+    request_invitation_scan: bool = True,
 ) -> dict[str, Any]:
     """Search bounded public snippets, then let port 9001 validate and store Events."""
     safe_region = " ".join(str(region or DEFAULT_REGION).split())[:40] or DEFAULT_REGION
@@ -1121,7 +1130,7 @@ def discover_and_ingest_events(
             for item in ingested_events[:MAX_DISCOVERY_RESULTS]
         ]
         ingested_count = sum(category_counts.values())
-        if ingested_count:
+        if ingested_count and request_invitation_scan:
             request_event_opportunity_scan()
         relevance_count = int(relevance_result.get("relevance_count", 0) or 0)
         avoidance_count = int(relevance_result.get("avoidance_count", 0) or 0)

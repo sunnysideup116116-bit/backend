@@ -226,7 +226,7 @@ def delete_room(room_id: str, user_id: str) -> bool:
     return bool(getattr(result, "deleted_count", 0))
 
 
-def most_recent_ai_room(user_id: str) -> str:
+def most_recent_ai_room(user_id: str, *, include_proposal_rooms: bool = True) -> str:
     """The room id where proactive care / system messages should land.
 
     Falls back to the legacy room when the user has no extra rooms or no room
@@ -234,6 +234,8 @@ def most_recent_ai_room(user_id: str) -> str:
     """
     rooms = list_rooms(user_id)
     for room in rooms:
+        if not include_proposal_rooms and "::proposal::" in str(room.get("room_id") or ""):
+            continue
         if room.get("latest_message"):
             return room["room_id"]
     return legacy_ai_room_id(user_id)

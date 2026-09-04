@@ -86,9 +86,10 @@ def slice_for_agent(
             ),
             "active_proposal": {
                 key: active_proposal[key]
-                for key in ("status", "counterparty", "user_can_decide")
+                for key in ("status", "stage", "counterparty", "user_can_decide", "allowed_actions", "created_at", "source")
                 if active_proposal.get(key) not in (None, "")
             } or None,
+            "match_search": turn_ctx.match_search,
             "active_event_invitation": {
                 key: active_event[key]
                 for key in ("status", "event_title", "counterparty", "user_can_decide")

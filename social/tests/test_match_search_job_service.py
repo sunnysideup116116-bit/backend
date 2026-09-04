@@ -17,12 +17,14 @@ class MatchSearchJobServiceTests(unittest.TestCase):
 
         result = jobs.enqueue_match_search(
             "owner", source="agent_v2", idempotency_key="run:0", force_new=True,
+            origin_room_id="ai_room::owner::origin",
         )
 
         self.assertEqual(result, {"status": "queued"})
         document = collection.insert_one.call_args.args[0]
         self.assertEqual(document["status"], "queued")
         self.assertEqual(document["context_revision"], 7)
+        self.assertEqual(document["origin_room_id"], "ai_room::owner::origin")
         self.assertEqual(jobs._pipeline.call_count, 0)
         self.assertNotIn("job_id", result)
 
@@ -41,8 +43,9 @@ class MatchSearchJobServiceTests(unittest.TestCase):
         self.assertEqual(result["estimated_seconds_max"], 180)
         self.assertEqual(set(result), {
             "status", "step", "progress_percent", "estimated_seconds_min", "estimated_seconds_max",
-            "reason_code",
+            "reason_code", "cancellable",
         })
+        self.assertTrue(result["cancellable"])
 
     @patch.object(jobs, "_finish_job")
     @patch.object(jobs, "_report_progress", return_value=False)
@@ -89,6 +92,20 @@ class MatchSearchJobServiceTests(unittest.TestCase):
     @patch.object(jobs, "_has_live_match", return_value=False)
     @patch.object(jobs, "profiles_coll")
     @patch.object(jobs, "MATCH_SEARCH_JOBS")
+    def test_cancel_search_cas_is_bound_to_expected_job(self, collection, profiles, _live):
+        collection.find_one_and_update.return_value = None
+        collection.find_one.return_value = None
+
+        result = jobs.cancel_match_search("owner", expected_job_id="job-expected")
+
+        query = collection.find_one_and_update.call_args.args[0]
+        self.assertEqual(query["job_id"], "job-expected")
+        self.assertEqual(result, {"status": "idle"})
+        profiles.update_one.assert_not_called()
+
+    @patch.object(jobs, "_has_live_match", return_value=False)
+    @patch.object(jobs, "profiles_coll")
+    @patch.object(jobs, "MATCH_SEARCH_JOBS")
     def test_terminal_idempotency_replay_returns_the_original_outcome(self, collection, profiles, _live):
         profiles.find_one.return_value = {"current_context_revision": 2}
         collection.insert_one.side_effect = DuplicateKeyError("duplicate")
@@ -109,7 +126,10 @@ class MatchSearchJobServiceTests(unittest.TestCase):
     def test_empty_pipeline_result_finishes_as_no_candidates(
         self, claim, _report, _ownership, finish, queue,
     ):
-        job = {"_id": "job", "job_id": "safe", "user_id": "owner", "lease_id": "lease"}
+        job = {
+            "_id": "job", "job_id": "safe", "user_id": "owner", "lease_id": "lease",
+            "origin_room_id": "ai_room::owner::origin",
+        }
         claim.return_value = job
         jobs.register_match_search_pipeline(
             lambda _user, _source, **_callbacks: {
@@ -121,6 +141,7 @@ class MatchSearchJobServiceTests(unittest.TestCase):
 
         finish.assert_called_once_with(job, "no_candidates")
         self.assertEqual(queue.call_args.args[2], "match_search_empty")
+        self.assertEqual(queue.call_args.kwargs["origin_room_id"], "ai_room::owner::origin")
 
     @patch.object(jobs, "queue_mediator_event")
     @patch.object(jobs, "_finish_job", return_value=True)

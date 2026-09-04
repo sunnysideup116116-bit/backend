@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from typing import Any
 
@@ -24,6 +25,7 @@ from services.conversation_compaction_contracts import (
     SUMMARY_FIELDS,
 )
 from services.profile_task_service import queue_profile_coverage
+from services.public_ai_room_scope import is_owned_public_ai_room
 
 
 CONVERSATION_COMPACTIONS = db["conversation_compactions"]
@@ -40,6 +42,9 @@ ROLLOUT_MIN_PASS_RATE = 0.95
 ROLLOUT_MAX_REVIEW_RATE = 0.05
 ROLLOUT_MAX_UNAVAILABLE_RATE = 0.02
 ROLLOUT_MAX_METRICS_AGE_SECONDS = 24 * 60 * 60
+ROLLOUT_READINESS_CACHE_SECONDS = 60
+_rollout_readiness_lock = threading.Lock()
+_rollout_readiness_cache: tuple[float, bool] = (0.0, False)
 
 
 def conversation_compaction_mode() -> str:
@@ -61,7 +66,25 @@ def conversation_context_enabled_for_user(user_id: str) -> bool:
             "AYUE_CONVERSATION_CONTEXT_USER_ALLOWLIST", "",
         ).split(",") if item.strip()
     }
-    return "*" in allowlist or str(user_id) in allowlist
+    if str(user_id) in allowlist:
+        return True
+    return "*" in allowlist and _global_context_rollout_ready()
+
+
+def _global_context_rollout_ready() -> bool:
+    """Gate global consumption on cached aggregate shadow readiness."""
+    global _rollout_readiness_cache
+    now = time.monotonic()
+    with _rollout_readiness_lock:
+        expires_at, ready = _rollout_readiness_cache
+        if now < expires_at:
+            return ready
+        try:
+            ready = conversation_compaction_rollout_readiness().get("status") == "ready"
+        except Exception:
+            ready = False
+        _rollout_readiness_cache = (now + ROLLOUT_READINESS_CACHE_SECONDS, ready)
+        return ready
 
 
 def ensure_conversation_compaction_indexes() -> None:
@@ -117,7 +140,7 @@ def _load_current_compaction(user_id: str, room_id: str) -> dict[str, Any] | Non
         "room_id": room_id,
         "version": "conversation-compaction-v1",
         "mode": "shadow",
-    })
+    }, {"_id": 0})
 
 
 def _validated_recursive_baseline(
@@ -151,7 +174,7 @@ def _validated_recursive_baseline(
 
 
 def _select_compaction_batch(user_id: str, room_id: str) -> dict[str, Any]:
-    if room_id != _public_room_id(user_id):
+    if not is_owned_public_ai_room(user_id, room_id):
         return {"status": "invalid_scope"}
     try:
         current = _load_current_compaction(user_id, room_id)
@@ -244,6 +267,14 @@ def _prompt_messages(user_id: str, messages: list[dict[str, Any]]) -> list[dict[
     return projected
 
 
+def _model_content(result: Any) -> str:
+    """Normalize the current ChatResult contract and legacy string test seams."""
+    content = getattr(result, "content", result)
+    if not isinstance(content, str):
+        raise TypeError("model result content must be text")
+    return content
+
+
 def _source_hash(previous_hash: str | None, messages: list[dict[str, Any]]) -> str:
     payload = {
         "previous_source_hash": previous_hash,
@@ -293,7 +324,7 @@ Continuity retention rules:
 The previous attempt did not satisfy the JSON contract. Repair only the output shape: return valid JSON, all six keys, array values only, no markdown, no explanation, and no extra keys.
 """
     raw = generate_chat_completion(prompt, temperature=0, json_output=True)
-    return ConversationSummaryV1.model_validate(json.loads(str(raw)))
+    return ConversationSummaryV1.model_validate(json.loads(_model_content(raw)))
 
 
 def _evaluate_summary(
@@ -333,7 +364,9 @@ All retention and safety values must be JSON booleans. confidence must be a JSON
 The previous attempt did not satisfy the evaluator schema. Repair only the output contract: include all six retention booleans, all three safety booleans, and numeric confidence. Do not add reason, issue_codes, status, text, or extra keys.
 """
     raw = generate_chat_completion(prompt, temperature=0, json_output=True)
-    return ConversationCompactionEvaluationDecisionV1.model_validate(json.loads(str(raw)))
+    return ConversationCompactionEvaluationDecisionV1.model_validate(
+        json.loads(_model_content(raw))
+    )
 
 
 def _evaluation_projection(
@@ -509,7 +542,7 @@ def load_validated_conversation_continuity(
     if (
         not conversation_context_enabled_for_user(user_id)
         or conversation_compaction_mode() != "shadow"
-        or room_id != _public_room_id(user_id)
+        or not is_owned_public_ai_room(user_id, room_id)
     ):
         return None
     try:
@@ -561,7 +594,10 @@ def run_conversation_compaction_shadow(
     shadow_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate and CAS-store one recursive shadow compaction batch."""
-    if conversation_compaction_mode() != "shadow" or room_id != _public_room_id(user_id):
+    if (
+        conversation_compaction_mode() != "shadow"
+        or not is_owned_public_ai_room(user_id, room_id)
+    ):
         return {"status": "disabled"}
     if not message_ids or len(message_ids) > COMPACTION_BATCH_MESSAGE_LIMIT:
         return {"status": "invalid_batch"}

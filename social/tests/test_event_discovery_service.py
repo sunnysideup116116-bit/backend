@@ -69,13 +69,16 @@ class EventDiscoveryServiceTests(unittest.TestCase):
         }
         post.side_effect = [discovery.requests.Timeout(), response]
 
-        with patch.dict(os.environ, {"EVENT_INGEST_MAX_ATTEMPTS": "2"}):
+        with patch.dict(os.environ, {"EVENT_INGEST_MAX_ATTEMPTS": "2"}), \
+             patch.object(discovery.time, "time", side_effect=[100.0, 200.0]):
             result = discovery._post_event_ingest(
                 {"search_results": []}, timeout_seconds=180, category="市集",
             )
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(post.call_count, 2)
+        self.assertEqual(post.call_args_list[0].kwargs["json"]["write_deadline"], 279.0)
+        self.assertEqual(post.call_args_list[1].kwargs["json"]["write_deadline"], 379.0)
         sleep.assert_called_once_with(2.0)
 
     @patch.object(discovery.time, "sleep")

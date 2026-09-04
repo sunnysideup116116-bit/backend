@@ -303,6 +303,7 @@ def _complete_public_turn(
         "is_locked": False,
         "conversation_intent": agent_result.conversation_intent,
         "calendar_state_changed": agent_result.calendar_state_changed,
+        "match_state_changed": agent_result.match_state_changed,
         "mentioned_other_ids": agent_result.mentioned_other_ids,
         "context_changed": agent_result.context_changed,
         "context_confirmation_needed": agent_result.context_confirmation_needed,

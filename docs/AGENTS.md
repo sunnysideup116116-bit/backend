@@ -141,7 +141,7 @@
 - `profile_skills.py` 是 owner message 的 typed extraction owner；`memory_service.apply_profile_memory_proposals` 是 validated durable-memory write facade。禁止在 chat router、Context Builder、matchmaker 或另一個 LLM prompt 新增平行的自由文字 memory extractor。
 - Neo4j durable memory 必須 owner-scoped、有 message-id idempotency、active state、confidence 與可追溯來源。Mongo `profile_memory_preview` 只是 read projection，不可成為第二個 source of truth。
 - `semantic_plans` 與 room-scoped chat triples 屬於雙人關係 context，不得自動轉成任一方的 durable preference。
-- 系統產生的長期建議是 recommendation，不是使用者事實。必須使用獨立 versioned contract、TTL、來源與 dismissed state，禁止寫成 `HAS_PREFERENCE`。
+- 系統產生的長期建議是 recommendation，不是使用者事實。必須使用獨立 versioned contract、TTL、來源與 dismissed state，禁止寫成 `PREFERS`、`AVOIDS` 或 `CURRENTLY_WANTS`。
 - 新 Context Engine 只能輸出 bounded、versioned typed bundle；Public／Private runtime 各自套用 privacy adapter。禁止輸出完整 prompt、raw Mongo／Neo4j document、對方私人 memory 或內部 ID。
 - Retrieval 必須先做 owner／room／accepted-relation 硬隔離，再做相關度排序、budget、dedup。失敗時回 bounded empty projection 與 error code，不得改抓 raw data 或 legacy context。
 - 設計時可參考 Hermes Agent 的 Memory Provider／Context Engine interface、lifecycle、hot/cold retrieval 與 compression hooks；但 Hermes 只是外部參考，本專案的 typed contract、domain source of truth 與隱私規則優先。禁止直接搬入單一使用者 memory-file prompt injection、完整 session context 或未經 evidence validation 的 agent-managed memory write。

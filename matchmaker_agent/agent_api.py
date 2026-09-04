@@ -1,12 +1,14 @@
 import json
+import asyncio
 import os
 import hashlib
 import math
 import re
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from neo4j import GraphDatabase
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from neo4j import GraphDatabase, Query
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -20,8 +22,8 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from matchmaker import MatchmakerAgent
+from pydantic import BaseModel, Field
+from matchmaker import MatchmakerAgent, MatchEvaluationError
 
 # ????FastAPI ?蝔? (撠望????銝?鈭?)
 app = FastAPI()
@@ -38,6 +40,9 @@ def destructive_tools_enabled() -> bool:
 
 # ??????慦?憭扯
 agent = MatchmakerAgent()
+MATCH_REQUEST_TIMEOUT_SECONDS = 90.0  # Must remain below Social's 120s HTTP deadline.
+MATCH_GRAPH_TIMEOUT_SECONDS = 15.0
+_MATCH_GRAPH_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="match-graph")
 
 GLOBAL_RULE_LIMIT = max(0, min(int(os.getenv("MATCH_GLOBAL_RULE_LIMIT", "2")), 5))
 GLOBAL_RULE_CHAR_LIMIT = max(10, min(int(os.getenv("MATCH_GLOBAL_RULE_CHAR_LIMIT", "30")), 140))
@@ -130,6 +135,9 @@ class EventIngestRequest(BaseModel):
     window_days: int = 30
     max_events: int = 6
     search_results: list[dict] = []
+    write_deadline: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False,
+    )
 
 class EventInventoryReconcileRequest(BaseModel):
     categories: list[str] = []
@@ -166,11 +174,15 @@ def ingest_event_search_results(req: EventIngestRequest):
         return {"status": "empty", "region": safe_region, "ingested_count": 0, "events": []}
     # Expiry deletion belongs to the lifecycle worker. Running cleanup before
     # every category batch can make one discovery run mutate earlier batches.
+    write_deadline = None
+    if req.write_deadline is not None:
+        write_deadline = min(float(req.write_deadline), time.time() + 900)
     result = agent.extract_and_ingest_search_results(
         bounded_results,
         region=safe_region,
         window_days=max(1, min(int(req.window_days or 30), 60)),
         max_events=max(1, min(int(req.max_events or 6), 6)),
+        write_deadline=write_deadline,
     )
     return {
         "status": "success",
@@ -182,23 +194,23 @@ def ingest_event_search_results(req: EventIngestRequest):
     }
 
 
-def get_user_graph_memory(user_id: str) -> str:
+def get_user_graph_memory(user_id: str, *, strict: bool = False) -> str:
     """Read one user preference memory from Neo4j."""
     step_start = time.perf_counter()
     uri = os.getenv("NEO4J_URI")
     auth = (os.getenv("NEO4J_USERNAME"), os.getenv("NEO4J_PASSWORD"))
     database = os.getenv("NEO4J_DATABASE", "neo4j")
     try:
-        with GraphDatabase.driver(uri, auth=auth) as driver:
+        with GraphDatabase.driver(uri, auth=auth, connection_timeout=5, connection_acquisition_timeout=5, max_transaction_retry_time=0) as driver:
             driver.verify_connectivity()
             print(f"✅ [Neo4j 讀取] 連線驗證成功 (user={user_id})")
             with driver.session(database=database) as session:
                 result = session.run(
-                    """
+                    Query("""
                     MATCH (u:User {id: $user_id})-[r:PREFERS|AVOIDS]->(c:Concept)
                     RETURN CASE type(r) WHEN 'AVOIDS' THEN 'DISLIKES_TRAIT' ELSE 'LIKES_TRAIT' END AS type,
                            coalesce(c.label, c.key) AS trait, '' AS reason
-                    """,
+                    """, timeout=5),
                     user_id=user_id,
                 )
                 memory_lines = [
@@ -210,28 +222,30 @@ def get_user_graph_memory(user_id: str) -> str:
         return "\n".join(memory_lines) if memory_lines else "目前圖庫中尚無該使用者的偏好或地雷紀錄。"
     except Exception as e:
         print(f"[TIMING][9001 /api/match] Neo4j user memory failed after {time.perf_counter() - step_start:.3f}s")
-        print(f"Neo4j user memory failed: {e}")
+        if strict:
+            raise MatchEvaluationError("matchmaker_graph_unavailable") from None
+        print(f"Neo4j user memory failed: {type(e).__name__}")
         return "無法讀取圖譜記憶。"
 
 
-def get_global_rules() -> str:
+def get_global_rules(*, strict: bool = False) -> str:
     """Read top global learned rules from Neo4j."""
     step_start = time.perf_counter()
     uri = os.getenv("NEO4J_URI")
     auth = (os.getenv("NEO4J_USERNAME"), os.getenv("NEO4J_PASSWORD"))
     database = os.getenv("NEO4J_DATABASE", "neo4j")
     try:
-        with GraphDatabase.driver(uri, auth=auth) as driver:
+        with GraphDatabase.driver(uri, auth=auth, connection_timeout=5, connection_acquisition_timeout=5, max_transaction_retry_time=0) as driver:
             driver.verify_connectivity()
             print("✅ [Neo4j 全域法則] 連線驗證成功")
             with driver.session(database=database) as session:
                 result = session.run(
-                    """
+                    Query("""
                     MATCH (a:Agent {name: "System"})-[r:LEARNED_RULE]->(rule:GlobalRule)
                     RETURN rule.content AS content, rule.category AS category, r.weight AS weight
                     ORDER BY r.weight DESC
                     LIMIT $limit
-                    """,
+                    """, timeout=5),
                     limit=GLOBAL_RULE_LIMIT,
                 )
                 rules = [
@@ -243,11 +257,24 @@ def get_global_rules() -> str:
         return "\n".join(rules)
     except Exception as e:
         print(f"[TIMING][9001 /api/match] Neo4j global rules failed after {time.perf_counter() - step_start:.3f}s")
-        print(f"Neo4j global rules failed: {e}")
+        if strict:
+            raise MatchEvaluationError("matchmaker_graph_unavailable") from None
+        print(f"Neo4j global rules failed: {type(e).__name__}")
         return ""
 
 @app.post("/api/match")
 async def match_endpoint(req: MatchRequest):
+    try:
+        async with asyncio.timeout(MATCH_REQUEST_TIMEOUT_SECONDS):
+            return await _evaluate_match_request(req)
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail={"code": "matchmaker_timeout"}) from None
+    except MatchEvaluationError as exc:
+        status = 504 if exc.code in {"matchmaker_timeout", "matchmaker_graph_timeout"} else 502
+        raise HTTPException(status_code=status, detail={"code": exc.code}) from None
+
+
+async def _evaluate_match_request(req: MatchRequest):
     total_start = time.perf_counter()
     print(
         f"[TIMING][9001 /api/match] start target={req.target_user.get('user_id')} "
@@ -261,23 +288,24 @@ async def match_endpoint(req: MatchRequest):
     step_start = time.perf_counter()
     target_user_id = req.target_user.get("user_id")
     candidate_ids = [candidate.get("user_id") for candidate in req.candidates]
-    max_workers = max(2, min(8, len(candidate_ids) + 2))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        target_future = executor.submit(get_user_graph_memory, target_user_id)
-        global_future = executor.submit(get_global_rules)
-        candidate_futures = {
-            executor.submit(get_user_graph_memory, candidate_id): candidate_id
-            for candidate_id in candidate_ids
-        }
-
-        graph_memory = target_future.result()
-        global_heuristics = global_future.result()
-        candidate_memory_by_id = {}
-        for future in as_completed(candidate_futures):
-            candidate_memory_by_id[candidate_futures[future]] = future.result()
+    loop = asyncio.get_running_loop()
+    futures = [
+        loop.run_in_executor(_MATCH_GRAPH_POOL, partial(get_user_graph_memory, target_user_id, strict=True)),
+        loop.run_in_executor(_MATCH_GRAPH_POOL, partial(get_global_rules, strict=True)),
+        *[loop.run_in_executor(_MATCH_GRAPH_POOL, partial(get_user_graph_memory, candidate_id, strict=True)) for candidate_id in candidate_ids],
+    ]
+    try:
+        values = await asyncio.wait_for(asyncio.gather(*futures), timeout=MATCH_GRAPH_TIMEOUT_SECONDS)
+    except TimeoutError:
+        raise MatchEvaluationError("matchmaker_graph_timeout") from None
+    finally:
+        for future in futures:
+            if not future.done():
+                future.cancel()
+    graph_memory, global_heuristics = values[:2]
+    candidate_memory_by_id = dict(zip(candidate_ids, values[2:]))
 
     print(f"[TIMING][9001 /api/match] parallel Neo4j reads wrapper: {time.perf_counter() - step_start:.3f}s")
-    print(f"📂 提煉出的記憶：\n{graph_memory}")
 
     enriched_candidates = []
     for candidate in req.candidates:
@@ -285,12 +313,10 @@ async def match_endpoint(req: MatchRequest):
         enriched["graph_memory"] = candidate_memory_by_id.get(candidate.get("user_id"), "")
         enriched_candidates.append(enriched)
 
-    if global_heuristics:
-        print(f"🌐 全域法則：\n{global_heuristics}")
     
     # 3. Agent decision with target graph memory + candidate graph memories + global rules.
     step_start = time.perf_counter()
-    raw_response = agent.match(
+    raw_response = await agent.match_async(
         req.target_user, enriched_candidates, graph_memory,
         global_heuristics, req.target_deep_profile
     )
@@ -338,10 +364,9 @@ async def match_endpoint(req: MatchRequest):
         
     except json.JSONDecodeError:
         print("⚠️ 媒婆沒有照格式輸出 JSON，啟動防呆機制！")
-        print(f"原始回覆: {raw_response}")
         
         print(f"[TIMING][9001 /api/match] parse failed; no fallback candidate is created. total: {time.perf_counter() - total_start:.3f}s")
-        raise HTTPException(status_code=502, detail="Invalid matchmaker response")
+        raise HTTPException(status_code=502, detail={"code": "matchmaker_invalid_response"}) from None
 
 
 
@@ -902,88 +927,62 @@ agent_memory_db = {}
 
 @app.post("/api/feedback")
 async def receive_feedback(req: FeedbackRequest):
-    print(f"📥 Agent 收到 Feedback: {req.user_id} -> {req.target_id}, action={req.action}")
-    if req.user_id not in agent_memory_db:
-        agent_memory_db[req.user_id] = {"history": [], "agent_reflection": "尚無反思"}
+    """Normalize this explicit selection, then use the existing Concept writer.
 
-    agent_memory_db[req.user_id]["history"].append({
-        "action": req.action,
-        "target_traits": req.target_traits,
-        "explicit_reasons": req.explicit_reasons,
-    })
-
-    history_text = ""
-    for item in agent_memory_db[req.user_id]["history"]:
-        reasons_str = ""
-        if item.get("explicit_reasons"):
-            reasons_str = f" | explicit_reasons: {', '.join(item['explicit_reasons'])}"
-        history_text += f"- action: {item['action']} | target_traits: {item['target_traits']}{reasons_str}\n"
-
+    A bare decision is not preference consent. Neither unselected target traits
+    nor a previous request's in-memory history may supply additional dislikes.
+    """
+    if req.action not in {"accept", "decline"}:
+        raise HTTPException(status_code=400, detail={"code": "invalid_feedback_action"})
+    if not any(reason.strip() for reason in req.explicit_reasons):
+        return {"status": "skipped", "memories": [], "message": "No reasons selected"}
+    history_text = json.dumps({
+        "action": req.action, "explicit_reasons": req.explicit_reasons,
+    }, ensure_ascii=False)
     try:
         raw_reflection_json = agent.generate_graph_reflection(
-            history_text, explicit_reasons=req.explicit_reasons or []
+            history_text, explicit_reasons=req.explicit_reasons,
         )
-        print(f"🧠 Graph reflection raw JSON:\n{raw_reflection_json}")
         reflection_data = parse_json_object_from_text(raw_reflection_json)
+        relationships = reflection_data.get("relationships")
+        if not isinstance(relationships, list):
+            raise ValueError("Missing feedback relationships")
+        expected_relation = "DISLIKES_TRAIT" if req.action == "decline" else "LIKES_TRAIT"
+        memories = []
+        for rel in relationships:
+            if not isinstance(rel, dict) or rel.get("relation_type") != expected_relation:
+                raise ValueError("Invalid feedback relationship")
+            label = rel.get("trait")
+            if not isinstance(label, str) or not label.strip():
+                raise ValueError("Missing feedback concept")
+            label = label.strip()
+            memories.append({
+                "key": _concept_key(label), "label": label,
+                "stance": "avoid" if req.action == "decline" else "like",
+                "confidence": 1.0,
+            })
+    except Exception as exc:
+        print(f"[FEEDBACK] normalization failed: {type(exc).__name__}")
+        raise HTTPException(status_code=502, detail={"code": "feedback_normalization_failed"}) from None
 
-        uri = os.getenv("NEO4J_URI")
-        auth = (os.getenv("NEO4J_USERNAME"), os.getenv("NEO4J_PASSWORD"))
-        database = os.getenv("NEO4J_DATABASE", "neo4j")
-        relationships = reflection_data.get("relationships", []) or []
-        if not relationships:
-            print("⚠️ Graph reflection produced no relationships.")
-
-        with GraphDatabase.driver(uri, auth=auth) as driver:
-            driver.verify_connectivity()
-            print("✅ [Neo4j Feedback 寫入] 連線驗證成功")
-            with driver.session(database=database) as session:
-                for rel in relationships:
-                    trait_value = str(rel.get("trait") or "").strip()
-                    rel_type_value = rel.get("relation_type")
-                    if not trait_value or not rel_type_value:
-                        print(f"⚠️ Skip invalid graph relationship: {rel}")
-                        continue
-                    key_value = "concept_" + hashlib.sha256(trait_value.lower().encode("utf-8")).hexdigest()[:16]
-                    if rel_type_value == "DISLIKES_TRAIT":
-                        session.run(
-                            """
-                            MERGE (u:User {id: $user_id})
-                            MERGE (c:Concept {key: $key})
-                            ON CREATE SET c.label = $trait, c.kind = 'preference'
-                            WITH u, c
-                            OPTIONAL MATCH (u)-[old:PREFERS]->(c)
-                            DELETE old
-                            MERGE (u)-[:AVOIDS]->(c)
-                            """,
-                            user_id=req.user_id,
-                            key=key_value,
-                            trait=trait_value,
-                        )
-                    else:
-                        session.run(
-                            """
-                            MERGE (u:User {id: $user_id})
-                            MERGE (c:Concept {key: $key})
-                            ON CREATE SET c.label = $trait, c.kind = 'preference'
-                            WITH u, c
-                            OPTIONAL MATCH (u)-[old:AVOIDS]->(c)
-                            DELETE old
-                            MERGE (u)-[:PREFERS]->(c)
-                            """,
-                            user_id=req.user_id,
-                            key=key_value,
-                            trait=trait_value,
-                        )
-                    print(f"✅ Neo4j saved: {req.user_id} -[{rel_type_value}]-> Concept({trait_value})")
-
-        agent_memory_db[req.user_id]["history"] = []
-    except json.JSONDecodeError as json_err:
-        print(f"❌ Graph reflection JSON parse failed: {json_err}")
-        print(f"raw={locals().get('raw_reflection_json', '')}")
-    except Exception as e:
-        print(f"❌ Feedback graph write failed: {e}")
-
-    return {"status": "success", "message": "Agent feedback processed"}
+    # The canonical memory writer owns validation and PREFERS/AVOIDS writes.
+    # It accepts three proposals per call; batch without dropping a fourth
+    # (or later) user-selected reason.
+    saved = []
+    for offset in range(0, len(memories), 3):
+        outcome = await apply_memory(MemoryApplyRequest(
+            user_id=req.user_id, memories=memories[offset:offset + 3],
+            surface="match_feedback",
+        ))
+        if outcome.get("status") != "success":
+            raise HTTPException(status_code=503, detail={"code": "feedback_graph_unavailable"})
+        saved.extend(outcome.get("memories") or [])
+    # Social persists these already-normalized facts with match/source evidence.
+    return {
+        "status": "success" if saved else "no_preferences",
+        "memories": saved,
+        "message": "Agent feedback processed",
+    }
 
 
 class GlobalReflectionRequest(BaseModel):
@@ -1206,58 +1205,73 @@ async def graph_health_endpoint():
 
 @app.post("/api/memory/apply")
 async def apply_memory(req: MemoryApplyRequest):
-    """Write trusted, already-validated profile-memory proposals without model extraction."""
+    """Atomically write validated proposals and their idempotency marker."""
     allowed_stances = {"like", "dislike", "require", "avoid"}
     protected = re.compile(r"(?:黑人|白人|黃種人|種族|族裔|宗教|信仰|穆斯林|基督教|同性戀|性傾向|性別認同|跨性別|殘障|身心障礙|疾病|政治立場|國籍|公民身分)", re.I)
     key_re = re.compile(r"^[a-z][a-z0-9_]{1,50}$")
     now, clean = time.time(), []
+    for item in req.memories[:3]:
+        key = str(item.get("key", "")).strip().lower().replace(" ", "_")
+        label = re.sub(
+            r"^(?:喜歡|討厭|不喜歡|偏好|近期情境)\s*[:：,，]?\s*", "",
+            str(item.get("label") or item.get("label_zh_tw") or "").strip(),
+        )[:40]
+        stance = str(item.get("stance", ""))
+        try:
+            confidence = float(item.get("confidence", 0))
+        except (TypeError, ValueError):
+            continue
+        if (
+            not key_re.match(key) or not label or protected.search(label)
+            or stance not in allowed_stances or confidence < 0.75
+        ):
+            continue
+        clean.append({
+            "key": key, "label": label, "stance": stance,
+            "category": "preference", "confidence": confidence,
+            "last_seen_at": now,
+        })
+    if not clean:
+        return {"memories": [], "status": "skipped"}
     URI, AUTH, DATABASE = _neo4j_config()
     try:
         with GraphDatabase.driver(URI, auth=AUTH) as driver:
             with driver.session(database=DATABASE) as session:
                 session.run("CREATE CONSTRAINT memory_observation_message_id IF NOT EXISTS FOR (o:MemoryObservation) REQUIRE o.message_id IS UNIQUE").consume()
-                if req.message_id:
-                    observed = session.run("""
-                        MERGE (o:MemoryObservation {message_id:$message_id})
-                        ON CREATE SET o.owner_user_id=$user_id,o.created_at=$now
-                        RETURN o.created_at=$now AS created
-                    """, message_id=req.message_id, user_id=req.user_id, now=now).single()
-                    if not observed or not observed["created"]:
-                        return {"memories": [], "status": "duplicate"}
-                for item in req.memories[:3]:
-                    key = str(item.get("key", "")).strip().lower().replace(" ", "_")
-                    label = re.sub(r"^(?:喜歡|討厭|不喜歡|偏好|近期情境)\s*[:：,，]?\s*", "", str(item.get("label") or item.get("label_zh_tw") or "").strip())[:40]
-                    stance = str(item.get("stance", ""))
-                    confidence = float(item.get("confidence", 0))
-                    if not key_re.match(key) or not label or protected.search(label) or stance not in allowed_stances or confidence < 0.75:
-                        continue
-                    if stance in ["want", "currently_wants"]:
-                        session.run("""
-                            MATCH (u:User {id:$user_id})-[old_w:CURRENTLY_WANTS]->()
-                            DELETE old_w
-                        """, user_id=req.user_id).consume()
-                    session.run("""
+
+                def write_memory(tx):
+                    if req.message_id:
+                        observed = tx.run("""
+                            MERGE (o:MemoryObservation {message_id:$message_id})
+                            ON CREATE SET o.owner_user_id=$user_id,o.created_at=$now
+                            RETURN o.created_at=$now AS created
+                        """, message_id=req.message_id, user_id=req.user_id, now=now).single()
+                        if not observed or not observed["created"]:
+                            return False
+                    tx.run("""
+                        UNWIND $memories AS item
                         MERGE (u:User {id:$user_id})
-                        MERGE (c:Concept {key:$key})
-                        ON CREATE SET c.label=$label, c.kind='preference'
-                        ON MATCH SET c.label=coalesce(c.label,$label)
-                        WITH u, c
+                        MERGE (c:Concept {key:item.key})
+                        ON CREATE SET c.label=item.label, c.kind='preference'
+                        ON MATCH SET c.label=coalesce(c.label,item.label)
+                        WITH u,c,item
                         OPTIONAL MATCH (u)-[old:PREFERS|AVOIDS|CURRENTLY_WANTS]->(c)
                         DELETE old
-                        WITH u, c
-                        FOREACH (_ IN CASE WHEN $stance IN ['dislike','avoid'] THEN [1] ELSE [] END |
+                        WITH u,c,item
+                        FOREACH (_ IN CASE WHEN item.stance IN ['dislike','avoid'] THEN [1] ELSE [] END |
                             MERGE (u)-[:AVOIDS]->(c)
                         )
-                        FOREACH (_ IN CASE WHEN $stance IN ['like','require','prefer'] THEN [1] ELSE [] END |
+                        FOREACH (_ IN CASE WHEN item.stance IN ['like','require'] THEN [1] ELSE [] END |
                             MERGE (u)-[:PREFERS]->(c)
                         )
-                        FOREACH (_ IN CASE WHEN $stance IN ['want','currently_wants'] THEN [1] ELSE [] END |
-                            MERGE (u)-[w:CURRENTLY_WANTS]->(c)
-                            SET w.expires_at = $now + 30 * 86400
-                        )
-                    """, user_id=req.user_id, key=key, label=label, stance=stance, now=now).consume()
-                    clean.append({"key":key,"label":label,"stance":stance,"category":"preference","confidence":confidence,"last_seen_at":now})
-        return {"memories": clean, "status": "success"}
+                    """, user_id=req.user_id, memories=clean).consume()
+                    return True
+
+                created = session.execute_write(write_memory)
+        return {
+            "memories": clean,
+            "status": "success" if created else "duplicate",
+        }
     except Exception as exc:
         print(f"[MEMORY][9001 apply] graph_write_failed user={req.user_id} error={exc}")
         return {"memories": [], "status": "error", "error_code": type(exc).__name__}
@@ -1282,31 +1296,120 @@ async def list_memories(user_id: str, limit: int = 12):
                            coalesce(r.last_seen_at, 0) AS last_seen_at
                     LIMIT $limit
                 """, user_id=user_id, limit=max(1,min(limit,30)))
-                return {"memories": [dict(row) for row in rows]}
+                return {"status": "success", "memories": [dict(row) for row in rows]}
     except Exception as exc:
         print(f"[MEMORY][9001] graph_read_failed user={user_id} error={exc}")
-        return {"memories": []}
+        return {"status": "error", "error_code": "graph_read_failed", "memories": []}
 
 @app.post("/api/memory/action")
 async def memory_action(req: MemoryActionRequest):
-    if req.action not in {"disable","restore","correct"}:
-        return {"status":"error","message":"unsupported action"}
+    if req.action not in {"disable", "restore", "correct"}:
+        return {"status": "error", "error_code": "unsupported_action"}
+    user_id = re.sub(r"\s+", "", str(req.user_id or ""))[:80]
+    key = str(req.key or "").strip().lower()[:100]
+    if not user_id or not key:
+        return {"status": "error", "error_code": "invalid_memory_reference"}
+    now = time.time()
     URI, AUTH, DATABASE = _neo4j_config()
-    with GraphDatabase.driver(URI, auth=AUTH) as driver:
-        with driver.session(database=DATABASE) as session:
-            if req.action == "disable":
-                session.run("""
-                    MATCH (u:User {id:$user_id})-[r:PREFERS|AVOIDS|CURRENTLY_WANTS]->(c:Concept {key:$key})
-                    DELETE r
-                """, user_id=req.user_id, key=req.key).consume()
-                return {"status":"success"}
-            elif req.action == "restore":
-                session.run("""
-                    MATCH (u:User {id:$user_id}), (c:Concept {key:$key})
-                    MERGE (u)-[:PREFERS]->(c)
-                """, user_id=req.user_id, key=req.key).consume()
-                return {"status":"success"}
-            return {"status":"success"}
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH) as driver:
+            with driver.session(database=DATABASE) as session:
+                if req.action == "disable":
+                    def disable(tx):
+                        row = tx.run("""
+                            MATCH (u:User {id:$user_id})-[active:PREFERS|AVOIDS|CURRENTLY_WANTS]->
+                                  (concept:Concept {key:$key})
+                            WITH u,concept,active,type(active) AS original_relation,
+                                 active.expires_at AS original_expires_at
+                            MERGE (u)-[disabled:MEMORY_DISABLED]->(concept)
+                            SET disabled.original_relation=original_relation,
+                                disabled.original_expires_at=original_expires_at,
+                                disabled.disabled_at=$now
+                            DELETE active
+                            RETURN original_relation
+                        """, user_id=user_id, key=key, now=now).single()
+                        return dict(row) if row else None
+                    changed = session.execute_write(disable)
+                    return {"status": "success" if changed else "not_found"}
+
+                if req.action == "restore":
+                    def restore(tx):
+                        row = tx.run("""
+                            MATCH (u:User {id:$user_id})-[disabled:MEMORY_DISABLED]->
+                                  (concept:Concept {key:$key})
+                            WITH u,concept,disabled,
+                                 disabled.original_relation AS original_relation,
+                                 disabled.original_expires_at AS original_expires_at
+                            DELETE disabled
+                            FOREACH (_ IN CASE WHEN original_relation='PREFERS' THEN [1] ELSE [] END |
+                                MERGE (u)-[:PREFERS]->(concept))
+                            FOREACH (_ IN CASE WHEN original_relation='AVOIDS' THEN [1] ELSE [] END |
+                                MERGE (u)-[:AVOIDS]->(concept))
+                            FOREACH (_ IN CASE WHEN original_relation='CURRENTLY_WANTS'
+                                                   AND coalesce(original_expires_at,0)>$now
+                                              THEN [1] ELSE [] END |
+                                MERGE (u)-[intent:CURRENTLY_WANTS]->(concept)
+                                SET intent.expires_at=original_expires_at)
+                            RETURN original_relation,original_expires_at
+                        """, user_id=user_id, key=key, now=now).single()
+                        return dict(row) if row else None
+                    restored = session.execute_write(restore)
+                    if not restored:
+                        return {"status": "not_found"}
+                    if (
+                        restored.get("original_relation") == "CURRENTLY_WANTS"
+                        and float(restored.get("original_expires_at") or 0) <= now
+                    ):
+                        return {"status": "expired"}
+                    return {"status": "success"}
+
+                label = re.sub(r"\s+", " ", str(req.value or "").strip())[:40]
+                protected = re.compile(
+                    r"(?:黑人|白人|黃種人|種族|族裔|宗教|信仰|穆斯林|基督教|同性戀|性傾向|性別認同|跨性別|殘障|身心障礙|疾病|政治立場|國籍|公民身分)",
+                    re.I,
+                )
+                if not label or protected.search(label):
+                    return {"status": "error", "error_code": "invalid_correction"}
+                corrected_key = "owner_correction_" + hashlib.sha256(
+                    label.casefold().encode("utf-8")
+                ).hexdigest()[:24]
+
+                def correct(tx):
+                    row = tx.run("""
+                        MATCH (u:User {id:$user_id})-[existing:PREFERS|AVOIDS|CURRENTLY_WANTS|MEMORY_DISABLED]->
+                              (old:Concept {key:$key})
+                        WITH u,old,existing,type(existing) AS relation,
+                             existing.expires_at AS expires_at,
+                             existing.original_relation AS original_relation,
+                             existing.original_expires_at AS original_expires_at
+                        MERGE (corrected:Concept {key:$corrected_key})
+                        SET corrected.label=$label,
+                            corrected.kind=coalesce(old.kind,'preference')
+                        FOREACH (_ IN CASE WHEN relation='PREFERS' THEN [1] ELSE [] END |
+                            MERGE (u)-[:PREFERS]->(corrected))
+                        FOREACH (_ IN CASE WHEN relation='AVOIDS' THEN [1] ELSE [] END |
+                            MERGE (u)-[:AVOIDS]->(corrected))
+                        FOREACH (_ IN CASE WHEN relation='CURRENTLY_WANTS' THEN [1] ELSE [] END |
+                            MERGE (u)-[intent:CURRENTLY_WANTS]->(corrected)
+                            SET intent.expires_at=expires_at)
+                        FOREACH (_ IN CASE WHEN relation='MEMORY_DISABLED' THEN [1] ELSE [] END |
+                            MERGE (u)-[disabled:MEMORY_DISABLED]->(corrected)
+                            SET disabled.original_relation=original_relation,
+                                disabled.original_expires_at=original_expires_at,
+                                disabled.disabled_at=$now)
+                        DELETE existing
+                        RETURN relation
+                    """, user_id=user_id, key=key, corrected_key=corrected_key,
+                         label=label, now=now).single()
+                    return dict(row) if row else None
+                corrected = session.execute_write(correct)
+                return {
+                    "status": "success" if corrected else "not_found",
+                    "key": corrected_key if corrected else key,
+                }
+    except Exception as exc:
+        print(f"[MEMORY][9001 action] failed error={type(exc).__name__}")
+        return {"status": "error", "error_code": "memory_action_failed"}
 @app.post("/api/chat_triples")
 async def receive_chat_triples(req: ChatTripleRequest):
     allowed = {
@@ -1398,4 +1501,3 @@ if __name__ == "__main__":
     import uvicorn
     # 霈?憍???9001 皜臬
     uvicorn.run(app, host="127.0.0.1", port=9001)
-

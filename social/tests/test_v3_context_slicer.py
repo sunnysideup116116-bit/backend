@@ -49,6 +49,22 @@ class V3ContextSlicerTests(unittest.TestCase):
         self.assertNotIn("user_location", s.payload)
         self.assertNotIn("recent_context", s.payload)
 
+    def test_match_slice_carries_bounded_search_and_allowed_actions(self):
+        self.turn.match_search = {
+            "status": "running", "step": "vector_search", "cancellable": True,
+        }
+        self.turn.active_proposal = {
+            "status": "pending", "counterparty": "對方",
+            "user_can_decide": True, "allowed_actions": ["cancelled"],
+            "proposal_revision": 9,
+        }
+
+        sliced = slice_for_agent("match", self.turn, prior_observations=[])
+
+        self.assertEqual(sliced.payload["match_search"]["status"], "running")
+        self.assertEqual(sliced.payload["active_proposal"]["allowed_actions"], ["cancelled"])
+        self.assertNotIn("proposal_revision", sliced.payload["active_proposal"])
+
     def test_match_slice_carries_bounded_continuity_and_event_invitation(self):
         self.turn.conversation_continuity = ConversationSummaryV1(
             active_topics=["週末想逛市集"], owner_goals=["找人一起去"],

@@ -716,6 +716,37 @@ def _observation_fallback(payload: dict[str, Any]) -> str:
         if not isinstance(obs, dict):
             continue
         result = obs.get("result")
+        tool = str(obs.get("tool") or "")
+        if tool == "match.get_status" and isinstance(result, dict):
+            state = str(result.get("state") or "idle")
+            counterparty = str(result.get("counterparty") or "對方")[:30]
+            replies = {
+                "idle": "目前沒有進行中的配對或搜尋。",
+                "searching": "目前正在搜尋合適人選；找到結果後我會回來告訴你。",
+                "waiting_user": "目前有一張配對提案正等你決定。",
+                "waiting_other": "你已對目前提案表示有興趣，正在等對方回覆。",
+                "incoming_decision": "目前有一張對方送來的配對提案，正等你接受或婉拒。",
+                "accepted": f"你和{counterparty}已互相接受，聊天室已經開啟。",
+                "declined": "最近一張配對提案已婉拒。",
+                "expired": "最近一張配對提案已失效。",
+                "cancelled": "最近一次配對搜尋已取消。",
+                "no_candidates": "這輪搜尋已完成，但目前沒有合適的新對象。",
+                "failed": "這輪配對搜尋沒有完成；可以稍後再試一次。",
+            }
+            if state in replies:
+                if re.fullmatch(r"[\s真的確定是對嗎嘛？?！!。]+", str(payload.get("message") or "")):
+                    return "我剛重新確認過，" + replies[state].replace("這輪", "上一次", 1)
+                return replies[state]
+        if tool == "match.get_counterparty_summary" and isinstance(result, dict):
+            if not result.get("found"):
+                return "目前沒有一位可提供公開摘要的配對對象。"
+            name = str(result.get("display_name") or "對方")[:30]
+            summary = str(result.get("safe_summary") or "").strip()[:240]
+            if summary:
+                return f"目前這位對象是{name}。{summary}"
+            return f"目前這位對象是{name}，但沒有更多可公開的摘要。"
+        if tool.startswith("match.") and obs.get("status") == "failed":
+            return "這次配對操作沒有完成；你可以先查看目前狀態，再決定是否重試。"
         suggestions = obs.get("calendar_candidate_suggestions") if isinstance(obs, dict) else None
         if isinstance(suggestions, list):
             labels: list[str] = []
@@ -1121,6 +1152,11 @@ def _server_owned_reply_from_result(result: dict[str, Any]) -> str | None:
     typed mutation clarifications. A clarification must never be paraphrased
     into a new confirmation offer.
     """
+    match_result = result.get("match_runtime")
+    if isinstance(match_result, dict) and match_result.get("code"):
+        if match_result.get("code") == "verified_status" and result.get("verified_match_read") is True:
+            return None
+        return str(match_result.get("reply") or "")[:900] or None
     verification = result.get("calendar_mutation_verification")
     if isinstance(verification, dict):
         mutation_verbs = {
@@ -1197,6 +1233,8 @@ def _partition_server_owned_replies(
             if reply:
                 locked.append(reply)
                 continue
+            if result.get("verified_match_read") is True:
+                observation = {**observation, "result": {k: v for k, v in result.items() if k != "match_runtime"}}
         if observation.get("tool") is None and isinstance(result, list):
             unknown_items: list[Any] = []
             for item in result:
@@ -1222,6 +1260,34 @@ def _verified_observation_reply(payload: dict[str, Any]) -> str | None:
     """
     locked, _remaining = _partition_server_owned_replies(payload)
     return "、".join(locked) if locked else None
+
+
+def _match_status_observations(payload: dict[str, Any]) -> list[dict]:
+    return [item["result"] for item in payload.get("observations") or []
+            if isinstance(item, dict) and item.get("tool") == "match.get_status"
+            and item.get("status") == "ok" and isinstance(item.get("result"), dict)]
+
+
+def _match_reply_has_unsupported_action(reply: str, payload: dict[str, Any]) -> bool:
+    facts = _match_status_observations(payload)
+    if not facts:
+        return False
+    states = {str(fact.get("state") or "") for fact in facts}
+    # Remove explicit negated state claims before checking positive assertions.
+    text = re.sub(r"(?:尚未|還沒|沒有|並未|不會)(?:幫你|替你|正在|開始)?(?:搜尋|找人|配對|撤回|取消|接受|送出|建立)[^，,。；;！？!?]*", "", reply)
+    if re.search(r"(?:我已|我剛|幫你|替你).{0,8}(?:開始|撤回|取消|接受|送出|建立|婉拒)", text):
+        return True
+    claims = [
+        (r"(?:已|已經).{0,4}(?:撤回|取消)", {"cancelled"}),
+        (r"(?:已|已經).{0,4}(?:婉拒|拒絕)", {"declined"}),
+        (r"(?:已|已經).{0,4}接受", {"accepted", "waiting_other", "incoming_decision"}),
+        (r"(?:已|已經).{0,4}(?:建立|送出).{0,5}(?:提案|確認|邀請)", set()),
+        (r"(?:正在|已開始|已經開始).{0,5}(?:搜尋|找人|配對)", {"searching"}),
+        (r"配對成功|互相接受|雙方.{0,4}(?:接受|同意)|聊天室.{0,4}(?:開好|開啟)", {"accepted"}),
+        (r"(?:等|等待)對方(?:回覆|回應)", {"waiting_other"}),
+        (r"(?:目前有|有一張|有張).{0,5}(?:待決|配對)?提案", {"waiting_user", "waiting_other", "incoming_decision"}),
+    ]
+    return any(re.search(pattern, text) and not states & allowed for pattern, allowed in claims)
 
 
 def synthesize(
@@ -1354,11 +1420,18 @@ def synthesize(
             presentation_mode,
             place_cards_enabled=cards_enabled,
         )
+        if _match_status_observations(payload):
+            system_prompt += (
+                "\n配對狀態是本回合唯讀查證結果，不是操作成功。自然回應目前的追問，不要原句重播；"
+                "『是嗎／真的嗎』是在核實，不代表同意搜尋。清楚區分上次搜尋結果與現在狀態，"
+                "不得宣稱本回合已開始、取消、撤回、接受或建立確認按鈕。沒有候選評估依據時，"
+                "不可猜測配不到的原因或虛構對象；不要把曾經沒有合適人選說成永遠配不到。"
+            )
         metrics.prompt_raw = f"SYSTEM:\n{system_prompt}\nUSER:\n{prompt}"
         metrics.llm_call_count += 1
         result = generate_chat_completion_with_tools(
             prompt, tools, temperature=0.65, system_prompt=system_prompt,
-            on_token=on_token if not tools else None,
+            on_token=on_token if not tools and not _match_status_observations(payload) else None,
         )
         if not isinstance(result, ToolCallResult):
             raise RuntimeError("synthesizer_invalid_provider_result")
@@ -1419,6 +1492,9 @@ def synthesize(
             calendar_claims_grounded = not _calendar_reply_has_unsupported_action(
                 "\n".join(composed_fragments), payload,
             )
+            calendar_claims_grounded = calendar_claims_grounded and not _match_reply_has_unsupported_action(
+                "\n".join(composed_fragments), payload,
+            )
             if web_claims_grounded and calendar_claims_grounded:
                 metrics.presented_candidate_refs = presented_candidate_refs
                 metrics.reply_source = "llm"
@@ -1460,6 +1536,8 @@ def synthesize(
             elif web_only_mode and not _web_reply_has_grounded_links(reply, web_research):
                 metrics.fallback_reason = "unsupported_claim"
             elif _calendar_reply_has_unsupported_action(reply, payload):
+                metrics.fallback_reason = "unsupported_claim"
+            elif _match_reply_has_unsupported_action(reply, payload):
                 metrics.fallback_reason = "unsupported_claim"
             elif _PERSISTENT_PLACE_REF_RE.search(reply):
                 metrics.fallback_reason = "internal_meta_reply"

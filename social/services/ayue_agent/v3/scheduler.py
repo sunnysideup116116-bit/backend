@@ -63,6 +63,7 @@ from .confirmation import (
     INTERACTION_LEGACY,
     SURFACE_PUBLIC,
     ConfirmationManager,
+    match_choice_cancel_reply,
     sync_choice_message_projection,
 )
 from . import calendar_runtime
@@ -102,6 +103,7 @@ from .debug_trace import (
     begin_run as begin_debug_run,
     finish_run as finish_debug_run,
 )
+from . import match_runtime
 
 
 ProgressCallback = Callable[[dict[str, Any]], Any]
@@ -159,6 +161,37 @@ def _direct_chat_block_reason(
     if plan.opportunity is not None and plan.opportunity.signal != "none":
         return "opportunity"
     return None
+
+
+def _planner_failure_reply(turn: Any) -> str:
+    """Return a state-aware clarification without inferring write authority."""
+    active = getattr(turn, "active_proposal", None) or {}
+    allowed = set(active.get("allowed_actions") or [])
+    if "cancelled" in allowed:
+        return "目前這張提案正在等對方回覆。你是想查看狀態，還是撤回這次配對？"
+    if allowed:
+        return "目前有一張待決定的配對提案。你可以直接告訴我要接受、婉拒，或只查看狀態。"
+    search = getattr(turn, "match_search", None) or {}
+    if search.get("cancellable"):
+        return "目前仍在搜尋人選。你是想查看進度，還是取消這次搜尋？"
+    if re.search(r"配對|媒合|牽線|找.{0,3}人|人選", str(getattr(turn, "message", "") or "")):
+        return "你是想了解配對方式，還是要我現在開始找人？直接選一個就好。"
+    return PUBLIC_PLANNER_INVALID_REPLY
+
+
+def _privacy_safe_planner_attempts(metrics: PlannerMetrics) -> list[dict[str, Any]]:
+    """Strip failed Planner attempts down to non-content schema diagnostics."""
+    return [
+        {
+            "attempt": int(item.get("attempt", 0) or 0),
+            "status": str(item.get("status") or "")[:40],
+            "failure_code": str(item.get("failure_code") or "")[:80],
+            "validation_fields": list(item.get("validation_fields") or [])[:8],
+            "repair_codes": list(item.get("repair_codes") or [])[:4],
+        }
+        for item in (metrics.attempts or [])[:2]
+        if isinstance(item, dict)
+    ]
 
 
 def _iter_runtime_registrations() -> list[RuntimeRegistration]:
@@ -322,7 +355,7 @@ _SUB_AGENT_RUNNERS = {
     ),
     "places": RuntimeRegistration(runner=proposal_runner(run_places)),
     "web": RuntimeRegistration(runner=web_runtime.run),
-    "match": RuntimeRegistration(runner=proposal_runner(run_match)),
+    "match": RuntimeRegistration(runner=match_runtime.run),
     "relationship": RuntimeRegistration(runner=relationship_runtime.run),
     "profile": RuntimeRegistration(runner=proposal_runner(run_profile)),
     "product_info": RuntimeRegistration(
@@ -719,6 +752,15 @@ def _run_sub_task(
             input_payload=context_slice.payload, prior_observations=prior_observations,
         )
 
+    def _create_runtime_confirmation(**kwargs: Any) -> str:
+        with guard_lock:
+            if step_counts.get("__writes", 0) >= 1:
+                raise ValueError("public confirmation budget exhausted")
+            step_counts["__writes"] = 1
+        return ConfirmationManager(_CONFIRMATIONS).create_confirmation(
+            room_id=turn_ctx.room_id, surface=SURFACE_PUBLIC, **kwargs,
+        )
+
     guarded_executor = GuardedReadExecutor(
         task_id=task.id,
         agent_name=task.agent,
@@ -735,13 +777,7 @@ def _run_sub_task(
         max_reads=MAX_READS,
         global_read_count=read_budget_state,
         global_max_reads=MAX_TOTAL_READS,
-        create_confirmation=lambda **kwargs: ConfirmationManager(
-            _CONFIRMATIONS
-        ).create_confirmation(
-            room_id=turn_ctx.room_id,
-            surface=SURFACE_PUBLIC,
-            **kwargs,
-        ),
+        create_confirmation=_create_runtime_confirmation,
         print_llm_metrics=_print_llm_metrics,
     )
     guarded_executor.runtime_state["planner_write_intent"] = planner_write_intent
@@ -785,6 +821,13 @@ def _run_sub_task(
         if registration.after_run is not None:
             registration.after_run(task, guarded_executor, runner_result, agent_metrics)
         completed = list(runner_result.completed_results)
+        if task.agent == "match":
+            trace.setdefault("match_results", []).extend({
+                "intent": task.match_intent or "missing",
+                "tool": item.tool_name,
+                "status": item.status.value,
+                "code": item.error_code or (item.observation or {}).get("match_runtime", {}).get("code") or "confirmation_prepared",
+            } for item in completed)
         # Outcome codes are a server-owned control channel.  Only the
         # Calendar availability runtime may populate them; a malformed or
         # future specialist result cannot smuggle a branch signal into the
@@ -829,6 +872,17 @@ def _run_sub_task(
 
     results: list[SubTaskResult] = []
     for index, proposal in enumerate(proposals):
+        if task.agent == "match" and not match_runtime.proposal_allowed(task.match_intent, proposal, allow_event=bool(turn_ctx.active_event_invitation)):
+            trace.setdefault("match_actions", []).append({
+                "intent": task.match_intent or "missing", "action": proposal.tool_name,
+                "outcome": "intent_mismatch",
+            })
+            results.append(SubTaskResult(
+                task_id=task.id, status=SubTaskStatus.FAILED,
+                error_code="match_intent_mismatch",
+                observation={"match_runtime": {"code": "intent_mismatch", "reply": "這次配對操作與你的要求不一致，沒有執行變更。"}},
+            ))
+            continue
         print(f"  [{task.id}#{index}] proposal: tool={proposal.tool_name}")
 
         with guard_lock:
@@ -891,6 +945,15 @@ def _run_sub_task(
                     preview=preview or "",
                     room_id=turn_ctx.room_id,
                     surface=SURFACE_PUBLIC,
+                    interaction_mode=(
+                        INTERACTION_BUBBLE
+                        if proposal.tool_name in {
+                            "match.start_search",
+                            "match.cancel_search",
+                            "match.decide_active_proposal",
+                        }
+                        else None
+                    ),
                 )
                 print(f"  [{task.id}#{index}] result=OK (pending_confirmation for {proposal.tool_name})")
                 results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.OK,
@@ -1147,11 +1210,12 @@ def run_public_agent_turn_v3(
         # deterministic branches both pass through it, so model drift to
         # Simplified Chinese cannot leak to the user.  Opaque URLs/code/JSON
         # fragments are protected by normalize_public_reply.
+        confirmation_run_id = result.agent_run_id or run_id
         button_choice_created = mgr.choice_for_run(
             user_id=ctx.user_id,
             room_id=ctx.room_id,
             surface=SURFACE_PUBLIC,
-            origin_run_id=run_id,
+            origin_run_id=confirmation_run_id,
         )
 
         def _button_copy(text: Any) -> str:
@@ -1190,14 +1254,14 @@ def run_public_agent_turn_v3(
         # layer will persist, after this final normalization boundary.
         mgr.bind_final_preview(
             user_id=ctx.user_id,
-            origin_run_id=run_id,
+            origin_run_id=confirmation_run_id,
             final_content=normalized_reply,
         )
         choice_prompt = mgr.choice_for_run(
             user_id=ctx.user_id,
             room_id=ctx.room_id,
             surface=SURFACE_PUBLIC,
-            origin_run_id=run_id,
+            origin_run_id=confirmation_run_id,
         )
         resolution = result.choice_resolution or continuation_resolution
         if choice_prompt and continuation_resolution:
@@ -1252,6 +1316,24 @@ def run_public_agent_turn_v3(
             choice_id=choice_id,
         )
         if record is None:
+            parent = mgr.record_for_choice(
+                user_id=ctx.user_id, room_id=ctx.room_id, surface=SURFACE_PUBLIC,
+                choice_id=choice_id, require_pending=False,
+            )
+            followup = (
+                match_runtime.offer_restart_continuation(mgr, ctx, turn, parent, run_id)
+                if ctx.choice_action == "confirm" and parent else None
+            )
+            if followup:
+                trace["match_continuations"] = [{"result": "replayed"}]
+                _persist_trace(run_id, ctx, trace)
+                return _finalize_debug(AgentResult(
+                    handled=True, reply=followup["reply"], agent_mode="v3",
+                    agent_run_id=followup.get("origin_run_id") or run_id,
+                    choice_prompt=followup.get("choice"),
+                    choice_resolution=mgr.choice_projection(user_id=ctx.user_id, room_id=ctx.room_id, surface=SURFACE_PUBLIC, choice_id=choice_id),
+                    conversation_intent="confirmation", presentation_class="transaction",
+                ))
             resolution = mgr.choice_projection(
                 user_id=ctx.user_id,
                 room_id=ctx.room_id,
@@ -1304,9 +1386,12 @@ def run_public_agent_turn_v3(
                 return _finalize_debug(result.model_copy(update={
                     "choice_resolution": resolution,
                 }))
+            cancellation_reply = match_choice_cancel_reply(record) or PUBLIC_PENDING_CANCEL_REPLY
+            if action_name.startswith("match.") and (resolution or {}).get("state") != "cancelled":
+                cancellation_reply = "這個操作已由另一個請求處理；請以最新配對狀態為準。"
             return _finalize_debug(AgentResult(
                 handled=True,
-                reply=PUBLIC_PENDING_CANCEL_REPLY,
+                reply=cancellation_reply,
                 presentation_class="transaction",
                 conversation_intent="confirmation_cancelled",
                 agent_run_id=run_id,
@@ -1373,6 +1458,25 @@ def run_public_agent_turn_v3(
                 agent_mode="v3",
                 choice_resolution=resolution,
             ))
+        if action_name.startswith("match."):
+            parent = mgr.record_for_choice(
+                user_id=ctx.user_id, room_id=ctx.room_id, surface=SURFACE_PUBLIC,
+                choice_id=choice_id, require_pending=False,
+            )
+            followup = match_runtime.offer_restart_continuation(mgr, ctx, turn, parent or {}, run_id)
+            reply = "\n".join(str((item.get("data") or {}).get("reply") or "") for item in results).strip()
+            trace.setdefault("match_continuations", []).append({
+                "result": "offered" if followup and followup.get("choice") else "not_offered",
+                "outcomes": [item.get("error_code") or "applied" for item in results],
+            })
+            _persist_trace(run_id, ctx, trace)
+            return _finalize_debug(AgentResult(
+                handled=True, reply=followup["reply"] if followup else reply or "這次配對操作没有完成，沒有開始新的搜尋。",
+                agent_run_id=(followup or {}).get("origin_run_id") or run_id,
+                agent_mode="v3", conversation_intent="confirmation", presentation_class="transaction",
+                choice_resolution=resolution, choice_prompt=(followup or {}).get("choice"),
+                match_state_changed=any(bool(item.get("ok")) for item in results),
+            ))
         synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{
             "task_id": "confirm", "status": "ok", "tool": None,
             "result": results, "error_code": None, "skip_reason": None,
@@ -1401,6 +1505,10 @@ def run_public_agent_turn_v3(
             agent_run_id=run_id,
             agent_mode="v3",
             choice_resolution=resolution,
+            match_state_changed=bool(
+                action_name.startswith("match.")
+                and any(bool(item.get("ok")) for item in results if isinstance(item, dict))
+            ),
             **confirmed_updates,
         ))
 
@@ -1674,6 +1782,12 @@ def run_public_agent_turn_v3(
             messages=synth_metrics.presentation_messages or [reply],
             presentation_class=synth_metrics.presentation_class,
             agent_run_id=run_id, agent_mode="v3",
+            match_state_changed=any(
+                isinstance(item, dict)
+                and str(item.get("tool_name") or "").startswith("match.")
+                and bool(item.get("ok"))
+                for item in results
+            ),
             **confirmed_updates,
         ))
     if choice == "cancel":
@@ -1766,8 +1880,27 @@ def run_public_agent_turn_v3(
         _print_separator("V3 RUN END")
         print(f"  total_tokens={total_input_tokens + total_output_tokens} (in={total_input_tokens} out={total_output_tokens})")
         print(f"  [llm] total_calls={_metric_call_count(planner_metrics)}")
+        trace["planner_failure"] = {
+            "failure_code": planner_metrics.failure_code,
+            "retry_count": planner_metrics.retry_count,
+            "retry_reason": planner_metrics.retry_reason,
+            "attempts": _privacy_safe_planner_attempts(planner_metrics),
+        }
+        trace["result"] = {
+            "handled": True,
+            "conversation_intent": "clarification",
+            "fallback_reason": "planner_invalid",
+        }
+        _persist_trace(run_id, ctx, trace)
+        match_requested = any(
+            isinstance(call, dict) and isinstance(call.get("arguments"), dict)
+            and any(isinstance(task, dict) and task.get("agent") == "match" for task in (call["arguments"].get("tasks") if isinstance(call["arguments"].get("tasks"), list) else []))
+            for call in (planner_metrics.tool_calls_raw or [])
+        )
+        reply = ("這次未能解析配對操作，沒有執行變更。" + match_runtime.safe_status_reply(ctx.user_id)
+                 if match_requested else _planner_failure_reply(turn))
         return _finalize_debug(AgentResult(
-            handled=True, reply=PUBLIC_PLANNER_INVALID_REPLY,
+            handled=True, reply=reply,
             agent_run_id=run_id, agent_mode="v3", fallback_reason="planner_invalid",
         ))
 
@@ -1921,6 +2054,7 @@ def run_public_agent_turn_v3(
             "id": t.id,
             "agent": t.agent,
             "depends_on": t.depends_on,
+            **({"match_intent": t.match_intent} if t.match_intent else {}),
             **({"outcome_contract": t.outcome_contract} if t.outcome_contract else {}),
             **({"run_if": t.run_if.model_dump()} if t.run_if else {}),
         }

@@ -36,6 +36,7 @@ Server/
 │
 ├── social/                    # ★ 主 API（port 8000）
 │   ├── main.py                #   FastAPI app：router 掛載 + startup index 建立 + 背景 worker
+│   ├── event_worker.py        #   Event singleton queue consumer（由 main.py startup 嵌入 daemon thread）
 │   ├── config.py              #   環境變數讀取（Mongo/Ollama/Google/Tavily/Giphy…）
 │   ├── database.py            #   MongoDB 連線（profiles / matches / messages）
 │   ├── models.py              #   Pydantic request models
@@ -122,6 +123,7 @@ Server/
 ├── docs/                      # 文件
 │   ├── AGENTS.md              #   開發規則
 │   ├── AYUE_V3_ARCHITECTURE.md
+│   ├── EVENT_DRIVEN_MATCHMAKER_GUIDE.md # Event queue API、活動卡與接受後導航
 │   ├── MEMORY_CONTEXT_ENGINE_GUIDE.md
 │   ├── architecture/          #   子系統文件（01-project-overview … subagent-*）
 │   ├── api/                   #   JSON schema + 契約文件
@@ -139,7 +141,11 @@ cd Server
 ./start_all.sh          # 依序啟動：guardrail → risk → matchmaker → social（前景，Ctrl+C 停止）
 ```
 
-個別啟動：
+`start_all.sh` 不會另外啟動 Event process。`social/main.py` 在 FastAPI startup 時會自動建立
+Event discovery daemon thread，shutdown 時呼叫對應 stop hook。一般開發與整合測試不得再另開
+`python event_worker.py`，否則會在同一 Mongo singleton queue 上產生多餘的第二個 consumer。
+
+以下是 `start_all.sh` 使用的內部啟動腳本與檢查工具；正式啟動仍統一使用 `start_all.sh`：
 
 ```bash
 ./scripts/run_ayue_guardrail.sh    # :8081（可選，llama.cpp）

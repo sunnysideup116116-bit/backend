@@ -62,6 +62,11 @@ class _DateCoordinationStartArguments(BaseModel):
 
 class _ProposalDecisionArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    decision: Literal["interested", "declined", "cancelled"]
+
+
+class _EventProposalDecisionArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     decision: Literal["interested", "declined"]
 
 
@@ -607,9 +612,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         "好，我開始幫你找合適的人…",
         requires_confirmation=True,
     ),
+    "match.cancel_search": ToolSpec(
+        "match.cancel_search", ToolRisk.WRITE, "cancel_search",
+        "取消本人目前仍在 queued／running 的配對搜尋；只能先建立 confirmation，確認後由 Runtime 執行。",
+        "我先確認是否要停止這次搜尋…",
+        requires_confirmation=True,
+    ),
     "match.decide_active_proposal": ToolSpec(
         "match.decide_active_proposal", ToolRisk.WRITE, "decide_active_proposal",
-        "對唯一可操作提案表達有興趣或婉拒；Runtime 注入 proposal revision。",
+        "對唯一可操作提案表達有興趣、婉拒，或在等待對方時撤回；Runtime 注入 proposal authority。",
         "我正在更新這張牽線提案…",
         requires_confirmation=True,
         planner_arguments_model=_ProposalDecisionArguments,
@@ -622,8 +633,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         "對唯一可操作的活動牽線邀請表達有興趣或婉拒；Runtime 注入 Event proposal revision。",
         "我正在更新這張活動牽線邀請…",
         requires_confirmation=True,
-        planner_arguments_model=_ProposalDecisionArguments,
-        executor_arguments_model=_ProposalDecisionArguments,
+        planner_arguments_model=_EventProposalDecisionArguments,
+        executor_arguments_model=_EventProposalDecisionArguments,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
     "profile.start_assessment": ToolSpec(

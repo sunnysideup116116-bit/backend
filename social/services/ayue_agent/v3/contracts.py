@@ -16,6 +16,10 @@ VALID_AGENTS = frozenset({
 })
 DATE_INVITATION_WRITE_INTENT = "relationship.date_invitation.v1"
 PlannerWriteIntent = Literal["none", "relationship.date_invitation.v1"]
+MatchIntent = Literal[
+    "status", "counterparty", "start_search", "cancel_search",
+    "accept_proposal", "dismiss_proposal", "clarify",
+]
 
 
 class SubTaskStatus(str, Enum):
@@ -84,6 +88,10 @@ class SubTask(BaseModel):
     )
     depends_on: list[str] = Field(default_factory=list, max_length=4)
     task_brief: str = Field(min_length=1, max_length=500)
+    match_intent: MatchIntent | None = Field(
+        default=None,
+        description="Match only. User intent, never state permission.",
+    )
     evidence_policy: Literal["casual_discovery", "strict_verification"] | None = Field(
         default=None,
         description="Web tasks only; omit for Calendar, Places, Match, Relationship and every other agent",

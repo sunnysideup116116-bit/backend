@@ -9,6 +9,7 @@ from bson.objectid import ObjectId
 
 from database import messages_coll, profiles_coll
 from services.profile_skills import PROFILE_RUNS, process_profile_message, profile_skills_mode_for_user
+from services.public_ai_room_scope import is_owned_public_ai_room
 
 
 PROFILE_PROCESS_TTL_SECONDS = 30
@@ -24,8 +25,8 @@ def queue_profile_coverage(
     }
     if mode == "off":
         return {**result, "status": "disabled"}
-    expected_room = "_".join(sorted([str(user_id), "ai_assistant"]))
-    if str(room_id) != expected_room:
+    expected_room = str(room_id)
+    if not is_owned_public_ai_room(user_id, expected_room):
         return {**result, "status": "invalid_scope"}
     safe_ids: list[ObjectId] = []
     for value in list(message_ids or [])[:20]:
