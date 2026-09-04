@@ -1,12 +1,21 @@
 import json
 import time
 import os
+from pathlib import Path
+
 import requests
+from dotenv import load_dotenv
+
+SERVER_ENV = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(dotenv_path=SERVER_ENV, override=False)
 
 ENDPOINT = "http://127.0.0.1/v1"
 PROJECT_ID = "6a44de590010fa46afbd"
-API_KEY = ""
+API_KEY = (os.getenv("APPWRITE_API_KEY") or "").strip()
 DB_ID = "chat_logs"
+
+if not API_KEY:
+    raise RuntimeError("APPWRITE_API_KEY is missing from Server/.env")
 
 headers = {
     "X-Appwrite-Project": PROJECT_ID,
