@@ -27,7 +27,9 @@ class ChatLogService:
         # Initialize MongoDB Fallback Client
         try:
             from pymongo import MongoClient
-            mongo_uri = os.getenv("MONGO_URI", "")
+            mongo_uri = os.getenv("MONGO_URI", "").strip()
+            if not mongo_uri:
+                raise RuntimeError("MONGO_URI is not configured")
             self.mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=2000)
             db_name = os.getenv("MONGO_DB_NAME", "profiling_db")
             self.mongo_db = self.mongo_client[db_name]
