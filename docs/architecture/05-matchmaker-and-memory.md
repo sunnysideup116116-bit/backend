@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | `/health` | GET | Process-level readiness（不讀 profile／Neo4j） |
 | `/api/match` | POST | 候選排序：`{target_user, candidates, target_deep_profile}` → `{outcome: selected\|no_suitable_candidate, matches: [1 筆]}` |
-| `/api/feedback` | POST | 婉拒／接受後的反思：LLM 產生 graph reflection → 轉成 `PREFERS`／`AVOIDS` Concept relationships |
+| `/api/feedback` | POST | 只正規化使用者本次明確勾選的 `explicit_reasons`；空清單回 `skipped`。目前提案 UI 僅在 opt-in 婉拒時呼叫，並共用 memory writer 轉成 `AVOIDS` Concept relationships |
 | `/api/global_reflection` | POST | 從一對（from_big_five→to_big_five）歸納全域法則 `GlobalRule`（相似度合併，weight 遞增） |
 | `/api/memory/apply` | POST | 寫入已驗證的 memory proposals（不重新萃取），message_id 冪等 |
 | `/api/memory/{user_id}` | GET | 讀某使用者 active 偏好（owner-scoped） |
@@ -78,10 +78,11 @@
 
 ## 4. 配對狀態真相（canonical lifecycle）
 
-- Lifecycle：`draft → pending → accepted`；`declined` 為終態。
+- Lifecycle：`draft → pending → accepted`；`declined`／`expired` 為終態。
 - `match_decision_service.py:apply_match_decision` 是唯一 CAS 轉移：`status + proposal_revision` 條件更新（`find_one_and_update`），stale 回報最新狀態且不覆寫；`idempotency_key` 存於 `last_decision`，重放回 `idempotent: true`。
-- 只有 live `draft/pending` 阻擋新的 active proposal；`accepted` 是已建立的聯絡關係。
-- 效果（通知、開聊天室、GIF、feedback）只在 transition 成功後執行（`match_action_service.apply_transition_effects`）；effect 失敗不讓已提交 transition 被重送。
+- 只有同 namespace 的 live `draft/pending` 阻擋新提案；`relationship_match` 與 `event_invitation` 各有一個獨立 slot，可同時存在。`accepted` relationship 是已建立的聯絡關係。
+- Durable search job 會綁定建立時的 `current_context_revision`。若 concurrent recent-context extraction 在搜尋中提交新 revision，worker 會以 Mongo CAS 將同一 job 最多重排一次並從最新 snapshot 重跑；queued/running 狀態持續可見。第二次仍變動才終止為 stale，並投遞 idempotent `match_search_failed` 說明，不得無聲消失或無限重跑。
+- 效果（通知、開聊天室、Event 開場卡、GIF、opt-in feedback）只在 transition 成功後執行（`match_action_service.apply_transition_effects`）；effect 失敗不讓已提交 transition 被重送。Event invitation 對既有 accepted pair 沿用 canonical chat，並以 match-scoped key 冪等保存一次公開活動介紹，不建立第二個 relationship anchor。
 
 ## 5. 雙人關係 context（不可誤用）
 

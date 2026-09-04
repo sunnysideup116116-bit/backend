@@ -56,6 +56,12 @@ not user profile storage.
 6. Demo reseeding may delete `User` and user-owned memory projections, but it
    must preserve `Event`, `GlobalRule`, `Agent`, and Concepts still linked to
    preserved nodes. A blanket `MATCH (n) DETACH DELETE n` is forbidden.
+7. A match decline creates `AVOIDS` only when the owner explicitly selects
+   `decline_reason_options` and confirms that the reasons may be recorded. The
+   successful match CAS happens first; the bounded `/api/feedback` normalizer
+   then reuses `/api/memory/apply`. Decline without recording, cancellation,
+   empty reasons, stale decisions, and inferred counterparty traits never write
+   preference edges.
 
 ## Event Ingestion V1
 

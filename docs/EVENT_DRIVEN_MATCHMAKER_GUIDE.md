@@ -167,6 +167,9 @@ EVENT_WEEKLY_CYCLE_ENABLED=off
 cycle 回報 `partial` 並跳過邀請，不會用不完整 Graph 強行配對。手動 Demo 仍保留三個獨立按鈕，不會因單獨執行 discovery
 而自動清理或發送邀請。
 
+上表的 `off` 是新環境的安全預設，不代表目前整合環境的有效值。部署狀態請以未提交的
+`social/.env` 與 Event Worker startup log 為準；不得為了記錄開關而把正式 `.env` 納入 Git。
+
 ### 5.2 搜尋額度
 
 每個類別有兩條搜尋方向：
@@ -805,6 +808,13 @@ cd Server
 `event_worker` 已整合至 `main.py` 的 FastAPI startup/shutdown 生命週期。透過 `start_all.sh` 啟動 Social 即會建立背景 Worker，
 不需另開視窗。雖然模組保留 standalone entrypoint，但現行沒有 disable-embedded-worker 開關，不得與正常 Server 併行啟動。
 
+#### 2026-09-04 整合環境基線
+
+- 正式 `Server/social/.env` 已設定 `EVENT_WEEKLY_CYCLE_ENABLED=on`；該私有檔案不進 Git。
+- `EVENT_DISCOVERY_WEEKDAY`／`EVENT_DISCOVERY_HOUR` 未覆寫，因此沿用週一 `0`、Asia/Taipei 08:00 的程式預設。
+- `start_all.sh` 啟動紀錄已確認 Event Worker thread、worker id 與 MongoDB Change Stream wake-up 均 active。
+- Google `gemini-embedding-2` free-tier 若回 429，Concept worker 會 bounded pause/retry；weekly cycle 在等待上限內仍未完成 relevance 時回 `partial` 並跳過邀請。這是 provider quota 狀態，不得誤判為提案 state machine 或 Event Worker 未啟動。
+
 ### 17.3 健康檢查
 
 ```powershell
@@ -990,7 +1000,7 @@ cd .\matchmaker_agent
 目前是可展示、可整合的 MVP；正式上線前仍需：
 
 1. 累積多輪真實 discovery 結果，逐類調整可信來源與 skill。
-2. 監控 Social 內嵌 Event Worker 的 startup／shutdown、Change Stream、lease 與 job stage；需要每週一自動更新時，再將 `EVENT_WEEKLY_CYCLE_ENABLED` 從 `off` 改為 `on`。若未來要分離為獨立 process，必須先新增 disable-embedded-worker 部署契約並整合進 `start_all.sh`，不得同時跑兩個 consumer。
+2. 監控 Social 內嵌 Event Worker 的 startup／shutdown、Change Stream、lease 與 job stage。2026-09-04 整合環境已將 `EVENT_WEEKLY_CYCLE_ENABLED` 設為 `on`；其他環境仍須逐一明確啟用與驗證。若未來要分離為獨立 process，必須先新增 disable-embedded-worker 部署契約並整合進 `start_all.sh`，不得同時跑兩個 consumer。
 3. 依拒絕頻率資料校準 `EVENT_PAIR_DECLINE_COOLDOWN_DAYS`；目前預設 7 天。
 4. 加入 scheduler run history、類別成功率與 provider latency 指標。
 5. 為 Web/LLM provider 設定成本、quota 與失敗告警。
@@ -1000,9 +1010,9 @@ cd .\matchmaker_agent
 
 Event-driven MVP 的主流程已完成：五類活動 discovery、Event/Concept graph、增量 embedding、
 relevance/avoidance、主動 opportunity scan、雙方 viewer-bound 卡片（UI 可顯示公開暱稱）、獨立 proposal namespace、CAS 決策、
-七天 pair decline cooldown、既有聊天室重用與 lifecycle 都已接入。Public Ayue 聊天歷史 compaction
-已由 `conversation_compaction_service.py` 接入；通用 Context Engine 與一般阿月長期記憶管理仍是獨立
-roadmap，三者都不屬於 Event proposal lifecycle。
+七天 pair decline cooldown、既有聊天室重用與 lifecycle 都已接入。Public Ayue 聊天歷史 compaction、
+owner durable memory、status-aware memory projection 與 bounded outbox retry 也已接入；它們是相鄰但獨立的 domain，
+不屬於 Event proposal lifecycle，Event 流程不得直接改寫或繞過其 canonical owner。
 
 目前使用者所在地若有填寫，主要保存在 Mongo profile；Event opportunity Graph query 尚未把所在地當成
 強制 eligibility filter。因此擴充全台前，應先由 port 8000 以 server-owned 的城市／行政區 projection

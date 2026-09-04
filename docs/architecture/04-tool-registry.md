@@ -47,18 +47,19 @@
 
 唯讀工具只能回傳完成問題所需的最小 typed projection；不傳 Mongo document、raw profile 或內部 ID。
 
-## 3. 寫入工具（6 個，全部需要確認）
+## 3. 寫入工具（7 個，全部需要確認）
 
 | 工具 | executor_key | Planner 參數 | 確認後執行路徑 |
 | --- | --- | --- | --- |
 | `relationship.start_date_coordination` | `date_coordination_start` | `target_source`（mention/name/recent_contact）＋ name 模式的連續原句 `target_evidence_span`；不含 ID | accepted-contact target resolution → pending confirmation → `date_coordination_service.create_invite` 建立空白卡片 |
 | `match.start_search` | `start_search` | 無 | `_start_search` → `start_match_search`（入 job 佇列） |
+| `match.cancel_search` | `cancel_search` | 無 | server 綁定 owner 目前 queued/running search → pending confirmation → `_cancel_search`；沒有 active search 時 fail closed |
 | `match.decide_active_proposal` | `decide_active_proposal` | `decision`(interested/declined) | `_decide_active_proposal` → revision CAS |
 | `match.decide_active_event_invitation` | `decide_active_event_invitation` | `decision`(interested/declined) | server 綁定 `event_invitation` revision → pending confirmation → namespace-aware revision CAS |
 | `profile.start_assessment` | `assessment_start` | `kind`(basic/deep) | `_start_assessment` → session 啟動 |
 | `calendar.submit_commands` | `calendar_commands` | `commands`（1–10 個 authority-free `CalendarCommand`；`target_selector` 僅篩選既有 update/cancel 目標） | Calendar Runtime deterministic preflight → server-owned `CalendarMutationPlan` → `_execute_calendar_mutation_plans`，依序執行、stop-on-failure |
 
-互動呈現分流：`calendar.submit_commands`、`match.start_search`、`profile.start_assessment`、`relationship.start_date_coordination` 使用一般 AI 泡泡內的 `bubble_buttons_v1` 確認；`match.decide_active_proposal` 與 `match.decide_active_event_invitation` 已有自己的媒人卡片，維持原卡片與 `legacy_text` 備援，不加入通用確認按鈕。
+互動呈現分流：`calendar.submit_commands`、`match.start_search`、`match.cancel_search`、`profile.start_assessment`、`relationship.start_date_coordination` 使用一般 AI 泡泡內的 `bubble_buttons_v1` 確認；`match.decide_active_proposal` 與 `match.decide_active_event_invitation` 已有自己的媒人卡片，維持原卡片與 `legacy_text` 備援，不加入通用確認按鈕。
 
 ## 4. 工具可見性（哪些 agent 看得到哪些工具）
 

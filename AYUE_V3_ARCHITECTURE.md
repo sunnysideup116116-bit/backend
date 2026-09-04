@@ -173,7 +173,7 @@ Guard 檢查：
 
 同一 `tool + normalized executor arguments` 在同一 Public run 不重跑。每回合最多建立一筆 pending side effect。
 
-目前共註冊 24 個 capabilities，其中 6 個 WRITE。完整表見 [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)。
+目前共註冊 25 個 capabilities，其中 18 個 READ、7 個 WRITE。完整表見 [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)。
 
 ## 7. Confirmation 與 writes
 
@@ -188,12 +188,13 @@ WRITE proposal / Calendar command batch
   -> canonical domain service（CAS + idempotency）
 ```
 
-`calendar.submit_commands`、`match.start_search`、`profile.start_assessment`、探索結果 commit 與卡片建立前的約會協調使用一般 AI 泡泡內按鈕；`match.decide_active_proposal`／`match.decide_active_event_invitation` 已有媒人卡片，維持原卡片與文字備援。一般文字會自動取消同房泡泡選擇並繼續進 Planner，不會被當成確認權限。
+`calendar.submit_commands`、`match.start_search`、`match.cancel_search`、`profile.start_assessment`、探索結果 commit 與卡片建立前的約會協調使用一般 AI 泡泡內按鈕；`match.decide_active_proposal`／`match.decide_active_event_invitation` 已有媒人卡片，維持原卡片與文字備援。一般文字會自動取消同房泡泡選擇並繼續進 Planner，不會被當成確認權限。
 
 目前 WRITE capabilities：
 
 - `relationship.start_date_coordination`
 - `match.start_search`
+- `match.cancel_search`
 - `match.decide_active_proposal`
 - `match.decide_active_event_invitation`
 - `profile.start_assessment`
@@ -303,6 +304,8 @@ run_started | tool_started | tool_finished | final | error
 - Context slices 與 Public/Private privacy isolation。
 - Guard codes、tool schema/output、duplicate、budgets。
 - Confirmation、CAS、idempotency、stale、concurrency。
+- 一般／Event 獨立 proposal slot、搜尋進度同頁刷新、viewer-bound nickname／decline options、舊快取卡過濾與 accepted Event 開場卡冪等性。
+- Owner memory opt-in feedback、outbox retry、disable／restore／correct，以及 legacy／新版 AI room compaction ownership、watermark 與 continuity gate。
 - Web research/finish、late extract projection、URL/source/subject binding。
 - Calendar command/preflight/draft/reference/verification。
 - ProductInfo retrieval/observation/progress/debug。
@@ -315,7 +318,7 @@ run_started | tool_started | tool_finished | final | error
 - [`docs/architecture/01-project-overview.md`](./docs/architecture/01-project-overview.md)：onboarding 與服務邊界。
 - [`docs/architecture/02-python-modules.md`](./docs/architecture/02-python-modules.md)：模組 owner map。
 - [`docs/architecture/03-v3-runtime-lifecycle.md`](./docs/architecture/03-v3-runtime-lifecycle.md)：單回合 lifecycle。
-- [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)：23 個 ToolSpec。
+- [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)：25 個 ToolSpec（18 READ、7 WRITE）。
 - [`docs/architecture/05-matchmaker-and-memory.md`](./docs/architecture/05-matchmaker-and-memory.md)：9001、Neo4j 與 profile memory pipeline。
 - [`docs/architecture/06-testing.md`](./docs/architecture/06-testing.md)：測試策略。
 - [`docs/architecture/07-guard.md`](./docs/architecture/07-guard.md)：Central Guard。

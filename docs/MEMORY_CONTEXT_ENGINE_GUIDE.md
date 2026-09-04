@@ -141,6 +141,13 @@ Saved owner message
 - **模型契約**：generation／evaluation 讀取 `generate_chat_completion()` 的 `ChatResult.content`；測試不得再用不符合正式 contract 的純字串掩蓋介面漂移。
 - **啟用閘門**：個別 canary user 可由明確 allowlist 讀取通過評估的摘要；`*` 全域 token 另要求 rollout readiness（至少 50 筆、pass ≥95%、review ≤5%、unavailable ≤2%、指標未過期），結果快取 60 秒。未達標時只保留 shadow generation，不注入 context。
 
+#### 2026-09-04 整合環境基線
+
+- 私有 `social/.env` 使用 `AYUE_CONVERSATION_COMPACTION_MODE=shadow` 與 `AYUE_CONVERSATION_CONTEXT_MODE=on`；私有環境檔不得提交。
+- `AYUE_MEMORY_OUTBOX_WORKER_ENABLED`／`AYUE_MEMORY_OUTBOX_POLL_SECONDS` 未覆寫，因此沿用 worker 啟用、30 秒輪詢的程式預設。
+- `shadow` 會產生與評估 room-scoped summary，但不等於無條件注入 prompt；continuity 仍須通過 owner/room、source hash、watermark、evaluation 與 rollout gate。
+- UI 可用重新載入／跨阿月房間後仍能回想 owner 明確保存內容，驗證 durable memory；是否真的完成 compaction 則應查 `conversation_compactions` 與 watermark，不能只憑聊天回覆猜測。
+
 ### 2.4 雙人關係語意
 
 `semantic_plan_service.py` 只處理 accepted pair room 中雙方真正傳送的訊息：

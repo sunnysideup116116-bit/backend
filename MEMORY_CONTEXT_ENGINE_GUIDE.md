@@ -67,7 +67,7 @@ Hermes ContextEngine concept
 | 雙人關係語意 | Mongo `semantic_plans` 與 room-scoped KG triples | 已接受關係中的共同話題、互動節奏與 mediator strategy | 任一方私人悄悄話、跨房間資料 |
 | Agent 每回合 context | `AgentTurnContextV2` | 讓 Planner 在有限 token 與隱私邊界內做當回合決策 | raw Mongo／Neo4j document、內部 ID、對方私人資料 |
 
-「長期建議」是系統推導出的 recommendation，不是使用者記憶。即使建議來自 Graph Memory，也必須保存到獨立 read model，並保留來源、版本、有效期與可撤銷狀態；禁止寫成 `PREFERS`。
+「長期建議」是系統推導出的 recommendation，不是使用者記憶。即使建議來自 Graph Memory，也必須保存到獨立 read model，並保留來源、版本、有效期與可撤銷狀態；禁止寫成 `PREFERS`、`AVOIDS` 或 `CURRENTLY_WANTS`。
 
 ## 2. 現有資料流與 source of truth
 
@@ -101,18 +101,39 @@ Saved owner message
 → context_slicer.py (user_preferences) → Synthesizer prompt
 ```
 
-- Neo4j 是 durable preference 的 source of truth，節點型別為 `Concept`（屬性 `{key, label, kind}`），廢除舊版 `Trait`。
+- Neo4j 是 durable preference 的 source of truth；正式節點型別為 `Concept`（屬性 `{key, label, kind}`）。`Trait`／`HAS_PREFERENCE` 只供 migration compatibility，新程式不得再產生。
 - 關係類型：
   - 正向偏好：`(:User)-[:PREFERS]->(:Concept)`
   - 負向地雷：`(:User)-[:AVOIDS]->(:Concept)`
   - 短期意圖：`(:User)-[:CURRENTLY_WANTS {expires_at}]->(:Concept)`（寫入新意圖時自動清除舊有 `CURRENTLY_WANTS`，維持最新單一意圖，預設 30 天過期）。
-- Mongo `profile_memory_preview`／`profile_memory_summary` 是 bounded read projection；前端「阿月記住的事」在開啟與載入時會即時與 Neo4j Concept 同步。
+- Mongo `profile_memory_preview`／`profile_memory_summary` 是 bounded read projection；前端「阿月記住的事」在開啟與載入時會以 status-aware Graph snapshot 刷新。Graph metadata 與 evidence／lifecycle 不得藉由舊 `HAS_PREFERENCE` properties 重複儲存。
 - `message_id` 是 observation idempotency key；同一 owner message 不得增加兩次 evidence count。
 - `profile_memory_outbox` 只保存已驗證的 typed proposals 與 error code，不保存 raw chat。
 - `memory_outbox_service.py` 以 Mongo lease 領取失敗寫入、指數退避並最多嘗試八次；舊資料的 `next_attempt_at=null` 與欄位不存在都視為立即可重試。成功、重複 delivery 與 terminal failed 都有明確狀態，不會重新萃取 raw chat。
 - 9001 將 `MemoryObservation` marker 與該訊息的全部 Concept edges 放在同一 Neo4j transaction；marker 不得早於 edge 單獨 commit。
 - 使用者 disable 時以 owner-scoped `MEMORY_DISABLED` 保存原 relation；restore 依原 `PREFERS`／`AVOIDS`／未過期 `CURRENTLY_WANTS` 恢復，correct 將該 owner edge 搬到新的 canonical Concept，不修改其他 owner 共用的 Concept 關係。完成後同步 Mongo projection。
 - 設定頁每次讀取都嘗試用 status-aware Graph snapshot 刷新 bounded Mongo projection；Graph 明確為空可清除 stale cache，Graph unavailable 才沿用 cache。
+
+舊版 `/api/memory/observe`、主服務直接 Neo4j fallback 與自由文字 extractor 已移除；`profile_skills.py → /api/memory/apply` 是唯一 owner-memory extraction/write flow。不要再新增另一個自由文字 extractor。
+
+### 2.2.1 使用者勾選的婉拒回饋
+
+提案視窗的 `explicit_reasons` 是本人明確選擇並同意記錄的結構化回饋，不是從 match state 或對方特質推測本人的偏好：
+
+```text
+使用者選擇「記錄原因並婉拒」
+→ /api/match/decision 的既有 CAS 成功
+→ match_action_service 的 optional feedback effect
+→ 9001 /api/feedback 的既有 normalizer（只正規化這次勾選清單）
+→ 共用 /api/memory/apply → User-[:AVOIDS]->Concept
+→ Social upsert_preference_facts（match_feedback source + match/message evidence）
+```
+
+- 「只婉拒，不記錄」、空清單、撤回邀請或 stale／重複決策不啟動此流程；不能用對方 Big Five 或舊的 process-local feedback history 補出未勾選的偏好。
+- Client 不自行按「近期情境／興趣／個性」分類刪除選項。Normalizer 的舊 `DISLIKES_TRAIT` output 只作為相容輸入，轉成 typed `stance=avoid`；Graph 不產生 Trait／DISLIKES_TRAIT 舊模型。
+- 寫入沿用既有 memory validation，不另維護 feedback Cypher writer；超過三個 normalized concepts 分批交給既有 writer，不能直接截掉第四項。
+- `/api/feedback` 沒有勾選時回 `skipped`，有效但空的正規化結果回 `no_preferences`；正規化失敗回 502，Graph 不可用回 503，不假裝寫入成功。Feedback 失敗不撤銷已提交的 decline，也不能重送 decision 作為偏好重試。
+- API 回傳 `memories` 供 Social 寫入既有偏好 facts。畫面上的「已送出」不是 Graph 成功收據；此 optional effect 尚非 durable retry queue。
 
 ### 2.3 對話壓縮與延續性（Compaction 機制）
 
@@ -123,7 +144,12 @@ Saved owner message
 - **模型契約**：generation／evaluation 讀取 `generate_chat_completion()` 的 `ChatResult.content`；測試不得再用不符合正式 contract 的純字串掩蓋介面漂移。
 - **啟用閘門**：個別 canary user 可由明確 allowlist 讀取通過評估的摘要；`*` 全域 token 另要求 rollout readiness（至少 50 筆、pass ≥95%、review ≤5%、unavailable ≤2%、指標未過期），結果快取 60 秒。未達標時只保留 shadow generation，不注入 context。
 
-舊版 `/api/memory/observe`、主服務直接 Neo4j fallback 與自由文字 extractor 已移除；`profile_skills.py → /api/memory/apply` 是唯一 owner-memory extraction/write flow。不要再新增另一個自由文字 extractor。
+#### 2026-09-04 整合環境基線
+
+- 私有 `social/.env` 使用 `AYUE_CONVERSATION_COMPACTION_MODE=shadow` 與 `AYUE_CONVERSATION_CONTEXT_MODE=on`；私有環境檔不得提交。
+- `AYUE_MEMORY_OUTBOX_WORKER_ENABLED`／`AYUE_MEMORY_OUTBOX_POLL_SECONDS` 未覆寫，因此沿用 worker 啟用、30 秒輪詢的程式預設。
+- `shadow` 會產生與評估 room-scoped summary，但不等於無條件注入 prompt；continuity 仍須通過 owner/room、source hash、watermark、evaluation 與 rollout gate。
+- UI 可用重新載入／跨阿月房間後仍能回想 owner 明確保存內容，驗證 durable memory；是否真的完成 compaction 則應查 `conversation_compactions` 與 watermark，不能只憑聊天回覆猜測。
 
 ### 2.4 雙人關係語意
 
