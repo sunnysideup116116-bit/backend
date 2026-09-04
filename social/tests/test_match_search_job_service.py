@@ -5,6 +5,7 @@ from pymongo.errors import DuplicateKeyError
 
 from routers import match as match_router
 from services import match_search_job_service as jobs
+from tests.match_flow_store import Collection
 
 
 class MatchSearchJobServiceTests(unittest.TestCase):
@@ -48,19 +49,150 @@ class MatchSearchJobServiceTests(unittest.TestCase):
         self.assertTrue(result["cancellable"])
 
     @patch.object(jobs, "_finish_job")
+    @patch.object(jobs, "_requeue_after_context_change", return_value=True)
     @patch.object(jobs, "_report_progress", return_value=False)
     @patch.object(jobs, "_claim_next_job")
-    def test_context_change_stales_job_before_pipeline_runs(self, claim, report, finish):
-        claim.return_value = {"_id": "job", "job_id": "safe", "user_id": "owner", "lease_id": "lease"}
+    def test_context_change_requeues_job_before_pipeline_runs(
+        self, claim, report, requeue, finish,
+    ):
+        claim.return_value = {
+            "_id": "job", "job_id": "safe", "user_id": "owner",
+            "lease_id": "lease", "attempt": 1, "context_revision": 2,
+        }
         pipeline = MagicMock()
         jobs.register_match_search_pipeline(pipeline)
 
         self.assertTrue(jobs.run_one_match_search_job())
 
         pipeline.assert_not_called()
+        requeue.assert_called_once_with(claim.return_value)
+        finish.assert_not_called()
+
+    @patch.object(jobs, "_job_has_lease", return_value=True)
+    @patch.object(jobs, "profiles_coll")
+    @patch.object(jobs, "MATCH_SEARCH_JOBS")
+    def test_first_context_change_requeues_same_job_with_latest_revision(
+        self, collection, profiles, lease,
+    ):
+        collection.update_one.return_value.modified_count = 1
+        profiles.find_one.return_value = {"current_context_revision": 4}
+        job = {
+            "_id": "job", "job_id": "safe", "user_id": "owner",
+            "lease_id": "lease", "attempt": 1, "context_revision": 3,
+            "source": "agent_v3",
+        }
+
+        self.assertTrue(jobs._requeue_after_context_change(job))
+
+        lease.assert_called_once_with(job)
+        query, update = collection.update_one.call_args.args
+        self.assertEqual(query["attempt"], {"$lte": 1})
+        self.assertEqual(update["$set"]["status"], "queued")
+        self.assertEqual(update["$set"]["step"], "loading_profile")
+        self.assertEqual(update["$set"]["context_revision"], 4)
+        self.assertIn("lease_id", update["$unset"])
+        projection = profiles.update_one.call_args.args[1]["$set"]["match_search"]
+        self.assertEqual(projection["status"], "queued")
+        self.assertEqual(projection["step"], "loading_profile")
+
+    @patch.object(jobs, "_job_has_lease")
+    @patch.object(jobs, "profiles_coll")
+    @patch.object(jobs, "MATCH_SEARCH_JOBS")
+    def test_second_context_change_does_not_requeue_forever(
+        self, collection, profiles, lease,
+    ):
+        job = {
+            "_id": "job", "job_id": "safe", "user_id": "owner",
+            "lease_id": "lease", "attempt": 2, "context_revision": 3,
+        }
+
+        self.assertFalse(jobs._requeue_after_context_change(job))
+
+        lease.assert_not_called()
+        profiles.find_one.assert_not_called()
+        collection.update_one.assert_not_called()
+
+    @patch.object(jobs, "queue_mediator_event")
+    @patch.object(jobs, "_finish_job", return_value=True)
+    @patch.object(jobs, "_requeue_after_context_change", return_value=False)
+    def test_exhausted_stale_search_delivers_visible_failure(
+        self, requeue, finish, queue,
+    ):
+        job = {
+            "_id": "job", "job_id": "safe", "user_id": "owner",
+            "lease_id": "lease", "attempt": 2,
+            "origin_room_id": "ai_room::owner::origin",
+        }
+
+        jobs._settle_stale_job(job)
+
+        requeue.assert_called_once_with(job)
         finish.assert_called_once_with(
-            claim.return_value, "stale", error_code="ownership_or_context_changed",
+            job, "stale", error_code="ownership_or_context_changed",
         )
+        self.assertEqual(queue.call_args.args[0], "owner")
+        self.assertEqual(queue.call_args.args[2], "match_search_failed")
+        self.assertEqual(
+            queue.call_args.kwargs["event_key"], "match-search-job:safe:stale",
+        )
+        self.assertEqual(
+            queue.call_args.kwargs["origin_room_id"], "ai_room::owner::origin",
+        )
+
+    def test_context_race_requeues_once_and_second_attempt_finishes(self):
+        collection = Collection([{
+            "_id": "job", "job_id": "safe", "user_id": "owner",
+            "active_user_id": "owner", "status": "queued",
+            "step": "loading_profile", "progress_percent": 0,
+            "context_revision": 3, "source": "agent_v3",
+            "origin_room_id": "ai_room::owner::origin",
+            "attempt": 0, "created_at": 1, "updated_at": 1,
+        }])
+        profiles = Collection([{
+            "_id": "profile", "user_id": "owner",
+            "current_context_revision": 3,
+            "active_match_search_job_id": "safe",
+            "matchmaking_in_progress": True,
+        }])
+        deliveries = MagicMock()
+        attempts = 0
+
+        def pipeline(_user_id, _source, *, report_progress, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                self.assertTrue(report_progress("vector_search"))
+                profiles.update_one(
+                    {"user_id": "owner"},
+                    {"$set": {"current_context_revision": 4}},
+                )
+                self.assertFalse(report_progress("matchmaker_request"))
+                return {"status": "stale", "matches": []}
+            self.assertTrue(report_progress("matchmaker_request"))
+            return {"status": "no_suitable_candidate", "matches": []}
+
+        with patch.object(jobs, "MATCH_SEARCH_JOBS", collection), \
+             patch.object(jobs, "profiles_coll", profiles), \
+             patch.object(jobs, "_live_match", return_value=None), \
+             patch.object(jobs, "queue_mediator_event", deliveries):
+            jobs.register_match_search_pipeline(pipeline)
+
+            self.assertTrue(jobs.run_one_match_search_job())
+            first = collection.find_one({"_id": "job"})
+            self.assertEqual(first["status"], "queued")
+            self.assertEqual(first["attempt"], 1)
+            self.assertEqual(first["context_revision"], 4)
+            self.assertEqual(
+                jobs.public_match_search_status("owner")["status"], "queued",
+            )
+            deliveries.assert_not_called()
+
+            self.assertTrue(jobs.run_one_match_search_job())
+            second = collection.find_one({"_id": "job"})
+            self.assertEqual(second["status"], "no_candidates")
+            self.assertEqual(second["attempt"], 2)
+            self.assertEqual(attempts, 2)
+            self.assertEqual(deliveries.call_args.args[2], "match_search_empty")
 
     @patch.object(jobs, "profiles_coll")
     @patch.object(jobs, "MATCH_SEARCH_JOBS")

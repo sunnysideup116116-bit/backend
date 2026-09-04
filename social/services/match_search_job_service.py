@@ -29,6 +29,7 @@ JOB_STEPS = {
 }
 LEASE_SECONDS = 180
 POLL_SECONDS = 0.5
+MAX_CONTEXT_CHANGE_REQUEUES = 1
 
 MatchPipeline = Callable[..., dict[str, Any]]
 _pipeline: MatchPipeline | None = None
@@ -47,6 +48,7 @@ class MatchSearchPipelineError(RuntimeError):
 
 
 _FAILURE_MESSAGES = {
+    "ownership_or_context_changed": "你的近況或配對狀態剛更新，這次搜尋已停止。請再開始一次配對。",
     "matchmaker_timeout": "這次媒人評估逾時，搜尋已停止。可以稍後重新搜尋。",
     "matchmaker_graph_timeout": "讀取配對依據逾時，這次搜尋沒有完成。可以稍後再試。",
     "matchmaker_graph_unavailable": "目前無法讀取配對依據，這次搜尋沒有完成。",
@@ -326,6 +328,84 @@ def _finish_job(
     return True
 
 
+def _requeue_after_context_change(job: dict[str, Any]) -> bool:
+    """Retry one search from the newest profile snapshot without hiding progress."""
+    try:
+        attempt = int(job.get("attempt", 0) or 0)
+        previous_revision = int(job.get("context_revision", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if attempt > MAX_CONTEXT_CHANGE_REQUEUES or not _job_has_lease(job):
+        return False
+    user_id = str(job.get("user_id") or "")
+    profile = profiles_coll.find_one(
+        {"user_id": user_id}, {"_id": 0, "current_context_revision": 1},
+    ) or {}
+    current_revision = _safe_revision(profile)
+    if current_revision == previous_revision:
+        return False
+    now = time.time()
+    result = MATCH_SEARCH_JOBS.update_one(
+        {
+            "_id": job.get("_id"),
+            "status": "running",
+            "active_user_id": user_id,
+            "lease_id": job.get("lease_id"),
+            "attempt": {"$lte": MAX_CONTEXT_CHANGE_REQUEUES},
+        },
+        {
+            "$set": {
+                "status": "queued",
+                "step": "loading_profile",
+                "progress_percent": 0,
+                "context_revision": current_revision,
+                "updated_at": now,
+            },
+            "$unset": {
+                "lease_id": "",
+                "lease_until": "",
+                "completed_at": "",
+                "error_code": "",
+                "failure_stage": "",
+            },
+        },
+    )
+    if not getattr(result, "modified_count", 0):
+        return False
+    profiles_coll.update_one(
+        {"user_id": user_id, "active_match_search_job_id": job.get("job_id")},
+        {"$set": {
+            "matchmaking_in_progress": True,
+            "match_search": _profile_search_projection(
+                "queued",
+                str(job.get("source") or "automatic"),
+                step="loading_profile",
+                progress_percent=0,
+            ),
+        }},
+    )
+    LOGGER.info(
+        "match search requeued after context revision changed job=%s attempt=%s",
+        str(job.get("job_id") or "")[:80], attempt,
+    )
+    return True
+
+
+def _settle_stale_job(job: dict[str, Any]) -> None:
+    """Requeue one context race, otherwise surface the terminal stale outcome."""
+    if _requeue_after_context_change(job):
+        return
+    error_code = "ownership_or_context_changed"
+    if _finish_job(job, "stale", error_code=error_code):
+        queue_mediator_event(
+            str(job.get("user_id") or ""),
+            _FAILURE_MESSAGES[error_code],
+            "match_search_failed",
+            event_key=f"match-search-job:{job.get('job_id')}:stale",
+            origin_room_id=str(job.get("origin_room_id") or ""),
+        )
+
+
 def run_one_match_search_job() -> bool:
     """Claim and execute at most one job. Safe to invoke from many workers."""
     job = _claim_next_job(time.time())
@@ -340,7 +420,7 @@ def run_one_match_search_job() -> bool:
             )
         return True
     if not _report_progress(job, "loading_profile"):
-        _finish_job(job, "stale", error_code="ownership_or_context_changed")
+        _settle_stale_job(job)
         return True
     try:
         result = _pipeline(
@@ -371,12 +451,12 @@ def run_one_match_search_job() -> bool:
             )
         return True
     if str((result or {}).get("status") or "") == "stale":
-        _finish_job(job, "stale", error_code="ownership_or_context_changed")
+        _settle_stale_job(job)
         return True
     matches = list((result or {}).get("matches") or [])[:1]
     if not matches:
         if not _job_has_ownership(job):
-            _finish_job(job, "stale", error_code="ownership_or_context_changed")
+            _settle_stale_job(job)
             return True
         if _finish_job(job, "no_candidates"):
             queue_mediator_event(
