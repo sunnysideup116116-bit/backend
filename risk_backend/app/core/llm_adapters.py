@@ -14,6 +14,7 @@ LLM Adapter Layer - 統一不同 provider 的 chat completion / generate 介面
 
 import os
 import random
+import threading
 import time
 from typing import Callable, Optional, Protocol
 
@@ -113,8 +114,28 @@ def call_with_retry(
     raise last_exc  # pragma: no cover — 迴圈內必定 return 或 raise
 
 
+def _collect_google_api_keys() -> list[str]:
+    keys: list[str] = []
+    for prefix in ("GOOGLE_API_KEYS", "GOOGLE_API_KEY_"):
+        idx = 1
+        while idx <= 50:
+            val = os.getenv(f"{prefix}{idx}", "").strip().strip("\"'")
+            if val and val not in keys:
+                keys.append(val)
+            elif not val and idx > 3:
+                break
+            idx += 1
+
+    for var in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"):
+        val = os.getenv(var, "").strip().strip("\"'")
+        if val and val not in keys:
+            keys.append(val)
+
+    return keys
+
+
 class GeminiAdapter:
-    """Google Generative AI 包裝（新版 google.genai SDK）"""
+    """Google Generative AI 包裝（新版 google.genai SDK），支援多 Key 自動分流與容錯切換"""
 
     def __init__(
         self,
@@ -126,9 +147,16 @@ class GeminiAdapter:
         from google import genai
         from google.genai import types
 
-        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        self._client = genai.Client(api_key=api_key) if api_key else None
         self._types = types
+        self._keys = _collect_google_api_keys()
+        self._clients = [
+            (k, genai.Client(api_key=k)) for k in self._keys
+        ]
+        self._client = self._clients[0][1] if self._clients else None
+        self._client_lock = threading.Lock()
+        self._client_index = 0
+        self._key_cooldown_until: dict[str, float] = {}
+
         self._fallback_model = fallback_model or os.getenv(
             "GEMINI_FALLBACK_MODEL",
             "gemini-2.5-flash-lite",
@@ -141,26 +169,58 @@ class GeminiAdapter:
         self._primary_unavailable_until = 0.0
 
     def generate(self, prompt: str, model: str) -> str:
-        if not self._client:
+        if not self._client and not self._clients:
             raise RuntimeError("GeminiAdapter 缺少 GOOGLE_API_KEY / GEMINI_API_KEY")
 
         def _call_model(target_model: str, timeout: float) -> str:
-            def _once() -> str:
-                response = self._client.models.generate_content(
-                    model=target_model,
-                    contents=prompt,
-                    config=self._types.GenerateContentConfig(
-                        temperature=0.0,
-                        http_options=self._types.HttpOptions(timeout=timeout * 1000),
-                    ),
-                )
-                return response.text
+            # 若測試或外部手動替換了 self._client，直接使用
+            if self._client and not any(c is self._client for _, c in self._clients):
+                active_clients = [("mock", self._client)]
+            else:
+                active_clients = self._clients or [("default", self._client)]
 
-            return call_with_retry(
-                _once,
-                label=f"Gemini({target_model})",
-                max_attempts=self._max_attempts,
-            )
+            with self._client_lock:
+                total = len(active_clients)
+                start_idx = self._client_index
+                self._client_index = (self._client_index + 1) % total
+
+            now = time.monotonic()
+            ordered = [active_clients[(start_idx + i) % total] for i in range(total)]
+
+            last_err = None
+            for key, client in ordered:
+                if total > 1 and now < self._key_cooldown_until.get(key, 0.0):
+                    continue
+
+                def _once() -> str:
+                    response = client.models.generate_content(
+                        model=target_model,
+                        contents=prompt,
+                        config=self._types.GenerateContentConfig(
+                            temperature=0.0,
+                            http_options=self._types.HttpOptions(timeout=timeout * 1000),
+                        ),
+                    )
+                    return response.text
+
+                try:
+                    return call_with_retry(
+                        _once,
+                        label=f"Gemini({target_model})",
+                        max_attempts=self._max_attempts,
+                    )
+                except Exception as exc:
+                    last_err = exc
+                    if _is_transient(exc):
+                        self._key_cooldown_until[key] = time.monotonic() + 60.0
+                        masked = (key[:6] + "..." + key[-4:]) if len(key) > 10 else "***"
+                        print(f"⚠️ [GeminiAdapter] Key {masked} 觸發配額/暫時限制，切換下一個 Key")
+                        continue
+                    raise exc
+
+            if last_err:
+                raise last_err
+            raise RuntimeError("GeminiAdapter 無可用 Client")
 
         fallback = self._fallback_model
         primary_available = time.monotonic() >= self._primary_unavailable_until
