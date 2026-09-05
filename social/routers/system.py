@@ -452,30 +452,35 @@ def undo_recent_context(req: ClearRequest):
 def get_profile_memories(user_id: str):
     doc = profiles_coll.find_one({"user_id": user_id}, {"profile_memory_preview": 1, "profile_memory_summary": 1}) or {}
     memories = doc.get("profile_memory_preview", [])
-    if not memories:
-        try:
-            from services.memory_service import get_user_graph_memories, memory_summary
-            graph_memories = get_user_graph_memories(user_id, limit=12)
-            if graph_memories:
-                memories = graph_memories
-                profiles_coll.update_one(
-                    {"user_id": user_id},
-                    {"$set": {
-                        "profile_memory_preview": graph_memories,
-                        "profile_memory_summary": memory_summary(graph_memories),
-                    }}
-                )
-        except Exception:
-            pass
-    return {"memories": memories, "summary": doc.get("profile_memory_summary", "")}
+    summary = doc.get("profile_memory_summary", "")
+    try:
+        from services.memory_service import get_graph_memory_snapshot, memory_summary
+        snapshot = get_graph_memory_snapshot(user_id, limit=12)
+        if snapshot["available"]:
+            memories = snapshot["items"]
+            summary = memory_summary(memories)
+            profiles_coll.update_one(
+                {"user_id": user_id},
+                {"$set": {
+                    "profile_memory_preview": memories,
+                    "profile_memory_summary": summary,
+                    "profile_memory_synced_at": time.time(),
+                }},
+            )
+    except Exception:
+        pass
+    return {"memories": memories, "summary": summary}
 
 @router.post("/profile/memories/action")
 def profile_memory_action(req: ProfileMemoryActionRequest):
-    from services.memory_service import apply_memory_action
+    from services.memory_service import MemoryWriteError, apply_memory_action
     try:
         return apply_memory_action(req.user_id, req.key, req.action, req.value)
-    except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+    except MemoryWriteError as exc:
+        raise HTTPException(status_code=503, detail={
+            "code": exc.error_code,
+            "message": "記憶設定暫時無法更新，請稍後再試。",
+        }) from exc
 
 @router.get("/debug/profile_skill_runs")
 def debug_profile_skill_runs(user_id: str, limit: int = 12):
@@ -553,5 +558,3 @@ def reset_deep_profile(req: ClearRequest):
         {"$unset": {"deep_profile": "", "dp_interaction_count": ""}}
     )
     return {"status": "success"}
-
-

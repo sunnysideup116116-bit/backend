@@ -2,12 +2,44 @@ import os
 from dotenv import load_dotenv
 
 if os.getenv("AYUE_SKIP_DOTENV", "").strip().lower() not in {"1", "true", "on"}:
-    load_dotenv(override=False)
+    social_env = os.path.abspath(os.path.join(os.path.dirname(__file__), ".env"))
+    if os.path.exists(social_env):
+        load_dotenv(social_env, override=False)
+    else:
+        load_dotenv(override=False)
+
+    # 確保絕對路徑載入根目錄 Server/.env，統一從根目錄讀取共用金鑰
+    parent_env = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+    if os.path.exists(parent_env):
+        load_dotenv(parent_env, override=False)
 
 MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "profiling_db").strip() or "profiling_db"
 DEMO_DESTRUCTIVE_TOOLS_ENABLED = os.getenv("DEMO_DESTRUCTIVE_TOOLS_ENABLED", "off").strip().lower() in {"1", "true", "on"}
-GOOGLE_API_KEY = os.getenv("GOOGLE_AI_STUDIO_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+def _collect_google_api_keys() -> list[str]:
+    keys: list[str] = []
+    # 1. 循序掃描 GOOGLE_API_KEYS1, GOOGLE_API_KEYS2... 與 GOOGLE_API_KEY_1...
+    for prefix in ("GOOGLE_API_KEYS", "GOOGLE_API_KEY_"):
+        idx = 1
+        while idx <= 50:
+            val = os.getenv(f"{prefix}{idx}", "").strip().strip("\"'")
+            if val and val not in keys:
+                keys.append(val)
+            elif not val and idx > 3:
+                break
+            idx += 1
+
+    # 2. 相容傳統單一 Key 變數
+    for var in ("GOOGLE_AI_STUDIO_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        val = os.getenv(var, "").strip().strip("\"'")
+        if val and val not in keys:
+            keys.append(val)
+
+    return keys
+
+GOOGLE_API_KEYS: list[str] = _collect_google_api_keys()
+GOOGLE_API_KEY = GOOGLE_API_KEYS[0] if GOOGLE_API_KEYS else None
 OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "deepseek-v4-flash:cloud")
 # Fast-tier routing is opt-in. An empty fast model preserves the main model.
 OLLAMA_FAST_CHAT_MODEL = (

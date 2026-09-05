@@ -63,11 +63,11 @@ Hermes ContextEngine concept
 | 狀態 | 目前 owner | 用途 | 不可混入 |
 | --- | --- | --- | --- |
 | 本人近期情境 | Mongo profile 的 `recent_context_state`／`current_context` | 最近、正在或預計進行的本人現實活動 | 配對操作、他人狀態、長期人格判定 |
-| 本人長期記憶 | Neo4j `User-[:HAS_PREFERENCE]->Trait` | 明確且可持續的本人偏好／限制 | 系統建議、一次性活動、對方特徵 |
+| 本人長期記憶 | Neo4j `User-[:PREFERS|AVOIDS|CURRENTLY_WANTS]->Concept` | 明確且可持續的本人偏好、排斥地雷與最新想要活動 | 系統建議、一次性活動、對方特徵 |
 | 雙人關係語意 | Mongo `semantic_plans` 與 room-scoped KG triples | 已接受關係中的共同話題、互動節奏與 mediator strategy | 任一方私人悄悄話、跨房間資料 |
 | Agent 每回合 context | `AgentTurnContextV2` | 讓 Planner 在有限 token 與隱私邊界內做當回合決策 | raw Mongo／Neo4j document、內部 ID、對方私人資料 |
 
-「長期建議」是系統推導出的 recommendation，不是使用者記憶。即使建議來自 Graph Memory，也必須保存到獨立 read model，並保留來源、版本、有效期與可撤銷狀態；禁止寫成 `HAS_PREFERENCE`。
+「長期建議」是系統推導出的 recommendation，不是使用者記憶。即使建議來自 Graph Memory，也必須保存到獨立 read model，並保留來源、版本、有效期與可撤銷狀態；禁止寫成 `PREFERS`、`AVOIDS` 或 `CURRENTLY_WANTS`。
 
 ## 2. 現有資料流與 source of truth
 
@@ -88,7 +88,7 @@ Saved owner message
 - 只接受 owner 已保存的原始訊息；assistant reply、history、tool result 與 match state 都不是寫入證據。
 - 每個 evidence span 必須是該 owner message 的連續原文子字串。
 
-### 2.2 長期偏好記憶
+### 2.2 長期偏好記憶（Concept 與 PREFERS / AVOIDS / CURRENTLY_WANTS）
 
 ```text
 Saved owner message
@@ -96,32 +96,71 @@ Saved owner message
 → typed validation
 → memory_service.apply_profile_memory_proposals
 → port 9001 /api/memory/apply
-→ Neo4j owner-scoped relationship
-→ Mongo profile_memory_preview read projection
-→ memory.search_my_profile / Context Builder
+→ Neo4j (:User)-[:PREFERS|AVOIDS|CURRENTLY_WANTS]->(:Concept)
+→ Mongo profile_memory_preview read projection & realtime sync
+→ context_slicer.py (user_preferences) → Synthesizer prompt
 ```
 
-- Neo4j 是 durable preference 的 source of truth。
-- Mongo `profile_memory_preview`／`profile_memory_summary` 是 bounded read projection，不是另一份可獨立修改的真相。
+- 正式 Graph 節點型別為 `Concept`（屬性 `{key, label, kind}`），關係只使用 `PREFERS`、`AVOIDS` 與 `CURRENTLY_WANTS`。`Trait`／`HAS_PREFERENCE` 只是 migration compatibility，新程式不得再產生。
+- 正向偏好使用 `PREFERS`；負向地雷使用 `AVOIDS`；短期意圖使用帶 `expires_at` 的 `CURRENTLY_WANTS`。
+- Mongo `profile_memory_preview`／`profile_memory_summary` 是 bounded read projection；Graph metadata 與 evidence／lifecycle 不得藉由舊 `HAS_PREFERENCE` properties 重複儲存。
 - `message_id` 是 observation idempotency key；同一 owner message 不得增加兩次 evidence count。
 - `profile_memory_outbox` 只保存已驗證的 typed proposals 與 error code，不保存 raw chat。
-- 使用者在設定中 disable／restore／correct 後，必須同步更新 Mongo projection。
+- `memory_outbox_service.py` 以 Mongo lease 領取失敗寫入、指數退避並最多嘗試八次；舊資料的 `next_attempt_at=null` 與欄位不存在都視為立即可重試。成功、重複 delivery 與 terminal failed 都有明確狀態，不會重新萃取 raw chat。
+- 9001 將 `MemoryObservation` marker 與該訊息的全部 Concept edges 放在同一 Neo4j transaction；marker 不得早於 edge 單獨 commit。
+- 使用者 disable 時以 owner-scoped `MEMORY_DISABLED` 保存原 relation；restore 依原 `PREFERS`／`AVOIDS`／未過期 `CURRENTLY_WANTS` 恢復，correct 將該 owner edge 搬到新的 canonical Concept，不修改其他 owner 共用的 Concept 關係。完成後同步 Mongo projection。
+- 設定頁每次讀取都嘗試用 status-aware Graph snapshot 刷新 bounded Mongo projection；Graph 明確為空可清除 stale cache，Graph unavailable 才沿用 cache。
 
 舊版 `/api/memory/observe`、主服務直接 Neo4j fallback 與自由文字 extractor 已移除；`profile_skills.py → /api/memory/apply` 是唯一 owner-memory extraction/write flow。不要再新增另一個自由文字 extractor。
 
-### 2.3 雙人關係語意
+### 2.2.1 使用者勾選的婉拒回饋
+
+提案視窗的 `explicit_reasons` 是本人明確選擇並同意記錄的結構化回饋，不是從 match state 或對方特質推測本人的偏好：
+
+```text
+使用者選擇「記錄原因並婉拒」
+→ /api/match/decision 的既有 CAS 成功
+→ match_action_service 的 optional feedback effect
+→ 9001 /api/feedback 的既有 normalizer（只正規化這次勾選清單）
+→ 共用 /api/memory/apply → User-[:AVOIDS]->Concept
+→ Social upsert_preference_facts（match_feedback source + match/message evidence）
+```
+
+- 「只婉拒，不記錄」、空清單或撤回邀請不啟動此流程；不能用對方 Big Five 或舊的 process-local feedback history 補出未勾選的偏好。
+- Client 不自行按「近期情境／興趣／個性」分類刪除選項。Normalizer 的舊 `DISLIKES_TRAIT` output 只作為相容輸入，轉成 typed `stance=avoid`；Graph 不產生 Trait／DISLIKES_TRAIT 舊模型。
+- 寫入沿用既有 memory validation，不另維護 feedback Cypher writer；超過三個 normalized concepts 分批交給既有 writer，不能直接截掉第四項。
+- `/api/feedback` 沒有勾選時回 `skipped`，有效但空的正規化結果回 `no_preferences`；正規化失敗回 502，Graph 不可用回 503，不假裝寫入成功。Feedback 失敗不撤銷已提交的 decline，也不能重送 decision 作為偏好重試。
+- API 回傳 `memories` 供 Social 寫入既有偏好 facts。畫面上的「已送出」不是 Graph 成功收據；此 optional effect 尚非 durable retry queue。
+
+### 2.3 對話壓縮與延續性（Compaction 機制）
+
+- **觸發條件**：單一聊天室累積訊息超過 **30 句**時觸發。
+- **壓縮策略**：壓縮最舊 **10~11 句**為結構化摘要，保留最新 **20 句**未壓縮訊息。
+- **儲存位置**：MongoDB `conversation_compactions`，並帶 `covered_through_message_id` watermark。
+- **聊天室範圍**：永久 legacy room 與 `ai_rooms` 中經 server 驗證屬於 owner 的新版聊天室各自壓縮；刪除、偽造或他人 room fail closed。壓縮前的 profile coverage 使用同一 owner-room validator。
+- **模型契約**：generation／evaluation 讀取 `generate_chat_completion()` 的 `ChatResult.content`；測試不得再用不符合正式 contract 的純字串掩蓋介面漂移。
+- **啟用閘門**：個別 canary user 可由明確 allowlist 讀取通過評估的摘要；`*` 全域 token 另要求 rollout readiness（至少 50 筆、pass ≥95%、review ≤5%、unavailable ≤2%、指標未過期），結果快取 60 秒。未達標時只保留 shadow generation，不注入 context。
+
+#### 2026-09-04 整合環境基線
+
+- 私有 `social/.env` 使用 `AYUE_CONVERSATION_COMPACTION_MODE=shadow` 與 `AYUE_CONVERSATION_CONTEXT_MODE=on`；私有環境檔不得提交。
+- `AYUE_MEMORY_OUTBOX_WORKER_ENABLED`／`AYUE_MEMORY_OUTBOX_POLL_SECONDS` 未覆寫，因此沿用 worker 啟用、30 秒輪詢的程式預設。
+- `shadow` 會產生與評估 room-scoped summary，但不等於無條件注入 prompt；continuity 仍須通過 owner/room、source hash、watermark、evaluation 與 rollout gate。
+- UI 可用重新載入／跨阿月房間後仍能回想 owner 明確保存內容，驗證 durable memory；是否真的完成 compaction 則應查 `conversation_compactions` 與 watermark，不能只憑聊天回覆猜測。
+
+### 2.4 雙人關係語意
 
 `semantic_plan_service.py` 只處理 accepted pair room 中雙方真正傳送的訊息：
 
 - `semantic_plans`：room-scoped summary、theme、strategy、role 與處理進度。
 - room-scoped KG triples：共同聊天中可驗證的 entity relation。
-- 不等於 owner durable memory，也不應自動回寫任一方的 `HAS_PREFERENCE`。
+- 不等於 owner durable memory，也不應自動回寫任一方的 `PREFERS`、`AVOIDS` 或 `CURRENTLY_WANTS`。
 - 對 Public Ayue 或 Private Ayue 只能輸出 consented／shared projection，不能輸出 raw chat 或完整 strategy。
 - Updater 只計算尚未處理的 pair-room 訊息，並以內容長度作保守 budget proxy；累積至少 600 字元單位才更新。短訊息數量本身不觸發更新，避免只因訊息筆數達門檻就呼叫模型。
 - Private V2 由 `PrivateAgentTurnContextV2` 獨立 adapter 讀取 current accepted pair room。Planner projection 只允許 role、macro summary、theme、action plan、dynamic bounds 與最多 20 筆 triples；final composer 再縮小為 role、macro summary 與 triples。Raw plan/Graph 欄位與其他 room 的資料不得進 prompt。
 - Neo4j relationship read 失敗時可退回同一 semantic plan 已保存的 bounded triples；兩者都沒有時回空集合，不得改抓 owner durable memory 或跨 room Graph。
 
-### 2.4 Public Context
+### 2.5 Public Context
 
 `services/ayue_agent/context.py` 是 Public V3 唯一 Context Builder。現在的 budget：
 
@@ -134,7 +173,7 @@ Saved owner message
 
 Context Builder 只組合安全 projection，不負責重新萃取、修正或寫入記憶。
 
-### 2.5 已知技術債（不要沿用成新架構）
+### 2.6 已知技術債（不要沿用成新架構）
 
 - Port 8000 `memory_service.py` 不再直接連 Neo4j；owner-memory 寫入、讀取與 action 都經由 port 9001 的 canonical API。
 - 舊版 `/api/memory/observe` 與 `memory_service.py` 的 direct fallback 已刪除；新版 owner-message pipeline 只接受 `profile_skills.py` 產生的 validated proposals，再交給 `/api/memory/apply`。
@@ -212,22 +251,20 @@ Context Engine 的輸出應是 provider-neutral typed bundle，而不是 prompt 
 
 ## 4. Graph Memory 改善邊界
 
-### 4.1 建議保留的最小 schema
+### 4.1 現行最小 schema
 
 ```text
 (User {id})
-  -[HAS_PREFERENCE {
-      stance,
-      confidence,
-      active,
-      first_seen_at,
-      last_seen_at,
-      evidence_count,
-      source,
-      display_label_zh_tw,
-      schema_version
-    }]->
-(Trait {key, name, category})
+  -[:PREFERS]->
+(Concept {key, label, kind})
+
+(User {id})
+  -[:AVOIDS]->
+(Concept {key, label, kind})
+
+(User {id})
+  -[:CURRENTLY_WANTS {expires_at}]->
+(Concept {key, label, kind})
 
 (MemoryObservation {
   message_id,
@@ -236,12 +273,16 @@ Context Engine 的輸出應是 provider-neutral typed bundle，而不是 prompt 
 })
 ```
 
+正式 Graph 不再建立 `Trait` 節點或 `HAS_PREFERENCE` 關係；兩者只能存在於 migration／compatibility 邊界。
+Evidence、confidence、active state、provenance 與 lifecycle metadata 保留在 Mongo canonical records，
+Neo4j 只保留配對與 Event traversal 需要的最小 relation projection。
+
 可以新增 evidence reference、conflict、superseded 或 decay metadata，但：
 
 - 不保存完整 owner message；最多保存不可逆 hash、message ID 或 bounded evidence span。
-- 所有 relation 必須 owner-scoped，禁止只靠 Trait key 反查後把 A 的偏好給 B。
+- 所有 relation 必須 owner-scoped，禁止只靠 Concept key 反查後把 A 的偏好給 B。
 - Protected／敏感屬性不可成為交友篩選記憶。
-- 使用者修正或停用記憶時採 soft state，保留 auditability；不要直接刪除整個 Trait。
+- 使用者修正或停用記憶時，先更新 Mongo canonical state，再刪除或重建該 owner 的 Concept relation projection；不要因單一使用者操作刪除共用 Concept 節點。
 - Schema migration 預設 dry-run，顯示數量與去識別化範例；review 後才 `--apply`。
 
 ### 4.2 Matchmaker 使用方式
@@ -301,7 +342,7 @@ Context Engine 的輸出應是 provider-neutral typed bundle，而不是 prompt 
 
 ## 7. 建議實作順序
 
-1. 先寫現況 fixture：owner memories、矛盾、disable、Neo4j timeout、兩位使用者相同 Trait。
+1. 先寫現況 fixture：owner memories、矛盾、disable、Neo4j timeout、兩位使用者相同 Concept。
 2. 定義 versioned memory／context contracts 與 privacy projection。
 3. 將現有 Graph read/write 包在 repository 或 domain service，保留 API 相容。
 4. 建立 retrieval／ranking／budgeting 的 deterministic tests。
@@ -313,7 +354,7 @@ Context Engine 的輸出應是 provider-neutral typed bundle，而不是 prompt 
 
 ## 8. 最低測試清單
 
-- A、B 有相同 Trait key 時，讀取仍嚴格依 owner 隔離。
+- A、B 有相同 Concept key 時，讀取仍嚴格依 owner 隔離。
 - 對方私人 memory 永不進 Public context、Private final composer 或 trace。
 - Private relationship projection 僅限 current accepted pair room、allowlisted semantic-plan 欄位與最多 20 筆 triples；raw Mongo／Neo4j 欄位不進 Planner 或 composer。
 - 未滿 600 字元單位的未處理短訊息不觸發 semantic update；達門檻後的 chat-log projection 必須保留實際 sender/content，而不是未展開的格式字串。

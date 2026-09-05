@@ -13,6 +13,28 @@ FAKE_RECORDS = [
     {"keyword": "傳裸照給我", "reason_label": "sexual_demand", "trigger_mode": "block"},
 ]
 
+CRITICAL_VARIANTS = [
+    "我要殺了你",
+    "我要弄死你",
+    "我要把你弄死",
+    "我要把你殺了",
+    "我要殺掉你",
+    "我要把你宰了",
+    "我要把你砍死",
+    "我一定會宰了你",
+    "我要砍死你",
+    "我要性侵你",
+    "我會把你的裸照公開",
+    "我會讓你的私密照外流",
+    "我就把你的私密照傳給所有人",
+    "我知道你住哪裡",
+    "我會去你家堵你",
+    "我會每天跟蹤你",
+    "我會傷害你的家人",
+    "你沒有拒絕的權利",
+    "不准拒絕我",
+]
+
 
 @pytest.fixture
 def guardrail(monkeypatch):
@@ -44,6 +66,44 @@ def test_block_mode_phrase_blocks(guardrail):
     result = asyncio.run(guardrail.check("傳裸照給我"))
     assert result["is_blocked"] is True
     assert "傳裸照給我" in result["reason"]
+
+
+@pytest.mark.parametrize("message", CRITICAL_VARIANTS)
+def test_critical_threat_variants_are_hard_blocked(monkeypatch, message):
+    records = [
+        {"keyword": keyword, "reason_label": "critical", "trigger_mode": "block"}
+        for keyword in (
+            "殺了你",
+            "弄死你",
+            "把你弄死",
+            "把你殺了",
+            "殺掉你",
+            "宰了你",
+            "把你宰了",
+            "砍死你",
+            "把你砍死",
+            "性侵你",
+            "裸照公開",
+            "私密照外流",
+            "私密照傳給",
+            "我知道你住哪",
+            "去你家堵你",
+            "跟蹤你",
+            "傷害你的家人",
+            "沒有拒絕的權利",
+            "不准拒絕",
+        )
+    ]
+    with patch(
+        "app.core.guardrail_engine.KBService.get_hard_block_records",
+        return_value=records,
+    ):
+        from app.core.guardrail_engine import GuardrailEngine
+
+        engine = GuardrailEngine()
+        result = asyncio.run(engine.check(message))
+
+    assert result["is_blocked"] is True
 
 
 def test_flag_mode_keyword_passes_with_flag(guardrail):

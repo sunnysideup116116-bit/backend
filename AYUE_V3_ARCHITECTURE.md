@@ -5,7 +5,7 @@
 ## 1. Current baseline
 
 - Public Ayue 永遠走 V3 sub-agent runtime；唯一 orchestrator 是 `social/services/ayue_agent/v3/scheduler.py`。
-- Event discovery 不在 Public Ayue request 內執行：8000 只寫入 Mongo singleton job，`social/event_worker.py` 獨立處理。Worker 以 MongoDB Change Stream 即時接收 queued transition，並以低頻 reconciliation 恢復漏失通知、斷線或租約到期工作，不做固定 2 秒 polling。手動 `discovery` job 只搜尋與建圖；`EVENT_WEEKLY_CYCLE_ENABLED=on` 時，每週一的 `weekly_cycle` job 由同一 Worker 依序執行 scoped Event reset、未來 30 天 discovery（每類最低 4、目標與上限 6）、等待 Concept embedding/relevance ready，再執行 invitation scan。Event identity 由 9001 以 Unicode NFKC 正規化的類別／標題／場地／日期管理，來源 URL 只作證據；全部批次完成後執行 Event-only reconciliation 與每類上限收斂，不碰 User。等待逾時時 fail closed 為 partial 並跳過邀請。Reset 只刪 Event 與因此孤立的 Concept，將未決定活動邀請轉為 expired，保留 User、一般配對及 accepted/declined 歷史。Event worker 在獨立背景進程執行，不阻塞也不依賴使用者聊天。
+- Event discovery 不在 Public Ayue request 內執行：8000 只寫入 Mongo singleton job，`social/event_worker.py` 獨立處理。Worker 以 MongoDB Change Stream 即時接收 queued transition，並以低頻 reconciliation 恢復漏失通知、斷線或租約到期工作，不做固定 2 秒 polling。手動 `discovery` job 只搜尋與建圖；`EVENT_WEEKLY_CYCLE_ENABLED=on` 時，每週一的 `weekly_cycle` job 由同一 Worker 依序執行 scoped Event reset、未來 30 天 discovery（每類最低 4、目標與上限 6）、等待 Concept embedding/relevance ready，再執行 invitation scan。Event identity 由 9001 以 Unicode NFKC 正規化的類別／標題／場地／日期管理，來源 URL 只作證據；全部批次完成後執行 Event-only reconciliation 與每類上限收斂，不碰 User。等待逾時時 fail closed 為 partial 並跳過邀請。Reset 只刪 Event 與因此孤立的 Concept，將未決定活動邀請轉為 expired，保留 User、一般配對及 accepted/declined 歷史。正式 `start_all.sh` 不另開第五個 Event process；Social FastAPI startup 會呼叫 `start_event_discovery_worker()`，在 :8000 進程內建立 daemon background thread。Worker 不阻塞 request path，也不依賴使用者聊天。
 - Public 失敗時 fail closed。Rollback 只能透過 deployment／commit rollback，不存在 request-level legacy fallback、rollout allowlist 或第二套 public router。
 - Private Ayue 是仍在使用、與 Public 隔離的 current V2 runtime，由 `routers/private_mediator.py`、`services/ayue_agent/private_v2.py` 與 `private_calendar.py` 擁有。
 - `public-v1`、`web_research.v1`、`product_info.v1`、`TurnClockV1` 等名稱是 typed payload/schema version，不是 Public V1 runtime。
@@ -173,7 +173,7 @@ Guard 檢查：
 
 同一 `tool + normalized executor arguments` 在同一 Public run 不重跑。每回合最多建立一筆 pending side effect。
 
-目前共註冊 24 個 capabilities，其中 6 個 WRITE。完整表見 [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)。
+目前共註冊 25 個 capabilities，其中 18 個 READ、7 個 WRITE。完整表見 [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)。
 
 ## 7. Confirmation 與 writes
 
@@ -188,12 +188,13 @@ WRITE proposal / Calendar command batch
   -> canonical domain service（CAS + idempotency）
 ```
 
-`calendar.submit_commands`、`match.start_search`、`profile.start_assessment`、探索結果 commit 與卡片建立前的約會協調使用一般 AI 泡泡內按鈕；`match.decide_active_proposal`／`match.decide_active_event_invitation` 已有媒人卡片，維持原卡片與文字備援。一般文字會自動取消同房泡泡選擇並繼續進 Planner，不會被當成確認權限。
+`calendar.submit_commands`、`match.start_search`、`match.cancel_search`、`profile.start_assessment`、探索結果 commit 與卡片建立前的約會協調使用一般 AI 泡泡內按鈕；`match.decide_active_proposal`／`match.decide_active_event_invitation` 已有媒人卡片，維持原卡片與文字備援。一般文字會自動取消同房泡泡選擇並繼續進 Planner，不會被當成確認權限。
 
 目前 WRITE capabilities：
 
 - `relationship.start_date_coordination`
 - `match.start_search`
+- `match.cancel_search`
 - `match.decide_active_proposal`
 - `match.decide_active_event_invitation`
 - `profile.start_assessment`
@@ -251,6 +252,10 @@ draft/pending -> expired
 - `accepted` 是已建立聯絡關係，不是 active proposal。
 - `match_decision_service.py` 擁有 status+revision CAS；stale 回最新狀態，不覆寫終態。
 - `match_action_service.py` 只在 transition 成功後執行通知、聊天室、feedback 等 effects；effect 失敗不讓已提交 transition 被重送。
+- `POST /api/match/decision` 與 `GET /api/match/state` 的 HTTP adapter 只在 canonical match 已 `accepted`、具有 `has_verified_acceptance` 證據且 caller 是 participant 時，增加導航用 `other_id`。此欄位不進 tool observation、Public prompt、stream 或 Event snapshot；導航讀取失敗也不改變已提交的接受結果。
+- Flutter 活動卡保留 canonical `proposal_namespace`、公開 `event` 與 `chat_reused`。日期以台灣時間呈現並尊重 date/datetime 精度；雙方同意後直接開啟對應聊天室，既有 pair 沿用原聊天室。後端以 match-scoped event key 在 canonical pair room 冪等保存安全的 Event 開場 system card，讓新／既有 pair 都能從同一份活動 snapshot 接著聊，且不建立第二個 relationship anchor。舊的卡片終態與 revision 保護不變。
+- 提案 HTTP state 與 AI 聊天歷史提供 viewer-bound、UI-only `counterparty_nickname`，讓一般／活動配對理由介紹對方暱稱。由 `public_nickname_service.py` 唯讀 Appwrite 公開 `name`，缺資料／不可用時回退 Mongo seed/legacy 公開稱呼，不同步或寫入 profile。歷史訊息只投影、不重存；名字不進新 model context、Graph 或婉拒原因，導航仍需雙方同意。
+- 婉拒原因由 viewer-bound `decline_reason_options` 提供；使用者可只婉拒、不記錄。只有本人勾選並同意記錄的 `explicit_reasons` 才進既有 feedback normalizer，再共用 `/api/memory/apply` 寫入 `AVOIDS -> Concept` 與 Social preference facts。空選擇、撤回、stale 不寫偏好，不從對方特質推論；UI 的「已送出」不等同 Graph 成功收據。
 
 ## 10. Profile、Memory 與 Context Engine
 
@@ -267,9 +272,11 @@ saved owner message
 
 - assistant reply、conversation history、tool result、match state 或對方資料不能成為 profile write source。
 - 已移除 `/api/memory/observe` 與主服務 direct Neo4j fallback；9001 failure 進 bounded outbox，不能改抓 raw data。
+- Memory outbox 由 lease worker bounded retry；9001 將 observation marker 與 edges 原子提交。Disable／restore／correct 保留 owner relation 語意，設定頁以 status-aware Graph snapshot 刷新 bounded Mongo projection。
 - `semantic_plans`／room chat triples 是雙人關係 context，不自動轉成任一方 durable preference。
 - Relationship semantic updater 以尚未處理的 pair-room 訊息內容長度作 bounded budget proxy；累積未達 600 字元單位時不更新，不能只因短訊息數量多就觸發。更新後的 shared projection 才能由 Private V2 adapter 消費。
 - 未來 Context Engine 只能輸出 bounded versioned typed bundle，先做 owner/room/accepted-relation hard isolation，再做 ranking/budget/dedup。
+- Conversation compaction 對 legacy 與新版 Public AI room 使用同一 server-owned owner validator；generation／evaluation 消費 `ChatResult.content`，通過評估的 room-scoped continuity 才能進 Public context。
 
 完整規則見 [`MEMORY_CONTEXT_ENGINE_GUIDE.md`](./MEMORY_CONTEXT_ENGINE_GUIDE.md)。
 
@@ -297,6 +304,8 @@ run_started | tool_started | tool_finished | final | error
 - Context slices 與 Public/Private privacy isolation。
 - Guard codes、tool schema/output、duplicate、budgets。
 - Confirmation、CAS、idempotency、stale、concurrency。
+- 一般／Event 獨立 proposal slot、搜尋進度同頁刷新、viewer-bound nickname／decline options、舊快取卡過濾與 accepted Event 開場卡冪等性。
+- Owner memory opt-in feedback、outbox retry、disable／restore／correct，以及 legacy／新版 AI room compaction ownership、watermark 與 continuity gate。
 - Web research/finish、late extract projection、URL/source/subject binding。
 - Calendar command/preflight/draft/reference/verification。
 - ProductInfo retrieval/observation/progress/debug。
@@ -309,7 +318,7 @@ run_started | tool_started | tool_finished | final | error
 - [`docs/architecture/01-project-overview.md`](./docs/architecture/01-project-overview.md)：onboarding 與服務邊界。
 - [`docs/architecture/02-python-modules.md`](./docs/architecture/02-python-modules.md)：模組 owner map。
 - [`docs/architecture/03-v3-runtime-lifecycle.md`](./docs/architecture/03-v3-runtime-lifecycle.md)：單回合 lifecycle。
-- [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)：23 個 ToolSpec。
+- [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)：25 個 ToolSpec（18 READ、7 WRITE）。
 - [`docs/architecture/05-matchmaker-and-memory.md`](./docs/architecture/05-matchmaker-and-memory.md)：9001、Neo4j 與 profile memory pipeline。
 - [`docs/architecture/06-testing.md`](./docs/architecture/06-testing.md)：測試策略。
 - [`docs/architecture/07-guard.md`](./docs/architecture/07-guard.md)：Central Guard。

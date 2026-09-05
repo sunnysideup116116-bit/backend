@@ -22,8 +22,15 @@ def _clock():
     )
 
 
-def _fc_result(content="", tool_calls=None, *, inject_write_intent=True):
+def _fc_result(content="", tool_calls=None, *, inject_write_intent=True, inject_match_intent=True):
     calls = deepcopy(tool_calls or [])
+    if inject_match_intent:
+        for call in calls:
+            arguments = call.get("arguments") or {}
+            if call.get("name") == "decompose_tasks" and isinstance(arguments, dict):
+                for task in arguments.get("tasks") or []:
+                    if isinstance(task, dict) and task.get("agent") == "match":
+                        task.setdefault("match_intent", "status")
     if inject_write_intent:
         for call in calls:
             if call.get("name") != "decompose_tasks":
@@ -249,6 +256,178 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(metrics.attempts[0]["status"], "repaired")
         self.assertEqual(metrics.attempts[0]["repair_codes"], ["non_calendar_outcome_contract_removed"])
 
+    def test_match_write_intent_is_normalized_without_bypassing_match_task(self):
+        turn = self._turn("幫我開始配對")
+        arguments = {
+            "mode": "tasks",
+            "write_intent": "match.start_search",
+            "tasks": [
+                {"id": "m1", "agent": "match", "depends_on": [], "task_brief": turn.message},
+                {"id": "s1", "agent": "synthesizer", "depends_on": ["m1"], "task_brief": "整理"},
+            ],
+        }
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(
+                tool_calls=[{"name": "decompose_tasks", "arguments": arguments}],
+                inject_write_intent=False,
+            ),
+        ):
+            plan, metrics = plan_turn(turn)
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.write_intent, "none")
+        self.assertEqual([task.agent for task in plan.tasks], ["match", "synthesizer"])
+        self.assertEqual(metrics.attempts[0]["repair_codes"], ["match_write_intent_normalized"])
+
+    def test_match_status_observation_contract_is_removed_without_retry(self):
+        turn = self._turn("我想看我有沒有配對中")
+        arguments = {
+            "mode": "tasks",
+            "write_intent": "none",
+            "tasks": [
+                {
+                    "id": "m1", "agent": "match", "depends_on": [],
+                    "task_brief": "查詢目前配對搜尋狀態",
+                    "outcome_contract": "match.search_status.v1",
+                },
+                {
+                    "id": "s1", "agent": "synthesizer", "depends_on": ["m1"],
+                    "task_brief": "回報已驗證狀態",
+                },
+            ],
+        }
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(
+                tool_calls=[{"name": "decompose_tasks", "arguments": arguments}],
+                inject_write_intent=False,
+            ),
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+
+        self.assertIsNotNone(plan)
+        self.assertEqual([task.agent for task in plan.tasks], ["match", "synthesizer"])
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(metrics.retry_count, 0)
+        self.assertEqual(metrics.attempts[0]["status"], "repaired")
+        self.assertEqual(
+            metrics.attempts[0]["repair_codes"],
+            ["match_observation_contract_removed"],
+        )
+
+    def test_match_action_result_labels_do_not_block_planning_or_grant_writes(self):
+        cases = [
+            ("我要撤回", "match.proposal_cancelled"),
+            ("撤回這次配對", "task.finished"),
+            ("取消搜尋", "match.search_cancelled"),
+            ("接受此次配對", "match.proposal_accepted"),
+            ("不要這個配對", "match.proposal_declined"),
+        ]
+        for message, label in cases:
+            with self.subTest(message=message, label=label):
+                arguments = {"write_intent": "none", "tasks": [
+                    {"id": "m1", "agent": "match", "depends_on": [],
+                     "task_brief": message, "outcome_contract": label},
+                    {"id": "s1", "agent": "synthesizer", "depends_on": ["m1"],
+                     "task_brief": "呈現 server 確認預覽"},
+                ]}
+                with patch(
+                    "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+                    return_value=_fc_result(tool_calls=[{
+                        "name": "decompose_tasks", "arguments": arguments,
+                    }]),
+                ) as provider:
+                    plan, metrics = plan_turn(self._turn(message))
+
+                self.assertIsNotNone(plan)
+                self.assertEqual(provider.call_count, 1)
+                self.assertEqual(plan.write_intent, "none")
+                self.assertEqual([task.agent for task in plan.tasks], ["match", "synthesizer"])
+                self.assertIsNone(plan.tasks[0].outcome_contract)
+                self.assertEqual(plan.tasks[0].task_brief, message)
+                self.assertEqual(arguments["tasks"][0]["outcome_contract"], label)
+                self.assertEqual(metrics.attempts[0]["repair_codes"], ["match_observation_contract_removed"])
+
+    def test_single_known_match_intent_flag_is_normalized_but_ambiguous_flags_fail(self):
+        for value, expected in [
+            ({"start_search": True}, "start_search"),
+            ({"accept_proposal": True}, "accept_proposal"),
+            ({"start_search": True, "accept_proposal": True}, None),
+            ({"start_search": False}, None),
+            ({"start_search": "true"}, None),
+            ({"unknown": True}, None),
+            (None, None),
+        ]:
+            with self.subTest(value=value):
+                args = {"write_intent": "none", "tasks": [
+                    {"id": "m", "agent": "match", "task_brief": "test", "match_intent": value},
+                    {"id": "s", "agent": "synthesizer", "depends_on": ["m"], "task_brief": "present"},
+                ]}
+                with patch("services.ayue_agent.v3.planner.generate_chat_completion_with_tools", return_value=_fc_result(
+                    tool_calls=[{"name": "decompose_tasks", "arguments": args}], inject_match_intent=False,
+                )):
+                    plan, metrics = plan_turn(self._turn("test"))
+                if expected:
+                    self.assertEqual(plan.tasks[0].match_intent, expected)
+                    self.assertEqual(metrics.attempts[0]["repair_codes"], ["match_intent_object_normalized"])
+                else:
+                    self.assertIsNone(plan)
+                    self.assertEqual(metrics.retry_count, 1)
+
+    def test_missing_match_synthesizer_gets_targeted_retry_guidance(self):
+        match_task = {"id": "m1", "agent": "match", "task_brief": "撤回提案",
+                      "outcome_contract": "match.proposal_cancelled"}
+        missing = {"write_intent": "none", "tasks": [match_task]}
+        complete = {"write_intent": "none", "tasks": [match_task, {
+            "id": "s1", "agent": "synthesizer", "depends_on": ["m1"],
+            "task_brief": "呈現確認預覽",
+        }]}
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            side_effect=[_fc_result(tool_calls=[{
+                "name": "decompose_tasks", "arguments": args,
+            }]) for args in (missing, complete)],
+        ) as provider:
+            plan, metrics = plan_turn(self._turn("我要撤回"))
+        self.assertIsNotNone(plan)
+        self.assertEqual(metrics.retry_count, 1)
+        self.assertIn("include exactly one terminal", provider.call_args.args[0])
+        self.assertIn("server-owned confirmation preview", provider.call_args.args[0])
+
+    def test_match_contract_repair_preserves_invalid_types_and_control_edges(self):
+        for extra in [
+            {"outcome_contract": {"unexpected": "value"}},
+            {"outcome_contract": ["match.proposal_cancelled"]},
+            {"outcome_contract": "match.proposal_cancelled", "run_if": {
+                "source_task_id": "missing", "required_outcome": "task.finished",
+            }},
+            {"outcome_contract": "match.proposal_cancelled", "run_if": {
+                "source_task_id": "m1", "required_outcome": "task.finished",
+            }},
+        ]:
+            with self.subTest(extra=extra):
+                arguments = {"write_intent": "none", "tasks": [
+                    {"id": "m1", "agent": "match", "depends_on": [],
+                     "task_brief": "撤回", **extra},
+                    {"id": "s1", "agent": "synthesizer", "depends_on": ["m1"],
+                     "task_brief": "呈現確認"},
+                ]}
+                with patch(
+                    "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+                    return_value=_fc_result(tool_calls=[{
+                        "name": "decompose_tasks", "arguments": arguments,
+                    }]),
+                ):
+                    plan, metrics = plan_turn(self._turn("我要撤回"))
+                self.assertIsNone(plan)
+                self.assertEqual(metrics.failure_code, "invalid_arguments")
+                normalized, _ = _normalize_provider_plan_arguments(arguments)
+                if "run_if" in extra:
+                    self.assertEqual(normalized["tasks"][0]["run_if"], extra["run_if"])
+                else:
+                    self.assertEqual(normalized, arguments)
+
     def test_repair_code_cap_does_not_stop_scanning_later_tasks(self):
         arguments = {"tasks": [
             {"id": "p1", "agent": "places", "depends_on": [], "task_brief": "x",
@@ -277,6 +456,41 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(codes, [])
         self.assertEqual(normalized, arguments)
         self.assertIsNot(normalized, arguments)
+
+    def test_cross_agent_string_fields_are_removed_without_granting_authority(self):
+        arguments = {"write_intent": "none", "tasks": [
+            {
+                "id": "p1", "agent": "profile", "depends_on": [],
+                "task_brief": "延續目前聊天室的使用者話題",
+                "match_intent": "remember_chatroom_passphrase",
+                "outcome_contract": "profile.memory.v1",
+            },
+            {
+                "id": "s1", "agent": "synthesizer", "depends_on": ["p1"],
+                "task_brief": "自然回應使用者",
+            },
+        ]}
+        original = deepcopy(arguments)
+
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "decompose_tasks", "arguments": arguments,
+            }], inject_match_intent=False),
+        ) as provider:
+            plan, metrics = plan_turn(self._turn("請只在這個聊天室記得暗號"))
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(metrics.retry_count, 0)
+        self.assertEqual(metrics.attempts[0]["status"], "repaired")
+        self.assertEqual(metrics.attempts[0]["repair_codes"], [
+            "non_match_match_intent_removed",
+            "non_calendar_outcome_contract_removed",
+        ])
+        self.assertIsNone(plan.tasks[0].match_intent)
+        self.assertIsNone(plan.tasks[0].outcome_contract)
+        self.assertEqual(arguments, original)
 
     def test_unhashable_optional_provider_value_reaches_strict_validation(self):
         arguments = {"tasks": [{
@@ -590,7 +804,7 @@ class V3PlannerTests(unittest.TestCase):
             set(task_schema["properties"]),
             {
                 "id", "agent", "depends_on", "task_brief", "evidence_policy",
-                "outcome_contract", "run_if",
+                "outcome_contract", "run_if", "match_intent",
             },
         )
         self.assertEqual(
@@ -770,7 +984,7 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(metrics.failure_code, "invalid_arguments")
 
     def test_blank_invite_prompt_version_is_explicit_and_budgeted(self):
-        self.assertEqual(_PLANNER_PROMPT_VERSION, "compact_v3_write_intent_v2")
+        self.assertEqual(_PLANNER_PROMPT_VERSION, "compact_v3_match_intent_v4")
         self.assertIn("write_intent 必填", _PLANNER_SYSTEM)
         self.assertIn("relationship.date_invitation.v1", _PLANNER_SYSTEM)
         self.assertNotIn("HIGH-PRIORITY DATE INVITATION ROUTING", _PLANNER_SYSTEM)
@@ -820,6 +1034,15 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(plan.mode, "tasks")
         self.assertEqual(plan.tasks[0].agent, "product_info")
         self.assertEqual(metrics.decision_mode, "tasks")
+
+    def test_planner_policy_distinguishes_match_explanation_start_and_actions(self):
+        for phrase in (
+            "怎麼配對／如何配到人",
+            "幫我配對／開始找人",
+            "取消搜尋",
+            "接受／婉拒／撤回",
+        ):
+            self.assertIn(phrase, _PLANNER_SYSTEM)
 
     def test_planner_system_policy_has_bounded_social_opening_contract(self):
         self.assertIn('opportunity.signal="social_opening"', _PLANNER_SYSTEM)
@@ -942,7 +1165,7 @@ class V3PlannerTests(unittest.TestCase):
         system_prompt = provider.call_args.kwargs["system_prompt"]
         self.assertIn("更認識我／更了解我／多了解我一點", system_prompt)
         self.assertIn("profile.start_assessment(kind=basic)", system_prompt)
-        self.assertEqual(metrics.prompt_version, "compact_v3_write_intent_v2")
+        self.assertEqual(metrics.prompt_version, "compact_v3_match_intent_v4")
         self.assertEqual([task.agent for task in plan.tasks], ["profile", "synthesizer"])
 
     def test_inaccurate_existing_personality_profile_can_produce_basic_assessment_task(self):
@@ -1017,7 +1240,7 @@ class V3PlannerTests(unittest.TestCase):
                         "id": "r1", "agent": "relationship", "depends_on": [],
                         "task_brief": "列出 accepted contacts",
                         "evidence_policy": "match.current_proposal.v1",
-                        "outcome_contract": "match.current_proposal.v1",
+                        "outcome_contract": {"unexpected": "match.current_proposal.v1"},
                     },
                     {
                         "id": "s1", "agent": "synthesizer", "depends_on": ["r1"],

@@ -242,7 +242,8 @@ class MatchQualificationTests(unittest.TestCase):
         self.assertNotIn("recommendation_reason", owner_card)
         self.assertNotIn("receiver_reason", owner_card)
         self.assertNotIn("other_id", owner_card)
-        self.assertNotIn("proposal_revision", owner_card)
+        # Revision is the existing public CAS token, not counterparty identity.
+        self.assertEqual(owner_card["proposal_revision"], 0)
 
     @patch("routers.match.public_display_name", return_value="對方")
     def test_old_live_v4_copy_is_reprojected_without_mutating_the_record(self, _display_name):

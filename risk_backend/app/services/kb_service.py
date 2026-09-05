@@ -89,15 +89,27 @@ class KBService:
         headers = KBService._headers()
 
         results = []
+        seen_ids = set()
         offset = 0
         while True:
-            params = {"limit": limit, "offset": offset}
-            if queries:
-                params["queries[]"] = [json.dumps(q) for q in queries]
+            serialized_queries = [
+                query if isinstance(query, str) else json.dumps(query)
+                for query in (queries or [])
+            ]
+            # Appwrite 1.9 ignores top-level limit/offset on the legacy
+            # documents route. Pagination must be encoded as Query values;
+            # otherwise only the first 25 KB rows are ever visible.
+            serialized_queries.extend([
+                json.dumps({"method": "limit", "values": [limit]}),
+                json.dumps({"method": "offset", "values": [offset]}),
+            ])
+            params = [("queries[]", query) for query in serialized_queries]
+            verify_ssl = False if ("127.0.0.1" in ep or "localhost" in ep) else True
             r = requests.get(
                 f"{ep}/databases/{kb_db_id}/collections/{collection_id}/documents",
                 headers=headers,
                 params=params,
+                verify=verify_ssl,
             )
             if r.status_code != 200:
                 print(f"[KB] list {collection_id} -> {r.status_code} {r.text[:200]}")
@@ -105,14 +117,34 @@ class KBService:
             data = r.json()
             docs = data.get("documents", [])
             for doc in docs:
+                document_id = doc.get("$id")
+                if document_id and document_id in seen_ids:
+                    continue
+                if document_id:
+                    seen_ids.add(document_id)
                 clean = {k: v for k, v in doc.items() if not k.startswith("$")}
                 results.append(clean)
             total = data.get("total", 0)
             offset += len(docs)
-            # KB 資料量小；當本頁未滿 limit、或無資料、或已抓到 total 就停止，
-            # 避免某些 legacy server 的 offset 行為造成重複抓取。
-            if len(docs) < limit or not docs or offset >= total:
+            if not docs or offset >= total:
                 break
+
+        # 防禦性客戶端過濾：若 Appwrite REST endpoint 未正確套用 queries 參數，在此二次過濾
+        if queries:
+            filtered = []
+            for doc in results:
+                matched = True
+                for q in queries:
+                    if isinstance(q, dict) and q.get("method") == "equal":
+                        attr = q.get("attribute")
+                        vals = q.get("values", [])
+                        if doc.get(attr) not in vals:
+                            matched = False
+                            break
+                if matched:
+                    filtered.append(doc)
+            results = filtered
+
         return results
 
     @staticmethod

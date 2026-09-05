@@ -1644,6 +1644,26 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertEqual(metrics.fallback_reason, "provider_error")
         self.assertEqual(metrics.error_code, "synthesizer_provider_error")
 
+    def test_match_status_provider_failure_uses_verified_state_fallback(self):
+        slc = self._slice([{
+            "task_id": "m1", "status": "ok", "tool": "match.get_status",
+            "result": {
+                "state": "waiting_other", "scope": "live_match",
+                "is_terminal": False, "chat_opened": False,
+                "counterparty": "對方", "revision": 2,
+                "updated_at": None, "reason_code": None,
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            side_effect=Exception("provider down"),
+        ):
+            reply, _card_decision, metrics = synthesize(slc)
+
+        self.assertIn("等對方回覆", reply)
+        self.assertNotIn("沒接好", reply)
+        self.assertEqual(metrics.reply_source, "observation_fallback")
+
     def test_capability_query_is_not_classified_by_synthesizer_regex(self):
         slc = self._slice([])
         slc.payload["message"] = "你可以幹嘛"

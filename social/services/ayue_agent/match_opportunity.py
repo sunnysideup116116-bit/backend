@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from database import matches_coll, profiles_coll
+from services.match_state_service import load_match_state
 
 
 GUIDANCE_COOLDOWN_SECONDS = 7 * 86400
@@ -98,11 +99,7 @@ def assess_match_opportunity(profile: dict[str, Any], user_id: str, *, explicit_
     guidance = profile.get("match_guidance") or {}
     now = time.time()
     fingerprint = opportunity_fingerprint(profile)
-    active = matches_coll.find_one({
-        "status": {"$in": list(LIVE_MATCH_STATUSES)},
-        "$or": [{"from_user": user_id}, {"to_user": user_id}],
-    }, {"_id": 1})
-    if active or bool(profile.get("matchmaking_in_progress")) or _text((profile.get("match_search") or {}).get("status")) in {"searching", "queued"}:
+    if load_match_state(user_id)["search_blocked"]:
         return MatchOpportunityAssessment("active_match_blocked", ("active_match",), fingerprint)
     recent_decline = matches_coll.find_one({
         "status": "declined",

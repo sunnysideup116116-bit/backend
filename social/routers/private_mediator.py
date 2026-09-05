@@ -219,7 +219,7 @@ def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: 
     match_doc = find_accepted_match(req.user_id, req.other_id)
     if not match_doc:
         raise HTTPException(status_code=403, detail="只能在已接受配對中私聊媒人")
-    event_queue: queue.Queue[dict | None] = queue.Queue(maxsize=16)
+    event_queue: queue.Queue[dict | None] = queue.Queue()
     fallback_run_id = uuid.uuid4().hex
     worker_done = threading.Event()
 
@@ -227,10 +227,7 @@ def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: 
         if event.get("type") not in {"run_started", "tool_started", "tool_finished", "token"}:
             return
         safe = {key: event[key] for key in ("type", "agent_run_id", "step_id", "text", "outcome") if key in event}
-        try:
-            event_queue.put_nowait(safe)
-        except queue.Full:
-            pass
+        event_queue.put_nowait(safe)
 
     def worker() -> None:
         worker_tasks = BackgroundTasks()
@@ -269,4 +266,11 @@ def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: 
             yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
 
     threading.Thread(target=worker, name="ayue-private-stream", daemon=True).start()
-    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )

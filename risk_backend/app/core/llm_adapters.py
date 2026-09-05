@@ -14,6 +14,7 @@ LLM Adapter Layer - 統一不同 provider 的 chat completion / generate 介面
 
 import os
 import random
+import threading
 import time
 from typing import Callable, Optional, Protocol
 
@@ -40,6 +41,21 @@ class LLMAdapter(Protocol):
 LLM_MAX_ATTEMPTS = int(os.getenv("LLM_MAX_ATTEMPTS", "3"))
 LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
 LLM_BACKOFF_BASE = float(os.getenv("LLM_BACKOFF_BASE", "1.0"))
+
+# Pair chat waits at most 40 seconds for the complete risk request.  The NLP
+# provider therefore needs its own, smaller budget: a primary attempt plus one
+# fallback attempt must leave time for guardrail and persistence work.  Summary
+# generation keeps the more generous global budget because it runs in the
+# background and is not on the message-send path.
+NLP_LLM_MAX_ATTEMPTS = int(os.getenv("NLP_LLM_MAX_ATTEMPTS", "1"))
+# Google GenAI rejects manually supplied deadlines below 10 seconds.
+NLP_LLM_TIMEOUT_SECONDS = float(os.getenv("NLP_LLM_TIMEOUT_SECONDS", "10"))
+NLP_LLM_FALLBACK_TIMEOUT_SECONDS = float(
+    os.getenv("NLP_LLM_FALLBACK_TIMEOUT_SECONDS", "15")
+)
+GEMINI_PRIMARY_COOLDOWN_SECONDS = float(
+    os.getenv("GEMINI_PRIMARY_COOLDOWN_SECONDS", "120")
+)
 
 # Guardrail classifier is optional and must not consume the NLP engine's much
 # larger retry budget. Rule and NLP evaluation remain available when it fails.
@@ -98,40 +114,142 @@ def call_with_retry(
     raise last_exc  # pragma: no cover — 迴圈內必定 return 或 raise
 
 
-class GeminiAdapter:
-    """Google Generative AI 包裝（新版 google.genai SDK）"""
+def _collect_google_api_keys() -> list[str]:
+    keys: list[str] = []
+    for prefix in ("GOOGLE_API_KEYS", "GOOGLE_API_KEY_"):
+        idx = 1
+        while idx <= 50:
+            val = os.getenv(f"{prefix}{idx}", "").strip().strip("\"'")
+            if val and val not in keys:
+                keys.append(val)
+            elif not val and idx > 3:
+                break
+            idx += 1
 
-    def __init__(self):
+    for var in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"):
+        val = os.getenv(var, "").strip().strip("\"'")
+        if val and val not in keys:
+            keys.append(val)
+
+    return keys
+
+
+class GeminiAdapter:
+    """Google Generative AI 包裝（新版 google.genai SDK），支援多 Key 自動分流與容錯切換"""
+
+    def __init__(
+        self,
+        fallback_model: Optional[str] = None,
+        timeout: Optional[float] = None,
+        fallback_timeout: Optional[float] = None,
+        max_attempts: Optional[int] = None,
+    ):
         from google import genai
         from google.genai import types
 
-        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        self._client = genai.Client(api_key=api_key) if api_key else None
         self._types = types
+        self._keys = _collect_google_api_keys()
+        self._clients = [
+            (k, genai.Client(api_key=k)) for k in self._keys
+        ]
+        self._client = self._clients[0][1] if self._clients else None
+        self._client_lock = threading.Lock()
+        self._client_index = 0
+        self._key_cooldown_until: dict[str, float] = {}
+
+        self._fallback_model = fallback_model or os.getenv(
+            "GEMINI_FALLBACK_MODEL",
+            "gemini-2.5-flash-lite",
+        )
+        self._timeout = LLM_TIMEOUT_SECONDS if timeout is None else timeout
+        self._fallback_timeout = (
+            self._timeout if fallback_timeout is None else fallback_timeout
+        )
+        self._max_attempts = max_attempts
+        self._primary_unavailable_until = 0.0
 
     def generate(self, prompt: str, model: str) -> str:
-        if not self._client:
+        if not self._client and not self._clients:
             raise RuntimeError("GeminiAdapter 缺少 GOOGLE_API_KEY / GEMINI_API_KEY")
 
-        # temperature=0（2026-08-05 新增）：原本未指定，沿用模型預設值。
-        # 實測同一則案例連跑三次，sexual_boundary 出現 0.75／0.75／0.65 的擺盪；
-        # 整個 test 集重跑一次，22 則中有 15 則（68%）NLP 分數改變，
-        # 3 則（14%）連最終等級都翻掉——大於我們想量測的多數效果量，
-        # 使「修正前 vs 修正後」的比較無法解讀（見 known-issues #23）。
-        # 設為 0 後三次結果完全相同。
-        # 這同時也是風險系統該有的性質：同樣的訊息與脈絡，應得到同樣的判斷。
-        def _once() -> str:
-            response = self._client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=self._types.GenerateContentConfig(
-                    temperature=0.0,
-                    http_options=self._types.HttpOptions(timeout=LLM_TIMEOUT_SECONDS * 1000),
-                ),
-            )
-            return response.text
+        def _call_model(target_model: str, timeout: float) -> str:
+            # 若測試或外部手動替換了 self._client，直接使用
+            if self._client and not any(c is self._client for _, c in self._clients):
+                active_clients = [("mock", self._client)]
+            else:
+                active_clients = self._clients or [("default", self._client)]
 
-        return call_with_retry(_once, label="Gemini")
+            with self._client_lock:
+                total = len(active_clients)
+                start_idx = self._client_index
+                self._client_index = (self._client_index + 1) % total
+
+            now = time.monotonic()
+            ordered = [active_clients[(start_idx + i) % total] for i in range(total)]
+
+            last_err = None
+            for key, client in ordered:
+                if total > 1 and now < self._key_cooldown_until.get(key, 0.0):
+                    continue
+
+                def _once() -> str:
+                    response = client.models.generate_content(
+                        model=target_model,
+                        contents=prompt,
+                        config=self._types.GenerateContentConfig(
+                            temperature=0.0,
+                            http_options=self._types.HttpOptions(timeout=timeout * 1000),
+                        ),
+                    )
+                    return response.text
+
+                try:
+                    return call_with_retry(
+                        _once,
+                        label=f"Gemini({target_model})",
+                        max_attempts=self._max_attempts,
+                    )
+                except Exception as exc:
+                    last_err = exc
+                    if _is_transient(exc):
+                        self._key_cooldown_until[key] = time.monotonic() + 60.0
+                        masked = (key[:6] + "..." + key[-4:]) if len(key) > 10 else "***"
+                        print(f"⚠️ [GeminiAdapter] Key {masked} 觸發配額/暫時限制，切換下一個 Key")
+                        continue
+                    raise exc
+
+            if last_err:
+                raise last_err
+            raise RuntimeError("GeminiAdapter 無可用 Client")
+
+        fallback = self._fallback_model
+        primary_available = time.monotonic() >= self._primary_unavailable_until
+        if primary_available or not fallback or fallback == model:
+            try:
+                return _call_model(model, self._timeout)
+            except Exception as primary_err:
+                if _is_transient(primary_err):
+                    self._primary_unavailable_until = (
+                        time.monotonic() + GEMINI_PRIMARY_COOLDOWN_SECONDS
+                    )
+                if fallback and fallback != model:
+                    print(f"   [ GeminiAdapter ] 主要模型 {model} 呼叫失敗 ({primary_err})，啟動 Fallback 至 {fallback}...")
+                    try:
+                        return _call_model(fallback, self._fallback_timeout)
+                    except Exception as fb_err:
+                        print(f"   [ GeminiAdapter ] Fallback 模型 {fallback} 亦失敗: {fb_err}")
+                        raise fb_err
+                raise primary_err
+        else:
+            print(
+                f"   [ GeminiAdapter ] 主要模型 {model} 暫時停用，"
+                f"直接使用 Fallback {fallback}"
+            )
+            try:
+                return _call_model(fallback, self._fallback_timeout)
+            except Exception as fb_err:
+                print(f"   [ GeminiAdapter ] Fallback 模型 {fallback} 亦失敗: {fb_err}")
+                raise fb_err
 
 
 class OpenAICompatAdapter:
@@ -240,8 +358,14 @@ def get_nlp_adapter() -> LLMAdapter:
         return _make_openai_compat(
             os.getenv("NLP_OPENAI_BASE_URL"),
             os.getenv("NLP_OPENAI_API_KEY"),
+            timeout=NLP_LLM_TIMEOUT_SECONDS,
+            max_attempts=NLP_LLM_MAX_ATTEMPTS,
         )
-    return GeminiAdapter()
+    return GeminiAdapter(
+        timeout=NLP_LLM_TIMEOUT_SECONDS,
+        fallback_timeout=NLP_LLM_FALLBACK_TIMEOUT_SECONDS,
+        max_attempts=NLP_LLM_MAX_ATTEMPTS,
+    )
 
 
 def get_nlp_model_name(kb_model_hint: Optional[str]) -> str:
@@ -253,7 +377,7 @@ def get_nlp_model_name(kb_model_hint: Optional[str]) -> str:
         if not model:
             raise RuntimeError("openai_compat 需要 NLP_MODEL 環境變數")
         return model
-    return kb_model_hint or "gemini-2.5-flash"
+    return os.getenv("GEMINI_MODEL") or kb_model_hint or "gemini-3.1-flash-lite"
 
 
 def get_summary_adapter() -> LLMAdapter:
@@ -273,7 +397,7 @@ def get_summary_model_name(kb_model_hint: Optional[str]) -> str:
         if not model:
             raise RuntimeError("openai_compat summary 需要 SUMMARY_MODEL 或 NLP_MODEL 環境變數")
         return model
-    return kb_model_hint or "gemini-2.5-flash"
+    return os.getenv("GEMINI_MODEL") or kb_model_hint or "gemini-3.1-flash-lite"
 
 
 def get_guardrail_classifier_adapter() -> LLMAdapter:

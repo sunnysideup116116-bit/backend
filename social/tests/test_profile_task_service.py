@@ -1,11 +1,45 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from bson.objectid import ObjectId
 
 from services import profile_task_service as profile_tasks
 
 
 class ProfileTaskServiceTests(unittest.TestCase):
+    def test_coverage_accepts_an_owned_new_ai_room(self):
+        tasks = MagicMock()
+        message_id = ObjectId()
+        with patch.object(profile_tasks, "profile_skills_mode_for_user", return_value="on"), \
+             patch.object(profile_tasks, "is_owned_public_ai_room", return_value=True), \
+             patch.object(profile_tasks.messages_coll, "find", return_value=[{
+                 "_id": message_id, "content": "我喜歡安靜咖啡廳", "metadata": {},
+             }]) as find_messages, \
+             patch.object(profile_tasks.PROFILE_RUNS, "find", return_value=[]), \
+             patch.object(profile_tasks, "process_profile_message") as process:
+            result = profile_tasks.queue_profile_coverage(
+                tasks, "owner", "ai_room::owner::topic", [str(message_id)],
+            )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["requeued_count"], 1)
+        self.assertEqual(
+            find_messages.call_args.args[0]["room_id"], "ai_room::owner::topic",
+        )
+        tasks.add_task.assert_called_once_with(
+            process, "owner", "我喜歡安靜咖啡廳", str(message_id), "global", None,
+        )
+
+    def test_coverage_rejects_a_foreign_room_before_message_read(self):
+        tasks = MagicMock()
+        with patch.object(profile_tasks, "profile_skills_mode_for_user", return_value="on"), \
+             patch.object(profile_tasks, "is_owned_public_ai_room", return_value=False), \
+             patch.object(profile_tasks.messages_coll, "find") as find_messages:
+            result = profile_tasks.queue_profile_coverage(
+                tasks, "owner", "ai_room::other::topic", [str(ObjectId())],
+            )
+        self.assertEqual(result["status"], "invalid_scope")
+        find_messages.assert_not_called()
+        tasks.add_task.assert_not_called()
     def test_enabled_pipeline_schedules_only_typed_profile_extractor(self):
         tasks = MagicMock()
         with patch.object(profile_tasks, "profile_skills_mode_for_user", return_value="on"), \

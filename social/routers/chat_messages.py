@@ -1,9 +1,10 @@
 """Message history and contact-list HTTP adapters for the chat surface."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from database import matches_coll, messages_coll, profiles_coll
+from database import db, matches_coll, messages_coll, profiles_coll
+from services.ayue_agent.v3.confirmation import project_match_choice_history
 from models import ClearRequest
 from services.ai_room_service import (
     create_room as create_ai_room,
@@ -18,7 +19,9 @@ from services.ayue_agent.onboarding import (
     complete_public_ayue_onboarding, public_ayue_onboarding_state,
 )
 from services.assessment_session_service import assessment_public_state_for_room
-from services.ayue_agent.public_relationship_projection import mentioned_contact_refs
+from services.ayue_agent.public_relationship_projection import (
+    mentioned_contact_refs, display_name as public_display_name,
+)
 from services.chat_service import generate_room_id
 from services.notification_service import (
     PAIR,
@@ -27,6 +30,8 @@ from services.notification_service import (
 )
 from services.relationship_engagement_service import generate_mediator_private_room_id
 from services.match_state_service import verified_accepted_match_query
+from services.match_card_projection import project_match_card_history
+from services.public_nickname_service import proposal_display_name
 from services.risk_block_service import (
     RiskBlockServiceUnavailable,
     risk_block_service,
@@ -47,7 +52,14 @@ def get_messages(
     ai_room_id: str | None = None,
     limit: int | None = None,
     before: float | None = None,
+    response: Response = None,
 ):
+    if response is not None:
+        # Message history is a live polling resource. Intermediary/CDN caching
+        # previously returned old risk metadata and made handled prompts appear
+        # again after users reopened a room.
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
     # Multi-room AI surface: an explicit AI room id overrides the derived
     # legacy room. Ownership is enforced; only AI rooms take this path.
     if ai_room_id:
@@ -78,6 +90,14 @@ def get_messages(
         # Legacy clients expect ascending order without a limit.
         messages = list(cursor)[::-1]
         has_more = False
+    if is_ai_contact:
+        messages = project_match_card_history(
+            messages, user_id,
+            nickname_lookup=lambda uid: proposal_display_name(uid, fallback_lookup=public_display_name),
+        )
+        messages = project_match_choice_history(
+            messages, user_id=user_id, room_id=room_id, collection=db["v3_pending_confirmations"],
+        )
     user_doc = profiles_coll.find_one({"user_id": user_id})
     active_proposal_id = (user_doc or {}).get("active_match_proposal_id")
     date_coordination = None

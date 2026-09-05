@@ -31,6 +31,8 @@ class MemoryCollection:
         for key, expected in query.items():
             actual = document.get(key)
             if isinstance(expected, dict):
+                if "$ne" in expected and actual == expected["$ne"]:
+                    return False
                 if "$gt" in expected and not (actual is not None and actual > expected["$gt"]):
                     return False
                 if "$in" in expected and actual not in expected["$in"]:

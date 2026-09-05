@@ -8,6 +8,11 @@ from services.ayue_agent.match_opportunity import (
 
 
 class MatchOpportunityPolicyTests(unittest.TestCase):
+    def setUp(self):
+        snapshot_patch = patch("services.ayue_agent.match_opportunity.load_match_state", return_value={"search_blocked": False})
+        self.snapshot = snapshot_patch.start()
+        self.addCleanup(snapshot_patch.stop)
+
     def _ready_profile(self):
         return {
             "current_context": "最近想去合掌村旅行",
@@ -53,6 +58,7 @@ class MatchOpportunityPolicyTests(unittest.TestCase):
     @patch("services.ayue_agent.match_opportunity.matches_coll.find_one")
     def test_active_match_blocks_guidance(self, find_one):
         find_one.return_value = {"_id": "active"}
+        self.snapshot.return_value = {"search_blocked": True}
         assessment = assess_match_opportunity(self._ready_profile(), "owner")
         self.assertEqual(assessment.state, "active_match_blocked")
         self.assertIn("active_match", assessment.reason_codes)
@@ -61,9 +67,7 @@ class MatchOpportunityPolicyTests(unittest.TestCase):
     def test_accepted_connection_is_terminal_and_does_not_block_explicit_next_search(self, find_one):
         assessment = assess_match_opportunity(self._ready_profile(), "owner", explicit_search=True)
         self.assertEqual(assessment.state, "ready")
-        blocking_query = find_one.call_args_list[0].args[0]
-        self.assertEqual(set(blocking_query["status"]["$in"]), {"draft", "pending"})
-        self.assertNotIn("accepted", blocking_query["status"]["$in"])
+        self.snapshot.assert_called_once_with("owner")
 
 
 if __name__ == "__main__":

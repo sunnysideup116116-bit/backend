@@ -6,7 +6,11 @@ import pytest
 
 
 os.environ["AYUE_SKIP_DOTENV"] = "1"
-os.environ["MONGO_URI"] = "mongodb://127.0.0.1:27017"
+os.environ["MONGO_URI"] = "mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=50&connectTimeoutMS=50"
+# A local root .env can still be loaded by legacy mirroring modules. Explicit
+# empty values keep unit-test nickname reads off the real Appwrite service.
+os.environ["APPWRITE_PROJECT_ID"] = ""
+os.environ["APPWRITE_API_KEY"] = ""
 
 
 @pytest.fixture(autouse=True)

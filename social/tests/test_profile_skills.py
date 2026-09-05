@@ -8,6 +8,7 @@ from unittest.mock import patch
 from bson.objectid import ObjectId
 
 from services.language_service import normalize_zh_tw
+from services.ai_service import ChatResult
 from services.memory_service import memory_summary
 from services.profile_skills import (
     _active_recent_episode,
@@ -31,8 +32,8 @@ def router_payload(activity=None, memories=None, *, recent=True, confidence=0.95
             fields[name] = {"operation": "set", "value": value, "evidence_span": evidence_span,
                             "confidence": confidence, "subject": "owner"}
     memories = [{"subject": "owner", "evidence_span": item.get("evidence_span", evidence_span), **item} for item in (memories or [])]
-    return json.dumps({"recent_context": {"action": "update" if recent else "none", "message_kind": "real_world_update" if recent else "other", "confidence": confidence,
-                       "fields": fields, "reason_code": "test"}, "memories": memories})
+    return ChatResult(content=json.dumps({"recent_context": {"action": "update" if recent else "none", "message_kind": "real_world_update" if recent else "other", "confidence": confidence,
+                       "fields": fields, "reason_code": "test"}, "memories": memories}))
 
 
 def patch_payload(fields, *, recent=True, confidence=0.95, kind="real_world_update", episode_relation="new"):
@@ -40,9 +41,9 @@ def patch_payload(fields, *, recent=True, confidence=0.95, kind="real_world_upda
         if isinstance(value, dict):
             value.setdefault("confidence", confidence)
             value.setdefault("subject", "owner")
-    return json.dumps({"recent_context": {"message_kind": kind, "action": "update" if recent else "none",
+    return ChatResult(content=json.dumps({"recent_context": {"message_kind": kind, "action": "update" if recent else "none",
                        "confidence": confidence, "fields": fields, "episode_relation": episode_relation,
-                       "reason_code": "test"}, "memories": []})
+                       "reason_code": "test"}, "memories": []}))
 
 
 class ProfileSkillsTests(unittest.TestCase):
@@ -256,9 +257,9 @@ class ProfileSkillsTests(unittest.TestCase):
         self.assertEqual(decision["recent_context"]["reason_code"], "blocked_input")
 
     def test_contract_does_not_infer_missing_owner_attribution(self):
-        payload = json.loads(router_payload("爬山", evidence_span="我想去爬山"))
+        payload = json.loads(router_payload("爬山", evidence_span="我想去爬山").content)
         del payload["recent_context"]["fields"]["activity"]["subject"]
-        with patch("services.profile_skills.generate_chat_completion", return_value=json.dumps(payload)):
+        with patch("services.profile_skills.generate_chat_completion", return_value=ChatResult(content=json.dumps(payload))):
             decision = analyze_profile_message("我想去爬山", "")
         self.assertFalse(decision["recent_context"]["should_update"])
         self.assertEqual(decision["contract"], {})
@@ -285,7 +286,7 @@ class ProfileSkillsTests(unittest.TestCase):
 
     def test_summary_composer_rejects_unverified_additions(self):
         fields = {"activity": {"value": "去市集"}, "timing": {"value": "近期"}}
-        with patch("services.profile_skills.generate_chat_completion", return_value="近期想去市集和帥哥約會"):
+        with patch("services.profile_skills.generate_chat_completion", return_value=ChatResult(content="近期想去市集和帥哥約會")):
             summary = _compose_recent_context_summary(fields)
         self.assertEqual(summary, "近期活動：去市集")
 
@@ -476,4 +477,3 @@ class ProfileSkillsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

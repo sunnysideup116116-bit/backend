@@ -3,39 +3,73 @@ set -euo pipefail
 
 server_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 canonical_root="$server_root"
-supplied_social_env="${AYUE_SOCIAL_ENV_SOURCE:-/home/sunny/下載/ayue_for_demo-main/social.env}"
+supplied_social_env="${AYUE_SOCIAL_ENV_SOURCE:-}"
+supplied_matchmaker_env="${AYUE_MATCHMAKER_ENV_SOURCE:-}"
 existing_server_env="${AYUE_SERVER_ENV_SOURCE:-$server_root/.env}"
 social_example="$canonical_root/social/.env.example"
 matchmaker_example="$canonical_root/matchmaker_agent/.env.example"
 social_target="$canonical_root/social/.env"
 matchmaker_target="$canonical_root/matchmaker_agent/.env"
 
-for required_file in "$supplied_social_env" "$existing_server_env" "$social_example" "$matchmaker_example"; do
+for required_file in "$social_example" "$matchmaker_example"; do
     if [[ ! -f "$required_file" ]]; then
         printf 'Missing environment source: %s\n' "$required_file" >&2
         exit 1
     fi
 done
 
-social_keys='MONGO_URI MONGO_DB_NAME DEMO_DESTRUCTIVE_TOOLS_ENABLED RISK_SERVICE_URL RISK_TIMEOUT_SEC OLLAMA_HOST OLLAMA_API_KEY OLLAMA_CHAT_MODEL OLLAMA_FAST_CHAT_MODEL AYUE_OLLAMA_TIMEOUT_SECONDS AYUE_LOCAL_DEBUG_TRACE AYUE_RUNTIME_MODEL_SETTINGS_TOKEN AYUE_ALLOWED_RUNTIME_MODELS GOOGLE_AI_STUDIO_API_KEY GOOGLE_EMBEDDING_MODEL AYUE_DEFAULT_TIMEZONE AYUE_CALENDAR_STATE_MONGO AYUE_PROFILE_SKILLS_MODE AYUE_PROFILE_SKILLS_USER_ALLOWLIST TAVILY_API_KEY TAVILY_PROJECT GIPHY_API_KEY GIPHY_GIF_ENABLED AYUE_MAPS_ENABLED AYUE_MAPS_MONGO_CACHE OSM_NOMINATIM_URL OSM_OVERPASS_URL OSM_OVERPASS_FALLBACK_URL OSM_USER_AGENT AYUE_GOOGLE_PLACE_CARDS_ENABLED AYUE_PUBLIC_PLACE_CARDS_ENABLED GOOGLE_PLACES_SERVER_API_KEY GOOGLE_MAPS_BROWSER_API_KEY AYUE_GOOGLE_PLACE_PHOTOS_ENABLED AYUE_GOOGLE_DISTANCE_MATRIX_ENABLED MATCH_AGENT_CANDIDATE_LIMIT MATCH_VECTOR_QUALIFICATION_MIN AYUE_V3_SIMPLE_CHAT_FAST_PATH AYUE_V3_WEB_PLACE_BOOTSTRAP_FAST_PATH AYUE_SUBAGENT_MAX_READS AYUE_SUBAGENT_MAX_PARALLEL'
-matchmaker_keys='LLM_API_KEY LLM_BASE_URL LLM_MODEL_ID NEO4J_URI NEO4J_USERNAME NEO4J_PASSWORD NEO4J_DATABASE MATCH_GLOBAL_RULE_LIMIT MATCH_GLOBAL_RULE_CHAR_LIMIT MATCH_GLOBAL_RULE_SIMILARITY_THRESHOLD'
+# An explicitly supplied source must exist. The shared legacy file is optional
+# when provisioning directly from separate Social and Matchmaker attachments.
+for supplied_file in "$supplied_social_env" "$supplied_matchmaker_env" "${AYUE_SERVER_ENV_SOURCE:-}"; do
+    if [[ -n "$supplied_file" && ! -f "$supplied_file" ]]; then
+        printf 'Missing environment source: %s\n' "$supplied_file" >&2
+        exit 1
+    fi
+done
+
+shared_sources=()
+social_sources=()
+matchmaker_sources=()
+if [[ -f "$existing_server_env" ]]; then
+    shared_sources+=("$existing_server_env")
+fi
+if [[ -n "$supplied_social_env" ]]; then
+    social_sources+=("$supplied_social_env")
+fi
+if [[ -n "$supplied_matchmaker_env" ]]; then
+    matchmaker_sources+=("$supplied_matchmaker_env")
+fi
 
 write_selected_env() {
     local target="$1"
-    local keys="$2"
+    local example="$2"
     shift 2
+    local inputs=("$example" "$@")
+    # Re-running provisioning fills missing settings without replacing current
+    # credentials, model choices, rollout flags, or additional local settings.
+    if [[ -f "$target" ]]; then
+        inputs+=("$target")
+    fi
     local temporary
     temporary="$(mktemp "$canonical_root/.env-build.XXXXXX")"
-    if ! awk -v keys="$keys" '
-        BEGIN {
-            count = split(keys, ordered, " ")
-        }
-        /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/ {
+    if ! awk -v example="$example" -v target="$target" '
+        {
             line = $0
+            sub(/\r$/, "", line)
+            sub(/^[[:space:]]*export[[:space:]]+/, "", line)
+            if (line !~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/) {
+                next
+            }
             key = line
             sub(/=.*/, "", key)
             gsub(/[[:space:]]/, "", key)
             sub(/^[^=]*=/, "", line)
+            # Examples are the canonical allowlist. Keep extra keys only when
+            # already present in this target, never by importing arbitrary keys.
+            if ((FILENAME == example || FILENAME == target) && !(key in seen)) {
+                ordered[++count] = key
+                seen[key] = 1
+            }
             selected[key] = line
         }
         END {
@@ -44,7 +78,7 @@ write_selected_env() {
                 printf "%s=%s\n", key, selected[key]
             }
         }
-    ' "$@" > "$temporary"; then
+    ' "${inputs[@]}" > "$temporary"; then
         rm -f "$temporary"
         return 1
     fi
@@ -52,10 +86,12 @@ write_selected_env() {
     rm -f "$temporary"
 }
 
-# Later files have priority. Examples contribute only public defaults.
-write_selected_env "$social_target" "$social_keys" \
-    "$social_example" "$existing_server_env" "$supplied_social_env"
-write_selected_env "$matchmaker_target" "$matchmaker_keys" \
-    "$matchmaker_example" "$supplied_social_env" "$existing_server_env"
+# Later sources have priority; each existing target is always read last.
+# Reading the Social source for Matchmaker also recovers graph thresholds that
+# older attachments placed in Social. They are not imported into Social itself.
+write_selected_env "$social_target" "$social_example" \
+    "${shared_sources[@]}" "${social_sources[@]}"
+write_selected_env "$matchmaker_target" "$matchmaker_example" \
+    "${social_sources[@]}" "${shared_sources[@]}" "${matchmaker_sources[@]}"
 
-printf 'Provisioned ignored Ayue V3 environment files with mode 600.\n'
+printf 'Provisioned ignored Ayue V3 environment files with mode 600; existing values preserved.\n'

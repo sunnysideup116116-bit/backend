@@ -37,6 +37,23 @@ Final response 使用 `AgentResult`：
 - `sources`、`place_cards`、`presentation_blocks` 都是 bounded typed projection。
 - `agent_run_id` 是不含內容的 opaque correlation ID，只能用來對應 localhost debug run。
 
+### 2.1 Match / Event HTTP projection
+
+`routers/match.py` 是 App 的 HTTP adapter，不是另一個狀態轉移 owner：
+
+- `POST /api/match/decision` 保留 `expected_status`、`expected_revision` 與 optional `proposal_namespace`，寫入仍只經 match action/decision services。只有成功接受、重新讀到 canonical `accepted` 且 caller 為 participant 時，回傳 optional `other_id` 供 App 導航；`pending/declined/expired` 或 409 不回傳聊天對象身份。
+- `GET /api/match/state` 也只向 accepted participants 回傳 `other_id`。兩個 HTTP 投影都必須通過既有 `has_verified_acceptance`：只有裸 `status=accepted`、沒有 pending→accepted 同意證據的舊匯入資料不得取得導航身份。成功接受後若導航欄位因讀取暫時失敗而缺少，App 可補讀一次 state，不能重送 decision 當作導航重試。導航資訊讀取失敗不把已提交的 consent 變成失敗。
+- 一般與 Event 提案的 `GET /api/match/state`、AI 聊天歷史增加 UI-only `counterparty_nickname`；依 canonical match 與 viewer 換邊，只公開對方暱稱。未送出的 draft 不向接收方公開。`public_nickname_service` 只讀 Appwrite `dating_db.user_profiles.name`（使用 name-only query、30 秒／256 筆 process cache、短 timeout、不跟隨 redirect），不可用時才回退 Mongo 公開稱呼；舊 seed 帳號以 ID 當 name 的佔位值也可回退。一般帳號明確空／不安全的 name 不復活舊 alias。暱稱最多 30 字，ID／聯絡方式不作 fallback。
+- Flutter 以原生 `Text` 在配對理由前加入「這次的牽線對象是『暱稱』」，不解析名字為 Markdown／連結。Hydration 與歷史投影保留終態／revision 保護；lookup 失敗只省略稱呼，不重新開啟按鈕、不改寫已保存訊息。這是 consent 前公開暱稱的 UI 例外，不包含導航 ID、contact 資料，不擴張 prompt／Graph／婉拒理由。
+- `chat_reused=true` 表示活動邀請沿用同 pair 的既有聊天室。Event 公開卡片的 title、venue、region、category、Unix-seconds timestamps、date/datetime 精度、bounded sessions 與安全來源 URL 由既有 `public_event_card` 投影；它們在 Flutter hydration 後仍保留，內部 Event ID 和私人資料不顯示。
+- Event invitation 進入 `accepted` 後，match action service 以 match-scoped event key 在 canonical pair room 冪等保存一張 `event_invitation_accepted` system card。內容只帶同一份 `public_event_card` 與雙方通知 projection；新關係與既有 `chat_reused` 關係都會看到活動名稱、時間、地點與安全來源，不建立第二個 relationship anchor。舊版曾把 receiver preface 保存成缺少理由的 mediator card；新投遞不再建立該卡，Flutter 載入歷史／快取時也只過濾 `incoming_match_intro` mediator card，不影響一般文字 preface 或 actionable proposal。
+- Actionable `GET /api/match/state` 增加 `decline_reason_options: string[]`，只來自建立提案時保存的對方公開資料／活動類別，依 viewer 換邊並匿名化，最多六項；不讀對方私人記憶。Flutter 優先讀此欄位，明確空陣列不回退舊標籤；缺欄位的舊卡才相容 `matches[0].distinctive_tags`。此欄位不是 Planner input，也不是自動寫入偏好的授權。
+- 婉拒視窗明確分成「只婉拒，不記錄」與「記錄原因並婉拒」。前者送空 `explicit_reasons`；後者原樣送出勾選清單，由既有 feedback normalizer 正規化、共用 `/api/memory/apply` 寫入 `AVOIDS -> Concept`，Social 保存回傳的 normalized facts 與 match/source evidence。取消邀請、空清單、stale／重複決策不新增偏好；不在前端新增理由分類或語義過濾。Feedback 是 transition 後的 optional effect，UI 只表示已送出處理，不提前宣稱 Graph 已寫入。
+- `POST /api/match/events/discover` 維持 HTTP 200，但結果已是 `status=queued|already_running` 與 `run_number`，不是搜尋結果。它只排入 `job_kind=discovery`，不清庫、不發邀請。長時間 pipeline 由既有 Event Worker 執行。
+- `GET /api/match/events/discover/status` 回同一 singleton 的公開 snapshot。外層 `status=success` 只表示讀取成功；工作進度看 `state/stage`，`state=completed` 後再看 `outcome/coverage/error_codes`。Mongo 不可用時，排隊或進度讀取回 HTTP 503 / `event_queue_unavailable`。不公開 job token、lease owner 或原始搜尋內容。
+
+以上是 HTTP/UI 的 additive projection，不擴張 Planner、ToolSpec、Context slice 或 Public stream 的 identifier 權限。
+
 ## 3. Context interface
 
 HTTP 層先組 `AgentTurnContext`；`services/ayue_agent/context.py` 再建立唯一 prompt-safe `PublicAgentTurnContext`。
@@ -52,6 +69,8 @@ AgentContextSlice（每個 specialist 的最小視圖）
 固定 budget：最近 12 則訊息、合計 6,000 字元、記憶最多 8 筆。Context Builder 不得輸出 raw Mongo/Neo4j document、內部 ID、對方私人記憶或對方行事曆。
 
 Public conversation compaction 使用 `ConversationSummaryV1` 的 bounded owner-scoped projection。Context Builder 只載入通過 evaluation、source hash 與 room/owner 驗證的最新摘要，並以 watermark 排除已涵蓋的舊訊息。這份 continuity 只協助延續話題；Match、Profile、Calendar、accepted relationship 與 durable memory 一律重新讀 canonical domain state。
+
+Room ownership 同時接受永久 legacy Public room 與 `ai_rooms` 中可由 server 驗證的 owner room。Compaction、壓縮前 profile coverage 與 continuity loader 共用同一 validator；偽造、他人、已刪除或 storage unavailable 的 room 在讀 message／summary 前 fail closed。壓縮模型輸出使用 `ChatResult.content` 的 typed boundary。
 
 Match slice 可同時包含兩份互不覆蓋的最小狀態：`active_proposal` 對應一般 `relationship_match`，`active_event_invitation` 對應活動牽線。兩份 projection 只提供 stage、公開對象稱呼、是否可決定、活動標題等必要資訊；ID 與 revision 僅留在 server-side turn context / confirmation payload，不由 Planner 提供。
 
@@ -109,7 +128,7 @@ Provider 輸出的 `mode="tasks"` 必須包含至少一個 domain task，除非�
 
 ### 4.1 Provider compatibility boundary
 
-Planner 在 canonical validation 前先複製 provider arguments，且只處理三類 allowlisted drift：known agent 上錯置但值合法的 `evidence_policy`／Calendar availability `outcome_contract`、精確空 optional placeholder，以及 known Relationship task 將精確 `relationship.date_invitation.v1` 放到 `outcome_contract` 的單一 relocation case。其他 agent/value、衝突 root intent、unknown agent、`depends_on`／`run_if` drift 與 DAG invariant 不修復。成功修復不消耗 retry，只把 bounded repair code 投影到 localhost ephemeral debug；normalized payload、owner text 與 raw exception 不進 durable trace 或 public events。
+Planner 在 canonical validation 前先複製 provider arguments，且只處理 allowlisted drift：known agent 上錯置但值合法的 `evidence_policy`／Calendar availability `outcome_contract`、精確空 optional placeholder、known Relationship task 將精確 `relationship.date_invitation.v1` 放到 `outcome_contract` 的單一 relocation case，以及 provider 把字串型 `match_intent`／`outcome_contract` 誤放在明確非 Match／非 Calendar task 時移除該無權欄位。最後一種相容處理不會替 task 取得 Match 或 Calendar authority；object/list 等畸形值仍 fail closed。其他 agent/value、衝突 root intent、unknown agent、`depends_on`／`run_if` drift 與 DAG invariant 不修復。成功修復不消耗 retry，只把 bounded repair code 投影到 localhost ephemeral debug；normalized payload、owner text 與 raw exception 不進 durable trace 或 public events。
 
 ## 5. Runtime registration interface
 

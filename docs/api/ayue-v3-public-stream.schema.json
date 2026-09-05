@@ -15,6 +15,17 @@
     {
       "type": "object",
       "additionalProperties": false,
+      "required": ["type", "agent_run_id", "stage", "text"],
+      "properties": {
+        "type": {"const": "stage"},
+        "agent_run_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "stage": {"type": "string", "minLength": 1, "maxLength": 80},
+        "text": {"type": "string", "maxLength": 200}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
       "required": ["type", "agent_run_id", "text"],
       "properties": {
         "type": {"const": "tool_started"},
@@ -31,6 +42,16 @@
         "agent_run_id": {"type": "string", "minLength": 1, "maxLength": 128},
         "outcome": {"enum": ["ok", "error"]},
         "duration_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "agent_run_id", "text"],
+      "properties": {
+        "type": {"const": "token"},
+        "agent_run_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "text": {"type": "string", "minLength": 1, "maxLength": 600}
       }
     },
     {

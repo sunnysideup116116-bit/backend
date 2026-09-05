@@ -36,6 +36,7 @@ Server/
 │
 ├── social/                    # ★ 主 API（port 8000）
 │   ├── main.py                #   FastAPI app：router 掛載 + startup index 建立 + 背景 worker
+│   ├── event_worker.py        #   Event singleton queue consumer（由 main.py startup 嵌入 daemon thread）
 │   ├── config.py              #   環境變數讀取（Mongo/Ollama/Google/Tavily/Giphy…）
 │   ├── database.py            #   MongoDB 連線（profiles / matches / messages）
 │   ├── models.py              #   Pydantic request models
@@ -122,6 +123,7 @@ Server/
 ├── docs/                      # 文件
 │   ├── AGENTS.md              #   開發規則
 │   ├── AYUE_V3_ARCHITECTURE.md
+│   ├── EVENT_DRIVEN_MATCHMAKER_GUIDE.md # Event queue API、活動卡與接受後導航
 │   ├── MEMORY_CONTEXT_ENGINE_GUIDE.md
 │   ├── architecture/          #   子系統文件（01-project-overview … subagent-*）
 │   ├── api/                   #   JSON schema + 契約文件
@@ -139,7 +141,16 @@ cd Server
 ./start_all.sh          # 依序啟動：guardrail → risk → matchmaker → social（前景，Ctrl+C 停止）
 ```
 
-個別啟動：
+`start_all.sh` 不會另外啟動 Event process。`social/main.py` 在 FastAPI startup 時會自動建立
+Event discovery daemon thread，shutdown 時呼叫對應 stop hook。一般開發與整合測試不得再另開
+`python event_worker.py`，否則會在同一 Mongo singleton queue 上產生多餘的第二個 consumer。
+
+2026-09-04 整合環境已在私有 `social/.env` 啟用 `EVENT_WEEKLY_CYCLE_ENABLED=on`，未覆寫時沿用
+週一 08:00（Asia/Taipei）的排程預設。一般 `relationship_match` 與 `event_invitation` 使用獨立 live slot；
+Event、Memory／Compaction、Neo4j Concept 的完整契約分別見 `docs/EVENT_DRIVEN_MATCHMAKER_GUIDE.md`、
+`docs/MEMORY_CONTEXT_ENGINE_GUIDE.md` 與 `docs/NEO4J_SCHEMA.md`。
+
+以下是 `start_all.sh` 使用的內部啟動腳本與檢查工具；正式啟動仍統一使用 `start_all.sh`：
 
 ```bash
 ./scripts/run_ayue_guardrail.sh    # :8081（可選，llama.cpp）
@@ -178,17 +189,22 @@ cd Server
 | 工具 | `TAVILY_API_KEY`、`TAVILY_PROJECT`、`GIPHY_API_KEY`、`GOOGLE_PLACES_SERVER_API_KEY`、`GOOGLE_MAPS_BROWSER_API_KEY` |
 | 風險 | `RISK_SERVICE_URL`、`RISK_TIMEOUT_SEC`、`GUARDRAIL_PROVIDER`、`GUARDRAIL_BASE_URL`、`GUARDRAIL_MODEL_PATH`、`GUARDRAIL_SERVER_BIN`、`GUARDRAIL_PORT` |
 | 媒婆 | `MATCH_AGENT_CANDIDATE_LIMIT`、`MATCH_VECTOR_QUALIFICATION_MIN` |
+| Event | `EVENT_WEEKLY_CYCLE_ENABLED`、`EVENT_DISCOVERY_WEEKDAY`、`EVENT_DISCOVERY_HOUR`、`EVENT_WORKER_RECONCILE_SECONDS`、`EVENT_PAIR_DECLINE_COOLDOWN_DAYS` |
+| Memory／Compaction | `AYUE_MEMORY_OUTBOX_WORKER_ENABLED`、`AYUE_MEMORY_OUTBOX_POLL_SECONDS`、`AYUE_CONVERSATION_COMPACTION_MODE`、`AYUE_CONVERSATION_CONTEXT_MODE` |
 | 行為開關 | `AYUE_V3_SIMPLE_CHAT_FAST_PATH`、`AYUE_MAPS_ENABLED`、`AYUE_GOOGLE_PLACE_CARDS_ENABLED`、`AYUE_PROFILE_SKILLS_MODE` … |
 
 ## 測試
 
 | 套件 | 位置 | 執行 |
 |------|------|------|
-| 跨服務契約 | `Server/tests/` | `Server/venv/bin/python -m pytest tests/`（49 個） |
-| social | `social/tests/` | `.local-venv/social/bin/python -m pytest tests/`（800+ 個） |
-| risk_backend | `risk_backend/tests/` | `Server/venv/bin/python -m pytest risk_backend/tests/`（102 個） |
+| 跨服務契約 | `Server/tests/` | `venv/bin/python -m unittest discover -s tests -p 'test_*.py'` |
+| social | `social/tests/` | `cd social && ../venv/bin/python -m unittest discover -s tests -p 'test_*.py'` |
+| matchmaker | `matchmaker_agent/test_*.py` | `cd matchmaker_agent && ../venv/bin/python -m unittest discover -s . -p 'test_*.py'` |
+| risk_backend | `risk_backend/tests/` | `venv/bin/python -m pytest risk_backend/tests/` |
 
-> `social/tests/test_profile_skills.py` 有 17 個既有失敗（profile_skills 功能問題），與檔案結構無關。
+2026-09-04 Event／Memory content-only 整合驗收快照：Flutter 212 項通過、Matchmaker 76 項通過；
+Social 為 1,158 項、3 個已在未套入整合內容的 target baseline 重現的 errors、7 skipped；跨服務契約為
+55 項、2 個 baseline failures 與 1 個 baseline import error。固定數量只作當次稽核紀錄，後續以實際輸出為準。
 
 ## 資料層
 

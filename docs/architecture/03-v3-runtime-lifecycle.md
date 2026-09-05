@@ -167,6 +167,8 @@ Planner 另使用 compact prompt projection：最近 4 則、合計 2,000 字元
 - **Profile extraction**：`public_chat.py` 在回合結束後把已保存的 owner 訊息排入 `profile_task_service` → `profile_skills.py`，message_id 去重，evidence 必須是原句連續子字串；assessment 答案不會進入此 pipeline。
 - **配對搜尋 job**：`match.start_search` 確認後入 `match_search_jobs` 佇列，`match_search_worker` 消費（claim/lease/progress），完成後呼叫媒婆 9001 `/api/match`，產出唯一 draft proposal，並以 mediator event 通知。
 - **主動關心**：`proactive_scheduler` 每 15 秒掃描到期使用者，`proactive_care.py` 依最近訊息、前一則回覆、近期情境與口吻產生 care；atomic claim 保證每個 owner activity 最多一則 care。
+- **Event discovery**：`POST /api/match/events/discover` 只寫入 Mongo singleton job。`social/main.py` 在 FastAPI startup 以 `start_event_discovery_worker()` 建立同一 Social process 內的 daemon thread，由 `event_worker.py` 使用 Change Stream 喚醒並消費；`EVENT_WEEKLY_CYCLE_ENABLED` 只控制 weekly-cycle enqueue，手動 discovery 不受影響。
+- **Event projection/lifecycle**：Concept embedding worker 補齊 768 維向量並刷新 `EVENT_RELEVANCE`／`EVENT_AVOIDANCE`；Event lifecycle worker 獨立處理 Mongo proposal expiry 與 Graph Event cleanup。
 
 ## 6. 失敗行為總表
 

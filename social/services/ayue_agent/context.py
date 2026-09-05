@@ -12,6 +12,7 @@ from database import matches_coll, profiles_coll
 from services.conversation_compaction_service import load_validated_conversation_continuity
 from services.profile_projection import safe_recent_context
 from services.profile_location import safe_profile_location
+from services.match_state_service import load_match_state
 from services.proposal_namespace import (
     EVENT_INVITATION_NAMESPACE,
     RELATIONSHIP_MATCH_NAMESPACE,
@@ -162,27 +163,29 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
             "covered_through_timestamp": continuity["covered_through_timestamp"],
         }
     history, _ = _history(ctx, watermark=watermark)
-    active = matches_coll.find_one(
-        live_proposal_query(ctx.user_id, RELATIONSHIP_MATCH_NAMESPACE),
-        sort=[("created_at", -1)],
-    )
-    # Only one active proposal is actionable. If old data has duplicates, expose
-    # none rather than letting a model choose an arbitrary one.
-    active_count = matches_coll.count_documents(
-        live_proposal_query(ctx.user_id, RELATIONSHIP_MATCH_NAMESPACE)
-    )
+    match_state = load_match_state(ctx.user_id)
+    active = match_state["active_proposal"]
     active_prompt = None
-    if active and active_count == 1:
+    active_authority = None
+    if active and not match_state["ambiguous"]:
         other = _other_id(active, ctx.user_id)
         status = active.get("status")
-        can_decide = (status == "draft" and active.get("from_user") == ctx.user_id) or (
-            status == "pending" and active.get("to_user") == ctx.user_id
-        )
+        allowed_actions = match_state["allowed_actions"]
         active_prompt = {
             "status": status,
             "counterparty": _public_label(other),
-            "user_can_decide": can_decide,
+            "user_can_decide": bool(allowed_actions),
+            "allowed_actions": allowed_actions,
             "proposal_revision": int(active.get("proposal_revision", 0)),
+            "stage": match_state["stage"],
+            "created_at": active.get("created_at"),
+            "source": "existing_proposal",
+        }
+        active_authority = {
+            "match_id": str(active.get("_id") or ""),
+            "expected_status": str(status or ""),
+            "proposal_revision": int(active.get("proposal_revision", 0) or 0),
+            "proposal_namespace": RELATIONSHIP_MATCH_NAMESPACE,
         }
     event_active = matches_coll.find_one(
         live_proposal_query(ctx.user_id, EVENT_INVITATION_NAMESPACE),
@@ -241,7 +244,7 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     )
     now = time.time()
     if recent_context_draft and now - float(recent_context_draft.get("created_at", 0) or 0) > RECENT_CONTEXT_DRAFT_TTL_SECONDS:
-        profiles_coll.update_one({"user_id": ctx.user_id}, {"$unset": {"recent_context_draft": ""}})
+        # Context assembly is read-only, including expired auxiliary drafts.
         recent_context_draft = None
     memories = []
     for item in (profile.get("profile_memory_preview") or [])[:8]:
@@ -250,14 +253,20 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
         if label:
             memories.append(label)
     mentioned_ids, validation_overflow = validated_mentioned_contact_ids(ctx.user_id, ctx.mentioned_ids)
-    return PublicAgentTurnContext(
+    match_search = match_state["search"]
+    request_location_label = _request_location_label(ctx)
+    turn = PublicAgentTurnContext(
         user_id=ctx.user_id, room_id=ctx.room_id, message=_clean_text(ctx.message, 1600),
         recent_messages=history,
         conversation_continuity=continuity["summary"] if continuity else None,
         recent_context=safe_recent_context(profile.get("current_context"), ""),
-        user_location=safe_profile_location(profile).get("display_name", ""),
+        user_location=(
+            request_location_label
+            or safe_profile_location(profile).get("display_name", "")
+        ),
         relevant_memories=memories, active_proposal=active_prompt,
         active_event_invitation=event_prompt,
+        match_search=match_search,
         latest_match_outcome=outcome, clock=turn_clock,
         calendar_draft=calendar_draft, calendar_recent_reference=calendar_recent_reference,
         calendar_recent_mutation=calendar_recent_mutation,
@@ -268,3 +277,13 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
         mentioned_contact_overflow=bool(ctx.mention_overflow or validation_overflow),
         capability_manifest_version=CAPABILITY_MANIFEST_VERSION,
     )
+    turn._active_proposal_authority = active_authority  # type: ignore[attr-defined]
+    turn._match_state = match_state  # type: ignore[attr-defined]
+    return turn
+
+
+def _request_location_label(ctx: AgentTurnContext) -> str:
+    request_location = getattr(ctx, "device_location", None) or {}
+    if not isinstance(request_location, dict):
+        return ""
+    return _clean_text(request_location.get("display_name"), 120)

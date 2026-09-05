@@ -40,7 +40,7 @@
 | `matchmaker_agent` port 9001 | Graph/Matchmaker service | LLM 活動驗證、Neo4j 寫入、Graph traversal、主動邀請文案 |
 | Neo4j Aura | Graph projection | Event、Concept、使用者到活動的可重建關聯 |
 | MongoDB | Workflow source of truth | proposal namespace、`draft/pending/accepted/declined/expired`、pair cooldown 與 Event snapshot |
-| Frontend | Presentation | 匿名提案、活動資訊、接受／婉拒操作與狀態 hydration |
+| Frontend | Presentation | 公開暱稱介紹、活動資訊、接受／婉拒操作與狀態 hydration；模型理由仍匿名 |
 
 重要原則：
 
@@ -102,10 +102,11 @@ flowchart TD
 6. **排除不可邀請者**：已有 live `event_invitation` 的人會進 exclusion list；一般
    `relationship_match` 不阻擋活動邀請。同一輪剛收到活動 proposal 的人也會加入，避免一輪內同時收到多張活動邀請。
 7. **找到 Graph bridge**：Graph 確認小安與小晴都連到該 Event、沒有活動地雷，也沒有雙方人物地雷衝突。
-8. **決定先問誰**：系統先詢問關聯證據較弱的一方，因為她若願意，證據較強的一方通常更值得接著詢問；
-   這只決定順序，不代表替任何一方答應。
+8. **決定先問誰**：系統以兩方已驗證 Event links 的數量做 deterministic 排序，先詢問關聯證據較弱的一方；
+   這個封閉規則不需要 LLM，也只決定順序，不代表替任何一方答應。
 9. **產生匿名 Hook**：阿月分別為兩人生成 2 至 3 句邀請，說明「為什麼是這個活動」與
-   「為什麼可能適合認識這個人」，但第一方看不到第二方身份。
+   「為什麼可能適合認識這個人」，但第一方看不到第二方身份。兩個 hook 各有 15 秒 provider
+   timeout 且不做 SDK 自動重試；逾時改用仍含 Event 名稱的安全 fallback，避免超過 Social 的 90 秒總等待。
 10. **建立 Mongo proposal**：保存 `status=draft`、`proposal_revision=0` 及 Event snapshot，第一方看到卡片。
 11. **雙方同意**：第一方依 CAS 從 `draft/revision 0` 接受後成為 `pending/revision 1`；第二方再依 CAS
     從 `pending/revision 1` 接受後成為 `accepted/revision 2`。尚未建立關係的 pair 此時開聊天室；
@@ -127,7 +128,14 @@ POST /api/match/events/discover
 ```
 
 API 只會把工作寫入 MongoDB 的 singleton queue，不會在 port 8000 request 內執行長時間搜尋。
-獨立的 `social/event_worker.py` 會領取工作、定期續租並執行搜尋；worker 中斷後，租約到期的
+POST 立即回 `queued` 或 `already_running`；以回傳的 `run_number` 對照
+`GET /api/match/events/discover/status`，讀取同一輪的 stage 與結果，不能把排隊成功當成探索完成。
+Worker 的手動 discovery 與 weekly cycle 都以 `request_invitation_scan=False` 呼叫搜尋服務，
+不觸發舊的同 process auto-scan hook；即使打開舊相容旗標也不會因這兩條搜尋路徑提前發送邀請。
+Weekly cycle 仍在 relevance readiness 通過後明確掃描一次。直接呼叫搜尋服務的舊 Python caller 保留原預設相容行為。
+專責的 `social/event_worker.py` 會領取工作、定期續租並執行搜尋；目前正式啟動路徑是由
+`social/main.py` 的 FastAPI startup 呼叫 `start_event_discovery_worker()`，在 Social :8000 進程內建立 daemon thread。
+worker 中斷後，租約到期的
 工作可由下一個 worker 安全接手。
 
 Worker 是常駐的 background consumer，但不會每 2 秒查詢 MongoDB。正式喚醒路徑是
@@ -140,7 +148,9 @@ Event 與 Public Ayue 可以並行，Event queue 不會接管或解析聊天訊�
 generic error 是 Planner provider 回傳非字串 optional 欄位，使舊 normalization 發生 `TypeError`；
 該欄位現在會交給 strict schema validation 與 bounded retry，與 Event Worker 並行本身無關。
 
-從 `social` 啟動 worker：
+正式開發、Demo 與整合測試只需執行 `Server/start_all.sh`，不需要另開 Event 視窗。
+`event_worker.py` 保留 standalone entrypoint 供診斷或特殊部署使用；目前沒有關閉 embedded worker 的部署開關，
+因此不得在正常 Social 運行時再併行啟動下列指令：
 
 ```powershell
 ..\.project-venv\Scripts\python.exe event_worker.py
@@ -152,10 +162,13 @@ generic error 是 Planner provider 回傳非字串 optional 欄位，使舊 norm
 EVENT_WEEKLY_CYCLE_ENABLED=off
 ```
 
-`on` 時由獨立 Event Worker 在每週一依序執行：限定範圍清理 Event 庫存、搜尋並建圖、
+`on` 時由同一嵌入式 Event Worker 在每週一依序執行：限定範圍清理 Event 庫存、搜尋並建圖、
 等待 Concept embedding/relevance 投影完成，最後掃描並產生活動邀請。若 relevance 在有界時間內未完成，
 cycle 回報 `partial` 並跳過邀請，不會用不完整 Graph 強行配對。手動 Demo 仍保留三個獨立按鈕，不會因單獨執行 discovery
 而自動清理或發送邀請。
+
+上表的 `off` 是新環境的安全預設，不代表目前整合環境的有效值。部署狀態請以未提交的
+`social/.env` 與 Event Worker startup log 為準；不得為了記錄開關而把正式 `.env` 納入 Git。
 
 ### 5.2 搜尋額度
 
@@ -238,6 +251,10 @@ active Event 達到 6 筆後停止後續抽取與補搜。
 deterministic `MERGE` identity，因此回應遺失後重送不會建立第二份相同 Event。4xx（408／429 除外）
 不重試，避免把 contract 或權限錯誤當成暫時故障。最終 `error_codes` 會保留 bounded 原因，例如
 `ingest_timeout`、`ingest_http_503` 或 `ingest_invalid_json`，不再全部壓成 `ingest_unavailable`。
+每次 8000 → 9001 ingest attempt 另帶 server-owned `write_deadline`；9001 在模型回覆後、任何 Graph
+write 前再次檢查。HTTP client timeout 不會自動取消遠端 handler，因此已超過 deadline 的 late result
+必須丟棄，不能在 discovery terminal snapshot 之後繼續改 Event inventory。舊的無 deadline 內部 caller
+仍保留相容行為。
 
 ## 6. Phase B：LLM 活動驗證
 
@@ -550,6 +567,31 @@ Cooldown 也是 namespace-scoped：只有 `event_invitation` 的 `last_decision.
 `active_proposals.event_invitation` 同時投影兩個不含 identifier 的 live 摘要；既有
 `active_proposal_card` 保留為 relationship slot 的相容 alias。操作用 match ID 仍只來自 mediator card。
 
+Flutter 以「活動牽線提案」呈現公開 Event snapshot，顯示活動名稱、類別／地區、場地及最多八個場次。
+Unix timestamp 以秒解讀並固定轉為台灣時間；只有日期的資料不補出 `00:00` 或 `23:59`。
+來源連結只接受公開 HTTP/HTTPS，拒絕本機、IP literal、帶帳密與 script URL；開啟失敗不阻擋提案決策。
+Hydration 保留 Event、namespace 與 `chat_reused`，但舊 revision 或非終態資料不能復活已結束的卡片。
+理由前另顯示 server 從 canonical match 換邊取得的公開 `counterparty_nickname`；新卡及歷史卡都支援。
+名稱來自 Appwrite `user_profiles.name`，不可用／seed ID 佔位時才回退 Mongo 公開稱呼；不更動任何 profile 或原訊息。
+
+卡片決策會攜帶 `proposal_namespace`。第一方接受後仍是 `pending`／等待對方；只有雙方都接受才進聊天室。
+`POST /api/match/decision` 在成功接受後，從 canonical accepted match 驗證 participant 與 `has_verified_acceptance` 同意證據，才回傳導航用 `other_id`；
+這不是提案卡的顯示欄位，也不進入 Public prompt、stream 或 Event snapshot。
+`GET /api/match/state` 對 accepted participants 提供同樣的導航資料，供回覆遺失／暫時讀取失敗時恢復，不能因此重送決策。
+既有 pair 的 `chat_reused=true` 會呈現沿用聊天室，不宣稱另外建立一間。
+雙方接受後，後端會用 match-scoped event key 在兩人的 canonical pair room 冪等保存一張
+`event_invitation_accepted` system card；它只包含安全的 Event snapshot 與活動聊天開場，
+因此新認識或原本已 accepted 的 pair 都能在實際聊天室看到活動名稱、時間、地點與安全來源。
+重送 decision、重啟 worker 或重複投遞都不會新增第二張；既有 pair 也不會建立第二個
+relationship anchor。修正前建立、缺少 `proposal_namespace` 的 `incoming_match_intro`
+mediator card 會在 Flutter 的歷史與持久快取載入邊界被忽略；一般配對的文字 preface 不受影響。
+
+婉拒活動卡時可選「只婉拒，不記錄」，或勾選 `GET /api/match/state` 的 viewer-bound
+`decline_reason_options` 後選「記錄原因並婉拒」。後者才原樣送 `explicit_reasons` 到既有 feedback
+normalizer，再經共用 memory writer 寫入 `AVOIDS -> Concept`；前者只結束這次邀請並保留既有
+pair cooldown 規則，不猜測活動或對方的哪些特質被討厭。選項空缺不虛構通用地雷，撤回邀請也不記偏好。
+Feedback 是非阻塞的 optional effect，畫面表示「已送出處理」；provider/Graph 失敗不能重送已完成的提案決策。
+
 Hook 目前已經是依「這一方的需求、共同 Event 與可公開關聯證據」個別生成，目標長度約 2 至 3 句；
 兩邊不必看到相同文案，也不能在對方同意前洩漏身份或私人資料。
 
@@ -587,15 +629,21 @@ POST /api/match/events/discover
 }
 ```
 
-`status`：
+HTTP 200 的 `status` 只會表示已排隊或已有工作：
 
-- `success`：所有搜尋／驗證批次正常完成。
-- `partial`：至少一條搜尋或類別驗證逾時，其他成功結果已保存。
-- `empty`：沒有找到搜尋候選。
-- `search_failed`：所有可用搜尋都失敗。
-- `already_running`：另一輪 discovery 尚未結束。
+- `queued`：工作已保存，worker 稍後執行。
+- `already_running`：singleton 已有 queued/running 工作；沿用回傳的 `run_number` 查看進度，不另開一輪。
 
+```http
+GET /api/match/events/discover/status
+```
+
+此端點外層 `status=success` 只代表成功讀取 snapshot。`state` 為
+`idle/queued/running/completed/failed`，`stage` 表示目前階段；以 `run_number` 確認沒有讀到別輪工作。
+當 `state=completed`，再依 `outcome` 區分 `success`、`partial`、`empty`、`search_failed` 等搜尋結果，
+並檢查 `coverage/error_codes`。不能只看到 completed 就當作五類庫存全部合格。
 `searched_results` 是候選摘要數；`ingested_count` 才是通過驗證並寫入的 Event 數。
+排隊或讀取 queue 不可用時回 HTTP 503，detail code 為 `event_queue_unavailable`，不洩漏底層資料庫錯誤。
 
 ### 14.2 重建 relevance
 
@@ -745,21 +793,27 @@ live-slot 衝突；有任何衝突時 apply 會 fail closed。確認無衝突後
 
 ## 17. 啟動與 Demo
 
-### 17.1 啟動 9001
+### 17.1 唯一正式啟動入口
 
-```powershell
-cd .\matchmaker_agent
-..\.project-venv\Scripts\python.exe agent_api.py
+```bash
+cd Server
+./start_all.sh
 ```
 
-### 17.2 啟動 8000 (已內建 Event Worker)
+此腳本統一啟動 Social :8000、Risk :8001、Matchmaker :9001 與 Guardrail :8081。
+若原視窗仍在運行，請先協調其他測試者，再於該視窗輸入 `r` 重啟；不要另外啟動第二份 Server。
 
-```powershell
-cd .\social
-..\.project-venv\Scripts\python.exe main.py
-```
+### 17.2 Social 已內建 Event Worker
 
-> **注意**：`event_worker`（活動探索與週排程 Worker）已直接整合至 `main.py` 的 FastAPI startup/shutdown 生命週期中。啟動 `main.py` 即會自動在背景啟動 Discovery Worker，無需手動開啟第三個視窗；若在獨立容器或特殊生產環境，亦可單獨執行 `python event_worker.py`。
+`event_worker` 已整合至 `main.py` 的 FastAPI startup/shutdown 生命週期。透過 `start_all.sh` 啟動 Social 即會建立背景 Worker，
+不需另開視窗。雖然模組保留 standalone entrypoint，但現行沒有 disable-embedded-worker 開關，不得與正常 Server 併行啟動。
+
+#### 2026-09-04 整合環境基線
+
+- 正式 `Server/social/.env` 已設定 `EVENT_WEEKLY_CYCLE_ENABLED=on`；該私有檔案不進 Git。
+- `EVENT_DISCOVERY_WEEKDAY`／`EVENT_DISCOVERY_HOUR` 未覆寫，因此沿用週一 `0`、Asia/Taipei 08:00 的程式預設。
+- `start_all.sh` 啟動紀錄已確認 Event Worker thread、worker id 與 MongoDB Change Stream wake-up 均 active。
+- Google `gemini-embedding-2` free-tier 若回 429，Concept worker 會 bounded pause/retry；weekly cycle 在等待上限內仍未完成 relevance 時回 `partial` 並跳過邀請。這是 provider quota 狀態，不得誤判為提案 state machine 或 Event Worker 未啟動。
 
 ### 17.3 健康檢查
 
@@ -767,6 +821,10 @@ cd .\social
 Invoke-RestMethod http://127.0.0.1:9001/health
 Invoke-WebRequest http://127.0.0.1:8000/ -UseBasicParsing
 ```
+
+`GET /api/health` 只證明 Social process 已就緒，不會檢查 Event thread 是否仍存活。
+Event 啟動證據應同時包含 log 的 `[EVENT_WORKER] background worker thread started`，以及
+`GET /api/match/events/discover/status`（Demo 相容入口為 `/api/demo/events/discover/status`）可讀取 singleton job snapshot。
 
 ### 17.4 建議 Demo 順序
 
@@ -801,6 +859,7 @@ $OutputEncoding = $utf8
 import json
 import requests
 import sys
+import time
 
 sys.stdout.reconfigure(encoding="utf-8")
 response = requests.post(
@@ -810,10 +869,27 @@ response = requests.post(
         "window_days": 30,
         "categories": ["市集", "音樂", "運動", "節慶", "美食"],
     },
-    timeout=3600,
+    timeout=(3, 15),
 )
 response.raise_for_status()
-print(json.dumps(response.json(), ensure_ascii=False, indent=2))
+queued = response.json()
+print(json.dumps(queued, ensure_ascii=False, indent=2))
+run_number = queued["run_number"]
+deadline = time.monotonic() + 3600
+while time.monotonic() < deadline:
+    status = requests.get(
+        "http://127.0.0.1:8000/api/match/events/discover/status", timeout=(3, 15),
+    )
+    status.raise_for_status()
+    snapshot = status.json()
+    if snapshot.get("run_number") != run_number:
+        raise RuntimeError("已切換到另一輪工作，請重新確認 run_number")
+    if snapshot.get("state") in {"completed", "failed"}:
+        print(json.dumps(snapshot, ensure_ascii=False, indent=2))
+        break
+    time.sleep(3)
+else:
+    print("工作仍在背景執行，請稍後查詢 status；不要重送 discovery。")
 '@ | .\.project-venv\Scripts\python.exe -
 ```
 
@@ -914,7 +990,7 @@ cd .\matchmaker_agent
 - URL 必須是公開 HTTP/HTTPS，不接受 localhost、private IP、credentials 或 `.local`。
 - Prompt、raw page、完整 profile、Graph ID 不寫入 public trace。
 - 前端 Event card 不拿 internal Event ID。
-- 對方身份在 consent 前保持匿名。
+- Consent 前僅在 App 的提案介紹公開 viewer-bound `counterparty_nickname`；由 server 唯讀公開 profile，不能拿 account ID 充當稱呼。一般／Event 新卡與歷史卡都支援；未送出的 draft 不向接收方公開。此 UI-only 例外不改模型的匿名理由、Graph、婉拒選項或歷史訊息原文；導航 ID 與聯絡權限仍需 canonical 雙方同意。
 - Graph 只找機會，不執行配對 transition。
 - Proposal side effect 由 Mongo canonical service 管理。
 - Demo reseed 不得使用 `MATCH (n) DETACH DELETE n` 清空整個 Neo4j。
@@ -924,7 +1000,7 @@ cd .\matchmaker_agent
 目前是可展示、可整合的 MVP；正式上線前仍需：
 
 1. 累積多輪真實 discovery 結果，逐類調整可信來源與 skill。
-2. 部署並監控獨立 `event_worker.py`；需要每週一自動更新時，再將 `EVENT_WEEKLY_CYCLE_ENABLED` 從 `off` 改為 `on`。
+2. 監控 Social 內嵌 Event Worker 的 startup／shutdown、Change Stream、lease 與 job stage。2026-09-04 整合環境已將 `EVENT_WEEKLY_CYCLE_ENABLED` 設為 `on`；其他環境仍須逐一明確啟用與驗證。若未來要分離為獨立 process，必須先新增 disable-embedded-worker 部署契約並整合進 `start_all.sh`，不得同時跑兩個 consumer。
 3. 依拒絕頻率資料校準 `EVENT_PAIR_DECLINE_COOLDOWN_DAYS`；目前預設 7 天。
 4. 加入 scheduler run history、類別成功率與 provider latency 指標。
 5. 為 Web/LLM provider 設定成本、quota 與失敗告警。
@@ -933,10 +1009,10 @@ cd .\matchmaker_agent
 8. 在部署前完成 migration/rollback 演練與 Aura 權限最小化。
 
 Event-driven MVP 的主流程已完成：五類活動 discovery、Event/Concept graph、增量 embedding、
-relevance/avoidance、主動 opportunity scan、雙方匿名卡片、獨立 proposal namespace、CAS 決策、
-七天 pair decline cooldown、既有聊天室重用與 lifecycle 都已接入。Public Ayue 聊天歷史 compaction
-已由 `conversation_compaction_service.py` 接入；通用 Context Engine 與一般阿月長期記憶管理仍是獨立
-roadmap，三者都不屬於 Event proposal lifecycle。
+relevance/avoidance、主動 opportunity scan、雙方 viewer-bound 卡片（UI 可顯示公開暱稱）、獨立 proposal namespace、CAS 決策、
+七天 pair decline cooldown、既有聊天室重用與 lifecycle 都已接入。Public Ayue 聊天歷史 compaction、
+owner durable memory、status-aware memory projection 與 bounded outbox retry 也已接入；它們是相鄰但獨立的 domain，
+不屬於 Event proposal lifecycle，Event 流程不得直接改寫或繞過其 canonical owner。
 
 目前使用者所在地若有填寫，主要保存在 Mongo profile；Event opportunity Graph query 尚未把所在地當成
 強制 eligibility filter。因此擴充全台前，應先由 port 8000 以 server-owned 的城市／行政區 projection

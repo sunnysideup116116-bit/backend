@@ -67,6 +67,10 @@ _REPAIR_CODES = frozenset({
     "non_calendar_outcome_contract_removed",
     "empty_optional_task_fields_removed",
     "misplaced_date_invitation_intent_recovered",
+    "match_write_intent_normalized",
+    "match_observation_contract_removed",
+    "match_intent_object_normalized",
+    "non_match_match_intent_removed",
 })
 
 
@@ -137,6 +141,10 @@ def _planner_validation_retry_hint(exc: Exception) -> str:
             "relationship.date_invitation.v1 cannot contain an opportunity",
         )
     )
+    missing_synthesizer = any(
+        "plan must contain exactly one synthesizer" in message
+        for message in messages
+    )
     hints: list[str] = []
     if "write_intent" in locations or write_intent_message:
         hints.append(
@@ -144,6 +152,15 @@ def _planner_validation_retry_hint(exc: Exception) -> str:
             "explicit request to create a date invitation card, with exactly Relationship "
             "then Synthesizer; Match is never a precheck. Use none for every other request."
         )
+    if "match_intent" in locations or any("Match task requires match_intent" in msg for msg in messages):
+        hints.append(
+            "Every Match task requires match_intent: status, counterparty, start_search, "
+            "cancel_search, accept_proposal, dismiss_proposal or clarify. Classify the "
+            'current request. Use a string, e.g. "match_intent":"start_search", not an object or flags. '
+            "Wanting a new match never means accepting an existing proposal."
+        )
+    if "task_brief" in locations:
+        hints.append("Every task, including Synthesizer, requires a non-empty task_brief string.")
     if "evidence_policy" in locations or evidence_message:
         hints.append(
             "evidence_policy is only for Web tasks and is exactly "
@@ -161,6 +178,13 @@ def _planner_validation_retry_hint(exc: Exception) -> str:
             "run_if is only a control edge with source_task_id and required_outcome; "
             "required_outcome is task.finished or an allowlisted calendar outcome; omit run_if rather than sending {}."
         )
+    if missing_synthesizer:
+        hints.append(
+            "Keep the required domain tasks and include exactly one terminal "
+            "agent=synthesizer task whose depends_on lists the domain leaves. "
+            "A Match action still needs Match then Synthesizer to present the "
+            "server-owned confirmation preview, not a claim that the write completed."
+        )
     if not hints and "tasks" in locations:
         hints.append(
             "A domain request uses mode=tasks with the required domain agents and exactly "
@@ -169,24 +193,67 @@ def _planner_validation_retry_hint(exc: Exception) -> str:
     return " ".join(hints)[:1200]
 
 
+def _planner_validation_fields(exc: Exception) -> list[str]:
+    """Return allowlisted schema locations without retaining rejected values."""
+    errors_fn = getattr(exc, "errors", None)
+    try:
+        errors = errors_fn() if callable(errors_fn) else []
+    except Exception:
+        errors = []
+    fields: list[str] = []
+    for error in errors:
+        if not isinstance(error, dict):
+            continue
+        location = ".".join(str(part)[:40] for part in (error.get("loc") or ()))
+        if location and location not in fields:
+            fields.append(location)
+    return fields[:8]
+
+
 def _normalize_provider_plan_arguments(
     arguments: Any,
 ) -> tuple[Any, list[str]]:
     """Repair only known agent-scoped provider compatibility drift.
 
     The returned payload is a deep copy. Canonical Pydantic contracts remain
-    strict; unknown agents, invalid values, and all graph fields are untouched.
+    strict; unknown agents, malformed field types, and all graph fields are
+    untouched. Match does not declare outcome contracts: textual provider
+    result labels in that Calendar-only field never grant execution authority.
     """
     normalized = deepcopy(arguments)
     if not isinstance(normalized, dict) or not isinstance(normalized.get("tasks"), list):
         return normalized, []
     repair_codes: list[str] = []
+    write_intent = normalized.get("write_intent")
+    if isinstance(write_intent, str) and (
+        write_intent.startswith("match.")
+        or write_intent in {"start_search", "cancel_search", "accept", "decline", "cancel"}
+    ):
+        # Match writes are proposed by the Match specialist and still pass the
+        # Guard + confirmation boundary. They never belong in PlannerWriteIntent.
+        normalized["write_intent"] = "none"
+        repair_codes.append("match_write_intent_normalized")
     for task in normalized["tasks"]:
         if not isinstance(task, dict):
             continue
         agent = task.get("agent")
         if not isinstance(agent, str) or agent not in _KNOWN_PLANNER_AGENTS:
             continue
+        intent = task.get("match_intent")
+        if agent == "match" and isinstance(intent, dict) and len(intent) == 1:
+            key, enabled = next(iter(intent.items()))
+            if key in {"status", "counterparty", "start_search", "cancel_search", "accept_proposal", "dismiss_proposal", "clarify"} and enabled is True:
+                task["match_intent"] = key
+                if "match_intent_object_normalized" not in repair_codes:
+                    repair_codes.append("match_intent_object_normalized")
+        elif agent != "match" and isinstance(intent, str):
+            # A task outside the Match domain cannot acquire Match authority.
+            # Dropping provider-invented string labels is therefore a
+            # compatibility repair, while malformed object/list shapes still
+            # reach strict validation and fail closed.
+            task.pop("match_intent", None)
+            if "non_match_match_intent_removed" not in repair_codes:
+                repair_codes.append("non_match_match_intent_removed")
         empty_placeholder_removed = False
         if task.get("evidence_policy") == "":
             task.pop("evidence_policy", None)
@@ -206,10 +273,6 @@ def _normalize_provider_plan_arguments(
             task.pop("evidence_policy", None)
             if "non_web_evidence_policy_removed" not in repair_codes:
                 repair_codes.append("non_web_evidence_policy_removed")
-        if agent != "calendar" and task.get("outcome_contract") == "calendar.availability.v1":
-            task.pop("outcome_contract", None)
-            if "non_calendar_outcome_contract_removed" not in repair_codes:
-                repair_codes.append("non_calendar_outcome_contract_removed")
         # DeepSeek occasionally places the known Relationship write capability
         # in the task-scoped Calendar outcome field. Recover only this exact,
         # known field relocation; all other invalid values remain fail-closed.
@@ -222,6 +285,18 @@ def _normalize_provider_plan_arguments(
             normalized["write_intent"] = DATE_INVITATION_WRITE_INTENT
             if "misplaced_date_invitation_intent_recovered" not in repair_codes:
                 repair_codes.append("misplaced_date_invitation_intent_recovered")
+        elif agent != "calendar" and isinstance(task.get("outcome_contract"), str):
+            # Only Calendar owns outcome_contract. Removing a string placed on
+            # another known agent cannot grant a capability; malformed
+            # container values remain untouched for strict validation.
+            task.pop("outcome_contract", None)
+            code = (
+                "match_observation_contract_removed"
+                if agent == "match"
+                else "non_calendar_outcome_contract_removed"
+            )
+            if code not in repair_codes:
+                repair_codes.append(code)
     return normalized, repair_codes[:2]
 
 
@@ -238,6 +313,7 @@ def _record_planner_attempt(
     duration_ms: int = 0,
     error: str = "",
     repair_codes: list[str] | None = None,
+    validation_fields: list[str] | None = None,
     ttft_ms: int = 0,
     tps: float = 0.0,
     model_name: str = "",
@@ -257,6 +333,7 @@ def _record_planner_attempt(
         "tool_calls": tool_calls or [],
         "error": error,
         "repair_codes": [code for code in (repair_codes or []) if code in _REPAIR_CODES][:2],
+        "validation_fields": [str(field)[:80] for field in (validation_fields or [])[:8]],
     })
 
 
@@ -302,6 +379,11 @@ class _DecomposeTasksArguments(BaseModel):
     @model_validator(mode="after")
     def _reject_unjustified_synthesizer_only_output(self) -> "_DecomposeTasksArguments":
         """Keep provider-authored task mode from silently bypassing all domains."""
+        for task in self.tasks:
+            if task.agent == "match" and task.match_intent is None and self.write_intent != DATE_INVITATION_WRITE_INTENT:
+                raise ValueError("Match task requires match_intent")
+            if task.agent != "match" and task.match_intent is not None:
+                raise ValueError("match_intent is only valid for Match tasks")
         if self.mode != "tasks" or not self.tasks:
             return self
         has_domain = any(task.agent != "synthesizer" for task in self.tasks)
@@ -350,7 +432,7 @@ def _decompose_tool_schema() -> dict[str, Any]:
         .get("items", {})
     )
     if isinstance(task_schema, dict):
-        for field_name in ("evidence_policy", "outcome_contract", "run_if"):
+        for field_name in ("evidence_policy", "outcome_contract", "run_if", "match_intent"):
             field_schema = task_schema.get("properties", {}).get(field_name)
             if not isinstance(field_schema, dict):
                 continue
@@ -375,7 +457,7 @@ def _decompose_tool_schema() -> dict[str, Any]:
     }
 
 
-_PLANNER_PROMPT_VERSION = "compact_v3_write_intent_v2"
+_PLANNER_PROMPT_VERSION = "compact_v3_match_intent_v4"
 _PLANNER_MAX_RECENT_MESSAGES = 4
 _PLANNER_MAX_RECENT_CHARS = 2000
 _PLANNER_MAX_SYSTEM_CHARS = 6000
@@ -392,10 +474,10 @@ _PLANNER_SYSTEM = f"""{AYUE_CORE_IDENTITY}
 
 輸出規則：
 - mode=direct_chat 只適用於不需要 App、domain、private、external truth 或 workflow 的一般聊天；tasks 為空，direct_reply 不超過 160 字。
-- direct_reply 短自然、像熟朋友；先接住內容再給看法或下一步；不得宣稱副作用已完成。
+- direct_reply 短自然；不得宣稱副作用已完成。
 - 只要任一子需求需要 state、產品能力、特定對方聊天內容、行事曆、配對、profile、relationship、places 或外部資料，整個回合就使用 mode=tasks；不得只回答可聊天的部分，也不得輸出只有 synthesizer 的 tasks。
-- tasks 最多 4 個 domain 加 1 個 terminal synthesizer，總數最多 5；只有複合需求才拆多個。
-- task 可使用 id、agent、depends_on、task_brief、evidence_policy、outcome_contract、run_if；Web 以外省略 evidence_policy，Calendar availability 以外省略 outcome_contract；outcome_contract 只能是 calendar.availability.v1，約會邀請 capability 絕對不要放進 task，只屬於頂層 write_intent。沒有 Calendar control edge 就省略 run_if。絕對不要把 match.current_proposal.v1 等 observation schema 名稱填入這三個欄位。不要使用 type 或 task_agent。
+- tasks 最多 4 個 domain + 1 個 terminal synthesizer；單一需求只用一個 domain。
+- task 只用 id、agent、depends_on、task_brief、match_intent、evidence_policy、outcome_contract、run_if；Match 才用 match_intent，Web 才用 evidence_policy，Calendar availability 才用 calendar.availability.v1，其餘可選欄位省略。約會邀請只屬頂層 write_intent；不要填 observation schema，不要使用 type 或 task_agent。
 - write_intent 必填。當使用者是在要求阿月實際建立一張給既有聯絡人的空白約會邀請卡，而不是只詢問功能或討論怎麼約時，使用 relationship.date_invitation.v1，且只輸出 relationship -> synthesizer；其他情況用 none。對象是否為 accepted contact、錯字與拼音由 Relationship runtime 驗證，Match 絕不作前置檢查。
 - depends_on 只表示下游會消費上游 typed observation、candidate ref 或其他明確 contract；run_if 是不傳遞 observation 的控制條件。獨立查詢放同一層，不為了排序而串接。
 - presentation_mode 只有 default／itinerary。itinerary 是普通 composition 的 editorial hint，不是固定 headings、server schema、卡片或特殊 renderer。
@@ -422,10 +504,14 @@ synthesizer=只根據本回合 verified observations 與 bounded context 組最�
 - current message 用「第二個」延續地點候選時，只信 server 的 `place_reference_resolution`；有綁定就沿用 label，建行程走 calendar -> synthesizer。沒有綁定由 server 澄清，不重新搜尋 Places、猜文字或改 ref。
 - 簡短肯定語接唯讀地點重試提議時，依語意建立 Places read -> synthesizer；不得當 Calendar confirmation；無提議則 direct_chat／澄清。
 - 明確開始／重做 assessment 用 profile。使用者表示希望阿月「更認識我／更了解我／多了解我一點」時，也代表希望開啟基本性格探索：固定使用 profile -> synthesizer，讓 profile 提出 profile.start_assessment(kind=basic) 的確認預覽；不得降成 direct_chat，也不得改成只讀既有 profile。產品問題用正常 product_info -> synthesizer DAG，不選內部 knowledge section，也不產生舊的 task-free ProductInfo envelope。
+- 「怎麼配對／如何配到人」→ product_info；明確「幫我配對／開始找人」→ match。
+- 配對狀態／取消搜尋／提案接受／婉拒／撤回→ match -> synthesizer；write_intent=none。Match 必填 match_intent：status、counterparty、start_search、cancel_search、accept_proposal、dismiss_proposal、clarify。
+- match_intent 是字串，如 "match_intent":"start_search"，不是物件。「我要配對／我想配對／撤回再找」固定 start_search；只有明確接受才用 accept_proposal；撤回／不要這張用 dismiss_proposal。allowed_actions 不是同意。
+- 單一 Match 需求省略 outcome_contract、run_if；保留 terminal synthesizer 呈現 server 確認。兩步重搜由 runtime 負責，Planner 不拆兩個寫入 task。
 - opportunity.signal="social_opening" 只用於間接表達想找人一起參與、尚未要求從既有聯絡人挑選或開始找新人的情況；evidence_span 必須是 current message 的連續原文，confidence >= 0.8。從既有聯絡人挑選用 relationship；找新的人用 match；單純寒暄、孤單或負面情緒使用 signal="none"。
 - Web task brief 必須保留原始 proposition、地點／日期限制與 evidence class；不可把背景資料改成新的答案目標。
 
-所有 state、authority、ID、revision、confirmation 與真實工具參數由 server/runtime 負責。"""
+"""
 
 _PLANNER_SYSTEM += """
 
@@ -433,13 +519,10 @@ Calendar availability policy (must follow for every concrete date):
 - This policy is for advice/discovery without persistence. An explicit Calendar create/update/cancel
   request takes precedence: use a normal mutation task,
   not `calendar.availability.v1`; preflight checks conflicts.
-- If the user asks for a personal outing/date/itinerary on a concrete or
-  resolvable date, create a read-only Calendar task first, even when the user
-  explicitly says not to add an event.  Do not create a mutation task unless
-  the user asks to save/create/update/cancel an event.
-- The Calendar precheck task must be `agent=calendar` with
-  `outcome_contract=calendar.availability.v1` and a brief that asks for one
-  `calendar.list_my_events` read covering the requested date/window.
+- For a personal outing/date/itinerary on a concrete or resolvable date,
+  precheck Calendar even if the user says not to save. Only explicit save/create/update/cancel requests authorize mutation.
+- Precheck: `agent=calendar`, `outcome_contract=calendar.availability.v1`,
+  brief requests one `calendar.list_my_events` read for the requested window.
 - Ordinary prechecks use a control-only edge:
   `run_if={source_task_id:<calendar-id>,required_outcome:"task.finished"}`.
   This means later recommendations wait for Calendar but still proceed when
@@ -447,13 +530,9 @@ Calendar availability policy (must follow for every concrete date):
 - Only explicit conditional wording such as "有事就算了／沒事才繼續／有空才找" may
   use `required_outcome="calendar.no_scheduled_events"`. A busy Calendar result
   then skips all gated downstream reads. Never mark a valid busy answer FAILED.
-- Keep the Calendar control edge separate from `depends_on`; do not pass raw
-  calendar events into Web, Places, Relationship, or another domain just to
-  implement a branch. Synthesizer remains terminal and receives the Calendar
-  observation.
-- A pure public activity lookup without a personal date/outing does not need
-  an automatic Calendar precheck. Advice-only requests must never emit a
-  Calendar mutation task.
+- Keep Calendar gates in `run_if`, separate from `depends_on`; no raw events in
+  downstream inputs. Terminal Synthesizer receives Calendar observations.
+- Pure public activity lookups need no Calendar precheck; advice never authorizes Calendar mutations.
 - Exact example 「這週六，從目前認識的人挑一位，找新活動，再排附近晚餐，只給建議」:
   c1=calendar(outcome_contract=calendar.availability.v1);
   r1=relationship(run_if c1:task.finished) and w1=web(run_if c1:task.finished) in parallel;
@@ -551,11 +630,21 @@ def _planner_prompt(turn_ctx: PublicAgentTurnContext) -> str:
     if isinstance(active, dict):
         active_projection = {
             key: active[key]
-            for key in ("status", "counterparty", "user_can_decide")
+            for key in ("status", "stage", "counterparty", "user_can_decide", "allowed_actions", "created_at", "source")
             if active.get(key) not in (None, "")
         }
         if active_projection:
             payload["active_proposal"] = active_projection
+
+    search = turn_ctx.match_search
+    if isinstance(search, dict):
+        search_projection = {
+            key: search[key]
+            for key in ("status", "cancellable")
+            if search.get(key) not in (None, "")
+        }
+        if search_projection:
+            payload["match_search"] = search_projection
 
     event_active = turn_ctx.active_event_invitation
     if isinstance(event_active, dict):
@@ -751,6 +840,7 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                         tool_calls=metrics.tool_calls_raw, input_tokens=input_tokens,
                         output_tokens=output_tokens, duration_ms=duration_ms,
                         error=metrics.error,
+                        validation_fields=_planner_validation_fields(exc),
                         ttft_ms=int(getattr(result, "ttft_ms", 0) or 0),
                         tps=round(float(getattr(result, "tps", 0) or 0), 3),
                         model_name=str(getattr(result, "model_name", "") or ""),
@@ -793,6 +883,7 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                                 tool_calls=metrics.tool_calls_raw, input_tokens=input_tokens,
                                 output_tokens=output_tokens, duration_ms=duration_ms,
                                 error=metrics.error,
+                                validation_fields=_planner_validation_fields(repair_exc),
                                 ttft_ms=int(getattr(result, "ttft_ms", 0) or 0),
                                 tps=round(float(getattr(result, "tps", 0) or 0), 3),
                                 model_name=str(getattr(result, "model_name", "") or ""),

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
 from models import CalendarActionRequest, ChatRequest, RelationshipGameRequest
 from routers.chat_messages import get_messages, list_ai_rooms_route
@@ -125,6 +125,21 @@ class ChatLeafRouterTests(unittest.TestCase):
         self.assertEqual(response["established_dates"], [])
         self.assertEqual(response["public_ayue_onboarding"]["version"], 1)
         self.assertIn("嗨，我是阿月。", response["public_ayue_onboarding"]["messages"][0])
+
+    def test_message_history_disables_intermediary_caching(self):
+        messages = _Cursor([])
+        http_response = Response()
+        with patch("routers.chat_messages.generate_room_id", return_value="room"), \
+             patch("routers.chat_messages.messages_coll.count_documents", return_value=0), \
+             patch("routers.chat_messages.messages_coll.find", return_value=messages), \
+             patch("routers.chat_messages.profiles_coll.find_one", return_value={}):
+            get_messages("ai_assistant", "owner", response=http_response)
+
+        self.assertEqual(
+            http_response.headers["cache-control"],
+            "no-store, no-cache, must-revalidate",
+        )
+        self.assertEqual(http_response.headers["pragma"], "no-cache")
 
     def test_ai_history_pagination_returns_has_more_when_older_messages_exist(self):
         messages = _Cursor([{"sender_id": "ai_assistant", "content": f"msg-{i}"} for i in range(31)])
@@ -308,12 +323,16 @@ class ChatLeafRouterTests(unittest.TestCase):
             "revision": 7, "updated_at": 12345,
         }
         with patch("routers.match.reconcile_match_state", return_value=None), \
-             patch("routers.match.public_match_search_status", return_value={"status": "idle"}), \
+             patch("routers.match._single_live_namespace_proposal", return_value=None), \
+             patch("routers.match.public_match_search_status", return_value={
+                 "status": "idle", "cancellable": False,
+             }), \
              patch("routers.match.get_match_status_snapshot", return_value=snapshot):
             response = get_match_status("owner")
         public_snapshot = response["status_snapshot"]
         self.assertNotIn("revision", public_snapshot)
         self.assertNotIn("updated_at", public_snapshot)
+        self.assertFalse(response["search"]["cancellable"])
 
 
 if __name__ == "__main__":

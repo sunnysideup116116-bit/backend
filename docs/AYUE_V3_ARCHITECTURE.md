@@ -5,6 +5,7 @@
 ## 1. Current baseline
 
 - Public Ayue 永遠走 V3 sub-agent runtime；唯一 orchestrator 是 `social/services/ayue_agent/v3/scheduler.py`。
+- Event discovery 不在 Public Ayue request 內執行：8000 只寫入 Mongo singleton job，`social/event_worker.py` 由 Social FastAPI startup 嵌入 daemon thread 處理。Worker 以 MongoDB Change Stream 即時接收 queued transition，並以低頻 reconciliation 恢復漏失通知、斷線或租約到期工作，不做固定 2 秒 polling。手動 `discovery` job 只搜尋與建圖；`EVENT_WEEKLY_CYCLE_ENABLED=on` 時，每週一的 `weekly_cycle` job 依序執行 scoped Event reset、未來 30 天 discovery（每類最低 4、目標與上限 6）、等待 Concept embedding/relevance ready，再執行 invitation scan。等待逾時時 fail closed 為 partial 並跳過邀請。Reset 只刪 Event 與因此孤立的 Concept，將未決定活動邀請轉為 expired，保留 User、一般配對及 accepted/declined 歷史。正式 `start_all.sh` 不另開第五個 Event process；此旗標只控制週期排程，不控制 Worker 本身是否啟動。
 - Public 失敗時 fail closed。Rollback 只能透過 deployment／commit rollback，不存在 request-level legacy fallback、rollout allowlist 或第二套 public router。
 - Private Ayue 是仍在使用、與 Public 隔離的 current V2 runtime，由 `routers/private_mediator.py`、`services/ayue_agent/private_v2.py` 與 `private_calendar.py` 擁有。
 - `public-v1`、`web_research.v1`、`product_info.v1`、`TurnClockV1` 等名稱是 typed payload/schema version，不是 Public V1 runtime。
@@ -139,6 +140,8 @@ LLM routing 使用兩級模型：Planner 與 Places／Match／Relationship／Pro
 `services/ayue_agent/context.py` 是 Public Context 唯一 owner：
 
 - recent messages ≤12；總字元 ≤6,000；relevant memories ≤8。
+- 已通過驗證的 `ConversationSummaryV1` 只作 owner-scoped 對話延續；watermark 之前的訊息不再重複送入 prompt。摘要不可取代 Profile、Match、Calendar 或 Memory 的 canonical state。
+- 一般配對與活動邀請分別投影為 `active_proposal` 與 `active_event_invitation`；兩者可同時存在，且 specialist slice 不含 match ID、event ID 或其他 authority-bearing identity。
 - 不輸出 raw Mongo/Neo4j document、`seed_user_*`、未公開 ID、對方私人記憶或對方行事曆。
 - 只有已接受關係且 server 驗證的 public display projection 能進 context。
 - Calendar、Web、ProductInfo 等 agent 只收到 `context_slicer.py` 明列欄位。
@@ -170,7 +173,7 @@ Guard 檢查：
 
 同一 `tool + normalized executor arguments` 在同一 Public run 不重跑。每回合最多建立一筆 pending side effect。
 
-目前 23 個 capabilities：18 READ、5 WRITE。完整表見 [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)。
+目前 25 個 capabilities：18 READ、7 WRITE。完整表見 [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)。
 
 ## 7. Confirmation 與 writes
 
@@ -185,19 +188,23 @@ WRITE proposal / Calendar command batch
   -> canonical domain service（CAS + idempotency）
 ```
 
-一般 AI 泡泡按鈕只用於 Calendar、配對搜尋啟動、assessment start／commit 與卡片建立前的約會協調。一般／活動配對決策已有媒人卡片，維持原卡片和文字備援；一般文字只會自動取消同房泡泡選擇並繼續對話。
+一般 AI 泡泡按鈕只用於 Calendar、配對搜尋啟動／取消、assessment start／commit 與卡片建立前的約會協調。一般／活動配對決策已有媒人卡片，維持原卡片和文字備援；一般文字只會自動取消同房泡泡選擇並繼續對話。
 
 目前 WRITE capabilities：
 
 - `relationship.start_date_coordination`
 - `match.start_search`
+- `match.cancel_search`
 - `match.decide_active_proposal`
+- `match.decide_active_event_invitation`
 - `profile.start_assessment`
 - `calendar.submit_commands`
 
 Calendar mutation 只使用 `calendar.submit_commands`。一至十筆 authority-free commands 可形成一筆 confirmation；Calendar Runtime resolve canonical target 一次，建立不進 LLM 的 `CalendarMutationPlan`。舊 create/update/cancel tool names 不再註冊，stale confirmation fail closed。
 
 `relationship.start_date_coordination` 只在 validated `write_intent="relationship.date_invitation.v1"` 的精確 `relationship -> synthesizer` DAG 可見。Relationship Runtime 接受 mention、連續原句 name evidence 或同 owner 15 分鐘 recent-contact reference，僅在唯一 accepted contact 可解析時建立一筆確認；確認後透過 `date_coordination_service.create_invite` 建立空白卡片，日期、地點與活動由雙方之後填寫。Target ID、revision 與 resolution metadata 不進 prompt、trace 或 public events。
+
+`match.decide_active_event_invitation` 只處理 `proposal_namespace="event_invitation"` 的 live proposal。Planner 只能提出 `interested|declined`；Runtime 從 `active_event_invitation` 綁定 canonical revision，確認後由 `write_executors.py` 呼叫 namespace-aware match domain service。一般 `relationship_match` 與活動邀請各有一個獨立 live slot；任一方接受既有聯絡人的活動邀請時沿用聊天室，不重新建立關係。
 
 ## 8. Domain specialists
 
@@ -245,6 +252,10 @@ draft/pending -> expired
 - `accepted` 是已建立聯絡關係，不是 active proposal。
 - `match_decision_service.py` 擁有 status+revision CAS；stale 回最新狀態，不覆寫終態。
 - `match_action_service.py` 只在 transition 成功後執行通知、聊天室、feedback 等 effects；effect 失敗不讓已提交 transition 被重送。
+- `POST /api/match/decision` 與 `GET /api/match/state` 的 HTTP adapter 只在 canonical match 已 `accepted`、具有 `has_verified_acceptance` 證據且 caller 是 participant 時，增加導航用 `other_id`。此欄位不進 tool observation、Public prompt、stream 或 Event snapshot；導航讀取失敗也不改變已提交的接受結果。
+- Flutter 活動卡保留 canonical `proposal_namespace`、公開 `event` 與 `chat_reused`。日期以台灣時間呈現並尊重 date/datetime 精度；雙方同意後直接開啟對應聊天室，既有 pair 沿用原聊天室。後端以 match-scoped event key 在 canonical pair room 冪等保存安全的 Event 開場 system card，讓新／既有 pair 都能從同一份活動 snapshot 接著聊，且不建立第二個 relationship anchor。舊的卡片終態與 revision 保護不變。
+- 提案 HTTP state 與 AI 聊天歷史提供 viewer-bound、UI-only `counterparty_nickname`，讓一般／活動配對理由介紹對方暱稱。由 `public_nickname_service.py` 唯讀 Appwrite 公開 `name`，缺資料／不可用時回退 Mongo seed/legacy 公開稱呼，不同步或寫入 profile。歷史訊息只投影、不重存；名字不進新 model context、Graph 或婉拒原因，導航仍需雙方同意。
+- 婉拒原因由 viewer-bound `decline_reason_options` 提供；使用者可只婉拒、不記錄。只有本人勾選並同意記錄的 `explicit_reasons` 才進既有 feedback normalizer，再共用 `/api/memory/apply` 寫入 `AVOIDS -> Concept` 與 Social preference facts。空選擇、撤回、stale 不寫偏好，不從對方特質推論；UI 的「已送出」不等同 Graph 成功收據。
 
 ## 10. Profile、Memory 與 Context Engine
 
@@ -261,9 +272,11 @@ saved owner message
 
 - assistant reply、conversation history、tool result、match state 或對方資料不能成為 profile write source。
 - 已移除 `/api/memory/observe` 與主服務 direct Neo4j fallback；9001 failure 進 bounded outbox，不能改抓 raw data。
+- Memory outbox 由 lease worker bounded retry；9001 將 observation marker 與 edges 原子提交。Disable／restore／correct 保留 owner relation 語意，設定頁以 status-aware Graph snapshot 刷新 bounded Mongo projection。
 - `semantic_plans`／room chat triples 是雙人關係 context，不自動轉成任一方 durable preference。
 - Relationship semantic updater 以尚未處理的 pair-room 訊息內容長度作 bounded budget proxy；累積未達 600 字元單位時不更新，不能只因短訊息數量多就觸發。更新後的 shared projection 才能由 Private V2 adapter 消費。
 - 未來 Context Engine 只能輸出 bounded versioned typed bundle，先做 owner/room/accepted-relation hard isolation，再做 ranking/budget/dedup。
+- Conversation compaction 對 legacy 與新版 Public AI room 使用同一 server-owned owner validator；generation／evaluation 消費 `ChatResult.content`，通過評估的 room-scoped continuity 才能進 Public context。
 
 完整規則見 [`MEMORY_CONTEXT_ENGINE_GUIDE.md`](./MEMORY_CONTEXT_ENGINE_GUIDE.md)。
 
@@ -291,6 +304,8 @@ run_started | tool_started | tool_finished | final | error
 - Context slices 與 Public/Private privacy isolation。
 - Guard codes、tool schema/output、duplicate、budgets。
 - Confirmation、CAS、idempotency、stale、concurrency。
+- 一般／Event 獨立 proposal slot、搜尋進度同頁刷新、viewer-bound nickname／decline options、舊快取卡過濾與 accepted Event 開場卡冪等性。
+- Owner memory opt-in feedback、outbox retry、disable／restore／correct，以及 legacy／新版 AI room compaction ownership、watermark 與 continuity gate。
 - Web research/finish、late extract projection、URL/source/subject binding。
 - Calendar command/preflight/draft/reference/verification。
 - ProductInfo retrieval/observation/progress/debug。
@@ -303,7 +318,7 @@ run_started | tool_started | tool_finished | final | error
 - [`docs/architecture/01-project-overview.md`](./docs/architecture/01-project-overview.md)：onboarding 與服務邊界。
 - [`docs/architecture/02-python-modules.md`](./docs/architecture/02-python-modules.md)：模組 owner map。
 - [`docs/architecture/03-v3-runtime-lifecycle.md`](./docs/architecture/03-v3-runtime-lifecycle.md)：單回合 lifecycle。
-- [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)：23 個 ToolSpec。
+- [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)：25 個 ToolSpec（18 READ、7 WRITE）。
 - [`docs/architecture/05-matchmaker-and-memory.md`](./docs/architecture/05-matchmaker-and-memory.md)：9001、Neo4j 與 profile memory pipeline。
 - [`docs/architecture/06-testing.md`](./docs/architecture/06-testing.md)：測試策略。
 - [`docs/architecture/07-guard.md`](./docs/architecture/07-guard.md)：Central Guard。

@@ -9,12 +9,19 @@ from pymongo import ReturnDocument
 
 from database import db, matches_coll, messages_coll, profiles_coll
 from services.ayue_agent.proactive_care import consume_proactive_delivery
-from services.chat_service import generate_proposal_ai_room_id, generate_room_id, save_message
-from services.ai_room_service import create_proposal_room, most_recent_ai_room
+from services.chat_service import (
+    generate_proposal_ai_room_id, generate_room_id, save_message,
+    save_system_message_once,
+)
+from services.ai_room_service import create_proposal_room, get_room, most_recent_ai_room
 from services.mediator_event_service import claim_next_mediator_event
 from services.match_reason_service import reason_for_viewer
 from services.event_card_projection import public_event_card
-from services.proposal_namespace import namespace_for_document
+from services.proposal_namespace import (
+    EVENT_INVITATION_NAMESPACE, RELATIONSHIP_MATCH_NAMESPACE,
+    namespace_for_document,
+)
+from services.match_card_projection import proposal_card_state
 from services.relationship_engagement_service import (
     find_accepted_match,
     generate_mediator_private_room_id,
@@ -204,6 +211,31 @@ def _deliver_relationship_event(
     }
 
 
+def _proposal_origin_room(user_id: str, match: dict, event: dict) -> str:
+    """Bind a per-viewer destination once so concurrent polling cannot split a card."""
+    role = "initiator" if match.get("from_user") == user_id else "receiver"
+    field = f"proposal_delivery_rooms.{role}"
+    existing = (match.get("proposal_delivery_rooms") or {}).get(role)
+    if existing and get_room(existing, user_id) is not None:
+        return existing
+    requested = str(event.get("origin_room_id") or "")
+    destination = requested if requested and get_room(requested, user_id) is not None else most_recent_ai_room(
+        user_id, include_proposal_rooms=False,
+    )
+    # A valid binding belongs to the user, is server-owned, and is never derived
+    # from model output. Keep independent destinations for both participants.
+    bound = matches_coll.find_one_and_update({
+        "_id": match["_id"], field: existing if existing else {"$exists": False},
+        "$or": [{"from_user": user_id}, {"to_user": user_id}],
+    }, {"$set": {field: destination}}, return_document=ReturnDocument.AFTER)
+    if not bound:
+        bound = matches_coll.find_one({"_id": match["_id"]}) or {}
+    room_id = (bound.get("proposal_delivery_rooms") or {}).get(role)
+    if not room_id or get_room(room_id, user_id) is None:
+        raise RuntimeError("proposal_destination_unavailable")
+    return room_id
+
+
 def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> dict:
     event_type = event.get("type", "mediator_message")
     if event_type in PROPOSAL_EVENT_TYPES:
@@ -221,6 +253,24 @@ def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> 
         if _proposal_source(live_match) in AUTOMATIC_PROPOSAL_SOURCES:
             _expire_automatic_proposal(live_match)
             return {"has_new": False, "stale": True, "automatic_proposal_suppressed": True}
+        if (
+            event_type == "incoming_match_intro"
+            and namespace_for_document(live_match) == EVENT_INVITATION_NAMESPACE
+        ):
+            # Event invitations already carry their own grounded hook in the
+            # actionable receiver card. Legacy queued intro events must not
+            # become a second mediator card with no match/reason projection.
+            return {
+                "has_new": False,
+                "deduplicated": True,
+                "event_intro_suppressed": True,
+            }
+        requested_origin = str(event.get("origin_room_id") or "")
+        origin_room_id = (
+            requested_origin
+            if requested_origin and get_room(requested_origin, user_id) is not None
+            else most_recent_ai_room(user_id)
+        )
         viewer_reason = reason_for_viewer(live_match, user_id)
         if not viewer_reason:
             viewer_reason = "我找到一位可能適合你的人，想先問問你願不願意認識對方。"
@@ -241,8 +291,30 @@ def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> 
             message_metadata["other_id"] = None
             message_metadata["matches"] = [public_match]
         match_id = str(live_match["_id"])
+        if namespace_for_document(live_match) == RELATIONSHIP_MATCH_NAMESPACE:
+            origin_room_id = _proposal_origin_room(user_id, live_match, event)
+            state = proposal_card_state(live_match, user_id)
+            message_metadata.update(
+                match_id=match_id, other_id=None,
+                proposal_role="initiator" if live_match.get("from_user") == user_id else "receiver",
+                canonical_status=state["status"], stage=state["stage"],
+                proposal_revision=state["proposal_revision"], decision_action=state["decision_action"],
+            )
+            saved = save_system_message_once(
+                origin_room_id, event.get("message", "阿月有一則新的媒合消息。"),
+                message_type="text" if event_type == "incoming_match_intro" else "mediator_card",
+                metadata=message_metadata,
+                event_key=str(event.get("event_key") or f"delivery:{event.get('event_id') or event_type}:{match_id}"),
+            )
+            return {
+                "has_new": True, "surface": "global_mediator", "message": event.get("message"),
+                "type": event_type, "matches": message_metadata.get("matches", []),
+                "metadata": message_metadata, "origin_room_id": origin_room_id,
+                "message_id": saved.get("message_id"),
+            }
         # Proposals get their own dedicated AI room so the default 找阿月配對
         # room is never interrupted by incoming matchmaking events.
+        proposal_room_id = generate_proposal_ai_room_id(user_id, match_id)
         create_proposal_room(
             user_id,
             match_id,
@@ -250,19 +322,46 @@ def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> 
             metadata=message_metadata,
             event_key=event.get("event_key") or f"delivery:{event.get('event_id') or event_type}:{match_id}",
         )
+        if origin_room_id != proposal_room_id:
+            ready_metadata = {
+                "event_type": "match_proposal_ready",
+                "proposal_room_id": proposal_room_id,
+                "match_id": match_id,
+            }
+            save_system_message_once(
+                origin_room_id,
+                "我找到一位可以介紹給你的人，提案已經整理好了。",
+                metadata=ready_metadata,
+                event_key=f"{event.get('event_key') or event.get('event_id') or match_id}:ready",
+            )
+        message_metadata["proposal_room_id"] = proposal_room_id
         return {
             "has_new": True, "surface": "global_mediator", "message": event.get("message"),
             "type": event_type, "matches": message_metadata.get("matches", []),
-            "metadata": message_metadata, "proposal_room_id": generate_proposal_ai_room_id(user_id, match_id),
+            "metadata": message_metadata, "proposal_room_id": proposal_room_id,
+            "origin_room_id": origin_room_id,
             "debug_info": event.get("debug_info", []),
         }
-    room_id = most_recent_ai_room(user_id)
-    save_message(
-        room_id, "ai_assistant", event.get("message", "阿月有一則新的媒合消息。"),
-        message_type="text", metadata=message_metadata,
+    requested_origin = str(event.get("origin_room_id") or "")
+    origin_room_id = (
+        requested_origin
+        if requested_origin and get_room(requested_origin, user_id) is not None
+        else most_recent_ai_room(user_id)
+    )
+    save_system_message_once(
+        origin_room_id,
+        event.get("message", "阿月有一則新的媒合消息。"),
+        message_type="text",
+        metadata=message_metadata,
+        event_key=str(
+            event.get("event_key")
+            or event.get("event_id")
+            or f"legacy:{event_type}:{event.get('created_at', 0)}"
+        ),
     )
     return {
         "has_new": True, "surface": "global_mediator", "message": event.get("message"),
         "type": event_type, "matches": message_metadata.get("matches", []),
-        "metadata": message_metadata, "debug_info": event.get("debug_info", []),
+        "metadata": message_metadata, "origin_room_id": origin_room_id,
+        "debug_info": event.get("debug_info", []),
     }

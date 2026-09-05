@@ -9,8 +9,10 @@ from typing import Any
 
 _PUBLIC_EVENT_KEYS = {
     "run_started": frozenset({"type", "agent_run_id"}),
+    "stage": frozenset({"type", "agent_run_id", "stage", "text"}),
     "tool_started": frozenset({"type", "agent_run_id", "text"}),
     "tool_finished": frozenset({"type", "agent_run_id", "outcome", "duration_ms"}),
+    "token": frozenset({"type", "agent_run_id", "text"}),
     "final": frozenset({"type", "response"}),
     "error": frozenset({"type", "agent_run_id", "reply"}),
 }
@@ -58,7 +60,7 @@ def validate_public_event(event: dict[str, Any]) -> None:
         raise ValueError("public event contains non-public fields")
     if event_type != "final" and not isinstance(event.get("agent_run_id"), str):
         raise ValueError("event needs an agent run ID")
-    if event_type == "tool_started" and not isinstance(event.get("text"), str):
+    if event_type in {"stage", "tool_started", "token"} and not isinstance(event.get("text"), str):
         raise ValueError("tool progress needs text")
     if event_type == "tool_finished":
         if event.get("outcome") not in {"ok", "error"}:

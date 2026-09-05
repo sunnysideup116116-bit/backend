@@ -110,7 +110,8 @@ def _execute_job(job: dict, worker_id: str) -> dict:
             ),
         )
     update_event_discovery_job_stage(job, worker_id, "discovering")
-    result = discover_and_ingest_events(**arguments)
+    # Manual jobs never opt into the legacy same-process invitation hook.
+    result = discover_and_ingest_events(**arguments, request_invitation_scan=False)
     result["job_kind"] = "discovery"
     return result
 

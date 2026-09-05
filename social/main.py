@@ -15,6 +15,10 @@ from services.ayue_agent.v3.relationship_references import ensure_indexes as ens
 from services.ayue_agent.v3.place_references import ensure_indexes as ensure_place_reference_indexes
 from services.match_search_job_service import start_match_search_worker, stop_match_search_worker
 from services.conversation_compaction_service import ensure_conversation_compaction_indexes
+from services.memory_outbox_service import (
+    ensure_memory_outbox_indexes, start_memory_outbox_worker,
+    stop_memory_outbox_worker,
+)
 from services.context_graph_service import (
     ensure_context_graph_indexes, start_context_graph_worker, stop_context_graph_worker,
 )
@@ -74,6 +78,7 @@ def setup_calendar_indexes():
     ensure_ayue_agent_indexes()
     ensure_map_cache_indexes()
     ensure_conversation_compaction_indexes()
+    ensure_memory_outbox_indexes()
     ensure_profile_skill_indexes()
     ensure_context_graph_indexes()
     ensure_match_indexes()
@@ -82,6 +87,7 @@ def setup_calendar_indexes():
     ensure_event_discovery_cache_indexes()
     ensure_interactive_priority_indexes()
     start_match_search_worker()
+    start_memory_outbox_worker()
     start_proactive_care_scheduler()
     start_context_graph_worker()
     start_concept_embedding_worker()
@@ -92,6 +98,7 @@ def setup_calendar_indexes():
 @app.on_event("shutdown")
 def stop_background_services():
     stop_proactive_care_scheduler()
+    stop_memory_outbox_worker()
     stop_match_search_worker()
     stop_context_graph_worker()
     stop_concept_embedding_worker()

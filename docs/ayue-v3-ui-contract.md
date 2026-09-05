@@ -56,7 +56,11 @@ The confirmation notice is driven by `context_confirmation_needed`, not keyword 
 
 ## Match search progress
 
-The website maps durable search steps into a single collapsible in-chat card. Flutter should preserve the ordering and server descriptions without exposing internal candidate data. `no_suitable_candidate`, cancelled, failed, and completed are distinct terminal outcomes.
+The website maps durable search steps into a single collapsible in-chat card. Flutter preserves the ordering and server descriptions without exposing internal candidate data. While a search is queued or running, the chat surface polls canonical `/api/match/status` and applies the returned step in place; the user must not leave and re-enter the page to reveal progress. Initial page load, proactive polling, and history hydration all converge on the same canonical state. `no_suitable_candidate`, cancelled, failed, and completed are distinct terminal outcomes, and an older response must never replace a newer terminal state.
+
+A concurrent recent-context revision change does not immediately erase the card: the worker atomically requeues the same job once at `loading_profile`, so the public state remains queued/running and the next attempt uses the latest profile snapshot. A second mismatch is terminal and produces a visible `match_search_failed` message. The client must not treat `stale` as a successful or still-running search, but the backend must never leave it as a silent outcome.
+
+General relationship matching and Event invitations occupy independent live slots: `relationship_match` and `event_invitation`. Hydrating one namespace must not hide, overwrite, or terminate the other. The compatibility `active_proposal_card` alias represents only the relationship slot; new clients use `active_proposals` or the card's `proposal_namespace`.
 
 ## Match proposal decision
 
@@ -67,7 +71,13 @@ draft -> pending | declined | expired
 pending -> accepted | declined | expired
 ```
 
-The initiator's pending cancellation maps to action `cancel`; receiver rejection maps to `decline`. A 409 response means the visible card is stale: read current state/status, update the card, and never automatically replay the previous decision. Accepted/declined/expired history remains visible and permanently inactive.
+The initiator's pending cancellation maps to action `cancel`; receiver rejection maps to `decline`. Every decision sends the card's `proposal_namespace`, expected status, and optional revision. A successful first acceptance renders canonical `pending` immediately, replaces accept/decline controls with the waiting/cancel actions, and does not require page navigation. Chat opens only after canonical `accepted` returns a participant-authorized `other_id`. A 409 response means the visible card is stale: read current state/status, update the card, and never automatically replay the previous decision. Accepted/declined/expired history remains visible and permanently inactive.
+
+The proposal introduction may display the viewer-bound `counterparty_nickname` before the anonymous reason. It is UI-only public profile data: never parse it as Markdown, feed it back into model context, expose an account ID as a fallback, or use it to generate decline reasons. Event cards additionally retain the bounded public Event snapshot, `chat_reused`, date precision, safe source URL, and up to eight sessions across history/cache hydration.
+
+Decline is explicitly split into **decline without recording** and **record selected reasons and decline**. Only the latter sends the server-provided, viewer-bound `decline_reason_options` as `explicit_reasons`; dismissing the dialog leaves the card unchanged. The client must not infer reasons from private profile data or claim that Neo4j succeeded merely because the match transition succeeded.
+
+After both parties accept an Event invitation, the canonical pair room displays one idempotent `event_invitation_accepted` system card containing the public activity introduction, including when the pair already had a chat. Historical/cache loading suppresses only the obsolete, namespace-less `incoming_match_intro` mediator card that previously produced a duplicate reason-less proposal; it must not suppress ordinary text prefaces or the actionable namespaced proposal.
 
 ## Calendar
 

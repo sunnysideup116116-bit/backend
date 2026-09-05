@@ -620,12 +620,18 @@ def handle_assessment_ui_message(
         if interest and interest not in {"無特別興趣", "沒有特別興趣"}:
             # This preserves the established onboarding field without coupling
             # it to the assessment draft or overwriting a later user choice.
+            # Upsert by identity only. An upsert on the conditional filter below
+            # would try to create a second profile when an interest already exists.
+            profiles_coll.update_one(
+                {"user_id": user_id},
+                {"$setOnInsert": {"user_id": user_id}}, upsert=True,
+            )
             profiles_coll.update_one(
                 {"user_id": user_id, "$or": [
                     {"initial_interest": {"$exists": False}},
                     {"initial_interest": ""},
                 ]},
-                {"$set": {"initial_interest": interest}}, upsert=True,
+                {"$set": {"initial_interest": interest}},
             )
     now = time.time()
     profile = profiles_coll.find_one({"user_id": user_id}) or {}

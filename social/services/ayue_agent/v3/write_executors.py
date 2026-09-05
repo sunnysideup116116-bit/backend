@@ -15,6 +15,8 @@ from database import db
 from services.match_action_service import (
     decide_active_event_invitation, decide_active_proposal, start_match_search,
 )
+from services.match_search_job_service import active_match_search_job, cancel_match_search
+from services.proposal_namespace import RELATIONSHIP_MATCH_NAMESPACE
 from services.assessment_session_service import start_assessment_session
 from services.ayue_agent.match_opportunity import (
     assess_match_opportunity, missing_basis_question,
@@ -60,6 +62,7 @@ def _start_search(ctx: Any, run_id: str, index: int, *, confirmation_id: str | N
     try:
         result = start_match_search(
             ctx.user_id, source="agent_v3", force_new=True, idempotency_key=key,
+            origin_room_id=str(ctx.room_id or ""),
         )
         status = result.get("status", "failed")
         reply = {
@@ -70,31 +73,61 @@ def _start_search(ctx: Any, run_id: str, index: int, *, confirmation_id: str | N
             "no_candidates": "這輪暫時沒有合適的新對象。",
         }.get(status, "這次搜尋沒有成功啟動，我沒有把它當作已完成。")
         _finish(key, "done", {"status": status, "reply": reply})
-        return status in {"queued", "already_queued", "already_active", "already_searching", "no_candidates"}, reply, None
+        ok = status in {"queued", "already_queued", "already_searching"}
+        return ok, reply, None if ok else "search_not_started"
     except Exception as exc:
         return False, "我現在不能安全地開始搜尋，請稍後再試。", type(exc).__name__
+
+
+def _cancel_search(
+    ctx: Any, run_id: str, index: int, payload: dict[str, Any] | None,
+    *, confirmation_id: str | None,
+) -> tuple[bool, str, str | None]:
+    key = _idempotency_key(confirmation_id, run_id, index, suffix="cancel_search")
+    if not _claim_once(key):
+        return True, "我已經處理過這次取消搜尋。", None
+    expected_job_id = str((payload or {}).get("match_search_job_id") or "")
+    if not expected_job_id:
+        return False, "這次取消搜尋的確認資料已失效，請重新查看目前狀態。", "match_search_confirmation_invalid"
+    try:
+        result = cancel_match_search(
+            ctx.user_id, source="agent_v3", expected_job_id=expected_job_id,
+        )
+        status = str(result.get("status") or "")
+        if status == "cancelled":
+            reply = "好，這次配對搜尋已取消。"
+            _finish(key, "done", {"status": status, "reply": reply})
+            return True, reply, None
+        if status == "already_active":
+            return False, "搜尋已結束，而且目前已有一張配對提案；我沒有取消新的狀態。", "stale_match_search"
+        return False, "這次搜尋已經結束或更新，我沒有取消其他搜尋。", "stale_match_search"
+    except Exception as exc:
+        return False, "我現在不能安全地取消搜尋，請稍後再試。", type(exc).__name__
 
 
 def _decide_active_proposal(
     ctx: Any, turn: Any, run_id: str, index: int,
     arguments: dict[str, Any], payload: dict[str, Any] | None,
 ) -> tuple[bool, str, str | None]:
-    proposal = turn.active_proposal or {}
     decision = str(arguments.get("decision") or "")
-    expected_revision = int((payload or {}).get("proposal_revision", 0) or 0)
+    authority = payload or {}
+    expected_revision = authority.get("proposal_revision")
     if (
-        not proposal.get("user_can_decide")
-        or not decision
-        or expected_revision <= 0
-        or int(proposal.get("proposal_revision", 0) or 0) != expected_revision
+        decision not in {"interested", "declined", "cancelled"}
+        or not str(authority.get("match_id") or "")
+        or str(authority.get("proposal_namespace") or "") != RELATIONSHIP_MATCH_NAMESPACE
+        or authority.get("expected_status") not in {"draft", "pending"}
+        or type(expected_revision) is not int or expected_revision < 0
     ):
-        return False, "我需要你對目前這張提案明確表示有興趣或婉拒。", "decision_not_actionable"
+        return False, "這次確認缺少有效的提案綁定資料，沒有執行變更。", "decision_not_actionable"
     try:
         outcome = decide_active_proposal(
             user_id=ctx.user_id,
             decision=decision,
             expected_revision=expected_revision,
-            idempotency_key=_idempotency_key(None, run_id, index),
+            idempotency_key=_idempotency_key(authority.get("_confirmation_id"), run_id, index),
+            expected_match_id=str(authority.get("match_id") or ""),
+            expected_status=str(authority.get("expected_status") or ""),
         )
         if outcome.get("stale"):
             latest = str(outcome.get("current_status") or "")
@@ -107,7 +140,12 @@ def _decide_active_proposal(
             return True, reply, "stale_revision"
         if outcome.get("status") != "success":
             return False, "我現在不能安全地更新這張提案。", str(outcome.get("status") or "decision_failed")
-        return True, "好，我已更新這張牽線提案。" if decision == "interested" else "好，這張提案已替你婉拒。", None
+        reply = {
+            "interested": "好，我已更新這張牽線提案。",
+            "declined": "好，這張提案已替你婉拒。",
+            "cancelled": "好，這次等待中的配對已替你撤回。",
+        }[decision]
+        return True, reply, None
     except Exception as exc:
         return False, "我現在不能安全地更新這張提案。", type(exc).__name__
 
@@ -535,6 +573,7 @@ def _calendar_execute(
 
 _WRITE_EXECUTORS = {
     "match.start_search": lambda ctx, turn, run_id, index, args, cid, payload: _start_search(ctx, run_id, index, confirmation_id=cid),
+    "match.cancel_search": lambda ctx, turn, run_id, index, args, cid, payload: _cancel_search(ctx, run_id, index, payload, confirmation_id=cid),
     "match.decide_active_proposal": lambda ctx, turn, run_id, index, args, cid, payload: _decide_active_proposal(ctx, turn, run_id, index, args, payload),
     "match.decide_active_event_invitation": lambda ctx, turn, run_id, index, args, cid, payload: _decide_active_event_invitation(ctx, turn, run_id, index, args, payload),
     "profile.start_assessment": lambda ctx, turn, run_id, index, args, cid, payload: _start_assessment(ctx, args, confirmation_id=cid),
@@ -560,20 +599,43 @@ def prepare_write_confirmation(
         return {"action": tool_name, "arguments": {}, "data": {}}, (
             "我會依你的近況、偏好和個性挑選，不會隨機配對。要我現在開始找就回覆「確認」；也可以先補充條件。"
         )
+    if tool_name == "match.cancel_search":
+        job = active_match_search_job(ctx.user_id)
+        if not job or str(job.get("status") or "") not in {"queued", "running"}:
+            return None, "目前沒有正在進行、可以取消的配對搜尋。"
+        job_id = str(job.get("job_id") or "")
+        if not job_id:
+            return None, "這次搜尋的狀態已更新，請重新查看後再取消。"
+        return {
+            "action": tool_name,
+            "arguments": {},
+            "data": {"match_search_job_id": job_id},
+        }, "要取消目前正在進行的配對搜尋嗎？確認後我才會停止。"
     if tool_name == "match.decide_active_proposal":
         proposal = turn.active_proposal or {}
         decision = str(arguments.get("decision") or "")
-        if not proposal.get("user_can_decide") or decision not in {"interested", "declined"}:
+        allowed_actions = set(proposal.get("allowed_actions") or [])
+        authority = getattr(turn, "_active_proposal_authority", None) or {}
+        if decision not in allowed_actions or decision not in {"interested", "declined", "cancelled"}:
             return None, "目前沒有一張可由你決定的配對提案。"
-        revision = int(proposal.get("proposal_revision", 0) or 0)
-        if revision <= 0:
+        revision = proposal.get("proposal_revision")
+        if type(revision) is not int or revision < 0 or not str(authority.get("match_id") or ""):
             return None, "這張提案的狀態已經更新，請重新查看後再決定。"
         counterparty = str(proposal.get("counterparty") or "對方")
-        action_label = "表示有興趣" if decision == "interested" else "婉拒"
+        action_label = {
+            "interested": "表示有興趣",
+            "declined": "婉拒",
+            "cancelled": "撤回等待",
+        }[decision]
         return {
             "action": tool_name,
             "arguments": {"decision": decision},
-            "data": {"proposal_revision": revision},
+            "data": {
+                "match_id": str(authority.get("match_id") or ""),
+                "expected_status": str(authority.get("expected_status") or ""),
+                "proposal_revision": revision,
+                "proposal_namespace": str(authority.get("proposal_namespace") or ""),
+            },
         }, f"要對 {counterparty} 的提案{action_label}嗎？確認後我才會送出。"
     if tool_name == "match.decide_active_event_invitation":
         invitation = turn.active_event_invitation or {}

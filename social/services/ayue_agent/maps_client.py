@@ -355,8 +355,22 @@ def parse_overpass_elements(raw_elements: list[dict[str, Any]], *, ref_lat: floa
     return sorted(places, key=lambda item: (item["distance_m"], item["name"]))
 
 
-def nearby_places(anchor: str, categories: list[str], *, radius_m: int = 1500, limit: int = 8) -> dict[str, Any]:
-    anchor_point = nominatim_search(anchor)
+def nearby_places(
+    anchor: str,
+    categories: list[str],
+    *,
+    radius_m: int = 1500,
+    limit: int = 8,
+    latitude: float | None = None,
+    longitude: float | None = None,
+) -> dict[str, Any]:
+    if latitude is None or longitude is None:
+        anchor_point = nominatim_search(anchor)
+    else:
+        lat, lon = float(latitude), float(longitude)
+        if not math.isfinite(lat) or not math.isfinite(lon) or not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+            raise MapClientError("location_not_found")
+        anchor_point = {"label": str(anchor or "目前位置")[:120], "lat": lat, "lon": lon}
     categories = [category for category in categories if category in _CATEGORY_TAGS][:3]
     if not categories:
         raise MapClientError("invalid_place_category")

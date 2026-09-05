@@ -130,7 +130,10 @@ class PairMessageRiskGate:
             or os.getenv("RISK_SERVICE_URL")
             or "http://127.0.0.1:8001"
         ).rstrip("/")
-        self._timeout = float(timeout_seconds or os.getenv("RISK_TIMEOUT_SEC") or "20")
+        # Risk requests can include a bounded primary/fallback attempt plus
+        # Appwrite state reads/writes. Keep this below the client's 45s send
+        # timeout while leaving margin above the observed healthy window.
+        self._timeout = float(timeout_seconds or os.getenv("RISK_TIMEOUT_SEC") or "40")
         self._transport = transport or self._http_transport
         self._cache_size = max(1, min(cache_size, 4096))
         self._cache: OrderedDict[str, PairMessageRiskDecision] = OrderedDict()

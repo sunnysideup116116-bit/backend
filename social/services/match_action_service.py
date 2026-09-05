@@ -14,6 +14,8 @@ from typing import Any, Callable
 import requests
 
 from database import matches_coll, profiles_coll
+from services.chat_service import generate_room_id, save_system_message_once
+from services.event_card_projection import public_event_card
 from services.giphy_service import schedule_match_celebration_gifs
 from services.match_decision_service import apply_match_decision
 from services.match_reason_service import accepted_opening_for_viewer
@@ -32,13 +34,19 @@ TaskScheduler = Callable[..., Any]
 
 
 def start_match_search(
-    user_id: str, *, source: str, force_new: bool = False, idempotency_key: str | None = None,
+    user_id: str,
+    *,
+    source: str,
+    force_new: bool = False,
+    idempotency_key: str | None = None,
+    origin_room_id: str = "",
 ) -> dict[str, Any]:
     """Queue a canonical persistent search job; never rank candidates inline."""
     from services.match_search_job_service import enqueue_match_search
     return enqueue_match_search(
         user_id, source=source, force_new=force_new,
         idempotency_key=idempotency_key or f"legacy-match-search:{uuid.uuid4().hex}",
+        origin_room_id=origin_room_id,
     )
 
 
@@ -72,6 +80,33 @@ def _receiver_intro(profile: dict, user_id: str) -> str:
     )
 
 
+def _save_event_chat_opening(match_doc: dict) -> dict | None:
+    """Persist one shared, public Event opener after mutual acceptance."""
+    event = public_event_card(match_doc)
+    first = str(match_doc.get("from_user") or "").strip()
+    second = str(match_doc.get("to_user") or "").strip()
+    if not event or not first or not second or first == second:
+        return None
+    match_id = str(match_doc["_id"])
+    title = str(event["title"])
+    return save_system_message_once(
+        generate_room_id(first, second),
+        (
+            f"你們都對「{title}」有興趣 ✦\n"
+            "阿月把活動資訊留在這裡，從最期待的活動內容開始聊也可以。"
+        ),
+        message_type="system",
+        metadata={
+            "event_type": "event_invitation_accepted",
+            "proposal_namespace": EVENT_INVITATION_NAMESPACE,
+            "match_id": match_id,
+            "event": event,
+            "notification_recipients": [first, second],
+        },
+        event_key=f"event-invitation:{match_id}:pair-opening",
+    )
+
+
 def apply_transition_effects(
     match_doc: dict, action: str, previous_status: str, explicit_reasons: list[str],
     *, schedule_task: TaskScheduler | None = None,
@@ -82,15 +117,16 @@ def apply_transition_effects(
     status = match_doc["status"]
     namespace = namespace_for_document(match_doc)
     if status == "pending":
-        receiver_doc = profiles_coll.find_one({"user_id": to_id}) or {}
-        try:
-            queue_mediator_event(
-                to_id, _receiver_intro(receiver_doc, to_id), "incoming_match_intro",
-                event_key=f"match:{match_id}:pending-intro:{to_id}", match_id=match_id,
-            )
-        except Exception as exc:
-            # The friendly preface is optional; the actionable proposal is not.
-            print(f"[match] receiver intro delivery failed: {type(exc).__name__}")
+        if namespace != EVENT_INVITATION_NAMESPACE:
+            receiver_doc = profiles_coll.find_one({"user_id": to_id}) or {}
+            try:
+                queue_mediator_event(
+                    to_id, _receiver_intro(receiver_doc, to_id), "incoming_match_intro",
+                    event_key=f"match:{match_id}:pending-intro:{to_id}", match_id=match_id,
+                )
+            except Exception as exc:
+                # The friendly preface is optional; the actionable proposal is not.
+                print(f"[match] receiver intro delivery failed: {type(exc).__name__}")
         queue_mediator_event(
             to_id, "欸，有位人選想認識你，我先來問你本人。", "incoming_match_interest",
             event_key=f"match:{match_id}:pending-proposal:{to_id}", match_id=match_id,
@@ -99,6 +135,14 @@ def apply_transition_effects(
         )
         return
     if status == "accepted":
+        if namespace == EVENT_INVITATION_NAMESPACE:
+            try:
+                _save_event_chat_opening(match_doc)
+            except Exception as exc:
+                # The consent transition is already committed. Keep the
+                # proposal-room confirmation available if the shared opener
+                # cannot be persisted right now.
+                print(f"[match] event chat opening failed: {type(exc).__name__}")
         if (
             namespace == EVENT_INVITATION_NAMESPACE
             and match_doc.get("relationship_establishing") is False
@@ -146,13 +190,14 @@ def apply_transition_effects(
         return
     actor = from_id if previous_status == "draft" or action == "cancel" else to_id
     other_id = to_id if actor == from_id else from_id
-    target_doc = profiles_coll.find_one({"user_id": other_id}) or {}
 
     def notify_decline_feedback() -> None:
         try:
             response = requests.post("http://127.0.0.1:9001/api/feedback", json={
                 "user_id": actor, "target_id": other_id, "action": "decline",
-                "target_traits": target_doc.get("big_five", {}),
+                # Only the user's selected reasons authorize a preference write.
+                # Keep the compatibility field without sending unselected traits.
+                "target_traits": {},
                 "explicit_reasons": explicit_reasons,
             }, timeout=15)
             response.raise_for_status()
@@ -166,11 +211,11 @@ def apply_transition_effects(
                     match_id=match_id,
                 )
         except Exception as exc:
-            print(f"[match] feedback forwarding failed: {exc}")
+            print(f"[match] feedback forwarding failed: {type(exc).__name__}")
 
     # Feedback is optional enrichment. Never block a synchronous agent turn on
     # the external feedback service when no background scheduler is available.
-    if action == "decline" and schedule_task is not None:
+    if action == "decline" and any(reason.strip() for reason in explicit_reasons) and schedule_task is not None:
         schedule_task(notify_decline_feedback)
     if previous_status == "pending":
         event_type = "match_cancelled" if action == "cancel" else "match_declined"
@@ -223,21 +268,31 @@ def decide_match(
 
 def decide_active_proposal(
     *, user_id: str, decision: str, expected_revision: int, idempotency_key: str,
-    schedule_task: TaskScheduler | None = None,
+    schedule_task: TaskScheduler | None = None, expected_match_id: str = "",
+    expected_status: str = "",
 ) -> dict[str, Any]:
     """Decide only the single current proposal; IDs and status stay server-side."""
-    if decision not in {"interested", "declined"}:
+    if decision not in {"interested", "declined", "cancelled"}:
         return {"status": "invalid", "invalid": True}
     active = reconcile_live_match(user_id)
     if not active or user_id not in {active.get("from_user"), active.get("to_user")}:
         return {"status": "stale", "stale": True}
+    if expected_match_id and str(active.get("_id") or "") != expected_match_id:
+        return {"status": "stale", "stale": True, "current_status": active.get("status")}
+    if expected_status and str(active.get("status") or "") != expected_status:
+        return {"status": "stale", "stale": True, "current_status": active.get("status")}
     stage = derive_match_stage(active, user_id)
-    if stage not in {"waiting_user", "incoming_decision"}:
+    allowed = {
+        "waiting_user": {"interested", "declined"},
+        "incoming_decision": {"interested", "declined"},
+        "waiting_other": {"cancelled"},
+    }.get(stage, set())
+    if decision not in allowed:
         return {"status": "stale", "stale": True, "current_status": active.get("status")}
     return decide_match(
         user_id=user_id,
         match_id=str(active["_id"]),
-        action="accept" if decision == "interested" else "decline",
+        action={"interested": "accept", "declined": "decline", "cancelled": "cancel"}[decision],
         expected_status=str(active.get("status") or ""),
         expected_revision=expected_revision,
         expected_namespace=RELATIONSHIP_MATCH_NAMESPACE,

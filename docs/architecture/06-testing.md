@@ -41,9 +41,9 @@ rg --files tests -g "test_*.py" | Sort-Object
 
 ## 3. Domain 與 API
 
-- 配對：`test_match_*`、`test_accepted_match_integrity.py`，覆蓋 qualification、job、directional reason、CAS／stale／終態。
+- 配對／Event：`test_match_*`、`test_event_*`、`test_inline_match_proposals.py`、`test_proposal_nickname.py`、`test_accepted_match_integrity.py`，覆蓋 qualification、job、一般／Event 獨立 slot、同頁 progress、viewer hydration、directional reason、暱稱、婉拒選項、CAS／stale／終態、既有聊天重用與單一 Event 開場卡。
 - 行事曆／共同約會：`test_calendar_*`、`test_date_coordination_service.py`、`test_private_calendar.py`。
-- Profile／Memory：`test_profile_*`、`test_memory_service.py`、`test_assessment_session_service.py`，特別驗證 owner evidence span 與 message-id idempotency。
+- Profile／Memory：`test_profile_*`、`test_memory_service.py`、`test_memory_outbox_service.py`、`test_conversation_compaction_service.py`、`test_assessment_session_service.py`，特別驗證 owner evidence span、message-id idempotency、bounded retry、relation-preserving restore，以及 legacy／新版 owner room 的 watermark 與 continuity gate。
 - Private Ayue：`test_private_v2.py`、`test_private_context_projection.py`、`test_private_mediator_extraction.py`、`test_private_redirect.py`、`test_semantic_plan_service_fixes.py`；覆蓋 relationship semantic projection、600 字元單位更新門檻與 raw Graph 欄位隔離，且不得和 Public V3 混用 context 或 runtime。
 - 主動關心：`test_proactive_*`；驗證 atomic claim、grounding 與不重複投遞。
 - HTTP／相容性：`test_chat_leaf_routers.py`、`test_chat_router_characterization.py`（launcher 測試已隨 start_ayue 移除）；保護 JSON contract、NDJSON final 與 health identity。
@@ -54,6 +54,9 @@ rg --files tests -g "test_*.py" | Sort-Object
 - Planner sequence、DAG 與 fail-closed 行為。
 - Guard result code、tool schema／output、重複呼叫與額度。
 - Confirmation、ownership、CAS、idempotency、stale 與 concurrency。
+- 一般與 Event proposal namespace 不互相佔名額；terminal state 不被較舊 polling/cache 復活；Event accepted opener 以 match-scoped key 最多保存一次。
+- Match search 與 recent-context 的競態必須覆蓋：第一次 revision mismatch 原子重排同一 job 並維持公開 queued 狀態、第二次不再重排且投遞一次可見失敗、cancel／lease handoff 不得被誤判為可重試。
+- 只有使用者 opt-in 勾選的婉拒原因能形成 `AVOIDS`；空選擇、取消或 stale decision 不寫記憶。
 - Context／trace／stream／mention 的隱私邊界。
 - Profile evidence 只來自已保存 owner 原句。
 - Public V3 與 Private V2 的 runtime／context 隔離。

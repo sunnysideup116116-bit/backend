@@ -45,6 +45,9 @@ _API_KEY = os.getenv("APPWRITE_API_KEY") or ""
 _DB_ID = "dating_db"
 _COLLECTION_ID = "chat_messages"
 
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_VERIFY_TLS = urlparse(_ENDPOINT).hostname not in _LOOPBACK_HOSTS
+
 _ENABLED = bool(_ENDPOINT and _PROJECT_ID and _API_KEY)
 
 _HEADERS = {
@@ -85,6 +88,7 @@ def mirror_message_to_appwrite(msg: dict) -> None:
     data = {
         "room_id": room_id,
         "sender_id": sender_id,
+        "receiver_id": receiver_id or "",
         "content": str(msg.get("content") or ""),
         "message_type": str(msg.get("message_type") or "text"),
         "timestamp": int(msg.get("timestamp") or time.time()),
@@ -99,7 +103,7 @@ def mirror_message_to_appwrite(msg: dict) -> None:
     if receiver_id:
         permissions.append(f'read("user:{receiver_id}")')
     try:
-        requests.post(
+        response = requests.post(
             f"{_ENDPOINT}/databases/{_DB_ID}/collections/{_COLLECTION_ID}/documents",
             headers=_HEADERS,
             json={
@@ -108,7 +112,13 @@ def mirror_message_to_appwrite(msg: dict) -> None:
                 "permissions": permissions,
             },
             timeout=5,
+            verify=_VERIFY_TLS,
         )
+        # Replaying the same canonical Mongo message is idempotent. Appwrite
+        # reports the already-created deterministic document as 409; every
+        # other non-success response should remain visible in diagnostics.
+        if response.status_code != 409:
+            response.raise_for_status()
     except Exception as exc:
         print(f"[appwrite_mirror] mirror failed: {type(exc).__name__}: {exc}")
 

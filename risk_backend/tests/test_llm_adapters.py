@@ -8,12 +8,17 @@ import pytest
 
 def test_default_provider_returns_gemini(monkeypatch):
     monkeypatch.delenv("NLP_PROVIDER", raising=False)
+    monkeypatch.delenv("GEMINI_FALLBACK_MODEL", raising=False)
     monkeypatch.setenv("GOOGLE_API_KEY", "fake")
     from app.core.llm_adapters import GeminiAdapter, get_nlp_adapter
 
     adapter = get_nlp_adapter()
 
     assert isinstance(adapter, GeminiAdapter)
+    assert adapter._timeout == 10
+    assert adapter._fallback_timeout == 15
+    assert adapter._max_attempts == 1
+    assert adapter._fallback_model == "gemini-2.5-flash-lite"
 
 
 def test_openai_compat_provider_returns_compat(monkeypatch):
@@ -25,6 +30,7 @@ def test_openai_compat_provider_returns_compat(monkeypatch):
     adapter = get_nlp_adapter()
 
     assert isinstance(adapter, OpenAICompatAdapter)
+    assert adapter._max_attempts == 1
 
 
 def test_openai_compat_missing_credentials_raises(monkeypatch):
@@ -81,6 +87,7 @@ def test_nlp_model_name_openai_compat_uses_env(monkeypatch):
 
 def test_nlp_model_name_gemini_uses_kb_hint(monkeypatch):
     monkeypatch.delenv("NLP_PROVIDER", raising=False)
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
     from app.core.llm_adapters import get_nlp_model_name
 
     assert get_nlp_model_name("gemini-2.5-flash") == "gemini-2.5-flash"
@@ -166,6 +173,34 @@ def test_component_retry_budget_can_disable_retries(monkeypatch):
     assert len(calls) == 1
 
 
+def test_gemini_nlp_budget_switches_to_fallback_without_retrying_primary(monkeypatch):
+    """The foreground risk path must not exhaust the chat gateway's 20s timeout."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "fake")
+    from app.core import llm_adapters as la
+
+    ServiceUnavailable = _transient("ServiceUnavailable")
+    calls = []
+
+    class FakeModels:
+        def generate_content(self, *, model, contents, config):
+            calls.append(model)
+            if model == "primary-model":
+                raise ServiceUnavailable("503")
+            return type("Response", (), {"text": "ok"})()
+
+    adapter = la.GeminiAdapter(
+        fallback_model="fallback-model",
+        timeout=6,
+        max_attempts=1,
+    )
+    adapter._client = type("Client", (), {"models": FakeModels()})()
+
+    assert adapter.generate("prompt", "primary-model") == "ok"
+    assert calls == ["primary-model", "fallback-model"]
+    assert adapter.generate("prompt", "primary-model") == "ok"
+    assert calls == ["primary-model", "fallback-model", "fallback-model"]
+
+
 def test_transient_detected_by_status_code():
     """類別名稱看不出來時，改以 status_code 判斷。"""
     from app.core import llm_adapters as la
@@ -234,3 +269,91 @@ def test_ollama_adapter_defaults_to_global_budget(monkeypatch):
 
     assert adapter._timeout == la.LLM_TIMEOUT_SECONDS
     assert adapter._max_attempts is None  # call_with_retry 會退回 LLM_MAX_ATTEMPTS
+
+
+def test_collect_google_api_keys_sequential(monkeypatch):
+    """測試從 GOOGLE_API_KEYS1, GOOGLE_API_KEYS2... 依序掃描並去重。"""
+    from app.core import llm_adapters as la
+
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_AI_STUDIO_API_KEY", raising=False)
+    for i in range(1, 10):
+        monkeypatch.delenv(f"GOOGLE_API_KEYS{i}", raising=False)
+        monkeypatch.delenv(f"GOOGLE_API_KEY_{i}", raising=False)
+
+    monkeypatch.setenv("GOOGLE_API_KEYS1", "key-one")
+    monkeypatch.setenv("GOOGLE_API_KEYS2", "key-two")
+    monkeypatch.setenv("GOOGLE_API_KEYS3", "key-three")
+    monkeypatch.setenv("GEMINI_API_KEY", "fallback-key")
+
+    keys = la._collect_google_api_keys()
+    assert keys == ["key-one", "key-two", "key-three", "fallback-key"]
+
+
+def test_gemini_adapter_multi_key_round_robin(monkeypatch):
+    """驗證多把 Key 時，請求會以 Round-Robin 方式均勻分流。"""
+    from app.core import llm_adapters as la
+
+    called_keys = []
+
+    class MockModels:
+        def __init__(self, key):
+            self._key = key
+
+        def generate_content(self, *, model, contents, config):
+            called_keys.append(self._key)
+            return type("Response", (), {"text": f"res-from-{self._key}"})()
+
+    adapter = la.GeminiAdapter(max_attempts=1)
+    adapter._keys = ["k1", "k2"]
+    adapter._clients = [
+        ("k1", type("Client", (), {"models": MockModels("k1")})()),
+        ("k2", type("Client", (), {"models": MockModels("k2")})()),
+    ]
+    adapter._client = adapter._clients[0][1]
+
+    # 第 1 次應該打 k1
+    r1 = adapter.generate("hi", "test-model")
+    # 第 2 次應該打 k2
+    r2 = adapter.generate("hi", "test-model")
+    # 第 3 次應該輪回 k1
+    r3 = adapter.generate("hi", "test-model")
+
+    assert r1 == "res-from-k1"
+    assert r2 == "res-from-k2"
+    assert r3 == "res-from-k1"
+    assert called_keys == ["k1", "k2", "k1"]
+
+
+def test_gemini_adapter_key_failover_on_429(monkeypatch):
+    """驗證當前 Key 遭遇 429 ResourceExhausted 時，能自動轉移到下一把可用 Key。"""
+    from app.core import llm_adapters as la
+
+    ResourceExhausted = type("ResourceExhausted", (Exception,), {"status_code": 429})
+    call_log = []
+
+    class MockModels:
+        def __init__(self, key, fail=False):
+            self._key = key
+            self._fail = fail
+
+        def generate_content(self, *, model, contents, config):
+            call_log.append(self._key)
+            if self._fail:
+                raise ResourceExhausted("429 Resource exhausted")
+            return type("Response", (), {"text": f"success-{self._key}"})()
+
+    adapter = la.GeminiAdapter(max_attempts=1)
+    adapter._keys = ["k1-limited", "k2-healthy"]
+    adapter._clients = [
+        ("k1-limited", type("Client", (), {"models": MockModels("k1-limited", fail=True)})()),
+        ("k2-healthy", type("Client", (), {"models": MockModels("k2-healthy", fail=False)})()),
+    ]
+    adapter._client = adapter._clients[0][1]
+
+    result = adapter.generate("prompt", "test-model")
+    assert result == "success-k2-healthy"
+    # k1 失敗後立即自動重試 k2
+    assert call_log == ["k1-limited", "k2-healthy"]
+

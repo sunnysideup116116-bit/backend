@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | `/health` | GET | Process-level readiness（不讀 profile／Neo4j） |
 | `/api/match` | POST | 候選排序：`{target_user, candidates, target_deep_profile}` → `{outcome: selected\|no_suitable_candidate, matches: [1 筆]}` |
-| `/api/feedback` | POST | 婉拒／接受後的反思：LLM 產生 graph reflection → 寫入 `HAS_PREFERENCE` relationships |
+| `/api/feedback` | POST | 只正規化使用者本次明確勾選的 `explicit_reasons`；空清單回 `skipped`。目前提案 UI 僅在 opt-in 婉拒時呼叫，並共用 memory writer 轉成 `AVOIDS` Concept relationships |
 | `/api/global_reflection` | POST | 從一對（from_big_five→to_big_five）歸納全域法則 `GlobalRule`（相似度合併，weight 遞增） |
 | `/api/memory/apply` | POST | 寫入已驗證的 memory proposals（不重新萃取），message_id 冪等 |
 | `/api/memory/{user_id}` | GET | 讀某使用者 active 偏好（owner-scoped） |
@@ -24,7 +24,7 @@
 
 ### 排序決策（`matchmaker.py:MatchmakerAgent`）
 
-權重：近期情境 context 30% + 雙方 graph memory 25% + deep_profile/價值觀 20% + Big Five 15% + 立即可聊話題 10%。硬性規則：任一方 `DISLIKES_TRAIT` 命中對方特質原則上不推薦；沒有值得誠實推薦的人時回 `no_suitable_candidate`，不得硬選。
+權重：近期情境 context 30% + 雙方 graph memory 25% + deep_profile/價值觀 20% + Big Five 15% + 立即可聊話題 10%。硬性規則：任一方的 `AVOIDS` Concept 明確命中對方公開特質時，原則上不得推薦；沒有值得誠實推薦的人時回 `no_suitable_candidate`，不得硬選。
 
 `/api/match` 的處理流程（`agent_api.py:match_endpoint`）：
 
@@ -36,16 +36,19 @@
 ## 2. Neo4j 圖記憶模型
 
 ```
-(:User {id}) -[HAS_PREFERENCE {stance, type, confidence, active, evidence_count, source}]-> (:Trait {key, name, category})
+(:User {id}) -[:PREFERS]-> (:Concept {key, label, kind})
+(:User {id}) -[:AVOIDS]-> (:Concept {key, label, kind})
+(:User {id}) -[:CURRENTLY_WANTS {expires_at}]-> (:Concept {key, label, kind})
 (:Agent {name:"System"}) -[LEARNED_RULE {weight}]-> (:GlobalRule {content, category})
 (:MemoryObservation {message_id})   ← message_id 冪等（每則 owner 訊息最多套用一次）
 (:ChatEntity {key}) -[IS_A|HAS|LIKES|...]-> (:ChatEntity {key})   ← 雙人聊天 triples
 ```
 
 - 偏好必須 **owner-scoped**：`MemoryObservation.message_id` 唯一約束保證同一訊息不會重複套用。
-- `stance` ∈ {like, dislike, require, avoid}；`type` 由 stance 推導（LIKES_TRAIT/DISLIKES_TRAIT）。
+- `stance=like|require` 投影為 `PREFERS`；`stance=dislike|avoid` 投影為 `AVOIDS`；短期活動意圖另由 recent-context projection 產生 `CURRENTLY_WANTS`。
+- `LIKES_TRAIT`／`DISLIKES_TRAIT` 目前只是 Matchmaker LLM／文字投影的 compatibility label；寫入 Neo4j 前必須分別轉成 `PREFERS`／`AVOIDS`，不得建立同名 Graph relationship。
 - 敏感內容（種族、宗教、性傾向、疾病等）在寫入前被正則擋掉（`agent_api.py` 的 `protected`）。
-- **系統產生的長期建議是 recommendation，不是使用者事實**：禁止寫成 `HAS_PREFERENCE`（需獨立 versioned contract + TTL + dismissed state，見 `MEMORY_CONTEXT_ENGINE_GUIDE.md`）。
+- **系統產生的長期建議是 recommendation，不是使用者事實**：禁止寫成 `PREFERS`、`AVOIDS` 或 `CURRENTLY_WANTS`（需獨立 versioned contract + TTL + dismissed state，見 `MEMORY_CONTEXT_ENGINE_GUIDE.md`）。
 
 ## 3. 主服務的記憶 pipeline
 
@@ -64,6 +67,8 @@
 - `get_user_graph_memories`：讀回 active 偏好並投影成 `profile_memory_preview`（Mongo read projection，**不是第二個 source of truth**）。
 - `apply_memory_action`：透過 `/api/memory/action` 執行 disable／restore／correct，再同步 read projection。
 - `_sync_memory_projection`：把圖記憶壓縮成 ≤12 筆的 Mongo 投影與摘要。
+- `memory_outbox_service.py`：以 Mongo lease、bounded exponential backoff 與最多八次嘗試重送已驗證 proposals；不重新讀 raw chat。9001 以單一 transaction 寫入 observation marker 與全部 edges，讓 duplicate delivery 可安全結案。
+- 記憶管理以 owner-scoped `MEMORY_DISABLED` 暫存原 relation；restore 不得把 `AVOIDS` 變成 `PREFERS`，correct 不得改寫其他 owner 共用的 Concept edge。設定頁用 status-aware Graph read 刷新 projection，只有 Graph unavailable 才沿用 cache。
 
 已移除的 `/api/memory/observe` 與自由文字 memory extractor 不得恢復。唯一 extraction owner 是 `profile_skills.py`；媒婆只接受已通過 subject、confidence 與原句 evidence 驗證的 typed proposals。
 
@@ -73,10 +78,11 @@
 
 ## 4. 配對狀態真相（canonical lifecycle）
 
-- Lifecycle：`draft → pending → accepted`；`declined` 為終態。
+- Lifecycle：`draft → pending → accepted`；`declined`／`expired` 為終態。
 - `match_decision_service.py:apply_match_decision` 是唯一 CAS 轉移：`status + proposal_revision` 條件更新（`find_one_and_update`），stale 回報最新狀態且不覆寫；`idempotency_key` 存於 `last_decision`，重放回 `idempotent: true`。
-- 只有 live `draft/pending` 阻擋新的 active proposal；`accepted` 是已建立的聯絡關係。
-- 效果（通知、開聊天室、GIF、feedback）只在 transition 成功後執行（`match_action_service.apply_transition_effects`）；effect 失敗不讓已提交 transition 被重送。
+- 只有同 namespace 的 live `draft/pending` 阻擋新提案；`relationship_match` 與 `event_invitation` 各有一個獨立 slot，可同時存在。`accepted` relationship 是已建立的聯絡關係。
+- Durable search job 會綁定建立時的 `current_context_revision`。若 concurrent recent-context extraction 在搜尋中提交新 revision，worker 會以 Mongo CAS 將同一 job 最多重排一次並從最新 snapshot 重跑；queued/running 狀態持續可見。第二次仍變動才終止為 stale，並投遞 idempotent `match_search_failed` 說明，不得無聲消失或無限重跑。
+- 效果（通知、開聊天室、Event 開場卡、GIF、opt-in feedback）只在 transition 成功後執行（`match_action_service.apply_transition_effects`）；effect 失敗不讓已提交 transition 被重送。Event invitation 對既有 accepted pair 沿用 canonical chat，並以 match-scoped key 冪等保存一次公開活動介紹，不建立第二個 relationship anchor。
 
 ## 5. 雙人關係 context（不可誤用）
 

@@ -1,4 +1,5 @@
 from enum import Enum
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -81,6 +82,17 @@ class MatchDecisionRequest(AcceptRequest):
     expected_revision: int | None = None
     proposal_namespace: str | None = None
 
+class DeviceLocationRequest(BaseModel):
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    accuracy_m: float = Field(default=0, ge=0, le=10_000)
+    captured_at: datetime
+    city: str = Field(default="", max_length=20)
+    district: str = Field(default="", max_length=20)
+    road: str = Field(default="", max_length=60)
+    display_name: str = Field(min_length=1, max_length=120)
+
+
 class DirectChatRequest(BaseModel):
     user_id: str
     contact_id: str
@@ -106,6 +118,11 @@ class DirectChatRequest(BaseModel):
     # (which must be owned by user_id) instead of the legacy single AI room.
     # Omit it to preserve the original single-room behavior.
     ai_room_id: str | None = Field(default=None, min_length=1, max_length=128)
+    # Precise coordinates are request-scoped and excluded from dumps so they
+    # cannot accidentally enter persistence, traces, or logs.
+    device_location: DeviceLocationRequest | None = Field(
+        default=None, exclude=True, repr=False,
+    )
 
     @model_validator(mode="after")
     def _validate_assessment_action_scope(self):

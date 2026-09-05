@@ -17,6 +17,9 @@ import requests
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from services.chat_service import generate_room_id
+from services.relationship_engagement_service import find_accepted_match
+
 router = APIRouter()
 
 _RISK_SERVICE_URL = (
@@ -30,6 +33,12 @@ class RiskFeedbackRequest(BaseModel):
     role: str
     feedback: str
     detail: str | None = Field(default=None, max_length=2000)
+
+
+class RiskFeedbackStatusRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=128)
+    contact_id: str = Field(min_length=1, max_length=128)
+    triggered_by_msg_ids: list[str] = Field(min_length=1, max_length=50)
 
 
 class SenderAppealProxyRequest(BaseModel):
@@ -112,6 +121,23 @@ def submit_risk_feedback(req: RiskFeedbackRequest):
     if req.feedback not in ("comfortable", "uncomfortable"):
         raise HTTPException(status_code=400, detail="feedback must be 'comfortable' or 'uncomfortable'")
     return _post("feedback", req.model_dump(exclude_none=True))
+
+
+@router.post("/pair/risk_feedback/status")
+def get_risk_feedback_status(req: RiskFeedbackStatusRequest):
+    """只允許已接受配對查詢自己的 receiver feedback。"""
+    if not find_accepted_match(req.user_id, req.contact_id):
+        raise HTTPException(status_code=403, detail="只能查詢已接受配對的回覆狀態")
+    safe_ids = list(dict.fromkeys(
+        value.strip() for value in req.triggered_by_msg_ids if value.strip()
+    ))[:50]
+    if not safe_ids:
+        return {"feedback_by_message": {}}
+    return _post("feedback/status", {
+        "conversation_id": generate_room_id(req.user_id, req.contact_id),
+        "receiver_id": req.user_id,
+        "triggered_by_msg_ids": safe_ids,
+    })
 
 
 @router.post("/pair/risk_appeal")

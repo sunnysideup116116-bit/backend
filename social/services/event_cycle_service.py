@@ -156,6 +156,7 @@ def run_weekly_event_cycle(
     notify("discovering")
     discovery = discover_and_ingest_events(
         region=region, window_days=window_days, categories=categories,
+        request_invitation_scan=False,
     )
     active_count = sum(
         int(value or 0)

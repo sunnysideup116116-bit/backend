@@ -33,7 +33,7 @@ class ChatChoiceSchedulerTests(unittest.TestCase):
             mentioned_contact_overflow=False,
         )
         plan = Plan(tasks=[
-            SubTask(id="m1", agent="match", depends_on=[], task_brief="開始搜尋"),
+            SubTask(id="m1", agent="match", match_intent="start_search", depends_on=[], task_brief="開始搜尋"),
             SubTask(id="s1", agent="synthesizer", depends_on=["m1"], task_brief="呈現確認"),
         ])
         store = MemoryCollection()

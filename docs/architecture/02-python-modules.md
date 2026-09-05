@@ -7,12 +7,20 @@
 ### `main.py`
 FastAPI app 入口。註冊五個 top-level routers（`frontend`、`chat`、`match`、`system`、`calendar`；`chat` 本身是 aggregate，底下再掛 leaf routers）。
 
-`startup` 時依序建立索引並啟動兩個 background worker：
+`startup` 時依序建立索引並啟動六個 background worker：
 
 - `start_match_search_worker()` — 配對搜尋 job 的消費 worker（`match_search_job_service.py`）。
 - `start_proactive_care_scheduler()` — 主動關心排程 loop（`ayue_agent/proactive_scheduler.py`）。
+- `start_context_graph_worker()` — 將 Mongo recent-context projection 重試同步到 Neo4j `CURRENTLY_WANTS`。
+- `start_concept_embedding_worker()` — 補齊 Concept embedding 並刷新 Event relevance projection。
+- `start_event_lifecycle_worker()` — 使過期的 Event proposal 與 Graph Event 進入正確 lifecycle。
+- `start_event_discovery_worker()` — 由 `event_worker.py` 在 Social 進程內建立 daemon thread，消費 Mongo singleton discovery queue。
 
-`shutdown` 時停止這兩個 worker。另外在啟動時建立：calendar、agent run、map cache、profile skill、match 的索引。
+`shutdown` 時停止這六個 worker。另外在啟動時建立：calendar、agent run、map cache、profile skill、match、Event queue/cache 與 interactive-priority 索引。
+
+`event_discovery_service.start_event_discovery_scheduler()` 是已廢止的 no-op compatibility entrypoint；
+現行排程與 queue ownership 在 `event_worker.py`。`EVENT_WEEKLY_CYCLE_ENABLED=off` 只關閉每週自動排程，
+不會關閉 worker，因此手動排入的 discovery job 仍可執行。
 
 ### `config.py`
 集中讀取環境變數（Mongo、Ollama/LLM 模型、功能旗標等）。測試用 `AYUE_SKIP_DOTENV=1` 跳過 `.env` 載入。

@@ -22,7 +22,7 @@ def _queue_memory_retry(user_id: str, proposals: list[dict], surface: str, messa
     document = {
         "user_id": user_id, "memories": proposals[:3], "surface": surface, "match_id": match_id,
         "message_id": message_id, "status": "pending", "last_error_code": error_code,
-        "updated_at": time.time(),
+        "updated_at": time.time(), "next_attempt_at": time.time() + 30,
     }
     try:
         if message_id:
@@ -30,7 +30,7 @@ def _queue_memory_retry(user_id: str, proposals: list[dict], surface: str, messa
         else:
             MEMORY_OUTBOX.insert_one({**document, "created_at": time.time()})
     except Exception as exc:
-        print(f"[MEMORY][outbox] skipped user={user_id} error={type(exc).__name__}")
+        print(f"[MEMORY][outbox] enqueue skipped error={type(exc).__name__}")
 
 
 def normalize_memory_item(item: dict) -> dict:
@@ -62,9 +62,37 @@ def get_user_graph_memories(user_id: str, limit: int = 20) -> list[dict]:
             for item in items if normalize_memory_item(item).get("label")]
 
 
+def get_graph_memory_snapshot(user_id: str, limit: int = 20) -> dict:
+    """Return a status-aware projection for cache refresh without changing list callers."""
+    try:
+        response = requests.get(
+            f"{AGENT_URL}/api/memory/{user_id}", params={"limit": limit}, timeout=12,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("status") == "error":
+            return {"available": False, "items": [], "error_code": str(
+                payload.get("error_code") or "graph_read_failed"
+            )[:80]}
+        raw_items = payload.get("memories", [])
+        if not isinstance(raw_items, list):
+            return {"available": False, "items": [], "error_code": "invalid_graph_response"}
+    except (requests.RequestException, ValueError):
+        return {"available": False, "items": [], "error_code": "memory_agent_unavailable"}
+    items = [
+        {**normalize_memory_item(item), "owner_user_id": user_id}
+        for item in raw_items if normalize_memory_item(item).get("label")
+    ]
+    return {"available": True, "items": items, "error_code": None}
+
+
 def _sync_memory_projection(user_id: str, learned: list[dict]) -> list[dict]:
-    graph_items = get_user_graph_memories(user_id, limit=12)
-    compact = sorted((graph_items or [normalize_memory_item(item) for item in learned]),
+    snapshot = get_graph_memory_snapshot(user_id, limit=12)
+    source = (
+        snapshot["items"] if snapshot["available"]
+        else [normalize_memory_item(item) for item in learned]
+    )
+    compact = sorted(source,
                      key=lambda x: x.get("last_seen_at", 0), reverse=True)[:12]
     profiles_coll.update_one({"user_id": user_id}, {"$set": {
         "profile_memory_preview": compact,
@@ -115,9 +143,17 @@ def apply_profile_memory_proposals(user_id: str, proposals: list[dict], surface:
     profiles_coll.update_one({"user_id": user_id}, {"$push": {"memory_notices": {"$each": notices}}}, upsert=True)
     return learned
 def apply_memory_action(user_id: str, key: str, action: str, value: str | None = None):
-    response = requests.post(f"{AGENT_URL}/api/memory/action", json={"user_id": user_id, "key": key, "action": action, "value": value}, timeout=30)
-    response.raise_for_status()
-    result = response.json()
+    try:
+        response = requests.post(f"{AGENT_URL}/api/memory/action", json={
+            "user_id": user_id, "key": key, "action": action, "value": value,
+        }, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise MemoryWriteError("memory_action_unavailable") from exc
+    if result.get("status") not in {"success", "expired"}:
+        raise MemoryWriteError(str(
+            result.get("error_code") or result.get("status") or "memory_action_failed"
+        )[:80])
     _sync_memory_projection(user_id, [])
     return result
-

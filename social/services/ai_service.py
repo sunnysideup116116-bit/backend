@@ -10,15 +10,14 @@ from ollama import Client
 from fastapi import HTTPException
 
 from config import (
-
-    GOOGLE_API_KEY, GOOGLE_EMBEDDING_MODEL, OLLAMA_HOST, OLLAMA_API_KEY,
-
+    GOOGLE_API_KEY, GOOGLE_API_KEYS, GOOGLE_EMBEDDING_MODEL, OLLAMA_HOST, OLLAMA_API_KEY,
     OLLAMA_CHAT_MODEL, OLLAMA_FAST_CHAT_MODEL,
     OLLAMA_REQUEST_TIMEOUT_SECONDS,
-
 )
 from services.language_service import normalize_model_text, normalize_zh_tw
 from services.ayue_agent.product_identity import PUBLIC_AYUE_PERSONA
+import threading
+import time
 
 
 _RUNTIME_MODEL_OVERRIDE: str | None = None
@@ -75,51 +74,92 @@ class ChatResult:
     prompt: str = ""
 
 
+class GoogleKeyPool:
+    """管理多個 Google API Key 的線程安全 KeyPool，支援 Round-Robin 分流與 429 容錯冷卻。"""
+
+    def __init__(self, keys: list[str], cooldown_seconds: float = 60.0):
+        self._keys = [k for k in keys if k]
+        self._cooldown_seconds = cooldown_seconds
+        self._lock = threading.Lock()
+        self._index = 0
+        self._cooldown_until: dict[str, float] = {}
+
+    @property
+    def has_keys(self) -> bool:
+        return bool(self._keys)
+
+    def mark_rate_limited(self, key: str) -> None:
+        with self._lock:
+            self._cooldown_until[key] = time.monotonic() + self._cooldown_seconds
+            masked = (key[:6] + "..." + key[-4:]) if len(key) > 10 else "***"
+            print(f"⚠️ [GoogleKeyPool] Key {masked} 觸發配額限制(429/ResourceExhausted)，進入冷卻 {self._cooldown_seconds}s")
+
+    def execute(self, operation_fn):
+        if not self._keys:
+            raise RuntimeError("缺少 GOOGLE_API_KEYS（或 GOOGLE_AI_STUDIO_API_KEY）")
+
+        with self._lock:
+            total = len(self._keys)
+            start_idx = self._index
+            self._index = (self._index + 1) % total
+
+        now = time.monotonic()
+        attempt_order = [self._keys[(start_idx + i) % total] for i in range(total)]
+
+        last_err = None
+        for key in attempt_order:
+            if total > 1 and now < self._cooldown_until.get(key, 0.0):
+                continue
+
+            try:
+                genai.configure(api_key=key)
+                return operation_fn(key)
+            except Exception as exc:
+                last_err = exc
+                err_str = str(exc).lower()
+                is_quota_error = (
+                    "429" in err_str
+                    or "resource_exhausted" in err_str
+                    or "quota" in err_str
+                    or "rate_limit" in err_str
+                    or getattr(exc, "status_code", None) == 429
+                )
+                if is_quota_error:
+                    self.mark_rate_limited(key)
+                    continue
+                raise exc
+
+        if last_err:
+            raise last_err
+        raise RuntimeError("Google API Key 池中無可用 Key")
+
+
+_raw_keys = list(GOOGLE_API_KEYS) if "GOOGLE_API_KEYS" in globals() and GOOGLE_API_KEYS else ([GOOGLE_API_KEY] if GOOGLE_API_KEY else [])
+google_key_pool = GoogleKeyPool(_raw_keys)
 
 if GOOGLE_API_KEY:
-
     genai.configure(api_key=GOOGLE_API_KEY)
 
-
-
 ollama_client = Client(
-
     host=OLLAMA_HOST,
-
     headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else None,
-
     timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS,
-
 )
 
 
-
 def get_embedding(text: str) -> list:
-
     try:
+        def _call(key: str):
+            result = genai.embed_content(
+                model=GOOGLE_EMBEDDING_MODEL,
+                content=text,
+                task_type="retrieval_document",
+            )
+            return result['embedding']
 
-        if not GOOGLE_API_KEY:
-
-            raise RuntimeError("缺少 GOOGLE_AI_STUDIO_API_KEY（或 GOOGLE_API_KEY）")
-
-        # 使用 Google AI Studio 免費額度的 embedding 模型
-
-        result = genai.embed_content(
-
-            model=GOOGLE_EMBEDDING_MODEL,
-
-            content=text,
-
-            task_type="retrieval_document",
-
-        )
-
-        return result['embedding']
-
+        return google_key_pool.execute(_call)
     except Exception as e:
-
         print(f"Embedding error: {e}")
-
         raise HTTPException(status_code=500, detail=f"Google Embedding 錯誤: {e}")
 
 
@@ -132,8 +172,6 @@ def get_embeddings(
     if not safe_texts:
         return []
     try:
-        if not GOOGLE_API_KEY:
-            raise RuntimeError("缺少 GOOGLE_AI_STUDIO_API_KEY（或 GOOGLE_API_KEY）")
         model_name = GOOGLE_EMBEDDING_MODEL.rsplit("/", 1)[-1]
         request = {"model": GOOGLE_EMBEDDING_MODEL, "content": safe_texts}
         if model_name == "gemini-embedding-2":
@@ -150,11 +188,15 @@ def get_embeddings(
             request["task_type"] = task_type
             if output_dimensionality:
                 request["output_dimensionality"] = int(output_dimensionality)
-        result = genai.embed_content(**request)
-        embeddings = result.get("embedding", [])
-        if len(safe_texts) == 1 and embeddings and isinstance(embeddings[0], (int, float)):
-            return [embeddings]
-        return embeddings
+
+        def _call(key: str):
+            result = genai.embed_content(**request)
+            embeddings = result.get("embedding", [])
+            if len(safe_texts) == 1 and embeddings and isinstance(embeddings[0], (int, float)):
+                return [embeddings]
+            return embeddings
+
+        return google_key_pool.execute(_call)
     except Exception as exc:
         print(f"Embedding error: {exc}")
         raise HTTPException(status_code=500, detail=f"Google Embedding 錯誤: {exc}") from exc

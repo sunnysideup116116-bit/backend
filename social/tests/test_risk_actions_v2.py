@@ -1,4 +1,4 @@
-"""Gateway contracts for all eight public risk action routes."""
+"""Gateway contracts for the public risk action routes."""
 
 from unittest.mock import MagicMock
 
@@ -118,6 +118,44 @@ def test_backend_4xx_detail_is_preserved(monkeypatch):
 
     assert raised.value.status_code == 400
     assert raised.value.detail == "cannot block yourself"
+
+
+def test_feedback_status_is_scoped_to_an_accepted_pair(monkeypatch):
+    posted = []
+    monkeypatch.setattr(risk_actions, "find_accepted_match", lambda *_: {"_id": "match-1"})
+    monkeypatch.setattr(
+        risk_actions,
+        "_post",
+        lambda path, payload: posted.append((path, payload)) or {
+            "feedback_by_message": {"m1": "comfortable"}
+        },
+    )
+
+    result = risk_actions.get_risk_feedback_status(
+        risk_actions.RiskFeedbackStatusRequest(
+            user_id="bob",
+            contact_id="alice",
+            triggered_by_msg_ids=["m1", "m1", "m2"],
+        )
+    )
+
+    assert result == {"feedback_by_message": {"m1": "comfortable"}}
+    assert posted == [("feedback/status", {
+        "conversation_id": "alice_bob",
+        "receiver_id": "bob",
+        "triggered_by_msg_ids": ["m1", "m2"],
+    })]
+
+    monkeypatch.setattr(risk_actions, "find_accepted_match", lambda *_: None)
+    with pytest.raises(HTTPException) as raised:
+        risk_actions.get_risk_feedback_status(
+            risk_actions.RiskFeedbackStatusRequest(
+                user_id="bob",
+                contact_id="mallory",
+                triggered_by_msg_ids=["m1"],
+            )
+        )
+    assert raised.value.status_code == 403
 
 
 def test_backend_connection_failure_becomes_503(monkeypatch):

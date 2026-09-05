@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
@@ -17,6 +18,29 @@ if not project_env.exists() and not local_env.exists():
 DEFAULT_APPWRITE_ENDPOINT = "https://appwrite.misproject.us.ci/v1"
 
 
+def _normalize_appwrite_endpoint(value: str) -> str:
+    """Avoid Appwrite's HTTP→HTTPS redirect, which breaks writes and queries.
+
+    The local reverse proxy redirects ``http://127.0.0.1:80`` to the default
+    HTTPS port. Appwrite POST requests then fail with
+    ``general_protocol_unsupported`` and redirected GET requests lose their
+    ``queries[]`` parameters. Connect to the canonical HTTPS origin directly.
+    Other development endpoints (for example http://localhost:8080) are left
+    unchanged.
+    """
+    endpoint = value.strip()
+    parsed = urlsplit(endpoint)
+    if (
+        parsed.scheme.lower() == "http"
+        and parsed.hostname in {"127.0.0.1", "localhost"}
+        and parsed.port == 80
+    ):
+        return urlunsplit(
+            ("https", parsed.hostname, parsed.path, parsed.query, parsed.fragment)
+        )
+    return endpoint
+
+
 @dataclass(frozen=True)
 class AppwriteConfig:
     endpoint: str
@@ -28,7 +52,9 @@ class AppwriteConfig:
 
 def get_appwrite_config() -> AppwriteConfig:
     return AppwriteConfig(
-        endpoint=(os.getenv("APPWRITE_ENDPOINT") or DEFAULT_APPWRITE_ENDPOINT).strip(),
+        endpoint=_normalize_appwrite_endpoint(
+            os.getenv("APPWRITE_ENDPOINT") or DEFAULT_APPWRITE_ENDPOINT
+        ),
         project_id=(os.getenv("APPWRITE_PROJECT_ID") or os.getenv("APPWRITE_PROJECT") or "").strip(),
         api_key=(os.getenv("APPWRITE_API_KEY") or "").strip(),
         db_id=(os.getenv("APPWRITE_DB_ID") or os.getenv("APPWRITE_DATABASE_ID") or "").strip(),
@@ -39,6 +65,8 @@ def get_appwrite_config() -> AppwriteConfig:
 def configure_appwrite_client(client):
     config = get_appwrite_config()
     client.set_endpoint(config.endpoint)
+    if "127.0.0.1" in config.endpoint or "localhost" in config.endpoint:
+        client.set_self_signed(status=True)
     if config.project_id:
         client.set_project(config.project_id)
     if config.api_key:
