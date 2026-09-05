@@ -254,12 +254,16 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
             memories.append(label)
     mentioned_ids, validation_overflow = validated_mentioned_contact_ids(ctx.user_id, ctx.mentioned_ids)
     match_search = match_state["search"]
+    request_location_label = _request_location_label(ctx)
     turn = PublicAgentTurnContext(
         user_id=ctx.user_id, room_id=ctx.room_id, message=_clean_text(ctx.message, 1600),
         recent_messages=history,
         conversation_continuity=continuity["summary"] if continuity else None,
         recent_context=safe_recent_context(profile.get("current_context"), ""),
-        user_location=safe_profile_location(profile).get("display_name", ""),
+        user_location=(
+            request_location_label
+            or safe_profile_location(profile).get("display_name", "")
+        ),
         relevant_memories=memories, active_proposal=active_prompt,
         active_event_invitation=event_prompt,
         match_search=match_search,
@@ -276,3 +280,10 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     turn._active_proposal_authority = active_authority  # type: ignore[attr-defined]
     turn._match_state = match_state  # type: ignore[attr-defined]
     return turn
+
+
+def _request_location_label(ctx: AgentTurnContext) -> str:
+    request_location = getattr(ctx, "device_location", None) or {}
+    if not isinstance(request_location, dict):
+        return ""
+    return _clean_text(request_location.get("display_name"), 120)

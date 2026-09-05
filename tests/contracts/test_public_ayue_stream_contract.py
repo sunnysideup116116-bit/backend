@@ -26,8 +26,10 @@ class PublicAyueStreamContractTests(unittest.TestCase):
     def test_decoder_handles_every_utf8_byte_boundary(self):
         events = [
             {"type": "run_started", "agent_run_id": "run-1"},
+            {"type": "stage", "agent_run_id": "run-1", "stage": "composing", "text": "整理中"},
             {"type": "tool_started", "agent_run_id": "run-1", "text": "阿月確認中…"},
             {"type": "tool_finished", "agent_run_id": "run-1", "outcome": "ok", "duration_ms": 12},
+            {"type": "token", "agent_run_id": "run-1", "text": "完成"},
             {"type": "final", "response": {"reply": "完成。", "future_field": {"safe": True}}},
         ]
         payload = "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events).encode("utf-8")
@@ -63,7 +65,10 @@ class PublicAyueStreamContractTests(unittest.TestCase):
             variant["properties"]["type"]["const"]
             for variant in stream_schema["oneOf"]
         }
-        self.assertEqual(event_types, {"run_started", "tool_started", "tool_finished", "final", "error"})
+        self.assertEqual(event_types, {
+            "run_started", "stage", "tool_started", "tool_finished",
+            "token", "final", "error",
+        })
         self.assertEqual(final_schema["required"], ["reply"])
         self.assertTrue(final_schema["additionalProperties"])
         for field in (

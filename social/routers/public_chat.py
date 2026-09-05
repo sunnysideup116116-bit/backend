@@ -26,7 +26,7 @@ from services.ayue_agent import (
     mark_public_confirmation_presented,
     run_public_agent_turn_v3,
 )
-from services.ayue_agent.contracts import AgentTurnContext
+from services.ayue_agent.contracts import PublicAgentRequestContext
 from services.assessment_session_service import (
     assessment_public_state_for_room,
     assessment_session_for_room,
@@ -218,7 +218,7 @@ def _complete_public_turn(
     agent_profile = dict(user_doc)
     if room_session is None:
         agent_profile.pop("agentic_assessment_session", None)
-    agent_ctx = AgentTurnContext(
+    agent_ctx = PublicAgentRequestContext(
         user_id=req.user_id,
         room_id=room_id,
         message=_public_request_message(req),
@@ -230,6 +230,10 @@ def _complete_public_turn(
         mention_overflow=mention_overflow,
         user_profile=agent_profile,
         recent_history=history,
+        device_location=(
+            req.device_location.model_dump(mode="json")
+            if req.device_location is not None else None
+        ),
     )
     agent_result = run_public_agent_turn_v3(
         agent_ctx, on_progress=on_progress, on_token=on_token,
@@ -451,7 +455,7 @@ def direct_chat_stream(
     req: DirectChatRequest, background_tasks: BackgroundTasks, request: Request = None,
 ):
     """NDJSON public-agent events; legacy and private chat retain direct JSON."""
-    event_queue: queue.Queue[dict | None] = queue.Queue(maxsize=16)
+    event_queue: queue.Queue[dict | None] = queue.Queue()
     fallback_run_id = uuid.uuid4().hex
     state = {"agent_run_id": fallback_run_id}
     worker_done = threading.Event()
@@ -462,17 +466,8 @@ def direct_chat_stream(
     )
 
     def enqueue(item: dict | None, *, terminal: bool = False) -> bool:
-        while True:
-            try:
-                event_queue.put_nowait(item)
-                return True
-            except queue.Full:
-                if not terminal:
-                    return False
-                try:
-                    event_queue.get_nowait()
-                except queue.Empty:
-                    return False
+        event_queue.put_nowait(item)
+        return True
 
     def emit(event: dict) -> bool:
         public_event = _sanitize_public_stream_event(event)
@@ -536,7 +531,14 @@ def direct_chat_stream(
             yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
 
     threading.Thread(target=worker, name="ayue-direct-chat-stream", daemon=True).start()
-    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/direct_chat")

@@ -410,7 +410,7 @@ class _PlaceOutput(BaseModel):
 class _PlacesNearbyOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     anchor_label: str
-    origin_kind: Literal["explicit", "saved_profile"]
+    origin_kind: Literal["explicit", "saved_profile", "device"]
     distance_basis: Literal["straight_line"]
     attribution: str
     attribution_url: str

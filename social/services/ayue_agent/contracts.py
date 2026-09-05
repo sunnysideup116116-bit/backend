@@ -63,6 +63,14 @@ class AgentTurnContext(BaseModel):
     recent_history: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class PublicAgentRequestContext(AgentTurnContext):
+    """Public-turn-only private inputs that must never reach prompt state."""
+
+    device_location: dict[str, Any] | None = Field(
+        default=None, exclude=True, repr=False,
+    )
+
+
 class TurnClockV1(BaseModel):
     """Authoritative local clock, created once for a public-agent turn."""
     version: str = "v1"

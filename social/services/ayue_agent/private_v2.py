@@ -414,13 +414,28 @@ def run_private_agent_turn_v2(
     run_id, observations, trace = agent_run_id or uuid.uuid4().hex, [], {"visible_tools": sorted(PRIVATE_TOOL_REGISTRY), "decisions": [], "guard": [], "tools": [], "context_ms": 0, "model_ms": [], "tool_ms": []}
     mgr = ConfirmationManager(PRIVATE_CONFIRMATIONS)
     continuation_resolution: dict[str, Any] | None = None
+    streamed_reply_started = False
     def emit(event_type: str, **payload: str) -> None:
         if on_progress:
             on_progress({"type": event_type, "agent_run_id": run_id, **payload})
+    def emit_reply_token(fragment: str) -> None:
+        nonlocal streamed_reply_started
+        if on_token is None or not fragment:
+            return
+        if fragment.strip():
+            streamed_reply_started = True
+        on_token(fragment)
     try:
         context_started = time.perf_counter()
         ctx = build_private_turn_context_v2(user_id, other_id, message, match_doc)
         trace["context_ms"] = round((time.perf_counter() - context_started) * 1000)
+        def compose_reply(strategy: str) -> str:
+            return _compose(
+                ctx,
+                observations,
+                strategy,
+                on_token=emit_reply_token if on_token is not None else None,
+            )
         result = None
         if choice_action is not None:
             record = mgr.record_for_choice(
@@ -549,7 +564,7 @@ def run_private_agent_turn_v2(
                 trace["model_ms"].append(round((time.perf_counter() - model_started) * 1000))
                 if not decision:
                     compose_started = time.perf_counter()
-                    result = AgentResult(handled=True, reply=_compose(ctx, observations, "warm", on_token), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2", fallback_reason="planner_invalid")
+                    result = AgentResult(handled=True, reply=compose_reply("warm"), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2", fallback_reason="planner_invalid")
                     trace["model_ms"].append(round((time.perf_counter() - compose_started) * 1000))
                     break
                 trace["decisions"].append({"kind": decision.kind, "tool": decision.tool_name, "confidence": decision.confidence})
@@ -579,29 +594,27 @@ def run_private_agent_turn_v2(
                     )
                     break
                 if decision.kind == "final":
-                    reply = _planner_reply(decision)
-                    if reply:
-                        if on_token:
-                            time.sleep(0.035)
-                            for start in range(0, len(reply), 6):
-                                on_token(reply[start:start + 6])
-                                time.sleep(0.035)
+                    if on_token is not None:
+                        compose_started = time.perf_counter()
+                        result = AgentResult(handled=True, reply=compose_reply(decision.strategy), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
+                        trace["model_ms"].append(round((time.perf_counter() - compose_started) * 1000))
+                    elif reply := _planner_reply(decision):
                         result = AgentResult(handled=True, reply=reply, conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
                     else:
                         compose_started = time.perf_counter()
-                        result = AgentResult(handled=True, reply=_compose(ctx, observations, decision.strategy, on_token), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
+                        result = AgentResult(handled=True, reply=compose_reply(decision.strategy), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
                         trace["model_ms"].append(round((time.perf_counter() - compose_started) * 1000))
                     break
                 spec = PRIVATE_TOOL_REGISTRY.get(str(decision.tool_name or ""))
                 if not spec or spec.risk != "read":
                     trace["guard"].append("tool_not_allowed")
-                    result = AgentResult(handled=True, reply=_compose(ctx, observations, decision.strategy, on_token), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2", fallback_reason="tool_not_allowed")
+                    result = AgentResult(handled=True, reply=compose_reply(decision.strategy), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2", fallback_reason="tool_not_allowed")
                     break
                 arguments = {"scope": str(decision.arguments.get("scope") or "")[:80]}
                 key = spec.name + json.dumps(arguments, ensure_ascii=False, sort_keys=True)
                 if key in seen:
                     trace["guard"].append("duplicate_observation_reused")
-                    result = AgentResult(handled=True, reply=_compose(ctx, observations, decision.strategy, on_token), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
+                    result = AgentResult(handled=True, reply=compose_reply(decision.strategy), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
                     break
                 seen.add(key)
                 step = f"{index}:read"
@@ -617,11 +630,15 @@ def run_private_agent_turn_v2(
                 observations.append({"tool": spec.name, "result": data})
             if result is None:
                 compose_started = time.perf_counter()
-                result = AgentResult(handled=True, reply=_compose(ctx, observations, "warm", on_token), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
+                result = AgentResult(handled=True, reply=compose_reply("warm"), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
                 trace["model_ms"].append(round((time.perf_counter() - compose_started) * 1000))
     except Exception as exc:
         trace["exception"] = type(exc).__name__
         result = AgentResult(handled=True, reply=PRIVATE_RUNTIME_FALLBACK_REPLY, conversation_intent="private_clarification", agent_run_id=run_id, agent_mode="v2", fallback_reason=type(exc).__name__)
+    if on_token and not streamed_reply_started:
+        safe_reply = str(result.reply or "")
+        for start in range(0, len(safe_reply), 12):
+            on_token(safe_reply[start:start + 12])
     mgr.bind_final_preview(
         user_id=user_id,
         origin_run_id=run_id,

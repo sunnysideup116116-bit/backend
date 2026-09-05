@@ -636,6 +636,30 @@ def _saved_location(ctx: AgentTurnContext) -> str:
     return str(safe_profile_location(ctx.user_profile).get("display_name") or "").strip()
 
 
+def _request_device_location(ctx: AgentTurnContext) -> dict[str, Any] | None:
+    raw = getattr(ctx, "device_location", None)
+    if not isinstance(raw, dict):
+        return None
+    try:
+        latitude = float(raw["latitude"])
+        longitude = float(raw["longitude"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
+        return None
+    label = re.sub(r"\s+", " ", str(raw.get("display_name") or "")).strip()[:120]
+    if not label:
+        return None
+    return {
+        "latitude": latitude,
+        "longitude": longitude,
+        "lat": latitude,
+        "lon": longitude,
+        "display_name": label,
+        "label": label,
+    }
+
+
 def _canonical_place_anchor(ctx: AgentTurnContext, anchor: str) -> str:
     """Disambiguate a short district against the owner's saved city.
 
@@ -716,9 +740,15 @@ def _place_failure_observation(
 def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResult:
     anchor = str(arguments.get("anchor") or "").strip()
     origin_kind = "explicit"
+    device_location = None
     if not anchor and arguments.get("use_saved_location"):
-        anchor = _saved_location(ctx)
-        origin_kind = "saved_profile"
+        device_location = _request_device_location(ctx)
+        if device_location:
+            anchor = str(device_location["display_name"])
+            origin_kind = "device"
+        else:
+            anchor = _saved_location(ctx)
+            origin_kind = "saved_profile"
     if not anchor:
         return ToolResult(ok=False, error_code="location_required", user_message="你想從哪個地點開始找？")
     anchor = _canonical_place_anchor(ctx, anchor)
@@ -730,7 +760,7 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
     # take away the existing OpenStreetMap place discovery capability.
     if google_place_cards_enabled():
         try:
-            point = nominatim_search(anchor)
+            point = device_location or nominatim_search(anchor)
             google_places = search_nearby_places(
                 str(point.get("label") or anchor), float(point["lat"]), float(point["lon"]), categories,
                 limit=safe_limit, cuisine=cuisine,
@@ -762,6 +792,8 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
             data = nearby_places(
                 anchor, categories,
                 radius_m=int(arguments.get("radius_m") or 1500), limit=safe_limit,
+                latitude=(device_location or {}).get("latitude"),
+                longitude=(device_location or {}).get("longitude"),
             )
         except MapClientError as exc:
             return ToolResult(ok=False, error_code=exc.code, user_message="")
