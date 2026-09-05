@@ -22,7 +22,7 @@
 
 ### 1.3 `social/services/risk_policy_service.py`
 - HTTP 客戶端，由 public_chat.py 呼叫去打 :8001
-- 含 timeout（20s）+ fail-open fallback（:8001 掛掉時 return None，訊息仍正常寫入）
+- 含 timeout（40s）+ fail-open fallback（:8001 掛掉時 return None，訊息仍正常寫入）
 
 ---
 
@@ -41,11 +41,22 @@
 加 2 行：
 ```
 RISK_SERVICE_URL=http://localhost:8001
-RISK_TIMEOUT_SEC=20
+RISK_TIMEOUT_SEC=40
 ```
 
 ### 2.3 `social/requirements.txt`
 加 `httpx>=0.27`
+
+### 2.4 Risk NLP 模型與前景逾時
+
+```env
+GEMINI_MODEL=gemini-3.6-flash
+GEMINI_FALLBACK_MODEL=gemini-2.5-flash-lite
+NLP_LLM_TIMEOUT_SECONDS=10
+NLP_LLM_FALLBACK_TIMEOUT_SECONDS=15
+```
+
+前景審查每個模型只嘗試一次；主模型遇到暫時性錯誤後短暫熔斷，直接走備援，避免重試時間超過聊天閘道。
 
 ---
 

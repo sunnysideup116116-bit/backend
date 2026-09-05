@@ -14,6 +14,10 @@ def test_default_provider_returns_gemini(monkeypatch):
     adapter = get_nlp_adapter()
 
     assert isinstance(adapter, GeminiAdapter)
+    assert adapter._timeout == 10
+    assert adapter._fallback_timeout == 15
+    assert adapter._max_attempts == 1
+    assert adapter._fallback_model == "gemini-2.5-flash-lite"
 
 
 def test_openai_compat_provider_returns_compat(monkeypatch):
@@ -25,6 +29,7 @@ def test_openai_compat_provider_returns_compat(monkeypatch):
     adapter = get_nlp_adapter()
 
     assert isinstance(adapter, OpenAICompatAdapter)
+    assert adapter._max_attempts == 1
 
 
 def test_openai_compat_missing_credentials_raises(monkeypatch):
@@ -164,6 +169,34 @@ def test_component_retry_budget_can_disable_retries(monkeypatch):
     with pytest.raises(ServiceUnavailable):
         la.call_with_retry(fn, label="Guardrail", max_attempts=1)
     assert len(calls) == 1
+
+
+def test_gemini_nlp_budget_switches_to_fallback_without_retrying_primary(monkeypatch):
+    """The foreground risk path must not exhaust the chat gateway's 20s timeout."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "fake")
+    from app.core import llm_adapters as la
+
+    ServiceUnavailable = _transient("ServiceUnavailable")
+    calls = []
+
+    class FakeModels:
+        def generate_content(self, *, model, contents, config):
+            calls.append(model)
+            if model == "primary-model":
+                raise ServiceUnavailable("503")
+            return type("Response", (), {"text": "ok"})()
+
+    adapter = la.GeminiAdapter(
+        fallback_model="fallback-model",
+        timeout=6,
+        max_attempts=1,
+    )
+    adapter._client = type("Client", (), {"models": FakeModels()})()
+
+    assert adapter.generate("prompt", "primary-model") == "ok"
+    assert calls == ["primary-model", "fallback-model"]
+    assert adapter.generate("prompt", "primary-model") == "ok"
+    assert calls == ["primary-model", "fallback-model", "fallback-model"]
 
 
 def test_transient_detected_by_status_code():

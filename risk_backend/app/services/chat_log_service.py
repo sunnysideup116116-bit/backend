@@ -447,6 +447,39 @@ class ChatLogService:
             print(f"update_intervention_feedback failed: {e}")
             return False
 
+    async def get_receiver_feedback_statuses(
+        self,
+        conversation_id: str,
+        receiver_id: str,
+        msg_ids: list[str],
+    ) -> dict[str, str]:
+        """批次回傳指定事件的 receiver feedback，不暴露其他風險資料。"""
+        requested = list(dict.fromkeys(
+            value.strip() for value in msg_ids if isinstance(value, str) and value.strip()
+        ))[:50]
+        if not requested:
+            return {}
+        response = self.db.list_documents(
+            self.db_id,
+            "intervention_logs",
+            queries=[
+                Query.equal("triggered_by_msg_id", requested),
+                Query.limit(len(requested)),
+            ],
+        )
+        statuses: dict[str, str] = {}
+        for doc in response.documents:
+            data = doc.data if hasattr(doc, "data") else doc
+            if data.get("conversation_id") != conversation_id:
+                continue
+            if data.get("receiver_id") != receiver_id:
+                continue
+            feedback = data.get("receiver_feedback")
+            msg_id = str(data.get("triggered_by_msg_id") or "")
+            if msg_id in requested and feedback in ("comfortable", "uncomfortable"):
+                statuses[msg_id] = feedback
+        return statuses
+
     async def get_recent_feedbacks(self, conversation_id: str, sender_id: str, limit: int = 5) -> list:
         """
         取得最近 N 次該 sender 在該對話內被回饋的 receiver_feedback 值。

@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks
 from app.models.schemas import (
     BlockUserRequest,
     FeedbackRequest,
+    FeedbackStatusRequest,
     ReceiverReportRequest,
     ReportUserRequest,
     RiskDetectionRequest,
@@ -419,6 +420,21 @@ async def submit_feedback(req: FeedbackRequest):
         "feedback": req.feedback,
         "detail": req.detail,
     }
+
+
+@router.post("/feedback/status")
+async def get_feedback_status(req: FeedbackStatusRequest):
+    """僅回傳收件方已送出的選擇，供前端避免跨頁重播。"""
+    try:
+        statuses = await chat_log_service.get_receiver_feedback_statuses(
+            req.conversation_id,
+            req.receiver_id,
+            req.triggered_by_msg_ids,
+        )
+    except Exception as exc:
+        print(f"get_feedback_status failed: {type(exc).__name__}")
+        raise HTTPException(status_code=503, detail="暫時無法同步回覆狀態") from exc
+    return {"feedback_by_message": statuses}
 
 
 @router.post("/appeal")

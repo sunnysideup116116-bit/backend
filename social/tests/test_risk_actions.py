@@ -325,6 +325,15 @@ def test_risk_gate_omits_trigger_id_for_unavailable():
     assert "triggered_by_msg_id" not in decision.public_projection()
 
 
+def test_risk_gate_default_timeout_leaves_room_for_bounded_nlp_fallback(monkeypatch):
+    from services.risk_policy_service import PairMessageRiskGate
+
+    monkeypatch.delenv("RISK_TIMEOUT_SEC", raising=False)
+    gate = PairMessageRiskGate(transport=lambda payload: {"risk_level": "safe"})
+
+    assert gate._timeout == 40
+
+
 def test_blocked_message_writes_receiver_notice_card():
     from routers import public_chat
     from models import DirectChatRequest

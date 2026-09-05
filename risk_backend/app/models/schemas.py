@@ -130,6 +130,13 @@ class FeedbackRequest(BaseModel):
         description="接收方對此次介入的詳細說明（可選）。僅供人工稽核與審計，不影響 feedback_signal 的計算。"
     )
 
+
+class FeedbackStatusRequest(BaseModel):
+    """查詢收件方已回覆的介入事件，僅供聊天室去重。"""
+    conversation_id: str = Field(..., min_length=1, max_length=128)
+    receiver_id: str = Field(..., min_length=1, max_length=128)
+    triggered_by_msg_ids: List[str] = Field(..., min_length=1, max_length=50)
+
 class SenderAppealRequest(BaseModel):
     """寄件方對某次介入的文字申訴。
 

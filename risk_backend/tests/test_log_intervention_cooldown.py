@@ -42,3 +42,35 @@ def test_log_intervention_cooldown_defaults_zero(chat_service):
     ))
     data = chat_service.db.create_document.call_args[0][3]
     assert data["cooldown_seconds"] == 0
+
+
+def test_receiver_feedback_statuses_are_scoped_and_bounded(chat_service):
+    matching = MagicMock(data={
+        "triggered_by_msg_id": "m1",
+        "conversation_id": "c1",
+        "receiver_id": "r1",
+        "receiver_feedback": "comfortable",
+    })
+    wrong_receiver = MagicMock(data={
+        "triggered_by_msg_id": "m2",
+        "conversation_id": "c1",
+        "receiver_id": "r2",
+        "receiver_feedback": "uncomfortable",
+    })
+    pending = MagicMock(data={
+        "triggered_by_msg_id": "m3",
+        "conversation_id": "c1",
+        "receiver_id": "r1",
+        "receiver_feedback": None,
+    })
+    chat_service.db.list_documents.return_value = MagicMock(
+        documents=[matching, wrong_receiver, pending]
+    )
+
+    result = asyncio.run(chat_service.get_receiver_feedback_statuses(
+        "c1", "r1", ["m1", "m2", "m3", "m1"]
+    ))
+
+    assert result == {"m1": "comfortable"}
+    queries = chat_service.db.list_documents.call_args.kwargs["queries"]
+    assert any("m1" in query and "m3" in query for query in queries)

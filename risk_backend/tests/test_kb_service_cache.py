@@ -1,5 +1,7 @@
 """KBService TTL cache regression tests."""
 
+import json
+
 import pytest
 
 from app.services import kb_service as kb_module
@@ -118,3 +120,49 @@ def test_non_positive_ttl_disables_cache(monkeypatch):
     assert KBService._list("kb_rules") == [{"version": 1}]
     assert KBService._list("kb_rules") == [{"version": 2}]
     assert len(calls) == 2
+
+
+def test_fetch_uses_query_pagination_and_reads_beyond_appwrite_default_25(
+    monkeypatch,
+):
+    calls = []
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        def __init__(self, documents):
+            self._documents = documents
+
+        def json(self):
+            return {"total": 27, "documents": self._documents}
+
+    def fake_get(url, *, headers, params, verify):
+        decoded = [json.loads(value) for key, value in params if key == "queries[]"]
+        offset = next(
+            query["values"][0]
+            for query in decoded
+            if query.get("method") == "offset"
+        )
+        calls.append(decoded)
+        start, end = (0, 25) if offset == 0 else (25, 27)
+        return Response([
+            {"$id": str(index), "id": index, "enabled": True}
+            for index in range(start, end)
+        ])
+
+    monkeypatch.setattr(KBService, "_endpoint", "https://127.0.0.1/v1")
+    monkeypatch.setattr(KBService, "_project_id", "project")
+    monkeypatch.setattr(KBService, "_api_key", "key")
+    monkeypatch.setattr(KBService, "_kb_db_id", "kb")
+    monkeypatch.setattr(kb_module.requests, "get", fake_get)
+
+    rows = KBService._fetch(
+        "kb_hard_blocks",
+        queries=[{"method": "equal", "attribute": "enabled", "values": [True]}],
+        limit=100,
+    )
+
+    assert [row["id"] for row in rows] == list(range(27))
+    assert len(calls) == 2
+    assert any(query == {"method": "offset", "values": [25]} for query in calls[1])
