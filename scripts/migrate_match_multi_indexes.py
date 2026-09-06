@@ -20,6 +20,17 @@ from database import matches_coll
 from services.proposal_namespace import namespace_for_document, participant_pair_key
 
 
+PAIR_INDEX_NAME = "one_live_proposal_per_pair"
+LEGACY_INDEX_NAME = "one_live_proposal_per_namespace_participant"
+
+
+def _pair_index_compatible(indexes: dict) -> bool:
+    spec = (indexes or {}).get(PAIR_INDEX_NAME) or {}
+    return bool(spec.get("unique")) and list(spec.get("key") or []) == [
+        ("live_pair_key", 1),
+    ]
+
+
 def _live_rows():
     return list(matches_coll.find({"status": {"$in": ["draft", "pending"]}}, {
         "_id": 1, "from_user": 1, "to_user": 1, "proposal_namespace": 1,
@@ -44,8 +55,9 @@ def audit() -> dict:
         "live_count": len(rows),
         "duplicate_pair_count": len(duplicates),
         "duplicate_pairs": duplicates,
-        "legacy_index_present": "one_live_proposal_per_namespace_participant" in indexes,
-        "pair_index_present": "one_live_proposal_per_pair" in indexes,
+        "legacy_index_present": LEGACY_INDEX_NAME in indexes,
+        "pair_index_present": PAIR_INDEX_NAME in indexes,
+        "pair_index_compatible": _pair_index_compatible(indexes),
         "missing_live_pair_key_count": missing_keys,
     }
 
@@ -71,17 +83,28 @@ def apply() -> dict:
                     "live_pair_key": f"{namespace_for_document(row)}:{pair}",
                 }},
             )
-    if report["legacy_index_present"]:
-        matches_coll.drop_index("one_live_proposal_per_namespace_participant")
-    matches_coll.create_index(
-        [("live_pair_key", 1)],
-        unique=True,
-        partialFilterExpression={
-            "status": {"$in": ["draft", "pending"]},
-            "live_pair_key": {"$exists": True},
-        },
-        name="one_live_proposal_per_pair",
-    )
+    indexes = matches_coll.index_information()
+    if PAIR_INDEX_NAME in indexes and not _pair_index_compatible(indexes):
+        raise SystemExit(
+            f"Refusing to apply: existing {PAIR_INDEX_NAME} is not a unique live_pair_key index"
+        )
+    if PAIR_INDEX_NAME not in indexes:
+        matches_coll.create_index(
+            [("live_pair_key", 1)],
+            unique=True,
+            partialFilterExpression={
+                "status": {"$in": ["draft", "pending"]},
+                "live_pair_key": {"$exists": True},
+            },
+            name=PAIR_INDEX_NAME,
+        )
+    # Keep the participant-wide guard until the pair index is verified. This
+    # avoids any interval where concurrent writers have no uniqueness guard.
+    indexes = matches_coll.index_information()
+    if not _pair_index_compatible(indexes):
+        raise SystemExit("Refusing to apply: pair index verification failed")
+    if LEGACY_INDEX_NAME in indexes:
+        matches_coll.drop_index(LEGACY_INDEX_NAME)
     return audit()
 
 

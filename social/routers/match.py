@@ -108,6 +108,13 @@ MATCH_SELECTION_TIMEOUT_SECONDS = 120.0
 MATCH_TEST_ID_PATTERN = r"^(?:seed_user_|match_test_)"
 
 
+def _usable_live_pair_index(indexes: dict) -> bool:
+    """Accept either safe partial-filter variant of the unique pair index."""
+    spec = (indexes or {}).get("one_live_proposal_per_pair") or {}
+    keys = list(spec.get("key") or [])
+    return bool(spec.get("unique")) and keys == [("live_pair_key", 1)]
+
+
 def ensure_match_indexes():
     """Ensure idempotent pair indexes for the multi-card Hub.
 
@@ -117,6 +124,7 @@ def ensure_match_indexes():
     made unavailable by an automatic destructive migration.
     """
     try:
+        indexes = matches_coll.index_information()
         if os.getenv("MATCH_MULTI_INDEX_READY", "on").strip().lower() not in {"1", "true", "on"}:
             # Legacy deployments can opt back into the old guard while the
             # audited index migration is pending. New installs use the pair
@@ -127,15 +135,19 @@ def ensure_match_indexes():
                 partialFilterExpression={"status": {"$in": ["draft", "pending"]}},
                 name="one_live_proposal_per_namespace_participant",
             )
-        matches_coll.create_index(
-            [("live_pair_key", 1)],
-            unique=True,
-            partialFilterExpression={
-                "status": {"$in": ["draft", "pending"]},
-                "live_pair_key": {"$exists": True},
-            },
-            name="one_live_proposal_per_pair",
-        )
+        if not _usable_live_pair_index(indexes):
+            if "one_live_proposal_per_pair" in indexes:
+                print("[match] live-pair index is incompatible; run migrate_match_multi_indexes.py")
+            else:
+                matches_coll.create_index(
+                    [("live_pair_key", 1)],
+                    unique=True,
+                    partialFilterExpression={
+                        "status": {"$in": ["draft", "pending"]},
+                        "live_pair_key": {"$exists": True},
+                    },
+                    name="one_live_proposal_per_pair",
+                )
     except Exception as exc:
         # A legacy duplicate must be migrated before Atlas can create this index.
         print(f"[match] unable to create live-match index: {exc}")
@@ -1820,14 +1832,25 @@ def generate_matches_for_user(
             return {"status": "stale", "matches": [], "debug_info": []}
         try:
             insert_result = matches_coll.insert_one(match_doc)
-        except DuplicateKeyError:
-            # Another worker/user established a live proposal after our final
-            # read. The unique participant index is the authoritative guard.
+        except DuplicateKeyError as exc:
             if quota_reserved:
                 release_daily_quota(
                     req.user_id, bucket="active", operation_key=quota_operation_key,
                 )
-            return {"status": "stale", "matches": [], "debug_info": []}
+            duplicate_detail = str(exc)
+            if (
+                "one_live_proposal_per_namespace_participant" in duplicate_detail
+                or "live_participants" in duplicate_detail
+            ):
+                raise MatchSearchPipelineError(
+                    "legacy_live_match_index_conflict", "proposal_write",
+                ) from exc
+            return {
+                "status": "no_suitable_candidate",
+                "matches": [],
+                "reason_code": "proposal_pair_already_active",
+                "debug_info": [],
+            }
         except Exception:
             if quota_reserved:
                 release_daily_quota(

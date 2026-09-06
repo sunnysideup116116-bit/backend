@@ -64,6 +64,8 @@ _FAILURE_MESSAGES = {
     "matchmaker_output_truncated": "媒人評估結果不完整，這次搜尋沒有完成。",
     "matchmaker_provider_error": "配對服務目前發生錯誤，請稍後再試。",
     "proposal_write_failed": "配對結果已找到，但儲存結果時失敗，請稍後再試。",
+    "legacy_live_match_index_conflict": "配對資料還沒完成更新，這次沒有送出邀請。請稍後再試。",
+    "proposal_pair_already_active": "你和這位人選已經有一張進行中的邀請，這次沒有重複送出。",
     "quota_unavailable": "目前無法確認今天還能找幾位，這次搜尋沒有啟動，請稍後再試。",
     "pipeline_unavailable": "配對服務目前還沒準備好，請稍後再試。",
     "vector_search_unavailable": "我目前無法讀取候選資料，請稍後再試。",

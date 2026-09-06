@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 import requests
+from pymongo.errors import DuplicateKeyError
 
 from routers import match as router
 from services import match_search_job_service as jobs
@@ -134,6 +135,30 @@ def test_stale_before_commit_never_creates_proposal(batch_flow):
     post.return_value = reply("candidate-0")
     assert run(can_commit=lambda: False)["status"] == "stale"
     matches.insert_one.assert_not_called()
+
+
+def test_legacy_participant_index_conflict_is_not_reported_as_context_change(batch_flow):
+    _, matches, post = batch_flow
+    post.return_value = reply("candidate-0")
+    matches.insert_one.side_effect = DuplicateKeyError(
+        "E11000 duplicate key index: one_live_proposal_per_namespace_participant live_participants"
+    )
+    with pytest.raises(jobs.MatchSearchPipelineError) as exc:
+        run()
+    assert exc.value.code == "legacy_live_match_index_conflict"
+    assert exc.value.stage == "proposal_write"
+    assert "近況" not in jobs._FAILURE_MESSAGES[exc.value.code]
+
+
+def test_same_pair_race_has_a_specific_normal_outcome(batch_flow):
+    _, matches, post = batch_flow
+    post.return_value = reply("candidate-0")
+    matches.insert_one.side_effect = DuplicateKeyError(
+        "E11000 duplicate key index: one_live_proposal_per_pair live_pair_key"
+    )
+    result = run()
+    assert result["status"] == "no_suitable_candidate"
+    assert result["reason_code"] == "proposal_pair_already_active"
 
 
 @pytest.mark.parametrize("outsider", ["candidate-4", "not-a-candidate", "owner"])
