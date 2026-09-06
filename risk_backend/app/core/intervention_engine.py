@@ -200,11 +200,14 @@ class InterventionEngine:
                     fallback["action"] = "show_reflection_banner"
                     fallback["allow_report_text"] = False
                     fallback.pop("action_options", None)
+                    # 規格 §5：寄件方豁免無吉祥物。dict(directive) 會把原等級的
+                    # mascot 帶進來，這裡必須拿掉。
+                    fallback.pop("mascot", None)
                     fallback["show_options"] = False
-                    body = "先前的處置已完成，目前對話仍在安全觀察中。"
+                    body = "這段對話仍在觀察中"
                 else:
                     fallback["action"] = "show_safety_info_card"
-                    body = "這段對話仍在安全觀察中，你可以隨時封鎖或檢舉對方。"
+                    body = "這段對話仍在加強保護中"
                     if risk_level in _NO_OPTIONS_ON_EXEMPT:
                         fallback.pop("action_options", None)
                         fallback["show_options"] = False
