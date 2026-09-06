@@ -297,6 +297,12 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
         get_reference as get_relationship_reference,
         public_projection as relationship_reference_projection,
     )
+    from .v3.date_coordination_references import (
+        authority_projection as date_coordination_authority_projection,
+        date_coordination_summary,
+        get_reference as get_date_coordination_reference,
+        public_projection as date_coordination_reference_projection,
+    )
     from .v3.relationship_recommendations import (
         get_snapshot as get_relationship_recommendation,
         public_projection as relationship_recommendation_projection,
@@ -317,6 +323,14 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     recent_contact_reference = relationship_reference_projection(
         get_relationship_reference(ctx.user_id)
     )
+    try:
+        recent_action_record = get_date_coordination_reference(ctx.user_id, ctx.room_id)
+    except Exception:
+        # A convenience reference outage must not block ordinary chat or other
+        # read-only domain flows; cancellation fails closed without it.
+        recent_action_record = None
+    recent_action_reference = date_coordination_reference_projection(recent_action_record)
+    date_summary, date_summary_authority = date_coordination_summary(ctx.user_id)
     recent_recommendation = relationship_recommendation_projection(
         get_relationship_recommendation(ctx.user_id, ctx.room_id)
     )
@@ -383,6 +397,8 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
         place_followup=recent_place_followup,
         recent_context_draft=recent_context_draft,
         recent_contact_reference=recent_contact_reference,
+        recent_action_reference=recent_action_reference,
+        date_coordination_summary=date_summary,
         recent_recommendation=recent_recommendation,
         mentioned_contacts=mentioned_contact_refs(ctx.user_id, mentioned_ids),
         mentioned_contact_overflow=bool(ctx.mention_overflow or validation_overflow),
@@ -390,6 +406,10 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     )
     turn._active_proposal_authority = active_authority  # type: ignore[attr-defined]
     turn._focused_match_authority = focused_authority  # type: ignore[attr-defined]
+    turn._recent_action_reference_authority = date_coordination_authority_projection(  # type: ignore[attr-defined]
+        recent_action_record
+    )
+    turn._date_coordination_summary_authority = date_summary_authority  # type: ignore[attr-defined]
     turn._match_state = match_state  # type: ignore[attr-defined]
     return turn
 

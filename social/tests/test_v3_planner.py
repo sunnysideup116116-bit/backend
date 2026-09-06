@@ -88,6 +88,17 @@ def _known_contact_activity_dinner_arguments(*, hard_gate=False):
 
 
 class V3PlannerTests(unittest.TestCase):
+    def test_match_diagnostic_helper_does_not_classify_discussion_or_negation(self):
+        for message in (
+            "配對那邊我不懂",
+            "我不想配對",
+            "先不要配對",
+            "我在講配對卡的文案",
+            "為什麼這個配對會出現",
+        ):
+            with self.subTest(message=message):
+                self.assertIsNone(_explicit_match_request_intent(message))
+
     def test_explicit_match_request_is_not_downgraded_to_status(self):
         self.assertEqual(_explicit_match_request_intent("我想配對"), "start_search")
         self.assertEqual(_explicit_match_request_intent("幫我找人"), "start_search")
@@ -96,7 +107,7 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIsNone(_explicit_match_request_intent("現在配得怎樣？"))
         self.assertIsNone(_explicit_match_request_intent("有哪些配對方式？"))
 
-    def test_provider_status_plan_is_repaired_for_explicit_match_request(self):
+    def test_provider_match_semantics_are_preserved_without_regex_repair(self):
         turn = self._turn("我想配對")
         arguments = {
             "mode": "tasks",
@@ -114,7 +125,7 @@ class V3PlannerTests(unittest.TestCase):
         ):
             plan, _metrics = plan_turn(turn)
         self.assertIsNotNone(plan)
-        self.assertEqual(plan.tasks[0].match_intent, "start_search")
+        self.assertEqual(plan.tasks[0].match_intent, "status")
 
     def _turn(self, message):
         return PublicAgentTurnContext(
@@ -965,7 +976,7 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIn("不使用關鍵字或 regex router", _PLANNER_SYSTEM)
 
     def test_planner_policy_distinguishes_contact_aggregate_from_match_singleton(self):
-        self.assertIn("match=單筆 active proposal/search lifecycle", _PLANNER_SYSTEM)
+        self.assertIn("match=搜尋、狀態彙總與多卡片牽線收件匣", _PLANNER_SYSTEM)
         self.assertIn("relationship=accepted contacts aggregate", _PLANNER_SYSTEM)
         self.assertIn("relationship.date_invitation.v1", _PLANNER_SYSTEM)
         self.assertIn("Match 絕不作前置檢查", _PLANNER_SYSTEM)
@@ -1084,7 +1095,7 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(metrics.failure_code, "invalid_arguments")
 
     def test_blank_invite_prompt_version_is_explicit_and_budgeted(self):
-        self.assertEqual(_PLANNER_PROMPT_VERSION, "compact_v3_match_intent_v4")
+        self.assertEqual(_PLANNER_PROMPT_VERSION, "compact_v3_semantic_match_v5")
         self.assertIn("write_intent 必填", _PLANNER_SYSTEM)
         self.assertIn("relationship.date_invitation.v1", _PLANNER_SYSTEM)
         self.assertNotIn("HIGH-PRIORITY DATE INVITATION ROUTING", _PLANNER_SYSTEM)
@@ -1095,7 +1106,7 @@ class V3PlannerTests(unittest.TestCase):
         agent_description = task_schema["properties"]["agent"]["description"]
         self.assertIn("aggregate of accepted/established contacts", agent_description)
         self.assertIn("list, count, compare, or choose among them", agent_description)
-        self.assertIn("singleton active proposal/search lifecycle", agent_description)
+        self.assertIn("multi-card inbox", agent_description)
 
     def test_specific_chat_advice_can_route_to_private_surface_product_info(self):
         turn = self._turn("你看得到我跟小安剛才聊什麼嗎？我下一句要怎麼回？")
@@ -1265,7 +1276,7 @@ class V3PlannerTests(unittest.TestCase):
         system_prompt = provider.call_args.kwargs["system_prompt"]
         self.assertIn("更認識我／更了解我／多了解我一點", system_prompt)
         self.assertIn("profile.start_assessment(kind=basic)", system_prompt)
-        self.assertEqual(metrics.prompt_version, "compact_v3_match_intent_v4")
+        self.assertEqual(metrics.prompt_version, "compact_v3_semantic_match_v5")
         self.assertEqual([task.agent for task in plan.tasks], ["profile", "synthesizer"])
 
     def test_inaccurate_existing_personality_profile_can_produce_basic_assessment_task(self):

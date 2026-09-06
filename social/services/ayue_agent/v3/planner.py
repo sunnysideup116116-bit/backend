@@ -23,6 +23,7 @@ from services.ayue_agent.product_identity import (
     AYUE_VOICE_SHORT,
 )
 from .contracts import (
+    DATE_COORDINATION_CANCEL_WRITE_INTENT,
     DATE_INVITATION_WRITE_INTENT,
     OpportunitySignal,
     Plan,
@@ -73,6 +74,7 @@ _REPAIR_CODES = frozenset({
     "match_observation_contract_removed",
     "match_intent_object_normalized",
     "non_match_match_intent_removed",
+    "known_counterparty_removed",
 })
 
 
@@ -153,6 +155,8 @@ def _planner_validation_retry_hint(exc: Exception) -> str:
             "relationship.date_invitation.v1 Synthesizer must",
             "relationship.date_invitation.v1 uses default presentation",
             "relationship.date_invitation.v1 cannot contain an opportunity",
+            "relationship.date_coordination_cancel.v1 requires",
+            "relationship date write intents require",
         )
     )
     missing_synthesizer = any(
@@ -163,8 +167,9 @@ def _planner_validation_retry_hint(exc: Exception) -> str:
     if "write_intent" in locations or write_intent_message:
         hints.append(
             "write_intent is required: use relationship.date_invitation.v1 only for an "
-            "explicit request to create a date invitation card, with exactly Relationship "
-            "then Synthesizer; Match is never a precheck. Use none for every other request."
+            "explicit request to create a date invitation card, or relationship.date_coordination_cancel.v1 "
+            "only for an explicit request to cancel a server-referenced date card; both use exactly "
+            "Relationship then Synthesizer and Match is never a precheck. Use none for every other request."
         )
     if "match_intent" in locations or any("Match task requires match_intent" in msg for msg in messages):
         hints.append(
@@ -266,6 +271,14 @@ def _normalize_provider_plan_arguments(
         agent = task.get("agent")
         if not isinstance(agent, str) or agent not in _KNOWN_PLANNER_AGENTS:
             continue
+        # Some providers attach a harmless public-label hint to a task. It is
+        # never an authority field and the executor resolves the real target,
+        # so remove only this known compatibility drift. Other unknown fields
+        # still fail closed under the strict task schema.
+        if "counterparty" in task:
+            task.pop("counterparty", None)
+            if "known_counterparty_removed" not in repair_codes:
+                repair_codes.append("known_counterparty_removed")
         intent = task.get("match_intent")
         if agent == "match" and isinstance(intent, dict) and len(intent) == 1:
             key, enabled = next(iter(intent.items()))
@@ -359,6 +372,11 @@ def _record_planner_attempt(
     metrics.attempts.append({
         "attempt": attempt,
         "status": status,
+        "stage": (
+            "safe_normalization" if status == "repaired"
+            else "llm_plan" if status == "ok"
+            else "retry"
+        ),
         "failure_code": failure_code,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -524,7 +542,7 @@ def _decompose_tool_schema() -> dict[str, Any]:
     }
 
 
-_PLANNER_PROMPT_VERSION = "compact_v3_match_intent_v4"
+_PLANNER_PROMPT_VERSION = "compact_v3_semantic_match_v5"
 _PLANNER_MAX_RECENT_MESSAGES = 4
 _PLANNER_MAX_RECENT_CHARS = 2000
 _PLANNER_MAX_SYSTEM_CHARS = 6000
@@ -541,12 +559,11 @@ _PLANNER_SYSTEM = f"""{AYUE_CORE_IDENTITY}
 
 輸出規則：
 - mode=direct_chat 只適用於不需要 App、domain、private、external truth 或 workflow 的聊天；tasks 為空，direct_reply 不超過160字。
-- direct_reply 自然；不得聲稱已完成副作用。
 - 任一子需求需要 state、產品能力、特定對方聊天內容、行事曆、配對、profile、relationship、places 或外部資料，就用 mode=tasks；不得只答聊天部分或只輸出 synthesizer。
-- tasks 最多 4 個 domain + 1 個 terminal synthesizer。
+- tasks 最多 4 個 domain + 1 個 synth。
 - Relationship 活動→recommend；理由追問→review；名單→lookup。
-- task 只填 id、agent、depends_on、task_brief 與 schema 內的 agent 欄位；Relationship 的活動與追問語意要保留在 task_brief，讓 runtime 產生內部 intent。約會邀請用頂層 write_intent；不要填 observation schema、不要使用 type/task_agent。
-- write_intent 必填；只有明確建立約會邀請卡用 relationship.date_invitation.v1 且 relationship -> synthesizer，其他用 none。Relationship 驗證 accepted contact；Match 絕不作前置檢查。
+- task 只填 id、agent、depends_on、task_brief 與 schema 內欄位；Relationship 語意放 task_brief。約會邀請用頂層 write_intent；不填 observation schema；不要使用 type/task_agent。
+- write_intent 必填；建立空白卡用 relationship.date_invitation.v1，取消卡用 relationship.date_coordination_cancel.v1；兩者走 relationship -> synthesizer。Relationship 驗證 accepted contact 或 server reference；Match 絕不作前置檢查。
 - depends_on 只表示下游會消費上游 typed observation、candidate ref 或其他明確 contract；run_if 是不傳遞 observation 的控制條件。獨立查詢放同一層，不為了排序而串接。
 - presentation_mode 僅 default／itinerary；itinerary 是 composition hint。
 
@@ -554,7 +571,7 @@ Agent ownership：
 calendar=本人行程、空檔、建立／修改／取消、共同日期、calendar draft 與 recent mutation 驗證。
 places=附近地點、餐廳、景點、地址、地圖、距離，以及 hours／price／rating／walking 等結構化地點資料。
 web=外部／近期／公開資訊、活動、新聞、文章、論壇、社群、URL，以及 Places 無法證明的公開主張。
-match=單筆 active proposal/search lifecycle；Hub 可有多張卡
+match=搜尋、狀態彙總與多卡片牽線收件匣；Hub 可同時有多張人物、主題與活動卡
 relationship=accepted contacts aggregate／@ 對象與公開互動。
 profile=本人 profile、memory、近期情境與 assessment start／restart。
 product_info=阿月／App 的能力、流程、限制、隱私與 Public／Private 入口邊界。
@@ -567,20 +584,20 @@ synthesizer=只根據本回合 verified observations 與 bounded context 組最�
 - 區域／場館／品牌活動走 web(public_lookup) -> synthesizer；延續問句沿用 recent_messages。
 - 店家優惠、特殊菜單、活動、臨時歇業、社群公告使用 places -> web -> synthesizer；只研究 server-issued candidate refs。
 - 一般區域半日／一日遊使用 t1=places、terminal t2=synthesizer、presentation_mode=itinerary。
-- 新活動整天用 Web、Places、Synth；具體日期依 Calendar policy 唯讀；除非要求保存不 mutation，排除 recent_messages／recent mutation 已出現的活動。
+- 新活動整天用 Web、Places、Synth；具體日期依 Calendar policy 唯讀；除非要求保存，排除 recent_messages／recent mutation 已出現的活動。
 - 外部探索使用 casual_discovery；明確官方查證或醫療／法律／金融／安全風險使用 strict_verification。
 - calendar_draft 的 missing_fields、candidates 補充、修正或選擇用 calendar。`calendar_recent_mutation` 的成功與否只交 calendar 做唯讀驗證，不自行猜測。
-- Calendar 寫入依完整語意：明確「幫我安排」、「幫我排一下」、「幫我記進行程」才走 calendar -> synthesizer mutation flow，不降成 availability read。「我明天五點想去健身」不必然授權；「幫我排明天五點去健身」才是明確 create。
-- Places 必填 place_mode：discover=清單；details=單店；reviews=口碑。discover 才 search_nearby；details/reviews 綁定 reference，不重新搜尋 Places；reviews 可接 web。延續只信 server resolution，不讀 match。
+- Calendar 寫入依完整語意：明確「幫我安排／幫我排一下／幫我記進行程」才走 calendar -> synthesizer mutation flow；「我明天五點想去健身」不必然授權，幫我排明天五點去健身才是明確 create。
+- Places 必填 place_mode：discover=清單；details=單店；reviews=口碑。discover 才 search_nearby；details/reviews 綁定 reference，不重新搜尋 Places；延續只信 server resolution。
 - 簡短肯定語接唯讀地點重試提議時，依語意建立 Places read -> synthesizer；不得當 Calendar confirmation；無提議則 direct_chat／澄清。
-- 明確／重做 assessment 用 profile；「更認識我／更了解我／多了解我一點」走 profile -> synthesizer，提出 profile.start_assessment(kind=basic) 確認；不可 direct_chat 或只讀 profile。正常 product_info -> synthesizer DAG，不選內部 knowledge section。
+- 明確／重做 assessment 用 profile；「更認識我／更了解我／多了解我一點」走 profile -> synthesizer，提出 profile.start_assessment(kind=basic) 確認；不可 direct_chat。正常 product_info -> synthesizer DAG。
 - 「怎麼配對／如何配到人」→ product_info；明確「幫我配對／開始找人」→ match。
 - 「我想配對／幫我找人」→開始；「配得怎樣／對方回了嗎」→進度。
-- 「幫我約人」若找新人走 Match；在活動語境詢問現有聯絡人中誰適合同行，或追問上一個推薦理由，走 Relationship recommend/review。
+- 「幫我約人」若找新人走 Match；在活動語境詢問現有聯絡人中誰適合同行，或追問上一個推薦理由，走 Relationship recommend/review。撤回約會邀請走 Relationship date-card cancellation。
 - 有 recent_recommendation 且追問上一個建議時判斷 review；活動改變時重新 recommend，不把快照當成新事實。
-- 配對狀態／取消搜尋／開始找人→ match -> synthesizer；write_intent=none。Match 必填 match_intent：status、counterparty、start_search、restart_search、cancel_search、clarify。接受／婉拒／撤回都導向「阿月牽線」，不建聊天確認。
-- match_intent：我要配對→start_search；換人→restart_search；等對方不擋新搜尋，未決 draft 到專區，卡片才可決定。
-- 單一 Match 需求省略 outcome_contract、run_if；保留 terminal synthesizer 呈現 server 確認。兩步重搜由 runtime 負責，Planner 不拆兩個寫入 task。
+- 配對狀態／取消搜尋／開始找人→ match -> synthesizer；write_intent=none。Match 必填 match_intent：status、counterparty、start_search、restart_search、cancel_search、clarify。人物／主題／活動邀請的接受／婉拒／撤回都到「阿月牽線」卡片，不建聊天確認。
+- match_intent：明確要找新的人→start_search；明確再找一位→restart_search（保留等待中的邀請）；換掉指定牽線卡→請到 Hub 先處理該卡；取消搜尋→只停止 queued/running 搜尋。單次搜尋由一次確認與一次 job 完成，Planner 不拆兩個寫入 task。
+- 「約會卡可以取消嗎」是 ProductInfo 能力問句，不建立操作；只有「幫我取消／撤回約會卡」等命令才用 write_intent=relationship.date_coordination_cancel.v1。Relationship 依 recent_action_reference 或 date_coordination_summary（零張說明、單張確認、多張指定）提出 cancel；過期／不唯一回 clarification，不查 Match。
 - opportunity.signal="social_opening" 只用於間接表達想找人一起參與、尚未要求從既有聯絡人挑選或開始找新人的情況；evidence_span 必須是 current message 的連續原文，confidence >= 0.8。從既有聯絡人挑選用 relationship；找新的人用 match；單純寒暄、孤單或負面情緒使用 signal="none"。
 - Web task brief 保留原始命題、地點／日期與 evidence class。活動名稱、場地有直接來源但時間不完整時保留 partial 並標示待確認，不湊數。
 
@@ -739,6 +756,8 @@ def _planner_prompt(turn_ctx: PublicAgentTurnContext) -> str:
         "calendar_recent_mutation",
         "mentioned_contacts",
         "recent_contact_reference",
+        "recent_action_reference",
+        "date_coordination_summary",
         "recent_recommendation",
         "recent_place_candidates",
         "recent_place_reference",
@@ -798,18 +817,41 @@ _DATE_INVITATION_SYNTHESIZER_BRIEF = (
     "Present only the server-owned confirmation preview or verified write result; "
     "do not ask for date, time, place, activity, budget, or notes."
 )
+_DATE_COORDINATION_CANCEL_RELATIONSHIP_BRIEF = (
+    "Propose relationship.cancel_date_coordination exactly once for an explicit date-card "
+    "cancellation request. Choose only a target_source grounded by the current message or "
+    "the prompt-safe recent_action_reference; use summary_singleton when its count is one; "
+    "never provide IDs, status, or revision."
+)
+_DATE_COORDINATION_CANCEL_SYNTHESIZER_BRIEF = (
+    "Present only the server-owned date-card cancellation confirmation or verified result; "
+    "do not invent a target, status, or calendar effect."
+)
 
 
 def _canonicalize_write_intent_briefs(plan: Plan) -> Plan:
     """Replace provider prose with bounded server-owned briefs for typed writes."""
-    if plan.write_intent != DATE_INVITATION_WRITE_INTENT:
+    if plan.write_intent not in {
+        DATE_INVITATION_WRITE_INTENT,
+        DATE_COORDINATION_CANCEL_WRITE_INTENT,
+    }:
         return plan
+    relationship_brief = (
+        _DATE_COORDINATION_CANCEL_RELATIONSHIP_BRIEF
+        if plan.write_intent == DATE_COORDINATION_CANCEL_WRITE_INTENT
+        else _DATE_INVITATION_RELATIONSHIP_BRIEF
+    )
+    synthesizer_brief = (
+        _DATE_COORDINATION_CANCEL_SYNTHESIZER_BRIEF
+        if plan.write_intent == DATE_COORDINATION_CANCEL_WRITE_INTENT
+        else _DATE_INVITATION_SYNTHESIZER_BRIEF
+    )
     tasks = [
         task.model_copy(update={
             "task_brief": (
-                _DATE_INVITATION_RELATIONSHIP_BRIEF
+                relationship_brief
                 if task.agent == "relationship"
-                else _DATE_INVITATION_SYNTHESIZER_BRIEF
+                else synthesizer_brief
             ),
         })
         for task in plan.tasks
@@ -818,63 +860,25 @@ def _canonicalize_write_intent_briefs(plan: Plan) -> Plan:
 
 
 def _explicit_match_request_intent(message: Any) -> str | None:
-    """Recognize only unambiguous new-search wording for provider repair.
+    """Legacy inspection helper kept for callers during the prompt rollout.
 
-    Planner remains the semantic router.  This bounded post-validation guard
-    exists for the one failure mode where a provider treats ``我想配對`` as a
-    status read because an older proposal is present in context.  Questions
-    about progress, methods, or reasons are deliberately excluded, so a
-    status/product-information request cannot acquire a write task here.
+    It is deliberately not used to mutate a Planner result. Exact phrases are
+    retained for old diagnostics/tests; all live routing remains provider
+    semantic output plus deterministic server validation.
     """
-    text = re.sub(r"\s+", "", str(message or "")).strip().casefold()
-    if not text:
-        return None
-    if any(marker in text for marker in (
-        "進度", "狀態", "回覆", "回應", "配得怎樣", "有沒有配對", "有配對嗎",
-        "幾張牽線", "目前配對", "怎麼配", "如何配", "配對方式", "配對原理",
-        "為什麼配對", "配對是什麼",
-    )):
-        return None
-    if re.search(r"(?:重新|重找|換人).*(?:配對|媒合|牽線|找人)|(?:再找|再配).*(?:人|配對|媒合|牽線)", text):
-        return "restart_search"
-    if re.search(
-        r"(?:我想|我要|幫我|請|開始)?(?:配對|媒合|牽線|找人|找新的人|找新的朋友|認識其他人|認識新的人)",
-        text,
-    ):
-        return "start_search"
-    return None
-
-
-def _repair_explicit_match_request(plan: Plan, turn_ctx: PublicAgentTurnContext) -> Plan:
-    """Keep a clear new-search request from being downgraded to a status read."""
-    desired = _explicit_match_request_intent(turn_ctx.message)
-    if desired is None:
-        return plan
-    match_tasks = [task for task in plan.tasks if task.agent == "match"]
-    if match_tasks:
-        tasks = [
-            task.model_copy(update={"match_intent": desired}) if task.agent == "match" else task
-            for task in plan.tasks
-        ]
-        return plan.model_copy(update={"mode": "tasks", "write_intent": "none", "tasks": tasks})
-    return Plan(
-        mode="tasks",
-        write_intent="none",
-        tasks=[
-            SubTask(
-                id="match",
-                agent="match",
-                match_intent=desired,
-                task_brief=str(turn_ctx.message or "開始找新對象")[:500],
-            ),
-            SubTask(
-                id="synthesizer",
-                agent="synthesizer",
-                depends_on=["match"],
-                task_brief="呈現配對搜尋的確認或目前狀態",
-            ),
-        ],
-    )
+    compact = re.sub(r"\s+", "", str(message or "")).casefold()
+    return {
+        "我想配對": "start_search",
+        "我要配對": "start_search",
+        "幫我配對": "start_search",
+        "幫我找人": "start_search",
+        "開始配對": "start_search",
+        "開始找人": "start_search",
+        "我想認識其他人": "start_search",
+        "重新配對": "restart_search",
+        "重新找人": "restart_search",
+        "再找一位": "restart_search",
+    }.get(compact)
 
 
 def _planner_context_conflict(
@@ -1084,7 +1088,6 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                         pass
                     else:
                         plan = _canonicalize_write_intent_briefs(plan)
-                        plan = _repair_explicit_match_request(plan, turn_ctx)
                         validation_hint = _planner_context_conflict(plan, turn_ctx)
                         if validation_hint:
                             failure_code = "invalid_arguments"

@@ -2119,6 +2119,45 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIn("欸所以約會卡是啥", provider.call_args.args[0])
         self.assertIn("relationship.date_invitation", provider.call_args.args[0])
 
+    def test_date_card_capability_reply_is_server_owned_and_includes_placement(self):
+        slc = self._slice([{
+            "task_id": "product_info", "status": "ok", "tool": None,
+            "result": {"product_info": {
+                "manifest_version": "v6",
+                "coverage": "sufficient",
+                "knowledge_sections": [
+                    "relationship.date_invitation",
+                    "relationship.date_coordination_cancel",
+                ],
+                "facts": {
+                    "relationship.date_invitation": {
+                        "card_surface": "accepted_pair_chat",
+                        "matching_page_shortcut": "needs_action_only",
+                        "available_in_match_hub": False,
+                    },
+                    "relationship.date_coordination_cancel": {
+                        "requires_confirmation": True,
+                    },
+                },
+            }},
+        }])
+        slc.payload["message"] = "約會卡可以取消嗎"
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(
+                content="可以，約會卡能取消，我會先跟你確認一次再處理。如果已同步到行事曆，也會一併處理。",
+            ),
+        ):
+            reply, card_decision, metrics = synthesize(slc)
+
+        self.assertIn("雙人聊天室", reply)
+        self.assertIn("配對首頁", reply)
+        self.assertIn("需要你處理時", reply)
+        self.assertNotIn("阿月牽線", reply)
+        self.assertIn("確認", reply)
+        self.assertIsNone(card_decision)
+        self.assertEqual(metrics.reply_source, "verified_observation")
+
     def test_date_invitation_product_info_answers_calendar_timing(self):
         slc = self._slice([{
             "task_id": "product_info", "status": "ok", "tool": None,

@@ -9,13 +9,22 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 # Forbidden ID/revision fields a sub-agent must never fill.
-FORBIDDEN_ARG_FIELDS = frozenset({"user_id", "match_id", "event_id", "revision", "expected_status"})
+FORBIDDEN_ARG_FIELDS = frozenset({
+    "user_id", "match_id", "event_id", "coordination_id", "calendar_event_id",
+    "other_id", "revision", "expected_revision", "expected_status",
+    "expected_coordination_revision", "expected_event_revision",
+})
 
 VALID_AGENTS = frozenset({
     "calendar", "places", "web", "match", "relationship", "profile", "product_info", "synthesizer",
 })
 DATE_INVITATION_WRITE_INTENT = "relationship.date_invitation.v1"
-PlannerWriteIntent = Literal["none", "relationship.date_invitation.v1"]
+DATE_COORDINATION_CANCEL_WRITE_INTENT = "relationship.date_coordination_cancel.v1"
+PlannerWriteIntent = Literal[
+    "none",
+    "relationship.date_invitation.v1",
+    "relationship.date_coordination_cancel.v1",
+]
 MatchIntent = Literal[
     "status", "counterparty", "start_search", "restart_search", "cancel_search",
     "accept_proposal", "dismiss_proposal", "clarify",
@@ -82,8 +91,8 @@ class SubTask(BaseModel):
     agent: Literal["calendar", "places", "web", "match", "relationship", "profile", "product_info", "synthesizer"] = Field(
         description=(
             "Domain owner. relationship owns the aggregate of accepted/established contacts "
-            "(list, count, compare, or choose among them) and date invitations; match owns the "
-            "singleton active proposal/search lifecycle and the Hub's multi-card inbox."
+            "(list, count, compare, or choose among them), date invitations, and cancellation "
+            "of a server-referenced date card; match owns search state and the Hub's multi-card inbox."
         ),
     )
     place_mode: PlaceMode | None = None
@@ -191,8 +200,8 @@ class Plan(BaseModel):
     write_intent: PlannerWriteIntent = Field(
         default="none",
         description=(
-            "Typed write capability declared by Planner. Date invitation intent is owned "
-            "exclusively by a Relationship-to-Synthesizer DAG."
+            "Typed write capability declared by Planner. Date invitation and date-card cancellation "
+            "are owned exclusively by a Relationship-to-Synthesizer DAG."
         ),
     )
     presentation_mode: Literal["default", "itinerary"] = "default"
@@ -228,9 +237,12 @@ class Plan(BaseModel):
 
     @model_validator(mode="after")
     def _validate_dag(self) -> "Plan":
-        if self.write_intent == DATE_INVITATION_WRITE_INTENT and self.mode != "tasks":
+        if self.write_intent in {
+            DATE_INVITATION_WRITE_INTENT,
+            DATE_COORDINATION_CANCEL_WRITE_INTENT,
+        } and self.mode != "tasks":
             raise ValueError(
-                "relationship.date_invitation.v1 requires tasks mode with exactly one "
+                "relationship date write intents require tasks mode with exactly one "
                 "Relationship task and one terminal Synthesizer"
             )
         if self.mode == "direct_chat":
@@ -266,28 +278,31 @@ class Plan(BaseModel):
         if self.presentation_mode == "itinerary" and not any(t.agent == "places" for t in self.tasks):
             raise ValueError("itinerary plan requires a places task")
 
-        if self.write_intent == DATE_INVITATION_WRITE_INTENT:
+        if self.write_intent in {
+            DATE_INVITATION_WRITE_INTENT,
+            DATE_COORDINATION_CANCEL_WRITE_INTENT,
+        }:
             relationship_tasks = [task for task in self.tasks if task.agent == "relationship"]
             synthesizer_tasks = [task for task in self.tasks if task.agent == "synthesizer"]
             if len(self.tasks) != 2 or len(relationship_tasks) != 1 or len(synthesizer_tasks) != 1:
                 raise ValueError(
-                    "relationship.date_invitation.v1 requires exactly one Relationship "
+                    "relationship date write intents require exactly one Relationship "
                     "task and one terminal Synthesizer; Match is never a precheck"
                 )
             relationship_task = relationship_tasks[0]
             synthesizer_task = synthesizer_tasks[0]
             if relationship_task.depends_on or relationship_task.run_if is not None:
                 raise ValueError(
-                    "relationship.date_invitation.v1 Relationship task cannot depend on a precheck"
+                    "relationship date write intents Relationship task cannot depend on a precheck"
                 )
             if synthesizer_task.depends_on != [relationship_task.id]:
                 raise ValueError(
-                    "relationship.date_invitation.v1 Synthesizer must depend only on the Relationship task"
+                    "relationship date write intents Synthesizer must depend only on the Relationship task"
                 )
             if self.presentation_mode != "default":
-                raise ValueError("relationship.date_invitation.v1 uses default presentation")
+                raise ValueError("relationship date write intents use default presentation")
             if self.opportunity is not None and self.opportunity.signal != "none":
-                raise ValueError("relationship.date_invitation.v1 cannot contain an opportunity")
+                raise ValueError("relationship date write intents cannot contain an opportunity")
 
         ids = {t.id for t in self.tasks}
         if len(ids) != len(self.tasks):

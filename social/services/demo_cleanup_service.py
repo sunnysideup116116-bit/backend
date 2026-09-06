@@ -56,12 +56,13 @@ def graph_health() -> dict[str, str]:
 
 def clear_runtime_fallbacks() -> dict[str, str]:
     from services.ayue_agent.v3 import (
-        calendar_drafts, calendar_references, place_followups,
-        place_references, scheduler,
+        calendar_drafts, calendar_references, date_coordination_references,
+        place_followups, place_references, scheduler,
     )
 
     calendar_drafts.clear_runtime_state()
     calendar_references.clear_runtime_state()
+    date_coordination_references.clear_runtime_state()
     place_followups.clear_runtime_state()
     place_references.clear_runtime_state()
     scheduler.clear_demo_runtime_state()

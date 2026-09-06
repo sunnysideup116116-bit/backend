@@ -57,6 +57,9 @@ EXPECTED_ROUTES = {
     ("POST", "/api/direct_chat"): ("DirectChatRequest", ()),
     ("POST", "/api/direct_chat/stream"): ("DirectChatRequest", ()),
     ("POST", "/api/public-ayue/onboarding/complete"): ("ClearRequest", ()),
+    ("POST", "/api/public-ayue/onboarding/ensure"): (
+        "PublicAyueOnboardingEnsureRequest", (),
+    ),
     ("POST", "/api/mediator/private"): ("MediatorPrivateRequest", ()),
     ("POST", "/api/mediator/private/stream"): ("MediatorPrivateRequest", ()),
     ("POST", "/api/pair/risk_block"): ("BlockUserProxyRequest", ()),
@@ -108,6 +111,7 @@ EXPECTED_EXTRACTED_ROUTE_MODULES = {
     ("POST", "/api/direct_chat"): "routers.public_chat",
     ("POST", "/api/direct_chat/stream"): "routers.public_chat",
     ("POST", "/api/public-ayue/onboarding/complete"): "routers.chat_messages",
+    ("POST", "/api/public-ayue/onboarding/ensure"): "routers.chat_messages",
 }
 
 
@@ -137,9 +141,17 @@ class ChatRouterCharacterizationTests(unittest.TestCase):
             )
 
     def test_router_keeps_the_current_chat_http_surface(self):
+        def body_model_name(route):
+            if not route.body_field:
+                return None
+            model = getattr(route.body_field, "type_", None)
+            if model is None:
+                model = getattr(route.body_field.field_info, "annotation", None)
+            return getattr(model, "__name__", None)
+
         actual = {
             (method, route.path): (
-                route.body_field.type_.__name__ if route.body_field else None,
+                body_model_name(route),
                 tuple(item.name for item in route.dependant.query_params),
             )
             for route in router.routes

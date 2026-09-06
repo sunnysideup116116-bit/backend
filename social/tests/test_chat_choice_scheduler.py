@@ -110,7 +110,7 @@ class ChatChoiceSchedulerTests(unittest.TestCase):
         planner.assert_called_once()
         execute_write.assert_not_called()
 
-    def test_card_owned_legacy_confirmation_still_uses_text_token(self):
+    def test_card_owned_legacy_confirmation_redirects_to_match_hub(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="確認")
         pending = {"_id": "legacy", "tool_name": "match.decide_active_proposal"}
         turn = MagicMock(calendar_draft=None)
@@ -139,12 +139,10 @@ class ChatChoiceSchedulerTests(unittest.TestCase):
         ):
             result = run_public_agent_turn_v3(ctx)
 
-        self.assertEqual(result.reply, "已接受提案")
+        self.assertIn("阿月牽線", result.reply)
+        self.assertIn("卡片", result.reply)
         self.assertIsNone(result.choice_prompt)
-        self.assertEqual(
-            execute_confirmed.call_args.kwargs["interaction_mode"],
-            "legacy_text",
-        )
+        execute_confirmed.assert_not_called()
 
 
 if __name__ == "__main__":

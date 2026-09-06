@@ -33,8 +33,27 @@ from .relationship_references import (
     get_reference as get_relationship_reference,
     remember_contact,
 )
+from .date_coordination_references import (
+    CANCELLABLE_STATUSES as DATE_COORDINATION_CANCELLABLE_STATUSES,
+    clear_reference as clear_date_coordination_reference,
+    get_reference as get_date_coordination_reference,
+    remember_date_coordination,
+)
 from services.match_search_context import safe_search_context, search_context_for_turn
 TOOL_CALLS = db["agent_tool_calls"]
+
+_DATE_CARD_CAPABILITY_QUESTION_RE = re.compile(
+    r"(?:"
+    r"(?:約會卡|約會邀請卡|約會邀請).{0,10}(?:可以|能不能|可不可以|能否).{0,10}(?:取消|撤回)"
+    r"|(?:可以|能不能|可不可以|能否).{0,10}(?:取消|撤回).{0,10}(?:約會卡|約會邀請卡|約會邀請)"
+    r")(?:嗎|呢|？|\?)?$"
+)
+
+
+def _is_date_card_capability_question(message: Any) -> bool:
+    """Recognise the closed capability question that must stay read-only."""
+    compact = re.sub(r"\s+", "", str(message or "")).strip()
+    return bool(compact and _DATE_CARD_CAPABILITY_QUESTION_RE.search(compact))
 
 
 def _idempotency_key(confirmation_id: str | None, run_id: str, index: int, suffix: str = "") -> str:
@@ -374,7 +393,305 @@ def _start_date_coordination(
         return False, "你和這位對象的聯絡狀態已變更，因此我沒有建立邀請卡。", "stale_relationship"
     _finish(key, "done", {"status": "created"})
     remember_contact(ctx.user_id, other_id, safe_label)
+    # Keep a room-scoped, short-lived referent for follow-ups such as
+    # 「可以取消嗎」. Persistence is advisory; the canonical match and
+    # coordination CAS remain the authority at confirmation time.
+    try:
+        remember_date_coordination(
+            ctx.user_id,
+            str(ctx.room_id or ""),
+            match,
+            coordination,
+            other_id=other_id,
+            safe_label=safe_label,
+        )
+    except Exception:
+        pass
     return True, f"完成啦！邀請卡已經放進聊天室了～接下來就等他回覆，之後你們再一起喬時間和細節。祝你們約會順利、玩得開心～", None
+
+
+def _date_coordination_candidates(user_id: str, other_id: str | None = None) -> list[dict[str, Any]]:
+    """Read current accepted date cards without exposing their authority."""
+    from services.date_coordination_service import find_accepted_match
+    from services.match_state_service import verified_accepted_match_query
+    from database import matches_coll
+
+    if other_id:
+        try:
+            match = find_accepted_match(user_id, other_id)
+        except Exception:
+            return []
+        return [match] if isinstance(match, dict) else []
+    try:
+        rows = list(matches_coll.find(verified_accepted_match_query(user_id)))
+    except Exception:
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _match_by_authority(user_id: str, match_id: str) -> dict[str, Any] | None:
+    if not match_id:
+        return None
+    from bson.objectid import ObjectId
+    from services.match_state_service import verified_accepted_match_query
+    from database import matches_coll
+
+    query: dict[str, Any]
+    try:
+        query = {"_id": ObjectId(match_id)}
+    except Exception:
+        query = {"_id": match_id}
+    try:
+        match = matches_coll.find_one(query)
+    except Exception:
+        return None
+    if not isinstance(match, dict):
+        return None
+    if user_id not in {match.get("from_user"), match.get("to_user")}:
+        return None
+    try:
+        accepted = matches_coll.find_one(
+            {"$and": [verified_accepted_match_query(user_id), {"_id": match.get("_id")}]}
+        )
+    except Exception:
+        accepted = None
+    return accepted if isinstance(accepted, dict) else None
+
+
+def _resolve_date_coordination_for_cancel(
+    arguments: dict[str, Any], ctx: Any, turn: Any,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str, str | None]:
+    """Resolve the requested date card, keeping every ID server-owned."""
+    target_source = str(arguments.get("target_source") or "")
+    evidence_span = str(arguments.get("target_evidence_span") or "").strip()
+    mention_ids = list(getattr(turn, "_mentioned_ids", []) or [])
+    if bool(getattr(turn, "mentioned_contact_overflow", False)) or len(mention_ids) > 1:
+        return None, None, "", "我找到不只一位可能的對象，請指定一位約會對象後再試一次。"
+
+    # A concrete @ mention is a stronger referent than a short-lived recent
+    # reference, even if the provider selected recent_action in its proposal.
+    if len(mention_ids) == 1 and target_source in {"recent_action", "summary_singleton", "singleton"}:
+        target_source = "mention"
+    # The most recent room-scoped date action wins over an unfocused Hub card.
+    # A provider-selected focused_card is still allowed when no recent action
+    # is available; the canonical match is checked again below.
+    if target_source == "focused_card" and not mention_ids:
+        try:
+            if get_date_coordination_reference(ctx.user_id, ctx.room_id):
+                target_source = "recent_action"
+        except Exception:
+            pass
+    match: dict[str, Any] | None = None
+    label = "對方"
+    if target_source == "recent_action":
+        reference = get_date_coordination_reference(ctx.user_id, ctx.room_id)
+        if not reference:
+            return None, None, "", "我還不確定你要取消哪一張約會卡，可以說對方名字或指定卡片嗎？"
+        reference_match_id = str(reference.get("match_id") or "")
+        recent_matches = _date_coordination_candidates(
+            ctx.user_id, str(reference.get("other_id") or "")
+        )
+        match = next(
+            (
+                row for row in recent_matches
+                if str(row.get("_id") or "") == reference_match_id
+            ),
+            None,
+        )
+        label = str(reference.get("safe_label") or "對方")[:30]
+    elif target_source == "focused_card":
+        authority = getattr(turn, "_focused_match_authority", None) or {}
+        match = _match_by_authority(ctx.user_id, str(authority.get("match_id") or ""))
+    elif target_source == "mention":
+        if len(mention_ids) != 1:
+            return None, None, "", "請指定一位約會對象後再試一次。"
+        other_id = str(mention_ids[0] or "")
+        match_rows = _date_coordination_candidates(ctx.user_id, other_id)
+        match = match_rows[0] if len(match_rows) == 1 else None
+        label = relationship_display_name(other_id)[:30] or "對方"
+    elif target_source == "name":
+        if not evidence_span or evidence_span not in str(ctx.message or ""):
+            return None, None, "", "我還不確定你指的是哪一位，可以說名字或指定一張約會卡嗎？"
+        resolved = resolve_accepted_contact_name(ctx.user_id, evidence_span)
+        if resolved.status == "ambiguous":
+            names = "、".join(resolved.candidates[:3])
+            return None, None, "", f"我找到不只一位可能的對象：{names or '請指定一位'}。你要取消哪一張約會卡？"
+        if resolved.status not in {"resolved_exact", "resolved_phonetic", "resolved_fuzzy"} or not resolved.other_id:
+            return None, None, "", "我在已建立聯絡的對象裡找不到這個名字，可以再說一次嗎？"
+        match_rows = _date_coordination_candidates(ctx.user_id, resolved.other_id)
+        match = match_rows[0] if len(match_rows) == 1 else None
+        label = str(resolved.display_name or relationship_display_name(resolved.other_id) or "對方")[:30]
+    elif target_source in {"summary_singleton", "singleton", ""}:
+        # No model or client identity is trusted here. Resolve the only
+        # currently cancellable card from canonical accepted relationships;
+        # zero and many are explicit outcomes rather than guesses.
+        candidates = [
+            row for row in _date_coordination_candidates(ctx.user_id)
+            if str((row.get("date_coordination") or {}).get("status") or "")
+            in DATE_COORDINATION_CANCELLABLE_STATUSES
+        ]
+        if not candidates:
+            return None, None, "", "目前沒有可以取消的約會卡。"
+        if len(candidates) > 1:
+            return None, None, "", "目前有不只一張可取消的約會卡，請指定對方或從卡片上操作。"
+        match = candidates[0]
+    else:
+        return None, None, "", "我還不確定你要取消哪一張約會卡，可以說對方名字或指定卡片嗎？"
+
+    if match is None:
+        candidates = [
+            row for row in _date_coordination_candidates(ctx.user_id)
+            if str((row.get("date_coordination") or {}).get("status") or "")
+            in DATE_COORDINATION_CANCELLABLE_STATUSES
+        ]
+        if len(candidates) > 1:
+            return None, None, "", "目前有不只一張可取消的約會卡，請指定對方或從卡片上操作。"
+        if not candidates:
+            return None, None, "", "目前沒有可以取消的約會卡。"
+        # Do not silently fall back from an explicit target to another card.
+        if target_source in {"mention", "name", "focused_card", "recent_action"}:
+            return None, None, "", "這張約會卡已不存在或狀態已更新，請重新查看後再試一次。"
+        match = candidates[0]
+    coordination = match.get("date_coordination") or {}
+    status = str(coordination.get("status") or "")
+    if status not in DATE_COORDINATION_CANCELLABLE_STATUSES:
+        return None, None, "", "這張約會卡已結束或取消，我沒有再次執行。"
+    if label == "對方":
+        other_id = match.get("to_user") if match.get("from_user") == ctx.user_id else match.get("from_user")
+        label = relationship_display_name(str(other_id or ""))[:30] or "對方"
+    return match, coordination, label, None
+
+
+def _cancel_date_coordination_preview(
+    match: dict[str, Any], coordination: dict[str, Any], label: str, user_id: str,
+) -> tuple[dict[str, Any], str]:
+    from database import calendar_events_coll
+
+    event = None
+    event_id = str(coordination.get("calendar_event_id") or "")
+    if event_id:
+        try:
+            event = calendar_events_coll.find_one({"event_id": event_id, "source_type": "date"})
+        except Exception:
+            event = None
+    status = str(coordination.get("status") or "")
+    preview = (
+        f"要撤回剛傳給{label}的約會邀請嗎？"
+        if status == "pending_partner"
+        else f"要取消你和{label}正在協調的約會嗎？"
+        if status == "active"
+        else f"要取消你和{label}的共同約會嗎？"
+    )
+    if event or event_id:
+        preview += "取消後會同步更新雙方行事曆，要繼續嗎？"
+    other_id = match.get("to_user") if match.get("from_user") == user_id else match.get("from_user")
+    return {
+        "action": "relationship.cancel_date_coordination",
+        "arguments": {},
+        "data": {
+            "match_id": str(match.get("_id") or ""),
+            "coordination_id": str(coordination.get("coordination_id") or ""),
+            "other_id": str(other_id or ""),
+            "expected_status": status,
+            "expected_revision": int(coordination.get("revision", 1) or 1),
+            "expected_coordination_revision": int(coordination.get("revision", 1) or 1),
+            "expected_event_revision": int(event.get("revision", 1) or 1) if event else None,
+            "calendar_event_id": event_id,
+            "safe_label": label[:30],
+        },
+    }, preview
+
+
+def _prepare_cancel_date_coordination(
+    arguments: dict[str, Any], ctx: Any, turn: Any,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if _is_date_card_capability_question(getattr(ctx, "message", "")):
+        from services.ayue_agent.capabilities import PRODUCT_INFO_FAILURE_FALLBACKS
+        return None, PRODUCT_INFO_FAILURE_FALLBACKS["date_coordination_cancel"]
+    match, coordination, label, error = _resolve_date_coordination_for_cancel(arguments, ctx, turn)
+    if error:
+        return None, error
+    if not match or not coordination:
+        return None, "目前沒有可以取消的約會卡。"
+    if coordination.get("calendar_event_id"):
+        from database import calendar_events_coll
+        try:
+            event = calendar_events_coll.find_one({
+                "event_id": str(coordination.get("calendar_event_id") or ""),
+                "source_type": "date",
+            })
+        except Exception:
+            event = None
+        if not event:
+            return None, "這張共同約會的行事曆資料不一致，我沒有建立取消確認。"
+    return _cancel_date_coordination_preview(match, coordination, label, ctx.user_id)
+
+
+def _cancel_date_coordination(
+    ctx: Any, turn: Any, run_id: str, index: int,
+    arguments: dict[str, Any], confirmation_id: str | None,
+    payload: dict[str, Any] | None,
+) -> tuple[bool, str, str | None]:
+    from fastapi import HTTPException
+    from services.date_coordination_service import cancel_coordination_or_event, find_accepted_match
+
+    data = payload or {}
+    match_id = str(data.get("match_id") or "")
+    coordination_id = str(data.get("coordination_id") or "")
+    other_id = str(data.get("other_id") or "")
+    expected_status = str(data.get("expected_status") or "")
+    expected_coord_revision = data.get("expected_coordination_revision", data.get("expected_revision"))
+    event_revision = data.get("expected_event_revision")
+    try:
+        expected_coord_revision = int(expected_coord_revision)
+    except (TypeError, ValueError):
+        expected_coord_revision = 0
+    if (
+        not match_id or not coordination_id or not other_id
+        or expected_status not in DATE_COORDINATION_CANCELLABLE_STATUSES
+        or expected_coord_revision <= 0
+    ):
+        return False, "這筆約會取消確認資料已失效，請重新查看約會卡。", "date_coordination_payload_invalid"
+    try:
+        event_revision = int(event_revision) if event_revision is not None else None
+    except (TypeError, ValueError):
+        return False, "這筆約會取消確認資料已失效，請重新查看約會卡。", "date_coordination_payload_invalid"
+    key = _idempotency_key(confirmation_id, run_id, index, suffix="date_coordination_cancel")
+    if not _claim_once(key):
+        return True, "我已經處理過這次約會取消。", None
+    try:
+        match = find_accepted_match(ctx.user_id, other_id)
+        current_coordination = match.get("date_coordination") or {}
+        if str(match.get("_id") or "") != match_id or str(current_coordination.get("coordination_id") or "") != coordination_id:
+            raise HTTPException(status_code=409, detail="約會剛剛已變更，請重新確認")
+        if str(current_coordination.get("status") or "") != expected_status or int(current_coordination.get("revision", 1) or 1) != expected_coord_revision:
+            raise HTTPException(status_code=409, detail="約會剛剛已變更，請重新確認")
+        coordination = cancel_coordination_or_event(
+            ctx.user_id,
+            other_id,
+            coordination_id,
+            expected_revision=event_revision,
+            expected_status=expected_status,
+            expected_coordination_revision=expected_coord_revision,
+            idempotency_key=key,
+        )
+    except HTTPException as exc:
+        _finish(key, "failed", {"error_code": "date_coordination_stale" if exc.status_code == 409 else "date_coordination_cancel_failed"})
+        if exc.status_code == 409:
+            return False, "這張約會卡剛剛已變更，請重新查看後再確認。", "date_coordination_stale"
+        return False, "我現在無法取消這張約會卡，請稍後再試。", "date_coordination_cancel_failed"
+    except Exception as exc:
+        _finish(key, "failed", {"error_code": "date_coordination_cancel_failed"})
+        return False, "我現在無法取消這張約會卡，請稍後再試。", type(exc).__name__
+    _finish(key, "done", {"status": "cancelled"})
+    clear_date_coordination_reference(ctx.user_id, ctx.room_id)
+    if expected_status == "pending_partner":
+        reply = "好，這張約會邀請已替你撤回。"
+    elif event_revision is not None or data.get("calendar_event_id"):
+        reply = "好，共同約會已取消，雙方行事曆也會同步更新。"
+    else:
+        reply = "好，這張約會協調已取消。"
+    return True, reply, None
 
 
 def _calendar_event_label(event: dict) -> str:
@@ -610,6 +927,7 @@ _WRITE_EXECUTORS = {
     "match.decide_active_event_invitation": lambda ctx, turn, run_id, index, args, cid, payload: _decide_active_event_invitation(ctx, turn, run_id, index, args, payload),
     "profile.start_assessment": lambda ctx, turn, run_id, index, args, cid, payload: _start_assessment(ctx, args, confirmation_id=cid),
     "relationship.start_date_coordination": _start_date_coordination,
+    "relationship.cancel_date_coordination": _cancel_date_coordination,
 }
 
 
@@ -723,6 +1041,8 @@ def prepare_write_confirmation(
         }, f"要對「{title}」的活動牽線邀請{action_label}嗎？確認後我才會送出。"
     if tool_name == "relationship.start_date_coordination":
         return _prepare_date_coordination(arguments, ctx, turn)
+    if tool_name == "relationship.cancel_date_coordination":
+        return _prepare_cancel_date_coordination(arguments, ctx, turn)
     if tool_name == "profile.start_assessment":
         kind = {"basic": "big_five", "deep": "deep_profile"}.get(str(arguments.get("kind") or ""))
         if kind is None:

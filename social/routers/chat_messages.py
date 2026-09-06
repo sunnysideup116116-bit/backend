@@ -19,7 +19,8 @@ from services.ai_room_service import (
     MATCH_HUB_ROOM_KIND,
 )
 from services.ayue_agent.onboarding import (
-    complete_public_ayue_onboarding, public_ayue_onboarding_state,
+    complete_public_ayue_onboarding, ensure_public_ayue_onboarding,
+    public_ayue_onboarding_state,
 )
 from services.assessment_session_service import assessment_public_state_for_room
 from services.ayue_agent.public_relationship_projection import (
@@ -65,6 +66,27 @@ def _strip_internal_message_use(messages: list[dict]) -> list[dict]:
     return projected
 
 
+def _project_public_message_ids(messages: list[dict]) -> list[dict]:
+    """Expose one stable public id without migrating legacy message rows.
+
+    Newer writers persist ``message_id`` while older rows may only have
+    Mongo's ``_id``.  The client needs the same identity for history and live
+    events, so derive the public value at read time and always remove the
+    database-only field before returning the payload.
+    """
+    projected: list[dict] = []
+    for message in messages:
+        item = dict(message or {})
+        message_id = item.get("message_id")
+        if message_id is None or not str(message_id).strip():
+            message_id = item.get("_id")
+        if message_id is not None and str(message_id).strip():
+            item["message_id"] = str(message_id)
+        item.pop("_id", None)
+        projected.append(item)
+    return projected
+
+
 @router.get("/messages/{contact_id}")
 def get_messages(
     contact_id: str,
@@ -98,7 +120,9 @@ def get_messages(
     query: dict = {"room_id": room_id, "is_blocked": {"$ne": True}}
     if before is not None:
         query["timestamp"] = {"$lt": before}
-    cursor = messages_coll.find(query, {"_id": 0}).sort("timestamp", -1)
+    # Keep _id available long enough to derive a stable public identity for
+    # legacy rows.  _project_public_message_ids removes it before serialization.
+    cursor = messages_coll.find(query).sort("timestamp", -1)
     if limit is not None and limit > 0:
         # Fetch one extra message to detect whether older history exists.
         fetched = list(cursor.limit(limit + 1))
@@ -110,6 +134,7 @@ def get_messages(
         # Legacy clients expect ascending order without a limit.
         messages = list(cursor)[::-1]
         has_more = False
+    messages = _project_public_message_ids(messages)
     messages = _strip_internal_message_use(messages)
     if is_ai_contact:
         messages = project_match_card_history(
@@ -154,6 +179,19 @@ def get_messages(
 def complete_public_ayue_onboarding_route(req: ClearRequest):
     complete_public_ayue_onboarding(req.user_id)
     return {"status": "ok", "version": 1}
+
+
+class PublicAyueOnboardingEnsureRequest(BaseModel):
+    """Optional room hint used to keep onboarding scoped to the general room."""
+
+    user_id: str
+    ai_room_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+@router.post("/public-ayue/onboarding/ensure")
+def ensure_public_ayue_onboarding_route(req: PublicAyueOnboardingEnsureRequest):
+    """Persist the one-time Public Ayue self-introduction, if applicable."""
+    return ensure_public_ayue_onboarding(req.user_id, room_id=req.ai_room_id)
 
 
 @router.get("/contacts")

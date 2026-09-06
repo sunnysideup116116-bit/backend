@@ -13,6 +13,7 @@ from services.ayue_agent.proactive_scheduler import start_proactive_care_schedul
 from services.ayue_agent.v3.calendar_drafts import ensure_indexes as ensure_calendar_draft_indexes
 from services.ayue_agent.v3.calendar_references import ensure_indexes as ensure_calendar_reference_indexes
 from services.ayue_agent.v3.relationship_references import ensure_indexes as ensure_relationship_reference_indexes
+from services.ayue_agent.v3.date_coordination_references import ensure_indexes as ensure_date_coordination_reference_indexes
 from services.ayue_agent.v3.relationship_recommendations import ensure_indexes as ensure_relationship_recommendation_indexes
 from services.ayue_agent.v3.place_references import ensure_indexes as ensure_place_reference_indexes
 from services.ayue_agent.v3.place_followups import ensure_indexes as ensure_place_followup_indexes
@@ -79,6 +80,7 @@ def setup_calendar_indexes():
     ensure_calendar_draft_indexes()
     ensure_calendar_reference_indexes()
     ensure_relationship_reference_indexes()
+    ensure_date_coordination_reference_indexes()
     ensure_relationship_recommendation_indexes()
     ensure_place_reference_indexes()
     ensure_place_followup_indexes()

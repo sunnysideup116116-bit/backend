@@ -26,6 +26,7 @@ from services.match_reason_service import (
     PRIVATE_OPENING_FEW_SHOTS,
     V4_REASON_VERSION,
     build_v4_snapshot_fallback,
+    contains_invitation_ask,
     friend_intro_fallback,
     match_reason_style_id,
     public_personality_phrase,
@@ -1279,9 +1280,47 @@ def _friend_intro_entry(
     else:
         reason = _refine_directional_reason(viewer, other, tier, fallback) if refine else fallback
     text = _short_text(reason.get("viewer_text"), 220)
-    if not text or any(token in text.lower() for token in ("seed_user", "user_id", "mongo", "資料庫", "物件")):
+    required_context = reason_public_text(other.get("current_context"), 56)
+    required_other_personality = _public_personality_phrase(other)
+    required_viewer_personality = _public_personality_phrase(viewer)
+    # Validate both provider output and the first fallback before persisting a
+    # V4 entry.  Topic requester copy is a statement after an auto invite, so
+    # validate it with a synthetic ask while preserving the statement itself.
+    validation_text = text
+    if invitation_topic and str(viewer.get("user_id") or "") == str(requester_id or "") and auto_invite and text and not text.endswith(("？", "?")):
+        validation_text = f"{text}你有興趣嗎？"
+    valid_text = valid_friend_intro_text(
+        validation_text,
+        required_context=required_context,
+        introduced_personality="" if invitation_topic else required_other_personality,
+        viewer_personality="" if invitation_topic else required_viewer_personality,
+        role_bound=True,
+    )
+    if not valid_text:
         reason = fallback
-        text = _short_text(reason.get("viewer_text"), 110)
+        text = _short_text(reason.get("viewer_text"), 220)
+        validation_text = text
+        if invitation_topic and str(viewer.get("user_id") or "") == str(requester_id or "") and auto_invite and text and not text.endswith(("？", "?")):
+            validation_text = f"{text}你有興趣嗎？"
+        valid_text = valid_friend_intro_text(
+            validation_text,
+            required_context=required_context,
+            introduced_personality="" if invitation_topic else required_other_personality,
+            viewer_personality="" if invitation_topic else required_viewer_personality,
+            role_bound=True,
+        )
+    if not valid_text:
+        # Keep the persisted contract complete even when profile snapshots are
+        # sparse.  ``friend_intro_fallback`` has no internal identity fields
+        # in its user-facing text and still ends with a consent question.
+        fallback = friend_intro_fallback(viewer, other, tier, style_id=style_id)
+        reason = fallback
+        text = _short_text(fallback.get("viewer_text"), 220)
+    if not text or not contains_invitation_ask(validation_text or text):
+        # A malformed provider/fallback must not create the old title-only
+        # card. The final minimum copy is deterministic and role-bound.
+        text = "我想到一位可以先認識看看的人；你願意先認識對方嗎？"
+        reason = {**fallback, "viewer_text": text}
     return {
         "copy_version": FRIEND_COPY_VERSION,
         # Internal only: public card projections deliberately drop this field.
@@ -1314,7 +1353,7 @@ def build_friend_intro_v4(
     tier = next((item.get("text") for item in items if item.get("kind") == "recommendation_tier"), "exploratory")
     if tier not in {"grounded", "exploratory"}:
         tier = "exploratory"
-    return {
+    projection = {
         "initiator_preview": _friend_intro_entry(
             initiator, receiver, tier, refine=refine,
             search_context=search_context,
@@ -1328,6 +1367,20 @@ def build_friend_intro_v4(
             auto_invite=auto_invite,
         ),
     }
+    # Sparse snapshots can legitimately produce the same generic sentence for
+    # both directions. Keep the two roles visibly distinct so the receiver is
+    # still told that another person wants to meet them, while the requester
+    # sees an introduction preview. This is presentation-only; no state or
+    # evidence is inferred.
+    initiator_entry = projection.get("initiator_preview") or {}
+    receiver_entry = projection.get("receiver_invitation") or {}
+    if (
+        initiator_entry.get("viewer_text")
+        and initiator_entry.get("viewer_text") == receiver_entry.get("viewer_text")
+    ):
+        receiver_entry["viewer_text"] = "有位朋友想和你認識看看；你願意先認識對方嗎？"
+        receiver_entry["conversation_starter"] = "可以先從最近想做的事聊起。"
+    return projection
 
 
 def build_friend_intro_v4_from_snapshot(match_doc: dict) -> dict:

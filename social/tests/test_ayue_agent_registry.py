@@ -15,7 +15,7 @@ from services.ayue_agent.tools import execute_tool
 
 class AyueAgentRegistryTests(unittest.TestCase):
     def test_every_write_tool_declares_confirmation(self):
-        self.assertEqual(len(SIDE_EFFECT_TOOLS), 7)
+        self.assertEqual(len(SIDE_EFFECT_TOOLS), 8)
         self.assertIn("match.cancel_search", SIDE_EFFECT_TOOLS)
         for tool_name in SIDE_EFFECT_TOOLS:
             spec = TOOL_REGISTRY[tool_name]
@@ -26,7 +26,7 @@ class AyueAgentRegistryTests(unittest.TestCase):
         executor_keys = {
             "calendar_events", "calendar_event_find", "calendar_next_event", "current_time", "match_status",
             "counterparty_summary", "recent_context", "relationship_evidence", "mentioned_contact_summary", "accepted_contact_list", "memory_profile",
-            "self_profile", "calendar_mutation_verification",
+            "self_profile", "calendar_mutation_verification", "contact_evidence",
         }
         for tool_name in READ_ONLY_TOOLS:
             spec = TOOL_REGISTRY[tool_name]

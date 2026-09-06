@@ -197,7 +197,21 @@ def check_and_trigger_date_activation(room_id: str, user_id: str, contact_id: st
     from services.ai_service import detect_date_activation
     from services.date_coordination_service import create_invite
     if match_doc and detect_date_activation(message):
-        create_invite(match_doc, user_id, contact_id)
+        coordination = create_invite(match_doc, user_id, contact_id)
+        if coordination:
+            try:
+                from services.ayue_agent.v3.date_coordination_references import remember_date_coordination
+                remember_date_coordination(
+                    user_id,
+                    room_id,
+                    match_doc,
+                    coordination,
+                    other_id=contact_id,
+                )
+            except Exception:
+                # The reference is convenience state. The pair-card write is
+                # already committed and remains canonical if storage is down.
+                pass
 
 
 def ai_process_date_coordination_step(room_id: str, user_id: str, contact_id: str, message: str, match_doc: dict):

@@ -386,9 +386,9 @@ class V3SchedulerTests(unittest.TestCase):
             ), "pending_confirmation")
             self.assertEqual(_direct_chat_block_reason(
                 plan, turn, [], {"fingerprint": "fp"}), "active_match_guidance")
-            self.assertEqual(_direct_chat_block_reason(
+            self.assertIsNone(_direct_chat_block_reason(
                 plan, turn.model_copy(update={"active_proposal": {"status": "pending"}}), [], None,
-            ), "active_match_proposal")
+            ))
 
     def test_assessment_start_wording_only_confirms_assessment_pending(self):
         self.assertTrue(_assessment_start_confirmation_requested(
@@ -821,8 +821,8 @@ class V3SchedulerTests(unittest.TestCase):
         ) as persist:
             result = run_public_agent_turn_v3(ctx)
 
-        self.assertIn("了解配對方式", result.reply)
-        self.assertNotIn("沒接好", result.reply)
+        self.assertNotIn("了解配對方式", result.reply)
+        self.assertIn("沒有執行任何操作", result.reply)
         trace = persist.call_args.args[2]
         self.assertEqual(trace["planner_failure"]["attempts"][0]["validation_fields"], ["write_intent"])
         self.assertNotIn("raw_content", trace["planner_failure"]["attempts"][0])

@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from bson import ObjectId
 from fastapi import HTTPException, Response
 
 from models import CalendarActionRequest, ChatRequest, RelationshipGameRequest
@@ -140,6 +141,37 @@ class ChatLeafRouterTests(unittest.TestCase):
             "no-store, no-cache, must-revalidate",
         )
         self.assertEqual(http_response.headers["pragma"], "no-cache")
+
+    def test_message_history_exposes_stored_or_mongo_message_identity(self):
+        mongo_id = ObjectId("64f000000000000000000001")
+        messages = _Cursor([
+            {
+                "_id": ObjectId("64f000000000000000000002"),
+                "message_id": "persisted-message-id",
+                "sender_id": "owner",
+                "content": "stored identity",
+                "timestamp": 1,
+            },
+            {
+                "_id": mongo_id,
+                "sender_id": "ai_assistant",
+                "content": "legacy identity",
+                "timestamp": 2,
+            },
+            {"sender_id": "owner", "content": "no identity", "timestamp": 3},
+        ])
+        with patch("routers.chat_messages.generate_room_id", return_value="room"), \
+             patch("routers.chat_messages.messages_coll.find", return_value=messages), \
+             patch("routers.chat_messages.matches_coll.find_one", return_value=None), \
+             patch("routers.chat_messages.profiles_coll.find_one", return_value={}):
+            response = get_messages("other", "owner")
+
+        by_content = {message["content"]: message for message in response["messages"]}
+        self.assertEqual(by_content["stored identity"]["message_id"], "persisted-message-id")
+        self.assertEqual(by_content["legacy identity"]["message_id"], str(mongo_id))
+        self.assertNotIn("message_id", by_content["no identity"])
+        for message in response["messages"]:
+            self.assertNotIn("_id", message)
 
     def test_ai_history_pagination_returns_has_more_when_older_messages_exist(self):
         messages = _Cursor([{"sender_id": "ai_assistant", "content": f"msg-{i}"} for i in range(31)])

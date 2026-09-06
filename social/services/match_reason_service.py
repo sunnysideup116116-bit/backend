@@ -52,6 +52,26 @@ _INTERNAL_REFERENCE_RE = re.compile(
     r"(?:@?seed_user_[\w-]+|@?demo_user|@?user[_-]?\d+)", re.IGNORECASE,
 )
 
+# This is a copy-contract check, rather than an intent router.  The match
+# pipeline already decided that a proposal is an invitation; this helper only
+# verifies that provider prose still contains a natural invitation question.
+# Keep the accepted forms together so generation, fallback and read-time
+# projection cannot drift apart (notably 「想先認識」 and 「願不願意先認識」).
+_INVITATION_ASK_RE = re.compile(
+    r"(?:"
+    r"想\s*(?:先\s*)?認識"
+    r"|願意\s*(?:先\s*)?認識"
+    r"|願不願意\s*(?:先\s*)?認識"
+    r"|要不要\s*(?:先\s*)?認識"
+    r"|有興趣"
+    r"|想\s*(?:讓我|請我)?\s*(?:幫你(?:們)?\s*)?(?:問問?|牽線|牽個線)"
+    r"|要不要\s*(?:讓我|請我)?\s*(?:幫你(?:們)?\s*)?(?:問問?|牽線|牽個線)"
+    r"|要我\s*(?:先\s*)?(?:幫你(?:們)?\s*)?(?:問問?|牽線|牽個線)"
+    r"|想\s*(?:跟|和)\s*對方\s*(?:聊|認識)"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def short_public_text(value: Any, limit: int = 220) -> str:
     text = re.sub(r"\s+", " ", normalize_zh_tw(str(value or ""))).strip()
@@ -79,6 +99,12 @@ def public_personality_phrase(profile: dict) -> str:
     if isinstance(value, (int, float)) and value >= 7:
         return "願意傾聽"
     return short_public_text(traits.get("summary"), 32)
+
+
+def contains_invitation_ask(value: Any) -> bool:
+    """Return whether copy contains one approved invitation ask shape."""
+    text = short_public_text(value, 260)
+    return bool(text and _INVITATION_ASK_RE.search(text))
 
 
 def match_reason_style_id(
@@ -277,10 +303,7 @@ def valid_friend_intro_text(
         return ""
     if not text.endswith(("？", "?")):
         return ""
-    if not any(token in text for token in (
-        "想認識", "願意認識", "要不要一起", "想一起", "願意一起",
-        "有興趣", "牽個線", "牽線", "問問他", "幫你問",
-    )):
+    if not contains_invitation_ask(text):
         return ""
     return text
 
@@ -491,10 +514,37 @@ def reason_for_viewer(match_doc: dict, user_id: str) -> str:
         if text:
             return text
         fallback = build_v4_snapshot_fallback(match_doc)
-        return _safe_bound_v4_entry(
+        text = _safe_bound_v4_entry(
             fallback.get(role_key), user_id, other_id,
             allow_topic_statement=allow_topic_statement,
         ) if fallback else ""
+        if text:
+            return text
+        # A live V4 proposal may have been written by an older worker before
+        # the immutable snapshot was added.  Preserve the role binding and
+        # return a complete, privacy-safe minimum introduction instead of the
+        # title-only/empty card that older readers produced.
+        viewer = {"user_id": user_id}
+        other = {"user_id": other_id}
+        minimum = friend_intro_fallback(
+            viewer, other,
+            str(match_doc.get("recommendation_tier") or "exploratory"),
+            style_id="warm_intro",
+        )
+        if role_key == "receiver_invitation":
+            minimum["viewer_text"] = "有位朋友想和你認識看看；你願意先認識對方嗎？"
+        else:
+            minimum["viewer_text"] = "我想到一位可以先認識看看的人；你會想先認識對方嗎？"
+        return _safe_bound_v4_entry(
+            {
+                "viewer_id": user_id,
+                "counterparty_id": other_id,
+                **minimum,
+            },
+            user_id,
+            other_id,
+            allow_topic_statement=allow_topic_statement,
+        ) or "我想到一位可以先認識看看的人；你願意先認識對方嗎？"
 
     entries = match_doc.get("directional_reason_v3") or []
     if isinstance(entries, list):

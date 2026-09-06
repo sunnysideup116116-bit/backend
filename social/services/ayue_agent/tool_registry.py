@@ -67,6 +67,24 @@ class _DateCoordinationStartArguments(BaseModel):
         return self
 
 
+class _DateCoordinationCancelArguments(BaseModel):
+    """Authority-free target reference for a confirmed date-card cancel."""
+
+    model_config = ConfigDict(extra="forbid")
+    target_source: Literal[
+        "recent_action", "mention", "name", "focused_card", "summary_singleton",
+    ]
+    target_evidence_span: str = Field(default="", max_length=80)
+
+    @model_validator(mode="after")
+    def _validate_target_reference(self) -> "_DateCoordinationCancelArguments":
+        if self.target_source == "name" and not self.target_evidence_span.strip():
+            raise ValueError("name target requires target_evidence_span")
+        if self.target_source != "name" and self.target_evidence_span:
+            raise ValueError("only name target may provide target_evidence_span")
+        return self
+
+
 class _ProposalDecisionArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     decision: Literal["interested", "declined", "cancelled"]
@@ -598,6 +616,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         "建立空白約會邀請卡前確認",
         requires_confirmation=True,
         planner_arguments_model=_DateCoordinationStartArguments,
+        executor_arguments_model=_NoArguments,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
+    ),
+    "relationship.cancel_date_coordination": ToolSpec(
+        "relationship.cancel_date_coordination", ToolRisk.WRITE, "date_coordination_cancel",
+        "取消一張由 server context 指定的約會卡；只提出確認，不接受模型提供的 coordination ID、對象 ID、狀態或 revision。",
+        "我先確認要不要取消這張約會卡…",
+        requires_confirmation=True,
+        planner_arguments_model=_DateCoordinationCancelArguments,
         executor_arguments_model=_NoArguments,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
