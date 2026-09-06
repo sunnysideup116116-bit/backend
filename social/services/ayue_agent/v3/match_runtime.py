@@ -17,27 +17,51 @@ from .write_executors import prepare_write_confirmation
 
 INTENT_TOOLS = {
     "status": "match.get_status", "counterparty": "match.get_counterparty_summary",
-    "start_search": "match.start_search", "cancel_search": "match.cancel_search",
-    "accept_proposal": "match.decide_active_proposal", "dismiss_proposal": "match.decide_active_proposal",
+    "start_search": "match.start_search", "restart_search": "match.start_search",
+    "cancel_search": "match.cancel_search",
 }
 
 
 def status_reply(snapshot: dict[str, Any]) -> str:
-    if snapshot.get("reason_code") == "ambiguous_live_match":
-        return "目前有多張有效配對提案，狀態需要處理；我沒有挑選對象或執行變更。"
-    return {
+    state = str(snapshot.get("state") or "")
+    count = int(snapshot.get("active_proposal_count", 0) or 0)
+    pending = int(snapshot.get("pending_action_count", 0) or 0)
+    waiting = int(snapshot.get("waiting_other_count", 0) or 0)
+    base = {
         "idle": "目前沒有進行中的配對提案或搜尋。",
         "searching": "目前已有配對搜尋正在執行，這次沒有重複開始。",
-        "waiting_user": "目前有一張既有提案等你接受或放棄，並不是這次新搜尋的結果。",
-        "waiting_other": "目前的既有提案正在等對方回覆。",
-        "incoming_decision": "目前有一張對方送來的提案等你接受或婉拒。",
+        "waiting_user": "目前有一張既有牽線卡等你回覆，請到「阿月牽線」查看。",
+        "waiting_other": "那張邀請還在等對方回覆，你也可以繼續認識其他人。",
+        "incoming_decision": "目前有一張對方送來的牽線卡等你回覆，請到「阿月牽線」查看。",
         "accepted": "最近的配對已互相接受；解除已建立的關係不屬於撤回提案。",
         "declined": "最近一張提案已結束，目前沒有待決提案。",
         "expired": "最近一張提案已失效，目前沒有待決提案。",
         "no_candidates": "上一次搜尋沒有合適人選；這次尚未開始新的搜尋。",
+        "insufficient_common_ground": "上一次搜尋沒有找到足夠的共同依據，因此沒有送出介紹；這次尚未開始新的搜尋。",
         "failed": "上一次搜尋未完成；這次尚未開始新的搜尋。",
         "cancelled": "上一次搜尋已取消；這次尚未開始新的搜尋。",
-    }.get(str(snapshot.get("state") or ""), "我暫時無法確認最新配對狀態，沒有執行任何變更。")
+        "quota_exceeded": "今天的介紹次數已用完，明天可以再找；已送出的邀請還是能繼續回覆。",
+    }.get(state, "我暫時無法確認最新配對狀態，沒有執行任何變更。")
+    if count > 1:
+        return f"目前有 {count} 張進行中的牽線卡，其中 {pending} 張等你回覆、{waiting} 張等待對方；請到「阿月牽線」查看。"
+    if state == "quota_exceeded":
+        quota = snapshot.get("daily_quota")
+        active_quota = quota.get("active") if isinstance(quota, dict) else None
+        limit = (
+            active_quota.get("limit") if isinstance(active_quota, dict) else None
+        ) or snapshot.get("active_limit") or 3
+        return f"今天已經幫你介紹 {int(limit)} 位新朋友了，明天可以再找；已送出的邀請還是能繼續回覆。"
+
+    quota = snapshot.get("daily_quota")
+    if isinstance(quota, dict) and isinstance(quota.get("active"), dict):
+        remaining = quota["active"].get("remaining")
+        if remaining is not None and state in {"idle", "no_candidates", "declined", "expired", "cancelled"}:
+            base += f"今天還可以請我介紹 {int(remaining)} 位新朋友。"
+    elif snapshot.get("active_remaining") is not None and state in {
+        "idle", "no_candidates", "declined", "expired", "cancelled",
+    }:
+        base += f"今天還可以請我介紹 {int(snapshot['active_remaining'])} 位新朋友。"
+    return base
 
 
 def safe_status_reply(user_id: str) -> str:
@@ -85,6 +109,13 @@ def run(context_slice: Any, *, task: Any, services: Any) -> tuple[TaskRunnerResu
     metrics = SubAgentMetrics()
     audit = {"intent": intent or "missing", "action": "none", "outcome": "not_executed"}
     services.trace.setdefault("match_actions", []).append(audit)
+    if intent in {"accept_proposal", "dismiss_proposal"}:
+        audit["outcome"] = "hub_only_redirect"
+        return _result(
+            task.id,
+            "邀請的接受、婉拒或撤回請在「阿月牽線」的這張卡片上操作；我沒有替你改變邀請狀態。",
+            "hub_only_decision",
+        ), metrics
     if intent not in INTENT_TOOLS or intent == "clarify":
         audit["outcome"] = "intent_unavailable"
         return _result(task.id, "這次沒有執行配對操作。" + safe_status_reply(turn.user_id), "intent_unavailable"), metrics
@@ -100,9 +131,11 @@ def run(context_slice: Any, *, task: Any, services: Any) -> tuple[TaskRunnerResu
             return _result(task.id, "我暫時無法讀取最新配對狀態，沒有執行任何變更。", "state_unavailable", tool=tool, failed=True), metrics
         data = result.observation or {}
         if intent == "status":
+            # Status is a read of the current canonical state.  Do not append
+            # the old proposal's creation date or an internal "not this search"
+            # disclaimer: that text made a fresh search confirmation look like
+            # a replay of the previous proposal.
             reply = status_reply(data)
-            if turn.active_proposal:
-                reply += proposal_provenance(turn.active_proposal)
         else:
             reply = (f"目前這位對象是{data.get('display_name') or '對方'}。{data.get('safe_summary') or ''}"
                      if data.get("found") else "目前沒有可提供公開摘要的配對對象。")
@@ -137,6 +170,19 @@ def run(context_slice: Any, *, task: Any, services: Any) -> tuple[TaskRunnerResu
     prior_authority = getattr(turn, "_active_proposal_authority", None) or {}
     if active and str(prior_authority.get("match_id") or "") != str(active.get("_id") or ""):
         return _result(task.id, "目前提案剛有更新，這次沒有替新對象建立確認。請重新查看提案。", "proposal_changed", failed=True), metrics
+    if active and intent in {"start_search", "restart_search"} and state.get("search_blocked"):
+        if intent == "restart_search":
+            reply = (
+                "目前有一張阿月牽線提案；如果你是想換人，請到牽線專區查看並自行處理目前提案。"
+                "我不會自動婉拒或撤回，也沒有開始新的搜尋。"
+            )
+        else:
+            reply = (
+                "目前有一張阿月牽線提案，我先保留它；請到「阿月牽線」專區查看或回覆這張提案。"
+                "這次沒有開始新的搜尋。"
+            )
+        audit.update(action="match.start_search", outcome="active_proposal_preserved")
+        return _result(task.id, reply, "active_proposal_preserved"), metrics
     # Rebind only server-owned context, never a model-provided target.
     turn = turn.model_copy(update={"active_proposal": None, "match_search": state["search"]})
     if active:
@@ -154,12 +200,11 @@ def run(context_slice: Any, *, task: Any, services: Any) -> tuple[TaskRunnerResu
     else:
         turn._active_proposal_authority = None
 
-    restart = intent == "start_search" and bool(active)
     tool = INTENT_TOOLS[intent]
     args: dict[str, Any] = {}
     if intent == "start_search" and state["search"]["status"] in {"queued", "running", "searching"}:
         return _result(task.id, "目前已有搜尋正在執行，這次沒有重複開始。", "search_already_active"), metrics
-    if restart or intent == "dismiss_proposal":
+    if intent == "dismiss_proposal":
         tool = "match.decide_active_proposal"
         allowed = state["allowed_actions"]
         decision = "cancelled" if "cancelled" in allowed else "declined" if "declined" in allowed else None
@@ -179,11 +224,6 @@ def run(context_slice: Any, *, task: Any, services: Any) -> tuple[TaskRunnerResu
     if payload is None:
         audit.update(action=tool, outcome="preflight_rejected")
         return _result(task.id, preview or "這次沒有執行配對操作。", "preflight_rejected", failed=True), metrics
-    if active:
-        preview = proposal_provenance(active) + str(preview or "")
-    if restart:
-        payload["data"]["continuation"] = "offer_start_search"
-        preview += "這一步只結束目前提案；成功後會再問你是否開始新搜尋。"
     try:
         services.create_confirmation(
             user_id=turn.user_id, agent_name="match", tool_name=tool,
@@ -201,42 +241,6 @@ def run(context_slice: Any, *, task: Any, services: Any) -> tuple[TaskRunnerResu
 
 
 def offer_restart_continuation(manager: Any, ctx: Any, turn: Any, parent: dict[str, Any], run_id: str) -> dict[str, Any] | None:
-    """Prepare a second confirmation only after a proven applied first step."""
-    if (parent.get("status") != "completed" or parent.get("error_code")
-            or parent.get("tool_name") != "match.decide_active_proposal"
-            or parent.get("arguments", {}).get("decision") not in {"declined", "cancelled"}
-            or parent.get("payload", {}).get("continuation") != "offer_start_search"):
-        return None
-    if parent.get("user_id") != ctx.user_id or parent.get("room_id") != ctx.room_id or parent.get("surface") != SURFACE_PUBLIC:
-        return None
-    import time
-    if time.time() > float(parent.get("resolved_at") or 0) + 900:
-        return None
-    import uuid
-    key = f"match-restart:{parent['_id']}"
-    cid = uuid.uuid5(uuid.NAMESPACE_URL, f"ayue-choice:{ctx.user_id}:{ctx.room_id}:{SURFACE_PUBLIC}:{key}").hex
-    existing = manager.record_for_choice(user_id=ctx.user_id, room_id=ctx.room_id, surface=SURFACE_PUBLIC, choice_id=cid, require_pending=False)
-    if existing:
-        if existing.get("status") not in {"prepared", "pending"}:
-            return None
-        if float(existing.get("expires_at", 0)) <= time.time():
-            return None
-        return {"reply": existing["preview_text"], "choice": public_choice_projection(existing), "origin_run_id": existing["origin_run_id"]}
-    try:
-        state = load_match_state(ctx.user_id)
-        if state["search_blocked"]:
-            return {"reply": "目前提案已結束，但狀態剛有更新；這次沒有開始新搜尋。" + safe_status_reply(ctx.user_id)}
-        payload, preview = prepare_write_confirmation("match.start_search", {}, ctx, turn)
-        if payload is None:
-            return {"reply": "目前提案已結束。" + str(preview or "尚不能開始新搜尋。")}
-        reply = "目前提案已結束。要開始新的配對搜尋嗎？再次確認後才會開始。"
-        cid = manager.create_confirmation(
-            user_id=ctx.user_id, room_id=ctx.room_id, surface=SURFACE_PUBLIC,
-            agent_name="match", tool_name="match.start_search", arguments={},
-            payload=payload["data"], origin_run_id=run_id, preview=reply,
-            interaction_mode=INTERACTION_BUBBLE, idempotency_key=key,
-        )
-        record = manager.record_for_choice(user_id=ctx.user_id, room_id=ctx.room_id, surface=SURFACE_PUBLIC, choice_id=cid, require_pending=False)
-        return {"reply": reply, "choice": public_choice_projection(record), "origin_run_id": record["origin_run_id"]}
-    except Exception:
-        return {"reply": "目前提案已結束，但暫時無法建立新搜尋確認；沒有開始搜尋。"}
+    """Retired compatibility hook; old restart continuations are inert."""
+    del manager, ctx, turn, parent, run_id
+    return None

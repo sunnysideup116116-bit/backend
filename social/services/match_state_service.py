@@ -7,6 +7,7 @@ from typing import Any
 
 from database import matches_coll, profiles_coll
 from services.proposal_namespace import (
+    EVENT_INVITATION_NAMESPACE,
     RELATIONSHIP_MATCH_NAMESPACE,
     live_proposal_query,
     namespace_clause,
@@ -16,7 +17,10 @@ from services.proposal_namespace import (
 
 LIVE_MATCH_STATUSES = {"draft", "pending"}
 SEARCHING_STATUSES = {"queued", "running", "searching", "loading_profile", "vector_search", "graph_check", "writing_reason"}
-SEARCH_RESULT_STATUSES = {"no_candidates", "failed", "cancelled"}
+SEARCH_RESULT_STATUSES = {
+    "no_candidates", "insufficient_common_ground", "failed", "cancelled",
+    "quota_exceeded",
+}
 TERMINAL_MATCH_STATUSES = {"accepted", "declined", "expired"}
 SEARCH_LOCK_TTL_SECONDS = 5 * 60
 
@@ -111,32 +115,93 @@ def _live_match_query(user_id: str, status: str | None = None) -> dict[str, Any]
     )
 
 
+def list_live_matches(
+    user_id: str,
+    *,
+    namespace: str = RELATIONSHIP_MATCH_NAMESPACE,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return all live proposals visible to one participant.
+
+    The old state projection deliberately failed closed when two rows existed
+    because it assumed one global slot.  The Hub now owns a small inbox, so
+    callers must select a card explicitly rather than treating a second row as
+    corruption.  This helper is the single read boundary for that list.
+    """
+    safe_limit = max(1, min(int(limit or 50), 100))
+    return list(matches_coll.find(
+        live_proposal_query(user_id, namespace),
+    ).sort([("updated_at", -1), ("created_at", -1)]).limit(safe_limit))
+
+
 def reconcile_live_match(user_id: str) -> dict[str, Any] | None:
-    """Compatibility name for a pure read. Never revive a terminal proposal."""
-    live = list(matches_coll.find(
-        _live_match_query(user_id),
-    ).sort([("created_at", -1)]).limit(2))
-    return live[0] if len(live) == 1 else None
+    """Compatibility name returning the newest relationship proposal.
+
+    New code should use :func:`list_live_matches`.  Returning a deterministic
+    newest row keeps older candidate exclusion and recovery callers safe while
+    no longer treating a legitimate multi-card inbox as an ambiguous failure.
+    """
+    return (list_live_matches(user_id, namespace=RELATIONSHIP_MATCH_NAMESPACE, limit=1) or [None])[0]
 
 
 def load_match_state(user_id: str) -> dict[str, Any]:
     """Executor-only canonical snapshot shared by reads and write preflight."""
     from services.match_search_job_service import match_search_snapshot
 
-    active = reconcile_live_match(user_id)
-    ambiguous = matches_coll.count_documents(_live_match_query(user_id)) > 1
+    active_matches = list_live_matches(user_id, namespace=RELATIONSHIP_MATCH_NAMESPACE)
+    event_matches = list_live_matches(user_id, namespace=EVENT_INVITATION_NAMESPACE)
+    all_live_matches = sorted(
+        [*active_matches, *event_matches],
+        key=lambda item: (
+            float(item.get("updated_at") or item.get("created_at") or 0),
+        ),
+        reverse=True,
+    )
+    active = next(
+        (
+            item for item in active_matches
+            if item.get("status") == "draft" and item.get("from_user") == user_id
+        ),
+        next(
+            (
+                item for item in active_matches
+                if item.get("status") == "pending" and item.get("to_user") == user_id
+            ),
+            active_matches[0] if active_matches else None,
+        ),
+    )
+    status_live = active or (event_matches[0] if event_matches else None)
+    # ``ambiguous`` remains in the response for old callers.  Real documents
+    # are multi-card data and therefore do not set it; the empty-result branch
+    # only catches legacy adapters that report a count without returning rows.
+    try:
+        ambiguous = not active_matches and matches_coll.count_documents(_live_match_query(user_id)) > 1
+    except Exception:
+        ambiguous = False
     search = match_search_snapshot(user_id)
-    stage = derive_match_stage(active, user_id) if not ambiguous else "ambiguous"
+    stage = derive_match_stage(status_live, user_id)
     allowed = {
         "waiting_user": ["interested", "declined"],
         "incoming_decision": ["interested", "declined"],
         "waiting_other": ["cancelled"],
     }.get(stage, [])
     return {
-        "active_proposal": active if not ambiguous else None,
+        "active_proposal": active,
+        "active_proposals": active_matches,
+        "active_event_proposals": event_matches,
+        "all_live_proposals": all_live_matches,
         "ambiguous": ambiguous, "stage": stage, "allowed_actions": allowed,
         "search": search,
-        "search_blocked": bool(active or ambiguous or search["status"] in {"queued", "running", "searching"}),
+        # A draft created for this user still needs an explicit decision before
+        # another search.  Waiting for someone else or receiving an invitation
+        # does not block a fresh search; the Hub can show all cards together.
+        "search_blocked": bool(
+            any(
+                item.get("status") == "draft" and item.get("from_user") == user_id
+                for item in all_live_matches
+            )
+            or search["status"] in {"queued", "running", "searching"}
+        ),
     }
 
 
@@ -191,12 +256,25 @@ def get_match_status_snapshot(user_id: str) -> dict[str, Any]:
     endpoint lost when it reconciled completed searches back to ``idle``.
     """
     state = load_match_state(user_id)
-    live = state["active_proposal"]
-    if state["ambiguous"]:
-        return {"state": "failed", "scope": "live_match", "is_terminal": False,
-                "chat_opened": False,
-                "counterparty": "對方", "revision": None, "updated_at": None,
-                "reason_code": "ambiguous_live_match"}
+    live = state["active_proposal"] or (list(state.get("active_event_proposals") or [])[:1] or [None])[0]
+    live_matches = list(state.get("all_live_proposals") or state.get("active_proposals") or [])
+    pending_actions = sum(
+        1 for item in live_matches
+        if (item.get("status") == "draft" and item.get("from_user") == user_id)
+        or (item.get("status") == "pending" and item.get("to_user") == user_id)
+    )
+    waiting_other = sum(
+        1 for item in live_matches
+        if item.get("status") == "pending" and item.get("from_user") == user_id
+    )
+    if state.get("ambiguous"):
+        return {
+            "state": "failed", "scope": "live_match", "is_terminal": False,
+            "chat_opened": False, "counterparty": "對方", "revision": None,
+            "updated_at": None, "reason_code": "ambiguous_live_match",
+            "active_proposal_count": 0, "pending_action_count": 0,
+            "waiting_other_count": 0,
+        }
     if live:
         return {
             "state": derive_match_stage(live, user_id), "scope": "live_match", "is_terminal": False,
@@ -206,6 +284,9 @@ def get_match_status_snapshot(user_id: str) -> dict[str, Any]:
             "counterparty": "對方",
             "revision": int(live.get("proposal_revision", 0)),
             "updated_at": live.get("updated_at") or live.get("created_at"), "reason_code": None,
+            "active_proposal_count": len(live_matches),
+            "pending_action_count": pending_actions,
+            "waiting_other_count": waiting_other,
         }
 
     search = state["search"]
@@ -214,7 +295,10 @@ def get_match_status_snapshot(user_id: str) -> dict[str, Any]:
         return {"state": "searching", "scope": "search", "is_terminal": False,
                 "chat_opened": False,
                 "counterparty": "對方", "revision": None, "updated_at": search.get("updated_at") or search.get("started_at"),
-                "reason_code": None}
+                "reason_code": None,
+                "active_proposal_count": len(live_matches),
+                "pending_action_count": pending_actions,
+                "waiting_other_count": waiting_other}
 
     participant_query = {"$or": [{"from_user": user_id}, {"to_user": user_id}]}
     latest = matches_coll.find_one(
@@ -255,7 +339,13 @@ def get_match_status_snapshot(user_id: str) -> dict[str, Any]:
             "counterparty": _display_name(_other_id(latest, user_id)) if state == "accepted" else "對方",
             "revision": int(latest.get("proposal_revision", 0)),
             "updated_at": latest.get("updated_at") or latest.get("created_at"), "reason_code": None,
+            "active_proposal_count": len(live_matches),
+            "pending_action_count": pending_actions,
+            "waiting_other_count": waiting_other,
         }
     return {"state": "idle", "scope": "none", "is_terminal": False,
             "chat_opened": False,
-            "counterparty": "對方", "revision": None, "updated_at": None, "reason_code": None}
+            "counterparty": "對方", "revision": None, "updated_at": None, "reason_code": None,
+            "active_proposal_count": len(live_matches),
+            "pending_action_count": pending_actions,
+            "waiting_other_count": waiting_other}

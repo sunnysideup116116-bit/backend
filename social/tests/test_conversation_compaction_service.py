@@ -14,6 +14,7 @@ from services.conversation_compaction_contracts import ConversationSummaryV1
 from services.ayue_agent import context as ayue_context
 from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext
 from services.ayue_agent.v3.planner import _planner_prompt
+from services.message_use_service import metadata_for_use
 
 
 def _message(index: int, sender: str, content: str | None = None, timestamp: float | None = None):
@@ -21,7 +22,7 @@ def _message(index: int, sender: str, content: str | None = None, timestamp: flo
         "_id": ObjectId(f"64b64c8f0000000000000{index:03d}"),
         "sender_id": sender,
         "content": content or f"訊息{index}",
-        "metadata": {},
+        "metadata": {"message_use": metadata_for_use("ordinary", reason="test")},
         "timestamp": float(index if timestamp is None else timestamp),
     }
 
@@ -267,6 +268,31 @@ class ConversationCompactionServiceTests(unittest.TestCase):
         self.assertNotIn("room_scope_hash", run_metadata)
         self.assertEqual(run_operation["$inc"], {"attempt_count": 1})
 
+    def test_excluded_only_batch_advances_watermark_without_model_calls(self):
+        os.environ["AYUE_CONVERSATION_COMPACTION_MODE"] = "shadow"
+        messages = [_message(index, "owner") for index in range(1, 4)]
+        for message in messages:
+            message["metadata"]["message_use"] = metadata_for_use(
+                "calendar_operation", reason="calendar_operation",
+            )
+        collection = MagicMock()
+        with patch.object(compaction, "CONVERSATION_COMPACTIONS", collection), \
+             patch.object(compaction, "_load_current_compaction", return_value=None), \
+             patch.object(compaction, "_load_exact_batch", return_value=messages), \
+             patch.object(compaction, "_generate_summary") as generate, \
+             patch.object(compaction, "_evaluate_summary") as evaluate:
+            result = compaction.run_conversation_compaction_shadow(
+                "owner", "ai_assistant_owner",
+                [str(item["_id"]) for item in messages], 0, None,
+            )
+        self.assertEqual(result["status"], "stored")
+        generate.assert_not_called()
+        evaluate.assert_not_called()
+        stored = collection.insert_one.call_args.args[0]
+        self.assertEqual(stored["observability"]["generation_result_code"], "excluded_only")
+        self.assertEqual(stored["covered_through_message_id"], str(messages[-1]["_id"]))
+        self.assertEqual(stored["summary"]["active_topics"], [])
+
     def test_generation_and_evaluation_accept_current_chat_result_contract(self):
         summary_payload = {
             "active_topics": ["週末活動"], "owner_goals": [],
@@ -293,7 +319,10 @@ class ConversationCompactionServiceTests(unittest.TestCase):
 
     def test_generation_uses_preserved_owner_raw_text_and_typed_prior_only(self):
         message = _message(1, "owner", "@對方 顯示內容")
-        message["metadata"] = {"owner_raw_content": "本人真正原句"}
+        message["metadata"] = {
+            "owner_raw_content": "本人真正原句",
+            "message_use": metadata_for_use("ordinary", reason="test"),
+        }
         payload = {
             "active_topics": ["近期話題"], "owner_goals": [], "known_continuity": [],
             "unresolved_questions": [], "ayue_commitments": [], "recent_decisions": [],
@@ -777,6 +806,19 @@ class ConversationCompactionServiceTests(unittest.TestCase):
             fallback = ayue_context.build_public_agent_turn_context(ctx)
         self.assertIsNone(fallback.conversation_continuity)
         self.assertEqual(len(fallback.recent_messages), 12)
+
+        limited = ctx.model_copy(update={"history_truncated": True})
+        with patch.object(ayue_context, "load_validated_conversation_continuity", return_value=None), \
+             patch.object(ayue_context, "load_match_state", return_value={"active_proposal": None, "ambiguous": False, "search": {"status": "idle"}}), \
+             patch.object(ayue_context.matches_coll, "find_one", side_effect=[None, None]), \
+             patch.object(ayue_context.matches_coll, "count_documents", side_effect=[0, 0]), \
+             patch.object(ayue_context, "validated_mentioned_contact_ids", return_value=([], False)), \
+             patch.object(ayue_context, "mentioned_contact_refs", return_value=[]):
+            limited_context = ayue_context.build_public_agent_turn_context(limited)
+        self.assertEqual(
+            limited_context.history_projection_status,
+            "recent_only_budget_limited",
+        )
 
     def test_planner_receives_summary_without_watermark_or_revision(self):
         ctx = PublicAgentTurnContext(

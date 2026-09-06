@@ -6,7 +6,8 @@ import json
 import os
 import re
 import time
-from typing import Any
+import uuid
+from typing import Any, Callable
 
 from bson.objectid import ObjectId
 from pymongo.errors import DuplicateKeyError
@@ -23,6 +24,15 @@ from services.profile_projection import (
     render_recent_context,
     safe_recent_context,
 )
+from services.message_use_service import MessageUse, message_use
+from services.match_search_context import context_embedding_source_hash
+from services.proactive_followup_service import (
+    apply_followup_proposal,
+    followup_candidate_snapshot,
+    followup_mode_for_user,
+    is_proactive_care_enabled,
+    validate_followup_proposal,
+)
 from services.skill_loader import load_profile_skill
 
 PROFILE_RUNS = db["profile_skill_runs"]
@@ -33,6 +43,9 @@ RECENT_FIELD_NAMES = ("activity", "destination", "timing", "companion_intent", "
 RECENT_TIMINGS = {"昨天", "前天", "今天", "明天", "後天", "最近", "近期", "本週", "下週", "本月", "下個月"}
 RECENT_TEMPORAL_STATUSES = {"past", "current", "planned"}
 RECENT_EPISODE_TTL_SECONDS = 30 * 60
+PROFILE_MAX_ATTEMPTS = 3
+PROFILE_LEASE_SECONDS = 90
+PROFILE_RETRY_DELAYS = (30, 120)
 
 
 def _activity_from_owner_message(activity: str, message: str) -> str:
@@ -180,37 +193,141 @@ def ensure_profile_skill_indexes() -> None:
         PROFILE_RUNS.create_index("created_at", expireAfterSeconds=14 * 86400)
         PROFILE_RUNS.create_index("message_id", unique=True, sparse=True)
         PROFILE_RUNS.create_index([("user_id", 1), ("created_at", -1)])
+        PROFILE_RUNS.create_index(
+            [("status", 1), ("next_attempt_at", 1)],
+            name="profile_retry_queue",
+        )
     except Exception as exc:
         print(f"Profile skill index setup skipped: {exc}")
 
 
 def _trace(user_id: str, mode: str, payload: dict[str, Any]) -> None:
-    doc = {"user_id": user_id, "skill": "profile_router", "mode": mode, "status": "completed", "created_at": time.time(), **payload}
+    payload = dict(payload or {})
+    run_status = str(payload.pop("_run_status", "completed") or "completed")
+    next_attempt_at = payload.pop("_next_attempt_at", None)
+    lease_token = payload.pop("_lease_token", None)
+    doc = {
+        "user_id": user_id,
+        "skill": "profile_router",
+        "mode": mode,
+        "status": run_status,
+        "updated_at": time.time(),
+        "created_at": time.time(),
+        **payload,
+    }
+    if next_attempt_at is not None:
+        doc["next_attempt_at"] = float(next_attempt_at)
     try:
         if doc.get("message_id"):
-            PROFILE_RUNS.replace_one({"message_id": doc["message_id"]}, doc, upsert=True)
+            update: dict[str, Any] = {
+                "$set": doc,
+                "$unset": {"lease_until": "", "lease_token": ""},
+            }
+            if next_attempt_at is None:
+                update["$unset"]["next_attempt_at"] = ""
+            query = {"message_id": doc["message_id"]}
+            if lease_token:
+                query["lease_token"] = lease_token
+            PROFILE_RUNS.update_one(query, update, upsert=not bool(lease_token))
         else:
             PROFILE_RUNS.insert_one(doc)
     except Exception as exc:
         print(f"Profile skill trace skipped: {exc}")
 
 
-def _claim_profile_message(user_id: str, message_id: str, mode: str) -> bool:
-    """Atomically claim an owner message before invoking the extractor."""
+def _claim_profile_message(user_id: str, message_id: str, mode: str) -> str | None:
+    """Atomically claim a source, allowing only bounded transient retries."""
+    now = time.time()
+    lease_token = uuid.uuid4().hex
     try:
         result = PROFILE_RUNS.update_one(
-            {"message_id": message_id},
-            {"$setOnInsert": {
-                "message_id": message_id, "user_id": user_id, "skill": "profile_router",
-                "mode": mode, "status": "processing", "created_at": time.time(),
-            }},
+            {
+                "message_id": message_id,
+                "$or": [
+                    {"status": {"$exists": False}},
+                    {
+                        "status": "processing",
+                        "attempt_count": {"$lt": PROFILE_MAX_ATTEMPTS},
+                        "lease_until": {"$lte": now},
+                    },
+                    {
+                        "status": "processing",
+                        "attempt_count": {"$lt": PROFILE_MAX_ATTEMPTS},
+                        "lease_until": {"$exists": False},
+                    },
+                    {
+                        "status": "failed",
+                        "attempt_count": {"$lt": PROFILE_MAX_ATTEMPTS},
+                        "$or": [
+                            {"next_attempt_at": {"$lte": now}},
+                            {"next_attempt_at": {"$exists": False}},
+                        ],
+                    },
+                ],
+            },
+            {
+                "$set": {
+                    "user_id": user_id,
+                    "skill": "profile_router",
+                    "mode": mode,
+                    "status": "processing",
+                    "lease_until": now + PROFILE_LEASE_SECONDS,
+                    "lease_token": lease_token,
+                    "attempt_started_at": now,
+                    "updated_at": now,
+                },
+                "$setOnInsert": {
+                    "message_id": message_id,
+                    "created_at": now,
+                },
+                "$inc": {"attempt_count": 1},
+            },
             upsert=True,
         )
-        return result.upserted_id is not None
+        return lease_token if (
+            getattr(result, "upserted_id", None) is not None
+            or getattr(result, "modified_count", 0)
+        ) else None
     except DuplicateKeyError:
         return False
     except Exception as exc:
         print(f"Profile skill claim failed: {type(exc).__name__}")
+        return None
+
+
+def _profile_claim_is_current(message_id: str, lease_token: str) -> bool:
+    try:
+        return bool(PROFILE_RUNS.find_one({
+            "message_id": message_id,
+            "status": "processing",
+            "lease_token": lease_token,
+            "lease_until": {"$gt": time.time()},
+        }, {"_id": 1}))
+    except Exception:
+        return False
+
+
+def _renew_profile_claim(message_id: str, lease_token: str) -> bool:
+    """Extend a live claim after model work and before owner-data writes."""
+    now = time.time()
+    try:
+        result = PROFILE_RUNS.update_one(
+            {
+                "message_id": message_id,
+                "status": "processing",
+                "lease_token": lease_token,
+                "lease_until": {"$gt": now},
+            },
+            {"$set": {
+                "lease_until": now + PROFILE_LEASE_SECONDS,
+                "updated_at": now,
+            }},
+        )
+        return bool(
+            getattr(result, "matched_count", 0)
+            or getattr(result, "modified_count", 0)
+        )
+    except Exception:
         return False
 
 
@@ -358,6 +475,7 @@ def _retry_recent_context_contract(
 def analyze_profile_message(
     message: str, previous_context: str = "", *, plan_id: str | None = None,
     active_episode: dict[str, Any] | None = None,
+    follow_up_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Extract from one saved owner message, then validate deterministically.
 
@@ -371,14 +489,14 @@ def analyze_profile_message(
              "summary_zh_tw": "", "reason_code": "skipped", "plan_id": plan_id or "",
              "episode_relation": "unrelated", "active_episode_id": ""}
     if not message or NO_STORE_RE.search(message) or contains_internal_identifier(message):
-        return {"recent_context": {**blank, "reason_code": "blocked_input"}, "memories": [], "memory_codes": ["blocked_input"], "policy_versions": {}, "contract": {}}
+        return {"recent_context": {**blank, "reason_code": "blocked_input"}, "memories": [], "follow_up": None, "memory_codes": ["blocked_input"], "policy_versions": {}, "contract": {}}
     if contains_protected_content(message):
-        return {"recent_context": {**blank, "reason_code": "protected_attribute"}, "memories": [], "memory_codes": ["protected_attribute"], "policy_versions": {}, "contract": {}}
+        return {"recent_context": {**blank, "reason_code": "protected_attribute"}, "memories": [], "follow_up": None, "memory_codes": ["protected_attribute"], "policy_versions": {}, "contract": {}}
     try:
         recent_skill = load_profile_skill("recent-context")
         memory_skill = load_profile_skill("memory")
     except Exception as exc:
-        return {"recent_context": {**blank, "reason_code": "skill_load_failed"}, "memories": [], "memory_codes": [type(exc).__name__], "policy_versions": {}, "contract": {}}
+        return {"recent_context": {**blank, "reason_code": "skill_load_failed"}, "memories": [], "follow_up": None, "memory_codes": [type(exc).__name__], "policy_versions": {}, "contract": {}}
     safe_episode = active_episode if isinstance(active_episode, dict) else None
     safe_episode = {
         "episode_id": str((safe_episode or {}).get("episode_id") or "")[:128],
@@ -393,6 +511,23 @@ def analyze_profile_message(
         "goal": (safe_episode or {}).get("goal") or "continue_current_activity",
         "fields": dict((safe_episode or {}).get("fields") or {}),
     } if safe_episode else None
+    safe_follow_up_candidates = []
+    for item in (follow_up_candidates or [])[:3]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            slot = int(item.get("slot", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= slot <= 3:
+            continue
+        safe_follow_up_candidates.append({
+            "slot": slot,
+            "topic": _clean(item.get("topic"), 80),
+            "question_goal": _clean(item.get("question_goal"), 120),
+            "timing": str(item.get("timing") or "after_days")[:24],
+            "status": str(item.get("status") or "pending")[:24],
+        })
     prompt = f"""
 你是阿月的 Profile Extractor。新欄位與 evidence 只能來自下方一則「已儲存的本人原始訊息」，不可使用對話歷史、助理回覆、工具結果、配對或行事曆資料。你可能收到一個已驗證的 typed active episode；它只用來判斷本句是延續還是新情境，不能當作本句新欄位的 evidence。
 
@@ -404,7 +539,11 @@ def analyze_profile_message(
 請輸出 ProfileExtractionDecision JSON。recent_context.action 必須為 update、clear 或 none。episode_relation 必須為 continue、new 或 unrelated：本句是在補充／修正 active episode 時用 continue，開始不同活動時用 new，無關時用 unrelated。短句沒有時間詞也能延續；不確定時用 unrelated，禁止硬合併。每個欄位都要有 value、evidence_span、confidence、subject；subject 只能是 owner。只有確實描述本人現實活動時才 update；訊息可同時包含找人要求，但只擷取本人活動，絕不把找人、配對、提案或等待回覆寫入欄位。時間詞（例如今天、下週）是活動的時間欄位，不是拒絕理由。若提到他人，但同時清楚表達「我喜歡／不喜歡這種類型」，只能提出本人偏好記憶，不能儲存他人的特徵。
 不得自行杜撰摘要。欄位與記憶標籤使用繁體中文；每個 evidence_span 必須是原訊息的連續子字串。
 
+待追問只針對本人有明確後續的生活活動或計畫。已有候選使用 existing_slot=1..3 做 update 或 close，不要重複建立；建立時必須有 topic、question_goal、evidence_span、confidence>=0.90、subject=owner。question_goal 只描述中性的後續確認，不得預設活動成功。行事曆、日曆、測驗、配對、他人資料與單純偏好不建立候選；沒有合適候選時 action=none。
+現有待追問候選（只有安全摘要，不含 ID）：{json.dumps(safe_follow_up_candidates, ensure_ascii=False)}
+
 JSON schema：{{"recent_context":{{"action":"update|clear|none","confidence":0.0,"message_kind":"real_world_update|match_operation|durable_preference|other","episode_relation":"continue|new|unrelated","fields":{{"activity":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"destination":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"timing":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"companion_intent":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"temporal_status":{{"operation":"set|clear","value":"past|current|planned","evidence_span":"","confidence":0.0,"subject":"owner"}}}},"reason_code":""}},"memories":[{{"key":"snake_case","label_zh_tw":"繁體中文標籤","stance":"like|dislike|require|avoid","category":"lifestyle|habit|personality|relationship|activity","confidence":0.0,"evidence_span":"","subject":"owner","reason_code":""}}]}}
+follow_up 欄位：{{"action":"create|update|close|none","existing_slot":null,"topic":"","question_goal":"","timing":"after_days|after_activity|none","wait_days":3,"evidence_span":"","confidence":0.0,"subject":"owner","reason_code":""}}
 目前有效的 typed episode：{json.dumps(prompt_episode or {}, ensure_ascii=False)}
 本人原始訊息：{message}
 """
@@ -412,7 +551,7 @@ JSON schema：{{"recent_context":{{"action":"update|clear|none","confidence":0.0
         data = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True).content)
         contract = ProfileExtractionDecision.model_validate(data)
     except Exception as exc:
-        return {"recent_context": {**blank, "reason_code": f"model_{type(exc).__name__}"}, "memories": [], "memory_codes": [f"model_{type(exc).__name__}"], "policy_versions": {"recent-context": recent_skill["version"], "memory": memory_skill["version"]}, "contract": {}}
+        return {"recent_context": {**blank, "reason_code": f"model_{type(exc).__name__}"}, "memories": [], "follow_up": None, "memory_codes": [f"model_{type(exc).__name__}"], "policy_versions": {"recent-context": recent_skill["version"], "memory": memory_skill["version"]}, "contract": {}}
 
     recent, retry_needed = _validated_recent_proposal(contract.recent_context, message, plan_id)
     recent["active_episode_id"] = str((safe_episode or {}).get("episode_id") or "")
@@ -430,13 +569,24 @@ JSON schema：{{"recent_context":{{"action":"update|clear|none","confidence":0.0
         codes.append(code)
         if candidate:
             memories.append(candidate)
-    return {"recent_context": recent, "memories": memories, "memory_codes": codes or ["no_memory_candidate"],
+    follow_up = validate_followup_proposal(contract.follow_up, message, recent)
+    contract_payload = contract.model_dump()
+    # Keep traces/provider output bounded to the deterministic, evidence-checked
+    # proposal rather than persisting arbitrary model text.
+    contract_payload["follow_up"] = follow_up
+    return {"recent_context": recent, "memories": memories, "follow_up": follow_up,
+            "memory_codes": codes or ["no_memory_candidate"],
             "policy_versions": {"recent-context": recent_skill["version"], "memory": memory_skill["version"]},
-            "contract": contract.model_dump()}
+            "contract": contract_payload}
 
 
 def apply_recent_context(
-    user_id: str, proposal: dict[str, Any], *, message_id: str, source_timestamp: float,
+    user_id: str,
+    proposal: dict[str, Any],
+    *,
+    message_id: str,
+    source_timestamp: float,
+    before_write: Callable[[], bool] | None = None,
 ) -> bool:
     """Atomically merge independently evidenced fields into V2 recent context."""
     if not proposal.get("should_update") or proposal.get("message_kind") != "real_world_update":
@@ -542,6 +692,7 @@ def apply_recent_context(
         if summary:
             try:
                 set_fields["context_embedding"] = get_embedding(summary)
+                set_fields["context_embedding_source_hash"] = context_embedding_source_hash(summary)
             except Exception as exc:
                 print(f"Recent context embedding skipped: {exc}")
         old_revision = int(profile.get("current_context_revision", 0))
@@ -549,6 +700,8 @@ def apply_recent_context(
             {"current_context_revision": old_revision},
             {"current_context_revision": {"$exists": False}, "$expr": {"$eq": [old_revision, 0]}},
         ]}
+        if before_write is not None and not before_write():
+            return False
         updated = profiles_coll.update_one(
             query, {"$set": set_fields, "$unset": {"recent_context_draft": ""}}, upsert=False,
         )
@@ -558,7 +711,9 @@ def apply_recent_context(
 
 
 def process_profile_message(user_id: str, message: str, message_id: str | None, surface: str, match_id: str | None = None) -> dict[str, Any]:
-    mode = profile_skills_mode_for_user(user_id)
+    profile_mode = profile_skills_mode_for_user(user_id)
+    followup_mode = followup_mode_for_user(user_id)
+    mode = profile_mode if profile_mode != "off" else followup_mode
     if mode == "off":
         return {"status": "disabled"}
     # Profile extraction is only allowed from the already-persisted owner message.
@@ -568,33 +723,124 @@ def process_profile_message(user_id: str, message: str, message_id: str | None, 
         source_message_id = ObjectId(message_id)
     except Exception:
         return {"status": "skipped", "reason": "invalid_message_id"}
+    source_projection = {
+        "content": 1,
+        "metadata.owner_raw_content": 1,
+        "metadata.message_use": 1,
+        "timestamp": 1,
+    }
+    if followup_mode != "off":
+        source_projection["room_id"] = 1
     source = messages_coll.find_one(
         {"_id": source_message_id, "sender_id": user_id},
-        {"content": 1, "metadata.owner_raw_content": 1, "timestamp": 1},
+        source_projection,
     )
     stored_owner_message = ((source or {}).get("metadata") or {}).get("owner_raw_content")
     stored_owner_message = stored_owner_message if isinstance(stored_owner_message, str) else (source or {}).get("content", "")
     if not source or stored_owner_message != str(message):
         return {"status": "skipped", "reason": "owner_message_not_saved"}
-    if not _claim_profile_message(user_id, message_id, mode):
+    source_use = message_use(source)
+    if source_use is not MessageUse.ORDINARY:
+        _trace(
+            user_id,
+            mode,
+            {
+                "message_id": message_id,
+                "surface": surface,
+                "match_id": match_id,
+                "_run_status": "excluded",
+                "recent_context": {
+                    "reason_code": f"message_use_{source_use.value}",
+                    "changed": False,
+                    "message_kind": "excluded",
+                    "field_names": [],
+                    "input_eligible": False,
+                },
+                "memory": {
+                    "codes": [f"message_use_{source_use.value}"],
+                    "candidate_count": 0,
+                    "saved_count": 0,
+                    "error_code": None,
+                },
+            },
+        )
+        return {"status": "skipped", "reason": f"message_use_{source_use.value}"}
+    claim_token = _claim_profile_message(user_id, message_id, mode)
+    if not claim_token:
         return {"status": "skipped", "reason": "already_processed"}
+    if isinstance(claim_token, str) and not _profile_claim_is_current(message_id, claim_token):
+        return {"status": "skipped", "reason": "stale_claim"}
     try:
         profile = profiles_coll.find_one(
             {"user_id": user_id},
-            {"recent_context_state": 1, "recent_context_updated_at": 1, "recent_context_draft": 1},
+            {
+                "recent_context_state": 1,
+                "recent_context_updated_at": 1,
+                "recent_context_draft": 1,
+                "proactive_care_enabled": 1,
+                "proactive_frequency": 1,
+            },
         ) or {}
     except Exception:
         profile = {}
+    if followup_mode != "off" and not is_proactive_care_enabled(profile):
+        followup_mode = "off"
     active_episode = _active_recent_episode(profile)
+    room_id = str(source.get("room_id") or "")
+    followup_candidates = (
+        followup_candidate_snapshot(user_id, room_id, now=time.time())
+        if followup_mode != "off" and room_id
+        else []
+    )
     decision = analyze_profile_message(
         message, plan_id=f"message:{message_id}", active_episode=active_episode,
+        follow_up_candidates=followup_candidates,
     )
+    reason_code = str(
+        (decision.get("recent_context") or {}).get("reason_code") or ""
+    )
+    retryable = reason_code.startswith("model_") or reason_code in {
+        "skill_load_failed",
+    }
+    try:
+        run = PROFILE_RUNS.find_one({"message_id": message_id}, {"attempt_count": 1}) or {}
+        attempt_count = max(1, int(run.get("attempt_count", 1) or 1))
+    except Exception:
+        attempt_count = 1
+    if isinstance(claim_token, str) and not _renew_profile_claim(message_id, claim_token):
+        return {"status": "skipped", "reason": "stale_claim"}
+    followup_result: dict[str, Any] = {"status": "disabled"}
+    if followup_mode != "off":
+        followup_result = apply_followup_proposal(
+            user_id,
+            room_id,
+            message_id,
+            stored_owner_message,
+            _timestamp(source.get("timestamp")),
+            decision.get("follow_up"),
+            decision.get("recent_context"),
+            mode=followup_mode,
+            candidate_snapshot=followup_candidates,
+        )
+        if followup_result.get("status") == "storage_unavailable":
+            retryable = True
+    run_status = "failed" if retryable and attempt_count < PROFILE_MAX_ATTEMPTS else "completed"
+    next_attempt_at = None
+    if run_status == "failed":
+        next_attempt_at = time.time() + PROFILE_RETRY_DELAYS[min(attempt_count - 1, len(PROFILE_RETRY_DELAYS) - 1)]
     recent_changed, saved_memories, memory_error = False, [], None
-    if mode == "on":
+    if profile_mode == "on":
         recent_changed = apply_recent_context(
             user_id, decision["recent_context"], message_id=message_id,
             source_timestamp=_timestamp(source.get("timestamp")),
+            before_write=(
+                lambda: _renew_profile_claim(message_id, claim_token)
+                if isinstance(claim_token, str)
+                else True
+            ),
         )
+        if isinstance(claim_token, str) and not _renew_profile_claim(message_id, claim_token):
+            return {"status": "skipped", "reason": "stale_claim"}
         try:
             from services.memory_service import MemoryWriteError, apply_profile_memory_proposals
             saved_memories = apply_profile_memory_proposals(user_id, decision["memories"], surface, message_id, match_id)
@@ -603,14 +849,30 @@ def process_profile_message(user_id: str, message: str, message_id: str | None, 
         except Exception as exc:
             memory_error = type(exc).__name__
     _trace(user_id, mode, {"message_id": message_id, "surface": surface, "match_id": match_id,
+                             "_run_status": run_status,
+                             "_next_attempt_at": next_attempt_at,
+                             "_lease_token": claim_token if isinstance(claim_token, str) else None,
                              "policy_versions": decision["policy_versions"],
                              "recent_context": {"reason_code": decision["recent_context"]["reason_code"], "changed": recent_changed,
                                                 "message_kind": decision["recent_context"].get("message_kind"),
                                                 "field_names": sorted((decision["recent_context"].get("fields") or {}).keys()),
                                                 "input_eligible": True},
-                             "memory": {"codes": decision["memory_codes"], "candidate_count": len(decision["memories"]), "saved_count": len(saved_memories), "error_code": memory_error}})
-    return {"status": "applied" if recent_changed or saved_memories else "skipped", "decision": decision,
-            "recent_changed": recent_changed, "saved_memories": saved_memories, "memory_error": memory_error}
+                             "memory": {"codes": decision["memory_codes"], "candidate_count": len(decision["memories"]), "saved_count": len(saved_memories), "error_code": memory_error},
+                             "follow_up": {"status": followup_result.get("status", "disabled"),
+                                           "action": (decision.get("follow_up") or {}).get("action"),
+                                           "changed": followup_result.get("status") in {"created", "updated"}}})
+    followup_changed = followup_result.get("status") in {"created", "updated"}
+    return {
+        "status": "retry_scheduled" if run_status == "failed" else ("applied" if recent_changed or saved_memories or followup_changed else "skipped"),
+        "decision": decision,
+        "recent_changed": recent_changed,
+        "saved_memories": saved_memories,
+        "memory_error": memory_error,
+        "follow_up": followup_result,
+        "retry_scheduled": run_status == "failed",
+        "attempt_count": attempt_count,
+        "next_attempt_at": next_attempt_at,
+    }
 
 
 # Compatibility shims for current callers and tests.
@@ -620,5 +882,3 @@ def analyze_recent_context(message: str, previous_context: str = "") -> dict[str
 
 def process_recent_context(user_id: str, message: str, message_id: str | None = None) -> dict[str, Any]:
     return process_profile_message(user_id, message, message_id, "legacy")
-
-

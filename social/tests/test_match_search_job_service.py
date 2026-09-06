@@ -5,10 +5,19 @@ from pymongo.errors import DuplicateKeyError
 
 from routers import match as match_router
 from services import match_search_job_service as jobs
+from services.match_search_context import context_embedding_source_hash
 from tests.match_flow_store import Collection
 
 
 class MatchSearchJobServiceTests(unittest.TestCase):
+    def setUp(self):
+        with jobs._owned_lease_lock:
+            jobs._owned_lease_ids.clear()
+
+    def tearDown(self):
+        with jobs._owned_lease_lock:
+            jobs._owned_lease_ids.clear()
+
     @patch.object(jobs, "_has_live_match", return_value=False)
     @patch.object(jobs, "profiles_coll")
     @patch.object(jobs, "MATCH_SEARCH_JOBS")
@@ -320,6 +329,7 @@ class MatchSearchJobServiceTests(unittest.TestCase):
         profiles.find_one.return_value = {
             "user_id": "owner", "current_context": "想找人去走走",
             "current_context_revision": 4, "context_embedding": [0.1],
+            "context_embedding_source_hash": context_embedding_source_hash("想找人去走走"),
         }
         profiles.aggregate.return_value = []
         matches.find.return_value = []
@@ -348,8 +358,154 @@ class MatchSearchJobServiceTests(unittest.TestCase):
 
         query, update = profiles.update_one.call_args.args
         self.assertEqual(query, {"user_id": "owner", "current_context": "最近想去散步"})
-        self.assertEqual(update, {"$set": {"context_embedding": [0.2]}})
+        self.assertEqual(update, {"$set": {
+            "context_embedding": [0.2],
+            "context_embedding_source_hash": context_embedding_source_hash("最近想去散步"),
+        }})
         self.assertNotIn("current_context", update["$set"])
+
+    @patch.object(match_router, "get_embedding", return_value=[0.9])
+    @patch.object(match_router, "matches_coll")
+    @patch.object(match_router, "profiles_coll")
+    def test_topic_query_embedding_is_ephemeral_and_does_not_pollute_profile(
+        self, profiles, matches, embedding,
+    ):
+        profiles.find_one.return_value = {
+            "user_id": "owner", "current_context": "最近想看展",
+            "current_context_revision": 7, "context_embedding": [0.1],
+            "context_embedding_source_hash": context_embedding_source_hash("最近想看展"),
+        }
+        profiles.aggregate.return_value = []
+        matches.find.return_value = []
+
+        with patch.object(match_router.risk_block_service, "excluded_user_ids", return_value=[]):
+            result = match_router.generate_matches_for_user(
+                "owner", report_progress=lambda _step: True, can_commit=lambda: True,
+                search_context={
+                    "invitation_topic": "衝浪",
+                    "query_text": "想找人一起衝浪",
+                    "source_message_id": "owner-message",
+                },
+            )
+
+        self.assertEqual(result["status"], "no_suitable_candidate")
+        embedding.assert_called_once_with("想找人一起衝浪")
+        profiles.update_one.assert_not_called()
+        pipeline = profiles.aggregate.call_args.args[0]
+        self.assertEqual(pipeline[0]["$vectorSearch"]["queryVector"], [0.9])
+
+    @patch.object(match_router, "matches_coll")
+    @patch.object(match_router, "profiles_coll")
+    def test_match_test_cohort_only_recalls_the_same_cohort(self, profiles, matches):
+        profiles.find_one.return_value = {
+            "user_id": "seed_user_01", "current_context": "最近想喝咖啡",
+            "current_context_revision": 7, "context_embedding": [0.1],
+            "context_embedding_source_hash": context_embedding_source_hash("最近想喝咖啡"),
+            "test_match_cohort": "match_v1",
+        }
+        profiles.aggregate.return_value = []
+        matches.find.return_value = []
+
+        with patch.object(match_router.risk_block_service, "excluded_user_ids", return_value=[]):
+            match_router.generate_matches_for_user(
+                "seed_user_01", report_progress=lambda _step: True,
+                can_commit=lambda: True,
+            )
+
+        match_stage = profiles.aggregate.call_args.args[0][1]["$match"]
+        self.assertEqual(match_stage["test_match_cohort"], "match_v1")
+
+    @patch.object(match_router, "matches_coll")
+    @patch.object(match_router, "profiles_coll")
+    def test_real_user_candidate_pool_excludes_all_test_ids(self, profiles, matches):
+        profiles.find_one.return_value = {
+            "user_id": "real-owner", "current_context": "最近想喝咖啡",
+            "current_context_revision": 7, "context_embedding": [0.1],
+            "context_embedding_source_hash": context_embedding_source_hash("最近想喝咖啡"),
+        }
+        profiles.aggregate.return_value = []
+        matches.find.return_value = []
+
+        with patch.object(match_router.risk_block_service, "excluded_user_ids", return_value=[]):
+            match_router.generate_matches_for_user(
+                "real-owner", report_progress=lambda _step: True,
+                can_commit=lambda: True,
+            )
+
+        match_stage = profiles.aggregate.call_args.args[0][1]["$match"]
+        self.assertEqual(match_stage["test_match_cohort"], {"$exists": False})
+        self.assertIn(
+            {"user_id": {"$not": {"$regex": match_router.MATCH_TEST_ID_PATTERN}}},
+            match_stage["$and"],
+        )
+
+    @patch.object(match_router, "get_embedding", side_effect=RuntimeError("embedding unavailable"))
+    @patch.object(match_router, "profiles_coll")
+    def test_topic_embedding_failure_is_a_search_service_error(self, profiles, _embedding):
+        profiles.find_one.return_value = {
+            "user_id": "owner", "current_context": "最近想看展",
+            "current_context_revision": 7, "context_embedding": [0.1],
+        }
+
+        with self.assertRaises(match_router.MatchSearchPipelineError) as raised:
+            match_router.generate_matches_for_user(
+                "owner", report_progress=lambda _step: True, can_commit=lambda: True,
+                search_context={"invitation_topic": "衝浪", "query_text": "想找人一起衝浪"},
+            )
+
+        self.assertEqual(raised.exception.code, "vector_search_unavailable")
+
+    @patch.object(match_router, "get_embedding", return_value=[0.9])
+    @patch.object(match_router, "matches_coll")
+    @patch.object(match_router, "profiles_coll")
+    def test_next_ordinary_search_uses_stored_context_after_topic_search(
+        self, profiles, matches, embedding,
+    ):
+        profiles.find_one.return_value = {
+            "user_id": "owner", "current_context": "最近想看展",
+            "current_context_revision": 7, "context_embedding": [0.1],
+            "context_embedding_source_hash": context_embedding_source_hash("最近想看展"),
+        }
+        profiles.aggregate.return_value = []
+        matches.find.return_value = []
+
+        with patch.object(match_router.risk_block_service, "excluded_user_ids", return_value=[]):
+            match_router.generate_matches_for_user(
+                "owner", report_progress=lambda _step: True, can_commit=lambda: True,
+                search_context={"invitation_topic": "衝浪", "query_text": "想找人一起衝浪"},
+            )
+            match_router.generate_matches_for_user(
+                "owner", report_progress=lambda _step: True, can_commit=lambda: True,
+            )
+
+        self.assertEqual(embedding.call_args_list[0].args, ("想找人一起衝浪",))
+        self.assertEqual(embedding.call_count, 1)
+        pipelines = [call.args[0] for call in profiles.aggregate.call_args_list]
+        self.assertEqual(pipelines[0][0]["$vectorSearch"]["queryVector"], [0.9])
+        self.assertEqual(pipelines[1][0]["$vectorSearch"]["queryVector"], [0.1])
+        profiles.update_one.assert_not_called()
+
+    @patch.object(jobs, "profiles_coll")
+    @patch.object(jobs, "MATCH_SEARCH_JOBS")
+    def test_graceful_shutdown_requeues_only_this_process_lease(
+        self, collection, profiles,
+    ):
+        collection.find_one_and_update.return_value = {
+            "job_id": "job-1", "user_id": "owner", "source": "agent_v3",
+        }
+        with jobs._owned_lease_lock:
+            jobs._owned_lease_ids.update({"owned-lease"})
+
+        jobs.stop_match_search_worker()
+
+        query, update = collection.find_one_and_update.call_args.args[:2]
+        self.assertEqual(query, {"status": "running", "lease_id": "owned-lease"})
+        self.assertEqual(update["$set"]["status"], "queued")
+        self.assertIn("lease_id", update["$unset"])
+        profile_projection = profiles.update_one.call_args.args[1]["$set"]["match_search"]
+        self.assertEqual(profile_projection["status"], "queued")
+        self.assertEqual(profile_projection["step"], "loading_profile")
+        self.assertEqual(jobs._owned_lease_ids, set())
 
     @patch.object(match_router, "matches_coll")
     @patch.object(match_router, "profiles_coll")

@@ -54,7 +54,8 @@
 
 ### 3.1 Profile extraction（`profile_skills.py`）
 
-- 只接受**已保存的 owner 原始訊息**（`public_chat.py` 在保存後背景排程）；同一 `message_id` 最多處理一次（`_claim_profile_message` 的 `$setOnInsert` upsert）。
+- 只接受**已保存的 owner 原始訊息**（`public_chat.py` 在保存後先寫入 `metadata.message_use`，再背景排程）；只有 `message-use-v1` 的 `ordinary` source 可處理，calendar operation、assessment、no-memory 與未標記 source fail closed。
+- 同一 `message_id` 最多成功處理一次；provider 暫時失敗保留 processing lease，最多三次依 30／120 秒退避，由 `profile-retry-worker` 重試；政策排除與 source 不可用不重試。
 - 禁止使用 assistant reply、conversation history、tool result、match state 或對方資料作為寫入來源。
 - LLM 只提出 typed `ProfileExtractionDecision`（`profile_contracts.py`）＋原句 `evidence_span`；evidence 必須是 owner message 的連續原文子字串（`_valid_evidence_span`），否則拒絕該欄位。
 - 近期情境只保存本人現實活動；找人、配對、提案、等待回覆不得成為近期情境。長期記憶只保存明確且可持續的本人偏好（confidence ≥0.90，`subject=owner`）。

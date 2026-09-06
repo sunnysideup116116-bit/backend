@@ -46,7 +46,7 @@ HTTP adapter
 | Guard adapter | `services/ayue_agent/v3/guarded_execution.py` | Guard→executor args→typed tool；Web URL binding |
 | Calendar runtime | `services/ayue_agent/v3/calendar_runtime.py` | clarification、draft/reference、reads、commands、preflight、confirmation preparation |
 | Web runtime | `services/ayue_agent/v3/web_runtime.py` | bounded research/finish phases 與 `web_research.v1` assembly |
-| Relationship runtime | `services/ayue_agent/v3/relationship_runtime.py` | 一般 read proposal 與 date-card write-intent 的受限 dispatch |
+| Relationship runtime | `services/ayue_agent/v3/relationship_runtime.py` | accepted-contact read、活動推薦補查與 date-card write-intent 的受限 dispatch |
 | ProductInfo | `services/ayue_agent/v3/sub_agents/product_info_agent.py` | bounded allowlisted product knowledge 與 `product_info.v1` observation |
 | Guard | `services/ayue_agent/v3/guard.py` | 純程式碼 registry/schema/duplicate/budget/write-confirmation validation |
 | Tool registry | `services/ayue_agent/tool_registry.py` | ToolSpec、三層 schema、risk、argument source、progress |
@@ -92,11 +92,11 @@ Agent allowlist：
 calendar | places | web | match | relationship | profile | product_info | synthesizer
 ```
 
-`task_brief` 保存目標與限制，不是 tool arguments。只有 Web 可帶 `evidence_policy=casual_discovery|strict_verification`；Calendar availability task 可帶 `outcome_contract=calendar.availability.v1`，下游可用 bounded `run_if` control edge 等待結果而不接收 Calendar observation。
+`task_brief` 保存目標與限制，不是 tool arguments。Places task 必填 typed `place_mode=discover|details|reviews`：只有 `discover` 可 search nearby 並發布新的推薦 snapshot；`details`／`reviews` 綁定單一 server-owned place reference，且不提供 nearby tool。只有 Web 可帶 `evidence_policy=casual_discovery|strict_verification`；Calendar availability task 可帶 `outcome_contract=calendar.availability.v1`，下游可用 bounded `run_if` control edge 等待結果而不接收 Calendar observation。
 
 Planner 只有在下游會消費上游 typed observation、candidate ref 或其他明確 contract 時才建立 `depends_on`；獨立請求放在同一層平行執行，不為了排列順序製造依賴。需要等待但不傳遞資料時使用 bounded `run_if` control edge。
 
-Planner 使用 compact prompt projection：保留最近 4 則且最多 2,000 字元的歷史，移除已在 `message` 中重複的最新 user message；clock 只投影本地日期／時間、時區、星期與實際出現的相對日期 reference。缺少的 optional state 不送入 prompt，active proposal 不包含 revision。這只縮短 Planner input，不改 PublicAgentTurnContext 的全域 12 則／6,000 字元 budget 或其他 specialist slice。
+Planner 使用 compact prompt projection：保留最近 4 則且最多 2,000 字元的歷史，移除已在 `message` 中重複的最新 user message；clock 只投影本地日期／時間、時區、星期與實際出現的相對日期 reference。缺少的 optional state 不送入 prompt，active proposal 不包含 revision。這只縮短 Planner input，不改 PublicAgentTurnContext 的全域 32 則／8,000 字元 budget 或其他 specialist slice。
 
 目前 compact-v3 prompt 將「具體日期＋從既有聯絡人挑一位＋新活動＋附近晚餐」明定為 `calendar`、平行 gated 的 `relationship`／`web`、依賴 Web activity venue 的 `places`，以及 terminal `synthesizer`。任一子需求需要 domain state 或 external truth 時，整回合不得使用 direct chat 或 provider-authored synth-only plan。Planner schema 失敗最多重試一次，並只附加欄位級 allowlisted 修正提示；無效／空 DAG 不靜默降級成 Synthesizer-only。
 
@@ -121,7 +121,7 @@ run(context_slice, *, task, services)
     -> tuple[TaskRunnerResult, SubAgentMetrics | None]
 ```
 
-Calendar、Web、ProductInfo 回 completed results；Places、Match、Profile 使用 proposal runner。Relationship 透過自己的 runtime 依已驗證 `write_intent` 切換一般 READ 或 date-card WRITE proposal surface，兩者仍交由 Scheduler 中央 Guard。
+Calendar、Web、ProductInfo 回 completed results；Places、Match、Profile 使用 proposal runner。Relationship 透過自己的 runtime 依已驗證 `relationship_intent`／`write_intent` 切換 lookup、活動推薦補查或 date-card WRITE surface；推薦結果以 `relationship_recommendation.v1` envelope 交給 Synthesizer，工具仍交由 Scheduler 中央 Guard。
 
 ### 4.5 Final composition
 
@@ -131,7 +131,7 @@ Synthesizer 只能使用本回合 verified observations。Map URL、source URL�
 
 格式提示依資訊量自適應：多候選、比較、步驟或清楚分組可用輕量 Markdown；簡單答案維持自然 prose，不要求 Places/Web/itinerary 固定標題。`presentation_mode="itinerary"` 只是 editorial hint，仍使用 ordinary compose contract。Server-owned mutation verification／pending preview 只有在 exclusive transaction 時 bypass Synthesizer；混合回合先組合其他 observations，再附加鎖定回覆，避免安全回覆丟失同回合結果。
 
-LLM routing 使用兩級模型：Planner 與 Places／Match／Relationship／Profile proposal runner 要求 `OLLAMA_FAST_CHAT_MODEL`（未設定時回退 main）；Calendar、Web、Synthesizer 使用 main；ProductInfo bounded path 不呼叫 LLM。Planner 對 function-call protocol failure 最多 retry 一次；provider error 不重試，兩次仍失敗時 fail closed。`llm_call_count` 由每個 owner 真實累計，Scheduler 以 metrics 加總，不以 agent 節點數猜測；retry/failure attempt details 只存在 localhost ephemeral debug。
+LLM routing 使用兩級模型：Planner 與 Places／Match／Relationship／Profile proposal runner 要求 `OLLAMA_FAST_CHAT_MODEL`（未設定時回退 main）；Calendar、Web、Synthesizer 使用 main；ProductInfo bounded path 不呼叫 LLM。Planner 對 function-call protocol failure 或 provider error 最多 retry 一次，重試仍使用同一 requested tier，不自動切換 main；兩次仍失敗時 fail closed。`llm_call_count` 由每個 owner 真實累計，Scheduler 以 metrics 加總，不以 agent 節點數猜測；retry/failure attempt details 只存在 localhost ephemeral debug。
 
 `compose_public_reply.presentation_class` 的正式 enum 不變。Synthesizer boundary 只對 provider drift 做窄幅相容：舊的 `itinerary` 正規化為 `grounded_recommendation`，其他未知值改用既有安全預設 `conversation`，避免丟棄其餘已通過驗證的自然文字。這項相容不放寬 candidate refs、Web URL/source refs、internal IDs 或 mutation authority 的驗證。
 
@@ -139,7 +139,9 @@ LLM routing 使用兩級模型：Planner 與 Places／Match／Relationship／Pro
 
 `services/ayue_agent/context.py` 是 Public Context 唯一 owner：
 
-- recent messages ≤12；總字元 ≤6,000；relevant memories ≤8。
+- recent messages ≤32；總字元 ≤8,000；relevant memories ≤8。
+- Saved Public owner messages carry the server-owned `metadata.message_use` (`message-use-v1`) projection. Only `ordinary` messages may feed profile extraction, compaction, or proactive care; calendar operations, assessment answers, explicit no-memory turns, and unmarked legacy messages fail closed.
+- Profile extraction may also persist up to three owner-scoped `proactive_followups` candidates. The background scheduler owns their timing, expiry, retry lease, consent and Calendar busy/free gate; the model receives only bounded topic/question/evidence projections, and the initial deployment uses `AYUE_PROACTIVE_FOLLOWUP_MODE=shadow` until delivery is explicitly enabled.
 - 已通過驗證的 `ConversationSummaryV1` 只作 owner-scoped 對話延續；watermark 之前的訊息不再重複送入 prompt。摘要不可取代 Profile、Match、Calendar 或 Memory 的 canonical state。
 - 一般配對與活動邀請分別投影為 `active_proposal` 與 `active_event_invitation`；兩者可同時存在，且 specialist slice 不含 match ID、event ID 或其他 authority-bearing identity。
 - 不輸出 raw Mongo/Neo4j document、`seed_user_*`、未公開 ID、對方私人記憶或對方行事曆。
@@ -216,11 +218,11 @@ Calendar mutation 只使用 `calendar.submit_commands`。一至十筆 authority-
 
 ### Places
 
-只擁有 structured nearby search、hours、price、rating、walking、distance 與 provider-neutral place projection。Search radius 對 OSM 與 Google 都是 hard bound；保存位置只允許粗粒度城市／行政區。`search_nearby` 可選 `rating|hours|price|walking` enrichment，`resolve_place` 可選前三者；預設不要求昂貴欄位，缺少或 partial price 不推測。Walking 以一筆 bounded Routes matrix 呼叫處理最多八個 destination，單一 element 失敗不拖垮其他候選；`measure_distance` 預設 `DRIVE`，明確要求時可用 `WALK`。只有優惠、特殊菜單、活動、臨時歇業公告、社群貼文等 Places 欄位無法建立的目前公開主張才由獨立 Web task 查證。Public place-card rendering 由 `AYUE_PUBLIC_PLACE_CARDS_ENABLED` 控制，目前 demo 預設關閉；關閉時 candidate refs、provider IDs、map URLs 與 Web grounding 仍只在 server-side runtime 內保留。
+只擁有 structured nearby search、hours、price、rating、walking、distance 與 provider-neutral place projection。Search radius 對 OSM 與 Google 都是 hard bound；保存位置只允許粗粒度城市／行政區。`search_nearby` 可選 `rating|hours|price|walking` enrichment，`resolve_place` 可選前三者；預設不要求昂貴欄位，缺少或 partial price 不推測。只有 `discover` mode 的 `search_nearby` 會發布可供後續序號選取的 candidate snapshot；`details`／`reviews` 會用 server-owned 名稱＋地址做 resolve，核對 provider identity 後直接回答，不重新加上「推薦地點」或建立新序號清單。明確的飲料店、餐廳、酒吧、公園等類別文字會先把 ordinal resolution 限縮到相符的歷史 snapshot；裸「它／這間／那間」只有在 `recent_place_reference` 唯一選定時才解析。未完成的 place-to-calendar 草稿若被明確放棄，room-scoped record 立即清除，但其 safe resolved place 可保留到本回合供 Places／Web 回答，不可改讀 Match 對象。Walking 以一筆 bounded Routes matrix 呼叫處理最多八個 destination，單一 element 失敗不拖垮其他候選；`measure_distance` 預設 `DRIVE`，明確要求距離／交通時才執行。只有優惠、特殊菜單、活動、臨時歇業公告、社群貼文等 Places 欄位無法建立的目前公開主張才由獨立 Web task 查證。Public place-card rendering 由 `AYUE_PUBLIC_PLACE_CARDS_ENABLED` 控制，目前 demo 預設關閉；關閉時 candidate refs、provider IDs、map URLs 與 Web grounding 仍只在 server-side runtime 內保留。
 
 ### Web
 
-Web Runtime 擁有 research/finish phases，research 最多三個 tool calls、extract 最多一次；finish-only phase 不消耗 Web tool budget。Web Agent 只依 `phase`／`available_actions` 行動，`round_index` 僅供診斷。
+Web Runtime 擁有 research/finish phases，research 最多三個 tool calls、extract 最多一次；finish-only phase 不消耗 Web tool budget。Reviews 只接收單一已驗證店家的 server-issued subject ref，口味食記可保留為 source-attributed direct finding，單一來源／分歧來源使用 partial 與限制。Web Agent 只依 `phase`／`available_actions` 行動，`round_index` 僅供診斷。
 
 Search rows 有獨立 projection cap；達到 search cap 不會停止掃描後續 observations，因此 late extract 仍可進 finalization。URL 必須綁定本回合搜尋結果或 owner 原句提供的安全公開 URL。
 

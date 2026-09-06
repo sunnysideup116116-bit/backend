@@ -41,6 +41,27 @@ class V3ContextSlicerTests(unittest.TestCase):
         self.assertNotIn("active_proposal", s.payload)
         self.assertNotIn("recent_context", s.payload)
 
+    def test_places_slice_gets_only_safe_abandoned_place_referent(self):
+        self.turn.place_followup = {
+            "fields": {"date": "2026-09-12", "start_time": "08:30"},
+            "resolved_place": {
+                "reference": "place_ref_0123456789abcdef01234567",
+                "ordinal": 3,
+                "label": "JINLIANFA 金聯發",
+            },
+            "abandonment_requested": True,
+        }
+
+        sliced = slice_for_agent("places", self.turn, prior_observations=[])
+
+        self.assertEqual(
+            sliced.payload["place_followup"]["resolved_place"]["label"],
+            "JINLIANFA 金聯發",
+        )
+        self.assertTrue(sliced.payload["place_followup"]["abandonment_requested"])
+        self.assertNotIn("fields", sliced.payload["place_followup"])
+        self.assertNotIn("date", str(sliced.payload["place_followup"]))
+
     def test_match_slice_excludes_calendar_details(self):
         s = slice_for_agent("match", self.turn, prior_observations=[])
         self.assertEqual(s.agent, "match")

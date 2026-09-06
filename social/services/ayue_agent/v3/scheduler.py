@@ -31,6 +31,7 @@ from services.ayue_agent.match_opportunity import (
     claim_guidance_offer,
     decline_guidance_offer,
 )
+from services.match_search_context import extract_invitation_topic
 from services.ayue_agent.product_identity import PUBLIC_PENDING_CANCEL_REPLY, PUBLIC_PLANNER_INVALID_REPLY
 from services.assessment_session_service import (
     active_assessment_session, advance_assessment_session,
@@ -84,11 +85,18 @@ from .sub_agents.product_info_agent import (
 )
 from .place_references import (
     clarification_message as place_reference_clarification,
+    commit_resolved_selection,
+    PlaceReferencePersistenceError,
     get_candidate_set as get_place_candidate_set,
+    get_candidate as get_place_candidate,
     public_projection as place_candidate_projection,
     public_resolution as public_place_resolution,
     replace_presented_candidates,
     resolve_message_reference,
+)
+from .place_followups import (
+    abandonment_requested as place_followup_abandonment_requested,
+    clear_followup as clear_place_followup,
 )
 from .place_projection import (
     MAX_PLACE_CARDS, MAX_PLACE_CARDS_PER_CATEGORY, _PLACE_CATEGORIES, _distance_label,
@@ -115,6 +123,39 @@ MAX_PARALLEL = max(1, min(int(os.getenv("AYUE_SUBAGENT_MAX_PARALLEL", "2") or "2
 # ceiling explicit across the whole Public run.
 MAX_TOTAL_READS = 9
 _ASSESSMENT_START_CONFIRMATIONS = frozenset({"開始", "開始吧", "開始啊", "開始阿"})
+
+
+def _new_match_topic_hint(turn: Any) -> str:
+    """Resolve the common ``拍人像，可以幫我約人嗎`` routing ambiguity.
+
+    This is a bounded hint for Planner output repair, not an authority gate:
+    it only applies when an activity topic and an explicit new-person cue are
+    both present in the current turn or its immediately adjacent history. A
+    named/@-mentioned contact therefore remains a Relationship request.
+    """
+    message = str(getattr(turn, "message", "") or "")
+    topic = extract_invitation_topic(message)
+    if not topic or "@" in message:
+        return ""
+    history = list(getattr(turn, "recent_messages", None) or [])
+    texts = [message] + [
+        str(item.get("content") or "")
+        for item in history
+        if isinstance(item, dict)
+        and (
+            item.get("role") == "user"
+            or (
+                not item.get("role")
+                and str(item.get("sender_id") or "") not in {"ai_assistant", "assistant", "system"}
+            )
+        )
+    ]
+    new_cue = re.search(r"找人|配對|牽線|新人|新朋友|新的人|找新的", " ".join(texts))
+    if not new_cue:
+        return ""
+    if re.search(r"已認識|已經認識|現有聯絡人|@", message):
+        return ""
+    return topic
 
 
 def _assessment_start_confirmation_requested(message: str, pending: list[dict[str, Any]]) -> bool:
@@ -156,8 +197,13 @@ def _direct_chat_block_reason(
         return "active_match_guidance"
     if getattr(turn, "mentioned_contact_overflow", False):
         return "mentioned_contact_overflow"
-    if getattr(turn, "place_reference_resolution", None):
+    if (
+        getattr(turn, "place_reference_resolution", None)
+        and getattr(plan, "place_selection", None) is not None
+    ):
         return "place_reference_resolution"
+    if getattr(turn, "place_followup", None):
+        return "place_followup"
     if plan.opportunity is not None and plan.opportunity.signal != "none":
         return "opportunity"
     return None
@@ -165,18 +211,39 @@ def _direct_chat_block_reason(
 
 def _planner_failure_reply(turn: Any) -> str:
     """Return a state-aware clarification without inferring write authority."""
+    message = re.sub(r"\s+", "", str(getattr(turn, "message", "") or ""))
+    match_context = bool(re.search(
+        r"配對|媒合|牽線|找.{0,3}人|約人|人選|對方|"
+        r"查看?狀態|進度|接受|婉拒|拒絕|撤回|取消搜尋|不要找|繼續等",
+        message,
+    ))
+    if not match_context:
+        return PUBLIC_PLANNER_INVALID_REPLY
     active = getattr(turn, "active_proposal", None) or {}
-    allowed = set(active.get("allowed_actions") or [])
-    if "cancelled" in allowed:
-        return "目前這張提案正在等對方回覆。你是想查看狀態，還是撤回這次配對？"
-    if allowed:
-        return "目前有一張待決定的配對提案。你可以直接告訴我要接受、婉拒，或只查看狀態。"
+    if active:
+        return "目前有一張牽線提案，接受、婉拒或撤回請到「阿月牽線」卡片上操作；我也可以替你查看狀態。"
     search = getattr(turn, "match_search", None) or {}
     if search.get("cancellable"):
         return "目前仍在搜尋人選。你是想查看進度，還是取消這次搜尋？"
-    if re.search(r"配對|媒合|牽線|找.{0,3}人|人選", str(getattr(turn, "message", "") or "")):
+    if re.search(r"配對|媒合|牽線|找.{0,3}人|約人|人選", message):
         return "你是想了解配對方式，還是要我現在開始找人？直接選一個就好。"
     return PUBLIC_PLANNER_INVALID_REPLY
+
+
+def _abandon_place_followup_for_turn(turn: Any) -> Any:
+    """Discard an explicitly abandoned draft while retaining its safe referent."""
+    followup = getattr(turn, "place_followup", None)
+    if (
+        not isinstance(followup, dict)
+        or not place_followup_abandonment_requested(getattr(turn, "message", ""))
+    ):
+        return turn
+    clear_place_followup(turn.user_id, turn.room_id)
+    turn.place_followup = {
+        **followup,
+        "abandonment_requested": True,
+    }
+    return turn
 
 
 def _privacy_safe_planner_attempts(metrics: PlannerMetrics) -> list[dict[str, Any]]:
@@ -222,6 +289,10 @@ def _runtime_collection(name: str) -> Any:
 
 
 RUNS = _runtime_collection("agent_runs")
+_EXPLICIT_PLACE_HOURS_RE = re.compile(
+    r"營業(?:時間|資訊)?|開(?:店|門)時間|關(?:店|門)時間|公休日?|休息日|幾點(?:開|關)|opening\s+hours?",
+    re.IGNORECASE,
+)
 
 
 def ensure_indexes() -> None:
@@ -346,6 +417,63 @@ def _invoke_registered_runner(
     return registration.runner(context_slice, task=task, services=services)
 
 
+_PLACE_MODE_TOOLS: dict[str, frozenset[str]] = {
+    "discover": frozenset({"places.search_nearby", "places.measure_distance"}),
+    "details": frozenset({"places.resolve_place", "places.measure_distance"}),
+    "reviews": frozenset({"places.resolve_place"}),
+}
+_PLACE_DISTANCE_REQUEST_RE = re.compile(
+    r"距離|多遠|走路|步行|交通|怎麼去|怎麼走|要多久|幾分鐘|公里|公尺",
+)
+
+
+def _place_distance_requested(context_slice: AgentContextSlice) -> bool:
+    text = str(context_slice.payload.get("message") or "")
+    return bool(_PLACE_DISTANCE_REQUEST_RE.search(text))
+
+
+def _run_registered_places(
+    context_slice: AgentContextSlice,
+    *,
+    task: SubTask,
+    services: GuardedReadExecutor,
+) -> tuple[TaskRunnerResult, SubAgentMetrics]:
+    """Run Places through the shared registration with a typed tool surface."""
+    del services
+    metrics = SubAgentMetrics()
+    mode = str(task.place_mode or "")
+    allowed_tools = _PLACE_MODE_TOOLS.get(mode)
+    if allowed_tools is None:
+        metrics.error = "place_mode_missing_or_invalid"
+        metrics.rejected_calls.append("place_mode_invalid")
+        return TaskRunnerResult.from_proposals([]), metrics
+
+    mode_slice = context_slice.model_copy(update={
+        "payload": {**context_slice.payload, "place_mode": mode},
+    })
+    proposals, metrics = run_places(
+        mode_slice,
+        task_brief=task.task_brief,
+        tool_names=allowed_tools,
+    )
+    accepted = []
+    for proposal in list(proposals or []):
+        if (
+            proposal.tool_name in allowed_tools
+            and (
+                proposal.tool_name != "places.measure_distance"
+                or _place_distance_requested(mode_slice)
+            )
+        ):
+            accepted.append(proposal)
+        else:
+            # The Planner's typed mode, not model-authored tool selection,
+            # decides whether a Places proposal is allowed. In particular a
+            # reviews task can never turn into a nearby search.
+            metrics.rejected_calls.append("place_tool_intent_mismatch")
+    return TaskRunnerResult.from_proposals(accepted), metrics
+
+
 _SUB_AGENT_RUNNERS = {
     "calendar": RuntimeRegistration(
         runner=calendar_runtime.run,
@@ -353,7 +481,7 @@ _SUB_AGENT_RUNNERS = {
         confirmed_result_projector=calendar_runtime.confirmed_result_projection,
         step_prefix="",
     ),
-    "places": RuntimeRegistration(runner=proposal_runner(run_places)),
+    "places": RuntimeRegistration(runner=_run_registered_places),
     "web": RuntimeRegistration(runner=web_runtime.run),
     "match": RuntimeRegistration(runner=match_runtime.run),
     "relationship": RuntimeRegistration(runner=relationship_runtime.run),
@@ -405,6 +533,59 @@ def _topological_layers(plan: Plan) -> list[list[SubTask]]:
             done.add(t.id)
             remaining.remove(t)
     return layers
+
+
+def _ensure_place_hours_fallback(plan: Plan, message: str) -> tuple[Plan, bool]:
+    """Add the typed optional Web fallback when Planner omitted explicit hours verification."""
+    if not _EXPLICIT_PLACE_HOURS_RE.search(str(message or "")):
+        return plan, False
+    if any(task.agent == "web" for task in plan.tasks):
+        return plan, False
+    place_tasks = [
+        task for task in plan.tasks
+        if task.agent == "places" and task.place_mode == "details"
+    ]
+    synthesizers = [task for task in plan.tasks if task.agent == "synthesizer"]
+    if len(place_tasks) != 1 or len(synthesizers) != 1 or len(plan.tasks) >= 5:
+        return plan, False
+    place_task = place_tasks[0]
+    synthesizer = synthesizers[0]
+    used_ids = {task.id for task in plan.tasks}
+    web_id = "web_hours_fallback"
+    suffix = 2
+    while web_id in used_ids:
+        web_id = f"web_hours_fallback_{suffix}"
+        suffix += 1
+    web_task = SubTask(
+        id=web_id,
+        agent="web",
+        web_mode="place_hours_fallback",
+        evidence_policy="casual_discovery",
+        depends_on=[place_task.id],
+        task_brief=(
+            "若 Places 沒有完整星期營業資訊，補查同一個 server 綁定店家的公開營業資訊；"
+            "不得改查其他店家。"
+        ),
+    )
+    synth_dependencies = [
+        dependency for dependency in synthesizer.depends_on
+        if dependency != place_task.id
+    ]
+    if web_id not in synth_dependencies:
+        synth_dependencies.append(web_id)
+    updated_synthesizer = synthesizer.model_copy(update={
+        "depends_on": synth_dependencies,
+    })
+    tasks: list[SubTask] = []
+    for task in plan.tasks:
+        if task.id == synthesizer.id:
+            tasks.extend([web_task, updated_synthesizer])
+        else:
+            tasks.append(task)
+    return Plan.model_validate({
+        **plan.model_dump(mode="python"),
+        "tasks": [task.model_dump(mode="python") for task in tasks],
+    }), True
 
 
 def _observation_dict(task_id: str, result: "SubTaskResult") -> dict[str, Any]:
@@ -519,7 +700,9 @@ def _failure_observation_from_tool_result(tool_result: Any) -> dict[str, Any] | 
 
 
 def _prior_observations_for(
-    task: "SubTask", task_results: dict[str, list["SubTaskResult"]],
+    task: "SubTask",
+    task_results: dict[str, list["SubTaskResult"]],
+    task_by_id: dict[str, "SubTask"] | None = None,
 ) -> list[dict[str, Any]]:
     """Return only the observations of this task's declared dependencies.
 
@@ -528,11 +711,34 @@ def _prior_observations_for(
     A task that produced multiple tool observations contributes each one.
     """
     prior: list[dict[str, Any]] = []
-    for dep in task.depends_on:
+    def add_dependency(dep: str) -> None:
         for result in task_results.get(dep, []):
-            if result.status is not SubTaskStatus.SKIPPED:
+            if result.status is SubTaskStatus.SKIPPED:
+                if (
+                    result.skip_reason == "places_hours_sufficient"
+                    and task_by_id is not None
+                    and dep in task_by_id
+                ):
+                    for upstream in task_by_id[dep].depends_on:
+                        add_dependency(upstream)
+                continue
+            else:
                 prior.append(_observation_dict(dep, result))
+    for dep in task.depends_on:
+        add_dependency(dep)
     return prior
+
+
+def _dependency_completed(results: list["SubTaskResult"]) -> bool:
+    """Treat a Web no-op as satisfied while preserving real failure semantics."""
+    return any(
+        result.status is SubTaskStatus.OK
+        or (
+            result.status is SubTaskStatus.SKIPPED
+            and result.skip_reason == "places_hours_sufficient"
+        )
+        for result in results
+    )
 
 
 def _public_sources(task_results: Any) -> list[dict[str, str]]:
@@ -681,6 +887,59 @@ def _resolve_presentation_blocks(
     return blocks[:12]
 
 
+def _server_ordered_place_messages(
+    messages: list[str], snapshot: dict[str, Any],
+) -> list[str]:
+    """Make the visible plain-text order come from the saved snapshot.
+
+    The model may explain candidates in any prose order.  The list users act
+    on is server-authored from the same snapshot that ordinal resolution reads,
+    so a displayed second item can never drift from the stored second item.
+    """
+    candidates = [
+        item for item in (snapshot.get("candidates") or [])
+        if isinstance(item, dict) and str(item.get("label") or "").strip()
+    ]
+    candidates.sort(key=lambda item: int(item.get("ordinal", 0) or 0))
+    if not candidates:
+        return [str(item).strip() for item in messages if str(item).strip()][:3]
+    candidate_summaries = []
+    for item in candidates[:8]:
+        label = str(item.get("label") or "地點").strip()[:80]
+        address = str(item.get("address_summary") or "").strip()[:100]
+        candidate_summaries.append({
+            "candidate_ref": str(item.get("reference") or ""),
+            "name": label + (f"（{address}）" if address else ""),
+        })
+
+    # The same server-owned renderer is used by Synthesizer and Scheduler.  A
+    # provider can repeat a candidate list in a different order, so remove only
+    # list-shaped candidate lines before handing the remaining explanation to
+    # that renderer.  Ordinary prose mentioning a place is retained.
+    base_messages = _strip_model_place_list_lines(
+        messages,
+        [str(item.get("label") or "") for item in candidates[:8]],
+    )
+    rendered, _refs, _bindings = synthesizer._server_ordered_place_messages(
+        base_messages, candidate_summaries,
+    )
+    return [str(item).strip()[:2400] for item in rendered if str(item).strip()][:3]
+
+
+def _strip_model_place_list_lines(
+    messages: list[str], candidate_labels: list[str],
+) -> list[str]:
+    """Use the Synthesizer's trusted candidate-row sanitizer consistently."""
+    return synthesizer.sanitize_candidate_presentation_messages(
+        messages,
+        [
+            {"name": str(label).strip()}
+            for label in candidate_labels
+            if str(label).strip()
+        ],
+    )
+
+
 def _same_public_place_reference(requested: Any, resolved: Any) -> bool:
     """Match a planner place phrase to a resolved public label."""
     def compact(value: Any) -> str:
@@ -690,6 +949,56 @@ def _same_public_place_reference(requested: Any, resolved: Any) -> bool:
     return bool(
         len(requested_key) >= 2 and len(resolved_key) >= 2
         and (requested_key in resolved_key or resolved_key in requested_key)
+    )
+
+
+def _place_binding_for_turn(turn_ctx: Any) -> dict[str, Any] | None:
+    """Read the private provider identity behind the public place binding."""
+    resolution = getattr(turn_ctx, "place_reference_resolution", None)
+    if isinstance(resolution, dict) and resolution.get("status") not in {None, "resolved"}:
+        return None
+    if not isinstance(resolution, dict):
+        resolution = getattr(turn_ctx, "recent_place_reference", None)
+    if not isinstance(resolution, dict):
+        return None
+    reference = str(resolution.get("reference") or "").strip()
+    if not reference:
+        return None
+    try:
+        return get_place_candidate(turn_ctx.user_id, turn_ctx.room_id, reference)
+    except Exception:
+        return None
+
+
+def _bound_place_query(turn_ctx: Any) -> str:
+    """Build the provider query from the server-owned name/address projection."""
+    resolution = getattr(turn_ctx, "place_reference_resolution", None)
+    if not isinstance(resolution, dict):
+        resolution = getattr(turn_ctx, "recent_place_reference", None)
+    if not isinstance(resolution, dict):
+        return ""
+    label = str(resolution.get("label") or "").strip()[:100]
+    address = str(resolution.get("address_summary") or "").strip()[:180]
+    return " ".join(value for value in (label, address) if value)
+
+
+def _place_provider_identity_matches(expected: dict[str, Any] | None, observed: Any) -> bool:
+    if not isinstance(expected, dict) or not isinstance(observed, dict):
+        return False
+    expected_provider = str(expected.get("provider") or "").strip().lower()
+    observed_provider = str(observed.get("provider") or "").strip().lower()
+    if not expected_provider or expected_provider != observed_provider:
+        return False
+    if expected_provider == "google":
+        return bool(
+            str(expected.get("provider_place_id") or "").strip()
+            and str(expected.get("provider_place_id") or "").strip()
+            == str(observed.get("place_id") or "").strip()
+        )
+    return bool(
+        str(expected.get("map_identity") or "").strip()
+        and str(expected.get("map_identity") or "").strip()
+        == str(observed.get("map_url") or "").strip()
     )
 
 
@@ -737,6 +1046,16 @@ def _run_sub_task(
     if read_budget_state is None:
         read_budget_state = {"count": 0}
     context_slice = slice_for_agent(task.agent, turn_ctx, prior_observations=prior_observations)
+    if (
+        task.agent == "calendar"
+        and getattr(turn_ctx, "_place_selection_requires_calendar_create", False)
+    ):
+        # This boolean is an internal protocol hint.  It contains no place or
+        # provider identity and is consumed only by the Calendar semantic agent.
+        context_slice.payload = {
+            **context_slice.payload,
+            "_place_selection_requires_create": True,
+        }
     registration = registration_for(_SUB_AGENT_RUNNERS.get(task.agent))
     if registration is None:
         return [SubTaskResult(task_id=task.id, status=SubTaskStatus.SKIPPED,
@@ -796,6 +1115,18 @@ def _run_sub_task(
             registration, context_slice, task, guarded_executor,
         )
         runner_result, agent_metrics = normalize_runner_output(raw_runner_output)
+        if task.agent == "places" and agent_metrics and agent_metrics.rejected_calls:
+            diagnostics = trace.setdefault("place_diagnostics", {})
+            diagnostics["tool_intent_mismatch_codes"] = list(dict.fromkeys(
+                [
+                    *list(diagnostics.get("tool_intent_mismatch_codes") or []),
+                    *[
+                        str(code)[:80]
+                        for code in agent_metrics.rejected_calls
+                        if str(code).strip()
+                    ],
+                ]
+            ))[:4]
     except Exception as exc:
         agent_metrics = SubAgentMetrics(error=str(exc))
         if registration.after_run is not None:
@@ -870,6 +1201,16 @@ def _run_sub_task(
             error_code=error_code,
         )], agent_metrics
 
+    bound_place = (
+        _place_binding_for_turn(turn_ctx)
+        if task.agent == "places" and task.place_mode in {"details", "reviews"}
+        else None
+    )
+    bound_place_query = (
+        _bound_place_query(turn_ctx)
+        if task.agent == "places" and task.place_mode in {"details", "reviews"}
+        else ""
+    )
     results: list[SubTaskResult] = []
     for index, proposal in enumerate(proposals):
         if task.agent == "match" and not match_runtime.proposal_allowed(task.match_intent, proposal, allow_event=bool(turn_ctx.active_event_invitation)):
@@ -1008,6 +1349,39 @@ def _run_sub_task(
                                           tool_name=proposal.tool_name,
                                           error_code="executor_args_invalid"))
             continue
+        if (
+            task.agent == "places"
+            and task.place_mode in {"details", "reviews"}
+            and proposal.tool_name == "places.resolve_place"
+        ):
+            if bound_place is None or not bound_place_query:
+                print(f"  [{task.id}#{index}] result=FAILED  error_code=place_reference_unbound")
+                results.append(SubTaskResult(
+                    task_id=task.id,
+                    status=SubTaskStatus.FAILED,
+                    tool_name=proposal.tool_name,
+                    error_code="place_reference_unbound",
+                ))
+                continue
+            # Ignore any model-authored branch/name and query the provider with
+            # the server-owned public name plus address summary. Identity is
+            # checked again against the opaque snapshot after execution.
+            safe_args = {**safe_args, "query": bound_place_query}
+        elif (
+            task.agent == "places"
+            and task.place_mode == "details"
+            and proposal.tool_name == "places.measure_distance"
+        ):
+            if bound_place is None or not bound_place_query:
+                print(f"  [{task.id}#{index}] result=FAILED  error_code=place_reference_unbound")
+                results.append(SubTaskResult(
+                    task_id=task.id,
+                    status=SubTaskStatus.FAILED,
+                    tool_name=proposal.tool_name,
+                    error_code="place_reference_unbound",
+                ))
+                continue
+            safe_args = {**safe_args, "destination": bound_place_query}
         with guard_lock:
             key = tool_call_key(spec, safe_args)
             if key in seen_keys:
@@ -1082,6 +1456,38 @@ def _run_sub_task(
             results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED,
                                           tool_name=proposal.tool_name, error_code=tool_result.error_code,
                                           observation=_failure_observation_from_tool_result(tool_result)))
+            continue
+        if (
+            task.agent == "places"
+            and task.place_mode in {"details", "reviews"}
+            and proposal.tool_name == "places.resolve_place"
+            and not _place_provider_identity_matches(
+                bound_place,
+                (tool_result.data or {}).get("place") if isinstance(tool_result.data, dict) else None,
+            )
+        ):
+            _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
+                            step_id=step_id, outcome="error", tool_name=proposal.tool_name,
+                            duration_ms=tool_duration_ms)
+            trace["tool_results"].append({
+                "tool": proposal.tool_name,
+                "ok": False,
+                "code": "place_provider_identity_mismatch",
+            })
+            if debug_enabled:
+                append_debug_event(
+                    run_id, "tool_finished", task_id=task.id, step_id=step_id,
+                    function=proposal.tool_name, outcome="error",
+                    duration_ms=tool_duration_ms,
+                    error_code="place_provider_identity_mismatch",
+                )
+            print(f"  [{task.id}#{index}] result=FAILED  error_code=place_provider_identity_mismatch")
+            results.append(SubTaskResult(
+                task_id=task.id,
+                status=SubTaskStatus.FAILED,
+                tool_name=proposal.tool_name,
+                error_code="place_provider_identity_mismatch",
+            ))
             continue
         private_data = tool_result.private_data or {}
         relationship_reference = (
@@ -1161,12 +1567,29 @@ def run_public_agent_turn_v3(
     turn = build_public_agent_turn_context(ctx, clock=clock)
     turn._raw_ctx = ctx  # type: ignore[attr-defined]
     turn._mentioned_ids = mentioned_ids  # type: ignore[attr-defined]
+    turn._place_resolution_origin_run_id = None  # type: ignore[attr-defined]
+    turn._place_resolution_method = None  # type: ignore[attr-defined]
+    turn._place_selection_requires_calendar_create = False  # type: ignore[attr-defined]
     trace: dict[str, Any] = {
         "plan": [], "guard_results": [], "tool_results": [],
         "event_sequence": [], "latency_ms": 0,
         "execution_mode": "dag", "llm_call_count": 0,
         "total_input_tokens": 0, "total_output_tokens": 0,
         "direct_chat_fallback_reason": None,
+        "web_research": [],
+        "place_diagnostics": {
+            "resolution": {
+                "status": "not_evaluated",
+                "method": None,
+                "candidate_count": 0,
+                "origin_run_id": None,
+            },
+            "candidate_count": 0,
+            "presentation_persistence": "not_attempted",
+            "source_message_linked": False,
+            "calendar_flow": False,
+            "selection_commit": {"status": "not_attempted", "method": None},
+        },
         "result": {"handled": True, "conversation_intent": "", "fallback_reason": None},
     }
     if debug_enabled:
@@ -1206,6 +1629,16 @@ def run_public_agent_turn_v3(
     all_agent_metrics: list[tuple[str, SubAgentMetrics]] = []
 
     def _finalize_debug(result: AgentResult) -> AgentResult:
+        # Calendar context can outlive the turn that created it. Only a write
+        # committed in this branch may upgrade an otherwise-casual result;
+        # planned Calendar tasks set their own reason at the normal boundary.
+        if (
+            str(result.profile_write_reason or "casual") in {"", "casual"}
+            and result.calendar_state_changed
+        ):
+            result = result.model_copy(update={
+                "profile_write_reason": "calendar_operation",
+            })
         # This is the single public V3 reply boundary.  Synthesizer output and
         # deterministic branches both pass through it, so model drift to
         # Simplified Chinese cannot leak to the user.  Opaque URLs/code/JSON
@@ -1293,7 +1726,8 @@ def run_public_agent_turn_v3(
                     "llm_call_metrics": result.llm_call_metrics or [],
                 },
             )
-        replay_reply_tokens(result.reply or "")
+        if not result.place_presentation_required:
+            replay_reply_tokens(result.reply or "")
         return result
 
     def _assessment_result(outcome: dict, session: dict, run_id: str) -> AgentResult:
@@ -1360,6 +1794,30 @@ def run_public_agent_turn_v3(
 
         action_name = str(record.get("tool_name") or "")
         payload = dict(record.get("payload") or {})
+        if action_name in {
+            "match.decide_active_proposal",
+            "match.decide_active_event_invitation",
+        }:
+            if ctx.choice_action == "cancel":
+                mgr.cancel_choice(
+                    user_id=ctx.user_id,
+                    room_id=ctx.room_id,
+                    surface=SURFACE_PUBLIC,
+                    choice_id=choice_id,
+                )
+            resolution = mgr.choice_projection(
+                user_id=ctx.user_id, room_id=ctx.room_id,
+                surface=SURFACE_PUBLIC, choice_id=choice_id,
+            )
+            return _finalize_debug(AgentResult(
+                handled=True,
+                reply="邀請的接受、婉拒或撤回已移到「阿月牽線」的卡片上，請到專區查看後再操作。",
+                presentation_class="transaction",
+                conversation_intent="match_hub_redirect",
+                agent_run_id=run_id,
+                agent_mode="v3",
+                choice_resolution=resolution,
+            ))
         if ctx.choice_action == "cancel":
             resolution = mgr.cancel_choice(
                 user_id=ctx.user_id,
@@ -1611,10 +2069,11 @@ def run_public_agent_turn_v3(
         _print_separator("V3 RUN END")
         return _finalize_debug(result)
 
-    # Resolve only a closed ordinal/deictic place reference here. Intent still
-    # belongs to Planner/Calendar; this gate only binds identity and fails
-    # closed before an invalid referent can reach a write flow. Calendar draft
-    # candidates retain precedence for their own same-domain ordinal follow-up.
+    # Resolve a server-owned place referent before the Planner only as context.
+    # This is not an intent gate: unresolved/ambiguous place language continues
+    # through Planner/Calendar so typed date and time fields can be retained in
+    # a draft while the user clarifies the place. Calendar draft candidates
+    # retain precedence for their own same-domain ordinal follow-up.
     calendar_draft_candidates = (
         list((turn.calendar_draft or {}).get("candidates") or [])
         if isinstance(turn.calendar_draft, dict)
@@ -1622,34 +2081,90 @@ def run_public_agent_turn_v3(
     )
     if not calendar_draft_candidates:
         place_resolution = resolve_message_reference(
-            ctx.user_id, ctx.room_id, turn.message,
+            ctx.user_id, ctx.room_id, turn.message, commit_selection=False,
         )
-        if place_resolution.get("status") == "resolved":
+        resolution_status = str(place_resolution.get("status") or "none")
+        trace["place_diagnostics"]["resolution"] = {
+            "status": resolution_status,
+            "method": str(place_resolution.get("resolution_method") or "") or None,
+            "candidate_count": int(place_resolution.get("candidate_count", 0) or 0),
+            "origin_run_id": str(place_resolution.get("origin_run_id") or "") or None,
+        }
+        if resolution_status == "resolved":
             turn = turn.model_copy(update={
                 "recent_place_candidates": place_candidate_projection(
                     get_place_candidate_set(ctx.user_id, ctx.room_id)
                 ),
                 "place_reference_resolution": public_place_resolution(place_resolution),
             })
+            turn._place_resolution_origin_run_id = str(  # type: ignore[attr-defined]
+                place_resolution.get("origin_run_id") or ""
+            ).strip() or None
+            turn._place_resolution_method = str(  # type: ignore[attr-defined]
+                place_resolution.get("resolution_method") or ""
+            ).strip() or None
             turn._raw_ctx = ctx  # type: ignore[attr-defined]
             turn._mentioned_ids = mentioned_ids  # type: ignore[attr-defined]
-        elif place_resolution.get("status") != "none":
-            return _finalize_debug(AgentResult(
-                handled=True,
-                reply=place_reference_clarification(place_resolution),
-                presentation_class="fallback",
-                conversation_intent="place_reference_clarification",
-                agent_run_id=run_id,
-                agent_mode="v3",
-                profile_write_allowed=False,
-                profile_write_reason="place_reference_clarification",
-            ))
+        elif resolution_status != "none":
+            # Keep only safe, non-authoritative resolution state in the Planner
+            # context. The Calendar runtime must not turn it into a provider
+            # identity; it may use the status to preserve a date/time draft.
+            issue_projection: dict[str, Any] = {
+                "status": resolution_status,
+                "candidate_count": int(place_resolution.get("candidate_count", 0) or 0),
+            }
+            options = place_resolution.get("candidate_options")
+            if isinstance(options, list):
+                issue_projection["candidate_options"] = [
+                    {
+                        "label": str(item.get("label") or "")[:80],
+                        "address_summary": str(item.get("address_summary") or "")[:100],
+                    }
+                    for item in options[:3]
+                    if isinstance(item, dict) and str(item.get("label") or "").strip()
+                ]
+            turn = turn.model_copy(update={"place_reference_resolution": issue_projection})
+            turn._place_resolution_origin_run_id = None  # type: ignore[attr-defined]
+            turn._place_resolution_method = None  # type: ignore[attr-defined]
+            turn._raw_ctx = ctx  # type: ignore[attr-defined]
+            turn._mentioned_ids = mentioned_ids  # type: ignore[attr-defined]
+    elif trace["place_diagnostics"]["resolution"]["status"] == "not_evaluated":
+        trace["place_diagnostics"]["resolution"] = {
+            "status": "skipped_calendar_draft",
+            "method": None,
+            "candidate_count": len(calendar_draft_candidates),
+            "origin_run_id": None,
+        }
+
+    turn = _abandon_place_followup_for_turn(turn)
 
     choice = "none" if continuation_resolution else confirmation_choice(ctx.message)
     pending_records = mgr.list_active(
         user_id=ctx.user_id,
         interaction_mode=INTERACTION_LEGACY,
     )
+    # Decision confirmations were moved to the Hub card surface.  An old
+    # bubble may still be present in a legacy room; consume neither decision
+    # nor cancellation there, and point the user to the canonical card.
+    legacy_match_decision = any(
+        isinstance(record, dict)
+        and str(record.get("tool_name") or "") in {
+            "match.decide_active_proposal",
+            "match.decide_active_event_invitation",
+        }
+        for record in pending_records
+    )
+    if legacy_match_decision and choice in {"confirm", "cancel"}:
+        if choice == "cancel":
+            mgr.cancel_legacy(user_id=ctx.user_id)
+        return _finalize_debug(AgentResult(
+            handled=True,
+            reply="邀請的接受、婉拒或撤回已移到「阿月牽線」的卡片上，請到專區查看後再操作。",
+            presentation_class="transaction",
+            conversation_intent="match_hub_redirect",
+            agent_run_id=run_id,
+            agent_mode="v3",
+        ))
     active_offer = active_guidance_offer(ctx.user_profile or {})
     if not pending_records and active_offer and choice in {"confirm", "cancel"}:
         fingerprint = str(active_offer.get("fingerprint") or "")
@@ -1838,7 +2353,6 @@ def run_public_agent_turn_v3(
             f"  [planner] failure_code={planner_metrics.failure_code}"
             f" retry_count={planner_metrics.retry_count}"
         )
-
     if debug_enabled:
         append_debug_event(
             run_id, "planner_completed", stage="planner",
@@ -1901,10 +2415,196 @@ def run_public_agent_turn_v3(
                  if match_requested else _planner_failure_reply(turn))
         return _finalize_debug(AgentResult(
             handled=True, reply=reply,
-            agent_run_id=run_id, agent_mode="v3", fallback_reason="planner_invalid",
+            agent_run_id=run_id,
+            agent_mode="v3",
+            fallback_reason="planner_invalid",
+            profile_write_reason="unknown",
         ))
 
     plan = normalize_plan_for_execution(plan, turn.message)
+    topic_hint = _new_match_topic_hint(turn)
+    if topic_hint and not any(task.agent == "match" for task in plan.tasks) and (
+        getattr(plan, "write_intent", "none") == DATE_INVITATION_WRITE_INTENT
+        or any(task.agent == "relationship" for task in plan.tasks)
+        or getattr(plan, "mode", "tasks") == "direct_chat"
+    ):
+        # A recent conversation that clearly asked for a new person wins over
+        # the provider's ambiguous ``date invitation`` classification. Keep
+        # one ordinary Match search and let its confirmation bind the topic.
+        plan = Plan(
+            mode="tasks",
+            write_intent="none",
+            tasks=[
+                SubTask(
+                    id="match",
+                    agent="match",
+                    match_intent="start_search",
+                    task_brief=f"找可能願意聊聊{topic_hint}的新朋友",
+                ),
+                SubTask(
+                    id="synthesizer",
+                    agent="synthesizer",
+                    depends_on=["match"],
+                    task_brief="呈現一次搜尋的確認與安全說明",
+                ),
+            ],
+        )
+        trace.setdefault("match_diagnostics", {})["topic_routing_repair"] = topic_hint
+    plan, hours_fallback_injected = _ensure_place_hours_fallback(plan, turn.message)
+    trace["place_diagnostics"]["hours_fallback_injected"] = hours_fallback_injected
+    trace["place_diagnostics"]["task_modes"] = {
+        task.id: task.place_mode
+        for task in plan.tasks
+        if task.agent == "places"
+    }
+    place_selection = getattr(plan, "place_selection", None)
+    resolution_status = str(
+        (getattr(turn, "place_reference_resolution", None) or {}).get("status") or "none"
+    )
+    if place_selection is not None:
+        selection_text = str(getattr(place_selection, "selection_text", "") or "").strip()
+        if not selection_text:
+            place_resolution = {
+                "status": "invalid_selection",
+                "candidate_count": 0,
+            }
+        else:
+            # Planner's selection text is an intent hint and may be normalized
+            # (for example, 「第二個」 versus the user's 「第二間」). The
+            # server resolver owns the actual place identity, so always give it
+            # the complete original message instead of requiring a literal
+            # substring match against model output.
+            place_resolution = resolve_message_reference(
+                ctx.user_id, ctx.room_id, turn.message, commit_selection=False,
+            )
+            if place_resolution.get("status") == "none":
+                # A Planner place hint without a matching durable snapshot is
+                # still a place continuation, but it is not permission to use
+                # the model's guessed title as a provider identity.
+                place_resolution = {
+                    "status": "unavailable",
+                    "candidate_count": 0,
+                }
+        resolution_status = str(place_resolution.get("status") or "none")
+        trace["place_diagnostics"]["resolution"] = {
+            "status": resolution_status,
+            "method": str(place_resolution.get("resolution_method") or "") or None,
+            "candidate_count": int(place_resolution.get("candidate_count", 0) or 0),
+            "origin_run_id": str(place_resolution.get("origin_run_id") or "") or None,
+        }
+        if resolution_status == "resolved":
+            turn = turn.model_copy(update={
+                "place_reference_resolution": public_place_resolution(place_resolution),
+            })
+            turn._place_resolution_origin_run_id = str(  # type: ignore[attr-defined]
+                place_resolution.get("origin_run_id") or ""
+            ).strip() or None
+            turn._place_resolution_method = str(  # type: ignore[attr-defined]
+                place_resolution.get("resolution_method") or ""
+            ).strip() or None
+        else:
+            issue_projection: dict[str, Any] = {
+                "status": resolution_status,
+                "candidate_count": int(place_resolution.get("candidate_count", 0) or 0),
+            }
+            options = place_resolution.get("candidate_options")
+            if isinstance(options, list):
+                issue_projection["candidate_options"] = [
+                    {
+                        "label": str(item.get("label") or "")[:80],
+                        "address_summary": str(item.get("address_summary") or "")[:100],
+                    }
+                    for item in options[:3]
+                    if isinstance(item, dict) and str(item.get("label") or "").strip()
+                ]
+            turn = turn.model_copy(update={
+                "place_reference_resolution": issue_projection,
+            })
+            turn._place_resolution_origin_run_id = None  # type: ignore[attr-defined]
+            turn._place_resolution_method = None  # type: ignore[attr-defined]
+        turn._raw_ctx = ctx  # type: ignore[attr-defined]
+        turn._mentioned_ids = mentioned_ids  # type: ignore[attr-defined]
+
+    resolved_selection = getattr(turn, "place_reference_resolution", None)
+    selection_method = str(getattr(turn, "_place_resolution_method", "") or "")
+    has_place_selection_read = any(
+        task.agent == "places" and task.place_mode in {"details", "reviews"}
+        for task in plan.tasks
+    )
+    has_calendar_selection = bool(
+        place_selection is not None
+        and any(
+            task.agent == "calendar" and task.outcome_contract is None
+            for task in plan.tasks
+        )
+    )
+    explicit_new_selection = bool(
+        selection_method
+        and selection_method not in {"selected_pronoun", "selected_deictic"}
+    )
+    should_commit_selection = bool(
+        isinstance(resolved_selection, dict)
+        and resolved_selection.get("status") == "resolved"
+        and (
+            has_calendar_selection
+            or (has_place_selection_read and explicit_new_selection)
+        )
+    )
+    if should_commit_selection:
+        commit_input = {
+            **resolved_selection,
+            "origin_run_id": getattr(turn, "_place_resolution_origin_run_id", None),
+        }
+        selection_commit = commit_resolved_selection(
+            ctx.user_id,
+            ctx.room_id,
+            commit_input,
+        )
+        commit_status = str(selection_commit.get("status") or "storage_unavailable")
+        trace["place_diagnostics"]["selection_commit"] = {
+            "status": commit_status,
+            "method": selection_method or None,
+        }
+        if commit_status == "committed":
+            selected_projection = selection_commit.get("selection")
+            if isinstance(selected_projection, dict):
+                turn = turn.model_copy(update={
+                    "recent_place_reference": selected_projection,
+                })
+                turn._raw_ctx = ctx  # type: ignore[attr-defined]
+                turn._mentioned_ids = mentioned_ids  # type: ignore[attr-defined]
+        else:
+            trace["llm_call_count"] = _metric_call_count(planner_metrics)
+            trace["total_input_tokens"] = total_input_tokens
+            trace["total_output_tokens"] = total_output_tokens
+            trace["latency_ms"] = round((time.perf_counter() - run_total_started) * 1000)
+            trace["result"] = {
+                "handled": True,
+                "conversation_intent": "clarification",
+                "fallback_reason": "place_selection_persistence_failed",
+            }
+            _persist_trace(run_id, ctx, trace)
+            reply = "這次有辨認到你選的店家，但暫時無法保存選擇，所以沒有繼續查詢。請重新選一次。"
+            return _finalize_debug(AgentResult(
+                handled=True,
+                reply=reply,
+                conversation_intent="clarification",
+                agent_run_id=run_id,
+                agent_mode="v3",
+                fallback_reason="place_selection_persistence_failed",
+                profile_write_reason="unknown",
+            ))
+    turn._place_selection_requires_calendar_create = bool(  # type: ignore[attr-defined]
+        place_selection is not None
+        and resolution_status == "resolved"
+        and any(
+            task.agent == "calendar" and task.outcome_contract is None
+            for task in plan.tasks
+        )
+    )
+    trace["place_diagnostics"]["calendar_flow"] = any(
+        task.agent == "calendar" for task in plan.tasks
+    )
 
     if plan.mode == "direct_chat":
         direct_reason = _direct_chat_block_reason(plan, turn, pending_records, active_offer)
@@ -2045,7 +2745,9 @@ def run_public_agent_turn_v3(
         "agent": t.agent,
         "depends_on": t.depends_on,
         "task_brief": t.task_brief,
+        **({"place_mode": t.place_mode} if t.agent == "places" and t.place_mode else {}),
         **({"evidence_policy": t.evidence_policy} if t.agent == "web" else {}),
+        **({"web_mode": t.web_mode} if t.agent == "web" and t.web_mode else {}),
         **({"outcome_contract": t.outcome_contract} if t.outcome_contract else {}),
         **({"run_if": t.run_if.model_dump()} if t.run_if else {}),
     } for t in plan.tasks]
@@ -2054,6 +2756,8 @@ def run_public_agent_turn_v3(
             "id": t.id,
             "agent": t.agent,
             "depends_on": t.depends_on,
+            **({"place_mode": t.place_mode} if t.agent == "places" and t.place_mode else {}),
+            **({"web_mode": t.web_mode} if t.agent == "web" and t.web_mode else {}),
             **({"match_intent": t.match_intent} if t.match_intent else {}),
             **({"outcome_contract": t.outcome_contract} if t.outcome_contract else {}),
             **({"run_if": t.run_if.model_dump()} if t.run_if else {}),
@@ -2105,6 +2809,7 @@ def run_public_agent_turn_v3(
     read_budget_state: dict[str, int] = {"count": 0}
     seen_keys: set[tuple[str, str]] = set()
     task_results: dict[str, list[SubTaskResult]] = {}
+    task_by_id = {task.id: task for task in plan.tasks}
 
     _print_separator("SUB-AGENT EXECUTION")
     for layer in _topological_layers(plan):
@@ -2115,7 +2820,7 @@ def run_public_agent_turn_v3(
 
         def _run_one(task: SubTask) -> tuple[SubTask, list[SubTaskResult], SubAgentMetrics | None]:
             deps_ok = all(
-                any(result.status is SubTaskStatus.OK for result in task_results.get(dep, []))
+                _dependency_completed(task_results.get(dep, []))
                 for dep in task.depends_on
             )
             if not deps_ok:
@@ -2139,7 +2844,7 @@ def run_public_agent_turn_v3(
                                 input_tokens=0, output_tokens=0, duration_ms=0,
                                 tool_name=None)
                 return task, result, None
-            prior = _prior_observations_for(task, task_results)
+            prior = _prior_observations_for(task, task_results, task_by_id)
             try:
                 result, agent_metrics = _run_sub_task(task, turn, prior, seen_keys=seen_keys,
                                         step_counts=step_counts, read_budget_state=read_budget_state,
@@ -2228,6 +2933,20 @@ def run_public_agent_turn_v3(
     for results in task_results.values():
         for r in results:
             print(f"  {r.task_id}: status={r.status.value}  tool={r.tool_name}  error={r.error_code}  skip={r.skip_reason}")
+    web_diagnostics = []
+    for results in task_results.values():
+        for result in results:
+            observation = result.observation if result.status is SubTaskStatus.OK else None
+            if not isinstance(observation, dict) or observation.get("schema_version") != "web_research.v1":
+                continue
+            web_diagnostics.append({
+                "task_id": result.task_id,
+                "status": str(observation.get("status") or "")[:32],
+                "coverage": str(observation.get("coverage") or "")[:32],
+                "finding_count": len(observation.get("findings") or []),
+                "source_count": len(observation.get("sources") or []),
+            })
+    trace["place_diagnostics"]["web"] = web_diagnostics
 
     _print_separator("SYNTHESIZER")
     prior: list[dict[str, Any]] = []
@@ -2237,9 +2956,42 @@ def run_public_agent_turn_v3(
             if r.status is not SubTaskStatus.SKIPPED:
                 prior.append(_observation_dict(task_id, r))
     synth_slice = slice_for_agent("synthesizer", turn, prior_observations=prior)
+    synth_slice.payload["web_execution_failures"] = [
+        {
+            "task_id": task.id,
+            "reason": result.error_code or result.skip_reason or "web_failed",
+        }
+        for task in plan.tasks
+        if task.agent == "web"
+        for result in task_results.get(task.id, [])
+        if result.status in {SubTaskStatus.FAILED, SubTaskStatus.SKIPPED}
+        and result.skip_reason != "places_hours_sufficient"
+    ][:4]
     synth_slice.payload["presentation_mode"] = getattr(plan, "presentation_mode", "default")
+    place_modes = {
+        task.id: task.place_mode
+        for task in plan.tasks
+        if task.agent == "places" and task.place_mode
+    }
+    synth_slice.payload["place_modes"] = place_modes
+    place_tasks = {
+        task.id: task
+        for task in plan.tasks
+        if task.agent == "places"
+    }
+    discovery_results = [
+        result
+        for results in task_results.values()
+        for result in results
+        if (
+            result.status is SubTaskStatus.OK
+            and place_tasks.get(result.task_id) is not None
+            and (place_tasks[result.task_id].place_mode or "discover") == "discover"
+            and result.tool_name == "places.search_nearby"
+        )
+    ]
     candidate_cards = _public_place_cards(
-        [r for results in task_results.values() for r in results],
+        discovery_results,
         run_id=run_id,
         include_internal=True,
     )
@@ -2252,7 +3004,28 @@ def run_public_agent_turn_v3(
             depends_on=[task.id for task in plan.tasks if task.agent != "synthesizer"],
             input_payload=synth_slice.payload, candidate_cards=candidate_cards,
         )
-    reply, card_decision, synth_metrics = synthesizer.synthesize(synth_slice, candidate_cards=candidate_cards, on_token=emit_token_fragment)
+    # Candidate-bearing replies are persisted and published as one atomic
+    # presentation. Do not stream model fragments before that handshake; the
+    # normal conversational path still receives raw token streaming.
+    has_grounded_observation = any(
+        isinstance(item, dict)
+        and (
+            item.get("tool") in {"places.search_nearby", "places.resolve_place"}
+            or str(item.get("tool") or "").startswith("calendar.")
+            or str(item.get("tool") or "").startswith("web.")
+            or (isinstance(item.get("result"), dict) and item["result"].get("schema_version") == "web_research.v1")
+        )
+        for item in prior
+    )
+    synth_token_callback = (
+        None if candidate_cards or has_grounded_observation
+        else emit_token_fragment
+    )
+    reply, card_decision, synth_metrics = synthesizer.synthesize(
+        synth_slice,
+        candidate_cards=candidate_cards,
+        on_token=synth_token_callback,
+    )
     server_reply = _server_owned_date_coordination_reply(task_results)
     server_failure_reply = _server_owned_date_coordination_failure_reply(
         task_results, write_intent=plan.write_intent,
@@ -2313,72 +3086,88 @@ def run_public_agent_turn_v3(
         _apply_card_decision(candidate_cards, card_decision)
         if public_cards_enabled else []
     )
-    has_new_place_result = any(
-        result.status is SubTaskStatus.OK
-        and result.tool_name in {"places.search_nearby", "places.resolve_place"}
-        for results in task_results.values()
-        for result in results
-    )
+    has_new_place_result = bool(discovery_results)
+    place_snapshot: dict[str, Any] | None = None
+    place_persistence_failed = False
     if has_new_place_result:
         cards_by_ref = {
             str(card.get("candidate_ref") or ""): card
             for card in candidate_cards
             if str(card.get("candidate_ref") or "")
         }
-        explicit_bindings = getattr(synth_metrics, "presented_candidate_bindings", None)
-        presented_refs: list[str] = []
-        presented_ordinals: dict[str, int] = {}
-        if explicit_bindings is None:
-            # Compatibility seam for older provider doubles/tests. Real
-            # Synthesizer responses always set [] or explicit bindings, so
-            # plain-text name matches cannot become production authority.
-            for ordinal, reference in enumerate(synth_metrics.presented_candidate_refs, start=1):
-                reference = str(reference or "")
-                if reference in cards_by_ref and reference not in presented_ordinals:
-                    presented_refs.append(reference)
-                    presented_ordinals[reference] = ordinal
-        else:
-            seen_refs: set[str] = set()
-            seen_ordinals: set[int] = set()
-            valid = True
-            for item in explicit_bindings:
-                if not isinstance(item, dict):
-                    valid = False
-                    break
-                reference = str(item.get("candidate_ref") or "")
-                ordinal = item.get("presented_ordinal")
-                if (
-                    reference not in cards_by_ref
-                    or isinstance(ordinal, bool)
-                    or not isinstance(ordinal, int)
-                    or not 1 <= ordinal <= len(candidate_cards)
-                    or reference in seen_refs
-                    or ordinal in seen_ordinals
-                ):
-                    valid = False
-                    break
-                seen_refs.add(reference)
-                seen_ordinals.add(ordinal)
-                presented_ordinals[reference] = ordinal
-            if valid and set(seen_ordinals) != set(range(1, len(seen_ordinals) + 1)):
-                valid = False
-            if valid:
-                presented_refs = [
-                    reference
-                    for reference, _ordinal in sorted(
-                        presented_ordinals.items(), key=lambda pair: pair[1],
-                    )
-                ]
-            else:
-                presented_refs = []
-                presented_ordinals = {}
-        replace_presented_candidates(
-            ctx.user_id,
-            ctx.room_id,
-            [cards_by_ref[reference] for reference in presented_refs],
-            presented_ordinals=presented_ordinals,
-        )
+        # Candidate order is owned by the verified Places projection. Model
+        # authored refs/ordinals are evidence only and cannot reorder it.
+        ordered_cards = [
+            card for card in candidate_cards[:8]
+            if str(card.get("candidate_ref") or "") in cards_by_ref
+        ]
+        ordered_ordinals = {
+            str(card["candidate_ref"]): index
+            for index, card in enumerate(ordered_cards, start=1)
+        }
+        try:
+            place_snapshot = replace_presented_candidates(
+                ctx.user_id,
+                ctx.room_id,
+                ordered_cards,
+                presented_ordinals=ordered_ordinals,
+                origin_run_id=run_id,
+                source_message_id=ctx.message_id,
+                # The HTTP boundary publishes this after saving the assistant
+                # message. Direct unit/runtime callers without a source message
+                # retain the historical synchronous seam.
+                published=not bool(ctx.message_id),
+            )
+        except PlaceReferencePersistenceError as exc:
+            place_persistence_failed = True
+            _LOGGER.error(
+                "V3 place presentation persistence failed run_id=%s reason=%s",
+                run_id, str(exc),
+            )
+        if ordered_cards and place_snapshot is None and not place_persistence_failed:
+            place_persistence_failed = True
+        trace["place_diagnostics"].update({
+            "candidate_count": len(ordered_cards),
+            "presentation_persistence": (
+                "failed" if place_persistence_failed
+                else "saved_published" if place_snapshot and not ctx.message_id
+                else "saved_pending_source_link" if place_snapshot
+                else "failed"
+            ),
+            "source_message_linked": bool(place_snapshot and not ctx.message_id),
+        })
+
     presentation_messages = synth_metrics.presentation_messages or [reply]
+    if place_persistence_failed:
+        reply = "這次找到地點，但暫時無法保存候選清單；請稍後再試，我還沒有替你建立行程。"
+        presentation_messages = [reply]
+        synth_metrics.presentation_messages = presentation_messages
+        synth_metrics.presentation_class = "fallback"
+        synth_metrics.fallback_reason = "place_presentation_persistence_failed"
+        synth_metrics.presentation_blocks = None
+    elif place_snapshot:
+        # The visible candidate order must stay tied to the same immutable
+        # snapshot whether optional place cards are enabled or not.  Cards can
+        # be added by the UI, but they never change the text ordinal contract.
+        presentation_messages = _server_ordered_place_messages(
+            presentation_messages, place_snapshot,
+        )
+        reply = "\n\n".join(presentation_messages)
+        synth_metrics.presentation_messages = presentation_messages
+        if not public_cards_enabled:
+            synth_metrics.presentation_blocks = []
+        synth_metrics.presented_candidate_refs = [
+            str(item.get("reference") or "")
+            for item in (place_snapshot.get("candidates") or [])
+            if isinstance(item, dict) and item.get("reference")
+        ]
+        synth_metrics.presented_candidate_bindings = [
+            {"candidate_ref": str(item["reference"]), "presented_ordinal": int(item["ordinal"])}
+            for item in (place_snapshot.get("candidates") or [])
+            if isinstance(item, dict) and item.get("reference")
+        ]
+    else:
+        synth_metrics.presentation_messages = presentation_messages
     presentation_blocks = _resolve_presentation_blocks(
         synth_metrics.presentation_blocks,
         selected_place_cards,
@@ -2409,6 +3198,17 @@ def run_public_agent_turn_v3(
         if synth_metrics.presentation_class == "product_info"
         else "casual_chat"
     )
+    relationship_recommendation_snapshot = next(
+        (
+            dict(result.observation)
+            for results in task_results.values()
+            for result in results
+            if result.status is SubTaskStatus.OK
+            and isinstance(result.observation, dict)
+            and result.observation.get("schema_version") == "relationship_recommendation.v1"
+        ),
+        None,
+    )
     result = AgentResult(
         handled=True,
         reply=reply,
@@ -2419,6 +3219,15 @@ def run_public_agent_turn_v3(
         agent_mode="v3",
         fallback_reason=synth_metrics.fallback_reason,
         match_guidance_shown=match_guidance_shown,
+        place_presentation_required=bool(
+            place_snapshot is not None and not place_persistence_failed
+        ),
+        profile_write_reason=(
+            "calendar_operation"
+            if any(task.agent == "calendar" for task in plan.tasks)
+            else "casual"
+        ),
+        relationship_recommendation_snapshot=relationship_recommendation_snapshot,
     )
     if place_cards:
         result.place_cards = place_cards

@@ -27,6 +27,7 @@ Planner 的 system prompt 使用 compact-v3 版本：保留 routing ownership、
   "agent": "web",
   "depends_on": [],
   "task_brief": "找鹽埕區近期可公開查證的新活動，保留日期、時間與場地",
+  "web_mode": "public_lookup",
   "evidence_policy": "casual_discovery"
 }
 ```
@@ -37,6 +38,8 @@ Planner 的 system prompt 使用 compact-v3 版本：保留 routing ownership、
 | `agent` | `calendar|places|web|match|relationship|profile|product_info|synthesizer` |
 | `depends_on` | 最多 4 個同一 DAG 的 task IDs；只代表資料依賴 |
 | `task_brief` | 1–500 字元；描述目標、限制與 evidence class，不是 tool arguments |
+| `place_mode` | Places 必填：`discover` 新推薦、`details` 單店結構化資料、`reviews` 單店口碑；非 Places 省略 |
+| `web_mode` | Web 新輸出必填：`public_lookup|place_verification|place_hours_fallback`；舊 payload 省略時由 dependency shape 相容推導 |
 | `evidence_policy` | 只有 Web 可用：`casual_discovery|strict_verification` |
 | `outcome_contract` | 只有 Calendar availability task 可用：`calendar.availability.v1` |
 | `run_if` | 控制依賴；`task.finished` 或 allowlisted Calendar outcome，不傳遞上游 observation |
@@ -57,12 +60,13 @@ Planner 永遠不能提供 `user_id`、match/proposal/event ID、revision、expe
 - 沒有或有多個 synthesizer。
 - synthesizer 不是 terminal，或沒有依賴所有 terminal domain tasks。
 - 非 Web task 帶 `evidence_policy`。
+- `public_lookup` 依賴 Places，或另外兩種 Web mode 沒有 Places dependency。
 - Provider 產生的 `mode="tasks"` 只有 Synthesizer、且沒有 `social_opening` opportunity。
 - `relationship.date_invitation.v1` 不是精確的 root Relationship → terminal Synthesizer DAG，或混入 precheck／其他 presentation／opportunity。
 - `direct_chat` 混入 task、domain opportunity 或不相容欄位。
 - `itinerary` 沒有 Places task。
 
-Planner 無 tool call、function name 錯誤或 schema 不符時最多重試一次；schema retry 只提供 allowlisted 欄位規則，例如 required `write_intent`、`evidence_policy` 僅限 Web、`outcome_contract` 僅限 Calendar availability，不回送錯誤值。無效或空 DAG 不再靜默改成 Synthesizer-only；兩次仍失敗或 provider timeout 時 fail closed，不執行任何工具或副作用。舊 ProductInfo envelope 的少量 protocol drift 只能在 planner compatibility boundary 做 bounded repair；不能用自然語言 regex 猜 intent。
+Planner 無 tool call、function name 錯誤、schema 不符或 provider error 時最多重試一次；schema retry 只提供 allowlisted 欄位規則，例如 required `write_intent`、`evidence_policy` 僅限 Web、`outcome_contract` 僅限 Calendar availability，不回送錯誤值。Provider retry 仍使用同一 requested model tier，不自動切換 main。無效或空 DAG 不再靜默改成 Synthesizer-only；兩次仍失敗時 fail closed，不執行任何工具或副作用。舊 ProductInfo envelope 的少量 protocol drift 只能在 planner compatibility boundary 做 bounded repair；不能用自然語言 regex 猜 intent。
 
 Compatibility normalization 一律先複製 provider arguments，且只接受三類封閉修復：known agent 上錯置但值合法的 `evidence_policy`／Calendar availability `outcome_contract`、精確空 optional placeholder，以及 Relationship 將精確 `relationship.date_invitation.v1` 放到 `outcome_contract` 的單一 relocation case。其他 agent/value、衝突 root intent、`depends_on`／`run_if` drift、unknown agent 與 DAG invariant 不修復。Repair 不消耗 retry，只記 allowlisted code 到 localhost ephemeral debug；normalized payload、owner text 與 raw exception 不進 durable trace 或 public events。
 
@@ -72,6 +76,7 @@ Planner 依完整語意選 agent；Python 不另建 keyword router：
 
 - 本人行程、空檔、增修取消 → `calendar`。
 - 附近地點、距離、地址、地圖卡，以及 Places 可投影的結構化地點事實（營業／目前開放、價位、評分、步行距離／時間）→ `places`。
+- Places task 的 `place_mode` 由 Planner 依完整語意決定：推薦多店用 `discover`；第二間怎樣／地址／營業時間用 `details`；好不好吃／好不好喝／口碑用 `reviews`。後兩者沿用 server-owned selected place，不重新 search nearby。
 - 近期／外部資訊、活動、新聞、公開文章、論壇、社群或 URL → `web`。
 - singleton active-proposal/search lifecycle（這一輪最多一筆提案的搜尋、進度、狀態、決策或單一對象摘要）→ `match`。
 - accepted／已建立聯絡對象 aggregate（清單、總數、比較、挑選、`@` 對象與互動摘要）→ `relationship`。「我目前配對到哪些人」「我現在有配到誰」「總共幾位」均屬此類，不因含「目前／配對」改送 `match`。
@@ -94,8 +99,11 @@ Target 只能來自一個已驗證 mention、current message 的連續名稱 evi
 ## 5. Web／Places／Itinerary DAG
 
 - 一般外部查詢：`web -> synthesizer`。
-- Places 可直接建立的結構化條件（`hours`、`price`、`rating`、`walking`）：`places -> synthesizer`，即使使用者指定今晚／目前也不自動建立 Web task。
+- Places 可直接建立的結構化條件（`price`、`rating`、`walking`）：`places -> synthesizer`。店家營業資訊使用 `places(details) -> web(place_hours_fallback) -> synthesizer`；有完整星期營業資料時 Web 以 typed no-op 跳過。
+- 若 provider 對明確營業時間請求只輸出唯一 Places `details -> synthesizer`，Scheduler 會以封閉規則補上同店的 `place_hours_fallback`；已有 Web task、一般地址／詳細資料或多個 Places task 時不補。
+- 區域／場館／品牌的公開活動查詢：`web(public_lookup) -> synthesizer`，不先建立 Places 搜尋；延續問句由 recent messages 保留活動命題。
 - 只有 Places 無法建立的非結構化／目前公開主張（優惠、特殊菜單、活動、臨時歇業公告、社群貼文等）：`places -> web -> synthesizer`。
+- `reviews` 固定使用 `places -> web -> synthesizer`，Web 預設 `casual_discovery`；部落格／社群食記的具體口味描述可作為 source-attributed direct finding，分歧或單一來源保留 `partial` 與限制。
 - 未要求新活動的一般區域一日遊：`places -> synthesizer` + `presentation_mode="itinerary"`。
 - 找一個有直接證據的新活動並排整天：`web -> places -> web -> synthesizer` + itinerary。
 

@@ -70,7 +70,7 @@ proposal → Guard(write_requires_confirmation) → prepare_write_confirmation
 | `awaiting_commit`（探索完成） | 完成訊息泡泡提供 `choice_id` 按鈕：「確認」→ `commit_assessment_session`（CAS revision）覆寫正式資料；「取消」或繼續同房對話 → 保留原本資料 |
 | session 過期 | `expire_assessment_session` |
 
-Assessment 相關回合回傳 `assessment_state/kind/revision`；**assessment 答案不會進入 profile extraction pipeline**（`public_chat.py` 以 `profile_write_reason == "assessment"` 排除），也不會成為近期情境或 durable memory evidence。
+Assessment 相關回合回傳 `assessment_state/kind/revision`；**assessment 答案不會進入 profile extraction pipeline**。Public turn 會在原始 owner message 寫入 `metadata.message_use=assessment`，後續 coverage、抽取、compaction 與 proactive consumer 都會再次排除，不依賴單一 `profile_write_reason` 字串。
 
 ## 4. Profile 資料怎麼來（與聊天 Agent 分離）
 
@@ -79,7 +79,8 @@ profile sub-agent 只**讀**；寫入由獨立的 owner-only pipeline 負責：
 ```text
 使用者訊息 → 保存（唯一一次）→ public_chat 背景排程
   → profile_task_service → profile_skills.py
-      - message_id 冪等（每則訊息最多處理一次）
+      - `metadata.message_use=ordinary` 才可進入；calendar operation、assessment、no-memory 與未標記 legacy source fail closed
+      - message_id 冪等；provider 暫時失敗最多三次，依 30／120 秒退避重試
       - 只用「已保存的 owner 原始訊息」；禁用 assistant reply/history/tool result/match state/對方資料
       - LLM 提出 typed ProfileExtractionDecision + 原句 evidence_span
       - evidence 必須是 owner message 連續原文子字串，否則拒絕

@@ -82,6 +82,7 @@ class WebResearchFindingV1(BaseModel):
     claim: str = Field(min_length=1, max_length=500)
     relation: Literal["direct", "adjacent_context"]
     subject_ref: str | None = Field(default=None, pattern=PLACE_CANDIDATE_REF_PATTERN)
+    source_refs: list[str] = Field(default_factory=list, max_length=MAX_WEB_SOURCES_PER_FINDING)
     source_urls: list[str] = Field(min_length=1, max_length=MAX_WEB_SOURCES_PER_FINDING)
 
 
@@ -284,6 +285,7 @@ def build_research_result(
     fallback_coverage: WebCoverage = "none",
     allowed_subject_refs: set[str] | None = None,
     evidence_policy: Literal["casual_discovery", "strict_verification"] = "casual_discovery",
+    diagnostics: dict[str, Any] | None = None,
 ) -> WebResearchResultV1:
     """Create and structurally validate the final server-owned result."""
     assessment = getattr(decision, "assessment", None)
@@ -296,6 +298,13 @@ def build_research_result(
     sources_by_url: dict[str, WebResearchSourceV1] = {}
     findings: list[WebResearchFindingV1] = []
     primary_activity: WebActivityV1 | None = None
+    dropped = {
+        "invalid_subject": 0,
+        "empty_claim": 0,
+        "unobserved_source": 0,
+        "subject_source_mismatch": 0,
+        "unsupported_finding": 0,
+    }
 
     raw_activity = getattr(decision, "activity", None)
     if isinstance(raw_activity, WebActivityV1):
@@ -332,32 +341,52 @@ def build_research_result(
         subject_ref = getattr(draft, "subject_ref", None)
         if allowed_subject_refs is not None:
             if subject_ref not in allowed_subject_refs:
+                dropped["invalid_subject"] += 1
                 continue
         elif subject_ref is not None and not re.fullmatch(PLACE_CANDIDATE_REF_PATTERN, str(subject_ref)):
+            dropped["invalid_subject"] += 1
             continue
         claim = _clean(getattr(draft, "claim", ""), 500)
         if not claim:
+            dropped["empty_claim"] += 1
             continue
         direct_urls: list[str] = []
         draft_source_refs = [
             str(value).strip() for value in (getattr(draft, "source_refs", []) or [])
             if re.fullmatch(WEB_SOURCE_REF_PATTERN, str(value).strip())
         ][:MAX_WEB_SOURCES_PER_FINDING]
-        resolved_urls = list(getattr(draft, "source_urls", []) or [])
+        explicit_urls = list(getattr(draft, "source_urls", []) or [])
+        source_types = list(getattr(draft, "source_types", []) or [])
+        source_type_by_url = {
+            str(raw_url).strip(): source_types[index]
+            for index, raw_url in enumerate(explicit_urls)
+            if index < len(source_types)
+        }
+        resolved_urls: list[str] = []
+        for raw_url in explicit_urls:
+            url = _safe_url(raw_url)
+            if not url or url not in catalog:
+                dropped["unobserved_source"] += 1
+                continue
+            if url not in resolved_urls:
+                resolved_urls.append(url)
         if draft_source_refs:
             for url, item in catalog.items():
                 if any(ref in (item.get("source_refs") or []) for ref in draft_source_refs):
-                    resolved_urls.append(url)
-        source_types = list(getattr(draft, "source_types", []) or [])
-        for index, raw_url in enumerate(resolved_urls[:MAX_WEB_SOURCES_PER_FINDING]):
+                    if url not in resolved_urls:
+                        resolved_urls.append(url)
+        for raw_url in resolved_urls:
+            if len(direct_urls) >= MAX_WEB_SOURCES_PER_FINDING:
+                break
             url = _safe_url(raw_url)
             if not url or url not in catalog or url in direct_urls:
                 continue
             observed_subjects = catalog[url].get("subject_refs") or []
             if subject_ref is not None and subject_ref not in observed_subjects:
+                dropped["subject_source_mismatch"] += 1
                 continue
             direct_urls.append(url)
-            source_type = source_types[index] if index < len(source_types) else "other"
+            source_type = source_type_by_url.get(url, "other")
             source = WebResearchSourceV1(
                 url=url,
                 title=catalog[url]["title"],
@@ -365,12 +394,19 @@ def build_research_result(
             )
             sources_by_url.setdefault(url, source)
         if direct_urls:
+            resolved_source_refs = [
+                ref for ref in draft_source_refs
+                if any(ref in (catalog[url].get("source_refs") or []) for url in direct_urls)
+            ]
             findings.append(WebResearchFindingV1(
                 claim=claim,
                 relation=getattr(draft, "relation", "adjacent_context"),
                 subject_ref=subject_ref,
+                source_refs=resolved_source_refs,
                 source_urls=direct_urls,
             ))
+        else:
+            dropped["unsupported_finding"] += 1
 
     # A finish-decision parser failure must not erase the safe source catalog
     # from Web calls that already succeeded.  Claims still require a validated
@@ -429,7 +465,7 @@ def build_research_result(
     elif stop_reason == "tool_failure" and execution_status == "unavailable":
         final_reason = stop_reason
 
-    return WebResearchResultV1(
+    result = WebResearchResultV1(
         research_question=_clean(research_question, 6000),
         answer_target=_clean(answer_target, 500),
         evidence_policy=evidence_policy,
@@ -442,3 +478,11 @@ def build_research_result(
         limitations=limitation_values[:MAX_WEB_LIMITATIONS],
         stop_reason=final_reason,
     )
+    if diagnostics is not None:
+        diagnostics.update({
+            "observed_source_count": len(catalog),
+            "finding_count_before_filter": len(findings_draft[:MAX_WEB_FINDINGS]),
+            "finding_count_after_filter": len(result.findings),
+            "dropped": dropped,
+        })
+    return result

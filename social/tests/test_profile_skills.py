@@ -10,6 +10,8 @@ from bson.objectid import ObjectId
 from services.language_service import normalize_zh_tw
 from services.ai_service import ChatResult
 from services.memory_service import memory_summary
+from services.message_use_service import metadata_for_use
+from services.match_search_context import context_embedding_source_hash
 from services.profile_skills import (
     _active_recent_episode,
     _compose_recent_context_summary,
@@ -47,6 +49,100 @@ def patch_payload(fields, *, recent=True, confidence=0.95, kind="real_world_upda
 
 
 class ProfileSkillsTests(unittest.TestCase):
+    def test_extractor_returns_an_evidence_checked_followup_proposal(self):
+        payload = {
+            "recent_context": {
+                "action": "update", "message_kind": "real_world_update",
+                "confidence": .95, "episode_relation": "new",
+                "fields": {
+                    "activity": {
+                        "operation": "set", "value": "看展",
+                        "evidence_span": "週末想去看展", "confidence": .95,
+                        "subject": "owner",
+                    },
+                },
+            },
+            "memories": [],
+            "follow_up": {
+                "action": "create", "topic": "週末看展",
+                "question_goal": "確認看展後感覺", "timing": "after_days",
+                "wait_days": 3, "evidence_span": "週末想去看展",
+                "confidence": .95, "subject": "owner",
+            },
+        }
+        with patch(
+            "services.profile_skills.generate_chat_completion",
+            return_value=ChatResult(content=json.dumps(payload)),
+        ):
+            decision = analyze_profile_message("週末想去看展")
+        self.assertEqual(decision["follow_up"]["action"], "create")
+        self.assertEqual(decision["follow_up"]["evidence_span"], "週末想去看展")
+
+    def test_extractor_drops_followup_that_uses_calendar_as_question(self):
+        payload = {
+            "recent_context": {
+                "action": "update", "message_kind": "real_world_update",
+                "confidence": .95, "episode_relation": "new", "fields": {},
+            },
+            "memories": [],
+            "follow_up": {
+                "action": "create", "topic": "週末聚餐",
+                "question_goal": "查看行事曆", "timing": "after_days",
+                "wait_days": 3, "evidence_span": "週末想聚餐",
+                "confidence": .95, "subject": "owner",
+            },
+        }
+        with patch(
+            "services.profile_skills.generate_chat_completion",
+            return_value=ChatResult(content=json.dumps(payload)),
+        ):
+            decision = analyze_profile_message("週末想聚餐")
+        self.assertIsNone(decision["follow_up"])
+
+    def test_profile_process_passes_the_exact_candidate_snapshot_to_persistence(self):
+        message_id = "64b64c8f0000000000000111"
+        owner_message = "看展取消了"
+        source = {
+            "content": owner_message,
+            "room_id": "room",
+            "timestamp": 100.0,
+            "metadata": {"message_use": metadata_for_use("ordinary")},
+        }
+        snapshot = [{
+            "slot": 1, "_candidate_id": "candidate-a", "_revision": 3,
+            "topic": "看展", "question_goal": "確認感覺",
+            "timing": "after_days", "status": "pending",
+        }]
+        decision = {
+            "recent_context": {
+                "should_update": False, "reason_code": "test",
+                "message_kind": "other", "fields": {},
+            },
+            "memories": [], "memory_codes": [], "policy_versions": {},
+            "follow_up": {
+                "action": "close", "existing_slot": 1,
+                "evidence_span": owner_message, "confidence": .95,
+                "subject": "owner",
+            },
+        }
+        with patch.object(profile_skills, "profile_skills_mode_for_user", return_value="off"), \
+             patch.object(profile_skills, "followup_mode_for_user", return_value="shadow"), \
+             patch.object(profile_skills.messages_coll, "find_one", return_value=source), \
+             patch.object(profile_skills, "_claim_profile_message", return_value="lease"), \
+             patch.object(profile_skills, "_profile_claim_is_current", return_value=True), \
+             patch.object(profile_skills.profiles_coll, "find_one", return_value={}), \
+             patch.object(profile_skills, "followup_candidate_snapshot", return_value=snapshot), \
+             patch.object(profile_skills, "analyze_profile_message", return_value=decision), \
+             patch.object(profile_skills.PROFILE_RUNS, "find_one", return_value={"attempt_count": 1}), \
+             patch.object(profile_skills, "_renew_profile_claim", return_value=True), \
+             patch.object(profile_skills, "apply_followup_proposal", return_value={"status": "updated"}) as apply, \
+             patch.object(profile_skills, "_trace"):
+            result = process_profile_message(
+                "owner", owner_message, message_id, "global",
+            )
+        self.assertEqual(result["status"], "applied")
+        self.assertIs(apply.call_args.kwargs["candidate_snapshot"], snapshot)
+
     def test_short_activity_phrase_is_written_only_when_the_extractor_proposes_it(self):
         payload = patch_payload({
             "activity": {"operation": "set", "value": "看煙火", "evidence_span": "看煙火"},
@@ -313,6 +409,10 @@ class ProfileSkillsTests(unittest.TestCase):
             self.assertTrue(apply_recent_context("owner", proposal, message_id="new", source_timestamp=2))
         fields = update.call_args.args[1]["$set"]["recent_context_state"]["fields"]
         self.assertEqual(set(fields), {"activity"})
+        self.assertEqual(
+            update.call_args.args[1]["$set"]["context_embedding_source_hash"],
+            context_embedding_source_hash("近期活動：逛市集"),
+        )
 
     def test_short_followup_merges_into_the_same_typed_episode(self):
         now = time.time()
@@ -433,7 +533,10 @@ class ProfileSkillsTests(unittest.TestCase):
             "recent_context": {"should_update": False, "reason_code": "test"},
             "memories": [], "memory_codes": ["no_memory_candidate"], "policy_versions": {},
         }
-        with patch("services.profile_skills.messages_coll.find_one", return_value={"content": "我最近想去非洲"}) as find_message, \
+        with patch("services.profile_skills.messages_coll.find_one", return_value={
+            "content": "我最近想去非洲",
+            "metadata": {"message_use": metadata_for_use("ordinary", reason="test")},
+        }) as find_message, \
              patch("services.profile_skills.profiles_coll.find_one", return_value={}), \
              patch("services.profile_skills._claim_profile_message", return_value=True), \
              patch("services.profile_skills.analyze_profile_message", return_value=decision), \
@@ -444,7 +547,8 @@ class ProfileSkillsTests(unittest.TestCase):
             "_id": ObjectId(message_id), "sender_id": "owner",
         })
         self.assertEqual(find_message.call_args.args[1], {
-            "content": 1, "metadata.owner_raw_content": 1, "timestamp": 1,
+            "content": 1, "metadata.owner_raw_content": 1,
+            "metadata.message_use": 1, "timestamp": 1,
         })
 
     def test_profile_source_accepts_server_preserved_raw_owner_content(self):
@@ -454,7 +558,13 @@ class ProfileSkillsTests(unittest.TestCase):
             "recent_context": {"should_update": False, "reason_code": "test"},
             "memories": [], "memory_codes": ["no_memory_candidate"], "policy_versions": {},
         }
-        source = {"content": "@seed_user_01 我想去爬山", "metadata": {"owner_raw_content": "我想去爬山"}}
+        source = {
+            "content": "@seed_user_01 我想去爬山",
+            "metadata": {
+                "owner_raw_content": "我想去爬山",
+                "message_use": metadata_for_use("ordinary", reason="test"),
+            },
+        }
         with patch("services.profile_skills.messages_coll.find_one", return_value=source), \
              patch("services.profile_skills.profiles_coll.find_one", return_value={}), \
              patch("services.profile_skills._claim_profile_message", return_value=True), \
@@ -467,12 +577,43 @@ class ProfileSkillsTests(unittest.TestCase):
     def test_duplicate_message_is_rejected_before_extraction(self):
         os.environ["AYUE_PROFILE_SKILLS_MODE"] = "on"
         message_id = "64b64c8f0000000000000002"
-        with patch("services.profile_skills.messages_coll.find_one", return_value={"content": "我想去爬山", "timestamp": 1}), \
+        with patch("services.profile_skills.messages_coll.find_one", return_value={
+            "content": "我想去爬山",
+            "timestamp": 1,
+            "metadata": {"message_use": metadata_for_use("ordinary", reason="test")},
+        }), \
              patch("services.profile_skills._claim_profile_message", return_value=False), \
              patch("services.profile_skills.analyze_profile_message") as analyze:
             result = process_profile_message("owner", "我想去爬山", message_id, "global")
         analyze.assert_not_called()
         self.assertEqual(result, {"status": "skipped", "reason": "already_processed"})
+
+    def test_provider_failure_is_recorded_for_bounded_retry(self):
+        os.environ["AYUE_PROFILE_SKILLS_MODE"] = "shadow"
+        message_id = "64b64c8f0000000000000004"
+        source = {
+            "content": "我最近想爬山",
+            "timestamp": 1,
+            "metadata": {"message_use": metadata_for_use("ordinary", reason="test")},
+        }
+        decision = {
+            "recent_context": {
+                "should_update": False,
+                "reason_code": "model_TimeoutError",
+                "fields": {},
+                "message_kind": "other",
+            },
+            "memories": [], "memory_codes": [], "policy_versions": {},
+        }
+        with patch("services.profile_skills.messages_coll.find_one", return_value=source), \
+             patch("services.profile_skills._claim_profile_message", return_value=True), \
+             patch("services.profile_skills.analyze_profile_message", return_value=decision), \
+             patch("services.profile_skills.PROFILE_RUNS.find_one", return_value={"attempt_count": 1}), \
+             patch("services.profile_skills._trace"):
+            result = process_profile_message("owner", "我最近想爬山", message_id, "global")
+        self.assertEqual(result["status"], "retry_scheduled")
+        self.assertTrue(result["retry_scheduled"])
+        self.assertEqual(result["attempt_count"], 1)
 
 
 if __name__ == "__main__":

@@ -13,12 +13,71 @@ from database import matches_coll
 from services.match_state_service import verified_accepted_match_query
 from services.proposal_namespace import (
     EVENT_INVITATION_NAMESPACE,
+    RELATIONSHIP_MATCH_NAMESPACE,
     namespace_clause,
     namespace_for_document,
 )
 
 
 LIVE_STATUSES = {"draft", "pending"}
+DRAFT_TTL_SECONDS = 24 * 3600
+PENDING_TTL_SECONDS = 72 * 3600
+
+
+def expire_unresolved_proposals(
+    *, now: float | None = None, limit: int = 500,
+) -> dict[str, int | str]:
+    """Expire stale user-to-user cards without reviving or deleting history."""
+    current_time = float(now if now is not None else time.time())
+    safe_limit = max(1, min(int(limit or 500), 1000))
+    due = {
+        "$or": [
+            {"status": "draft", "created_at": {"$lte": current_time - DRAFT_TTL_SECONDS}},
+            {"status": "pending", "updated_at": {"$lte": current_time - PENDING_TTL_SECONDS}},
+        ],
+        "$and": [namespace_clause(RELATIONSHIP_MATCH_NAMESPACE)],
+    }
+    try:
+        rows = list(matches_coll.find(
+            due,
+            {"_id": 1, "status": 1, "proposal_revision": 1},
+        ).sort([("created_at", 1)]).limit(safe_limit))
+    except Exception:
+        return {"status": "unavailable", "checked_count": 0, "expired_count": 0, "stale_count": 0}
+    expired_count = 0
+    stale_count = 0
+    for row in rows:
+        status = str(row.get("status") or "")
+        revision = int(row.get("proposal_revision", 0) or 0)
+        transition = {
+            "from": status, "to": "expired", "actor": "system",
+            "action": "proposal_expired", "reason": f"{status}_timeout",
+            "at": current_time,
+        }
+        query: dict[str, Any] = {"_id": row.get("_id"), "status": status}
+        query["proposal_revision"] = revision if "proposal_revision" in row else {"$exists": False}
+        updated = matches_coll.find_one_and_update(
+            query,
+            {
+                "$set": {
+                    "status": "expired", "updated_at": current_time,
+                    "expired_at": current_time, "expired_reason": f"{status}_timeout",
+                    "last_decision": transition,
+                },
+                "$inc": {"proposal_revision": 1},
+                "$push": {"state_history": transition},
+                "$unset": {"live_participants": ""},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if updated:
+            expired_count += 1
+        else:
+            stale_count += 1
+    return {
+        "status": "success", "checked_count": len(rows),
+        "expired_count": expired_count, "stale_count": stale_count,
+    }
 
 
 def expire_event_proposals(

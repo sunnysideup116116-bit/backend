@@ -39,6 +39,13 @@ class _RelationshipEvidenceArguments(BaseModel):
     other_id: str | None = None
 
 
+class _RelationshipContactEvidenceArguments(BaseModel):
+    """Opaque accepted-contact references selected from the current list."""
+
+    model_config = ConfigDict(extra="forbid")
+    contact_refs: list[str] = Field(min_length=1, max_length=3)
+
+
 class _MentionedContactSummaryArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     other_ids: list[str] = Field(min_length=1, max_length=3)
@@ -246,6 +253,16 @@ class _MatchStatusOutput(BaseModel):
     revision: int | None = None
     updated_at: Any = None
     reason_code: str | None = None
+    active_proposal_count: int = 0
+    pending_action_count: int = 0
+    waiting_other_count: int = 0
+    daily_quota: dict[str, Any] = Field(default_factory=dict)
+    active_limit: int | None = None
+    active_used: int | None = None
+    active_remaining: int | None = None
+    background_limit: int | None = None
+    background_used: int | None = None
+    background_remaining: int | None = None
 
 
 class _CounterpartySummaryOutput(BaseModel):
@@ -301,6 +318,7 @@ class _RelationshipOutput(BaseModel):
 
 class _MentionedContactOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    contact_ref: str = ""
     display_name: str = "對方"
     recent_context: str = ""
     initial_interest: str = ""
@@ -308,6 +326,7 @@ class _MentionedContactOutput(BaseModel):
     safe_match_reason: str = ""
     verified_common_ground: list[str] = Field(default_factory=list)
     distinctive_tags: list[str] = Field(default_factory=list)
+    evidence_available: bool = False
 
 
 class _MentionedContactSummaryOutput(BaseModel):
@@ -320,6 +339,26 @@ class _AcceptedContactListOutput(BaseModel):
     contacts: list[_MentionedContactOutput] = Field(default_factory=list, max_length=8)
     truncated: bool = False
     total_count: int | None = Field(default=None, ge=0)
+
+
+class _ContactEvidenceOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    contact_ref: str
+    display_name: str = "對方"
+    recent_context: str = ""
+    initial_interest: str = ""
+    personality_summary: str = ""
+    safe_match_reason: str = ""
+    verified_common_ground: list[str] = Field(default_factory=list)
+    distinctive_tags: list[str] = Field(default_factory=list)
+    evidence_fields: list[str] = Field(default_factory=list, max_length=8)
+    truncated: bool = False
+
+
+class _ContactEvidenceListOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    contacts: list[_ContactEvidenceOutput] = Field(default_factory=list, max_length=3)
+    unavailable_refs: list[str] = Field(default_factory=list, max_length=3)
 
 
 class _MemoryOutput(BaseModel):
@@ -501,13 +540,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "match.get_status": ToolSpec(
         "match.get_status", ToolRisk.READ, "match_status",
-        "讀取本人唯一正式配對狀態；只回答單一 proposal／配對的成功、接受、回覆與目前進度，不提供已接受聯絡人清單或總數。",
+        "讀取本人目前的配對搜尋與牽線卡數量；可回答有幾張待回覆、幾張等待對方與搜尋進度，不提供未授權的對方資料。",
         "我看一下目前的配對進度…",
         output_model=_MatchStatusOutput,
     ),
     "match.get_counterparty_summary": ToolSpec(
         "match.get_counterparty_summary", ToolRisk.READ, "counterparty_summary",
-        "讀取唯一目前有效或已接受配對的單一公開對象摘要；適用於問這一位對方是誰、共同點或聊天室是否已開啟，不提供 accepted contacts aggregate 清單、總數或整體比較。",
+        "讀取使用者明確指向的單一公開對象摘要；若有多張牽線卡，不可自行猜測使用者指的是哪一張。",
         "我確認一下這位對象的公開資訊…",
         output_model=_CounterpartySummaryOutput,
     ),
@@ -530,6 +569,14 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         executor_arguments_model=_RelationshipEvidenceArguments,
         output_model=_RelationshipOutput,
         argument_source=ToolArgumentSource.MENTIONED_RELATIONSHIP,
+    ),
+    "relationship.get_contact_evidence": ToolSpec(
+        "relationship.get_contact_evidence", ToolRisk.READ, "contact_evidence",
+        "讀取目前 accepted-contact 清單中最多三位候選人的較完整公開摘要；只能使用本回合清單回傳的 contact_ref，不接受 user ID。",
+        "我再核對一下這幾位對象的公開資訊…",
+        executor_arguments_model=_RelationshipContactEvidenceArguments,
+        output_model=_ContactEvidenceListOutput,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
     "relationship.get_mentioned_contact_summary": ToolSpec(
         "relationship.get_mentioned_contact_summary", ToolRisk.READ, "mentioned_contact_summary",

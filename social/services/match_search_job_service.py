@@ -11,14 +11,20 @@ from typing import Any, Callable
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from database import db, profiles_coll
+from database import db, matches_coll, profiles_coll
 from services.mediator_event_service import queue_mediator_event
 from services.proposal_namespace import RELATIONSHIP_MATCH_NAMESPACE
+from services.match_search_context import safe_search_context
 
 
 MATCH_SEARCH_JOBS = db["match_search_jobs"]
 JOB_ACTIVE_STATUSES = frozenset({"queued", "running"})
-JOB_TERMINAL_STATUSES = frozenset({"completed", "no_candidates", "failed", "cancelled", "stale"})
+PREVIEW_ON_MATCH = "preview_on_match"
+INVITE_ON_MATCH = "invite_on_match"
+JOB_TERMINAL_STATUSES = frozenset({
+    "completed", "no_candidates", "insufficient_common_ground",
+    "failed", "cancelled", "stale", "quota_exceeded",
+})
 JOB_STEPS = {
     "loading_profile": 15,
     "vector_search": 40,
@@ -35,6 +41,8 @@ MatchPipeline = Callable[..., dict[str, Any]]
 _pipeline: MatchPipeline | None = None
 _worker_thread: threading.Thread | None = None
 _stop_event = threading.Event()
+_owned_lease_lock = threading.Lock()
+_owned_lease_ids: set[str] = set()
 LOGGER = logging.getLogger(__name__)
 
 
@@ -56,11 +64,16 @@ _FAILURE_MESSAGES = {
     "matchmaker_output_truncated": "媒人評估結果不完整，這次搜尋沒有完成。",
     "matchmaker_provider_error": "配對服務目前發生錯誤，請稍後再試。",
     "proposal_write_failed": "配對結果已找到，但儲存結果時失敗，請稍後再試。",
+    "legacy_live_match_index_conflict": "配對資料還沒完成更新，這次沒有送出邀請。請稍後再試。",
+    "proposal_pair_already_active": "你和這位人選已經有一張進行中的邀請，這次沒有重複送出。",
+    "quota_unavailable": "目前無法確認今天還能找幾位，這次搜尋沒有啟動，請稍後再試。",
     "pipeline_unavailable": "配對服務目前還沒準備好，請稍後再試。",
     "vector_search_unavailable": "我目前無法讀取候選資料，請稍後再試。",
     "matchmaker_unavailable": "配對服務暫時連不上，請稍後再試。",
     "matchmaker_http_error": "配對服務回應失敗，請稍後再試。",
     "matchmaker_invalid_response": "配對服務回傳的結果不完整，請稍後再試。",
+    "insufficient_common_ground": "我暫時找不到足夠的共同依據；你可以補充這次想一起做的事或主題，再決定是否重新搜尋。",
+    "daily_active_quota_exceeded": "今天已經幫你介紹 3 位新朋友了，明天可以再找；已送出的邀請還是能繼續回覆。",
     "unexpected_pipeline_error": "配對流程中途發生問題，請稍後再試。",
 }
 
@@ -104,14 +117,21 @@ def _profile_search_projection(status: str, source: str, *, step: str = "", prog
 
 def _live_match(user_id: str) -> dict[str, Any] | None:
     # Avoid an import cycle with match_state_service at module import time.
-    from services.match_state_service import reconcile_live_match
-    return reconcile_live_match(user_id)
+    from services.match_state_service import load_match_state
+    return load_match_state(user_id).get("active_proposal")
 
 
 def _has_live_match(user_id: str) -> bool:
     from services.match_state_service import load_match_state
     state = load_match_state(user_id)
-    return bool(state["active_proposal"] or state["ambiguous"])
+    active_rows = state.get("all_live_proposals") or state.get("active_proposals") or []
+    if active_rows:
+        return any(
+            row.get("status") == "draft" and row.get("from_user") == user_id
+            for row in active_rows
+        )
+    active = state.get("active_proposal") or {}
+    return bool(active.get("status") == "draft" and active.get("from_user") == user_id)
 
 
 def enqueue_match_search(
@@ -121,14 +141,55 @@ def enqueue_match_search(
     idempotency_key: str,
     force_new: bool = False,
     origin_room_id: str = "",
+    search_context: dict[str, Any] | None = None,
+    delivery_mode: str = PREVIEW_ON_MATCH,
 ) -> dict[str, Any]:
     """Create one queued job. This call never runs candidate ranking inline."""
+    # Replay a known request before applying today's quota guard.  A retry of a
+    # previously queued/completed job must return its original outcome rather
+    # than looking like a new search after the user has used today's slots.
+    if idempotency_key:
+        try:
+            prior = MATCH_SEARCH_JOBS.find_one(
+                {"user_id": user_id, "idempotency_key": str(idempotency_key)[:120]},
+                {"_id": 0, "status": 1},
+            )
+        except Exception:
+            prior = None
+        if isinstance(prior, dict) and prior.get("status"):
+            prior_status = str(prior.get("status"))
+            if prior_status == "queued":
+                return {"status": "already_queued"}
+            if prior_status == "running":
+                return {"status": "already_searching"}
+            if prior_status in JOB_TERMINAL_STATUSES:
+                return {"status": prior_status}
+    if str(source or "").strip().lower() not in {
+        "automatic", "background", "event_opportunity", "proactive_event",
+    }:
+        # This is a fast read guard.  The worker reserves the slot again just
+        # before writing the proposal, closing the race between queueing and
+        # completion without charging searches that return no candidate.
+        try:
+            from services.match_quota_service import daily_quota_status
+            if daily_quota_status(user_id)["active"]["remaining"] <= 0:
+                return {"status": "quota_exceeded", "reason_code": "daily_active_quota_exceeded"}
+        except Exception:
+            # The authoritative reservation will fail closed in the worker.
+            pass
     if _has_live_match(user_id):
         return {"status": "already_active"}
     now = time.time()
     profile = profiles_coll.find_one(
         {"user_id": user_id}, {"_id": 0, "current_context_revision": 1},
     ) or {}
+    bound_context = safe_search_context(search_context)
+    bound_delivery_mode = (
+        INVITE_ON_MATCH
+        if str(delivery_mode or "").strip() == INVITE_ON_MATCH
+        and str(bound_context.get("invitation_topic") or "").strip()
+        else PREVIEW_ON_MATCH
+    )
     job = {
         "job_id": uuid.uuid4().hex,
         "user_id": user_id,
@@ -139,6 +200,8 @@ def enqueue_match_search(
         "context_revision": _safe_revision(profile),
         "source": str(source or "automatic")[:40],
         "origin_room_id": str(origin_room_id or "")[:240],
+        "search_context": bound_context,
+        "delivery_mode": bound_delivery_mode,
         "idempotency_key": str(idempotency_key)[:120],
         "lease_id": "",
         "lease_until": 0.0,
@@ -224,7 +287,7 @@ def cancel_match_search(
 
 def _claim_next_job(now: float) -> dict[str, Any] | None:
     lease_id = uuid.uuid4().hex
-    return MATCH_SEARCH_JOBS.find_one_and_update(
+    job = MATCH_SEARCH_JOBS.find_one_and_update(
         {
             "active_user_id": {"$exists": True},
             "$or": [
@@ -239,6 +302,18 @@ def _claim_next_job(now: float) -> dict[str, Any] | None:
         sort=[("created_at", 1)],
         return_document=ReturnDocument.AFTER,
     )
+    if job:
+        with _owned_lease_lock:
+            _owned_lease_ids.add(lease_id)
+    return job
+
+
+def _forget_owned_lease(job: dict[str, Any]) -> None:
+    lease_id = str(job.get("lease_id") or "")
+    if not lease_id:
+        return
+    with _owned_lease_lock:
+        _owned_lease_ids.discard(lease_id)
 
 
 def _job_has_lease(job: dict[str, Any]) -> bool:
@@ -266,11 +341,14 @@ def _job_has_ownership(job: dict[str, Any]) -> bool:
 def _job_is_current(job: dict[str, Any]) -> bool:
     if not _job_has_lease(job):
         return False
-    live_match = _live_match(str(job.get("user_id") or ""))
-    if live_match:
+    user_id = str(job.get("user_id") or "")
+    live_match = _live_match(user_id)
+    if live_match and str(live_match.get("search_job_id") or "") == str(job.get("job_id") or ""):
         # A proposal already committed by this same durable job is recoverable
-        # after a lease handoff; any other live proposal makes the job stale.
-        return str(live_match.get("search_job_id") or "") == str(job.get("job_id") or "")
+        # after a lease handoff.  Other waiting cards do not stale this job.
+        return True
+    if live_match and live_match.get("status") == "draft" and live_match.get("from_user") == user_id:
+        return False
     return _job_context_matches(job)
 
 
@@ -287,6 +365,7 @@ def _report_progress(job: dict[str, Any], step: str) -> bool:
     )
     if not getattr(result, "modified_count", 0):
         return False
+    _forget_owned_lease(job)
     profiles_coll.update_one(
         {"user_id": job.get("user_id"), "active_match_search_job_id": job.get("job_id")},
         {"$set": {"match_search": _profile_search_projection("running", str(job.get("source") or "automatic"), step=step, progress_percent=JOB_STEPS[step])}},
@@ -312,6 +391,7 @@ def _finish_job(
     )
     if not getattr(result, "modified_count", 0):
         return False
+    _forget_owned_lease(job)
     profiles_coll.update_one(
         {"user_id": job.get("user_id"), "active_match_search_job_id": job.get("job_id")},
         {"$set": {
@@ -321,7 +401,7 @@ def _finish_job(
                 str(job.get("source") or "automatic"),
                 progress_percent=100 if status == "completed" else 0,
                 completed_at=now,
-                reason_code=error_code[:80] if status == "failed" else "",
+                reason_code=error_code[:80] if status in {"failed", "insufficient_common_ground", "quota_exceeded"} else "",
             ),
         }, "$unset": {"active_match_search_job_id": ""}},
     )
@@ -406,6 +486,156 @@ def _settle_stale_job(job: dict[str, Any]) -> None:
         )
 
 
+def _deliver_invitation_on_match(job: dict[str, Any], matches: list[dict[str, Any]]) -> None:
+    """Use the canonical draft -> pending CAS for a confirmed topic search.
+
+    The search worker and the proposal live in separate Mongo documents, so a
+    cross-document transaction is not assumed here.  The proposal transition
+    itself is atomic and keyed by the durable job id; a lease retry therefore
+    either observes the already-pending decision or applies it once.  The
+    action service owns receiver notification and its event keys make delivery
+    idempotent as well.
+    """
+    if str(job.get("delivery_mode") or PREVIEW_ON_MATCH) != INVITE_ON_MATCH:
+        return
+    first = matches[0] if matches else {}
+    match_id = str(first.get("match_id") or "").strip()
+    if not match_id:
+        raise MatchSearchPipelineError("proposal_write_failed", "proposal_write")
+    try:
+        from services.match_action_service import decide_match
+
+        outcome = decide_match(
+            user_id=str(job.get("user_id") or ""),
+            match_id=match_id,
+            action="accept",
+            expected_status="draft",
+            expected_revision=int(first.get("proposal_revision", 0) or 0),
+            expected_namespace=RELATIONSHIP_MATCH_NAMESPACE,
+            idempotency_key=f"match-search-job:{job.get('job_id')}:invite-on-match",
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "invite-on-match transition failed job=%s error=%s",
+            str(job.get("job_id") or "")[:80], type(exc).__name__,
+        )
+        raise MatchSearchPipelineError("proposal_write_failed", "proposal_write") from exc
+    if str(outcome.get("status") or "") != "success":
+        # A concurrent transition can safely win the CAS only when the
+        # proposal is already pending/accepted. Other outcomes are stale and
+        # must not be presented as a sent invitation.
+        current_status = str(outcome.get("current_status") or "")
+        if not outcome.get("stale") or current_status not in {"pending", "accepted"}:
+            raise MatchSearchPipelineError("proposal_write_failed", "proposal_write")
+    # ``decide_match`` invokes transition effects for a fresh CAS. If this is
+    # lease recovery and the same idempotency key was already committed, replay
+    # the effects from the canonical proposal so a crash between the state write
+    # and notification delivery can heal without another transition.
+    if outcome.get("idempotent"):
+        try:
+            from services.match_action_service import apply_transition_effects
+            proposal = matches_coll.find_one({
+                "search_job_id": str(job.get("job_id") or ""),
+                "from_user": str(job.get("user_id") or ""),
+                "status": {"$in": ["pending", "accepted"]},
+            })
+            if proposal:
+                apply_transition_effects(proposal, "accept", "draft", [])
+        except Exception as exc:
+            LOGGER.warning(
+                "invite-on-match effect recovery failed job=%s error=%s",
+                str(job.get("job_id") or "")[:80], type(exc).__name__,
+            )
+
+
+def _live_proposal_for_job(job: dict[str, Any]) -> dict[str, Any] | None:
+    """Read a proposal committed by an earlier lease owner, if any."""
+    job_id = str(job.get("job_id") or "").strip()
+    user_id = str(job.get("user_id") or "").strip()
+    if not job_id or not user_id:
+        return None
+    return matches_coll.find_one({
+        "search_job_id": job_id,
+        "from_user": user_id,
+        # The receiver can accept while the original worker is down. Keep the
+        # accepted row tied to this job so reclaim never reruns ranking/quota.
+        "status": {"$in": ["draft", "pending", "accepted"]},
+        "proposal_namespace": RELATIONSHIP_MATCH_NAMESPACE,
+    })
+
+
+def _proposal_result_from_document(proposal: dict[str, Any]) -> dict[str, Any]:
+    """Create the minimum pipeline result needed by recovery delivery."""
+    matched_id = proposal.get("to_user")
+    return {
+        "match_id": str(proposal.get("_id") or ""),
+        "matched_user_id": str(matched_id or ""),
+        "proposal_revision": int(proposal.get("proposal_revision", 0) or 0),
+    }
+
+
+def _queue_completed_match_event(job: dict[str, Any], first: dict[str, Any]) -> None:
+    """Publish one stable requester receipt after a completed search."""
+    topic = str(
+        ((job.get("search_context") or {}).get("invitation_topic") or "")
+    ).strip()[:80]
+    if str(job.get("delivery_mode") or PREVIEW_ON_MATCH) == INVITE_ON_MATCH and topic:
+        message = f"已替你送出「{topic}」邀請，正在等對方回覆。"
+    elif str(job.get("delivery_mode") or PREVIEW_ON_MATCH) == INVITE_ON_MATCH:
+        message = "已替你送出邀請，正在等對方回覆。"
+    else:
+        tone_doc = profiles_coll.find_one(
+            {"user_id": job.get("user_id")}, {"_id": 0, "mediator_tone": 1},
+        ) or {}
+        message = {
+            "friend": "我翻到一位可以介紹給你的人，先看這張阿月牽線提案。",
+            "gentle": "我幫你留意到一位可能合拍的人，先看看這個提案。",
+            "enthusiastic": "我找到一位有機會聊起來的人，快看看這張牽線提案！",
+        }.get(
+            str(tone_doc.get("mediator_tone") or "friend"),
+            "我翻到一位可以介紹給你的人，先看這張阿月牽線提案。",
+        )
+    queue_mediator_event(
+        str(job.get("user_id") or ""), message, "match_proposal",
+        event_key=f"match-search-job:{job.get('job_id')}:proposal",
+        match_id=first.get("match_id"), proposal_role="initiator",
+        proposal_namespace=RELATIONSHIP_MATCH_NAMESPACE,
+        origin_room_id=str(job.get("origin_room_id") or ""),
+    )
+
+
+def _recover_committed_job(job: dict[str, Any]) -> bool:
+    """Finish a lease-reclaimed job whose proposal was already inserted."""
+    try:
+        proposal = _live_proposal_for_job(job)
+    except Exception as exc:
+        # An unavailable proposal read is not evidence that no proposal exists;
+        # rerunning selection could double-charge the user. Leave the job for
+        # the normal lease retry instead.
+        LOGGER.warning(
+            "match proposal recovery read failed job=%s error=%s",
+            str(job.get("job_id") or "")[:80], type(exc).__name__,
+        )
+        return True
+    if not proposal:
+        return False
+    recovered = _proposal_result_from_document(proposal)
+    try:
+        _deliver_invitation_on_match(job, [recovered])
+    except MatchSearchPipelineError as exc:
+        if _finish_job(job, "failed", error_code=exc.code, failure_stage=exc.stage):
+            queue_mediator_event(
+                str(job.get("user_id") or ""),
+                _FAILURE_MESSAGES.get(exc.code, _FAILURE_MESSAGES["proposal_write_failed"]),
+                "match_search_failed", event_key=f"match-search-job:{job.get('job_id')}:failed",
+                origin_room_id=str(job.get("origin_room_id") or ""),
+            )
+        return True
+    if _finish_job(job, "completed"):
+        _queue_completed_match_event(job, recovered)
+    return True
+
+
 def run_one_match_search_job() -> bool:
     """Claim and execute at most one job. Safe to invoke from many workers."""
     job = _claim_next_job(time.time())
@@ -422,12 +652,30 @@ def run_one_match_search_job() -> bool:
     if not _report_progress(job, "loading_profile"):
         _settle_stale_job(job)
         return True
+    recovery_checkpoint = str(job.get("step") or "") == "proposal_write"
     try:
+        recovery_checkpoint = recovery_checkpoint or int(job.get("progress_percent", 0) or 0) >= JOB_STEPS["proposal_write"]
+    except (TypeError, ValueError):
+        pass
+    if recovery_checkpoint and _recover_committed_job(job):
+        # A previous lease owner may have inserted the proposal before the
+        # process died. Recovery finalizes that exact proposal and skips the
+        # candidate pipeline, quota reservation and duplicate insert.
+        return True
+    try:
+        pipeline_kwargs = {
+            "report_progress": lambda step: _report_progress(job, step),
+            "can_commit": lambda: _job_is_current(job),
+            "search_job_id": str(job.get("job_id") or ""),
+            "search_context": dict(job.get("search_context") or {}),
+        }
+        if str(job.get("origin_room_id") or "").strip():
+            pipeline_kwargs["origin_room_id"] = str(job.get("origin_room_id") or "")[:240]
+        if str(job.get("delivery_mode") or PREVIEW_ON_MATCH) == INVITE_ON_MATCH:
+            pipeline_kwargs["delivery_mode"] = INVITE_ON_MATCH
         result = _pipeline(
             str(job.get("user_id") or ""), str(job.get("source") or "automatic"),
-            report_progress=lambda step: _report_progress(job, step),
-            can_commit=lambda: _job_is_current(job),
-            search_job_id=str(job.get("job_id") or ""),
+            **pipeline_kwargs,
         )
     except MatchSearchPipelineError as exc:
         if _finish_job(job, "failed", error_code=exc.code, failure_stage=exc.stage):
@@ -458,9 +706,24 @@ def run_one_match_search_job() -> bool:
         if not _job_has_ownership(job):
             _settle_stale_job(job)
             return True
-        if _finish_job(job, "no_candidates"):
+        result_reason = str((result or {}).get("reason_code") or "")
+        terminal_status = (
+            "insufficient_common_ground"
+            if result_reason == "insufficient_common_ground"
+            else "quota_exceeded"
+            if result_reason == "daily_active_quota_exceeded"
+            else "no_candidates"
+        )
+        finish_kwargs = {}
+        if result_reason:
+            finish_kwargs["error_code"] = result_reason
+        if _finish_job(job, terminal_status, **finish_kwargs):
+            empty_reply = _FAILURE_MESSAGES.get(
+                result_reason, "這輪暫時沒有合適的新對象；你可以補充想認識的對象或想一起做的事，再決定是否搜尋。",
+            )
             queue_mediator_event(
-                str(job.get("user_id") or ""), "這輪我暫時沒看到合適的新對象，等資料多一點我再幫你看。",
+                str(job.get("user_id") or ""),
+                empty_reply,
                 "match_search_empty", event_key=f"match-search-job:{job.get('job_id')}:empty",
                 origin_room_id=str(job.get("origin_room_id") or ""),
             )
@@ -471,21 +734,19 @@ def run_one_match_search_job() -> bool:
         # A new lease owner will recover the proposal by search_job_id and
         # publish the single terminal event.
         return True
+    try:
+        _deliver_invitation_on_match(job, matches)
+    except MatchSearchPipelineError as exc:
+        if _finish_job(job, "failed", error_code=exc.code, failure_stage=exc.stage):
+            queue_mediator_event(
+                str(job.get("user_id") or ""),
+                _FAILURE_MESSAGES.get(exc.code, _FAILURE_MESSAGES["proposal_write_failed"]),
+                "match_search_failed", event_key=f"match-search-job:{job.get('job_id')}:failed",
+                origin_room_id=str(job.get("origin_room_id") or ""),
+            )
+        return True
     if _finish_job(job, "completed"):
-        first = matches[0]
-        tone_doc = profiles_coll.find_one({"user_id": job.get("user_id")}, {"_id": 0, "mediator_tone": 1}) or {}
-        proposal_message = {
-            "friend": "我翻到一位可以介紹給你的人，先看這張阿月牽線提案。",
-            "gentle": "我幫你留意到一位可能合拍的人，先看看這個提案。",
-            "enthusiastic": "我找到一位有機會聊起來的人，快看看這張牽線提案！",
-        }.get(str(tone_doc.get("mediator_tone") or "friend"), "我翻到一位可以介紹給你的人，先看這張阿月牽線提案。")
-        queue_mediator_event(
-            str(job.get("user_id") or ""), proposal_message, "match_proposal",
-            event_key=f"match-search-job:{job.get('job_id')}:proposal",
-            match_id=first.get("match_id"), proposal_role="initiator",
-            proposal_namespace=RELATIONSHIP_MATCH_NAMESPACE,
-            origin_room_id=str(job.get("origin_room_id") or ""),
-        )
+        _queue_completed_match_event(job, matches[0])
     return True
 
 
@@ -524,7 +785,7 @@ def match_search_snapshot(user_id: str) -> dict[str, Any]:
     # Keep old job checkpoints for diagnostics, not public in-progress UI.
     if status not in JOB_ACTIVE_STATUSES:
         percent = 100 if status == "completed" else 0
-    reason_code = str(job.get("error_code") or "") if status == "failed" else ""
+    reason_code = str(job.get("error_code") or "") if status in {"failed", "insufficient_common_ground", "quota_exceeded"} else ""
     if reason_code not in _FAILURE_MESSAGES:
         reason_code = "unexpected_pipeline_error" if status == "failed" else ""
     return {
@@ -582,3 +843,38 @@ def start_match_search_worker() -> None:
 
 def stop_match_search_worker() -> None:
     _stop_event.set()
+    # A graceful development reload must not make the next process wait for
+    # the full lease window. Release only leases claimed by this process; an
+    # unrelated worker's lease remains untouched.
+    with _owned_lease_lock:
+        lease_ids = list(_owned_lease_ids)
+    for lease_id in lease_ids:
+        job = MATCH_SEARCH_JOBS.find_one_and_update(
+            {"status": "running", "lease_id": lease_id},
+            {
+                "$set": {
+                    "status": "queued",
+                    "step": "loading_profile",
+                    "progress_percent": 0,
+                    "updated_at": time.time(),
+                },
+                "$unset": {"lease_id": "", "lease_until": ""},
+            },
+            return_document=ReturnDocument.BEFORE,
+        )
+        if job:
+            profiles_coll.update_one(
+                {
+                    "user_id": job.get("user_id"),
+                    "active_match_search_job_id": job.get("job_id"),
+                },
+                {"$set": {
+                    "matchmaking_in_progress": True,
+                    "match_search": _profile_search_projection(
+                        "queued", str(job.get("source") or "automatic"),
+                        step="loading_profile", progress_percent=0,
+                    ),
+                }},
+            )
+        with _owned_lease_lock:
+            _owned_lease_ids.discard(lease_id)

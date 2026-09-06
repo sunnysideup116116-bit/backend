@@ -186,6 +186,7 @@ class AyueAgentStreamTests(unittest.TestCase):
                  {"message_id": "owner-message"}, {"message_id": "assistant-message"},
              ]) as save_message, \
              patch("routers.public_chat.queue_profile_skills", return_value="on") as queue_profile, \
+             patch("routers.public_chat.profile_skills_mode_for_user", return_value="on"), \
              patch("routers.public_chat.profiles_coll.update_one"), \
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
              patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
@@ -494,6 +495,83 @@ class AyueAgentStreamTests(unittest.TestCase):
             "type": "token", "agent_run_id": "run-tok", "text": "字" * 900,
         })
         self.assertEqual(len(token["text"]), 600)
+
+    def test_place_tokens_are_released_only_after_assistant_and_snapshot_persist(self):
+        req = DirectChatRequest(
+            user_id="owner", contact_id="ai_assistant", message="把第二間排進行程",
+        )
+        history_cursor = MagicMock()
+        history_cursor.sort.return_value.limit.return_value = []
+        canonical = "推薦地點：\n1. A 店\n2. B 店\n\n" + "這是已保存的說明。" * 30
+        callbacks: list[str] = []
+        order: list[str] = []
+
+        def save_reply(_room_id, sender_id, content, **_kwargs):
+            self.assertEqual(sender_id, "ai_assistant")
+            order.append("assistant_saved")
+            return {"message_id": "assistant-message", "content": content}
+
+        def publish(_user_id, _room_id, _run_id, _message_id):
+            order.append("presentation_published")
+            self.assertEqual(callbacks, [])
+            return True
+
+        with patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
+             patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
+             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
+                 handled=True, reply=canonical, messages=[canonical],
+                 presentation_class="grounded_recommendation",
+                 agent_run_id="a" * 32, place_presentation_required=True,
+             )), \
+             patch("routers.public_chat.mark_message_use_from_turn"), \
+             patch("routers.public_chat.mark_message_use"), \
+             patch("routers.public_chat.complete_public_ayue_onboarding"), \
+             patch("routers.public_chat.save_message", side_effect=save_reply), \
+             patch("routers.public_chat.publish_place_presentation", side_effect=publish), \
+             patch("routers.public_chat.mark_public_confirmation_presented"):
+            response = _complete_public_turn(
+                req, "room", [], background_tasks=None, user_message_id="owner-message",
+                on_token=callbacks.append,
+            )
+
+        self.assertEqual(order, ["assistant_saved", "presentation_published"])
+        self.assertEqual("".join(callbacks), canonical)
+        self.assertTrue(all(0 < len(fragment) <= 120 for fragment in callbacks))
+        self.assertEqual(response["reply"], canonical)
+
+    def test_place_tokens_are_not_released_when_snapshot_publication_fails(self):
+        req = DirectChatRequest(
+            user_id="owner", contact_id="ai_assistant", message="把第二間排進行程",
+        )
+        history_cursor = MagicMock()
+        history_cursor.sort.return_value.limit.return_value = []
+        callbacks: list[str] = []
+        canonical = "推薦地點：\n1. A 店\n2. B 店"
+
+        with patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
+             patch("routers.public_chat.messages_coll.update_one"), \
+             patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
+             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
+                 handled=True, reply=canonical, messages=[canonical],
+                 presentation_class="grounded_recommendation",
+                 agent_run_id="b" * 32, place_presentation_required=True,
+             )), \
+             patch("routers.public_chat.mark_message_use_from_turn"), \
+             patch("routers.public_chat.mark_message_use"), \
+             patch("routers.public_chat.complete_public_ayue_onboarding"), \
+             patch("routers.public_chat.save_message", return_value={
+                 "message_id": "assistant-message", "content": canonical,
+             }), \
+             patch("routers.public_chat.publish_place_presentation", return_value=False), \
+             patch("routers.public_chat.mark_public_confirmation_presented"):
+            response = _complete_public_turn(
+                req, "room", [], background_tasks=None, user_message_id="owner-message",
+                on_token=callbacks.append,
+            )
+
+        self.assertEqual(callbacks, [])
+        self.assertNotIn("A 店", response["reply"])
+        self.assertIn("暫時無法保存候選清單", response["reply"])
 
     def test_public_stream_does_not_publish_tokens_without_opt_in(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="說點什麼")

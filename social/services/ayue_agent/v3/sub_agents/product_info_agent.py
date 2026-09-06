@@ -41,6 +41,7 @@ _SECTION_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("surfaces.context_boundary", ("跨入口", "跨聊天室", "完整對話", "互相看到", "context", "看得到", "cross_surface_context")),
     ("privacy.relationship", ("對方看到", "隱私", "可見", "visibility", "private message", "private_message_visibility", "relationship_chat_access")),
     ("matching.overview", ("配對", "媒合", "找人", "人選", "match", "matching")),
+    ("matching.methods", ("有哪些配對方式", "配對方式", "有幾種方式", "怎麼配對", "如何配到人", "three ways", "matching methods")),
     ("matching.selection", ("怎麼挑", "怎麼選", "排序", "原理", "抽籤", "隨機", "rank", "select", "matching_principles")),
     ("matching.profile_usage", ("偏好", "喜好", "記得我", "我的資料", "profile", "preference", "already knows", "近況")),
     ("matching.confirmation", ("確認", "核准", "開始搜尋", "開始找", "confirmation", "confirm")),
@@ -62,6 +63,7 @@ _SECTION_HINTS += (
     ("surfaces.context_boundary", ("\u8de8\u5165\u53e3", "\u8de8\u804a\u5929\u5ba4", "\u5b8c\u6574\u5c0d\u8a71", "\u4e92\u76f8\u770b\u5230", "\u770b\u5f97\u5230")),
     ("privacy.relationship", ("\u5c0d\u65b9\u770b\u5230", "\u96b1\u79c1", "\u53ef\u898b")),
     ("matching.overview", ("\u914d\u5c0d", "\u5a92\u5408", "\u627e\u4eba", "\u4eba\u9078")),
+    ("matching.methods", ("\u6709\u54ea\u4e9b\u914d\u5c0d\u65b9\u5f0f", "\u914d\u5c0d\u65b9\u5f0f", "\u6709\u5e7e\u7a2e\u65b9\u5f0f", "\u600e\u9ebc\u914d\u5c0d", "\u5982\u4f55\u914d\u5230\u4eba")),
     ("matching.selection", ("\u600e\u9ebc\u6311", "\u600e\u9ebc\u9078", "\u6392\u5e8f", "\u539f\u7406", "\u62bd\u7c64", "\u96a8\u6a5f")),
     ("matching.profile_usage", ("\u504f\u597d", "\u559c\u597d", "\u8a18\u5f97\u6211", "\u6211\u7684\u8cc7\u6599", "\u8fd1\u6cc1")),
     ("matching.confirmation", ("\u78ba\u8a8d", "\u6838\u51c6", "\u958b\u59cb\u641c\u5c0b", "\u958b\u59cb\u627e")),
@@ -102,7 +104,7 @@ def _supplement_sections(text: str, selected: list[str]) -> list[str]:
     lowered = text.casefold()
     supplements: list[str] = []
     if any(term in lowered for term in ("配對", "媒合", "match", "找人")):
-        supplements.extend(("matching.overview", "matching.limitations"))
+        supplements.extend(("matching.overview", "matching.methods", "matching.limitations"))
     if any(term in lowered for term in ("悄悄話", "聊天室", "對方", "private", "visibility")):
         supplements.extend(("surfaces.context_boundary", "privacy.relationship"))
     if any(term in lowered for term in ("行事曆", "行程", "calendar")):

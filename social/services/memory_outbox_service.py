@@ -9,8 +9,10 @@ import uuid
 from typing import Any
 
 from pymongo import ReturnDocument
+from bson.objectid import ObjectId
 
-from database import db
+from database import db, messages_coll
+from services.message_use_service import is_reusable_for_profile
 
 
 MEMORY_OUTBOX = db["profile_memory_outbox"]
@@ -88,6 +90,44 @@ def _finish_failure(record: dict[str, Any], error_code: str, *, now: float) -> N
     )
 
 
+def _finish_excluded(record: dict[str, Any], *, now: float) -> None:
+    """Terminally retire a retry whose original owner source is no longer reusable."""
+    MEMORY_OUTBOX.update_one(
+        {"_id": record["_id"], "lease_token": record.get("lease_token")},
+        {
+            "$set": {
+                "status": "excluded",
+                "last_error_code": "source_unavailable_or_excluded",
+                "updated_at": now,
+            },
+            "$unset": {"lease_token": "", "lease_until": "", "next_attempt_at": ""},
+        },
+    )
+
+
+def _outbox_source_is_reusable(record: dict[str, Any]) -> bool | None:
+    """Revalidate owner-chat provenance before replaying a durable proposal."""
+    message_id = str(record.get("message_id") or "")
+    if not message_id:
+        return True
+    # Explicit feedback and other domain effects may have no owner chat source;
+    # only the profile pipeline is required to carry message-use provenance.
+    if str(record.get("surface") or "") not in {"global", "profile", "legacy"}:
+        return True
+    try:
+        source = messages_coll.find_one(
+            {"_id": ObjectId(message_id), "sender_id": str(record.get("user_id") or "")},
+            {"metadata.message_use": 1},
+        )
+    except Exception:
+        # ``None`` means the source could not be checked.  Keep the outbox
+        # retryable instead of treating a storage outage as a policy exclusion.
+        return None
+    if not source:
+        return False
+    return is_reusable_for_profile(source)
+
+
 def process_memory_outbox_once(limit: int = 3) -> dict[str, int]:
     """Retry a small batch; records contain typed proposals, never raw chat."""
     from services.memory_service import MemoryWriteError, apply_profile_memory_proposals
@@ -101,6 +141,20 @@ def process_memory_outbox_once(limit: int = 3) -> dict[str, int]:
         if not record:
             break
         processed += 1
+        source_reusable = _outbox_source_is_reusable(record)
+        if source_reusable is None:
+            try:
+                _finish_failure(record, "source_check_unavailable", now=time.time())
+            except Exception:
+                pass
+            failed += 1
+            continue
+        if not source_reusable:
+            try:
+                _finish_excluded(record, now=time.time())
+            except Exception:
+                pass
+            continue
         try:
             apply_profile_memory_proposals(
                 str(record.get("user_id") or ""),

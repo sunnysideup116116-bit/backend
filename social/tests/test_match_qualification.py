@@ -18,11 +18,30 @@ from services.match_reason_service import (
     MATCH_PROPOSAL_STYLE_IDS,
     accepted_opening_for_viewer,
     match_reason_style_id,
+    topic_friend_intro_fallback,
     valid_friend_intro_text,
 )
 
 
 class MatchQualificationTests(unittest.TestCase):
+    def test_topic_fallback_preserves_together_activity_and_viewer_role(self):
+        initiator = {"user_id": "owner", "current_context": "最近想去雪地旅行"}
+        receiver = {"user_id": "candidate", "current_context": "週末想拍照"}
+        owner_copy = topic_friend_intro_fallback(
+            initiator, receiver, "滑雪", requester_id="owner",
+            query_text="我想找人一起滑雪",
+        )
+        receiver_copy = topic_friend_intro_fallback(
+            receiver, initiator, "滑雪", requester_id="owner",
+            query_text="我想找人一起滑雪",
+        )
+        self.assertIn("找人一起滑雪", owner_copy["viewer_text"])
+        self.assertIn("找人一起滑雪", receiver_copy["viewer_text"])
+        self.assertNotIn("找人聊聊滑雪", owner_copy["viewer_text"])
+        self.assertNotEqual(owner_copy["viewer_text"], receiver_copy["viewer_text"])
+        self.assertIn("不能確認", owner_copy["viewer_text"])
+        self.assertIn("有位朋友", receiver_copy["viewer_text"])
+
     def test_match_reason_style_is_stable_but_not_a_single_global_first_shot(self):
         first = match_reason_style_id("owner", "candidate", context_revision="r1")
         self.assertEqual(first, match_reason_style_id("owner", "candidate", context_revision="r1"))
@@ -329,14 +348,104 @@ class MatchQualificationTests(unittest.TestCase):
         self.assertFalse(qualification["eligible"])
 
     @patch("routers.match.get_user_graph_memories", return_value=[])
-    def test_semantically_similar_recent_context_is_eligible_without_exact_activity(self, _graph_memories):
+    def test_semantically_similar_recent_context_reaches_the_matchmaker(self, _graph_memories):
         qualification = candidate_qualification(
             {"user_id": "owner", "current_context": "近期想去京都逛市集"},
             {"user_id": "candidate", "current_context": "週末想逛老街和手作攤位"},
             vector_score=0.72,
+            allow_adjacent=True,
         )
         self.assertTrue(qualification["eligible"])
         self.assertIn("semantic_context_similarity", qualification["strong_reason_codes"])
+        self.assertEqual(qualification["match_basis"]["level"], "adjacent")
+
+    @patch("routers.match.get_user_graph_memories", return_value=[])
+    def test_vector_similarity_alone_is_not_enough_without_one_shot_widening(self, _graph_memories):
+        qualification = candidate_qualification(
+            {"user_id": "owner", "current_context": "最近想找人出門"},
+            {"user_id": "candidate", "current_context": "週末想放鬆"},
+            vector_score=0.95,
+        )
+        self.assertFalse(qualification["eligible"])
+        self.assertEqual(qualification["match_basis"]["level"], "insufficient")
+
+    @patch("routers.match.get_user_graph_memories", return_value=[])
+    def test_requested_topic_can_select_without_candidate_skill_evidence(self, _graph_memories):
+        target = {"user_id": "owner", "current_context": "最近想找戶外活動"}
+        candidate = {"user_id": "candidate", "current_context": "週末想放鬆"}
+        qualification = candidate_qualification(
+            target, candidate, vector_score=0.82,
+            search_context={"invitation_topic": "衝浪", "query_text": "想找人一起衝浪"},
+        )
+        self.assertTrue(qualification["eligible"])
+        self.assertIn("requested_topic", qualification["strong_reason_codes"])
+        self.assertEqual(qualification["match_basis"]["level"], "adjacent")
+        intro = build_friend_intro_v4(
+            target, candidate, 0.82,
+            search_context={"invitation_topic": "衝浪"},
+        )
+        for entry in intro.values():
+            self.assertIn("衝浪", entry["viewer_text"])
+            self.assertNotIn("會衝浪", entry["viewer_text"])
+            self.assertNotIn("對方會出席", entry["viewer_text"])
+            self.assertNotIn("對方已安排出席", entry["viewer_text"])
+
+    @patch("routers.match.generate_chat_completion")
+    def test_topic_introductions_are_generated_separately_for_both_roles(self, generate):
+        generate.side_effect = [
+            type("Reply", (), {"content": json.dumps({
+                "viewer_text": "你想找人一起滑雪。我想到一位最近提過「週末想去雪地走走」的人，可以先從這件事認識彼此。",
+                "conversation_starter": "可以先聊聊想嘗試的雪地活動。",
+                "accepted_opening": "{{counterparty}}也願意認識！他最近提過週末想去雪地走走，可以先聊聊對滑雪的想法。",
+            }, ensure_ascii=False)})(),
+            type("Reply", (), {"content": json.dumps({
+                "viewer_text": "有人正在找人一起滑雪，對方最近提過「最近想找滑雪伴」。可以先認識、聊聊彼此的想法，再決定要不要一起去。你願意認識看看嗎？",
+                "conversation_starter": "可以先聊聊各自想怎麼體驗滑雪。",
+                "accepted_opening": "{{counterparty}}也點頭了！對方最近想找滑雪伴，可以先聊聊彼此的滑雪想法。",
+            }, ensure_ascii=False)})(),
+        ]
+        result = build_friend_intro_v4(
+            {"user_id": "owner", "current_context": "最近想找滑雪伴"},
+            {"user_id": "candidate", "current_context": "週末想去雪地走走"},
+            0.82,
+            refine=True,
+            search_context={
+                "invitation_topic": "滑雪",
+                "query_text": "我想找人一起滑雪",
+            },
+            auto_invite=True,
+        )
+        self.assertEqual(generate.call_count, 2)
+        requester = result["initiator_preview"]["viewer_text"]
+        receiver = result["receiver_invitation"]["viewer_text"]
+        self.assertIn("週末想去雪地走走", requester)
+        self.assertFalse(requester.endswith("？"))
+        self.assertIn("最近想找滑雪伴", receiver)
+        self.assertTrue(receiver.endswith(("？", "?")))
+        self.assertNotEqual(requester, receiver)
+        match_doc = {
+            "from_user": "owner",
+            "to_user": "candidate",
+            "status": "pending",
+            "delivery_mode": "invite_on_match",
+            "reason_version": "v4_friend_intro",
+            "reason_copy_version": "v8_source_directional",
+            "friend_intro_v4": result,
+        }
+        self.assertEqual(reason_for_viewer(match_doc, "owner"), requester)
+        self.assertEqual(reason_for_viewer(match_doc, "candidate"), receiver)
+
+    @patch("routers.match.get_user_graph_memories", return_value=[])
+    def test_requested_topic_does_not_bypass_hard_conflict(self, _graph_memories):
+        qualification = candidate_qualification(
+            {"user_id": "owner"}, {"user_id": "candidate"},
+            target_stances={"surfing": {"avoid"}},
+            candidate_stances={"surfing": {"like"}},
+            vector_score=0.99,
+            search_context={"invitation_topic": "衝浪"},
+        )
+        self.assertFalse(qualification["eligible"])
+        self.assertEqual(qualification["hard_conflict_keys"], ["surfing"])
 
     @patch("routers.match.get_user_graph_memories", return_value=[])
     def test_user_visible_explanation_never_contains_internal_candidate_id(self, _graph_memories):

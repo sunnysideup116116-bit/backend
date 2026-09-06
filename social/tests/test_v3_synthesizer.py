@@ -10,6 +10,7 @@ from services.ayue_agent.v3.synthesizer import (
     _parse_composed_reply,
     _synthesizer_system_prompt,
     _web_research_fallback,
+    sanitize_candidate_presentation_messages,
     synthesize,
 )
 from services.ai_service import ToolCallResult
@@ -198,11 +199,42 @@ class V3SynthesizerTests(unittest.TestCase):
             return_value=composed,
         ) as provider:
             reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
-        self.assertIn("- **A 店**", reply)
-        self.assertIn("- **B 店**", reply)
+        self.assertIn("推薦地點：\n1. A 店\n2. B 店", reply)
+        self.assertIn("我會先這樣比較:", reply)
+        self.assertNotIn("- **A 店**", reply)
+        self.assertNotIn("- **B 店**", reply)
         self.assertIsNone(card_decision)
         self.assertEqual(metrics.presentation_blocks, [])
         self.assertIn("多個候選、比較、步驟或清楚分組", provider.call_args.kwargs["system_prompt"])
+
+    def test_candidate_presentation_sanitizer_preserves_prose(self):
+        messages = [
+            "推薦地點：\n1. B 店：適合聊天\n2. **A 店**\n\n我會先比較交通，再決定要去哪裡。",
+        ]
+        sanitized = sanitize_candidate_presentation_messages(
+            messages,
+            [{"name": "A 店"}, {"name": "B 店"}],
+        )
+        self.assertEqual(sanitized, ["我會先比較交通，再決定要去哪裡。"])
+
+    def test_candidate_presentation_sanitizer_matches_conservative_main_name_alias(self):
+        messages = [
+            "推薦地點：\n1. **koou coffee**(約 174 公尺)—老屋二樓，空間安靜。\n"
+            "\n我推薦 koou coffee，因為距離近。",
+        ]
+        sanitized = sanitize_candidate_presentation_messages(
+            messages,
+            [{"name": "koou coffee (僅接待十二歲以上,老屋二樓空間安全考量)"}],
+        )
+        self.assertEqual(sanitized, ["我推薦 koou coffee，因為距離近。"])
+
+    def test_candidate_presentation_sanitizer_keeps_untrusted_list_prose(self):
+        messages = ["候選清單：\n1. 未知店\n\n這一行是一般說明。"]
+        sanitized = sanitize_candidate_presentation_messages(
+            messages,
+            [{"name": "A 店"}],
+        )
+        self.assertEqual(sanitized, ["候選清單：\n1. 未知店\n\n這一行是一般說明。"])
 
     def test_disabled_cards_do_not_prompt_browse_or_curated_presentation(self):
         prompt = _synthesizer_system_prompt(
@@ -298,7 +330,10 @@ class V3SynthesizerTests(unittest.TestCase):
             return_value=composed,
         ):
             reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
-        self.assertEqual(reply, "A 店和 B 店都在附近,A 店的距離更近。")
+        self.assertEqual(
+            reply,
+            "推薦地點：\n1. A 店\n2. B 店\n\nA 店和 B 店都在附近,A 店的距離更近。",
+        )
         self.assertEqual(metrics.reply_source, "llm")
         self.assertIsNone(metrics.fallback_reason)
         self.assertIsNone(card_decision)
@@ -362,8 +397,189 @@ class V3SynthesizerTests(unittest.TestCase):
                 },
             }]),
         ):
-            _reply, _decision, metrics = synthesize(slc, candidate_cards=cards)
-        self.assertEqual(metrics.presented_candidate_refs, ["place_b", "place_a"])
+            reply, _decision, metrics = synthesize(slc, candidate_cards=cards)
+        # The model's ordinal binding is evidence only. The server keeps the
+        # verified candidate order that it renders publicly.
+        self.assertEqual(metrics.presented_candidate_refs, ["place_a", "place_b"])
+        self.assertEqual(reply, "推薦地點：\n1. A 店\n2. B 店")
+        self.assertNotIn("1. B 店", reply)
+
+    def test_single_resolved_place_is_not_reframed_as_recommendation_list(self):
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.resolve_place",
+            "result": {
+                "found": True,
+                "place": {
+                    "name": "JINLIANFA 金聯發",
+                    "category": "cafe",
+                    "address_summary": "高雄市鹽埕區瀨南街162號",
+                },
+            },
+        }])
+        cards = [{
+            "candidate_ref": "place_detail",
+            "name": "JINLIANFA 金聯發",
+            "category": "cafe",
+        }]
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="JINLIANFA 金聯發位於高雄市鹽埕區瀨南街162號。"),
+        ):
+            reply, _decision, metrics = synthesize(slc, candidate_cards=cards)
+
+        self.assertNotIn("推薦地點", reply)
+        self.assertEqual(reply, "JINLIANFA 金聯發位於高雄市鹽埕區瀨南街162號。")
+        self.assertEqual(metrics.presented_candidate_refs, [])
+
+    def test_place_followup_removes_model_authored_recommendation_rows(self):
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.resolve_place",
+            "result": {
+                "found": True,
+                "place": {
+                    "name": "原大禮街香雞排",
+                    "category": "restaurant",
+                    "address_summary": "高雄市鹽埕區大禮街",
+                },
+            },
+        }])
+        slc.payload.update({
+            "place_modes": {"places1": "reviews"},
+            "place_reference_resolution": {
+                "status": "resolved",
+                "reference": "place_ref_0123456789abcdef01234567",
+                "label": "原大禮街香雞排",
+            },
+        })
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content=(
+                "推薦地點：\n1. 原大禮街香雞排\n2. 十九甲雞排－新北樹林店\n\n"
+                "目前食記提到外皮酥脆，這是針對原大禮街香雞排的評論。"
+            )),
+        ):
+            reply, _decision, metrics = synthesize(slc)
+
+        self.assertNotIn("推薦地點", reply)
+        self.assertNotIn("十九甲雞排", reply)
+        self.assertIn("外皮酥脆", reply)
+        self.assertEqual(metrics.presentation_class, "conversation")
+
+    def test_reviews_direct_findings_are_not_replaced_by_generic_subjective_reply(self):
+        slc = self._slice([{
+            "task_id": "web1", "status": "ok", "tool": None,
+            "result": {
+                "schema_version": "web_research.v1",
+                "research_question": "原大禮街香雞排好不好吃",
+                "answer_target": "查原大禮街香雞排的口味評論",
+                "status": "partial",
+                "execution_status": "completed",
+                "coverage": "direct_partial",
+                "findings": [{
+                    "claim": "一篇食記形容外皮酥脆，但也提到整體偏油。",
+                    "relation": "direct",
+                    "subject_ref": "place_candidate_0123456789abcdef",
+                    "source_refs": ["web_source_01"],
+                    "source_urls": ["https://example.com/review"],
+                }],
+                "sources": [{
+                    "url": "https://example.com/review",
+                    "title": "原大禮街香雞排食記",
+                    "source_type": "article",
+                }],
+                "limitations": ["目前只有一篇可直接對應的食記。"],
+                "stop_reason": "partial_coverage",
+            },
+        }])
+        slc.payload["place_modes"] = {"web1": "reviews"}
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="查到的一篇食記提到外皮酥脆，但也覺得偏油；目前只有一篇來源。"),
+        ):
+            reply, _decision, metrics = synthesize(slc)
+
+        self.assertIn("外皮酥脆", reply)
+        self.assertIn("偏油", reply)
+        self.assertNotIn("口味因人而異，要不要我再查", reply)
+        self.assertEqual(metrics.reply_source, "llm")
+
+    def test_reviews_generic_reply_falls_back_to_concrete_finding(self):
+        slc = self._slice([{
+            "task_id": "web1", "status": "ok", "tool": None,
+            "result": {
+                "schema_version": "web_research.v1",
+                "research_question": "原大禮街香雞排好不好吃",
+                "answer_target": "查原大禮街香雞排的口味評論",
+                "status": "partial", "execution_status": "completed",
+                "coverage": "direct_partial",
+                "findings": [{
+                    "claim": "食記提到外皮酥脆。",
+                    "relation": "direct",
+                    "source_urls": ["https://example.com/review"],
+                }],
+                "sources": [{
+                    "url": "https://example.com/review",
+                    "title": "食記",
+                    "source_type": "article",
+                }],
+                "limitations": ["目前只有一篇來源。"],
+                "stop_reason": "partial_coverage",
+            },
+        }])
+        slc.payload["place_modes"] = {"web1": "reviews"}
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="口味因人而異，要不要我再查？"),
+        ):
+            reply, _decision, metrics = synthesize(slc)
+
+        self.assertIn("外皮酥脆", reply)
+        self.assertEqual(metrics.fallback_reason, "unsupported_claim")
+
+    def test_unperformed_lookup_claim_is_rejected(self):
+        slc = self._slice([])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="我剛剛想幫你查，但沒查到這間店的詳細資料。"),
+        ):
+            reply, _decision, metrics = synthesize(slc)
+
+        self.assertEqual(metrics.fallback_reason, "unsupported_claim")
+        self.assertNotIn("沒查到", reply)
+
+    def test_resolved_place_provider_failure_uses_detail_fallback_without_list(self):
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.resolve_place",
+            "result": {
+                "found": True,
+                "place": {
+                    "name": "JINLIANFA 金聯發",
+                    "category": "cafe",
+                    "address_summary": "高雄市鹽埕區瀨南街162號",
+                },
+            },
+        }])
+        cards = [{
+            "candidate_ref": "place_detail",
+            "name": "JINLIANFA 金聯發",
+            "category": "cafe",
+        }]
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            side_effect=RuntimeError("provider unavailable"),
+        ):
+            reply, _decision, metrics = synthesize(slc, candidate_cards=cards)
+
+        self.assertIn("JINLIANFA 金聯發", reply)
+        self.assertIn("瀨南街162號", reply)
+        self.assertNotIn("推薦地點", reply)
+        self.assertEqual(metrics.presentation_class, "conversation")
 
     def test_cards_off_plain_content_derives_presented_refs(self):
         slc = self._slice([{
@@ -383,11 +599,14 @@ class V3SynthesizerTests(unittest.TestCase):
             return_value=_fc_result(content="附近有 B 店、A 店和 C 店，都可以先參考。"),
         ):
             reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
-        self.assertEqual(reply, "附近有 B 店、A 店和 C 店,都可以先參考。")
+        self.assertEqual(
+            reply,
+            "推薦地點：\n1. A 店\n2. B 店\n3. C 店\n\n附近有 B 店、A 店和 C 店,都可以先參考。",
+        )
         self.assertIsNone(card_decision)
         self.assertEqual(
             metrics.presented_candidate_refs,
-            [],
+            ["place_a", "place_b", "place_c"],
         )
 
     def test_cards_off_plain_content_does_not_bind_duplicate_names(self):
@@ -407,7 +626,7 @@ class V3SynthesizerTests(unittest.TestCase):
             return_value=_fc_result(content="我找到同名店，請再指定一間。"),
         ):
             _reply, _card_decision, metrics = synthesize(slc, candidate_cards=cards)
-        self.assertEqual(metrics.presented_candidate_refs, [])
+        self.assertEqual(metrics.presented_candidate_refs, ["place_a", "place_b"])
 
     def test_cards_off_presented_binding_requires_supplied_ref_and_contiguous_ordinal(self):
         cards = [
@@ -598,6 +817,147 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIn("已取消", reply)
         self.assertIsNone(card_decision)
         self.assertEqual(metrics.presentation_blocks, [])
+
+    def test_pending_calendar_preview_rejects_model_claim_that_write_already_completed(self):
+        candidate_ref = "place_candidate_pending_0001"
+        preview = "要新增 9/8 15:00–16:00「看牙醫」嗎？請選擇是否套用這次變更。"
+        slc = self._slice([
+            {
+                "task_id": "calendar1", "status": "ok",
+                "tool": "calendar.submit_commands",
+                "result": {"pending_confirmation": True, "preview": preview},
+            },
+            {
+                "task_id": "places1", "status": "ok",
+                "tool": "places.search_nearby",
+                "result": {"places": [{"name": "A咖啡店"}]},
+            },
+        ])
+        cards = [{
+            "candidate_ref": candidate_ref, "name": "A咖啡店",
+            "category": "cafe", "distance_label": "300 公尺",
+        }]
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(content="我已幫你新增牙醫行程。附近找到 A咖啡店。"),
+        ):
+            reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
+
+        self.assertNotIn("已幫你新增", reply)
+        self.assertIn("A咖啡店", reply)
+        self.assertIn("要新增 9/8 15:00–16:00「看牙醫」", reply)
+        self.assertIn("請選擇是否套用這次變更", reply)
+        self.assertEqual(reply.count("要新增 9/8 15:00–16:00「看牙醫」"), 1)
+        self.assertIsNone(card_decision)
+        self.assertEqual(metrics.reply_source, "observation_fallback")
+        self.assertEqual(metrics.fallback_reason, "unsupported_claim")
+
+    def test_pending_calendar_preview_also_rejects_completed_claim_from_compose_tool(self):
+        candidate_ref = "place_candidate_pending_compose_0001"
+        preview = "要新增 9/8 15:00–16:00「看牙醫」嗎？請選擇是否套用這次變更。"
+        slc = self._slice([
+            {
+                "task_id": "calendar1", "status": "ok",
+                "tool": "calendar.submit_commands",
+                "result": {"pending_confirmation": True, "preview": preview},
+            },
+            {
+                "task_id": "places1", "status": "ok",
+                "tool": "places.search_nearby",
+                "result": {"places": [{"name": "A咖啡店"}]},
+            },
+        ])
+        cards = [{
+            "candidate_ref": candidate_ref, "name": "A咖啡店",
+            "category": "cafe", "distance_label": "300 公尺",
+        }]
+        composed = _fc_result(tool_calls=[{
+            "name": "compose_public_reply",
+            "arguments": {
+                "messages": ["我已幫你新增牙醫行程，也找到 A咖啡店。"],
+                "presentation_class": "grounded_recommendation",
+                "card_intent": "browse",
+                "selected_candidate_refs": [candidate_ref],
+                "recommended_candidate_refs": [candidate_ref],
+                "discussed_candidate_refs": [candidate_ref],
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=composed,
+        ):
+            reply, _card_decision, metrics = synthesize(slc, candidate_cards=cards)
+
+        self.assertNotIn("已幫你新增", reply)
+        self.assertIn("A咖啡店", reply)
+        self.assertEqual(reply.count("要新增 9/8 15:00–16:00「看牙醫」"), 1)
+        self.assertEqual(metrics.reply_source, "observation_fallback")
+        self.assertEqual(metrics.fallback_reason, "unsupported_claim")
+
+    def test_calendar_clarification_lists_safe_candidate_labels_without_refs(self):
+        slc = self._slice([{
+            "task_id": "calendar1", "status": "ok",
+            "tool": "calendar.submit_commands",
+            "result": {"calendar_command_result": {
+                "status": "needs_clarification",
+                "clarification": {
+                    "message": "我找到幾筆相近的行程，請告訴我要處理哪一筆。",
+                    "candidates": [
+                        {"label": "9/8 15:00 看牙醫", "reference": "calendar_ref_secret_1"},
+                        {"label": "9/12 10:00 看牙醫", "reference": "calendar_ref_secret_2"},
+                    ],
+                },
+            }},
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+        ) as provider:
+            reply, _card_decision, metrics = synthesize(slc)
+
+        provider.assert_not_called()
+        self.assertIn("1. 9/8 15:00 看牙醫", reply)
+        self.assertIn("2. 9/12 10:00 看牙醫", reply)
+        self.assertNotIn("calendar_ref_secret", reply)
+        self.assertEqual(metrics.reply_source, "verified_observation")
+
+    def test_calendar_read_fallback_keeps_full_intervals_and_omitted_count(self):
+        slc = self._slice([{
+            "task_id": "calendar1", "status": "ok",
+            "tool": "calendar.list_my_events",
+            "result": {"events": [
+                {
+                    "title": "全天工作坊", "date": "2026-09-08",
+                    "end_date": "2026-09-10", "all_day": True,
+                },
+                {
+                    "title": "夜車", "date": "2026-09-08", "start_time": "23:00",
+                    "end_date": "2026-09-09", "end_time": "01:00",
+                },
+                {
+                    "title": "早餐", "date": "2026-09-09", "start_time": "08:00",
+                    "end_date": "2026-09-09", "end_time": "09:00",
+                },
+                {
+                    "title": "午餐", "date": "2026-09-09", "start_time": "12:00",
+                    "end_date": "2026-09-09", "end_time": "13:00",
+                },
+            ]},
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            side_effect=Exception("provider down"),
+        ):
+            reply, _card_decision, metrics = synthesize(slc)
+
+        self.assertIn("2026-09-08–2026-09-10 全天", reply)
+        self.assertIn("2026-09-08 23:00–2026-09-09 01:00", reply)
+        self.assertIn("2026-09-09 08:00–09:00", reply)
+        self.assertIn("另有 1 筆未列出", reply)
+        self.assertLessEqual(len(reply), 160)
+        self.assertEqual(metrics.reply_source, "observation_fallback")
 
     def test_empty_observation_uses_general_conversation_mode(self):
         slc = self._slice([])
@@ -1877,6 +2237,20 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertIn("青埔香雞排", prompt)
         self.assertIn("老宋牛肉麵", prompt)
         self.assertIn("看電視", prompt)
+
+    def test_web_dependency_failure_is_not_reported_as_no_evidence(self):
+        slc = self._slice([])
+        slc.payload["web_execution_failures"] = [{
+            "task_id": "w1", "reason": "dependency_failed",
+        }]
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+        ) as provider:
+            reply, _cards, metrics = synthesize(slc)
+        provider.assert_not_called()
+        self.assertIn("網路查詢沒有完成", reply)
+        self.assertNotIn("沒有足夠", reply)
+        self.assertEqual(metrics.fallback_reason, "web_execution_failed")
 
 
 if __name__ == "__main__":

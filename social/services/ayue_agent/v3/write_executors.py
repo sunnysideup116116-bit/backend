@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import time
 import uuid
+import re
 from typing import Any
 
 from database import db
 from services.match_action_service import (
     decide_active_event_invitation, decide_active_proposal, start_match_search,
 )
-from services.match_search_job_service import active_match_search_job, cancel_match_search
+from services.match_search_job_service import (
+    INVITE_ON_MATCH, active_match_search_job, cancel_match_search,
+)
 from services.proposal_namespace import RELATIONSHIP_MATCH_NAMESPACE
 from services.assessment_session_service import start_assessment_session
 from services.ayue_agent.match_opportunity import (
@@ -30,6 +33,7 @@ from .relationship_references import (
     get_reference as get_relationship_reference,
     remember_contact,
 )
+from services.match_search_context import safe_search_context, search_context_for_turn
 TOOL_CALLS = db["agent_tool_calls"]
 
 
@@ -55,22 +59,48 @@ def _finish(key: str, status: str, result: dict[str, Any]) -> None:
         pass
 
 
-def _start_search(ctx: Any, run_id: str, index: int, *, confirmation_id: str | None) -> tuple[bool, str, str | None]:
+def _start_search(
+    ctx: Any, run_id: str, index: int, *, confirmation_id: str | None,
+    payload: dict[str, Any] | None = None,
+) -> tuple[bool, str, str | None]:
     key = _idempotency_key(confirmation_id, run_id, index)
     if not _claim_once(key):
         return True, "我已經處理過這次搜尋。", None
     try:
+        search_context = safe_search_context((payload or {}).get("search_context"))
+        search_kwargs: dict[str, Any] = {}
+        if search_context:
+            search_kwargs["search_context"] = search_context
+        if (
+            str((payload or {}).get("delivery_mode") or "").strip() == INVITE_ON_MATCH
+            and search_context.get("invitation_topic")
+        ):
+            search_kwargs["delivery_mode"] = INVITE_ON_MATCH
         result = start_match_search(
             ctx.user_id, source="agent_v3", force_new=True, idempotency_key=key,
             origin_room_id=str(ctx.room_id or ""),
+            **search_kwargs,
         )
         status = result.get("status", "failed")
+        invite_on_match = search_kwargs.get("delivery_mode") == INVITE_ON_MATCH
+        queued_reply = (
+            "好，我開始幫你找。找到合適的人後，我會替你送出邀請；有結果時會回來告訴你。"
+            if invite_on_match
+            else "好，我開始幫你找，通常約需要 1–3 分鐘。你可以先繼續跟我聊，找到後我會回來。"
+        )
+        already_queued_reply = (
+            "這次已經開始找了。找到合適的人後，我會替你送出邀請；有結果時會回來告訴你。"
+            if invite_on_match
+            else "這次搜尋已經排進去了，通常約需要 1–3 分鐘；你可以先繼續跟我聊。"
+        )
         reply = {
-            "queued": "好，我開始幫你找，通常約需要 1–3 分鐘。你可以先繼續跟我聊，找到後我會回來。",
-            "already_queued": "這次搜尋已經排進去了，通常約需要 1–3 分鐘；你可以先繼續跟我聊。",
+            "queued": queued_reply,
+            "already_queued": already_queued_reply,
             "already_active": "你目前還有一張進行中的提案，我先不重複開新搜尋。",
             "already_searching": "我正在幫你找，先不用重複送出。",
+            "quota_exceeded": "今天已經幫你介紹 3 位新朋友了，明天可以再找；已送出的邀請還是能繼續回覆。",
             "no_candidates": "這輪暫時沒有合適的新對象。",
+            "insufficient_common_ground": "這輪還找不到足夠的共同依據；你可以補充這次想一起做的事或主題，再決定是否重新搜尋。",
         }.get(status, "這次搜尋沒有成功啟動，我沒有把它當作已完成。")
         _finish(key, "done", {"status": status, "reply": reply})
         ok = status in {"queued", "already_queued", "already_searching"}
@@ -572,7 +602,9 @@ def _calendar_execute(
 
 
 _WRITE_EXECUTORS = {
-    "match.start_search": lambda ctx, turn, run_id, index, args, cid, payload: _start_search(ctx, run_id, index, confirmation_id=cid),
+    "match.start_search": lambda ctx, turn, run_id, index, args, cid, payload: _start_search(
+        ctx, run_id, index, confirmation_id=cid, payload=payload,
+    ),
     "match.cancel_search": lambda ctx, turn, run_id, index, args, cid, payload: _cancel_search(ctx, run_id, index, payload, confirmation_id=cid),
     "match.decide_active_proposal": lambda ctx, turn, run_id, index, args, cid, payload: _decide_active_proposal(ctx, turn, run_id, index, args, payload),
     "match.decide_active_event_invitation": lambda ctx, turn, run_id, index, args, cid, payload: _decide_active_event_invitation(ctx, turn, run_id, index, args, payload),
@@ -596,9 +628,46 @@ def prepare_write_confirmation(
             return None, "我想先多了解你的方向，才能幫你找得更準。" + missing_basis_question(assessment)
         if assessment.state == "active_match_blocked":
             return None, "你目前還有一段配對正在進行，我先不重複開新搜尋。"
-        return {"action": tool_name, "arguments": {}, "data": {}}, (
-            "我會依你的近況、偏好和個性挑選，不會隨機配對。要我現在開始找就回覆「確認」；也可以先補充條件。"
+        search_context = search_context_for_turn(
+            (arguments or {}).get("search_context"),
+            message=getattr(ctx, "message", ""),
+            message_id=getattr(ctx, "message_id", None),
+            history=getattr(ctx, "recent_history", None),
         )
+        data = {"search_context": search_context} if search_context else {}
+        topic = str(search_context.get("invitation_topic") or "").strip()
+        if topic:
+            # This flag is created only inside the preview-bound confirmation
+            # record.  The worker accepts it only alongside this same topic,
+            # so an old proposal or a client supplied boolean cannot authorize
+            # an automatic message to the other participant.
+            data["delivery_mode"] = INVITE_ON_MATCH
+            query_text = str(search_context.get("query_text") or "")
+            skill_requested = bool(
+                re.search(
+                    r"(?:也?會|擅長|熟悉|懂得)\s*" + re.escape(topic),
+                    query_text,
+                )
+            )
+            skill_note = f"不一定已經會{topic}。" if skill_requested else ""
+            preview = (
+                f"我幫你找一位可能對{topic}有興趣的夥伴，找到後就替你問問願不願意認識。"
+                f"{skill_note}要我開始找並送出邀請嗎？"
+            )
+        elif isinstance(getattr(turn, "active_proposal", None), dict) and (
+            getattr(turn, "active_proposal", {}).get("stage") == "waiting_other"
+        ):
+            preview = (
+                "可以，原本那張邀請會繼續等對方回覆。"
+                "這次有特別想一起做的事嗎？沒有的話，我就依你最近的近況找。"
+                "要我現在開始找嗎？"
+            )
+        else:
+            preview = (
+                "這次沒有指定活動，我會依你最近分享的近況找人。"
+                "要我現在開始嗎？"
+            )
+        return {"action": tool_name, "arguments": {}, "data": data}, preview
     if tool_name == "match.cancel_search":
         job = active_match_search_job(ctx.user_id)
         if not job or str(job.get("status") or "") not in {"queued", "running"}:

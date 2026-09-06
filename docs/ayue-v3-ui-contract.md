@@ -97,4 +97,4 @@ Only privacy-safe public projections are displayed. An accepted match creates a 
 
 ## Settings and memories
 
-`proactive_frequency` accepts `none`, `60`, `3600`, or `86400`. Memory actions use server keys and typed actions; Flutter does not expose raw stored documents. Runtime model controls appear only when the capability/config response authorizes them.
+`proactive_care_enabled` is the only user-facing proactive-care control and defaults to enabled for new profiles. The old `proactive_frequency` values remain accepted for migration, but the server chooses natural timing and Flutter renders a single “阿月主動找我” switch. Memory actions use server keys and typed actions; Flutter does not expose raw stored documents. Runtime model controls appear only when the capability/config response authorizes them.

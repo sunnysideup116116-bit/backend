@@ -78,7 +78,7 @@
 ### 6. Context 與隱私邊界
 
 - Context 只能由 `services/ayue_agent/context.py` 建立。
-- 最多最近 12 則訊息、合計 6,000 字元；近期記憶最多 8 筆。
+- 最多最近 32 則訊息、合計 8,000 字元；近期記憶最多 8 筆。`metadata.message_use=ordinary` 才可供 profile、compaction 或 proactive consumer 重用；calendar operation、assessment、no-memory 與未標記來源 fail closed。
 - Prompt 不得包含 `seed_user_*`、MongoDB document、未公開 ID、對方私人記憶、對方行事曆內容或不相關舊媒合。
 - 對象名稱只能使用可公開顯示名稱；沒有名稱時使用「對方」。
 - Calendar 可讀本人完整行程；對方資訊只能使用該產品流程明確允許的公開／busy-free projection。
@@ -129,10 +129,12 @@
 
 ### 11. 主動關心與 @ 對象
 
-- 「AI 關心頻率」是 `services/ayue_agent/proactive_care.py` 的獨立 typed care surface，不是一般聊天 tool，也不得回到 `chat.py` 的自由 prompt。
-- Care 只能根據最近 owner 訊息、前一則阿月回覆、本人近期情境、使用者口吻與台北時間；不得讀取 Big Five、配對、對方或行事曆。
+- 主動關心分成 Profile extractor 提出的 `proactive_followups` 候選與 `proactive_care.py` 的獨立 typed care surface，不是一般聊天 tool，也不得回到 `chat.py` 的自由 prompt。`AYUE_PROACTIVE_FOLLOWUP_MODE=shadow` 只保存候選並觀察資料品質，`on` 才會送出。
+- 候選只接受已保存、`metadata.message_use=ordinary` 的本人訊息；行事曆、測驗、配對、他人資料、no-memory 與未標記來源一律排除。每位使用者最多三筆，原聊天室保存追問。
+- Care 只能根據候選 grounding、最近 owner 訊息、本人近期情境、有限的 memory wording、使用者口吻與台北時間；不得把行事曆標題／地點／備註送進模型。行事曆只做 busy/free gate。
 - Care output 必須有可驗證 grounding span，且以阿月為說話者。角色反轉、無 grounding、provider 失敗或低信心時不發送罐頭訊息。
-- 每個 owner activity 必須透過 atomic claim 最多產生一則 care 訊息；多分頁 polling 不得重複保存。
+- 背景 scheduler 自行套用 48 小時間隔、七日最多三則、未回答後七日冷卻、22:00–09:00 靜默、近期活躍與 busy/free gate；candidate 以 durable active slot、lease、revision、固定 message event key 與 retry claim 去重，未回答的 `asked` 候選不重送。
+- UI 只呈現 `proactive_care_enabled` 開關；舊 `proactive_frequency` 只作相容輸入／輸出，server 不接受使用者選頻率。
 - `@` 只是 server 驗證過的 accepted-contact entity binding，不是每次都自動讀資料。只有語意需要公開資料時，Planner 才可使用 `relationship.get_mentioned_contact_summary`。
 - 所有 client mention ID 都必須重新依 canonical accepted relation 驗證。Planner context、顯示訊息、trace 和回覆只可使用公開名稱；最多三位，超過時請使用者縮小範圍。
 

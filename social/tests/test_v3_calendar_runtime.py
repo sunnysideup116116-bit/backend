@@ -1,7 +1,9 @@
 import inspect
 import unittest
 
+from services.ayue_agent.v3.contracts import AgentContextSlice
 from services.ayue_agent.v3 import scheduler
+from services.ayue_agent.v3.sub_agents import calendar_agent
 from services.ayue_agent.v3.runtime_registry import RuntimeRegistration, TaskRunnerResult
 
 
@@ -33,6 +35,18 @@ class V3CalendarRuntimeBoundaryTests(unittest.TestCase):
         self.assertIsInstance(registration, RuntimeRegistration)
         self.assertIsNotNone(registration.direct_chat_blocker)
         self.assertIsNotNone(registration.confirmed_result_projector)
+
+    def test_place_create_protocol_hint_requires_typed_calendar_command(self):
+        prompt = calendar_agent._prompt(
+            AgentContextSlice(
+                agent="calendar",
+                payload={"_place_selection_requires_create": True},
+            ),
+            "安排已選地點",
+        )
+        self.assertIn("calendar.submit_commands", prompt)
+        self.assertIn("action=create", prompt)
+        self.assertIn("不要提出 calendar 的唯讀查詢", prompt)
 
 
 if __name__ == "__main__":

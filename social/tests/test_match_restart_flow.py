@@ -79,10 +79,13 @@ def flow(monkeypatch):
 
 
 def test_withdraw_then_new_search_never_revives_expired_proposal(flow):
-    preview = flow.send("撤回", "dismiss_proposal")
-    assert flow.matches.find_one({"_id": flow.old_id})["status"] == "pending"
-    done = flow.send(choice=preview.choice_prompt["id"], action="confirm")
-    assert done.choice_prompt is None
+    # Decisions are made from the Hub card; the canonical service remains the
+    # shared transition used by the UI and agent status reads.
+    actions.decide_match(
+        user_id="owner", match_id=str(flow.old_id), action="cancel",
+        expected_status="pending", expected_revision=2,
+        expected_namespace="relationship_match",
+    )
     assert flow.matches.find_one({"_id": flow.old_id})["status"] == "declined"
     assert flow.matches.find_one({"_id": flow.expired_id})["status"] == "expired"
     before = (flow.matches.writes, flow.profiles.writes)
@@ -103,64 +106,54 @@ def test_withdraw_then_new_search_never_revives_expired_proposal(flow):
 
 
 @pytest.mark.parametrize("stage", ["draft", "pending"])
-def test_restart_requires_two_confirmations_and_replay_reuses_child(flow, stage):
+@pytest.mark.parametrize("intent", ["start_search", "restart_search"])
+def test_search_request_never_abandons_active_proposal(flow, stage, intent):
     flow.matches.update_one({"_id": flow.old_id}, {"$set": {"status": stage}})
-    first = flow.send("撤回再重新找")
-    parent_id = first.choice_prompt["id"]
-    record = flow.choices.find_one({"_id": parent_id})
-    assert record["arguments"]["decision"] == ("declined" if stage == "draft" else "cancelled")
-    assert record["payload"]["continuation"] == "offer_start_search"
-    second = flow.send(choice=parent_id, action="confirm", persist=False)
-    assert second.choice_resolution["state"] == "confirmed"
-    assert second.choice_prompt["id"] != parent_id
-    assert not flow.jobs.rows
-    replay = flow.send(choice=parent_id, action="confirm")
-    assert replay.choice_prompt["id"] == second.choice_prompt["id"]
-    assert replay.agent_run_id == second.agent_run_id
-    assert len(flow.choices.rows) == 2
-    started = flow.send(choice=second.choice_prompt["id"], action="confirm")
-    assert started.match_state_changed
-    assert len(flow.jobs.rows) == 1
-
-
-@pytest.mark.parametrize("cancel_step", [1, 2])
-def test_cancel_each_step_has_no_unrequested_write(flow, cancel_step):
-    first = flow.send("我要重新配對")
-    if cancel_step == 1:
-        flow.send(choice=first.choice_prompt["id"], action="cancel")
-        assert flow.matches.find_one({"_id": flow.old_id})["status"] == "pending"
+    before = flow.matches.writes
+    result = flow.send("撤回再重新找" if intent == "restart_search" else "我想要配對", intent)
+    if stage == "draft":
+        assert result.choice_prompt is None
+        assert not flow.choices.rows
+        assert "阿月牽線" in result.reply
     else:
-        second = flow.send(choice=first.choice_prompt["id"], action="confirm")
-        flow.send(choice=second.choice_prompt["id"], action="cancel")
-        assert flow.matches.find_one({"_id": flow.old_id})["status"] == "declined"
+        assert result.choice_prompt
+        assert "原本那張邀請會繼續等對方回覆" in result.reply
+    assert not flow.jobs.rows
+    assert flow.matches.writes == before
+    assert flow.matches.find_one({"_id": flow.old_id})["status"] == stage
+    assert "確認放棄" not in result.reply
+
+
+def test_explicit_restart_without_active_proposal_confirms_one_search(flow):
+    flow.matches.update_one({"_id": flow.old_id}, {"$set": {"status": "declined"}})
+    result = flow.send("重新配對", "restart_search")
+    assert result.choice_prompt
+    record = flow.choices.find_one({"_id": result.choice_prompt["id"]})
+    assert record["tool_name"] == "match.start_search"
+    assert not record["payload"].get("continuation")
     assert not flow.jobs.rows
 
 
-def test_stale_first_step_never_creates_search_confirmation(flow):
-    first = flow.send("重新配對")
+def test_plain_search_uses_current_pending_revision_without_changing_the_card(flow):
     flow.matches.update_one({"_id": flow.old_id}, {"$inc": {"proposal_revision": 1}})
-    result = flow.send(choice=first.choice_prompt["id"], action="confirm")
-    assert result.choice_prompt is None
-    assert len(flow.choices.rows) == 1
+    result = flow.send("重新配對", "start_search")
+    assert result.choice_prompt
     assert not flow.jobs.rows
 
 
-def test_new_proposal_between_steps_blocks_start(flow):
-    first = flow.send("重新配對")
-    second = flow.send(choice=first.choice_prompt["id"], action="confirm")
+def test_explicit_restart_with_an_undecided_draft_redirects_to_hub(flow):
     flow.matches.insert_one({"_id": ObjectId(), "from_user": "owner", "to_user": "new", "status": "draft", "created_at": 300, "proposal_revision": 1})
-    result = flow.send(choice=second.choice_prompt["id"], action="confirm")
+    result = flow.send("重新配對", "restart_search")
+    assert result.choice_prompt is None
+    assert not flow.choices.rows
     assert not flow.jobs.rows
-    assert "不重複" in result.reply or "沒有" in result.reply
+    assert "牽線專區" in result.reply
 
 
-def test_wrong_room_and_expired_first_choice_never_change_state(flow):
-    first = flow.send("重新配對")
-    result = flow.send(choice=first.choice_prompt["id"], action="confirm", room="another")
-    assert result.choice_prompt is None
-    flow.choices.update_one({"_id": first.choice_prompt["id"]}, {"$set": {"expires_at": 1}})
-    result = flow.send(choice=first.choice_prompt["id"], action="confirm")
-    assert result.choice_prompt is None
+def test_restart_wording_in_another_room_does_not_change_active_proposal(flow):
+    result = flow.send("我要換人重新配對", "restart_search", room="another")
+    assert result.choice_prompt
+    assert not flow.jobs.rows
     assert flow.matches.find_one({"_id": flow.old_id})["status"] == "pending"
 
 
@@ -184,65 +177,58 @@ def test_unknown_match_intent_is_read_only(flow):
     assert "沒有執行" in result.reply
 
 
-def test_two_clients_confirm_first_step_only_once(flow):
-    first = flow.send("重新配對")
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda _: flow.send(choice=first.choice_prompt["id"], action="confirm"), range(2)))
-    assert len(flow.choices.rows) == 2
-    assert flow.matches.find_one({"_id": flow.old_id})["proposal_revision"] == 3
+def test_repeated_search_requests_leave_active_proposal_unchanged(flow):
+    for _ in range(3):
+        result = flow.send("我想要配對", "start_search")
+        assert result.choice_prompt
+    assert len([row for row in flow.choices.rows if row.get("status") == "pending"]) == 1
     assert not flow.jobs.rows
-    children = {r.choice_prompt["id"] for r in results if r.choice_prompt}
-    assert len(children) == 1
+    assert flow.matches.find_one({"_id": flow.old_id})["status"] == "pending"
 
 
 @pytest.mark.parametrize("intent,expected", [("accept_proposal", "pending"), ("dismiss_proposal", "declined")])
 def test_new_draft_revision_zero_is_actionable(flow, intent, expected):
     flow.matches.update_one({"_id": flow.old_id}, {"$set": {"status": "draft", "proposal_revision": 0}})
     first = flow.send("接受這張" if intent == "accept_proposal" else "不要這張", intent)
-    assert first.choice_prompt
-    record = flow.choices.find_one({"_id": first.choice_prompt["id"]})
-    assert record["payload"]["proposal_revision"] == 0
-    result = flow.send(choice=first.choice_prompt["id"], action="confirm")
-    assert result.match_state_changed
-    assert flow.matches.find_one({"_id": flow.old_id})["status"] == expected
+    assert first.choice_prompt is None
+    assert "阿月牽線" in first.reply
+    assert flow.matches.find_one({"_id": flow.old_id})["status"] == "draft"
     assert not flow.jobs.rows
 
 
 def test_incoming_proposal_can_be_declined_without_starting_search(flow):
     flow.matches.update_one({"_id": flow.old_id}, {"$set": {"from_user": "other", "to_user": "owner", "proposal_revision": 0}})
-    preview = flow.send("不要這張", "dismiss_proposal")
-    assert flow.choices.find_one({"_id": preview.choice_prompt["id"]})["arguments"] == {"decision": "declined"}
-    flow.send(choice=preview.choice_prompt["id"], action="confirm")
-    assert flow.matches.find_one({"_id": flow.old_id})["status"] == "declined"
-    assert not flow.jobs.rows
-
-
-def test_second_confirmation_expiry_never_restores_old_proposal(flow):
-    first = flow.send("重新配對")
-    second = flow.send(choice=first.choice_prompt["id"], action="confirm")
-    flow.choices.update_one({"_id": second.choice_prompt["id"]}, {"$set": {"expires_at": 1}})
-    result = flow.send(choice=second.choice_prompt["id"], action="confirm")
+    result = flow.send("不要這張", "dismiss_proposal")
     assert result.choice_prompt is None
+    assert "阿月牽線" in result.reply
+    assert flow.matches.find_one({"_id": flow.old_id})["status"] == "pending"
     assert not flow.jobs.rows
-    assert flow.matches.find_one({"_id": flow.old_id})["status"] == "declined"
 
 
-def test_failed_search_enqueue_keeps_old_proposal_ended(flow, monkeypatch):
-    first = flow.send("重新配對")
-    second = flow.send(choice=first.choice_prompt["id"], action="confirm")
+def test_old_restart_confirmation_cannot_execute_or_restore_abandonment(flow):
+    first = flow.send("不要這張", "dismiss_proposal")
+    assert first.choice_prompt is None
+    assert "阿月牽線" in first.reply
+    assert flow.matches.find_one({"_id": flow.old_id})["status"] == "pending"
+    assert not flow.jobs.rows
+
+
+def test_failed_new_search_does_not_touch_old_terminal_proposal(flow, monkeypatch):
+    flow.matches.update_one({"_id": flow.old_id}, {"$set": {"status": "declined"}})
+    first = flow.send("重新配對", "restart_search")
     monkeypatch.setattr(write_executors, "start_match_search", Mock(side_effect=RuntimeError("isolated failure")))
-    result = flow.send(choice=second.choice_prompt["id"], action="confirm")
+    result = flow.send(choice=first.choice_prompt["id"], action="confirm")
     assert not result.match_state_changed
     assert not flow.jobs.rows
     assert flow.matches.find_one({"_id": flow.old_id})["status"] == "declined"
-    assert "不能安全" in result.reply
 
 
-def test_search_created_between_steps_is_not_duplicated(flow):
-    first = flow.send("重新配對")
-    second = flow.send(choice=first.choice_prompt["id"], action="confirm")
+def test_search_created_before_new_confirmation_blocks_duplicate(flow):
+    flow.matches.update_one({"_id": flow.old_id}, {"$set": {"status": "declined"}})
+    first = flow.send("重新配對", "restart_search")
     flow.jobs.insert_one({"user_id": "owner", "active_user_id": "owner", "job_id": "other-search",
                          "status": "running", "created_at": 300, "idempotency_key": "other-request"})
-    flow.send(choice=second.choice_prompt["id"], action="confirm")
+    result = flow.send(choice=first.choice_prompt["id"], action="confirm")
+    assert "重複" in result.reply or "正在幫你找" in result.reply
     assert len(flow.jobs.rows) == 1
     assert flow.jobs.rows[0]["job_id"] == "other-search"

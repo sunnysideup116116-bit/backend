@@ -8,6 +8,7 @@ database identifiers or private memory/calendar fields.
 from __future__ import annotations
 
 import re
+import hashlib
 import unicodedata
 from dataclasses import dataclass
 from typing import Any
@@ -24,6 +25,17 @@ MAX_LISTED_ACCEPTED_CONTACTS = 8
 MAX_CONTACT_RESOLUTION_CANDIDATES = 50
 _INTERNAL_REFERENCE_RE = re.compile(r"(?:@?seed_user_[\w-]+|@?demo_user|@?user[_-]?\d+)", re.IGNORECASE)
 _PUBLIC_REASON_KINDS = frozenset({"shared_graph", "shared_context", "shared_value"})
+CONTACT_REF_PREFIX = "relref_"
+
+
+def contact_reference(
+    user_id: str, other_user_id: str, reference_scope: str = "legacy",
+) -> str:
+    """Return an opaque reference scoped to one owner turn."""
+    digest = hashlib.sha256(
+        f"{user_id}:{reference_scope}:{other_user_id}".encode("utf-8")
+    ).hexdigest()
+    return f"{CONTACT_REF_PREFIX}{digest[:24]}"
 
 
 def public_text(value: Any, limit: int = 160) -> str:
@@ -361,6 +373,7 @@ def mentioned_contact_summary(user_id: str, other_user_ids: list[str]) -> list[d
 
 def accepted_contact_summaries(
     user_id: str, limit: int = MAX_LISTED_ACCEPTED_CONTACTS,
+    *, reference_scope: str = "legacy",
 ) -> tuple[list[dict[str, Any]], bool]:
     """Return a bounded public projection of the owner's accepted contacts only."""
     safe_limit = max(1, min(int(limit), MAX_LISTED_ACCEPTED_CONTACTS))
@@ -370,12 +383,7 @@ def accepted_contact_summaries(
         "reason_version": 1, "friend_intro_v4": 1,
         "distinctive_tags": 1, "recommendation_tier": 1, "updated_at": 1,
     }
-    try:
-        matches = list(matches_coll.find(verified_accepted_match_query(user_id), projection))
-    except Exception:
-        # Relationship lookup is an authorization boundary. Do not return a
-        # partial or client-supplied list when canonical state is unavailable.
-        return [], False
+    matches = list(matches_coll.find(verified_accepted_match_query(user_id), projection))
     matches.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
     truncated = len(matches) > safe_limit
     contacts: list[dict[str, Any]] = []
@@ -386,10 +394,61 @@ def accepted_contact_summaries(
         public_profile = safe_public_profile(other_user_id)
         tags = [public_text(value, 30) for value in (match.get("distinctive_tags") or [])]
         contacts.append({
+            "contact_ref": contact_reference(user_id, other_user_id, reference_scope),
             "display_name": display_name(other_user_id),
             **public_profile,
             "safe_match_reason": safe_match_reason(match, user_id),
             "verified_common_ground": verified_common_ground(match, user_id),
             "distinctive_tags": [tag for tag in tags if tag][:4],
+            "evidence_available": bool(
+                public_profile.get("recent_context")
+                or public_profile.get("initial_interest")
+                or public_profile.get("personality_summary")
+                or safe_match_reason(match, user_id)
+            ),
         })
     return contacts, truncated
+
+
+def contact_evidence_by_refs(
+    user_id: str, contact_refs: list[str], *, reference_scope: str = "legacy",
+    limit: int = 3,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Resolve only current accepted contacts represented by opaque refs."""
+    wanted = [str(ref).strip() for ref in contact_refs[:limit] if str(ref).strip()]
+    if not wanted:
+        return [], []
+    matches = list(matches_coll.find(verified_accepted_match_query(user_id)))
+    matches.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    matches = matches[:MAX_LISTED_ACCEPTED_CONTACTS]
+    result: list[dict[str, Any]] = []
+    found: set[str] = set()
+    for match in matches:
+        other_user_id = other_id(match, user_id)
+        if not other_user_id:
+            continue
+        ref = contact_reference(user_id, other_user_id, reference_scope)
+        if ref not in wanted or ref in found:
+            continue
+        found.add(ref)
+        profile = profiles_coll.find_one(
+            {"user_id": other_user_id},
+            {"_id": 0, "current_context": 1, "initial_interest": 1, "big_five.summary": 1},
+        ) or {}
+        values = {
+            "recent_context": public_text(profile.get("current_context"), 400),
+            "initial_interest": public_text(profile.get("initial_interest"), 400),
+            "personality_summary": public_text((profile.get("big_five") or {}).get("summary"), 400),
+            "safe_match_reason": public_text(reason_for_viewer(match, user_id), 400),
+            "verified_common_ground": verified_common_ground(match, user_id),
+            "distinctive_tags": [public_text(value, 80) for value in (match.get("distinctive_tags") or [])[:4]],
+        }
+        fields = [key for key, value in values.items() if value]
+        result.append({
+            "contact_ref": ref,
+            "display_name": display_name(other_user_id),
+            **values,
+            "evidence_fields": fields,
+            "truncated": any(len(str(value)) >= 400 for value in values.values() if isinstance(value, str)),
+        })
+    return result, [ref for ref in wanted if ref not in found]

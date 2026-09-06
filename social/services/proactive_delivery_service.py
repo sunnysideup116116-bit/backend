@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import re
 
 from bson.objectid import ObjectId
 from pymongo import ReturnDocument
@@ -13,7 +14,10 @@ from services.chat_service import (
     generate_proposal_ai_room_id, generate_room_id, save_message,
     save_system_message_once,
 )
-from services.ai_room_service import create_proposal_room, get_room, most_recent_ai_room
+from services.ai_room_service import (
+    create_proposal_room, get_room, match_hub_room_id,
+    match_hub_v1_enabled, most_recent_ai_room,
+)
 from services.mediator_event_service import claim_next_mediator_event
 from services.match_reason_service import reason_for_viewer
 from services.event_card_projection import public_event_card
@@ -53,6 +57,75 @@ def _proposal_source(match: dict) -> str:
         if job_source:
             return job_source
     return source
+
+
+def _source_summary(match: dict, event: dict) -> str:
+    """Create a short, public summary for a Hub card's provenance."""
+    event_card = public_event_card(match)
+    if event_card:
+        title = str(event_card.get("title") or "").strip()
+        date = str(event_card.get("start_at") or event_card.get("date") or "").strip()
+        location = str(event_card.get("location") or "").strip()
+        parts = [item for item in (title, date, location) if item]
+        if parts:
+            return " · ".join(parts)[:180]
+    return str(event.get("message") or "近期配對提案")[:180]
+
+
+def _public_match_basis(match: dict, user_id: str) -> dict:
+    """Project the server-owned evidence contract without participant IDs."""
+    raw = match.get("match_basis")
+    if not isinstance(raw, dict):
+        tier = str(match.get("recommendation_tier") or "")
+        raw = {
+            "level": "direct" if tier in {"grounded", "event_grounded"} else "adjacent",
+            "need_evidence": [],
+            "counterparty_evidence": [],
+            "concrete_overlap": [],
+            "cannot_infer": ["對方尚未同意這次介紹或活動安排。"],
+        }
+    allowed = {"direct", "adjacent", "insufficient"}
+    level = str(raw.get("level") or "insufficient")
+    if level not in allowed:
+        level = "insufficient"
+
+    def strings(value: object, limit: int = 3) -> list[str]:
+        values = value if isinstance(value, list) else [value]
+        output = []
+        for item in values:
+            text = str(item or "").strip()[:120]
+            # Evidence summaries are UI text, never a contact channel or
+            # account identifier. Redact common email/phone forms before the
+            # Hub projection crosses the HTTP boundary.
+            text = re.sub(
+                r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}",
+                "已隱藏聯絡方式",
+                text,
+            )
+            text = re.sub(
+                r"(?<!\d)(?:\+?886[-\s]?)?0?9\d{2}[-\s]?\d{3}[-\s]?\d{3}(?!\d)",
+                "已隱藏聯絡方式",
+                text,
+            )
+            text = re.sub(
+                r"seed_user_[A-Za-z0-9_-]+|(?:user_id|match_id)\s*[:=]\s*\S+",
+                "對方",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if text and text not in output:
+                output.append(text)
+            if len(output) >= limit:
+                break
+        return output
+
+    return {
+        "level": level,
+        "need_evidence": strings(raw.get("need_evidence")),
+        "counterparty_evidence": strings(raw.get("counterparty_evidence")),
+        "concrete_overlap": strings(raw.get("concrete_overlap")),
+        "cannot_infer": strings(raw.get("cannot_infer"), 4),
+    }
 
 
 def _expire_automatic_proposal(match: dict) -> None:
@@ -95,10 +168,14 @@ def proactive_check(user_id: str, conversation_active: bool = False) -> dict:
     if not conversation_active:
         marker = consume_proactive_delivery(user_id)
         if marker:
-            return {
+            response = {
                 "has_new": True, "message": marker["message"], "type": "proactive_care",
-                "surface": "global_mediator", "metadata": {"event_type": "proactive_care"},
+                "surface": "global_mediator",
+                "metadata": {"event_type": "proactive_care"},
             }
+            if marker.get("origin_room_id"):
+                response["origin_room_id"] = marker["origin_room_id"]
+            return response
     return {"has_new": False}
 
 
@@ -124,6 +201,70 @@ def _metadata(event: dict) -> dict:
         "matches": event.get("matches", []), "actions": event.get("actions", []),
         "media": event.get("media"),
     }
+
+
+def _safe_source_entry(
+    saved: dict | None,
+    *,
+    room_id: str,
+    match_id: str,
+    destination_room_id: str,
+    proposal_namespace: str,
+) -> dict | None:
+    """Project one saved source-room pointer for immediate chat merging.
+
+    This response is consumed by a polling client before it reloads history.
+    Keep it in the same shape as a saved message and copy only server-owned
+    navigation metadata; participant ids and the full Hub card never cross
+    this optional convenience field.
+    """
+    if not isinstance(saved, dict):
+        return None
+    message_id = str(saved.get("message_id") or saved.get("_id") or "").strip()
+    safe_room = str(room_id or "").strip()[:240]
+    safe_match = str(match_id or "").strip()[:128]
+    if not safe_room or not message_id or not safe_match:
+        return None
+    namespace = str(proposal_namespace or "").strip()
+    if namespace not in {RELATIONSHIP_MATCH_NAMESPACE, EVENT_INVITATION_NAMESPACE}:
+        namespace = RELATIONSHIP_MATCH_NAMESPACE
+    metadata = {
+        "event_type": "match_proposal_ready",
+        "destination_room_id": str(destination_room_id or "").strip()[:240],
+        "proposal_room_id": str(destination_room_id or "").strip()[:240],
+        "focus_match_id": safe_match,
+        "match_id": safe_match,
+        "proposal_namespace": namespace,
+    }
+    # Preserve the stable saved pointer text/timestamp. The response must
+    # represent what was actually written, even when a retry reads it back.
+    content = str(saved.get("content") or saved.get("message") or "").strip()[:2000]
+    if not content:
+        return None
+    return {
+        "room_id": safe_room,
+        "message_id": message_id[:256],
+        "sender_id": "ai_assistant",
+        "content": content,
+        "message_type": str(saved.get("message_type") or "text")[:40],
+        "metadata": metadata,
+        "timestamp": float(saved.get("timestamp") or saved.get("created_at") or time.time()),
+    }
+
+
+def _source_pointer_message(match: dict, *, fallback: str = "") -> str:
+    """Use canonical proposal state when wording the original-room pointer."""
+    delivery_mode = str(match.get("delivery_mode") or "").strip()
+    status = str(match.get("status") or "").strip()
+    if delivery_mode == "invite_on_match" and status == "pending":
+        topic = str(
+            ((match.get("search_context") or {}).get("invitation_topic") or "")
+        ).strip()[:80]
+        return (
+            f"已替你送出「{topic}」邀請，正在等對方回覆。"
+            if topic else "已替你送出邀請，正在等對方回覆。"
+        )
+    return fallback or "我找到一位可以介紹給你的人，介紹放在阿月牽線。"
 
 
 def _deliver_claimed_event(user_id: str, event: dict) -> dict:
@@ -266,11 +407,12 @@ def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> 
                 "event_intro_suppressed": True,
             }
         requested_origin = str(event.get("origin_room_id") or "")
-        origin_room_id = (
+        source_room_id = (
             requested_origin
             if requested_origin and get_room(requested_origin, user_id) is not None
-            else most_recent_ai_room(user_id)
+            else most_recent_ai_room(user_id, include_proposal_rooms=False)
         )
+        is_initiator = live_match.get("from_user") == user_id
         viewer_reason = reason_for_viewer(live_match, user_id)
         if not viewer_reason:
             viewer_reason = "我找到一位可能適合你的人，想先問問你願不願意認識對方。"
@@ -280,17 +422,144 @@ def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> 
             "reason_version": str(live_match.get("reason_version") or "legacy"),
             "proposal_namespace": namespace_for_document(live_match),
             "proposal_revision": int(live_match.get("proposal_revision", 0) or 0),
+            "match_source_kind": str(
+                live_match.get("match_source_kind")
+                or ("event" if namespace_for_document(live_match) == EVENT_INVITATION_NAMESPACE
+                    else "requested_topic" if (live_match.get("search_context") or {}).get("invitation_topic")
+                    else "recent_context")
+            ),
         }
         event_card = public_event_card(live_match)
         if event_card:
             public_match["event"] = event_card
+        # The card is the canonical, viewer-bound projection.  Keep the
+        # matching evidence opaque while exposing a short safety explanation
+        # that is useful to the Hub's "詢問這張" flow.
+        public_match["match_basis"] = _public_match_basis(live_match, user_id)
+        public_match["source_room_id"] = source_room_id
+        source_room = get_room(source_room_id, user_id) or {}
+        source_room_title = str(
+            source_room.get("title")
+            or (live_match.get("source_room_title") if is_initiator else "")
+            or ""
+        )[:60]
+        source_summary = (
+            str(live_match.get("source_summary") or "").strip()
+            or _source_summary(live_match, event)
+        )[:180] if is_initiator else ""
+        public_match["source_room_title"] = source_room_title
+        public_match["source_summary"] = source_summary
         # Rebuild proposal metadata from the canonical match at delivery time.
         # Queued events cannot smuggle stale profile snippets, the opposite
         # direction reason, or participant identifiers into the public card.
-        if event_type != "incoming_match_intro":
-            message_metadata["other_id"] = None
-            message_metadata["matches"] = [public_match]
+        message_metadata["other_id"] = None
+        # Every Hub proposal event variant projects the same canonical card.
+        # The first intro and the actionable interest event therefore share one
+        # durable card instead of allowing an empty intro card to race ahead.
+        message_metadata["matches"] = [public_match]
         match_id = str(live_match["_id"])
+        source_entry = None
+        # Match Hub V1 owns both relationship and event invitations.  The
+        # durable card is written once into the fixed room; old proposal rooms
+        # remain readable for history and are only used by the rollback path.
+        if match_hub_v1_enabled():
+            hub_room_id = match_hub_room_id(user_id)
+            hub_room = get_room(hub_room_id, user_id)
+            # A hub projection is server-owned.  Requiring the explicit room
+            # kind also keeps old test doubles/legacy deployments on their
+            # existing origin-room compatibility path during rollout.
+            if isinstance(hub_room, dict) and hub_room.get("room_kind") == "match_hub":
+                # Persist the per-viewer source binding before saving the Hub
+                # card. The status/state endpoints read match documents, so
+                # message metadata alone cannot provide a stable source link.
+                try:
+                    source_room_id = _proposal_origin_room(user_id, live_match, event)
+                except RuntimeError:
+                    source_room_id = ""
+                source_room = get_room(source_room_id, user_id) if source_room_id else None
+                source_room = source_room if isinstance(source_room, dict) else {}
+                source_room_title = str(
+                    source_room.get("title")
+                    or (live_match.get("source_room_title") if is_initiator else "")
+                    or ""
+                )[:60]
+                source_summary = (
+                    str(live_match.get("source_summary") or "").strip()
+                    or _source_summary(live_match, event)
+                )[:180] if is_initiator else ""
+                public_match.update(
+                    source_room_id=source_room_id,
+                    source_room_title=source_room_title,
+                    source_summary=source_summary,
+                )
+                if is_initiator and source_room_id:
+                    matches_coll.update_one(
+                        {"_id": live_match["_id"], "from_user": user_id},
+                        {"$set": {
+                            "source_room_id": source_room_id,
+                            "source_room_title": source_room_title,
+                            "source_summary": source_summary,
+                        }},
+                    )
+                state = proposal_card_state(live_match, user_id)
+                message_metadata.update(
+                    match_id=match_id, other_id=None,
+                    proposal_role="initiator" if live_match.get("from_user") == user_id else "receiver",
+                    canonical_status=state["status"], stage=state["stage"],
+                    proposal_revision=state["proposal_revision"], decision_action=state["decision_action"],
+                    destination_room_id=hub_room_id, focus_match_id=match_id,
+                    source_room_id=source_room_id,
+                    source_room_title=source_room_title,
+                    source_summary=source_summary,
+                )
+                hub_event_key = f"match-hub:{match_id}"
+                saved = save_system_message_once(
+                    hub_room_id, event.get("message", "阿月有一則新的媒合消息。"),
+                    message_type="mediator_card",
+                    metadata=message_metadata,
+                    event_key=hub_event_key,
+                )
+                # A relationship proposal can still have been discovered from
+                # the legacy/general room. Leave one lightweight, idempotent
+                # pointer there. The receiver's incoming-interest event does
+                # not know the initiator's source room, so it stays Hub-only.
+                if (
+                    event_type == "match_proposal"
+                    and
+                    namespace_for_document(live_match) == RELATIONSHIP_MATCH_NAMESPACE
+                    and source_room_id
+                    and source_room_id != hub_room_id
+                ):
+                    source_saved = save_system_message_once(
+                        source_room_id,
+                        _source_pointer_message(live_match),
+                        message_type="text",
+                        metadata={
+                            "event_type": "match_proposal_ready",
+                            "proposal_room_id": hub_room_id,
+                            "destination_room_id": hub_room_id,
+                            "focus_match_id": match_id,
+                            "proposal_namespace": namespace_for_document(live_match),
+                        },
+                        event_key=f"{hub_event_key}:entry",
+                    )
+                    source_entry = _safe_source_entry(
+                        source_saved,
+                        room_id=source_room_id,
+                        match_id=match_id,
+                        destination_room_id=hub_room_id,
+                        proposal_namespace=namespace_for_document(live_match),
+                    )
+                return {
+                    "has_new": True, "surface": "global_mediator", "message": event.get("message"),
+                    "type": event_type, "matches": message_metadata.get("matches", []),
+                    "metadata": message_metadata, "origin_room_id": hub_room_id,
+                    "destination_room_id": hub_room_id, "focus_match_id": match_id,
+                    "source_room_id": source_room_id,
+                    **({"source_entry": source_entry} if source_entry else {}),
+                    "message_id": saved.get("message_id"),
+                    "debug_info": event.get("debug_info", []),
+                }
         if namespace_for_document(live_match) == RELATIONSHIP_MATCH_NAMESPACE:
             origin_room_id = _proposal_origin_room(user_id, live_match, event)
             state = proposal_card_state(live_match, user_id)
@@ -306,14 +575,23 @@ def _deliver_global_event(user_id: str, event: dict, message_metadata: dict) -> 
                 metadata=message_metadata,
                 event_key=str(event.get("event_key") or f"delivery:{event.get('event_id') or event_type}:{match_id}"),
             )
+            if event_type == "match_proposal":
+                source_entry = _safe_source_entry(
+                    saved,
+                    room_id=origin_room_id,
+                    match_id=match_id,
+                    destination_room_id=origin_room_id,
+                    proposal_namespace=namespace_for_document(live_match),
+                )
             return {
                 "has_new": True, "surface": "global_mediator", "message": event.get("message"),
                 "type": event_type, "matches": message_metadata.get("matches", []),
                 "metadata": message_metadata, "origin_room_id": origin_room_id,
+                **({"source_entry": source_entry} if source_entry else {}),
                 "message_id": saved.get("message_id"),
             }
-        # Proposals get their own dedicated AI room so the default 找阿月配對
-        # room is never interrupted by incoming matchmaking events.
+        # Rollback path for deployments with MATCH_HUB_V1 disabled.  Existing
+        # proposal rooms remain intact and can be read without migration.
         proposal_room_id = generate_proposal_ai_room_id(user_id, match_id)
         create_proposal_room(
             user_id,

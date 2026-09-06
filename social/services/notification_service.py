@@ -122,6 +122,7 @@ def _event(
     timestamp = float(msg.get("timestamp") or time.time())
     sender_id = str(msg.get("sender_id") or "")
     message_type = str(msg.get("message_type") or "text")
+    metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
     data = {
         "chat_surface": surface,
         "chat_conversation_id": conversation_id,
@@ -131,6 +132,21 @@ def _event(
         "chat_message_kind": message_type,
         "chat_sender_id": sender_id,
     }
+    # Hub navigation is a user choice.  Carry only the server-owned,
+    # allowlisted references needed by the client; the push listener must not
+    # switch rooms or perform a decision by itself.
+    if str(metadata.get("event_type") or "") in {
+        "match_proposal", "incoming_match_interest", "match_proposal_ready",
+    }:
+        destination = str(metadata.get("destination_room_id") or "").strip()[:240]
+        focus = str(metadata.get("focus_match_id") or "").strip()[:128]
+        namespace = str(metadata.get("proposal_namespace") or "").strip()
+        if destination:
+            data["destination_room_id"] = destination
+        if focus:
+            data["focus_match_id"] = focus
+        if namespace in {"relationship_match", "event_invitation"}:
+            data["proposal_namespace"] = namespace
     return NotificationEvent(
         recipient_id=recipient_id,
         surface=surface,

@@ -66,15 +66,23 @@ PublicAgentTurnContext（bounded prompt-safe state）
 AgentContextSlice（每個 specialist 的最小視圖）
 ```
 
-固定 budget：最近 12 則訊息、合計 6,000 字元、記憶最多 8 筆。Context Builder 不得輸出 raw Mongo/Neo4j document、內部 ID、對方私人記憶或對方行事曆。
+固定 budget：最近 32 則訊息、合計 8,000 字元、記憶最多 8 筆。Context Builder 不得輸出 raw Mongo/Neo4j document、內部 ID、對方私人記憶或對方行事曆。
 
-Public conversation compaction 使用 `ConversationSummaryV1` 的 bounded owner-scoped projection。Context Builder 只載入通過 evaluation、source hash 與 room/owner 驗證的最新摘要，並以 watermark 排除已涵蓋的舊訊息。這份 continuity 只協助延續話題；Match、Profile、Calendar、accepted relationship 與 durable memory 一律重新讀 canonical domain state。
+Public owner source messages carry a server-owned `metadata.message_use` marker (`message-use-v1`). Only `ordinary` is reusable by profile extraction, conversation compaction, or proactive care. `calendar_operation`, `assessment`, `no_memory`, and unmarked `unknown` messages are excluded. The marker is written after the V3 turn and rechecked by every background consumer; calendar drafts, field follow-ups, confirmations, cancellations, and failures keep the same exclusion.
+
+Profile extraction may return one bounded `follow_up` proposal in the same typed response as recent context and memory. `proactive_followup_service.py` validates owner evidence, stores at most three source-scoped candidates with durable active slots, revision/lease/expiry, and binds model-visible slots to the exact candidate revision seen before the call. The care scheduler recovers expired processing leases and writes one deterministic message event to the original owner room only after consent is rechecked and cadence, unanswered cooldown, quiet-time, recent-activity and Calendar busy/free gates pass; Calendar titles, locations, notes and participant data never enter the care prompt. `proactive_care_enabled` is the UI setting; legacy `proactive_frequency` is migration-only.
+
+Public conversation compaction 使用 `ConversationSummaryV1` 的 bounded owner-scoped projection。Context Builder 只載入通過 evaluation、source hash 與 room/owner 驗證的最新摘要，並以 watermark 排除已涵蓋的舊訊息；`history_projection_status` 會標記 sentinel row 或字元預算造成的 `recent_only_budget_limited` 降級。這份 continuity 只協助延續話題；Match、Profile、Calendar、accepted relationship 與 durable memory 一律重新讀 canonical domain state。
 
 Room ownership 同時接受永久 legacy Public room 與 `ai_rooms` 中可由 server 驗證的 owner room。Compaction、壓縮前 profile coverage 與 continuity loader 共用同一 validator；偽造、他人、已刪除或 storage unavailable 的 room 在讀 message／summary 前 fail closed。壓縮模型輸出使用 `ChatResult.content` 的 typed boundary。
 
 Match slice 可同時包含兩份互不覆蓋的最小狀態：`active_proposal` 對應一般 `relationship_match`，`active_event_invitation` 對應活動牽線。兩份 projection 只提供 stage、公開對象稱呼、是否可決定、活動標題等必要資訊；ID 與 revision 僅留在 server-side turn context / confirmation payload，不由 Planner 提供。
 
 Planner 在取得 `PublicAgentTurnContext` 後另做 bounded prompt projection：最多最近 4 則、合計 2,000 字元，若最新 history item 就是本回合 `message` 則只保留一份；clock 只送 timezone、local date/time、weekday 與實際存在的 temporal references。Optional state 為空時省略；active proposal 只送公開 status、counterparty、user_can_decide，不送 proposal revision。此 projection 不改全域 Context Builder budget，也不改其他 sub-agent slice。
+
+Places presentation 另由 owner+room 的 durable snapshot 維持候選與 opaque reference。使用者成功選定候選後，Context Builder 以 `selected_reference`／`selected_at` 投影獨立的 `recent_place_reference`（reference、公開名稱、類別、地址摘要）；它不讀取或重用 Calendar draft。裸「它／這間／那間」只有在這個引用唯一且未被更新的推薦清單取代時才解析；明確店名、序號與歷史清單仍依 server resolver 的優先順序處理。
+
+Planner 前的地點解析維持唯讀。Plan 驗證通過後，只要當回合有明確的新地點解析且會執行 Places `details|reviews`，Scheduler 就以 owner+room+reference 重新驗證 snapshot 並提交選擇，不依賴 provider 是否重複輸出 `place_selection`。純 Web／Relationship 回合和已選店家的短句延續不改寫 `selected_at`；提交失敗時在執行地點或 Web 工具前明確失敗，durable trace 只保存 commit status 與 resolution method。
 
 每個 sub-agent 只能收到 `context_slicer.py` 對該 agent 明確列出的欄位。新增 agent 時，必須新增獨立 slice 與 privacy test；不得把整個 `PublicAgentTurnContext` 直接交給 agent。
 
@@ -112,11 +120,15 @@ mode=tasks
 }
 ```
 
+Places task 另有必填的 typed `place_mode`：`discover` 建立並發布新的推薦候選；`details` 查單一已綁定店家的結構化資料；`reviews` 查單一已綁定店家的公開口碑。這個欄位只屬 Places，非 Places task 不填；provider 缺漏或送出非法值會在 Planner boundary retry once 後 fail closed。
+
 Provider-facing schema 將 `write_intent` 設為 required；一般請求必須明確送 `none`。Canonical `Plan` 的 `none` default 只供 server-side 與舊 fixture 建構相容，不替 provider 補值。
 
 未使用的 optional task 欄位應省略；不可用空字串代替 enum，也不可送出不完整的 `{}` `run_if`。Provider boundary 只會把 known agent 的精確空 placeholder 視為省略；空白字串、非空無效值、不完整 condition 與 graph／DAG drift 仍由 canonical validator 拒絕，最多 retry once 後 fail closed。
 
-只有 Web task 可帶 `evidence_policy=casual_discovery|strict_verification`。Calendar availability task 可帶 `outcome_contract="calendar.availability.v1"`，但它只有在 graph 中至少有一個下游 `run_if` consumer 時才有控制意義；若 provider 把它放在沒有 consumer 的普通 Calendar 查詢或 mutation task，contract normalization 會移除這個無效 metadata，而不是拒絕整張 plan。`run_if` 是控制 edge，必要欄位為 `source_task_id` 與 `required_outcome`（`task.finished` 或 allowlisted Calendar outcome）。這是 DAG 結構 normalization，不是 Calendar intent parser：Planner 不選 command、tool arguments、event ID 或 confirmation，也不選 ProductInfo section、不執行工具、不寫 final domain answer。
+Places task 必須帶 `place_mode=discover|details|reviews`；只有 `discover` 可提出 `places.search_nearby` 與發布新的 presentation snapshot，`details`／`reviews` 都綁定 server-owned place reference。Web task 可帶 `evidence_policy=casual_discovery|strict_verification` 與 `web_mode=public_lookup|place_verification|place_hours_fallback`；`public_lookup` 不接受 Places dependency，另外兩種必須消費 Places observation。舊 Web task 省略 mode 時依 dependency shape 相容推導。Calendar availability task 可帶 `outcome_contract="calendar.availability.v1"`，但它只有在 graph 中至少有一個下游 `run_if` consumer 時才有控制意義；若 provider 把它放在沒有 consumer 的普通 Calendar 查詢或 mutation task，contract normalization 會移除這個無效 metadata，而不是拒絕整張 plan。`run_if` 是控制 edge，必要欄位為 `source_task_id` 與 `required_outcome`（`task.finished` 或 allowlisted Calendar outcome）。這是 DAG 結構 normalization，不是 Calendar intent parser：Planner 不選 command、tool arguments、event ID 或 confirmation，也不選 ProductInfo section、不執行工具、不寫 final domain answer。
+
+當 current message 明確要求店家營業時間、Planner 已選唯一 Places `details`、但漏掉 Web task 時，Scheduler 會補上一個 server-owned `place_hours_fallback` task。它仍先消費同一個 Places observation；完整星期營業資料存在時 typed no-op，缺漏時才查 Web。既有 Web task 不重複補入，地址或一般詳細資料請求也不觸發。
 
 Planner 只有在下游會消費上游的 typed observation、candidate ref 或其他明確 contract 時才建立 `depends_on`；獨立的 domain request 放在同一層平行執行。這個規則是 DAG 的資料依賴，不是為了排列顯示順序。只需等待、不需傳遞上游資料時使用 `run_if`；Scheduler 只在來源完成後評估它。
 
@@ -155,7 +167,7 @@ run(
 | Agent | Runtime 類型 | Owner |
 | --- | --- | --- |
 | `calendar` | completed specialist runtime | `calendar_runtime.py` |
-| `places` | proposal runner | `sub_agents/places_agent.py` |
+| `places` | typed-mode proposal runtime | `sub_agents/places_agent.py` + Scheduler registration |
 | `web` | completed specialist runtime | `web_runtime.py` |
 | `match` | proposal runner | `sub_agents/match_agent.py` |
 | `relationship` | intent-aware proposal runtime | `relationship_runtime.py` → `sub_agents/relationship_agent.py` |
@@ -167,12 +179,24 @@ run(
 Relationship Runtime owns already-accepted／established contacts: their bounded
 list, exact count when `total_count` is available, comparison, and recommendation
 among existing contacts. A `truncated=true` list cannot support claiming that a
-recommendation is best among all accepted contacts. In ordinary mode it returns
-READ proposals; only a validated date-card `write_intent` switches it to the
-single confirmed WRITE proposal surface. Match owns the singleton pending/live
+recommendation is best among all accepted contacts. Activity recommendation and
+review use a bounded read→evaluate→optional `relationship.get_contact_evidence`
+loop (at most three reads and four Relationship model calls), returning a typed
+`relationship_recommendation.v1` evidence envelope. Candidate refs are opaque,
+scoped to the saved owner message that started the run, and revalidated against
+accepted relationships for every follow-up. In ordinary
+lookup mode it returns READ proposals; only a validated date-card `write_intent`
+switches it to the single confirmed WRITE proposal surface. Match owns the singleton pending/live
 proposal status, counterparty summary, and start/retry/decision flow; an accepted
 contact is not an active proposal. A current Match observation never supplies
 aggregate accepted-contact count or roster authority.
+
+Successful public replies keep the recommendation envelope in the room-scoped
+`v3_relationship_recommendations` snapshot for 30 minutes. Mongo expiry uses a
+UTC BSON datetime so the TTL index can remove stale rows. It is published only
+after the assistant message is saved; a later reason/revision question reads a
+safe projection and starts a fresh Relationship review, never treating an old
+assistant sentence as new evidence.
 
 The Planner-facing `SubTask.agent` schema describes this as an aggregate-versus-
 singleton boundary. Colloquial questions such as 「我目前配對到哪些人」、
@@ -244,7 +268,7 @@ Observation 不是 user-facing prose。Synthesizer 是一般 DAG 的唯一 final
 
 `OLLAMA_FAST_CHAT_MODEL` 是可選的 fast tier；未設定時回退到 `OLLAMA_CHAT_MODEL`。Planner 與 Places／Match／Relationship／Profile proposal runners 要求 fast tier；Calendar、Web、Synthesizer 使用 main tier。ProductInfo retrieval 本身是 bounded typed path；Synthesizer 可用該 projection 搭配使用者的實際問題自然組合回答，固定產品文案只作 provider failure fallback。Runtime model override 優先於這些 tier，且不自動在 fast 失敗後重試 main。
 
-每個 LLM owner 的 metrics 都回報 `llm_call_count` 與 `requested_model_tier`。Planner 對 `missing_tool_call`、`wrong_function_name`、`invalid_arguments` 最多做一次 bounded protocol retry；`provider_error` 不重試，兩次 protocol failure 後仍 fail closed。Planner 的 `retry_count`、`retry_reason`、`failure_code` 與 bounded `attempts` 只投影到 localhost ephemeral debug；durable trace 不保存 prompt 或 raw output。Web 的 bounded retry／finish attempts 會累計真實 provider call 數，Scheduler 的 `trace.llm_call_count` 是 Planner、所有 sub-agent 與 Synthesizer counters 的總和；它不再以 agent 節點數估算呼叫次數。
+每個 LLM owner 的 metrics 都回報 `llm_call_count` 與 `requested_model_tier`。Planner 對 `missing_tool_call`、`wrong_function_name`、`invalid_arguments` 或 `provider_error` 最多做一次 bounded retry；Provider retry 維持同一 requested tier，不自動切換 main，第二次仍失敗便 fail closed。Planner 的 `retry_count`、`retry_reason`、`failure_code` 與 bounded `attempts` 只投影到 localhost ephemeral debug；durable trace 不保存 prompt 或 raw output。Web 的 bounded retry／finish attempts 會累計真實 provider call 數，Scheduler 的 `trace.llm_call_count` 是 Planner、所有 sub-agent 與 Synthesizer counters 的總和；它不再以 agent 節點數估算呼叫次數。
 
 Domain failure 可以在既有 `SubTaskResult` 形狀內帶 bounded `observation` projection，例如 `{"failure": {"code": "location_not_found", "subject": "...", "message": "..."}}`。這只適用於 domain 明確 allowlist 的 user-facing failure；`subject` 必須來自已驗證的 planner/executor arguments，`message` 必須是 server-owned 固定文字。不得放入 raw exception、stack trace、provider detail 或 internal ID。Scheduler 只傳遞這個 projection，不負責解讀 Places 或其他 domain 的 failure semantics。
 

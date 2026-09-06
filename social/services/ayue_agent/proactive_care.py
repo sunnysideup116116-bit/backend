@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+from bson.objectid import ObjectId
 from pydantic import BaseModel, ConfigDict, Field
 
 from database import messages_coll, profiles_coll
@@ -22,6 +23,7 @@ from services.ai_service import generate_chat_completion
 from services.chat_service import generate_room_id
 from services.ai_room_service import most_recent_ai_room
 from services.profile_projection import safe_recent_context
+from services.message_use_service import is_reusable_for_care
 from services.ayue_agent.product_identity import AYUE_MISSION_SHORT, AYUE_VOICE_SHORT
 
 
@@ -29,7 +31,7 @@ class ProactiveCareDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     message: str = Field(min_length=1, max_length=160)
-    focus: Literal["latest_message", "recent_context"]
+    focus: Literal["latest_message", "recent_context", "follow_up"]
     grounding_span: str = Field(min_length=1, max_length=240)
     confidence: float = Field(ge=0, le=1)
 
@@ -38,6 +40,10 @@ class ProactiveCareContext(BaseModel):
     latest_owner_message: str = ""
     previous_assistant_message: str = ""
     recent_context: str = ""
+    followup_topic: str = ""
+    followup_question_goal: str = ""
+    followup_grounding_span: str = ""
+    relevant_memories: list[str] = Field(default_factory=list, max_length=8)
     tone: str = "friend"
     local_date: str
     local_period: str
@@ -99,20 +105,133 @@ def schedule_proactive_care(user_id: str, frequency: object, *, last_activity: f
 
 
 def record_proactive_activity(user_id: str, *, now: float | None = None) -> float:
-    """Schedule exactly one new care opportunity for a newly saved owner turn."""
-    activity_at = now if now is not None else time.time()
-    profile = profiles_coll.find_one({"user_id": user_id}, {"proactive_frequency": 1}) or {}
-    schedule_proactive_care(user_id, profile.get("proactive_frequency", "3600"), last_activity=activity_at, now=activity_at)
-    return activity_at
+    """Compatibility alias for the candidate pipeline's activity marker."""
+    from services.proactive_followup_service import record_owner_activity
+    return record_owner_activity(user_id, now=now)
 
 
-def build_proactive_care_context(user_id: str, user_doc: dict, *, now: datetime | None = None) -> ProactiveCareContext:
-    room_id = most_recent_ai_room(user_id)
+def _recent_context_sources_are_reusable(user_id: str, user_doc: dict) -> bool:
+    """Require every active recent-context field to retain ordinary evidence."""
+    state = user_doc.get("recent_context_state") or {}
+    fields = state.get("fields") if isinstance(state, dict) else None
+    if not isinstance(fields, dict) or not fields:
+        return False
+    evidence_ids: set[str] = set()
+    for field in fields.values():
+        if not isinstance(field, dict):
+            return False
+        message_id = str(field.get("evidence_message_id") or "")
+        if not message_id:
+            return False
+        evidence_ids.add(message_id)
+    for message_id in evidence_ids:
+        try:
+            source_id = ObjectId(message_id)
+        except Exception:
+            return False
+        try:
+            source = messages_coll.find_one(
+                {"_id": source_id, "sender_id": user_id},
+                {"metadata.message_use": 1},
+            )
+        except Exception:
+            return False
+        if not source or not is_reusable_for_care(source):
+            return False
+    return True
+
+
+def build_proactive_care_context(
+    user_id: str,
+    user_doc: dict,
+    *,
+    now: datetime | None = None,
+    room_id: str | None = None,
+    candidate: dict | None = None,
+) -> ProactiveCareContext:
+    room_id = room_id or most_recent_ai_room(user_id)
     history = list(messages_coll.find(
-        {"room_id": room_id}, {"_id": 0, "sender_id": 1, "content": 1},
-    ).sort("timestamp", -1).limit(12))
-    latest_owner = next((_clean(item.get("content"), 240) for item in history if item.get("sender_id") == user_id), "")
-    previous_assistant = next((_clean(item.get("content"), 160) for item in history if item.get("sender_id") == "ai_assistant"), "")
+        {
+            "room_id": room_id,
+        },
+        {
+            "_id": 0,
+            "sender_id": 1,
+            "content": 1,
+            "metadata.message_use": 1,
+        },
+    ).sort([("timestamp", -1), ("_id", -1)]).limit(12))
+    owner_messages = [
+        item for item in history if item.get("sender_id") == user_id
+    ]
+    latest_owner_item = owner_messages[0] if owner_messages else None
+    latest_owner = (
+        _clean(latest_owner_item.get("content"), 240)
+        if latest_owner_item and is_reusable_for_care(latest_owner_item)
+        else ""
+    )
+    previous_assistant = next(
+        (
+            _clean(item.get("content"), 160)
+            for item in history
+            if item.get("sender_id") == "ai_assistant" and is_reusable_for_care(item)
+        ),
+        "",
+    )
+    safe_context = (
+        safe_recent_context(user_doc.get("current_context"), "")
+        if _recent_context_sources_are_reusable(user_id, user_doc)
+        else ""
+    )
+    candidate_source = None
+    if candidate:
+        try:
+            candidate_source = messages_coll.find_one(
+                {
+                    "_id": ObjectId(str(candidate.get("source_message_id") or "")),
+                    "room_id": room_id,
+                    "sender_id": user_id,
+                },
+                {"content": 1, "metadata.owner_raw_content": 1, "metadata.message_use": 1},
+            )
+        except Exception:
+            candidate_source = None
+        if not candidate_source or not is_reusable_for_care(candidate_source):
+            candidate_source = None
+    if (latest_owner_item is None or not is_reusable_for_care(latest_owner_item)) and not candidate_source:
+        # A control/calendar turn must not wake care for an older topic merely
+        # because that topic remains in the profile projection.
+        safe_context = ""
+    followup_grounding = (
+        _clean((candidate or {}).get("evidence_span"), 240)
+        if candidate_source
+        else ""
+    )
+    if candidate_source:
+        source_text = _clean(
+            ((candidate_source.get("metadata") or {}).get("owner_raw_content"))
+            or candidate_source.get("content"),
+            800,
+        )
+        if followup_grounding not in source_text:
+            followup_grounding = ""
+    memories: list[str] = []
+    stance_labels = {
+        "like": "喜歡",
+        "dislike": "不喜歡",
+        "avoid": "避免",
+        "require": "需要",
+    }
+    for item in (user_doc.get("profile_memory_preview") or [])[:8]:
+        if isinstance(item, dict):
+            label = _clean(item.get("label_zh_tw") or item.get("label"), 48)
+            stance = stance_labels.get(str(item.get("stance") or "").lower(), "偏好")
+        else:
+            label = _clean(item, 48)
+            stance = "偏好"
+        memory_text = f"{stance}：{label}" if label else ""
+        if memory_text and not _INTERNAL_TEXT_RE.search(memory_text) and memory_text not in memories:
+            memories.append(memory_text)
     local_now = (now or datetime.now(ZoneInfo("Asia/Taipei"))).astimezone(ZoneInfo("Asia/Taipei"))
     tone = str(user_doc.get("mediator_tone") or "friend")
     if tone not in {"friend", "gentle", "enthusiastic"}:
@@ -120,7 +239,11 @@ def build_proactive_care_context(user_id: str, user_doc: dict, *, now: datetime 
     return ProactiveCareContext(
         latest_owner_message=latest_owner,
         previous_assistant_message=previous_assistant,
-        recent_context=safe_recent_context(user_doc.get("current_context"), ""),
+        recent_context=safe_context,
+        followup_topic=_clean((candidate or {}).get("topic"), 80) if candidate_source else "",
+        followup_question_goal=_clean((candidate or {}).get("question_goal"), 160) if candidate_source else "",
+        followup_grounding_span=followup_grounding,
+        relevant_memories=memories,
         tone=tone,
         local_date=local_now.date().isoformat(),
         local_period=_period(local_now),
@@ -219,10 +342,16 @@ def _valid_decision(raw: object, context: ProactiveCareContext) -> ProactiveCare
         decision = ProactiveCareDecision.model_validate(json.loads(str(raw)))
     except Exception:
         return None
-    source = context.latest_owner_message if decision.focus == "latest_message" else context.recent_context
+    if decision.focus == "latest_message":
+        source = context.latest_owner_message
+    elif decision.focus == "recent_context":
+        source = context.recent_context
+    else:
+        source = context.followup_grounding_span
     text = _clean(decision.message, 160)
     if (
         decision.confidence < 0.72
+        or (context.followup_grounding_span and decision.focus != "follow_up")
         or not source
         or decision.grounding_span not in source
         or not text
@@ -249,10 +378,10 @@ def proactive_care_claim_is_current(user_id: str, claim_id: str, last_activity: 
 
 def generate_proactive_care_outcome(context: ProactiveCareContext) -> tuple[ProactiveCareDecision | None, str]:
     """Return a grounded care message, or None, after at most one repair call."""
-    if not context.latest_owner_message and not context.recent_context:
+    if not context.latest_owner_message and not context.recent_context and not context.followup_grounding_span:
         return None, "no_grounding"
     effective_context = context
-    if context.latest_owner_message.strip().lower() in _CONTROL_ONLY_MESSAGES and context.recent_context:
+    if not context.followup_grounding_span and context.latest_owner_message.strip().lower() in _CONTROL_ONLY_MESSAGES and context.recent_context:
         # Confirmation/cancellation tokens belong to a closed protocol and are
         # not a useful topic for a later care message.
         effective_context = context.model_copy(update={"latest_owner_message": ""})
@@ -261,9 +390,9 @@ def generate_proactive_care_outcome(context: ProactiveCareContext) -> tuple[Proa
 {AYUE_VOICE_SHORT}
 
 你是阿月，正在主動關心一位使用者。阿月是說話者，使用者是收話者；絕對不可把阿月叫成「欸阿月」，也不可角色顛倒。
-只能根據安全 context 的 latest_owner_message 或 recent_context 關心使用者。不要讀取、提及或推銷配對、對方、行事曆、心理診斷或系統能力。若沒有具體可關心的內容，輸出空字串以外的 JSON 不可。
+只能根據安全 context 的 latest_owner_message、recent_context 或 follow-up 候選關心使用者。若有 follow-up 候選，focus 必須使用 follow_up，且只能確認候選的中性 question_goal，不得預設結果。不要讀取、提及或推銷配對、對方、行事曆、心理診斷或系統能力。若沒有具體可關心的內容，輸出空字串以外的 JSON 不可。
 訊息必須一到兩句、最多一個自然問題、繁體中文且不重複 previous_assistant_message。grounding_span 必須是所選 focus 的原文連續子字串。
-只輸出 JSON：{{"message":"...","focus":"latest_message|recent_context","grounding_span":"原文子字串","confidence":0.0}}
+Memory 只可作為語氣背景，不可把記憶當成這次追問的 evidence。只輸出 JSON：{{"message":"...","focus":"latest_message|recent_context|follow_up","grounding_span":"原文子字串","confidence":0.0}}
 安全 context：{json.dumps(payload, ensure_ascii=False)}"""
     provider_failed = False
     for attempt in range(2):

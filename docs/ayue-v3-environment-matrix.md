@@ -37,6 +37,7 @@ The table records variable names and public defaults only. Secret values from `s
 | `AYUE_RELATIONSHIP_REFERENCE_MONGO` | no | implementation default | deployment config | Boolean |
 | `AYUE_PROFILE_SKILLS_MODE` | no | `on` | `social.env`, example | Boolean |
 | `AYUE_PROFILE_SKILLS_USER_ALLOWLIST` | no | empty | `social.env`, example | Comma-separated owner IDs |
+| `AYUE_PROACTIVE_FOLLOWUP_MODE` | no | `off` | `social.env`, example | `off`, `shadow`, or `on`; shadow stores candidates without sending |
 | `TAVILY_API_KEY` | no | empty | `social.env` | Empty disables provider-backed web search |
 | `TAVILY_PROJECT` | no | empty | deployment config | Optional provider project label |
 | `GIPHY_API_KEY` | no | empty | `social.env` | Empty disables GIF delivery |

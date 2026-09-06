@@ -16,6 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field
 RecentContextAction = Literal["update", "clear", "none"]
 RecentContextEpisodeRelation = Literal["continue", "new", "unrelated"]
 FieldOperation = Literal["set", "clear"]
+FollowUpAction = Literal["create", "update", "close", "none"]
+FollowUpTiming = Literal["after_days", "after_activity", "none"]
 
 
 class EvidenceField(BaseModel):
@@ -58,6 +60,23 @@ class DurableMemoryCandidate(BaseModel):
     reason_code: str = ""
 
 
+class FollowUpDecision(BaseModel):
+    """A bounded proposal for a later, owner-scoped conversational check-in."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: FollowUpAction = "none"
+    existing_slot: int | None = Field(default=None, ge=1, le=3)
+    topic: str = Field(default="", max_length=80)
+    question_goal: str = Field(default="", max_length=160)
+    timing: FollowUpTiming = "none"
+    wait_days: int = Field(default=3, ge=1, le=7)
+    evidence_span: str = Field(default="", max_length=240)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    subject: Literal["owner"] = "owner"
+    reason_code: str = Field(default="", max_length=60)
+
+
 class ProfileExtractionDecision(BaseModel):
     """The only provider-neutral extraction payload accepted by V2."""
 
@@ -65,3 +84,4 @@ class ProfileExtractionDecision(BaseModel):
 
     recent_context: RecentContextDecision
     memories: list[DurableMemoryCandidate] = Field(default_factory=list)
+    follow_up: FollowUpDecision | None = None

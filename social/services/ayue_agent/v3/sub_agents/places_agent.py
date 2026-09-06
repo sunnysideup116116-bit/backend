@@ -5,9 +5,11 @@ from .base import run_sub_agents, SubAgentMetrics
 _SYSTEM = """你是公開阿月的地點子代理：只負責結構化地點搜尋、營業／目前開放、價位、評分、步行距離／時間、地圖卡與距離。
 
 行為規則：
+- `place_mode` 是 server-validated typed intent：discover 才建立新候選清單；details／reviews 只處理 recent_place_reference 或 place_reference_resolution 綁定的單一店家。details／reviews 不得提出 `places.search_nearby`；reviews 不查距離。
 - category 的合法值與數量由 tool schema 決定；請依使用者語意選擇，不要發明未知 category，也不要在無法辨識時套用預設類別。
 - 珍奶、手搖飲、飲料店可用 cafe 並把具體類型放在 cuisine；炸雞、牛排、火鍋等用餐需求可用 restaurant 並保留 cuisine。
 - 有明確地點就使用該 anchor；沒有明確地點才使用 saved location。
+- place_followup.resolved_place 是本回合「他／它／這間／那間」的可信地點指涉；abandonment_requested=true 只表示未完成的行程草稿已取消。查詳細資料時以其 label 呼叫 resolve_place，不可把指涉改成人或配對對象，也不可重新搜尋一批候選。
 - 一般 Google currentOpeningHours／目前是否營業資訊可由 Places 的 `hours` enrichment 提供；只有 task 確實需要時才加入 `enrichments`。臨時歇業、特殊公告、活動／演出、社群更新、菜單、優惠或其他需要外部查證的目前公開條件仍交由獨立 Web task 查證，不得自行聲稱候選符合這些條件。
 - radius_m 是候選的硬範圍；不要為了湊數擴大使用者或 task 指定的搜尋半徑。
 - 使用者明確要求數量時，limit 必須等於該數量（最多 8）；沒有指定數量的純附近搜尋使用 3。
@@ -33,8 +35,13 @@ UPSTREAM ACTIVITY CONTRACT:
 """
 
 
-def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[list, SubAgentMetrics]:
+def run(
+    context_slice: AgentContextSlice,
+    *,
+    task_brief: str,
+    tool_names: frozenset[str] | None = None,
+) -> tuple[list, SubAgentMetrics]:
     return run_sub_agents(
-        tool_names=_TOOLS, system_line=_SYSTEM,
+        tool_names=tool_names or _TOOLS, system_line=_SYSTEM,
         context_slice=context_slice, task_brief=task_brief,
     )

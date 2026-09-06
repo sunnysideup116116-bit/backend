@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from database import db, matches_coll, messages_coll, profiles_coll
 from services.ayue_agent.v3.confirmation import project_match_choice_history
@@ -14,6 +15,8 @@ from services.ai_room_service import (
     mark_room_read,
     maybe_backfill_title,
     rename_room as rename_ai_room,
+    ensure_match_hub,
+    MATCH_HUB_ROOM_KIND,
 )
 from services.ayue_agent.onboarding import (
     complete_public_ayue_onboarding, public_ayue_onboarding_state,
@@ -43,6 +46,23 @@ router = APIRouter()
 
 def _find_accepted_match(user_id: str, other_id: str):
     return matches_coll.find_one(verified_accepted_match_query(user_id, other_id))
+
+
+def _strip_internal_message_use(messages: list[dict]) -> list[dict]:
+    """Keep server-owned reuse policy out of the public history contract."""
+    projected: list[dict] = []
+    for message in messages:
+        item = dict(message or {})
+        metadata = item.get("metadata")
+        if isinstance(metadata, dict) and "message_use" in metadata:
+            metadata = dict(metadata)
+            metadata.pop("message_use", None)
+            if metadata:
+                item["metadata"] = metadata
+            else:
+                item.pop("metadata", None)
+        projected.append(item)
+    return projected
 
 
 @router.get("/messages/{contact_id}")
@@ -90,6 +110,7 @@ def get_messages(
         # Legacy clients expect ascending order without a limit.
         messages = list(cursor)[::-1]
         has_more = False
+    messages = _strip_internal_message_use(messages)
     if is_ai_contact:
         messages = project_match_card_history(
             messages, user_id,
@@ -211,6 +232,7 @@ def get_contacts(user_id: str):
 
 class CreateAiRoomRequest(BaseModel):
     user_id: str
+    room_kind: Literal["conversation", "match_hub"] = "conversation"
 
 
 class RenameAiRoomRequest(BaseModel):
@@ -232,7 +254,13 @@ def list_ai_rooms_route(user_id: str):
 
 @router.post("/ai_rooms")
 def create_ai_room_route(req: CreateAiRoomRequest):
-    room = create_ai_room(req.user_id)
+    room = (
+        ensure_match_hub(req.user_id)
+        if req.room_kind == MATCH_HUB_ROOM_KIND
+        else create_ai_room(req.user_id)
+    )
+    if not room:
+        raise HTTPException(status_code=503, detail="阿月牽線目前暫時無法使用")
     return {"room": room}
 
 

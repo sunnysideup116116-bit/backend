@@ -7,6 +7,7 @@ whose arguments ARE the typed Plan. No free-text JSON parsing.
 from __future__ import annotations
 
 import json
+import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -25,6 +26,7 @@ from .contracts import (
     DATE_INVITATION_WRITE_INTENT,
     OpportunitySignal,
     Plan,
+    PlaceSelection,
     PlannerWriteIntent,
     SubTask,
 )
@@ -56,7 +58,7 @@ class PlannerMetrics:
 
 _PLANNER_MAX_ATTEMPTS = 2
 _PLANNER_RETRYABLE_FAILURES = frozenset({
-    "missing_tool_call", "wrong_function_name", "invalid_arguments",
+    "missing_tool_call", "wrong_function_name", "invalid_arguments", "provider_error",
 })
 _KNOWN_PLANNER_AGENTS = frozenset({
     "calendar", "places", "web", "match", "relationship", "profile",
@@ -116,6 +118,18 @@ def _planner_validation_retry_hint(exc: Exception) -> str:
         "outcome_contract is only valid for Calendar tasks" in message
         for message in messages
     )
+    place_mode_message = any(
+        "place_mode is required for Places tasks" in message
+        or "place_mode is only valid for Places tasks" in message
+        for message in messages
+    )
+    web_mode_message = any(
+        "web_mode is required for Web tasks" in message
+        or "web_mode is only valid for Web tasks" in message
+        or "public_lookup Web task cannot depend on Places" in message
+        or "Web task requires a Places dependency" in message
+        for message in messages
+    )
     run_if_message = any(
         fragment in message
         for message in messages
@@ -155,7 +169,8 @@ def _planner_validation_retry_hint(exc: Exception) -> str:
     if "match_intent" in locations or any("Match task requires match_intent" in msg for msg in messages):
         hints.append(
             "Every Match task requires match_intent: status, counterparty, start_search, "
-            "cancel_search, accept_proposal, dismiss_proposal or clarify. Classify the "
+            "restart_search, cancel_search or clarify. Accepting, declining and withdrawing an invitation "
+            "are Hub card actions, not chat tools. Classify the "
             'current request. Use a string, e.g. "match_intent":"start_search", not an object or flags. '
             "Wanting a new match never means accepting an existing proposal."
         )
@@ -165,6 +180,18 @@ def _planner_validation_retry_hint(exc: Exception) -> str:
         hints.append(
             "evidence_policy is only for Web tasks and is exactly "
             "casual_discovery or strict_verification; omit the key, not an empty string, for every other agent."
+        )
+    if "web_mode" in locations or web_mode_message:
+        hints.append(
+            "Every Web task requires web_mode: public_lookup for a public topic with no Places dependency, "
+            "place_verification for a bound place claim, or place_hours_fallback after a Places details task; "
+            "omit it for every other agent."
+        )
+    if place_mode_message or "place_mode" in locations:
+        hints.append(
+            "Every Places task requires place_mode: discover for a new recommendation list, "
+            "details for one bound place's structured data, or reviews for one bound place's public opinions; "
+            "omit it for every other agent."
         )
     if "outcome_contract" in locations or outcome_message:
         hints.append(
@@ -242,7 +269,7 @@ def _normalize_provider_plan_arguments(
         intent = task.get("match_intent")
         if agent == "match" and isinstance(intent, dict) and len(intent) == 1:
             key, enabled = next(iter(intent.items()))
-            if key in {"status", "counterparty", "start_search", "cancel_search", "accept_proposal", "dismiss_proposal", "clarify"} and enabled is True:
+            if key in {"status", "counterparty", "start_search", "restart_search", "cancel_search", "accept_proposal", "dismiss_proposal", "clarify"} and enabled is True:
                 task["match_intent"] = key
                 if "match_intent_object_normalized" not in repair_codes:
                     repair_codes.append("match_intent_object_normalized")
@@ -257,6 +284,9 @@ def _normalize_provider_plan_arguments(
         empty_placeholder_removed = False
         if task.get("evidence_policy") == "":
             task.pop("evidence_policy", None)
+            empty_placeholder_removed = True
+        if task.get("web_mode") == "":
+            task.pop("web_mode", None)
             empty_placeholder_removed = True
         if task.get("outcome_contract") == "":
             task.pop("outcome_contract", None)
@@ -273,6 +303,13 @@ def _normalize_provider_plan_arguments(
             task.pop("evidence_policy", None)
             if "non_web_evidence_policy_removed" not in repair_codes:
                 repair_codes.append("non_web_evidence_policy_removed")
+        web_mode = task.get("web_mode")
+        if agent != "web" and isinstance(web_mode, str) and web_mode in {
+            "public_lookup", "place_verification", "place_hours_fallback",
+        }:
+            task.pop("web_mode", None)
+            if "non_web_web_mode_removed" not in repair_codes:
+                repair_codes.append("non_web_web_mode_removed")
         # DeepSeek occasionally places the known Relationship write capability
         # in the task-scoped Calendar outcome field. Recover only this exact,
         # known field relocation; all other invalid values remain fail-closed.
@@ -363,27 +400,35 @@ class _DecomposeTasksArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["tasks", "direct_chat"] = "tasks"
     write_intent: PlannerWriteIntent = Field(
-        description=(
-            "Required semantic capability decision. Use relationship.date_invitation.v1 "
-            "when the user asks Ayue to actually create an empty date invitation card "
-            "for an existing contact. Use none for capability questions, advice, contact "
-            "lookup, or match search."
-        ),
+        description="Use relationship.date_invitation.v1 only for an explicit date invitation card; use none otherwise.",
     )
     presentation_mode: Literal["default", "itinerary"] = "default"
     tasks: list[SubTask] = Field(default_factory=list, max_length=5)
     direct_reply: str | None = Field(default=None, max_length=160)
     direct_messages: list[str] = Field(default_factory=list, max_length=3)
     opportunity: _OpportunityArguments | None = None
+    place_selection: str | None = Field(
+        default=None,
+        description=(
+            "Only when the current message continues a presented place list; "
+            "selection_text must be copied verbatim from the message and refs are not authoritative"
+        ),
+    )
 
     @model_validator(mode="after")
     def _reject_unjustified_synthesizer_only_output(self) -> "_DecomposeTasksArguments":
         """Keep provider-authored task mode from silently bypassing all domains."""
         for task in self.tasks:
+            if task.agent == "places" and task.place_mode is None:
+                raise ValueError("place_mode is required for Places tasks")
+            if task.agent != "places" and task.place_mode is not None:
+                raise ValueError("place_mode is only valid for Places tasks")
             if task.agent == "match" and task.match_intent is None and self.write_intent != DATE_INVITATION_WRITE_INTENT:
                 raise ValueError("Match task requires match_intent")
             if task.agent != "match" and task.match_intent is not None:
                 raise ValueError("match_intent is only valid for Match tasks")
+            if task.agent != "web" and task.web_mode is not None:
+                raise ValueError("web_mode is only valid for Web tasks")
         if self.mode != "tasks" or not self.tasks:
             return self
         has_domain = any(task.agent != "synthesizer" for task in self.tasks)
@@ -432,7 +477,10 @@ def _decompose_tool_schema() -> dict[str, Any]:
         .get("items", {})
     )
     if isinstance(task_schema, dict):
-        for field_name in ("evidence_policy", "outcome_contract", "run_if", "match_intent"):
+        # Keep this internal classification out of the compact provider schema;
+        # the canonical SubTask contract infers it from the task brief.
+        task_schema.get("properties", {}).pop("relationship_intent", None)
+        for field_name in ("evidence_policy", "web_mode", "outcome_contract", "run_if", "match_intent"):
             field_schema = task_schema.get("properties", {}).get(field_name)
             if not isinstance(field_schema, dict):
                 continue
@@ -447,6 +495,25 @@ def _decompose_tool_schema() -> dict[str, Any]:
             field_schema.update(options[0])
             if description:
                 field_schema["description"] = description
+        # The system prompt carries the full routing policy.  Keep the
+        # provider schema compact so native tool calling remains within the
+        # planner's request budget; canonical Pydantic validation is unchanged.
+        for field_name in ("relationship_intent", "match_intent", "evidence_policy", "web_mode", "outcome_contract", "run_if"):
+            field_schema = task_schema.get("properties", {}).get(field_name)
+            if isinstance(field_schema, dict):
+                field_schema.pop("description", None)
+                if field_name == "run_if":
+                    for nested in field_schema.get("properties", {}).values():
+                        if isinstance(nested, dict):
+                            nested.pop("description", None)
+    write_intent_schema = schema.get("properties", {}).get("write_intent")
+    if isinstance(write_intent_schema, dict):
+        write_intent_schema.pop("description", None)
+    # Keep the optional provider hint compact.  The full internal Plan contract
+    # wraps the phrase in PlaceSelection after provider validation.
+    place_selection_schema = schema.get("properties", {}).get("place_selection")
+    if isinstance(place_selection_schema, dict):
+        schema["properties"]["place_selection"] = {"type": "string"}
     return {
         "type": "function",
         "function": {
@@ -473,20 +540,21 @@ _PLANNER_SYSTEM = f"""{AYUE_CORE_IDENTITY}
 只呼叫 decompose_tasks 一次，不輸出普通文字；輸出必須符合提供的 schema。
 
 輸出規則：
-- mode=direct_chat 只適用於不需要 App、domain、private、external truth 或 workflow 的一般聊天；tasks 為空，direct_reply 不超過 160 字。
-- direct_reply 短自然；不得宣稱副作用已完成。
-- 只要任一子需求需要 state、產品能力、特定對方聊天內容、行事曆、配對、profile、relationship、places 或外部資料，整個回合就使用 mode=tasks；不得只回答可聊天的部分，也不得輸出只有 synthesizer 的 tasks。
-- tasks 最多 4 個 domain + 1 個 terminal synthesizer；單一需求只用一個 domain。
-- task 只用 id、agent、depends_on、task_brief、match_intent、evidence_policy、outcome_contract、run_if；Match 才用 match_intent，Web 才用 evidence_policy，Calendar availability 才用 calendar.availability.v1，其餘可選欄位省略。約會邀請只屬頂層 write_intent；不要填 observation schema，不要使用 type 或 task_agent。
-- write_intent 必填。當使用者是在要求阿月實際建立一張給既有聯絡人的空白約會邀請卡，而不是只詢問功能或討論怎麼約時，使用 relationship.date_invitation.v1，且只輸出 relationship -> synthesizer；其他情況用 none。對象是否為 accepted contact、錯字與拼音由 Relationship runtime 驗證，Match 絕不作前置檢查。
+- mode=direct_chat 只適用於不需要 App、domain、private、external truth 或 workflow 的聊天；tasks 為空，direct_reply 不超過160字。
+- direct_reply 自然；不得聲稱已完成副作用。
+- 任一子需求需要 state、產品能力、特定對方聊天內容、行事曆、配對、profile、relationship、places 或外部資料，就用 mode=tasks；不得只答聊天部分或只輸出 synthesizer。
+- tasks 最多 4 個 domain + 1 個 terminal synthesizer。
+- Relationship 活動→recommend；理由追問→review；名單→lookup。
+- task 只填 id、agent、depends_on、task_brief 與 schema 內的 agent 欄位；Relationship 的活動與追問語意要保留在 task_brief，讓 runtime 產生內部 intent。約會邀請用頂層 write_intent；不要填 observation schema、不要使用 type/task_agent。
+- write_intent 必填；只有明確建立約會邀請卡用 relationship.date_invitation.v1 且 relationship -> synthesizer，其他用 none。Relationship 驗證 accepted contact；Match 絕不作前置檢查。
 - depends_on 只表示下游會消費上游 typed observation、candidate ref 或其他明確 contract；run_if 是不傳遞 observation 的控制條件。獨立查詢放同一層，不為了排序而串接。
-- presentation_mode 只有 default／itinerary。itinerary 是普通 composition 的 editorial hint，不是固定 headings、server schema、卡片或特殊 renderer。
+- presentation_mode 僅 default／itinerary；itinerary 是 composition hint。
 
 Agent ownership：
 calendar=本人行程、空檔、建立／修改／取消、共同日期、calendar draft 與 recent mutation 驗證。
 places=附近地點、餐廳、景點、地址、地圖、距離，以及 hours／price／rating／walking 等結構化地點資料。
 web=外部／近期／公開資訊、活動、新聞、文章、論壇、社群、URL，以及 Places 無法證明的公開主張。
-match=單筆 active proposal/search lifecycle。
+match=單筆 active proposal/search lifecycle；Hub 可有多張卡
 relationship=accepted contacts aggregate／@ 對象與公開互動。
 profile=本人 profile、memory、近期情境與 assessment start／restart。
 product_info=阿月／App 的能力、流程、限制、隱私與 Public／Private 入口邊界。
@@ -494,22 +562,27 @@ synthesizer=只根據本回合 verified observations 與 bounded context 組最�
 
 關鍵 routing：
 - 以上規則以完整語意判斷，不使用關鍵字或 regex router；不確定時保留 tasks 讓既有 domain flow 處理。
-- 結構化 hours、price、rating、walking 即使包含今晚／目前，使用 places -> synthesizer，不自動加 web。
-- 優惠、特殊菜單、活動、臨時歇業、社群公告等非結構化或目前公開主張，使用 places -> web -> synthesizer。Places task 只建立候選池；Web 只能研究 t1 的 server-issued candidate refs，不得發明新地點。
+- web_mode：public_lookup=獨立公開查詢；place_verification=綁定店家查證；place_hours_fallback=Places 營業時間不足才補查。
+- 結構化 hours、price、rating、walking 使用 places -> synthesizer；不自動加 web，資訊不足才補查。
+- 區域／場館／品牌活動走 web(public_lookup) -> synthesizer；延續問句沿用 recent_messages。
+- 店家優惠、特殊菜單、活動、臨時歇業、社群公告使用 places -> web -> synthesizer；只研究 server-issued candidate refs。
 - 一般區域半日／一日遊使用 t1=places、terminal t2=synthesizer、presentation_mode=itinerary。
-- 找一個有直接證據的新活動並排整天，固定使用 Web、Places 與 terminal Synthesizer；若同時有具體日期的個人外出安排，依 Calendar availability policy 先做唯讀檢查。除非使用者要求保存，不建立 calendar mutation；活動研究排除 recent_messages 與 recent calendar mutation 已出現的活動。
+- 新活動整天用 Web、Places、Synth；具體日期依 Calendar policy 唯讀；除非要求保存不 mutation，排除 recent_messages／recent mutation 已出現的活動。
 - 外部探索使用 casual_discovery；明確官方查證或醫療／法律／金融／安全風險使用 strict_verification。
 - calendar_draft 的 missing_fields、candidates 補充、修正或選擇用 calendar。`calendar_recent_mutation` 的成功與否只交 calendar 做唯讀驗證，不自行猜測。
-- Calendar 寫入依完整語意判斷：清楚要求系統保存可辨識活動，如「幫我安排」、「幫我排一下」、「幫我記進行程」，用 calendar -> synthesizer mutation flow，不得降成 availability read。「我明天五點想去健身」不必然授權寫入；「幫我排明天五點去健身」才是明確 create。
-- current message 用「第二個」延續地點候選時，只信 server 的 `place_reference_resolution`；有綁定就沿用 label，建行程走 calendar -> synthesizer。沒有綁定由 server 澄清，不重新搜尋 Places、猜文字或改 ref。
+- Calendar 寫入依完整語意：明確「幫我安排」、「幫我排一下」、「幫我記進行程」才走 calendar -> synthesizer mutation flow，不降成 availability read。「我明天五點想去健身」不必然授權；「幫我排明天五點去健身」才是明確 create。
+- Places 必填 place_mode：discover=清單；details=單店；reviews=口碑。discover 才 search_nearby；details/reviews 綁定 reference，不重新搜尋 Places；reviews 可接 web。延續只信 server resolution，不讀 match。
 - 簡短肯定語接唯讀地點重試提議時，依語意建立 Places read -> synthesizer；不得當 Calendar confirmation；無提議則 direct_chat／澄清。
-- 明確開始／重做 assessment 用 profile。使用者表示希望阿月「更認識我／更了解我／多了解我一點」時，也代表希望開啟基本性格探索：固定使用 profile -> synthesizer，讓 profile 提出 profile.start_assessment(kind=basic) 的確認預覽；不得降成 direct_chat，也不得改成只讀既有 profile。產品問題用正常 product_info -> synthesizer DAG，不選內部 knowledge section，也不產生舊的 task-free ProductInfo envelope。
+- 明確／重做 assessment 用 profile；「更認識我／更了解我／多了解我一點」走 profile -> synthesizer，提出 profile.start_assessment(kind=basic) 確認；不可 direct_chat 或只讀 profile。正常 product_info -> synthesizer DAG，不選內部 knowledge section。
 - 「怎麼配對／如何配到人」→ product_info；明確「幫我配對／開始找人」→ match。
-- 配對狀態／取消搜尋／提案接受／婉拒／撤回→ match -> synthesizer；write_intent=none。Match 必填 match_intent：status、counterparty、start_search、cancel_search、accept_proposal、dismiss_proposal、clarify。
-- match_intent 是字串，如 "match_intent":"start_search"，不是物件。「我要配對／我想配對／撤回再找」固定 start_search；只有明確接受才用 accept_proposal；撤回／不要這張用 dismiss_proposal。allowed_actions 不是同意。
+- 「我想配對／幫我找人」→開始；「配得怎樣／對方回了嗎」→進度。
+- 「幫我約人」若找新人走 Match；在活動語境詢問現有聯絡人中誰適合同行，或追問上一個推薦理由，走 Relationship recommend/review。
+- 有 recent_recommendation 且追問上一個建議時判斷 review；活動改變時重新 recommend，不把快照當成新事實。
+- 配對狀態／取消搜尋／開始找人→ match -> synthesizer；write_intent=none。Match 必填 match_intent：status、counterparty、start_search、restart_search、cancel_search、clarify。接受／婉拒／撤回都導向「阿月牽線」，不建聊天確認。
+- match_intent：我要配對→start_search；換人→restart_search；等對方不擋新搜尋，未決 draft 到專區，卡片才可決定。
 - 單一 Match 需求省略 outcome_contract、run_if；保留 terminal synthesizer 呈現 server 確認。兩步重搜由 runtime 負責，Planner 不拆兩個寫入 task。
 - opportunity.signal="social_opening" 只用於間接表達想找人一起參與、尚未要求從既有聯絡人挑選或開始找新人的情況；evidence_span 必須是 current message 的連續原文，confidence >= 0.8。從既有聯絡人挑選用 relationship；找新的人用 match；單純寒暄、孤單或負面情緒使用 signal="none"。
-- Web task brief 必須保留原始 proposition、地點／日期限制與 evidence class；不可把背景資料改成新的答案目標。
+- Web task brief 保留原始命題、地點／日期與 evidence class。活動名稱、場地有直接來源但時間不完整時保留 partial 並標示待確認，不湊數。
 
 """
 
@@ -535,7 +608,7 @@ Calendar availability policy (must follow for every concrete date):
 - Pure public activity lookups need no Calendar precheck; advice never authorizes Calendar mutations.
 - Exact example 「這週六，從目前認識的人挑一位，找新活動，再排附近晚餐，只給建議」:
   c1=calendar(outcome_contract=calendar.availability.v1);
-  r1=relationship(run_if c1:task.finished) and w1=web(run_if c1:task.finished) in parallel;
+  r1=relationship(run_if c1:task.finished) and w1=web(run_if c1:task.finished)(web_mode=public_lookup) in parallel;
   p1=places(depends_on=[w1]); s1=synthesizer(depends_on=[c1,r1,p1]). Places uses
   the typed Web activity venue.
 - With explicit 「有事就算了／沒事才繼續」, change r1 and w1 to
@@ -640,7 +713,10 @@ def _planner_prompt(turn_ctx: PublicAgentTurnContext) -> str:
     if isinstance(search, dict):
         search_projection = {
             key: search[key]
-            for key in ("status", "cancellable")
+            for key in (
+                "status", "cancellable", "reason_code", "active_proposal_count",
+                "pending_action_count", "waiting_other_count",
+            )
             if search.get(key) not in (None, "")
         }
         if search_projection:
@@ -657,13 +733,17 @@ def _planner_prompt(turn_ctx: PublicAgentTurnContext) -> str:
             payload["active_event_invitation"] = event_projection
 
     optional_fields = (
+        "focused_match",
         "calendar_draft",
         "calendar_recent_reference",
         "calendar_recent_mutation",
         "mentioned_contacts",
         "recent_contact_reference",
+        "recent_recommendation",
         "recent_place_candidates",
+        "recent_place_reference",
         "place_reference_resolution",
+        "place_followup",
     )
     for field_name in optional_fields:
         value = getattr(turn_ctx, field_name, None)
@@ -737,6 +817,102 @@ def _canonicalize_write_intent_briefs(plan: Plan) -> Plan:
     return plan.model_copy(update={"tasks": tasks})
 
 
+def _explicit_match_request_intent(message: Any) -> str | None:
+    """Recognize only unambiguous new-search wording for provider repair.
+
+    Planner remains the semantic router.  This bounded post-validation guard
+    exists for the one failure mode where a provider treats ``我想配對`` as a
+    status read because an older proposal is present in context.  Questions
+    about progress, methods, or reasons are deliberately excluded, so a
+    status/product-information request cannot acquire a write task here.
+    """
+    text = re.sub(r"\s+", "", str(message or "")).strip().casefold()
+    if not text:
+        return None
+    if any(marker in text for marker in (
+        "進度", "狀態", "回覆", "回應", "配得怎樣", "有沒有配對", "有配對嗎",
+        "幾張牽線", "目前配對", "怎麼配", "如何配", "配對方式", "配對原理",
+        "為什麼配對", "配對是什麼",
+    )):
+        return None
+    if re.search(r"(?:重新|重找|換人).*(?:配對|媒合|牽線|找人)|(?:再找|再配).*(?:人|配對|媒合|牽線)", text):
+        return "restart_search"
+    if re.search(
+        r"(?:我想|我要|幫我|請|開始)?(?:配對|媒合|牽線|找人|找新的人|找新的朋友|認識其他人|認識新的人)",
+        text,
+    ):
+        return "start_search"
+    return None
+
+
+def _repair_explicit_match_request(plan: Plan, turn_ctx: PublicAgentTurnContext) -> Plan:
+    """Keep a clear new-search request from being downgraded to a status read."""
+    desired = _explicit_match_request_intent(turn_ctx.message)
+    if desired is None:
+        return plan
+    match_tasks = [task for task in plan.tasks if task.agent == "match"]
+    if match_tasks:
+        tasks = [
+            task.model_copy(update={"match_intent": desired}) if task.agent == "match" else task
+            for task in plan.tasks
+        ]
+        return plan.model_copy(update={"mode": "tasks", "write_intent": "none", "tasks": tasks})
+    return Plan(
+        mode="tasks",
+        write_intent="none",
+        tasks=[
+            SubTask(
+                id="match",
+                agent="match",
+                match_intent=desired,
+                task_brief=str(turn_ctx.message or "開始找新對象")[:500],
+            ),
+            SubTask(
+                id="synthesizer",
+                agent="synthesizer",
+                depends_on=["match"],
+                task_brief="呈現配對搜尋的確認或目前狀態",
+            ),
+        ],
+    )
+
+
+def _planner_context_conflict(
+    plan: Plan,
+    turn_ctx: PublicAgentTurnContext,
+) -> str:
+    """Reject a domain plan that contradicts server-owned active context."""
+    followup = turn_ctx.place_followup
+    resolved = followup.get("resolved_place") if isinstance(followup, dict) else None
+    if not isinstance(resolved, dict):
+        resolution = turn_ctx.place_reference_resolution
+        resolved = resolution if isinstance(resolution, dict) and resolution.get("status") == "resolved" else None
+    if not isinstance(resolved, dict) or not str(resolved.get("label") or "").strip():
+        return ""
+    has_match_task = any(task.agent == "match" for task in plan.tasks)
+    has_place_task = any(task.agent == "places" for task in plan.tasks)
+    explicit_match_reference = bool(re.search(
+        r"配對|媒合|牽線|對方|人選",
+        str(turn_ctx.message or ""),
+    ))
+    if has_match_task and not explicit_match_reference:
+        return (
+            "The selected referent is the resolved place from place_followup. "
+            "Do not use Match; route place details through Places or Web."
+        )
+    if getattr(plan, "place_selection", None) is not None and not has_place_task:
+        return (
+            "The current message explicitly selects a server-resolved place. Include a Places "
+            "details task for that place while preserving any independent Relationship request."
+        )
+    if plan.mode == "direct_chat" and not has_place_task:
+        return (
+            "The current message has a server-resolved place referent. "
+            "Use a Places task with details or reviews rather than direct_chat."
+        )
+    return ""
+
+
 def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMetrics]:
     """Call LLM (function calling) to decompose the request into a static Plan.
 
@@ -763,13 +939,19 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
             duration_ms = round((time.perf_counter() - attempt_started) * 1000)
             metrics.duration_ms += duration_ms
             metrics.error = str(exc)
-            metrics.failure_code = "provider_error"
+            failure_code = "provider_error"
+            metrics.failure_code = failure_code
             _record_planner_attempt(
                 metrics, attempt=attempt, status="provider_error",
                 failure_code=metrics.failure_code, duration_ms=duration_ms,
                 error=metrics.error,
             )
-            break
+            if attempt >= _PLANNER_MAX_ATTEMPTS:
+                break
+            metrics.retry_count += 1
+            metrics.retry_reason = failure_code
+            attempt_prompt = _planner_retry_prompt(prompt, failure_code)
+            continue
         input_tokens = int(result.input_tokens or 0)
         output_tokens = int(result.output_tokens or 0)
         duration_ms = int(result.duration_ms or 0)
@@ -847,6 +1029,11 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                     )
                 else:
                     opportunity = _opportunity_from_arguments(validated)
+                    selection_text = str(validated.place_selection or "").strip()[:160]
+                    place_selection = (
+                        PlaceSelection(selection_text=selection_text)
+                        if selection_text else None
+                    )
                     try:
                         plan = Plan(
                             mode=validated.mode,
@@ -856,6 +1043,7 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                             direct_reply=validated.direct_reply,
                             direct_messages=validated.direct_messages,
                             opportunity=opportunity,
+                            place_selection=place_selection,
                         )
                     except Exception as exc:
                         # Preserve a valid domain DAG if the provider incorrectly adds a
@@ -870,6 +1058,7 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                                     presentation_mode=validated.presentation_mode,
                                     tasks=validated.tasks,
                                     opportunity=opportunity,
+                                    place_selection=place_selection,
                                 )
                             else:
                                 raise ValueError("invalid plan has no executable domain DAG")
@@ -895,21 +1084,43 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                         pass
                     else:
                         plan = _canonicalize_write_intent_briefs(plan)
-                        _record_planner_attempt(
-                            metrics, attempt=attempt,
-                            status="repaired" if repair_codes else "ok",
-                            raw_content=metrics.raw_content, tool_calls=metrics.tool_calls_raw,
-                            input_tokens=input_tokens, output_tokens=output_tokens,
-                            duration_ms=duration_ms,
-                            repair_codes=repair_codes,
-                            ttft_ms=int(getattr(result, "ttft_ms", 0) or 0),
-                            tps=round(float(getattr(result, "tps", 0) or 0), 3),
-                            model_name=str(getattr(result, "model_name", "") or ""),
-                        )
-                        metrics.failure_code = ""
-                        metrics.error = ""
-                        metrics.decision_mode = plan.mode
-                        return plan, metrics
+                        plan = _repair_explicit_match_request(plan, turn_ctx)
+                        validation_hint = _planner_context_conflict(plan, turn_ctx)
+                        if validation_hint:
+                            failure_code = "invalid_arguments"
+                            metrics.error = "planner_context_conflict"
+                            _record_planner_attempt(
+                                metrics, attempt=attempt, status="protocol_error",
+                                failure_code=failure_code,
+                                raw_content=metrics.raw_content,
+                                tool_calls=metrics.tool_calls_raw,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                duration_ms=duration_ms,
+                                error=metrics.error,
+                                validation_fields=["place_followup"],
+                                repair_codes=repair_codes,
+                                ttft_ms=int(getattr(result, "ttft_ms", 0) or 0),
+                                tps=round(float(getattr(result, "tps", 0) or 0), 3),
+                                model_name=str(getattr(result, "model_name", "") or ""),
+                            )
+                            plan = None
+                        else:
+                            _record_planner_attempt(
+                                metrics, attempt=attempt,
+                                status="repaired" if repair_codes else "ok",
+                                raw_content=metrics.raw_content, tool_calls=metrics.tool_calls_raw,
+                                input_tokens=input_tokens, output_tokens=output_tokens,
+                                duration_ms=duration_ms,
+                                repair_codes=repair_codes,
+                                ttft_ms=int(getattr(result, "ttft_ms", 0) or 0),
+                                tps=round(float(getattr(result, "tps", 0) or 0), 3),
+                                model_name=str(getattr(result, "model_name", "") or ""),
+                            )
+                            metrics.failure_code = ""
+                            metrics.error = ""
+                            metrics.decision_mode = plan.mode
+                            return plan, metrics
 
         if failure_code not in _PLANNER_RETRYABLE_FAILURES:
             metrics.failure_code = failure_code

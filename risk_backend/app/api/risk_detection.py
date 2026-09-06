@@ -281,6 +281,23 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
         # ---------------------------------------------------------
         # 效能優化：背景執行更新
         # ---------------------------------------------------------
+        # 介入紀錄必須排在所有背景任務之前。BackgroundTasks 是依序執行的，
+        # 若排在 review_guardrail_context（LLM 呼叫，數秒）後面，下一則訊息進來時
+        # get_last_displayed_intervention() 會讀不到這一筆，導致顯示節流失效、
+        # 且已處置豁免的條件①（上一次介入存在）誤判為不成立。
+        if risk_level != "safe":
+            primary_risk_type = max(new_state.model_dump(), key=new_state.model_dump().get)
+            background_tasks.add_task(
+                chat_log_service.log_intervention,
+                req.conversation_id, real_msg_id, req.sender_id, req.receiver_id,
+                risk_level, new_state, diag, diag.get('reason', 'normal'), primary_risk_type,
+                intervention_cmd["sender_directive"]["action"], intervention_cmd["receiver_directive"]["action"],
+                cooldown_seconds=intervention_cmd["sender_directive"].get("cooldown_seconds", 0)
+            )
+            print(f"   [ Step 9 ] Sender Action  : {intervention_cmd['sender_directive']['action']}")
+            print(f"      |-- Receiver Action     : {intervention_cmd['receiver_directive']['action']}")
+            print(f"      |-- Delivery Status     : {final_delivery_status}")
+
         background_tasks.add_task(chat_log_service.update_message_status, real_msg_id, is_msg_blocked, final_delivery_status)
         background_tasks.add_task(chat_log_service.update_temporal_features, req.conversation_id, req.sender_id, computed_features)
         background_tasks.add_task(
@@ -307,19 +324,6 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
         
         if final_delivery_status == "delivered":
             background_tasks.add_task(handle_relationship_update, req.conversation_id, req.sender_id, req.receiver_id)
-
-        if risk_level != "safe":
-            primary_risk_type = max(new_state.model_dump(), key=new_state.model_dump().get)
-            background_tasks.add_task(
-                chat_log_service.log_intervention,
-                req.conversation_id, real_msg_id, req.sender_id, req.receiver_id,
-                risk_level, new_state, diag, diag.get('reason', 'normal'), primary_risk_type,
-                intervention_cmd["sender_directive"]["action"], intervention_cmd["receiver_directive"]["action"],
-                cooldown_seconds=intervention_cmd["sender_directive"].get("cooldown_seconds", 0)
-            )
-            print(f"   [ Step 9 ] Sender Action  : {intervention_cmd['sender_directive']['action']}")
-            print(f"      |-- Receiver Action     : {intervention_cmd['receiver_directive']['action']}")
-            print(f"      |-- Delivery Status     : {final_delivery_status}")
 
         response = RiskDetectionResponse(
             conversation_id=req.conversation_id,

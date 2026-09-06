@@ -61,10 +61,23 @@ class AgentTurnContext(BaseModel):
     mention_overflow: bool = False
     user_profile: dict[str, Any] = Field(default_factory=dict)
     recent_history: list[dict[str, Any]] = Field(default_factory=list)
+    # The HTTP adapter may fetch one sentinel row beyond the public history
+    # budget so Context Builder can report a bounded recent-only projection.
+    history_truncated: bool = False
 
 
 class PublicAgentRequestContext(AgentTurnContext):
     """Public-turn-only private inputs that must never reach prompt state."""
+
+    focused_match_id: str | None = Field(
+        default=None, exclude=True, repr=False,
+    )
+    focused_match_namespace: str | None = Field(
+        default=None, exclude=True, repr=False,
+    )
+    focused_match_revision: int | None = Field(
+        default=None, exclude=True, repr=False,
+    )
 
     device_location: dict[str, Any] | None = Field(
         default=None, exclude=True, repr=False,
@@ -90,12 +103,16 @@ class PublicAgentTurnContext(BaseModel):
     room_id: str
     message: str
     recent_messages: list[dict[str, str]] = Field(default_factory=list)
+    history_projection_status: Literal["complete", "recent_only_budget_limited"] = "complete"
     conversation_continuity: ConversationSummaryV1 | None = None
     recent_context: str = ""
     user_location: str = ""
     relevant_memories: list[str] = Field(default_factory=list)
     active_proposal: dict[str, Any] | None = None
     active_event_invitation: dict[str, Any] | None = None
+    # Server-validated, prompt-safe target for a Hub "詢問這張" follow-up.
+    # The match id and revision remain on the private request/authority path.
+    focused_match: dict[str, Any] | None = None
     match_search: dict[str, Any] | None = None
     latest_match_outcome: dict[str, Any] | None = None
     calendar_draft: dict[str, Any] | None = None
@@ -104,7 +121,13 @@ class PublicAgentTurnContext(BaseModel):
     # Only opaque refs and bounded public labels are projected here. Provider
     # identity remains in the server-owned place reference store.
     recent_place_candidates: dict[str, Any] | None = None
+    # The latest uniquely selected place is independent from Calendar draft
+    # state, so a later details/reviews question can safely resolve "它".
+    recent_place_reference: dict[str, Any] | None = None
     place_reference_resolution: dict[str, Any] | None = None
+    # Room-scoped, prompt-safe state for an incomplete place-to-calendar
+    # continuation. Provider identity and persistence details remain server-side.
+    place_followup: dict[str, Any] | None = None
     recent_context_draft: dict[str, Any] | None = None
     # Public references only. Their executor-side IDs remain on AgentTurnContext.
     mentioned_contacts: list[dict[str, str]] = Field(default_factory=list)
@@ -112,6 +135,9 @@ class PublicAgentTurnContext(BaseModel):
     # Short-lived, prompt-safe relationship referent. The executor-side ID is
     # kept in v3.relationship_references and is never part of this model.
     recent_contact_reference: dict[str, Any] | None = None
+    # Short-lived, server-owned recommendation context for a reason/revision
+    # follow-up. Candidate identity remains opaque and room scoped.
+    recent_recommendation: dict[str, Any] | None = None
     capability_manifest_version: str = "v2"
     match_opportunity_state: str = "not_ready"
     guidance_directive: str = "none"
@@ -195,3 +221,11 @@ class AgentResult(BaseModel):
     # the confirmation store and never enter prompts or debug traces.
     choice_prompt: dict[str, Any] | None = None
     choice_resolution: dict[str, Any] | None = None
+    # Internal publication handshake for a newly persisted Places snapshot.
+    # Excluded from all public response/model projections.
+    place_presentation_required: bool = Field(default=False, exclude=True, repr=False)
+    # Internal handoff to the HTTP adapter; published only after the assistant
+    # reply has a durable message id.
+    relationship_recommendation_snapshot: dict[str, Any] | None = Field(
+        default=None, exclude=True, repr=False,
+    )

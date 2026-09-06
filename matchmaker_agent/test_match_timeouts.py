@@ -132,7 +132,7 @@ class MatchEndpointDeadlineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_outer_deadline_cancels_model_but_does_not_block_health(self):
         started, cancelled = asyncio.Event(), asyncio.Event()
-        async def slow(*_args):
+        async def slow(*_args, **_kwargs):
             started.set()
             try:
                 await asyncio.sleep(10)

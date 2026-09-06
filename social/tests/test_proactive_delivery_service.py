@@ -319,6 +319,21 @@ class ProactiveDeliveryServiceTests(unittest.TestCase):
         claim.assert_not_called()
         consume.assert_not_called()
 
+    def test_proactive_care_delivery_preserves_origin_room_without_internal_ids(self):
+        marker = {
+            "message": "看展後感覺如何？", "message_id": "care-1",
+            "origin_room_id": "ai_room::owner::one",
+        }
+        with patch.object(delivery.profiles_coll, "find_one", return_value={"user_id": "owner"}), \
+             patch.object(delivery.profiles_coll, "find_one_and_update", return_value=None), \
+             patch.object(delivery, "queue_due_feedback"), \
+             patch.object(delivery, "claim_next_mediator_event", return_value=None), \
+             patch.object(delivery, "consume_proactive_delivery", return_value=marker):
+            response = delivery.proactive_check("owner")
+        self.assertEqual(response["origin_room_id"], "ai_room::owner::one")
+        self.assertEqual(response["type"], "proactive_care")
+        self.assertNotIn("message_id", response)
+
 
 if __name__ == "__main__":
     unittest.main()

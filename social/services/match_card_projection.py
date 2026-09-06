@@ -13,6 +13,35 @@ PROPOSAL_CARD_EVENTS = {"match_proposal", "incoming_match_interest"}
 NicknameLookup = Callable[[str], str]
 
 
+def _safe_match_basis(document: dict) -> dict:
+    """Project the shared evidence contract without participant identifiers."""
+    raw = document.get("match_basis")
+    if not isinstance(raw, dict):
+        return {}
+    level = str(raw.get("level") or "insufficient")
+    if level not in {"direct", "adjacent", "insufficient"}:
+        level = "insufficient"
+
+    def bounded(value: Any, limit: int = 4) -> list[str]:
+        values = value if isinstance(value, list) else [value]
+        result: list[str] = []
+        for item in values:
+            text = re.sub(r"\s+", " ", str(item or "")).strip()[:120]
+            if text and text not in result:
+                result.append(text)
+            if len(result) >= limit:
+                break
+        return result
+
+    return {
+        "level": level,
+        "need_evidence": bounded(raw.get("need_evidence")),
+        "counterparty_evidence": bounded(raw.get("counterparty_evidence")),
+        "concrete_overlap": bounded(raw.get("concrete_overlap")),
+        "cannot_infer": bounded(raw.get("cannot_infer")),
+    }
+
+
 def safe_proposal_nickname(value: Any, other_user_id: str) -> str:
     """Allow a bounded public nickname, never an account ID or contact address."""
     if not isinstance(value, str):
@@ -83,7 +112,10 @@ def project_match_card_history(
     ids = list({ObjectId(mid) for _, mid in entries if ObjectId.is_valid(mid)})
     documents = {str(doc["_id"]): doc for doc in collection.find({
         "_id": {"$in": ids}, "$or": [{"from_user": user_id}, {"to_user": user_id}],
-    }, {"status": 1, "from_user": 1, "to_user": 1, "proposal_revision": 1, "last_decision.action": 1})} if ids else {}
+    }, {"status": 1, "from_user": 1, "to_user": 1, "proposal_revision": 1,
+        "last_decision.action": 1, "match_basis": 1, "source_room_id": 1,
+        "source_room_title": 1, "source_summary": 1, "match_source_kind": 1,
+        "search_context.invitation_topic": 1, "proposal_namespace": 1})} if ids else {}
     projected = deepcopy(messages)
     nickname_cache: dict[str, str] = {}
 
@@ -107,6 +139,24 @@ def project_match_card_history(
                     candidate.pop("counterparty_nickname", None)
             continue
         metadata.update(canonical_status=state["status"], **{k: v for k, v in state.items() if k != "status"})
+        if document:
+            basis = _safe_match_basis(document)
+            if basis:
+                metadata["match_basis"] = basis
+            source_room_id = str(document.get("source_room_id") or "")
+            if source_room_id:
+                metadata["source_room_id"] = source_room_id
+            if document.get("source_room_title"):
+                metadata["source_room_title"] = str(document["source_room_title"])[:60]
+            if document.get("source_summary"):
+                metadata["source_summary"] = str(document["source_summary"])[:180]
+            source_kind = str(document.get("match_source_kind") or "").strip()
+            if source_kind:
+                metadata["match_source_kind"] = source_kind[:32]
+            topic = str((document.get("search_context") or {}).get("invitation_topic") or "").strip()
+            if topic:
+                metadata["invitation_topic"] = topic[:80]
+            metadata["focus_match_id"] = match_id
         if nickname_lookup is not None:
             metadata["counterparty_nickname"] = proposal_counterparty_nickname(document, user_id, lookup_once)
         if state["status"] not in {"draft", "pending"}:
