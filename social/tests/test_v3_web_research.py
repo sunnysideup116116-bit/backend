@@ -1019,6 +1019,30 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertEqual(results[0].observation["execution_status"], "unavailable")
         execute.assert_not_called()
 
+    def test_place_web_task_does_not_fall_back_to_unbound_search(self):
+        slc = _slice("它好不好吃？")
+        slc.payload["prior_observations"] = [{
+            "task_id": "places1",
+            "status": "ok",
+            "tool": "places.resolve_place",
+            "result": {"found": False, "place": None},
+        }]
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide") as decide, \
+             patch.object(guarded_execution, "execute_tool") as execute:
+            results, _metrics = _run_web(
+                SubTask(id="web1", agent="web", task_brief="查選定店家的口味評論"),
+                _turn("它好不好吃？"), slc, seen_keys=set(),
+                guard_lock=threading.Lock(), on_progress=None,
+                run_id="run", trace=_trace(), debug_enabled=False,
+            )
+
+        self.assertEqual(results[0].observation["status"], "insufficient_evidence")
+        self.assertEqual(results[0].observation["execution_status"], "unavailable")
+        self.assertEqual(results[0].observation["stop_reason"], "tool_failure")
+        decide.assert_not_called()
+        execute.assert_not_called()
+
     def test_parser_failure_after_successful_search_preserves_sources(self):
         decisions = [WebResearchDecision(action="search", queries=["direct query"]), None, None]
         with patch.object(web_runtime, "web_enabled", return_value=True), \
@@ -1181,7 +1205,270 @@ class V3WebResearchTests(unittest.TestCase):
             stop_reason="evidence_sufficient",
         )
         self.assertEqual(result.status, "answered")
+        self.assertEqual(result.findings[0].source_refs, ["web_source_01"])
         self.assertEqual(result.findings[0].source_urls, ["https://example.com/forum/post"])
+
+    def test_invalid_urls_do_not_displace_a_valid_source_ref(self):
+        observations = [{"tool": "web.search", "result": _search_result()}]
+        decision = WebResearchDecision(
+            action="finish",
+            assessment=WebEvidenceAssessmentV1(coverage="direct_partial"),
+            status="partial",
+            findings=[{
+                "claim": "活動名稱與場地已公開，日期仍待確認",
+                "relation": "direct",
+                "source_refs": ["web_source_01"],
+                "source_urls": [
+                    "https://invalid.example/one",
+                    "https://invalid.example/two",
+                    "https://invalid.example/three",
+                ],
+            }],
+            limitations=["日期仍待確認"],
+        )
+        diagnostics = {}
+        result = build_research_result(
+            research_question="推薦五個活動", answer_target="鹽埕近期活動",
+            decision=decision, observations=observations,
+            execution_status="completed", stop_reason="evidence_sufficient",
+            diagnostics=diagnostics,
+        )
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(len(result.findings), 1)
+        self.assertEqual(result.findings[0].source_refs, ["web_source_01"])
+        self.assertEqual(result.findings[0].source_urls, ["https://example.com/forum/post"])
+        self.assertEqual(diagnostics["finding_count_before_filter"], 1)
+        self.assertEqual(diagnostics["finding_count_after_filter"], 1)
+        self.assertEqual(diagnostics["dropped"]["unobserved_source"], 3)
+
+    def test_casual_activity_partial_keeps_only_supported_candidates(self):
+        observations = [{"tool": "web.search", "result": {"results": [
+            {"title": "活動甲", "url": "https://example.com/event-a", "snippet": "名稱、場地"},
+            {"title": "活動乙", "url": "https://example.com/event-b", "snippet": "名稱、場地"},
+        ]}}]
+        decision = WebResearchDecision(
+            action="finish",
+            assessment=WebEvidenceAssessmentV1(coverage="direct_partial"),
+            status="partial",
+            findings=[
+                {"claim": "活動甲在駁二舉辦，日期待確認", "relation": "direct", "source_refs": ["web_source_01"]},
+                {"claim": "活動乙在鹽埕舉辦，時間待確認", "relation": "direct", "source_refs": ["web_source_02"]},
+                {"claim": "活動丙可能舉辦", "relation": "direct"},
+            ],
+            limitations=["只找到兩個有直接公開來源的候選"],
+        )
+        result = build_research_result(
+            research_question="推薦五個活動", answer_target="鹽埕近期活動",
+            decision=decision, observations=observations,
+            execution_status="completed", stop_reason="evidence_sufficient",
+        )
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(len(result.findings), 2)
+        self.assertEqual(len(result.sources), 2)
+
+    def test_place_hours_fallback_skips_web_when_weekly_hours_are_complete(self):
+        slc = _slice("查它的營業資訊")
+        slc.payload["prior_observations"] = [{
+            "task_id": "p1", "status": "ok", "tool": "places.resolve_place",
+            "result": {"found": True, "place": {
+                "name": "一等一咖啡茶飲", "category": "cafe", "distance_m": 100,
+                "address_summary": "高雄市鹽埕區", "provider": "google",
+                "place_id": "ChIJhours", "map_url": "https://maps.google.com/place/hours",
+                "opening_hours": {
+                    "open_now": True,
+                    "weekday_descriptions": [f"星期{index}: 10:00–18:00" for index in range(1, 8)],
+                },
+            }},
+        }]
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide") as decide, \
+             patch.object(guarded_execution, "execute_tool") as execute:
+            results, metrics = _run_web(
+                SubTask(
+                    id="w1", agent="web", web_mode="place_hours_fallback",
+                    depends_on=["p1"], task_brief="補查一等一咖啡茶飲營業時間",
+                ),
+                _turn("查它的營業資訊"), slc,
+            )
+        self.assertEqual(results[0].status, SubTaskStatus.SKIPPED)
+        self.assertEqual(results[0].skip_reason, "places_hours_sufficient")
+        self.assertEqual(metrics.error, "")
+        decide.assert_not_called()
+        execute.assert_not_called()
+
+    def test_open_now_without_weekly_schedule_requires_web_fallback(self):
+        prior = [{
+            "task_id": "p1", "status": "ok", "tool": "places.resolve_place",
+            "result": {"found": True, "place": {
+                "opening_hours": {"open_now": True, "weekday_descriptions": []},
+            }},
+        }]
+        self.assertFalse(web_runtime._places_hours_sufficient(prior))
+
+    def test_web_runtime_records_bounded_filter_diagnostics(self):
+        trace = _trace()
+        decisions = [
+            WebResearchDecision(action="search", queries=["public activity"]),
+            self._finish(coverage="direct_partial", status="partial").model_copy(update={
+                "normalization_codes": ["web_activity_name_alias_normalized"],
+            }),
+        ]
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", side_effect=[
+                 (decisions[0], SubAgentMetrics(input_tokens=1)),
+                 (decisions[1], SubAgentMetrics(input_tokens=1)),
+             ]), \
+             patch.object(guarded_execution, "execute_tool", return_value=SimpleNamespace(
+                 ok=True, data=_search_result(),
+             )):
+            results, _metrics = _run_web(
+                SubTask(
+                    id="w1", agent="web", web_mode="public_lookup",
+                    task_brief="查公開活動",
+                ),
+                _turn(), _slice(), trace=trace,
+            )
+        self.assertEqual(results[0].observation["status"], "partial")
+        diagnostic = trace["web_research"][0]
+        self.assertEqual(diagnostic["web_mode"], "public_lookup")
+        self.assertEqual(diagnostic["tool_calls_used"], 1)
+        self.assertEqual(diagnostic["observed_source_count"], 1)
+        self.assertEqual(diagnostic["finding_count_before_filter"], 1)
+        self.assertEqual(diagnostic["finding_count_after_filter"], 1)
+        self.assertEqual(
+            diagnostic["normalization_codes"],
+            ["web_activity_name_alias_normalized"],
+        )
+
+    def test_real_activity_alias_shape_keeps_findings_in_one_finish_call(self):
+        source_url = "https://example.com/2026-milk-tea-festival"
+        provider_result = SimpleNamespace(
+            input_tokens=1, output_tokens=1, duration_ms=1, content="",
+            tool_calls=[{"name": "web_finish_decision", "arguments": {
+                "has_direct_evidence": True,
+                "direct_evidence_complete": False,
+                "evidence_conflicts_target": False,
+                "findings": [
+                    {
+                        "finding": "2026高雄奶茶節日期與場地已有公開資料。",
+                        "evidence_class": "direct",
+                        "source_refs": ["web_source_01"],
+                    },
+                    {
+                        "finding": "2025年的優惠只能作為背景參考。",
+                        "evidence_class": "adjacent",
+                        "source_refs": ["web_source_01"],
+                    },
+                ],
+                "supporting_source_refs": ["web_source_01"],
+                "supporting_source_urls": [source_url],
+                "supporting_source_types": ["event_listing"],
+                "activity": {
+                    "name": "2026高雄奶茶節",
+                    "location": "捷運鹽埕埔站1號出口周邊／大勇路",
+                    "start_date": "2026-09-19",
+                    "end_date": "2026-09-20",
+                    "source_refs": ["web_source_01"],
+                },
+                "limitations": ["詳細時間仍待主辦單位確認。"],
+            }}],
+        )
+        observations = [{"tool": "web.search", "result": _search_result(source_url)}]
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            return_value=provider_result,
+        ) as provider:
+            decision, metrics = decide_web(
+                _slice(), task_brief="推薦2026高雄奶茶節", round_index=4,
+                observations=observations, tool_calls_used=3,
+                search_calls_used=2, extract_calls_used=1, finish_only=True,
+            )
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(metrics.error, "")
+        self.assertEqual(decision.status, "partial")
+        self.assertEqual(decision.activity.title, "2026高雄奶茶節")
+        self.assertEqual(decision.activity.venue, "捷運鹽埕埔站1號出口周邊／大勇路")
+        self.assertEqual(decision.activity.date, "")
+        self.assertIn("web_activity_name_alias_normalized", decision.normalization_codes)
+        self.assertIn("web_activity_location_alias_normalized", decision.normalization_codes)
+        self.assertIn("web_activity_date_range_omitted", decision.normalization_codes)
+        self.assertEqual([item.relation for item in decision.findings], ["direct", "adjacent_context"])
+
+        result = build_research_result(
+            research_question="第一個活動推薦嗎", answer_target="推薦2026高雄奶茶節",
+            decision=decision, observations=observations,
+            execution_status="completed", stop_reason="evidence_sufficient",
+        )
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(len(result.findings), 2)
+        self.assertEqual(result.primary_activity.title, "2026高雄奶茶節")
+
+    def test_invalid_optional_activity_does_not_erase_valid_findings(self):
+        source_url = "https://example.com/activity"
+        observations = [{"tool": "web.search", "result": _search_result(source_url)}]
+        for activity, expected_code in (
+            (
+                {"title": "活動甲", "name": "活動乙", "venue": "駁二"},
+                "web_activity_discarded_title_conflict",
+            ),
+            ({"name": "活動甲"}, "web_activity_discarded_incomplete"),
+            (42, "web_activity_discarded_invalid_type"),
+        ):
+            with self.subTest(activity=activity):
+                provider_result = SimpleNamespace(
+                    input_tokens=1, output_tokens=1, duration_ms=1, content="",
+                    tool_calls=[{"name": "web_finish_decision", "arguments": {
+                        "has_direct_evidence": True,
+                        "direct_evidence_complete": False,
+                        "findings": [{
+                            "finding": "活動甲有直接公開來源。",
+                            "direct": True,
+                            "source_refs": ["web_source_01"],
+                        }],
+                        "activity": activity,
+                    }}],
+                )
+                with patch(
+                    "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+                    return_value=provider_result,
+                ):
+                    decision, metrics = decide_web(
+                        _slice(), task_brief="推薦活動甲", round_index=4,
+                        observations=observations, tool_calls_used=3,
+                        search_calls_used=2, extract_calls_used=1, finish_only=True,
+                    )
+                self.assertEqual(metrics.error, "")
+                self.assertIsNone(decision.activity)
+                self.assertEqual(len(decision.findings), 1)
+                self.assertIn(expected_code, decision.normalization_codes)
+
+    def test_explicit_false_direct_overrides_direct_evidence_class(self):
+        source_url = "https://example.com/2025-background"
+        provider_result = SimpleNamespace(
+            input_tokens=1, output_tokens=1, duration_ms=1, content="",
+            tool_calls=[{"name": "web_finish_decision", "arguments": {
+                "has_direct_evidence": True,
+                "direct_evidence_complete": False,
+                "findings": [{
+                    "finding": "這是2025年的背景資料。",
+                    "direct": False,
+                    "evidence_class": "direct",
+                    "source_refs": ["web_source_01"],
+                }],
+            }}],
+        )
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            return_value=provider_result,
+        ):
+            decision, metrics = decide_web(
+                _slice(), task_brief="查2026活動", round_index=4,
+                observations=[{"tool": "web.search", "result": _search_result(source_url)}],
+                tool_calls_used=3, search_calls_used=2, extract_calls_used=1,
+                finish_only=True,
+            )
+        self.assertEqual(metrics.error, "")
+        self.assertEqual(decision.findings[0].relation, "adjacent_context")
 
     def test_synthesizer_surfaces_safe_adjacent_findings_without_llm(self):
         slc = AgentContextSlice(agent="synthesizer", payload={

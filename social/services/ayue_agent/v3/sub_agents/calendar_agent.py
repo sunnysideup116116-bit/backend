@@ -41,6 +41,7 @@ _SYSTEM = """你是公開阿月的行事曆子代理，負責提出本人行程�
 - 使用者本回合明確說「加／新增／建立／排一筆行程」時，action 必須是 create；不要因為較早對話出現「改」而輸出 update。只有明確要變更已存在的行程才是 update。
 - 使用者不必說出「新增」才能建立行程。若完整語意是要求系統把可辨識的活動存進行事曆，例如「幫我安排」、「幫我排一下」、「幫我記進行程」，也要提出 action=create 的 typed command。只是說「我明天五點想去健身」不代表要寫入，不可自行提出 mutation。
 - current message 用「第一個／第二個／最後一個」延續地點候選時，只接受 context 的 `place_reference_resolution`；create 使用其 label 作 title/location 線索。command 沒有 place ref 欄位，不得回傳、拼造或改寫 opaque reference；沒有 resolution 時提交缺 title 的 typed create 交 server 澄清，不靠最近文字猜店名。
+- 若 context 有 `place_followup`，這是同一聊天室尚未完成的地點行程；使用者只補地點、日期或時間時使用 `draft_mode=continue`，只提交本回合明確補充的欄位，讓 server 合併 room-scoped 草稿。
 - 使用者明確說「全天／整天／一整天」時填 all_day=true 並省略 start_time、end_time、duration_minutes。單日全天省略 end_date；連續多日全天的 end_date 是使用者涵蓋的最後一天（inclusive）。
 - 有明確時間且跨日時，date/start_time 是開始，end_date/end_time 是結束；同日 timed event 可省略 end_date。不要把跨日結束時間硬塞回開始日。
 - 使用者明確說出「半小時／一小時／一個半小時／兩小時」等持續時間時，填 duration_minutes；不要自行從開始時間猜 duration 或計算 end_time。server 會在 preflight 產生結束時間；若同時有 end_time，兩者不一致時交由 server 追問。
@@ -133,12 +134,19 @@ def _tools_schema(*, availability_only: bool = False) -> list[dict[str, Any]]:
 
 
 def _prompt(context_slice: AgentContextSlice, task_brief: str) -> str:
-    return f"""任務說明：{task_brief}
+    prompt = f"""任務說明：{task_brief}
 
 目前可公開的 context：
 {json.dumps(context_slice.payload, ensure_ascii=False)}
 
 只呼叫一個或多個上述 function，不要輸出其他文字。"""
+    if context_slice.payload.get("_place_selection_requires_create") is True:
+        prompt += (
+            "\n\nServer 內部協定提示：目前已由 server 驗證地點選取，這是新增該地點行程的請求。"
+            "本次必須呼叫 calendar.submit_commands，至少提交一個 action=create 的 typed command；"
+            "不要提出 calendar 的唯讀查詢，也不要只輸出文字。"
+        )
+    return prompt
 
 
 def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[CalendarAgentResult, SubAgentMetrics]:

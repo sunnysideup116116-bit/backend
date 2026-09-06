@@ -22,8 +22,13 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from matchmaker import MatchmakerAgent, MatchEvaluationError
+from pydantic import BaseModel, Field, field_validator
+from matchmaker import (
+    MatchmakerAgent,
+    MatchEvaluationError,
+    provider_search_context,
+    safe_search_context,
+)
 
 # ????FastAPI ?蝔? (撠望????銝?鈭?)
 app = FastAPI()
@@ -125,6 +130,14 @@ class MatchRequest(BaseModel):
     target_user: dict
     candidates: list
     target_deep_profile: dict = {}
+    search_context: dict | None = None
+
+    @field_validator("search_context", mode="before")
+    @classmethod
+    def _bound_search_context(cls, value):
+        if value is None:
+            return None
+        return safe_search_context(value)
 
 class ProactiveEventMatchRequest(BaseModel):
     user_id: str
@@ -318,7 +331,8 @@ async def _evaluate_match_request(req: MatchRequest):
     step_start = time.perf_counter()
     raw_response = await agent.match_async(
         req.target_user, enriched_candidates, graph_memory,
-        global_heuristics, req.target_deep_profile
+        global_heuristics, req.target_deep_profile,
+        search_context=provider_search_context(req.search_context),
     )
     print(f"[TIMING][9001 /api/match] agent.match LLM wrapper: {time.perf_counter() - step_start:.3f}s raw_chars={len(raw_response) if raw_response else 0}")
     

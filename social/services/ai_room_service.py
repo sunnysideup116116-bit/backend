@@ -21,6 +21,7 @@ from database import ai_rooms_coll, messages_coll
 from services.chat_service import (
     ai_room_owner,
     generate_ai_room_id,
+    generate_match_hub_ai_room_id,
     generate_proposal_ai_room_id,
     generate_room_id,
     is_ai_room,
@@ -30,14 +31,114 @@ from services.assessment_session_service import assessment_public_state_for_room
 from services.notification_service import PUBLIC_AYUE, notification_unread_map
 
 
-LEGACY_AI_ROOM_TITLE = "找阿月配對"
+LEGACY_AI_ROOM_TITLE = "和阿月聊聊"
 PROPOSAL_AI_ROOM_TITLE = "牽線提案"
+MATCH_HUB_ROOM_TITLE = "阿月牽線"
+MATCH_HUB_ROOM_SUBTITLE = "近期、指定主題與活動邀請都在這裡"
+MATCH_HUB_ROOM_KIND = "match_hub"
 
 # Title generation budget: each LLM call may take at most TITLE_CALL_TIMEOUT
 # seconds; we retry up to TITLE_MAX_ATTEMPTS times so a transient empty reply
 # (observed with the cloud model) does not leave the room untitled.
 TITLE_CALL_TIMEOUT_SECONDS = 5
 TITLE_MAX_ATTEMPTS = 3
+
+
+def match_hub_v1_enabled() -> bool:
+    """Return whether the fixed Match Hub surface is enabled.
+
+    The flag gives deployments a safe rollback to the pre-hub room flow while
+    keeping the room contract in one place.  It defaults on because the hub is
+    the current product surface.
+    """
+    import os
+
+    value = os.getenv("MATCH_HUB_V1", "on").strip().lower()
+    return value not in {"0", "false", "off", "no", "disabled"}
+
+
+def match_hub_room_id(user_id: str) -> str:
+    """Return the canonical fixed hub id for one owner."""
+    return generate_match_hub_ai_room_id(str(user_id))
+
+
+def _match_hub_counts(user_id: str) -> tuple[int, int]:
+    """Count viewer actions and proposals waiting on the other participant."""
+    try:
+        from database import matches_coll
+        rows = matches_coll.find(
+            {
+                "status": {"$in": ["draft", "pending"]},
+                "$or": [{"from_user": user_id}, {"to_user": user_id}],
+                "proposal_suppressed": {"$ne": True},
+            },
+            {"from_user": 1, "to_user": 1, "status": 1},
+        )
+        pending = 0
+        waiting = 0
+        for row in rows:
+            status = str(row.get("status") or "")
+            if status == "draft" and row.get("from_user") == user_id:
+                pending += 1
+            elif status == "pending" and row.get("to_user") == user_id:
+                pending += 1
+            elif status == "pending" and row.get("from_user") == user_id:
+                waiting += 1
+        return pending, waiting
+    except Exception:
+        # Room listing is best effort; an unavailable count must not prevent a
+        # user from opening the durable room or cached history.
+        return 0, 0
+
+
+def ensure_match_hub(user_id: str) -> dict | None:
+    """Idempotently provision and project the user's server-owned hub."""
+    if not match_hub_v1_enabled():
+        return None
+    owner = str(user_id or "").strip()
+    if not owner:
+        return None
+    room_id = match_hub_room_id(owner)
+    now = time.time()
+    document = {
+        "_id": room_id,
+        "room_id": room_id,
+        "user_id": owner,
+        "title": MATCH_HUB_ROOM_TITLE,
+        "subtitle": MATCH_HUB_ROOM_SUBTITLE,
+        "room_kind": MATCH_HUB_ROOM_KIND,
+        "is_pinned": True,
+        "can_rename": False,
+        "can_delete": False,
+        "needs_title": False,
+        "created_at": now,
+        "updated_at": now,
+        "is_legacy": False,
+        "is_new": False,
+    }
+    try:
+        ai_rooms_coll.update_one(
+            {"room_id": room_id, "user_id": owner},
+            {
+                "$setOnInsert": document,
+                "$set": {
+                    "title": MATCH_HUB_ROOM_TITLE,
+                    "subtitle": MATCH_HUB_ROOM_SUBTITLE,
+                    "room_kind": MATCH_HUB_ROOM_KIND,
+                    "is_pinned": True,
+                    "can_rename": False,
+                    "can_delete": False,
+                    "updated_at": now,
+                },
+            },
+            upsert=True,
+        )
+        stored = ai_rooms_coll.find_one({"room_id": room_id, "user_id": owner}, {"_id": 0})
+    except Exception as exc:
+        # A temporary storage outage should preserve the legacy room fallback.
+        print(f"[ai_room_service] match hub provision skipped: {type(exc).__name__}")
+        stored = None
+    return _project(stored or document)
 
 
 def legacy_ai_room_id(user_id: str) -> str:
@@ -58,6 +159,10 @@ def create_room(user_id: str) -> dict:
         "created_at": now,
         "updated_at": now,
         "is_legacy": False,
+        "room_kind": "conversation",
+        "is_pinned": False,
+        "can_rename": True,
+        "can_delete": True,
     }
     ai_rooms_coll.insert_one(doc)
     return _project(doc)
@@ -93,6 +198,11 @@ def create_proposal_room(
                 "created_at": now,
                 "is_legacy": False,
                 "is_proposal_room": True,
+                "is_legacy_proposal": True,
+                "room_kind": "legacy_proposal",
+                "is_pinned": False,
+                "can_rename": False,
+                "can_delete": False,
                 "match_id": match_id,
             },
             "$set": {"updated_at": now, "is_new": True},
@@ -138,6 +248,8 @@ def get_room(room_id: str, user_id: str) -> dict | None:
     """
     if room_id == legacy_ai_room_id(user_id):
         return _legacy_projection(user_id)
+    if room_id == match_hub_room_id(user_id):
+        return ensure_match_hub(user_id)
     if ai_room_owner(room_id) != user_id:
         return None
     doc = ai_rooms_coll.find_one({"room_id": room_id}, {"_id": 0})
@@ -161,6 +273,18 @@ def list_rooms(
     rooms: list[dict] = []
     unread_by_room = notification_unread_map(user_id, PUBLIC_AYUE)
 
+    hub = ensure_match_hub(user_id)
+    if hub is not None:
+        pending_count, waiting_count = _match_hub_counts(user_id)
+        hub.update({
+            "pending_action_count": pending_count,
+            "waiting_other_count": waiting_count,
+            "pending_count": pending_count,
+            "unread_count": int(unread_by_room.get(hub["room_id"], 0)),
+        })
+        hub["latest_message"] = _latest_message(hub["room_id"])
+        rooms.append(hub)
+
     # Legacy room (synthesized).
     legacy_id = legacy_ai_room_id(user_id)
     legacy_latest = _latest_message(legacy_id)
@@ -170,13 +294,21 @@ def list_rooms(
         "needs_title": False,
         "is_legacy": True,
         "is_new": False,
+        "room_kind": "legacy",
+        "is_pinned": False,
+        "can_rename": False,
+        "can_delete": False,
+        "subtitle": "性格探索與一般對話",
         "created_at": 0.0,
         "updated_at": legacy_latest or now,
         "latest_message": legacy_latest,
         "unread_count": int(unread_by_room.get(legacy_id, 0)),
     })
 
+    hub_id = match_hub_room_id(user_id)
     for doc in ai_rooms_coll.find({"user_id": user_id}, {"_id": 0}):
+        if str(doc.get("room_id") or doc.get("_id") or "") == hub_id:
+            continue
         proj = _project(doc)
         latest = _latest_message(doc["room_id"])
         proj["updated_at"] = latest or doc.get("updated_at") or doc.get("created_at") or now
@@ -192,13 +324,15 @@ def list_rooms(
                 include_unscoped=bool(room.get("is_legacy")),
             ))
 
-    rooms.sort(key=lambda r: r.get("updated_at") or 0, reverse=True)
+    rooms.sort(
+        key=lambda r: (not bool(r.get("is_pinned")), -(float(r.get("updated_at") or 0))),
+    )
     return rooms
 
 
 def rename_room(room_id: str, user_id: str, title: str) -> dict | None:
     """Rename a non-legacy AI room. Returns the updated projection or None."""
-    if room_id == legacy_ai_room_id(user_id):
+    if room_id in {legacy_ai_room_id(user_id), match_hub_room_id(user_id)}:
         return None  # legacy room is not renameable
     if ai_room_owner(room_id) != user_id:
         return None
@@ -218,7 +352,7 @@ def delete_room(room_id: str, user_id: str) -> bool:
     Per the product decision, message history stays in ``messages_coll`` as a
     backup; only the room-list entry is removed.
     """
-    if room_id == legacy_ai_room_id(user_id):
+    if room_id in {legacy_ai_room_id(user_id), match_hub_room_id(user_id)}:
         return False
     if ai_room_owner(room_id) != user_id:
         return False
@@ -234,7 +368,10 @@ def most_recent_ai_room(user_id: str, *, include_proposal_rooms: bool = True) ->
     """
     rooms = list_rooms(user_id)
     for room in rooms:
-        if not include_proposal_rooms and "::proposal::" in str(room.get("room_id") or ""):
+        if not include_proposal_rooms and (
+            "::proposal::" in str(room.get("room_id") or "")
+            or room.get("room_kind") == "legacy_proposal"
+        ):
             continue
         if room.get("latest_message"):
             return room["room_id"]
@@ -367,11 +504,34 @@ def _latest_message(room_id: str) -> float:
 
 
 def _project(doc: dict) -> dict:
+    room_id = str(doc.get("room_id") or doc.get("_id") or "")
+    room_kind = str(doc.get("room_kind") or "conversation")
+    is_hub = room_kind == MATCH_HUB_ROOM_KIND or room_id.endswith("::match_hub")
+    # Older proposal rooms were written with only ``is_proposal_room`` (or
+    # only their deterministic id). Infer the historical kind at read time so
+    # clients can group and lock them without a data migration.
+    is_legacy_proposal = bool(
+        not is_hub
+        and (
+            doc.get("is_legacy_proposal")
+            or doc.get("is_proposal_room")
+            or "::proposal::" in room_id
+        )
+    )
+    if is_legacy_proposal:
+        room_kind = "legacy_proposal"
+    is_legacy = bool(doc.get("is_legacy", False))
     return {
         "room_id": doc.get("room_id") or doc.get("_id"),
-        "title": doc.get("title"),
+        "title": MATCH_HUB_ROOM_TITLE if is_hub else (LEGACY_AI_ROOM_TITLE if is_legacy else doc.get("title")),
+        "subtitle": MATCH_HUB_ROOM_SUBTITLE if is_hub else doc.get("subtitle"),
+        "room_kind": MATCH_HUB_ROOM_KIND if is_hub else ("legacy" if is_legacy else room_kind),
+        "is_pinned": True if is_hub else bool(doc.get("is_pinned", False)),
+        "can_rename": False if is_hub or is_legacy or is_legacy_proposal else bool(doc.get("can_rename", True)),
+        "can_delete": False if is_hub or is_legacy or is_legacy_proposal else bool(doc.get("can_delete", True)),
         "needs_title": bool(doc.get("needs_title")),
-        "is_legacy": bool(doc.get("is_legacy", False)),
+        "is_legacy": is_legacy,
+        "is_legacy_proposal": is_legacy_proposal,
         "is_new": bool(doc.get("is_new", False)),
         "created_at": float(doc.get("created_at") or 0),
         "updated_at": float(doc.get("updated_at") or 0),
@@ -385,6 +545,11 @@ def _legacy_projection(user_id: str) -> dict:
     return {
         "room_id": room_id,
         "title": LEGACY_AI_ROOM_TITLE,
+        "subtitle": "性格探索與一般對話",
+        "room_kind": "legacy",
+        "is_pinned": False,
+        "can_rename": False,
+        "can_delete": False,
         "needs_title": False,
         "is_legacy": True,
         "created_at": 0.0,

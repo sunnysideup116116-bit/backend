@@ -144,6 +144,7 @@ class WebResearchDecision(BaseModel):
     activity: WebActivityV1 | None = None
     findings: list[WebResearchFindingDraft] = Field(default_factory=list, max_length=5)
     limitations: list[str] = Field(default_factory=list, max_length=3)
+    normalization_codes: list[str] = Field(default_factory=list, max_length=4)
 
     @field_validator("recency", mode="before")
     @classmethod
@@ -215,7 +216,10 @@ _SYSTEM = """你是 Public Ayue V3 的 Web Research Agent。
 - 在 `strict_verification` 中，Search 摘要不足以支撐完整答案，仍須保留 direct completeness 門檻。
 - direct 是「內容直接對上問題」，不是「必須來自官網或新聞稿」。主辦方、店家、場館的 Instagram／Facebook／Threads 公告、活動頁、售票頁，只要包含所需活動名稱、日期或地點，都可算 direct evidence。
 - 來源權威性與內容相關性分開判斷。一般活動探索、餐廳或行程推薦可使用直接的公開社群公告並標示可能變動；不要用論文或高風險事實的門檻拒絕回答。
+- 店家 reviews task 的 `direct` 表示來源內容直接評論這家已綁定的店，不表示客觀定論。部落格／社群食記的具體口味描述可以保留為有歸屬的主觀 finding；若只有一篇或不同來源分歧，使用 partial 並說明樣本限制，不要整批丟掉。
 - 有直接但尚未完整確認的活動資訊，使用 partial 並保留具體 findings 與來源；只有完全沒有對題細節時才使用 insufficient_evidence。
+- 一般活動探索只要公開來源直接提供活動名稱與場地，就保留為 partial；日期／時間缺漏逐項標示待確認，找到少於要求數量時不可湊數。
+- 年份不明、已過期或只有背景介紹的活動不得描述成目前正在舉辦；只有來源明確支持的日期與狀態才能這樣表述。
 - finish 時優先把實際支持 findings 的 observation `source_ref` 放入 supporting_source_refs（需要相容時才填 supporting_source_urls）；不可捏造或填未觀察的 ref/URL。
 - 若 task 是尋找活動供 itinerary 使用，且來源直接提供活動名稱、場地、日期或時間，額外填 `activity`；activity 的 source_refs/source_urls 必須是實際 observation，缺少的日期或時間留空，不要推測。
 - 找不到指定 direct evidence 時，使用 insufficient_evidence，列出 limitation；不要推測或把 adjacent context 升級成答案。
@@ -306,7 +310,9 @@ def _coerce_closed_bool(value: Any) -> Any:
     return value
 
 
-def _normalize_finish_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+def _normalize_finish_arguments(
+    arguments: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
     """Bound harmless provider drift before the strict finish contract.
 
     This never invents evidence or URLs. It drops extra prose fields, truncates
@@ -339,20 +345,74 @@ def _normalize_finish_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
             if re.fullmatch(WEB_SOURCE_REF_PATTERN, str(item).strip())
         ]
 
+    normalization_codes: list[str] = []
     raw_activity = arguments.get("activity")
     activity: dict[str, Any] | None = None
-    if isinstance(raw_activity, dict):
-        activity = {
-            "title": str(raw_activity.get("title") or "").strip()[:120],
-            "date": str(raw_activity.get("date") or "").strip()[:20],
-            "start_time": str(raw_activity.get("start_time") or "").strip()[:10],
-            "end_time": str(raw_activity.get("end_time") or "").strip()[:10],
-            "venue": str(raw_activity.get("venue") or "").strip()[:160],
-            "district": str(raw_activity.get("district") or "").strip()[:80],
-            "summary": str(raw_activity.get("summary") or "").strip()[:300],
-            "source_refs": source_refs(raw_activity.get("source_refs")),
-            "source_urls": urls(raw_activity.get("source_urls")),
-        }
+    if raw_activity is not None and not isinstance(raw_activity, dict):
+        normalization_codes.append("web_activity_discarded_invalid_type")
+    elif isinstance(raw_activity, dict):
+        def activity_text(key: str, limit: int) -> str | None:
+            value = raw_activity.get(key)
+            if value is None:
+                return ""
+            if not isinstance(value, str):
+                return None
+            return value.strip()[:limit]
+
+        title = activity_text("title", 120)
+        name_alias = activity_text("name", 120)
+        venue = activity_text("venue", 160)
+        location_alias = activity_text("location", 160)
+        if None in {title, name_alias, venue, location_alias}:
+            normalization_codes.append("web_activity_discarded_invalid_type")
+        elif title and name_alias and title != name_alias:
+            normalization_codes.append("web_activity_discarded_title_conflict")
+        elif venue and location_alias and venue != location_alias:
+            normalization_codes.append("web_activity_discarded_venue_conflict")
+        else:
+            if not title and name_alias:
+                title = name_alias
+                normalization_codes.append("web_activity_name_alias_normalized")
+            if not venue and location_alias:
+                venue = location_alias
+                normalization_codes.append("web_activity_location_alias_normalized")
+            optional_fields = {
+                key: activity_text(key, limit)
+                for key, limit in (
+                    ("date", 20),
+                    ("start_time", 10),
+                    ("end_time", 10),
+                    ("district", 80),
+                    ("summary", 300),
+                )
+            }
+            if any(value is None for value in optional_fields.values()):
+                normalization_codes.append("web_activity_discarded_invalid_type")
+            elif not title or not venue:
+                normalization_codes.append("web_activity_discarded_incomplete")
+            else:
+                date = optional_fields["date"] or ""
+                if date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+                    date = ""
+                    normalization_codes.append("web_activity_date_omitted")
+                if raw_activity.get("start_date") or raw_activity.get("end_date"):
+                    normalization_codes.append("web_activity_date_range_omitted")
+                for time_key in ("start_time", "end_time"):
+                    value = optional_fields[time_key] or ""
+                    if value and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+                        optional_fields[time_key] = ""
+                        normalization_codes.append(f"web_activity_{time_key}_omitted")
+                activity = {
+                    "title": title,
+                    "date": date,
+                    "start_time": optional_fields["start_time"] or "",
+                    "end_time": optional_fields["end_time"] or "",
+                    "venue": venue,
+                    "district": optional_fields["district"] or "",
+                    "summary": optional_fields["summary"] or "",
+                    "source_refs": source_refs(raw_activity.get("source_refs")),
+                    "source_urls": urls(raw_activity.get("source_urls")),
+                }
 
     global_direct = _coerce_closed_bool(arguments.get("has_direct_evidence"))
     findings: list[dict[str, Any]] = []
@@ -373,15 +433,22 @@ def _normalize_finish_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
             finding = str(raw_item.get("finding") or raw_item.get("claim") or "").strip()[:500]
             if not finding:
                 continue
+            if "direct" in raw_item:
+                direct = _coerce_closed_bool(raw_item["direct"])
+            else:
+                evidence_class = str(raw_item.get("evidence_class") or "").strip().lower()
+                direct = (
+                    True if evidence_class == "direct"
+                    else False if evidence_class in {"adjacent", "adjacent_context"}
+                    else global_direct
+                )
             findings.append({
                 "finding": finding,
                 "evidence": str(raw_item.get("evidence") or "").strip()[:500],
                 # Respect an explicit per-finding false value.  Only fall back
                 # to the round-level signal when the provider omitted the
                 # field entirely.
-                "direct": _coerce_closed_bool(
-                    raw_item["direct"] if "direct" in raw_item else global_direct
-                ),
+                "direct": direct,
                 "subject_ref": raw_item.get("subject_ref"),
                 "source_refs": source_refs(raw_item.get("source_refs")),
                 "source_urls": urls(raw_item.get("source_urls")),
@@ -412,7 +479,7 @@ def _normalize_finish_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         "supporting_source_types": source_types(arguments.get("supporting_source_types")),
         "activity": activity,
         "limitations": limitations,
-    }
+    }, normalization_codes
 
 
 def _parse_decision_call(
@@ -479,7 +546,7 @@ def _parse_decision_call(
             return WebResearchDecision(action="extract", **parsed.model_dump()), ""
 
         if call.get("name") == "web_finish_decision":
-            arguments = _normalize_finish_arguments(arguments)
+            arguments, normalization_codes = _normalize_finish_arguments(arguments)
             parsed = WebResearchFinishDecisionArguments.model_validate(arguments)
             shared_urls = list(parsed.supporting_source_urls)
             shared_refs = list(parsed.supporting_source_refs)
@@ -529,6 +596,7 @@ def _parse_decision_call(
                     subject_ref=item.subject_ref,
                 ) for item in parsed.findings],
                 limitations=parsed.limitations,
+                normalization_codes=normalization_codes,
             ), ""
         return None, "web_decision_wrong_function"
     except Exception:

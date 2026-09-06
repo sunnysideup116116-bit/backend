@@ -9,7 +9,8 @@ from services.ayue_agent.contracts import PublicAgentTurnContext, TurnClockV1
 from services.ayue_agent.v3.contracts import Plan, SubTask
 from services.ayue_agent.v3.planner import (
     _PLANNER_PROMPT_VERSION, _PLANNER_SYSTEM, _decompose_tool_schema, _planner_prompt,
-    _planner_validation_retry_hint, _normalize_provider_plan_arguments, plan_turn,
+    _planner_validation_retry_hint, _normalize_provider_plan_arguments,
+    _explicit_match_request_intent, plan_turn,
 )
 from services.ai_service import ToolCallResult
 
@@ -45,8 +46,8 @@ def _steak_dag_arguments():
     return {
         "tasks": [
             {"id": "t1", "agent": "calendar", "depends_on": [], "task_brief": "查詢使用者下週五晚上的行程空檔"},
-            {"id": "t2", "agent": "places", "depends_on": [], "task_brief": "搜尋附近的牛排餐廳"},
-            {"id": "t3", "agent": "places", "depends_on": ["t2"], "task_brief": "依 t2 結果篩選推薦餐廳"},
+            {"id": "t2", "agent": "places", "place_mode": "discover", "depends_on": [], "task_brief": "搜尋附近的牛排餐廳"},
+            {"id": "t3", "agent": "places", "place_mode": "discover", "depends_on": ["t2"], "task_brief": "依 t2 結果篩選推薦餐廳"},
             {"id": "t4", "agent": "synthesizer", "depends_on": ["t1", "t2", "t3"], "task_brief": "彙整行程空檔與餐廳推薦，產生最終回覆給使用者。"}
         ]
     }
@@ -74,7 +75,7 @@ def _known_contact_activity_dinner_arguments(*, hard_gate=False):
                 "run_if": {"source_task_id": "c1", "required_outcome": outcome},
             },
             {
-                "id": "p1", "agent": "places", "depends_on": ["w1"],
+                "id": "p1", "agent": "places", "place_mode": "discover", "depends_on": ["w1"],
                 "task_brief": "依 w1 的 typed activity venue 找附近晚餐",
             },
             {
@@ -87,6 +88,34 @@ def _known_contact_activity_dinner_arguments(*, hard_gate=False):
 
 
 class V3PlannerTests(unittest.TestCase):
+    def test_explicit_match_request_is_not_downgraded_to_status(self):
+        self.assertEqual(_explicit_match_request_intent("我想配對"), "start_search")
+        self.assertEqual(_explicit_match_request_intent("幫我找人"), "start_search")
+        self.assertEqual(_explicit_match_request_intent("我想認識其他人"), "start_search")
+        self.assertEqual(_explicit_match_request_intent("重新配對"), "restart_search")
+        self.assertIsNone(_explicit_match_request_intent("現在配得怎樣？"))
+        self.assertIsNone(_explicit_match_request_intent("有哪些配對方式？"))
+
+    def test_provider_status_plan_is_repaired_for_explicit_match_request(self):
+        turn = self._turn("我想配對")
+        arguments = {
+            "mode": "tasks",
+            "write_intent": "none",
+            "tasks": [
+                {"id": "m", "agent": "match", "match_intent": "status", "task_brief": "查詢目前狀態"},
+                {"id": "s", "agent": "synthesizer", "depends_on": ["m"], "task_brief": "呈現結果"},
+            ],
+        }
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(
+                tool_calls=[{"name": "decompose_tasks", "arguments": arguments}],
+            ),
+        ):
+            plan, _metrics = plan_turn(turn)
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.tasks[0].match_intent, "start_search")
+
     def _turn(self, message):
         return PublicAgentTurnContext(
             user_id="owner", room_id="room", message=message,
@@ -223,7 +252,7 @@ class V3PlannerTests(unittest.TestCase):
     def test_provider_scoped_evidence_policy_is_repaired_without_mutating_raw_arguments(self):
         turn = self._turn("找附近適合約會的地方")
         arguments = {"tasks": [
-            {"id": "p1", "agent": "places", "depends_on": [], "task_brief": "找地方",
+            {"id": "p1", "agent": "places", "place_mode": "discover", "depends_on": [], "task_brief": "找地方",
              "evidence_policy": "casual_discovery"},
             {"id": "s1", "agent": "synthesizer", "depends_on": ["p1"], "task_brief": "整理"},
         ]}
@@ -243,7 +272,7 @@ class V3PlannerTests(unittest.TestCase):
     def test_provider_scoped_calendar_outcome_contract_is_repaired(self):
         turn = self._turn("找附近的地方")
         arguments = {"tasks": [
-            {"id": "p1", "agent": "places", "depends_on": [], "task_brief": "找地方",
+            {"id": "p1", "agent": "places", "place_mode": "discover", "depends_on": [], "task_brief": "找地方",
              "outcome_contract": "calendar.availability.v1"},
             {"id": "s1", "agent": "synthesizer", "depends_on": ["p1"], "task_brief": "整理"},
         ]}
@@ -634,7 +663,7 @@ class V3PlannerTests(unittest.TestCase):
         from services.ayue_agent.v3.planner import _DecomposeTasksArguments
         with self.assertRaises(ValidationError) as caught:
             _DecomposeTasksArguments.model_validate({"write_intent": "none", "tasks": [{
-                "id": "p1", "agent": "places", "depends_on": [], "task_brief": "x",
+                "id": "p1", "agent": "places", "place_mode": "discover", "depends_on": [], "task_brief": "x",
                 "evidence_policy": "casual_discovery",
             }]})
         hint = _planner_validation_retry_hint(caught.exception)
@@ -795,7 +824,7 @@ class V3PlannerTests(unittest.TestCase):
             set(schema["properties"]),
             {
                 "mode", "write_intent", "presentation_mode", "tasks", "direct_reply",
-                "direct_messages", "opportunity",
+                "direct_messages", "opportunity", "place_selection",
             },
         )
         self.assertIn("write_intent", schema["required"])
@@ -803,19 +832,90 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(
             set(task_schema["properties"]),
             {
-                "id", "agent", "depends_on", "task_brief", "evidence_policy",
-                "outcome_contract", "run_if", "match_intent",
+                "id", "agent", "depends_on", "task_brief", "place_mode", "evidence_policy",
+                "web_mode", "outcome_contract", "run_if", "match_intent",
             },
         )
         self.assertEqual(
             set(task_schema["required"]),
             {"id", "agent", "task_brief"},
         )
-        for field_name in ("evidence_policy", "outcome_contract", "run_if"):
+        for field_name in ("evidence_policy", "web_mode", "outcome_contract", "run_if"):
             with self.subTest(field_name=field_name):
                 self.assertNotIn("default", task_schema["properties"][field_name])
                 self.assertNotIn("anyOf", task_schema["properties"][field_name])
                 self.assertNotIn('"type": "null"', json.dumps(task_schema["properties"][field_name]))
+
+    def test_web_mode_is_scoped_and_dependency_checked(self):
+        with self.assertRaises(ValueError):
+            SubTask(
+                id="p1", agent="places", place_mode="discover",
+                web_mode="public_lookup", task_brief="找地點",
+            )
+        with self.assertRaises(ValueError):
+            Plan(tasks=[
+                SubTask(id="p1", agent="places", place_mode="discover", task_brief="找地點"),
+                SubTask(
+                    id="w1", agent="web", web_mode="public_lookup",
+                    depends_on=["p1"], task_brief="查公開活動",
+                ),
+                SubTask(id="s1", agent="synthesizer", depends_on=["w1"], task_brief="整理"),
+            ])
+        plan = Plan(tasks=[
+            SubTask(id="p1", agent="places", place_mode="details", task_brief="查店家"),
+            SubTask(
+                id="w1", agent="web", web_mode="place_hours_fallback",
+                depends_on=["p1"], task_brief="補查營業資訊",
+            ),
+            SubTask(id="s1", agent="synthesizer", depends_on=["w1"], task_brief="整理"),
+        ])
+        self.assertEqual(plan.tasks[1].web_mode, "place_hours_fallback")
+
+    def test_legacy_web_task_without_mode_remains_valid(self):
+        plan = Plan(tasks=[
+            SubTask(id="w1", agent="web", task_brief="查公開活動"),
+            SubTask(id="s1", agent="synthesizer", depends_on=["w1"], task_brief="整理"),
+        ])
+        self.assertIsNone(plan.tasks[0].web_mode)
+
+    def test_explicit_place_selection_in_mixed_request_requires_places_task(self):
+        turn = self._turn(
+            "第五間詳細資訊也給我，你覺得有人適合跟我一起去嗎？",
+        ).model_copy(update={
+            "place_reference_resolution": {
+                "status": "resolved",
+                "reference": "place_ref_0123456789abcdef01234567",
+                "ordinal": 5,
+                "label": "一等一咖啡茶飲",
+            },
+        })
+        relationship_only = _fc_result(tool_calls=[{
+            "name": "decompose_tasks", "arguments": {
+                "write_intent": "none", "place_selection": "第五間",
+                "tasks": [
+                    {"id": "r1", "agent": "relationship", "depends_on": [], "task_brief": "找適合同行的人"},
+                    {"id": "s1", "agent": "synthesizer", "depends_on": ["r1"], "task_brief": "整理"},
+                ],
+            },
+        }])
+        corrected = _fc_result(tool_calls=[{
+            "name": "decompose_tasks", "arguments": {
+                "write_intent": "none", "place_selection": "第五間",
+                "tasks": [
+                    {"id": "p1", "agent": "places", "place_mode": "details", "depends_on": [], "task_brief": "查一等一咖啡茶飲詳細資料"},
+                    {"id": "r1", "agent": "relationship", "depends_on": [], "task_brief": "找適合同行的人"},
+                    {"id": "s1", "agent": "synthesizer", "depends_on": ["p1", "r1"], "task_brief": "整理"},
+                ],
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            side_effect=[relationship_only, corrected],
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual([task.agent for task in plan.tasks], ["places", "relationship", "synthesizer"])
+        self.assertEqual(metrics.retry_reason, "invalid_arguments")
 
     def test_planner_system_policy_has_routing_catalog_and_task_contract(self):
         for agent in ("calendar", "places", "web", "match", "relationship", "profile", "product_info", "synthesizer"):
@@ -1285,7 +1385,7 @@ class V3PlannerTests(unittest.TestCase):
             "name": "decompose_tasks",
             "arguments": {"tasks": [
                 {
-                    "id": "p1", "agent": "places", "depends_on": [],
+                    "id": "p1", "agent": "places", "place_mode": "discover", "depends_on": [],
                     "task_brief": "找附近咖啡廳",
                 },
                 {
@@ -1307,6 +1407,35 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(metrics.failure_code, "")
         self.assertEqual([item["status"] for item in metrics.attempts], ["protocol_error", "ok"])
         self.assertIn("protocol retry", provider.call_args_list[1].args[0])
+
+    def test_places_task_without_mode_retries_once_then_fails_closed(self):
+        turn = self._turn("找附近的飲料店")
+        invalid = _fc_result(tool_calls=[{
+            "name": "decompose_tasks",
+            "arguments": {
+                "mode": "tasks",
+                "write_intent": "none",
+                "tasks": [{
+                    "id": "p1", "agent": "places", "depends_on": [],
+                    "task_brief": "找附近飲料店",
+                }],
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            side_effect=[invalid, invalid],
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+
+        self.assertIsNone(plan)
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(metrics.retry_reason, "invalid_arguments")
+        self.assertIn("Every Places task requires place_mode", provider.call_args_list[1].args[0])
+        self.assertEqual(metrics.failure_code, "invalid_arguments")
+        self.assertEqual(
+            [item["status"] for item in metrics.attempts],
+            ["protocol_error", "protocol_error"],
+        )
 
     def test_wrong_function_name_retries_once_then_recovers(self):
         turn = self._turn("查詢明天行程")
@@ -1359,12 +1488,164 @@ class V3PlannerTests(unittest.TestCase):
         ) as provider:
             plan, metrics = plan_turn(turn)
         self.assertIsNone(plan)
-        self.assertEqual(provider.call_count, 1)
-        self.assertEqual(metrics.llm_call_count, 1)
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(metrics.llm_call_count, 2)
+        self.assertEqual(metrics.retry_count, 1)
+        self.assertEqual(metrics.retry_reason, "provider_error")
         self.assertEqual(metrics.failure_code, "provider_error")
+
+    def test_timeout_retries_once_then_recovers(self):
+        turn = self._turn("x")
+        valid = _fc_result(tool_calls=[{
+            "name": "decompose_tasks",
+            "arguments": {
+                "write_intent": "none",
+                "tasks": [
+                    {
+                        "id": "c1",
+                        "agent": "calendar",
+                        "depends_on": [],
+                        "task_brief": "查詢行程",
+                    },
+                    {
+                        "id": "s1",
+                        "agent": "synthesizer",
+                        "depends_on": ["c1"],
+                        "task_brief": "回覆使用者",
+                    },
+                ],
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            side_effect=[TimeoutError("timeout"), valid],
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+        self.assertIsNotNone(plan)
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(metrics.llm_call_count, 2)
+        self.assertEqual(metrics.retry_count, 1)
+        self.assertEqual(metrics.retry_reason, "provider_error")
+        self.assertEqual(metrics.failure_code, "")
+
+    def test_abandoned_place_followup_rejects_match_plan_and_retries_places(self):
+        turn = self._turn("算了不用，但給我他的詳細資料").model_copy(update={
+            "active_proposal": {
+                "status": "pending",
+                "counterparty": "某人",
+                "allowed_actions": ["cancelled"],
+            },
+            "place_followup": {
+                "abandonment_requested": True,
+                "resolved_place": {
+                    "reference": "place_ref_0123456789abcdef01234567",
+                    "ordinal": 3,
+                    "label": "JINLIANFA 金聯發",
+                },
+            },
+        })
+        wrong_match = _fc_result(tool_calls=[{
+            "name": "decompose_tasks",
+            "arguments": {
+                "tasks": [
+                    {
+                        "id": "m1", "agent": "match", "depends_on": [],
+                        "task_brief": "查對象資料", "match_intent": "counterparty",
+                    },
+                    {
+                        "id": "s1", "agent": "synthesizer", "depends_on": ["m1"],
+                        "task_brief": "回覆",
+                    },
+                ],
+            },
+        }])
+        corrected_places = _fc_result(tool_calls=[{
+            "name": "decompose_tasks",
+            "arguments": {
+                "tasks": [
+                    {
+                    "id": "p1", "agent": "places", "place_mode": "details", "depends_on": [],
+                        "task_brief": "查 JINLIANFA 金聯發的地點詳情",
+                    },
+                    {
+                        "id": "s1", "agent": "synthesizer", "depends_on": ["p1"],
+                        "task_brief": "回覆店家資料",
+                    },
+                ],
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            side_effect=[wrong_match, corrected_places],
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual([task.agent for task in plan.tasks], ["places", "synthesizer"])
+        self.assertEqual(metrics.retry_count, 1)
+        self.assertEqual(metrics.retry_reason, "invalid_arguments")
+        self.assertEqual(metrics.attempts[0]["validation_fields"], ["place_followup"])
+
+    def test_explicit_match_reference_is_not_blocked_by_place_followup(self):
+        turn = self._turn("告訴我目前配對對方的詳細資料").model_copy(update={
+            "place_followup": {
+                "resolved_place": {
+                    "reference": "place_ref_0123456789abcdef01234567",
+                    "ordinal": 3,
+                    "label": "JINLIANFA 金聯發",
+                },
+            },
+        })
+        match_plan = _fc_result(tool_calls=[{
+            "name": "decompose_tasks",
+            "arguments": {
+                "tasks": [
+                    {
+                        "id": "m1", "agent": "match", "depends_on": [],
+                        "task_brief": "查目前配對對方", "match_intent": "counterparty",
+                    },
+                    {
+                        "id": "s1", "agent": "synthesizer", "depends_on": ["m1"],
+                        "task_brief": "回覆",
+                    },
+                ],
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=match_plan,
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual([task.agent for task in plan.tasks], ["match", "synthesizer"])
+        self.assertEqual(metrics.retry_count, 0)
 
 
 class V3PlannerOpportunityTests(unittest.TestCase):
+    def test_plan_turn_keeps_place_selection_as_an_internal_hint(self):
+        from services.ayue_agent.v3.contracts import PlaceSelection
+        turn = PublicAgentTurnContext(
+            user_id="owner", room_id="room", message="把第二個加到明天行程",
+            clock=_clock(),
+        )
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "decompose_tasks", "arguments": {
+                    "write_intent": "none",
+                    "place_selection": "第二個",
+                    "tasks": [
+                        {"id": "c1", "agent": "calendar", "depends_on": [], "task_brief": "安排地點"},
+                        {"id": "s1", "agent": "synthesizer", "depends_on": ["c1"], "task_brief": "呈現確認"},
+                    ],
+                },
+            }]),
+        ):
+            plan, _metrics = plan_turn(turn)
+        self.assertIsInstance(plan.place_selection, PlaceSelection)
+        self.assertEqual(plan.place_selection.selection_text, "第二個")
+
     def test_plan_parses_opportunity_signal(self):
         from services.ayue_agent.v3.contracts import OpportunitySignal
         from services.ayue_agent.v3.planner import _DecomposeTasksArguments

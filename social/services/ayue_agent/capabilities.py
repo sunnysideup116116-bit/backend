@@ -57,6 +57,11 @@ CAPABILITY_MANIFEST: dict[str, Any] = {
         "依地名查附近餐廳、咖啡廳、景點或公園，以及估算兩地直線距離",
     ],
     "matching": {
+        "methods": [
+            "依你最近分享的近況找人",
+            "依你直接指定的活動或主題找人",
+            "阿月發現適合的活動時，問你要不要認識活動伴",
+        ],
         "selection": "ranked_not_random",
         "signals": ["近期情境", "偏好與限制", "價值觀", "個性"],
         "uses_existing_profile_when_no_new_preferences": True,
@@ -118,8 +123,16 @@ _PRODUCT_KNOWLEDGE_SECTIONS: dict[str, dict[str, Any]] = {
     "matching.overview": {
         "domain": "matching",
         "facts": {
+            "methods": copy.deepcopy(CAPABILITY_MANIFEST["matching"]["methods"]),
             "selection": CAPABILITY_MANIFEST["matching"]["selection"],
             "may_return_no_suitable_candidate": CAPABILITY_MANIFEST["matching"]["may_return_no_suitable_candidate"],
+        },
+    },
+    "matching.methods": {
+        "domain": "matching",
+        "facts": {
+            "methods": copy.deepcopy(CAPABILITY_MANIFEST["matching"]["methods"]),
+            "requires_confirmation": CAPABILITY_MANIFEST["matching"]["requires_confirmation"],
         },
     },
     "matching.selection": {
@@ -260,8 +273,14 @@ PRODUCT_INFO_FAILURE_FALLBACKS: dict[str, str] = {
     "relationship_chat_access": "主聊天室的我看不到你和對方的聊天紀錄；進到你們的雙人聊天室後，阿月悄悄話能使用那段關係允許的近期聊天脈絡。要問某句怎麼回或最近聊得怎樣，去那裡問會比較準。",
     "private_message_visibility": "你在阿月悄悄話裡說的內容不會直接顯示給對方；只有你明確確認會影響對方的動作時，才會照那個流程通知或更新對方。",
     "matching_principles": (
-        "我不會隨機配對，也不是只看一個總分。我會先用你已分享的近期情境、偏好與限制、價值觀和個性縮小範圍，"
-        "再交給媒合排序；沒有足夠合適的人就直接說沒有。真的開始搜尋前，我也會先向你確認。"
+        "你可以叫我依最近的近況找人，也可以直接說想找人一起做什麼，像滑雪、攝影；"
+        "我偶爾也會找到適合的活動，問你要不要認識活動伴。"
+        "挑選時我會綜合你的近況、偏好與限制、價值觀和個性做排序，不會隨機配對；"
+        "真的開始搜尋前，我會先跟你確認。"
+    ),
+    "matching_methods": (
+        "配對可以依最近的近況找，也可以直接指定想一起做的活動或主題；"
+        "如果我發現適合的活動，也會問你要不要認識活動伴。真的開始搜尋前，我會先跟你確認。"
     ),
     "date_invitation": (
         "沒錯喔～你指定一位已建立聯絡的對象後，我會先請你確認；確認後只會在你們聊天室放一張空白邀請卡，"
@@ -276,9 +295,17 @@ def product_info_answer(topics: list[str] | None = None) -> list[str]:
     replies: list[str] = []
     if "capabilities" in selected:
         replies.append(capability_answer())
+    topic_aliases = {
+        "matching.overview": "matching_principles",
+        "matching.methods": "matching_methods",
+        "matching.selection": "matching_principles",
+    }
+    seen_fallbacks: set[str] = set()
     for topic in selected:
-        if topic in PRODUCT_INFO_FAILURE_FALLBACKS:
-            replies.append(PRODUCT_INFO_FAILURE_FALLBACKS[topic])
+        fallback_key = topic_aliases.get(topic, topic)
+        if fallback_key in PRODUCT_INFO_FAILURE_FALLBACKS and fallback_key not in seen_fallbacks:
+            replies.append(PRODUCT_INFO_FAILURE_FALLBACKS[fallback_key])
+            seen_fallbacks.add(fallback_key)
     if not replies:
         replies = [AYUE_SURFACE_IDENTITY]
     return replies[:2]

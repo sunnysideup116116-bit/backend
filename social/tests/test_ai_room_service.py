@@ -182,6 +182,19 @@ class AiRoomServiceTests(unittest.TestCase):
         self.assertEqual(save.call_args.args[1], "有位人選想認識你。")
         self.assertEqual(save.call_args.kwargs["message_type"], "mediator_card")
 
+    def test_old_proposal_projection_is_grouped_and_locked_without_migration(self):
+        projected = ai_room_service._project({
+            "room_id": "ai_room::owner::proposal::legacy-match",
+            "user_id": "owner",
+            "title": "牽線提案",
+            "is_proposal_room": True,
+            "is_legacy": False,
+        })
+        self.assertEqual(projected["room_kind"], "legacy_proposal")
+        self.assertTrue(projected["is_legacy_proposal"])
+        self.assertFalse(projected["can_rename"])
+        self.assertFalse(projected["can_delete"])
+
     def test_create_proposal_room_uses_same_room_for_same_match(self):
         from services.chat_service import generate_proposal_ai_room_id
 

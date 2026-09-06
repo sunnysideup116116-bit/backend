@@ -17,9 +17,11 @@ VALID_AGENTS = frozenset({
 DATE_INVITATION_WRITE_INTENT = "relationship.date_invitation.v1"
 PlannerWriteIntent = Literal["none", "relationship.date_invitation.v1"]
 MatchIntent = Literal[
-    "status", "counterparty", "start_search", "cancel_search",
+    "status", "counterparty", "start_search", "restart_search", "cancel_search",
     "accept_proposal", "dismiss_proposal", "clarify",
 ]
+PlaceMode = Literal["discover", "details", "reviews"]
+WebMode = Literal["public_lookup", "place_verification", "place_hours_fallback"]
 
 
 class SubTaskStatus(str, Enum):
@@ -79,15 +81,22 @@ class SubTask(BaseModel):
     id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     agent: Literal["calendar", "places", "web", "match", "relationship", "profile", "product_info", "synthesizer"] = Field(
         description=(
-            "Domain owner. Use relationship for the aggregate of accepted/established contacts "
-            "(list, count, compare, or choose among them), including colloquial questions such as "
-            "'who have I matched with', and for an explicit request to create a shared date "
-            "invitation card. Use match only for the singleton active proposal/search lifecycle, "
-            "its current status/counterparty, or an explicit start/retry/decision."
+            "Domain owner. relationship owns the aggregate of accepted/established contacts "
+            "(list, count, compare, or choose among them) and date invitations; match owns the "
+            "singleton active proposal/search lifecycle and the Hub's multi-card inbox."
         ),
     )
+    place_mode: PlaceMode | None = None
     depends_on: list[str] = Field(default_factory=list, max_length=4)
     task_brief: str = Field(min_length=1, max_length=500)
+    relationship_intent: Literal["lookup", "recommend", "review"] | None = Field(
+        default=None,
+        description=(
+            "Relationship only. lookup reads the accepted-contact aggregate; "
+            "recommend evaluates who fits the current activity; review rechecks "
+            "a prior recommendation or its reasoning."
+        ),
+    )
     match_intent: MatchIntent | None = Field(
         default=None,
         description="Match only. User intent, never state permission.",
@@ -95,6 +104,12 @@ class SubTask(BaseModel):
     evidence_policy: Literal["casual_discovery", "strict_verification"] | None = Field(
         default=None,
         description="Web tasks only; omit for Calendar, Places, Match, Relationship and every other agent",
+    )
+    web_mode: WebMode | None = Field(
+        default=None,
+        description=(
+            "Web only: independent lookup, bound-place verification, or hours fallback."
+        ),
     )
     outcome_contract: Literal["calendar.availability.v1"] | None = Field(
         default=None,
@@ -111,14 +126,57 @@ class SubTask(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_evidence_policy(self) -> "SubTask":
+        if self.agent != "relationship" and self.relationship_intent is not None:
+            raise ValueError("relationship_intent is only valid for Relationship tasks")
+        if self.agent == "relationship" and self.relationship_intent is None:
+            brief = str(self.task_brief or "")
+            if any(token in brief for token in ("為什麼", "為啥", "理由", "換一個", "不喜歡", "上一個", "剛才")):
+                self.relationship_intent = "review"
+            elif any(token in brief for token in ("適合", "約誰", "同行", "一起去", "推薦", "挑一位", "活動")):
+                self.relationship_intent = "recommend"
+            else:
+                self.relationship_intent = "lookup"
         if self.agent == "web":
             if self.evidence_policy is None:
                 self.evidence_policy = "casual_discovery"
         elif self.evidence_policy is not None:
             raise ValueError("evidence_policy is only valid for Web tasks")
+        if self.agent != "web" and self.web_mode is not None:
+            raise ValueError("web_mode is only valid for Web tasks")
         if self.outcome_contract is not None and self.agent != "calendar":
             raise ValueError("outcome_contract is only valid for Calendar tasks")
         return self
+
+
+class PlaceSelection(BaseModel):
+    """Planner evidence that the current turn continues a place list.
+
+    This is an intent hint only.  The Scheduler resolves the selection against
+    the server-owned presentation snapshot before Calendar can use it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    selection_text: str = Field(
+        min_length=1,
+        max_length=160,
+        description="A contiguous selection phrase copied from the current user message",
+    )
+    source_references: list[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description="Optional opaque references copied from the server-projected place list",
+    )
+
+    @field_validator("selection_text")
+    @classmethod
+    def _trim_selection_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("source_references")
+    @classmethod
+    def _trim_source_references(cls, value: list[str]) -> list[str]:
+        return [item.strip()[:80] for item in value if isinstance(item, str) and item.strip()]
 
 
 class Plan(BaseModel):
@@ -150,6 +208,13 @@ class Plan(BaseModel):
     # ``product_info`` SubTask and do not expose a section/topic taxonomy.
     product_info_topics: list[str] = Field(default_factory=list, max_length=3)
     opportunity: OpportunitySignal | None = None
+    place_selection: PlaceSelection | None = Field(
+        default=None,
+        description=(
+            "Optional intent hint for continuing a server-presented place list; "
+            "the reference is never authoritative by itself"
+        ),
+    )
 
     @field_validator("direct_reply")
     @classmethod
@@ -235,6 +300,18 @@ class Plan(BaseModel):
             for dep in t.depends_on:
                 if dep not in ids:
                     raise ValueError(f"SubTask {t.id} depends on unknown {dep}")
+            if t.agent == "web" and t.web_mode is not None:
+                dependency_agents = {
+                    next(item.agent for item in self.tasks if item.id == dep)
+                    for dep in t.depends_on
+                }
+                if t.web_mode == "public_lookup" and "places" in dependency_agents:
+                    raise ValueError("public_lookup Web task cannot depend on Places")
+                if (
+                    t.web_mode in {"place_verification", "place_hours_fallback"}
+                    and "places" not in dependency_agents
+                ):
+                    raise ValueError(f"{t.web_mode} Web task requires a Places dependency")
             if t.run_if is not None:
                 if t.agent == "synthesizer":
                     raise ValueError("synthesizer cannot have run_if")

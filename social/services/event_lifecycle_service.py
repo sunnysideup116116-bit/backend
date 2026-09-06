@@ -9,7 +9,9 @@ from typing import Any
 
 import requests
 
-from services.match_decision_service import expire_event_proposals
+from services.match_decision_service import (
+    expire_event_proposals, expire_unresolved_proposals,
+)
 
 
 AGENT_EVENT_CLEANUP_URL = "http://127.0.0.1:9001/api/events/lifecycle/cleanup"
@@ -63,11 +65,14 @@ def run_event_lifecycle_once(
         proposal_result = expire_event_proposals(
             now=current_time, event_ids=event_ids, lead_seconds=lead_seconds,
         )
+        match_result = expire_unresolved_proposals(now=current_time)
         return {
             "status": "partial" if cleanup_error else "success",
             "deleted_event_count": deleted_event_count,
-            "expired_proposal_count": int(proposal_result.get("expired_count", 0) or 0),
-            "stale_proposal_count": int(proposal_result.get("stale_count", 0) or 0),
+            "expired_proposal_count": int(proposal_result.get("expired_count", 0) or 0)
+            + int(match_result.get("expired_count", 0) or 0),
+            "stale_proposal_count": int(proposal_result.get("stale_count", 0) or 0)
+            + int(match_result.get("stale_count", 0) or 0),
             "graph_cleanup_ran": include_graph_cleanup,
             "cleanup_error": cleanup_error or None,
         }

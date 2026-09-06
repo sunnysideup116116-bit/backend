@@ -869,16 +869,11 @@
                             <option value="demo_user">demo_user</option>
                         </select>
                     </div>
-                    <div class="flex items-center gap-2">
-                        <span class="text-xs text-fuchsia-400 whitespace-nowrap">阿月關心頻率</span>
-                        <select id="frequency-select" onchange="updateProactiveFrequency()"
-                            class="w-full bg-[#2a2a2a] border border-white/20 text-white text-sm rounded-lg px-2 py-1 focus:outline-none focus:border-fuchsia-500">
-                            <option value="none">停用</option>
-                            <option value="60">聊天結束 1 分鐘後 (測試)</option>
-                            <option value="3600">聊天結束 1 小時後</option>
-                            <option value="86400">聊天結束隔天</option>
-                        </select>
-                    </div>
+                    <label class="flex items-center justify-between gap-3 cursor-pointer">
+                        <span class="text-xs text-fuchsia-400">阿月主動找我<br><span class="text-gray-500">偶爾接著聊你分享的近況</span></span>
+                        <input id="proactive-care-enabled" type="checkbox" onchange="updateProactiveCare(this.checked)"
+                            class="h-4 w-4 accent-fuchsia-500" checked>
+                    </label>
                     <div class="flex items-center gap-2">
                         <span class="text-xs whitespace-nowrap">阿月口吻</span>
                         <select id="mediator-tone-select" onchange="updateMediatorTone(this.value)" class="w-full text-sm px-2 py-1">
@@ -1904,7 +1899,7 @@
             const dpSection = document.getElementById("dropdown-dp-section");
             const dpValuesEl = document.getElementById("dropdown-dp-values");
             const dpFutureEl = document.getElementById("dropdown-dp-future");
-            const frequencyEl = document.getElementById("frequency-select");
+            const proactiveCareEl = document.getElementById("proactive-care-enabled");
 
             const profileParts = [];
             if (data.my_initial_interest) {
@@ -1925,7 +1920,12 @@
             if (dpSection) dpSection.classList.toggle("hidden", !(deepParts.values || deepParts.future));
             if (dpValuesEl) dpValuesEl.innerText = deepParts.values || "無";
             if (dpFutureEl) dpFutureEl.innerText = deepParts.future || "無";
-            if (frequencyEl) frequencyEl.value = data.proactive_frequency || data.my_proactive_frequency || "none";
+            if (proactiveCareEl) {
+                const legacyFrequency = String(data.proactive_frequency || data.my_proactive_frequency || "3600").toLowerCase();
+                proactiveCareEl.checked = typeof data.proactive_care_enabled === "boolean"
+                    ? data.proactive_care_enabled
+                    : ["60", "3600", "86400", "high", "normal", "low", "on", "true", "1"].includes(legacyFrequency);
+            }
             const location = data.user_location || {};
             const cityEl = document.getElementById("profile-location-city");
             const districtEl = document.getElementById("profile-location-district");
@@ -1962,16 +1962,18 @@
             }
         }
 
-        async function updateProactiveFrequency() {
-            const val = document.getElementById("frequency-select").value;
+        async function updateProactiveCare(enabled) {
             try {
-                await fetch('/api/settings', {
+                const res = await fetch('/api/settings', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: currentUserId, proactive_frequency: val })
+                    body: JSON.stringify({ user_id: currentUserId, proactive_care_enabled: Boolean(enabled) })
                 });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
             } catch (e) {
-                console.error("Failed to update frequency", e);
+                const control = document.getElementById("proactive-care-enabled");
+                if (control) control.checked = !enabled;
+                console.error("Failed to update proactive care", e);
             }
         }
 

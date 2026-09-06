@@ -15,7 +15,7 @@ from services.language_service import normalize_zh_tw
 
 
 V4_REASON_VERSION = "v4_friend_intro"
-FRIEND_COPY_VERSION = "v7_directional_style_rotation"
+FRIEND_COPY_VERSION = "v8_source_directional"
 LIVE_PROPOSAL_STATUSES = frozenset({"draft", "pending"})
 COUNTERPARTY_PLACEHOLDER = "{{counterparty}}"
 MATCH_PROPOSAL_FEW_SHOTS = (
@@ -132,17 +132,17 @@ def friend_intro_fallback(
     if viewer_trait and other_trait:
         second = (
             f"你{viewer_trait}，你們至少有一個具體話題可以自然聊起來；"
-            "你會想認識對方，看看要不要一起參加嗎？"
+            "你會想先認識對方，聊聊這件事嗎？"
         )
     elif viewer_trait:
         second = (
             f"你{viewer_trait}，或許可以先從這件事聊聊彼此的節奏；"
-            "你會想認識對方，看看要不要一起參加嗎？"
+            "你會想先認識對方，聊聊這件事嗎？"
         )
     elif other_trait:
         second = (
             f"對方{other_trait}，你們或許可以先從這件事自然聊起；"
-            "你會想認識對方，看看要不要一起參加嗎？"
+            "你會想先認識對方，聊聊這件事嗎？"
         )
     elif tier == "grounded":
         second = "你們可以先從已確認的共同點自然聊起；你會想認識對方嗎？"
@@ -171,6 +171,71 @@ def friend_intro_fallback(
                 ("viewer.big_five", viewer_trait),
                 ("other.big_five", other_trait),
             ) if value
+        ],
+    }
+
+
+def topic_friend_intro_fallback(
+    viewer: dict,
+    other: dict,
+    topic: str,
+    *,
+    requester_id: str = "",
+    query_text: str = "",
+) -> dict:
+    """Role-specific copy for a one-search topic request.
+
+    The topic belongs to the requester.  A receiver must therefore see it as
+    another person's wish, while the requester sees it as their own request;
+    neither direction claims that the other person has the skill or has agreed
+    to attend.
+    """
+    safe_topic = short_public_text(topic, 80)
+    # ``invitation_topic`` is intentionally a compact label (for example,
+    # ``滑雪``), while the requester's meaning is usually ``找人一起滑雪``.
+    # Keep that purpose in the copy so the card does not turn an activity ask
+    # into the vague phrase ``找人聊聊滑雪``.  Prefer the original query when
+    # it contains the user's own together/companion wording.
+    query = short_public_text(query_text, 600)
+    activity_phrase = ""
+    for prefix in ("一起", "陪我", "跟我", "和我"):
+        candidate = f"{prefix}{safe_topic}"
+        if candidate and candidate in query:
+            activity_phrase = candidate
+            break
+    if not activity_phrase:
+        activity_phrase = safe_topic
+        if activity_phrase and not activity_phrase.startswith(("一起", "陪我", "跟我", "和我")):
+            activity_phrase = f"一起{activity_phrase}"
+    other_context = short_public_text(other.get("current_context"), 56)
+    is_requester = str(viewer.get("user_id") or "") == str(requester_id or "")
+    if is_requester:
+        first = (
+            f"你這次想找人{activity_phrase}；"
+            + (f"我想到一位最近提到「{other_context}」的人。" if other_context else "我想到一位可以先認識看看的人。")
+        )
+        text = (
+            first
+            + "目前不能確認對方是否會這件事，或本來就打算一起去；可以先問問對方有沒有興趣。"
+            + "要不要讓我先幫你問問？"
+        )
+    else:
+        first = (
+            f"有位朋友想找人{activity_phrase}；"
+            + (f"對方最近提到「{other_context}」。" if other_context else "我想先介紹你們認識看看。")
+        )
+        text = first + "我可以先替你們牽線，再問問彼此有沒有興趣；這不代表你已經會這件事或確定同行。你願意認識看看嗎？"
+    return {
+        "style_id": "topic_request",
+        "tier": "exploratory",
+        "viewer_text": text,
+        "scenario_bridge": activity_phrase,
+        "personality_dynamic": "",
+        "conversation_starter": f"可以先問對方對{activity_phrase}有沒有興趣。",
+        "accepted_opening": f"好消息，{COUNTERPARTY_PLACEHOLDER}也點頭了！可以先聊聊{activity_phrase}的想法。",
+        "used_evidence_keys": [
+            "search_context.invitation_topic",
+            *( ["other.current_context"] if other_context else []),
         ],
     }
 
@@ -299,7 +364,20 @@ def build_v4_snapshot_fallback(match_doc: dict) -> dict:
             if match_doc.get("reason_copy_version") != FRIEND_COPY_VERSION
             else match_reason_style_id(viewer, other, context_revision=context_revision)
         )
-        fallback = friend_intro_fallback(viewer, other, tier, style_id=style_id)
+        topic = short_public_text(
+            (match_doc.get("search_context") or {}).get("invitation_topic"), 80,
+        )
+        query_text = short_public_text(
+            (match_doc.get("search_context") or {}).get("query_text"), 600,
+        )
+        fallback = (
+            topic_friend_intro_fallback(
+                viewer, other, topic,
+                requester_id=str(match_doc.get("from_user") or ""),
+                query_text=query_text,
+            )
+            if topic else friend_intro_fallback(viewer, other, tier, style_id=style_id)
+        )
         return {
             "copy_version": FRIEND_COPY_VERSION,
             "style_id": style_id,
@@ -320,12 +398,39 @@ def build_v4_snapshot_fallback(match_doc: dict) -> dict:
     }
 
 
-def _safe_bound_v4_entry(entry: Any, user_id: str, other_id: str) -> str:
+def _safe_bound_v4_entry(
+    entry: Any,
+    user_id: str,
+    other_id: str,
+    *,
+    allow_topic_statement: bool = False,
+) -> str:
     if not isinstance(entry, dict):
         return ""
     if str(entry.get("viewer_id") or "") != user_id:
         return ""
     if str(entry.get("counterparty_id") or "") != other_id:
+        return ""
+    if str(entry.get("style_id") or "") == "topic_request":
+        # A confirmed topic search may already have sent the invitation. Its
+        # requester copy is then a short introduction, not another consent
+        # question. Validate it with the same evidence/privacy rules while
+        # leaving every non-topic projection on the stricter legacy path.
+        text = short_public_text(entry.get("viewer_text"), 220)
+        if not text:
+            return ""
+        is_question = text.endswith(("？", "?"))
+        if not allow_topic_statement and not is_question:
+            return ""
+        validation_text = text if is_question else f"{text}你有興趣嗎？"
+        if valid_friend_intro_text(
+            validation_text,
+            required_context=short_public_text(
+                entry.get("counterparty_context_snapshot"), 56,
+            ),
+            role_bound=True,
+        ):
+            return text
         return ""
     text = valid_friend_intro_text(
         entry.get("viewer_text"),
@@ -355,6 +460,10 @@ def reason_for_viewer(match_doc: dict, user_id: str) -> str:
         role_key, other_id, legacy_key = "receiver_invitation", from_user, "candidate"
     else:
         return ""
+    allow_topic_statement = bool(
+        role_key == "initiator_preview"
+        and str(match_doc.get("delivery_mode") or "") == "invite_on_match"
+    )
 
     if match_doc.get("reason_version") == V4_REASON_VERSION:
         # Proposals created before the five-style contract may contain a
@@ -367,18 +476,25 @@ def reason_for_viewer(match_doc: dict, user_id: str) -> str:
             and match_doc.get("reason_copy_version") != FRIEND_COPY_VERSION
         ):
             fallback = build_v4_snapshot_fallback(match_doc)
-            text = _safe_bound_v4_entry(fallback.get(role_key), user_id, other_id) if fallback else ""
+            text = _safe_bound_v4_entry(
+                fallback.get(role_key), user_id, other_id,
+                allow_topic_statement=allow_topic_statement,
+            ) if fallback else ""
             if text:
                 return text
         projection = match_doc.get("friend_intro_v4") or {}
         text = _safe_bound_v4_entry(
             projection.get(role_key) if isinstance(projection, dict) else None,
             user_id, other_id,
+            allow_topic_statement=allow_topic_statement,
         )
         if text:
             return text
         fallback = build_v4_snapshot_fallback(match_doc)
-        return _safe_bound_v4_entry(fallback.get(role_key), user_id, other_id) if fallback else ""
+        return _safe_bound_v4_entry(
+            fallback.get(role_key), user_id, other_id,
+            allow_topic_statement=allow_topic_statement,
+        ) if fallback else ""
 
     entries = match_doc.get("directional_reason_v3") or []
     if isinstance(entries, list):

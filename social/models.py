@@ -1,8 +1,10 @@
 from enum import Enum
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from services.match_search_context import safe_search_context
 
 class ChatType(str, Enum):
     big_five = "big_five"
@@ -21,6 +23,20 @@ class MatchRequest(BaseModel):
     source: str = "manual"
     force_new: bool = False
     confirmed: bool = False
+    # Optional, one-search meaning.  It is bounded at the HTTP boundary and
+    # never changes the server-owned safety/qualification rules.
+    search_context: dict[str, Any] | None = None
+    # Optional caller-owned routing/idempotency hints. The router validates
+    # room ownership before they reach the durable search job.
+    origin_room_id: str = Field(default="", max_length=256)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=160)
+
+    @field_validator("search_context", mode="before")
+    @classmethod
+    def _bound_search_context(cls, value: Any) -> dict[str, str] | None:
+        if value is None:
+            return None
+        return safe_search_context(value)
 
 class ProactiveEventRequest(BaseModel):
     user_id: str
@@ -118,6 +134,16 @@ class DirectChatRequest(BaseModel):
     # (which must be owned by user_id) instead of the legacy single AI room.
     # Omit it to preserve the original single-room behavior.
     ai_room_id: str | None = Field(default=None, min_length=1, max_length=128)
+    # A focused Hub card is only a reference hint.  The HTTP adapter resolves
+    # it against the participant's canonical match before the agent sees the
+    # turn; it is excluded from prompt/model serialization.
+    focused_match_id: str | None = Field(
+        default=None, min_length=1, max_length=128, repr=False,
+    )
+    focused_match_namespace: Literal["relationship_match", "event_invitation"] | None = Field(
+        default=None, repr=False,
+    )
+    focused_match_revision: int | None = Field(default=None, ge=0, repr=False)
     # Precise coordinates are request-scoped and excluded from dumps so they
     # cannot accidentally enter persistence, traces, or logs.
     device_location: DeviceLocationRequest | None = Field(
@@ -128,6 +154,12 @@ class DirectChatRequest(BaseModel):
     def _validate_assessment_action_scope(self):
         if self.assessment_action is not None and self.contact_id != "ai_assistant":
             raise ValueError("assessment_action is only available for ai_assistant")
+        if self.focused_match_id is not None and self.contact_id != "ai_assistant":
+            raise ValueError("focused_match_id is only available for ai_assistant")
+        if self.focused_match_namespace is not None and self.focused_match_id is None:
+            raise ValueError("focused_match_namespace requires focused_match_id")
+        if self.focused_match_revision is not None and self.focused_match_id is None:
+            raise ValueError("focused_match_revision requires focused_match_id")
         has_choice = self.choice_id is not None or self.choice_action is not None
         if has_choice:
             if self.contact_id != "ai_assistant":
@@ -172,7 +204,11 @@ class RelationshipQuizAnswerRequest(RelationshipGameRequest):
 
 class SettingsRequest(BaseModel):
     user_id: str
-    proactive_frequency: str = "3600"  # "none", "60", "3600", "86400"
+    # New clients send a single consent-style switch. Keep the legacy field
+    # optional so older clients can migrate without a default silently
+    # re-enabling care.
+    proactive_care_enabled: bool | None = None
+    proactive_frequency: str | None = None  # legacy: "none", "60", "3600", "86400"
 
 class MediatorToneRequest(BaseModel):
     user_id: str

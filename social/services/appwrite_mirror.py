@@ -98,7 +98,11 @@ def mirror_message_to_appwrite(msg: dict) -> None:
     }
     metadata = msg.get("metadata")
     if metadata:
-        data["metadata"] = json.dumps(metadata, ensure_ascii=False)[:_METADATA_MAX]
+        public_metadata = dict(metadata) if isinstance(metadata, dict) else metadata
+        if isinstance(public_metadata, dict):
+            public_metadata.pop("message_use", None)
+        if public_metadata:
+            data["metadata"] = json.dumps(public_metadata, ensure_ascii=False)[:_METADATA_MAX]
     permissions = [f'read("user:{sender_id}")']
     if receiver_id:
         permissions.append(f'read("user:{receiver_id}")')

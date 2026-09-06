@@ -31,10 +31,21 @@ class ProductSurfaceContractTests(unittest.TestCase):
     def test_matching_principles_answers_the_question_instead_of_repeating_identity_copy(self):
         messages = product_info_answer(["matching_principles"])
         joined = " ".join(messages)
+        self.assertIn("最近的近況找人", joined)
+        self.assertIn("想找人一起做什麼", joined)
+        self.assertIn("活動伴", joined)
         self.assertIn("不會隨機配對", joined)
         self.assertIn("排序", joined)
         self.assertIn("確認", joined)
         self.assertNotIn("我是阿月", joined)
+        self.assertNotIn("額度", joined)
+        self.assertNotIn("扣打", joined)
+
+    def test_matching_knowledge_section_fallback_uses_plain_matching_methods(self):
+        joined = " ".join(product_info_answer(["matching.methods"]))
+        self.assertIn("最近的近況", joined)
+        self.assertIn("活動或主題", joined)
+        self.assertIn("活動伴", joined)
 
     def test_product_info_projection_contains_only_selected_typed_facts(self):
         projection = product_info_projection(["same_identity", "surface_scope"])

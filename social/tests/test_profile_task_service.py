@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 from bson.objectid import ObjectId
 
 from services import profile_task_service as profile_tasks
+from services.message_use_service import metadata_for_use
 
 
 class ProfileTaskServiceTests(unittest.TestCase):
@@ -13,7 +14,8 @@ class ProfileTaskServiceTests(unittest.TestCase):
         with patch.object(profile_tasks, "profile_skills_mode_for_user", return_value="on"), \
              patch.object(profile_tasks, "is_owned_public_ai_room", return_value=True), \
              patch.object(profile_tasks.messages_coll, "find", return_value=[{
-                 "_id": message_id, "content": "我喜歡安靜咖啡廳", "metadata": {},
+                 "_id": message_id, "content": "我喜歡安靜咖啡廳",
+                 "metadata": {"message_use": metadata_for_use("ordinary", reason="test")},
              }]) as find_messages, \
              patch.object(profile_tasks.PROFILE_RUNS, "find", return_value=[]), \
              patch.object(profile_tasks, "process_profile_message") as process:
@@ -62,6 +64,22 @@ class ProfileTaskServiceTests(unittest.TestCase):
 
         self.assertEqual(mode, "off")
         tasks.add_task.assert_not_called()
+
+    def test_followup_only_mode_queues_without_profile_progress_projection(self):
+        tasks = MagicMock()
+        with patch.object(profile_tasks, "profile_skills_mode_for_user", return_value="off"), \
+             patch.object(profile_tasks, "followup_mode_for_user", return_value="shadow"), \
+             patch.object(profile_tasks, "process_profile_message") as process, \
+             patch.object(profile_tasks.profiles_coll, "update_one") as update:
+            mode = profile_tasks.queue_profile_skills(
+                tasks, "owner", "週末想去看展", "message-1", "global",
+                progress_token="d" * 32,
+            )
+        self.assertEqual(mode, "shadow")
+        update.assert_not_called()
+        tasks.add_task.assert_called_once_with(
+            process, "owner", "週末想去看展", "message-1", "global", None,
+        )
 
     def test_progress_run_queues_isolated_profile_process_without_message_content(self):
         tasks = MagicMock()
@@ -145,6 +163,46 @@ class ProfileTaskServiceTests(unittest.TestCase):
         process.assert_called_once_with(
             "owner", "這句仍要處理", "message-2", "global", None,
         )
+
+    def test_due_profile_retry_reuses_validated_source(self):
+        cursor = MagicMock()
+        cursor.sort.return_value.limit.return_value = [{
+            "message_id": "64b64c8f0000000000000011",
+            "user_id": "owner",
+            "surface": "global",
+        }]
+        source = {
+            "content": "我最近想爬山",
+            "metadata": {"message_use": metadata_for_use("ordinary", reason="test")},
+        }
+        with patch.object(profile_tasks.PROFILE_RUNS, "find", return_value=cursor), \
+             patch.object(profile_tasks.messages_coll, "find_one", return_value=source), \
+             patch.object(profile_tasks, "process_profile_message", return_value={"recent_changed": True}) as process:
+            result = profile_tasks.run_due_profile_retries_once(now=100.0)
+        self.assertEqual(result["attempted"], 1)
+        self.assertEqual(result["completed"], 1)
+        process.assert_called_once_with(
+            "owner", "我最近想爬山", "64b64c8f0000000000000011", "global", None,
+        )
+
+    def test_due_profile_retry_excludes_calendar_source(self):
+        cursor = MagicMock()
+        cursor.sort.return_value.limit.return_value = [{
+            "message_id": "64b64c8f0000000000000012",
+            "user_id": "owner",
+        }]
+        source = {
+            "content": "幫我新增週五聚餐",
+            "metadata": {"message_use": metadata_for_use("calendar_operation")},
+        }
+        with patch.object(profile_tasks.PROFILE_RUNS, "find", return_value=cursor), \
+             patch.object(profile_tasks.messages_coll, "find_one", return_value=source), \
+             patch.object(profile_tasks.PROFILE_RUNS, "update_one") as update, \
+             patch.object(profile_tasks, "process_profile_message") as process:
+            result = profile_tasks.run_due_profile_retries_once(now=100.0)
+        self.assertEqual(result["excluded"], 1)
+        process.assert_not_called()
+        self.assertEqual(update.call_args.args[1]["$set"]["status"], "excluded")
 
 
 if __name__ == "__main__":

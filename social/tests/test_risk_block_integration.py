@@ -11,6 +11,7 @@ from services.risk_block_service import (
     RiskBlockService,
     RiskBlockServiceUnavailable,
 )
+from services.match_search_context import context_embedding_source_hash
 
 
 def test_block_service_keeps_outgoing_private_from_bidirectional_exclusions():
@@ -237,6 +238,7 @@ def test_standard_matching_passes_block_set_into_vector_exclusion():
         "user_id": "alice",
         "current_context": "make friends",
         "context_embedding": [0.1, 0.2],
+        "context_embedding_source_hash": context_embedding_source_hash("make friends"),
         "current_context_revision": 1,
     }
     with patch.object(match.profiles_coll, "find_one", return_value=user), \
@@ -264,6 +266,7 @@ def test_standard_matching_fails_closed_before_vector_search():
         "user_id": "alice",
         "current_context": "make friends",
         "context_embedding": [0.1, 0.2],
+        "context_embedding_source_hash": context_embedding_source_hash("make friends"),
         "current_context_revision": 1,
     }
     with patch.object(match.profiles_coll, "find_one", return_value=user), \

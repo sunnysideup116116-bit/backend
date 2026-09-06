@@ -40,14 +40,22 @@ def start_match_search(
     force_new: bool = False,
     idempotency_key: str | None = None,
     origin_room_id: str = "",
+    search_context: dict | None = None,
+    delivery_mode: str = "preview_on_match",
 ) -> dict[str, Any]:
     """Queue a canonical persistent search job; never rank candidates inline."""
     from services.match_search_job_service import enqueue_match_search
-    return enqueue_match_search(
-        user_id, source=source, force_new=force_new,
-        idempotency_key=idempotency_key or f"legacy-match-search:{uuid.uuid4().hex}",
-        origin_room_id=origin_room_id,
-    )
+    kwargs: dict[str, Any] = {
+        "source": source,
+        "force_new": force_new,
+        "idempotency_key": idempotency_key or f"legacy-match-search:{uuid.uuid4().hex}",
+        "origin_room_id": origin_room_id,
+    }
+    if search_context is not None:
+        kwargs["search_context"] = search_context
+    if str(delivery_mode or "").strip() == "invite_on_match":
+        kwargs["delivery_mode"] = "invite_on_match"
+    return enqueue_match_search(user_id, **kwargs)
 
 
 def _schedule_or_run(scheduler: TaskScheduler | None, task: Callable[[], None]) -> None:

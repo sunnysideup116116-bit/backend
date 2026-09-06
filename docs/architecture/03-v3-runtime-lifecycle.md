@@ -27,7 +27,7 @@ JSON 與 stream 的 final response 都保留 `reply`，並可附加 bounded `mes
 direct_chat (routers/public_chat.py)
   → _complete_public_turn
       - 保存使用者訊息（唯一一次）
-      - 組 AgentTurnContext（含 recent_history ≤12 則、user_profile、提及清單）
+      - 組 AgentTurnContext（含 recent_history ≤32 則、user_profile、提及清單）
   → run_public_agent_turn_v3 (services/ayue_agent/__init__.py → v3/scheduler.py)
   → save_message(ai_assistant 回覆)（唯一一次）
   → 背景 queue_profile_skills（僅非 assessment 回合）
@@ -45,7 +45,7 @@ direct_chat (routers/public_chat.py)
 
 ### 階段 1：Planner 拆解（LLM）
 
-`planner.py:plan_turn` 使用 `decompose_tasks` function calling；若 provider 沒有送出該 call、名稱錯誤或 tasks arguments 不符合 schema，最多進行一次 protocol retry。兩次仍失敗時維持 fail closed，不建立或執行任何 task。成功時模型輸出的 tool call arguments 就是 typed `Plan`。Planner 正常輸出 bounded `direct_chat`，或一張靜態子任務 DAG：每個 `SubTask` 有 `id`、`agent`（calendar/places/web/match/relationship/profile/product_info/synthesizer）、`depends_on`、`task_brief`；只有 Web 可再帶 `evidence_policy`，Calendar availability task 可帶 `outcome_contract` 與下游 `run_if` control edge。
+`planner.py:plan_turn` 使用 `decompose_tasks` function calling；若 provider 沒有送出該 call、名稱錯誤、tasks arguments 不符合 schema，或 provider call 發生例外，最多進行一次 bounded retry。Provider retry 仍使用同一 requested model tier，不自動切換 main。兩次仍失敗時維持 fail closed，不建立或執行任何 task。成功時模型輸出的 tool call arguments 就是 typed `Plan`。Planner 正常輸出 bounded `direct_chat`，或一張靜態子任務 DAG：每個 `SubTask` 有 `id`、`agent`（calendar/places/web/match/relationship/profile/product_info/synthesizer）、`depends_on`、`task_brief`；Places task 另必填 `place_mode=discover|details|reviews`，只有 discover 可 search nearby／發布新 snapshot；只有 Web 可再帶 `evidence_policy`，Calendar availability task 可帶 `outcome_contract` 與下游 `run_if` control edge。
 
 `Plan` 的 DAG 驗證（`contracts.py`，純程式碼）：
 
@@ -53,7 +53,7 @@ direct_chat (routers/public_chat.py)
 - synthesizer 必須是終端：不能被任何其他 task 依賴。
 - Planner 另可輸出 `opportunity`（`signal=social_opening` + `evidence_span` + `confidence≥0.8`），Scheduler 會再驗證 evidence_span 是原句連續子字串。這是非動作性的短期溫和提議，不會建立 pending confirmation；明確的開始／重試配對請求必須產生 `match` task，走一般 confirmation path。
 
-Planner 無效（無 tool call、名字錯誤、schema 不符、逾時）→ **fail closed**：回「我現在沒辦法判斷這個請求要不要執行」，不執行任何工具。
+Planner 無效（無 tool call、名字錯誤、schema 不符，或 provider error bounded retry 後仍失敗）→ **fail closed**：回「我現在沒辦法判斷這個請求要不要執行」，不執行任何工具。
 
 產品身份／入口問題建立正常的 `product_info -> synthesizer` DAG。ProductInfoAgent 自己理解 `task_brief`、最多做兩輪 allowlisted knowledge retrieval，回傳 `product_info.v1` observation；Scheduler 不知道 section taxonomy，也不直接組產品答案。`mode="product_info"`／`product_info_topics` 只在 contract boundary 接受舊 provider payload，執行前立即正規化成 DAG，新 Planner 不會產生它。Public 與 Private 是同一位阿月的不同 bounded surface，Private 訊息不自動回流 Public profile/memory。
 
@@ -96,7 +96,7 @@ Guard 通過後各 runtime 再做三道 runtime 檢查：
 
 ### 階段 5：Synthesizer（LLM）
 
-`synthesizer.py:synthesize` 收集所有非 SKIPPED 的 observation，經 `_strip_place_internals`（移除 map_url/place_id/photo_url 等內部欄位）後組成 prompt；server-owned confirmation reply、typed calendar clarification、capability answer 與 assessment domain reply 先 deterministic 直出，不再交給 LLM 改寫；其他結果才由模型產出回覆。若候選地點卡存在，模型以 `compose_public_reply` 回傳自然文字與 server-owned `selected_candidate_refs`；Synthesizer 依 `card_intent` 產生 bounded card projection，Scheduler 再套用回 server-side `place_cards`。沒有候選卡片時 `tools=[]`、`tool_calls=[]` 是正常結果。
+`synthesizer.py:synthesize` 收集所有非 SKIPPED 的 observation，經 `_strip_place_internals`（移除 map_url/place_id/photo_url 等內部欄位）後組成 prompt；server-owned confirmation reply、typed calendar clarification、capability answer 與 assessment domain reply 先 deterministic 直出，不再交給 LLM 改寫；其他結果才由模型產出回覆。只有 `discover` task 的成功 `search_nearby` 結果會建立可供 ordinal follow-up 的 presentation snapshot 與 server-owned ordering；`details`／`reviews` 的 `resolve_place` 維持原選定店家自然 prose，不重新編號或加推薦地點前綴。若沒有任何實際 tool／typed Web observation，Synthesizer 不得聲稱「查過但沒查到」。若候選地點卡存在，模型以 `compose_public_reply` 回傳自然文字與 server-owned `selected_candidate_refs`；Synthesizer 依 `card_intent` 產生 bounded card projection，Scheduler 再套用回 server-side `place_cards`。沒有候選卡片時 `tools=[]`、`tool_calls=[]` 是正常結果。
 
 Web-only 的 `web_research.v1` 不論是 `answered`、`partial`、`insufficient_evidence`、`degraded` 或 `unavailable`，都先進入 Synthesizer 取得自然 prose 或輕量 Markdown；typed status、findings、limitations 不再被轉成固定 headings。只有 provider、compose、grounding 或 presentation validation failure 才使用最小化 deterministic Web fallback。Synthesizer 只收到該 typed Web result 作為 Web-only grounding；source URLs 與 `web_source_*` refs 由 server-owned metadata 提供，模型不得新增未觀察到的連結或 reference。
 
@@ -158,15 +158,16 @@ Calendar Agent 提出 `calendar.submit_commands` typed command batch
 | product_info | bounded message、最近 4 則訊息、server-owned product knowledge catalog；不含 profile/calendar/relationship private state |
 | synthesizer | message、recent_messages、recent_context、user_location、clock、observations |
 
-`PublicAgentTurnContext`（`context.py:build_public_agent_turn_context` 組建）的總體限制：最近 12 則訊息、合計 6000 字元；近期記憶最多 8 筆；prompt 不含 `seed_user_*`、Mongo document、未公開 ID、對方私人記憶或行事曆內容。
+`PublicAgentTurnContext`（`context.py:build_public_agent_turn_context` 組建）的總體限制：最近 32 則訊息、合計 8,000 字元；近期記憶最多 8 筆；prompt 不含 `seed_user_*`、Mongo document、未公開 ID、對方私人記憶或行事曆內容。原文與 compaction watermark 使用相同排序；超出預算時只提供 bounded recent-only projection。
 
 Planner 另使用 compact prompt projection：最近 4 則、合計 2,000 字元，會移除與 current message 重複的最新 user history；clock 僅保留 timezone、local date/time、weekday 與實際 temporal references。空的 optional state 省略，active proposal 不含 revision；其他 specialist 仍依上表收到自己的 slice。
 
 ## 5. 背景流程（非同步）
 
-- **Profile extraction**：`public_chat.py` 在回合結束後把已保存的 owner 訊息排入 `profile_task_service` → `profile_skills.py`，message_id 去重，evidence 必須是原句連續子字串；assessment 答案不會進入此 pipeline。
+- **Profile extraction**：`public_chat.py` 在回合結束後先把 `message-use-v1` 寫回已保存的 owner 訊息，再由 `profile_task_service` → `profile_skills.py` 只領取 `ordinary` source；message_id 去重，暫時 provider failure 最多三次有限重試，evidence 必須是原句連續子字串；calendar／assessment／no-memory／unknown 不會進入此 pipeline。
+- **Profile retry worker**：Social startup 會啟動 `profile-retry-worker`，每 30 秒最多領取三筆到期的 failed/expired lease；它重讀同一個 owner source，重新驗證用途後才重跑 extractor，第三次失敗即終止。
 - **配對搜尋 job**：`match.start_search` 確認後入 `match_search_jobs` 佇列，`match_search_worker` 消費（claim/lease/progress），完成後呼叫媒婆 9001 `/api/match`，產出唯一 draft proposal，並以 mediator event 通知。
-- **主動關心**：`proactive_scheduler` 每 15 秒掃描到期使用者，`proactive_care.py` 依最近訊息、前一則回覆、近期情境與口吻產生 care；atomic claim 保證每個 owner activity 最多一則 care。
+- **主動關心**：保存 owner turn 後的 Profile background task 以一次 typed extraction 提出最多三筆 `proactive_followups` 候選；`proactive_scheduler` 每 15 秒掃描到期或 lease 過期候選，依 owner consent、原聊天室、48 小時／七日上限、未回答後七日冷卻、22:00–09:00 靜默、近期活躍與 Calendar busy/free gate 產生一則 grounded care。候選用 durable active slot、source unique key、revision、lease 與固定 message event key 去重；`shadow` 只記錄不送出，`on` 才寫入原聊天室並交給既有 polling marker。
 - **Event discovery**：`POST /api/match/events/discover` 只寫入 Mongo singleton job。`social/main.py` 在 FastAPI startup 以 `start_event_discovery_worker()` 建立同一 Social process 內的 daemon thread，由 `event_worker.py` 使用 Change Stream 喚醒並消費；`EVENT_WEEKLY_CYCLE_ENABLED` 只控制 weekly-cycle enqueue，手動 discovery 不受影響。
 - **Event projection/lifecycle**：Concept embedding worker 補齊 768 維向量並刷新 `EVENT_RELEVANCE`／`EVENT_AVOIDANCE`；Event lifecycle worker 獨立處理 Mongo proposal expiry 與 Graph Event cleanup。
 
@@ -174,7 +175,7 @@ Planner 另使用 compact prompt projection：最近 4 則、合計 2,000 字元
 
 | 情境 | 行為 |
 | --- | --- |
-| Planner 無效/逾時 | fail closed，直接回覆，不執行工具 |
+| Planner 無效，或 provider error 重試後仍失敗 | fail closed，直接回覆，不執行工具 |
 | sub-agent 無 tool call | `sub_agent_no_proposal`（Calendar command 缺欄位、歧義、找不到目標則由 preflight 回 `needs_clarification`，不是此 generic failure） |
 | sub-agent exception | `sub_agent_exception`，其他 task 照跑 |
 | Guard 拒絕 | 該 proposal 標記失敗 code，其他 proposal 不受影響 |
@@ -213,12 +214,12 @@ model failure, and no direct evidence have separate typed outcomes.
 ### Places -> Web candidate collaboration
 
 For current/public criteria that typed Places data cannot answer, the Planner
-may emit `places -> web -> synthesizer`. Scheduler projects at most five
-validated Places candidates into the Web slice with ephemeral
-`place_candidate_*` refs. Web search, extraction, findings, and final card
-selection retain the same ref; provider IDs and map internals never enter the
-Web prompt or public response. Synthesizer receives all non-skipped domain
-observations even when the terminal dependency is only the Web task.
+may emit `places -> web -> synthesizer`. A `reviews` Places task first resolves
+the selected place and passes exactly one server-issued `place_candidate_*`
+subject ref to Web. Search, extraction, findings, and source metadata retain
+that binding; provider IDs and map internals never enter the Web prompt or
+public response. Synthesizer receives all non-skipped domain observations even
+when the terminal dependency is only the Web task.
 
 Retrieval count and display count are separate. Up to eight Places candidates
 may be retrieved, while a normal grounded recommendation selects two or three

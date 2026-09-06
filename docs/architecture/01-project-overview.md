@@ -76,7 +76,7 @@ Neo4j 只在需要完整媒婆記憶功能時設定；沒有 Neo4j 時媒婆仍�
 2. `routers/public_chat.py` 保存使用者訊息、組 `AgentTurnContext`，呼叫 `run_public_agent_turn_v3`。
 3. Scheduler 依序處理：assessment session → confirmation → Planner（拆 DAG）→ 依 `RuntimeRegistration` 拓撲分層執行 sub-agents → proposal 經 Guard/工具執行，specialist runtime 回 completed typed result → Synthesizer 產出最終回覆。
 4. 回覆保存為唯一一筆 assistant message；assessment 回答不會進 profile 記憶 pipeline。
-5. 背景：`profile_skills.py` 以保存的 owner 原始訊息做近期情境／記憶 extraction；`proactive_scheduler.py` 依使用者的「AI 關心頻率」定期產生主動關心。
+5. 背景：`profile_skills.py` 以保存的 owner 原始訊息做近期情境／記憶 extraction，並可提出最多三筆 `proactive_followups`；`proactive_scheduler.py` 依 server-owned cadence、quiet/busy 與 consent gate 產生原聊天室的自然追問。
 
 完整流程與每層職責見 `03-v3-runtime-lifecycle.md`。
 

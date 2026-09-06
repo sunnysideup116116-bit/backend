@@ -24,6 +24,7 @@ from services.match_state_service import (
     get_match_status_snapshot,
     verified_accepted_match_query,
 )
+from services.match_quota_service import daily_quota_status
 from services.profile_projection import clean_profile_text, contains_internal_identifier, safe_recent_context
 from services.profile_location import safe_profile_location
 
@@ -34,6 +35,7 @@ from .public_relationship_projection import (
     anonymize_counterparty_payload,
     accepted_contact_ids_by_display_name,
     accepted_contact_summaries,
+    contact_evidence_by_refs,
     display_name as _display_name,
     mentioned_contact_summary,
     other_id as _other_id,
@@ -360,7 +362,9 @@ def _match_latest_outcome(user_id: str) -> ToolResult:
 
 
 def _match_status(user_id: str) -> ToolResult:
-    return ToolResult(ok=True, data=get_match_status_snapshot(user_id))
+    snapshot = get_match_status_snapshot(user_id)
+    snapshot["daily_quota"] = daily_quota_status(user_id)
+    return ToolResult(ok=True, data=snapshot)
 
 
 def _current_time(clock: TurnClockV1 | None) -> ToolResult:
@@ -500,8 +504,23 @@ def _mentioned_contact_summary(ctx: AgentTurnContext, other_ids: list[str]) -> T
     return ToolResult(ok=True, data={"contacts": contacts}, private_data=private_data)
 
 
+def _contact_reference_scope(ctx: AgentTurnContext) -> str:
+    """Bind opaque contact refs to one saved owner message when available."""
+    return str(ctx.message_id or f"{ctx.room_id}:{ctx.message}")[:180]
+
+
 def _accepted_contact_list(ctx: AgentTurnContext) -> ToolResult:
-    contacts, truncated = accepted_contact_summaries(ctx.user_id)
+    try:
+        contacts, truncated = accepted_contact_summaries(
+            ctx.user_id,
+            reference_scope=_contact_reference_scope(ctx),
+        )
+    except Exception:
+        return ToolResult(
+            ok=False,
+            error_code="accepted_contact_list_unavailable",
+            user_message="目前無法讀取已建立聯絡人的資料。",
+        )
     total_count: int | None = len(contacts) if not truncated else None
     if truncated:
         try:
@@ -515,6 +534,27 @@ def _accepted_contact_list(ctx: AgentTurnContext) -> ToolResult:
         "contacts": contacts,
         "truncated": truncated,
         "total_count": total_count,
+    })
+
+
+def _contact_evidence(ctx: AgentTurnContext, contact_refs: list[str]) -> ToolResult:
+    """Read bounded public evidence for refs emitted by this turn's list."""
+    try:
+        contacts, unavailable_refs = contact_evidence_by_refs(
+            ctx.user_id,
+            contact_refs,
+            reference_scope=_contact_reference_scope(ctx),
+            limit=3,
+        )
+    except Exception:
+        return ToolResult(
+            ok=False,
+            error_code="contact_evidence_unavailable",
+            user_message="目前無法確認這些聯絡人的公開資料。",
+        )
+    return ToolResult(ok=True, data={
+        "contacts": contacts,
+        "unavailable_refs": unavailable_refs,
     })
 
 
@@ -884,6 +924,7 @@ def execute_tool(
         "counterparty_summary": lambda: _counterparty_summary(ctx),
         "recent_context": lambda: _recent_context(ctx),
         "relationship_evidence": lambda: _relationship_evidence(ctx, arguments.get("other_id")),
+        "contact_evidence": lambda: _contact_evidence(ctx, arguments.get("contact_refs") or []),
         "mentioned_contact_summary": lambda: _mentioned_contact_summary(ctx, arguments.get("other_ids") or []),
         "accepted_contact_list": lambda: _accepted_contact_list(ctx),
         "memory_profile": lambda: _memory_profile(ctx),

@@ -9,6 +9,7 @@ import requests
 from routers import match as router
 from services import match_search_job_service as jobs
 from services import match_state_service as state
+from services.match_search_context import context_embedding_source_hash
 from tests.test_match_restart_flow import flow
 
 
@@ -24,7 +25,11 @@ def reply(selected=None):
 
 @pytest.fixture
 def batch_flow(monkeypatch):
-    target = {"user_id": "owner", "current_context": "晚上想看電影", "context_embedding": [0.1]}
+    target = {
+        "user_id": "owner", "current_context": "晚上想看電影",
+        "context_embedding": [0.1],
+        "context_embedding_source_hash": context_embedding_source_hash("晚上想看電影"),
+    }
     candidates = [{"user_id": f"candidate-{i}", "current_context": "想去看展覽", "score": 0.8}
                   for i in range(12)]
     profiles, matches = Mock(), Mock()
@@ -39,7 +44,7 @@ def batch_flow(monkeypatch):
     monkeypatch.setattr(router, "agent_candidate_limit", lambda: 3)
     monkeypatch.setattr(router, "_trait_stances", lambda *_args: {})
     monkeypatch.setattr(router, "reconcile_match_state", lambda *_args: None)
-    monkeypatch.setattr(router, "build_validated_match_explanation", lambda *_args: ({}, [], [], "資料支持的介紹"))
+    monkeypatch.setattr(router, "build_validated_match_explanation", lambda *_args, **_kwargs: ({}, [], [], "資料支持的介紹"))
     monkeypatch.setattr(router, "build_friend_intro_v4", lambda *_args, **_kwargs: {})
     post = Mock(return_value=reply())
     monkeypatch.setattr(router.requests, "post", post)
@@ -97,14 +102,15 @@ def test_ineligible_first_three_do_not_hide_later_candidates(batch_flow, monkeyp
     ]
 
 
-def test_excluded_and_busy_candidates_never_reenter_later_batches(batch_flow, monkeypatch):
+def test_excluded_candidates_stay_out_while_waiting_candidates_remain_available(batch_flow, monkeypatch):
     profiles, matches, post = batch_flow
     matches.find.return_value = [{"from_user": "owner", "to_user": "candidate-0", "status": "declined", "created_at": time.time()}]
     monkeypatch.setattr(router.risk_block_service, "excluded_user_ids", lambda _: {"candidate-1"})
     monkeypatch.setattr(router, "reconcile_match_state", lambda user: {"status": "pending"} if user == "candidate-2" else None)
     assert run()["status"] == "no_suitable_candidate"
     ids = [c["user_id"] for call in post.call_args_list for c in call.kwargs["json"]["candidates"]]
-    assert not {"candidate-0", "candidate-1", "candidate-2"} & set(ids)
+    assert not {"candidate-0", "candidate-1"} & set(ids)
+    assert "candidate-2" in ids
     assert "candidate-3" in ids
     exclusions = profiles.aggregate.call_args.args[0][1]["$match"]["user_id"]["$nin"]
     assert {"owner", "candidate-0", "candidate-1"} <= set(exclusions)

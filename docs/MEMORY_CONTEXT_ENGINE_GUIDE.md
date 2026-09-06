@@ -87,6 +87,8 @@ Saved owner message
 - `current_context` 是給 UI／Planner 的安全顯示 projection。
 - 只接受 owner 已保存的原始訊息；assistant reply、history、tool result 與 match state 都不是寫入證據。
 - 每個 evidence span 必須是該 owner message 的連續原文子字串。
+- Public message 的 `metadata.message_use`（`message-use-v1`）是 profile、compaction 與 proactive surface 共用的用途標記。`ordinary` 才可重用；`calendar_operation`、`assessment`、`no_memory` 與未標記的 `unknown` 一律排除。行事曆草稿、補充、確認、取消與失敗回合都沿用同一排除標記。
+- 用途標記在 server 完成 V3 turn 後寫回原始 owner message；background coverage、profile extractor、compaction 與 care delivery 都再次驗證，不能只信 router 當次的結果。
 
 ### 2.2 長期偏好記憶（Concept 與 PREFERS / AVOIDS / CURRENTLY_WANTS）
 
@@ -106,6 +108,7 @@ Saved owner message
 - Mongo `profile_memory_preview`／`profile_memory_summary` 是 bounded read projection；Graph metadata 與 evidence／lifecycle 不得藉由舊 `HAS_PREFERENCE` properties 重複儲存。
 - `message_id` 是 observation idempotency key；同一 owner message 不得增加兩次 evidence count。
 - `profile_memory_outbox` 只保存已驗證的 typed proposals 與 error code，不保存 raw chat。
+- Profile extraction 的 `profile_skill_runs` 以 message-id 唯一去重，保留 processing lease 與 bounded attempt state；provider 暫時失敗由 Social `profile-retry-worker` 依 30／120 秒退避最多重試三次，政策排除與未標記 source 不重試。
 - `memory_outbox_service.py` 以 Mongo lease 領取失敗寫入、指數退避並最多嘗試八次；舊資料的 `next_attempt_at=null` 與欄位不存在都視為立即可重試。成功、重複 delivery 與 terminal failed 都有明確狀態，不會重新萃取 raw chat。
 - 9001 將 `MemoryObservation` marker 與該訊息的全部 Concept edges 放在同一 Neo4j transaction；marker 不得早於 edge 單獨 commit。
 - 使用者 disable 時以 owner-scoped `MEMORY_DISABLED` 保存原 relation；restore 依原 `PREFERS`／`AVOIDS`／未過期 `CURRENTLY_WANTS` 恢復，correct 將該 owner edge 搬到新的 canonical Concept，不修改其他 owner 共用的 Concept 關係。完成後同步 Mongo projection。
@@ -138,6 +141,8 @@ Saved owner message
 - **壓縮策略**：壓縮最舊 **10~11 句**為結構化摘要，保留最新 **20 句**未壓縮訊息。
 - **儲存位置**：MongoDB `conversation_compactions`，並帶 `covered_through_message_id` watermark。
 - **聊天室範圍**：永久 legacy room 與 `ai_rooms` 中經 server 驗證屬於 owner 的新版聊天室各自壓縮；刪除、偽造或他人 room fail closed。壓縮前的 profile coverage 使用同一 owner-room validator。
+- **用途隔離**：只有 `message-use-v1` 的 `ordinary` message 送入摘要模型；被排除的訊息仍計入批次 watermark，但不送入 generation/evaluation。整批皆被排除時保留既有合格摘要並直接推進 watermark，不呼叫模型。舊版或未標記來源不作為遞迴摘要基底。
+- **政策版本**：目前 compaction policy 為 `conversation_compaction_policy_v4`；摘要來源用途變更時，舊版摘要不再注入 context。
 - **模型契約**：generation／evaluation 讀取 `generate_chat_completion()` 的 `ChatResult.content`；測試不得再用不符合正式 contract 的純字串掩蓋介面漂移。
 - **啟用閘門**：個別 canary user 可由明確 allowlist 讀取通過評估的摘要；`*` 全域 token 另要求 rollout readiness（至少 50 筆、pass ≥95%、review ≤5%、unavailable ≤2%、指標未過期），結果快取 60 秒。未達標時只保留 shadow generation，不注入 context。
 
@@ -164,14 +169,14 @@ Saved owner message
 
 `services/ayue_agent/context.py` 是 Public V3 唯一 Context Builder。現在的 budget：
 
-- 最近 12 則訊息，合計最多 6,000 字元。
+- 最近 32 則訊息，合計最多 8,000 字元。
 - 本人近期情境一份。
 - 本人長期記憶最多 8 筆。
 - 唯一 live proposal 的安全狀態。
 - 經 server 驗證的公開 mention。
 - Asia/Taipei turn clock 與 capability version。
 
-Context Builder 只組合安全 projection，不負責重新萃取、修正或寫入記憶。
+Context Builder 只組合安全 projection，不負責重新萃取、修正或寫入記憶。原文視窗和 compaction watermark 使用相同的 `(timestamp, _id)` 排序；超出 32 則／8,000 字元時回 bounded recent-only projection，不宣稱完整覆蓋。
 
 ### 2.6 已知技術債（不要沿用成新架構）
 
@@ -323,7 +328,7 @@ Neo4j 只保留配對與 Event traversal 需要的最小 relation projection。
 - 建議有 TTL、版本與 dismissed state；使用者不喜歡某建議，不代表他討厭該活動。
 - 不使用對方私人資料產生本人建議。Relationship advice 只能依共同聊天室與已同意分享資訊。
 - 醫療、法律、財務等高風險建議不得由這個一般交友 advice surface 自動生成。
-- 主動推播 advice 前另做 frequency、grounding 與 duplication policy，不可直接重用 proactive care claim。
+- 主動追問先由 owner-scoped `proactive_followups` 保存 typed topic、question goal、source 與 expiry，再由 server scheduler 做 consent、48 小時／七日上限、未回答後七日冷卻、quiet/busy 與 lease gate；active slot 與固定 message event key 分別防止候選競態超額與重試重複訊息。`proactive_care.py` 只接收 bounded candidate grounding，以及保留 like/dislike/avoid/require 方向的安全 memory wording，不把 frequency selector 或 Calendar 詳細內容送進模型。
 
 ## 6. 允許的整合點
 

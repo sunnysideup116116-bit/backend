@@ -56,7 +56,11 @@ def match_choice_labels(record: dict[str, Any]) -> dict[str, str]:
             "interested": ("先不接受", "確認接受"),
         }.get((record.get("arguments") or {}).get("decision"))
     elif action == "match.start_search":
-        pair = ("暫不搜尋", "開始搜尋")
+        invite_on_match = (
+            isinstance(record.get("payload"), dict)
+            and str(record["payload"].get("delivery_mode") or "").strip() == "invite_on_match"
+        )
+        pair = ("先不找", "開始找並送出邀請") if invite_on_match else ("暫不搜尋", "開始搜尋")
     elif action == "match.cancel_search":
         pair = ("繼續搜尋", "停止搜尋")
     return {"cancel_label": pair[0], "confirm_label": pair[1]} if pair else {}
@@ -70,7 +74,14 @@ def match_choice_cancel_reply(record: dict[str, Any]) -> str | None:
             "cancelled": "這次沒有送出撤回，我沒有更動提案。",
             "interested": "這次沒有送出接受，我沒有更動提案。",
         }.get((record.get("arguments") or {}).get("decision"))
-    return {"match.start_search": "這次不開始搜尋。", "match.cancel_search": "這次沒有送出停止搜尋。"}.get(action)
+    if action == "match.start_search":
+        if (
+            isinstance(record.get("payload"), dict)
+            and str(record["payload"].get("delivery_mode") or "").strip() == "invite_on_match"
+        ):
+            return "好，這次先不找，也沒有送出邀請。"
+        return "這次不開始搜尋。"
+    return {"match.cancel_search": "這次沒有送出停止搜尋。"}.get(action)
 
 
 def public_choice_projection(record: dict[str, Any]) -> dict[str, Any]:
@@ -88,13 +99,14 @@ def public_choice_projection(record: dict[str, Any]) -> dict[str, Any]:
         "superseded": "superseded",
         "failed": "failed",
     }.get(status, "failed")
-    return {
+    projection = {
         "id": str(record.get("_id") or ""),
         "state": state,
         "selected": selected,
         "expires_at": float(record.get("expires_at", 0) or 0),
         **match_choice_labels(record),
     }
+    return projection
 
 
 def project_match_choice_history(messages: list[dict], *, user_id: str, room_id: str, collection: Any) -> list[dict]:

@@ -32,6 +32,7 @@ from services.assessment_session_service import (
     assessment_session_for_room,
 )
 from services.ayue_agent.proactive_care import record_proactive_activity
+from services.proactive_followup_service import record_owner_activity
 from services.ayue_agent.onboarding import complete_public_ayue_onboarding
 from services.ayue_agent.product_identity import PUBLIC_RETRY_REPLY, PUBLIC_RUNTIME_ERROR_REPLY
 from services.ayue_agent.v3.debug_trace import (
@@ -54,6 +55,19 @@ from services.conversation_compaction_service import (
 )
 from services.profile_skills import profile_skills_mode_for_user
 from services.profile_task_service import queue_profile_skills as _queue_profile_skills
+from services.message_use_service import (
+    MessageUse,
+    mark_message_use,
+    mark_message_use_from_turn,
+)
+from services.ayue_agent.v3.place_references import (
+    PlaceReferencePersistenceError,
+    publish_place_presentation,
+)
+from services.ayue_agent.v3.relationship_recommendations import (
+    RecommendationPersistenceError,
+    save_snapshot as save_relationship_recommendation_snapshot,
+)
 from services.relationship_engagement_service import (
     find_accepted_match,
     mark_post_chat_activity,
@@ -69,6 +83,7 @@ from services.risk_block_service import (
     RiskBlockServiceUnavailable,
     risk_block_service,
 )
+from services.proposal_namespace import namespace_for_document
 
 
 def _log_public_stream_exception(exc: Exception) -> None:
@@ -90,6 +105,46 @@ router = APIRouter()
 MATCH_READINESS_THRESHOLD = 75
 
 
+def _validate_focused_match(req: DirectChatRequest) -> dict | None:
+    """Resolve one Hub card against canonical participant/namespace state."""
+    match_id = str(req.focused_match_id or "").strip()
+    if not match_id:
+        return None
+    from bson.objectid import ObjectId
+
+    try:
+        document = matches_coll.find_one({"_id": ObjectId(match_id)})
+    except Exception:
+        document = None
+    if not document:
+        raise HTTPException(status_code=404, detail="這張牽線卡已不存在")
+    if req.user_id not in {document.get("from_user"), document.get("to_user")}:
+        raise HTTPException(status_code=403, detail="只能詢問自己收到的牽線卡")
+    namespace = namespace_for_document(document)
+    if req.focused_match_namespace and req.focused_match_namespace != namespace:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "這張牽線卡的類型已更新，請重新查看。",
+                "current_namespace": namespace,
+                "current_status": document.get("status"),
+                "current_revision": int(document.get("proposal_revision", 0) or 0),
+            },
+        )
+    current_revision = int(document.get("proposal_revision", 0) or 0)
+    if req.focused_match_revision is not None and req.focused_match_revision != current_revision:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "這張牽線卡的狀態已更新，請重新查看。",
+                "current_namespace": namespace,
+                "current_status": document.get("status"),
+                "current_revision": current_revision,
+            },
+        )
+    return document
+
+
 def _resolve_ai_room_id(req: DirectChatRequest) -> str:
     """Resolve the room id for a Public Ayue turn.
 
@@ -97,6 +152,10 @@ def _resolve_ai_room_id(req: DirectChatRequest) -> str:
     (enforced via :func:`get_ai_room`); otherwise we fall back to the legacy
     deterministic AI room. Invalid/foreign room ids are rejected with 403.
     """
+    if req.focused_match_id:
+        # Validate before persisting the owner message, so a stale/foreign
+        # focus cannot become part of conversation history.
+        _validate_focused_match(req)
     if req.ai_room_id:
         if not get_ai_room(req.ai_room_id, req.user_id):
             raise HTTPException(status_code=403, detail="無權存取此聊天室")
@@ -210,7 +269,13 @@ def _complete_public_turn(
     debug_enabled: bool = False,
 ) -> dict:
     """Run and persist one V3 turn after the owner message has been saved."""
-    history = list(messages_coll.find({"room_id": room_id}).sort("timestamp", -1).limit(12))[::-1]
+    fetched_history = list(
+        messages_coll.find({"room_id": room_id})
+        .sort([("timestamp", -1), ("_id", -1)])
+        .limit(33)
+    )
+    history_truncated = len(fetched_history) > 32
+    history = list(reversed(fetched_history[:32]))
     user_doc = profiles_coll.find_one({"user_id": req.user_id}) or {}
     room_session = assessment_session_for_room(
         user_doc, room_id, include_unscoped=not bool(req.ai_room_id),
@@ -226,8 +291,12 @@ def _complete_public_turn(
         choice_id=req.choice_id,
         choice_action=req.choice_action,
         message_id=user_message_id,
+        history_truncated=history_truncated,
         mentioned_ids=requested_mentions,
         mention_overflow=mention_overflow,
+        focused_match_id=req.focused_match_id,
+        focused_match_namespace=req.focused_match_namespace,
+        focused_match_revision=req.focused_match_revision,
         user_profile=agent_profile,
         recent_history=history,
         device_location=(
@@ -239,6 +308,19 @@ def _complete_public_turn(
         agent_ctx, on_progress=on_progress, on_token=on_token,
         debug_enabled=debug_enabled,
     )
+    owner_profile_message = _owner_profile_message(req, requested_mentions)
+    message_use = mark_message_use_from_turn(
+        user_message_id,
+        user_id=req.user_id,
+        room_id=room_id,
+        profile_write_reason=agent_result.profile_write_reason,
+        owner_message=owner_profile_message,
+        calendar_operation=agent_result.calendar_state_changed,
+    )
+    if user_message_id is None:
+        # A turn without a saved owner source (button control or a defensive
+        # fallback path) must never make its assistant receipt reusable.
+        message_use = MessageUse.UNKNOWN
     complete_public_ayue_onboarding(req.user_id)
     latest_profile = profiles_coll.find_one(
         {"user_id": req.user_id}, {"_id": 0, "agentic_assessment_session": 1},
@@ -275,6 +357,80 @@ def _complete_public_turn(
         saved_reply = save_message(room_id, "ai_assistant", ai_reply, metadata=metadata)
     else:
         saved_reply = save_message(room_id, "ai_assistant", ai_reply)
+    place_presentation_published = False
+    if isinstance(saved_reply, dict):
+        try:
+            mark_message_use(
+                saved_reply.get("message_id"),
+                user_id=req.user_id,
+                room_id=room_id,
+                sender_id="ai_assistant",
+                use=message_use,
+                reason="owner_turn_excluded",
+            )
+        except Exception:
+            # Unmarked messages fail closed in every reuse consumer. Keep the
+            # already-saved reply available even when the auxiliary marker
+            # write is temporarily unavailable.
+            pass
+        if (
+            agent_result.relationship_recommendation_snapshot
+            and saved_reply.get("message_id")
+            and run_id
+        ):
+            try:
+                save_relationship_recommendation_snapshot(
+                    req.user_id,
+                    room_id,
+                    run_id,
+                    str(saved_reply["message_id"]),
+                    agent_result.relationship_recommendation_snapshot,
+                )
+            except RecommendationPersistenceError as exc:
+                print(f"[relationship_recommendation] snapshot skipped: {type(exc).__name__}")
+        if (
+            run_id
+            and saved_reply.get("message_id")
+            and agent_result.place_presentation_required
+        ):
+            # Place snapshots are created before this assistant write but stay
+            # unpublished until the message has a durable message_id. This
+            # prevents a failed assistant save from arming an unreferenced
+            # candidate list for a later turn.
+            try:
+                published = publish_place_presentation(
+                    req.user_id,
+                    room_id,
+                    run_id,
+                    str(saved_reply["message_id"]),
+                )
+            except PlaceReferencePersistenceError:
+                published = False
+            if not published:
+                # The assistant row was saved before its source relation could
+                # be committed. Quarantine it so a later turn cannot resolve
+                # an unbound list, and return the same fail-closed copy used by
+                # Scheduler persistence failures.
+                try:
+                    from bson.objectid import ObjectId
+                    messages_coll.update_one(
+                        {"_id": ObjectId(str(saved_reply["message_id"]))},
+                        {"$set": {"is_blocked": True}},
+                    )
+                except Exception:
+                    pass
+                ai_reply = "這次找到地點，但暫時無法保存候選清單；請稍後再試，我還沒有替你建立行程。"
+                reply_messages = [ai_reply]
+            else:
+                place_presentation_published = True
+    if place_presentation_published and on_token is not None:
+        # Scheduler withholds its normal final-reply replay for place turns.
+        # Release exactly the text stored in the assistant row only after the
+        # snapshot is linked to that durable row, so a client never observes a
+        # candidate list that cannot be selected on a later turn.
+        persisted_reply = str(saved_reply.get("content") or ai_reply)
+        for start in range(0, len(persisted_reply), 120):
+            on_token(persisted_reply[start:start + 120])
     if run_id and isinstance(saved_reply, dict) and saved_reply.get("message_id"):
         mark_public_confirmation_presented(
             user_id=req.user_id,
@@ -287,17 +443,13 @@ def _complete_public_turn(
     # messages still reach the isolated extractor.
     profile_skill_mode = "off"
     profile_process_run_key = None
-    if (
-        background_tasks is not None and user_message_id
-        and agent_result.profile_write_reason != "assessment"
-    ):
+    if background_tasks is not None and user_message_id and message_use is MessageUse.ORDINARY:
         candidate_run_key = uuid.uuid4().hex
-        owner_profile_message = _owner_profile_message(req, requested_mentions)
         profile_skill_mode = queue_profile_skills(
             background_tasks, req.user_id, owner_profile_message, user_message_id, "global",
             progress_token=candidate_run_key,
         )
-        if profile_skill_mode in {"on", "shadow"}:
+        if profile_skill_mode in {"on", "shadow"} and profile_skills_mode_for_user(req.user_id) != "off":
             profile_process_run_key = candidate_run_key
     if background_tasks is not None:
         queue_conversation_compaction_shadow(background_tasks, req.user_id, room_id)
@@ -574,7 +726,11 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
                 name="ayue-room-title",
                 daemon=True,
             ).start()
-        record_proactive_activity(req.user_id)
+        # Owner activity is tracked independently from the legacy fixed
+        # frequency scheduler. Follow-up candidates are proposed by the
+        # background Profile task from this persisted source message.
+        if user_message:
+            record_owner_activity(req.user_id)
         return _complete_public_turn(
             req, room_id, requested_mentions, mention_overflow,
             background_tasks=background_tasks,

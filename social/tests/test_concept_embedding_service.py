@@ -7,6 +7,12 @@ from services import concept_embedding_service as service
 
 
 class ConceptEmbeddingServiceTests(unittest.TestCase):
+    def setUp(self):
+        service._projection_cache.clear()
+
+    def tearDown(self):
+        service._projection_cache.clear()
+
     @patch.object(service, "_mongo_kind_overrides", return_value={"hiking": "activity"})
     @patch.object(service, "get_embeddings", return_value=[[3.0] + [4.0] + [0.0] * 766])
     @patch.object(service.requests, "post")
@@ -59,6 +65,53 @@ class ConceptEmbeddingServiceTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "rate_limited")
         self.assertGreaterEqual(result["retry_after"], 46.0)
+
+    def test_legacy_preference_kind_is_projected_as_interest(self):
+        self.assertEqual(
+            service._resolved_kind(
+                {"key": "coffee", "suggested_kind": "preference"}, {},
+            ),
+            "interest",
+        )
+
+    @patch.object(service, "_mongo_kind_overrides", return_value={})
+    @patch.object(service, "get_embeddings", return_value=[[1.0] + [0.0] * 767])
+    @patch.object(service.requests, "post")
+    @patch.object(service.requests, "get")
+    def test_no_progress_stops_short_interval_reembedding(
+        self, read, write, embed, _mongo_kinds,
+    ):
+        read_response = Mock()
+        read_response.raise_for_status.return_value = None
+        read_response.json.return_value = {
+            "status": "success",
+            "concepts": [{
+                "key": "coffee", "label": "咖啡",
+                "suggested_kind": "preference",
+            }],
+        }
+        read.return_value = read_response
+        write_response = Mock()
+        write_response.raise_for_status.return_value = None
+        write_response.json.return_value = {
+            "status": "success", "embedded_count": 0, "pending_count": 1,
+        }
+        write.return_value = write_response
+
+        first = service.process_pending_concept_embeddings()
+        second = service.process_pending_concept_embeddings()
+
+        self.assertEqual(first["status"], "stalled")
+        self.assertGreaterEqual(first["retry_after"], 6 * 60 * 60)
+        self.assertEqual(second["status"], "stalled")
+        embed.assert_called_once()
+
+    def test_daily_quota_waits_until_next_pacific_reset(self):
+        delay = service._retry_after_seconds(
+            "429 quota_id=EmbedContentRequestsPerDayPerUserPerProjectPerModel-FreeTier",
+        )
+        self.assertGreater(delay, 60)
+        self.assertLessEqual(delay, 25 * 60 * 60)
 
 
 if __name__ == "__main__":

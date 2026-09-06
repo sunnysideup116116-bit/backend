@@ -15,9 +15,11 @@ from services.ai_service import get_embedding, generate_chat_completion
 from services.memory_service import get_user_graph_memories
 from services.mediator_event_service import queue_mediator_event
 from services.match_state_service import (
-    get_match_status_snapshot, has_verified_acceptance, reconcile_live_match,
+    get_match_status_snapshot, has_verified_acceptance, load_match_state,
+    reconcile_live_match,
 )
 from services.match_reason_service import (
+    COUNTERPARTY_PLACEHOLDER,
     FRIEND_COPY_VERSION,
     MATCH_PROPOSAL_FEW_SHOTS,
     MATCH_PROPOSAL_STYLE_IDS,
@@ -39,6 +41,7 @@ from services.match_action_service import (
 )
 from services.match_search_job_service import (
     MatchSearchPipelineError,
+    INVITE_ON_MATCH,
     cancel_match_search,
     public_match_search_status,
     register_match_search_pipeline,
@@ -58,10 +61,28 @@ from services.proposal_namespace import (
     participant_pair_key,
 )
 from services.profile_projection import safe_recent_context
+from services.match_search_context import (
+    context_embedding_source_hash,
+    provider_search_context,
+    safe_search_context,
+    search_context_for_turn,
+)
+from services.match_quota_service import (
+    daily_quota_status,
+    release_daily_quota,
+    reserve_daily_quota,
+)
 from services.match_card_projection import (
     proposal_card_state, proposal_counterparty_nickname,
 )
 from services.public_nickname_service import proposal_display_name
+from services.ai_room_service import (
+    MATCH_HUB_ROOM_KIND,
+    get_room,
+    match_hub_room_id,
+    match_hub_v1_enabled,
+)
+from services.chat_service import generate_room_id
 from services.language_service import normalize_zh_tw
 from services.risk_block_service import (
     RiskBlockServiceUnavailable,
@@ -84,16 +105,36 @@ LIVE_MATCH_STATUSES = {"draft", "pending"}
 MATCH_CANDIDATE_POOL_SIZE = 20
 MATCH_MAX_CANDIDATE_BATCHES = 3
 MATCH_SELECTION_TIMEOUT_SECONDS = 120.0
+MATCH_TEST_ID_PATTERN = r"^(?:seed_user_|match_test_)"
 
 
 def ensure_match_indexes():
-    """Keep one unresolved proposal per participant in each namespace."""
+    """Ensure idempotent pair indexes for the multi-card Hub.
+
+    The legacy participant-wide unique index is intentionally not dropped at
+    startup.  ``scripts/migrate_match_multi_indexes.py --apply`` performs that
+    separately after a duplicate dry-run, so an existing deployment cannot be
+    made unavailable by an automatic destructive migration.
+    """
     try:
+        if os.getenv("MATCH_MULTI_INDEX_READY", "on").strip().lower() not in {"1", "true", "on"}:
+            # Legacy deployments can opt back into the old guard while the
+            # audited index migration is pending. New installs use the pair
+            # index below and therefore support several cards per participant.
+            matches_coll.create_index(
+                [("proposal_namespace", 1), ("live_participants", 1)],
+                unique=True,
+                partialFilterExpression={"status": {"$in": ["draft", "pending"]}},
+                name="one_live_proposal_per_namespace_participant",
+            )
         matches_coll.create_index(
-            [("proposal_namespace", 1), ("live_participants", 1)],
+            [("live_pair_key", 1)],
             unique=True,
-            partialFilterExpression={"status": {"$in": ["draft", "pending"]}},
-            name="one_live_proposal_per_namespace_participant",
+            partialFilterExpression={
+                "status": {"$in": ["draft", "pending"]},
+                "live_pair_key": {"$exists": True},
+            },
+            name="one_live_proposal_per_pair",
         )
     except Exception as exc:
         # A legacy duplicate must be migrated before Atlas can create this index.
@@ -144,8 +185,122 @@ def derive_match_stage(match_doc: dict, user_id: str) -> str:
     return status or "idle"
 
 
+def _public_match_basis(match_doc: dict) -> dict:
+    """Return the shared, privacy-safe evidence contract for a match card."""
+    raw = match_doc.get("match_basis")
+    if not isinstance(raw, dict):
+        tier = str(match_doc.get("recommendation_tier") or "")
+        raw = {
+            "level": "direct" if tier in {"grounded", "event_grounded"} else "adjacent",
+            "need_evidence": [],
+            "counterparty_evidence": [],
+            "concrete_overlap": [],
+            "cannot_infer": ["對方尚未同意這次介紹或活動安排。"],
+        }
+    level = str(raw.get("level") or "insufficient")
+    if level not in {"direct", "adjacent", "insufficient"}:
+        level = "insufficient"
+
+    def bounded_list(value: object, limit: int = 4) -> list[str]:
+        values = value if isinstance(value, list) else [value]
+        result = []
+        for item in values:
+            text = _short_text(item, 120)
+            text = re.sub(
+                r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}",
+                "已隱藏聯絡方式",
+                text,
+            )
+            text = re.sub(
+                r"(?<!\d)(?:\+?886[-\s]?)?0?9\d{2}[-\s]?\d{3}[-\s]?\d{3}(?!\d)",
+                "已隱藏聯絡方式",
+                text,
+            )
+            text = re.sub(
+                r"seed_user_[A-Za-z0-9_-]+|(?:user_id|match_id)\s*[:=]\s*\S+",
+                "對方",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if text and text not in result:
+                result.append(text)
+            if len(result) >= limit:
+                break
+        return result
+
+    return {
+        "level": level,
+        "need_evidence": bounded_list(raw.get("need_evidence")),
+        "counterparty_evidence": bounded_list(raw.get("counterparty_evidence")),
+        "concrete_overlap": bounded_list(raw.get("concrete_overlap")),
+        "cannot_infer": bounded_list(raw.get("cannot_infer")),
+    }
+
+
+def _proposal_source_projection(match_doc: dict, user_id: str) -> dict:
+    """Expose only a bound source-room summary for Hub navigation."""
+    is_initiator = match_doc.get("from_user") == user_id
+    role = "initiator" if is_initiator else "receiver"
+    rooms = match_doc.get("proposal_delivery_rooms") or {}
+    # The initiator may have a legacy/global source binding. A receiver must
+    # have an explicit receiver binding; accepting the global source here can
+    # expose the initiator's originating room or summary to the other viewer.
+    requested_room_id = str(
+        rooms.get(role)
+        or (match_doc.get("source_room_id") if is_initiator else "")
+        or ""
+    ).strip()
+    if requested_room_id:
+        if requested_room_id == match_hub_room_id(user_id):
+            source_room = {
+                "room_id": requested_room_id,
+                "user_id": user_id,
+                "title": "阿月牽線",
+            }
+        else:
+            try:
+                source_room = get_room(requested_room_id, user_id)
+            except Exception:
+                source_room = None
+        if not isinstance(source_room, dict):
+            # A source room from the other participant, a deleted room, or a
+            # malformed legacy binding must never become a navigation target.
+            requested_room_id = ""
+            source_room = None
+    else:
+        source_room = None
+    if not requested_room_id:
+        return {
+            "source_room_id": "",
+            "source_room_title": "",
+            "source_summary": "",
+        }
+    # The summary/title fields on a legacy match document are initiator-owned
+    # metadata. A receiver can only see the title returned by their own
+    # validated room; no global summary or title fallback is allowed.
+    source_title = str(
+        (source_room or {}).get("title")
+        or (match_doc.get("source_room_title") if is_initiator else "")
+        or ""
+    )[:60]
+    source_summary = (
+        str(match_doc.get("source_summary") or "")[:180]
+        if is_initiator else ""
+    )
+    return {
+        "source_room_id": requested_room_id,
+        "source_room_title": source_title,
+        "source_summary": source_summary,
+    }
+
+
 def build_active_proposal_card(match_doc: dict, user_id: str):
-    stage = derive_match_stage(match_doc, user_id)
+    if not isinstance(match_doc, dict):
+        return None
+    canonical_state = proposal_card_state(match_doc, user_id)
+    if not canonical_state:
+        return None
+    stage = canonical_state.get("stage") or ""
     if stage not in {"waiting_user", "waiting_other", "incoming_decision"}:
         return None
     is_initiator = match_doc.get("from_user") == user_id
@@ -172,9 +327,8 @@ def build_active_proposal_card(match_doc: dict, user_id: str):
             reason_for_viewer(match_doc, user_id) or "目前沒有明確共同點，適合先從公開近況聊起。",
             other_id, 180, counterparty_name=other_name,
         )]
-    score = (
-        match_doc.get("score_breakdown", {})
-        if is_initiator else match_doc.get("receiver_score_breakdown", {})
+    invitation_topic = _short_text(
+        (match_doc.get("search_context") or {}).get("invitation_topic"), 80,
     )
     card = {
         "match_id": str(match_doc["_id"]),
@@ -198,13 +352,26 @@ def build_active_proposal_card(match_doc: dict, user_id: str):
             counterparty_name=other_name,
         ),
         "reasons": reasons,
-        "score": round(float(score.get("total", 0) or 0)),
         "viewer_reason": anonymize_counterparty_text(
             viewer_reason, other_id, 180, counterparty_name=other_name,
         ),
         "reason_version": str(match_doc.get("reason_version") or "legacy"),
         "proposal_namespace": namespace_for_document(match_doc),
-        "proposal_revision": int(match_doc.get("proposal_revision", 0) or 0),
+        "status": canonical_state.get("status"),
+        "canonical_status": canonical_state.get("status"),
+        "decision_action": canonical_state.get("decision_action") or "",
+        "proposal_revision": canonical_state.get("proposal_revision", 0),
+        "invitation_topic": invitation_topic,
+        "match_source_kind": str(
+            match_doc.get("match_source_kind")
+            or ("event" if namespace_for_document(match_doc) == EVENT_INVITATION_NAMESPACE
+                else "requested_topic" if invitation_topic else "recent_context")
+        ),
+        "match_basis": _public_match_basis(match_doc),
+        **_proposal_source_projection(match_doc, user_id),
+        "focus_match_id": str(match_doc.get("_id") or ""),
+        "created_at": float(match_doc.get("created_at") or 0),
+        "updated_at": float(match_doc.get("updated_at") or match_doc.get("created_at") or 0),
     }
     event_card = public_event_card(match_doc)
     if event_card:
@@ -256,9 +423,15 @@ def build_status_proposal_card(match_doc: dict, user_id: str):
     return {
         key: card[key]
         for key in (
-            "other_label", "stage", "event_type", "opening", "your_context",
-            "other_context", "reasons", "score", "viewer_reason",
+            "match_id", "other_label", "stage", "event_type", "opening", "your_context",
+            "other_context", "reasons", "viewer_reason",
             "event", "proposal_namespace", "proposal_revision",
+            "status", "canonical_status", "decision_action",
+            "match_basis", "source_room_id", "source_room_title", "source_summary",
+            "focus_match_id",
+            "created_at", "updated_at",
+            "invitation_topic",
+            "match_source_kind",
         )
         if key in card
     }
@@ -270,6 +443,30 @@ def _single_live_namespace_proposal(user_id: str, namespace: str) -> dict | None
         live_proposal_query(user_id, namespace),
     ).sort([("created_at", -1)]).limit(2))
     return rows[0] if len(rows) == 1 else None
+
+
+def _live_namespace_proposals(user_id: str, namespace: str) -> list[dict]:
+    """Load the Hub inbox without collapsing a namespace to one slot.
+
+    The compatibility singleton helper remains available to older callers;
+    this projection is used by the status endpoint and always returns all
+    participant-visible cards.  A fallback to the helper keeps older test
+    adapters and legacy deployments readable while their indexes are upgraded.
+    """
+    try:
+        rows = list(matches_coll.find(
+            live_proposal_query(user_id, namespace),
+        ).sort([("updated_at", -1), ("created_at", -1)]).limit(50))
+    except Exception:
+        rows = []
+    if rows:
+        return rows
+    if namespace == RELATIONSHIP_MATCH_NAMESPACE:
+        compatibility = reconcile_match_state(user_id)
+        if compatibility:
+            return [compatibility]
+    fallback = _single_live_namespace_proposal(user_id, namespace)
+    return [fallback] if fallback else []
 def _short_text(value, limit: int) -> str:
     text = re.sub(r"\s+", " ", normalize_zh_tw(str(value or ""))).strip()
     return text[:limit].rstrip()
@@ -287,6 +484,11 @@ def _short_list(value, item_limit: int = 3, char_limit: int = 24) -> list[str]:
         if len(clean) >= item_limit:
             break
     return clean
+
+
+def _safe_search_context(value: object) -> dict[str, object]:
+    """Compatibility facade for the bounded per-search context contract."""
+    return safe_search_context(value)
 
 
 def strip_agent_payload(doc):
@@ -363,13 +565,36 @@ def _trait_stances(user_id: str) -> dict[str, set[str]]:
     return stances
 
 
+def _has_specific_context(value: object) -> bool:
+    """Keep broad mood/availability phrases out of semantic-only matches."""
+    text = re.sub(r"\s+", "", normalize_zh_tw(str(value or ""))).strip()
+    if not text:
+        return False
+    return not bool(re.fullmatch(
+        r"(?:最近|目前|這週|本週|週末|今天|今晚|晚上|平常)?"
+        r"(?:都)?(?:是)?(?:晚上|平常)?(?:想|想要|希望|正在)?"
+        r"(?:找人(?:出門|出去|聊天)?|找個人(?:出門|出去|聊天)?|出門|出去|放鬆|休息|放空|聊天|有人陪|有空|看看|隨便走走)",
+        text,
+    ))
+
+
 def candidate_qualification(
     target: dict, candidate: dict, *,
     target_stances: dict[str, set[str]] | None = None,
     candidate_stances: dict[str, set[str]] | None = None,
     vector_score: float = 0.0,
+    allow_adjacent: bool = False,
+    search_context: dict | None = None,
 ) -> dict:
-    """Require a reciprocal safety check plus one strong, owner-grounded link."""
+    """Require reciprocal safety plus a direct or concrete semantic link.
+
+    ``allow_adjacent`` is retained as a call-compatibility keyword only.  It
+    never grants eligibility by itself.  A request-scoped activity topic or
+    specific recent contexts may let a high-scoring candidate reach the
+    Matchmaker; the candidate side remains explicitly unverified.
+    """
+    del allow_adjacent
+    search_context = safe_search_context(search_context)
     target_stances = target_stances if target_stances is not None else _trait_stances(target.get("user_id"))
     candidate_stances = candidate_stances if candidate_stances is not None else _trait_stances(candidate.get("user_id"))
     hard_conflicts = []
@@ -387,6 +612,13 @@ def candidate_qualification(
     shared_values = sorted(target_values & candidate_values)
     target_activity = str((target.get("context_signals") or {}).get("activity") or "").strip()
     candidate_activity = str((candidate.get("context_signals") or {}).get("activity") or "").strip()
+    target_context = str(target.get("current_context") or "").strip()
+    candidate_context = str(
+        candidate.get("current_context")
+        or candidate.get("initial_interest")
+        or candidate_activity
+        or ""
+    ).strip()
     same_activity = bool(target_activity and candidate_activity and target_activity == candidate_activity)
     strong_reason_codes = []
     if same_activity:
@@ -395,23 +627,78 @@ def candidate_qualification(
         strong_reason_codes.append("shared_persistent_preference")
     if shared_values:
         strong_reason_codes.append("shared_value")
-    target_context = str(target.get("current_context") or "").strip()
-    candidate_context = str(
-        candidate.get("current_context")
-        or candidate.get("initial_interest")
-        or (candidate.get("context_signals") or {}).get("activity")
-        or ""
-    ).strip()
-    if (
+    invitation_topic = str(search_context.get("invitation_topic") or "").strip()
+    if invitation_topic and float(vector_score or 0) >= vector_qualification_minimum():
+        strong_reason_codes.append("requested_topic")
+    semantic_context_similarity = bool(
         target_context
         and candidate_context
         and float(vector_score or 0) >= vector_qualification_minimum()
-    ):
+        and (
+            target_activity
+            or candidate_activity
+            or (
+                _has_specific_context(target_context)
+                and _has_specific_context(candidate_context)
+            )
+        )
+    )
+    if semantic_context_similarity:
+        # Embedding supplies recall. LLM still decides whether this candidate
+        # deserves an introduction; the copy remains adjacent unless a direct
+        # owner-grounded overlap is present.
         strong_reason_codes.append("semantic_context_similarity")
+    direct_codes = {
+        "shared_activity", "shared_persistent_preference", "shared_value",
+    }
+    level = (
+        "direct"
+        if direct_codes.intersection(strong_reason_codes)
+        else "adjacent"
+        if {"requested_topic", "semantic_context_similarity"}.intersection(strong_reason_codes)
+        else "insufficient"
+    )
+    target_evidence = _short_list(
+        [
+            f"指定活動主題：{invitation_topic}" if invitation_topic else "",
+            target.get("current_context"), target_activity,
+        ], item_limit=3, char_limit=90,
+    )
+    candidate_evidence = _short_list(
+        [candidate.get("current_context"), candidate_activity], item_limit=3, char_limit=90,
+    )
+    overlap = _short_list(
+        [
+            *(f"近期活動：{target_activity}" for _ in [0] if same_activity),
+            *(f"共同偏好：{item}" for item in shared_persistent_preferences),
+            *(f"共同價值：{item}" for item in shared_values),
+            f"本次指定主題：{invitation_topic}" if "requested_topic" in strong_reason_codes else "",
+            "近期情境相近" if "semantic_context_similarity" in strong_reason_codes else "",
+        ],
+        item_limit=4,
+        char_limit=90,
+    )
     return {
         "eligible": not hard_conflicts and bool(strong_reason_codes),
         "hard_conflict_keys": sorted(set(hard_conflicts)),
         "strong_reason_codes": strong_reason_codes,
+        # This is the shared candidate/write contract.  It deliberately
+        # contains owner-provided evidence only; vector recall alone yields
+        # ``insufficient`` and cannot create a proposal.
+        "match_basis": {
+            "level": level,
+            "need_evidence": target_evidence,
+            "counterparty_evidence": candidate_evidence,
+            "concrete_overlap": overlap,
+            "cannot_infer": [
+                "性格或語意相近不代表對方已同意認識你。",
+                "不會從近況推論對方的行程、位置或聯絡方式。",
+                *(
+                    [f"對方是否具備「{invitation_topic}」技能或已有出席安排，仍待本人確認。"]
+                    if invitation_topic else []
+                ),
+            ],
+        },
     }
 
 
@@ -434,8 +721,16 @@ def validated_distinctive_tags(candidate: dict) -> list[str]:
     return tags
 
 
-def build_validated_match_explanation(target: dict, candidate: dict, vector_score: float):
+def build_validated_match_explanation(
+    target: dict,
+    candidate: dict,
+    vector_score: float,
+    *,
+    search_context: dict | None = None,
+):
     """Build user-visible scores and reasons only from owner-bound facts."""
+    search_context = safe_search_context(search_context)
+    invitation_topic = str(search_context.get("invitation_topic") or "").strip()
     target_id, candidate_id = target.get("user_id"), candidate.get("user_id")
     target_graph = get_user_graph_memories(target_id, 20)
     candidate_graph = get_user_graph_memories(candidate_id, 20)
@@ -519,6 +814,13 @@ def build_validated_match_explanation(target: dict, candidate: dict, vector_scor
             "target_evidence_ids": [f"profile:{target_id}:deep_profile"],
             "candidate_evidence_ids": [f"profile:{candidate_id}:deep_profile"],
         })
+    if invitation_topic:
+        reason_items.append({
+            "kind": "requested_topic",
+            "text": f"這次指定想聊的主題：{invitation_topic}",
+            "target_evidence_ids": ["search_context:invitation_topic"],
+            "candidate_evidence_ids": [],
+        })
     shared_kinds = {"shared_graph", "shared_context", "shared_value"}
     shared_reasons = [item["text"] for item in reason_items if item.get("kind") in shared_kinds]
     candidate_context = str(candidate.get("current_context") or "").strip()
@@ -535,6 +837,22 @@ def build_validated_match_explanation(target: dict, candidate: dict, vector_scor
         if candidate_context:
             recommendation_reason += f"。對方公開近況：{candidate_context}。"
         recommendation_reason += "可以先從這些共同點聊起。"
+    elif invitation_topic:
+        tier = "exploratory"
+        reason_items.append({
+            "kind": "exploratory_notice",
+            "text": (
+                f"這次依你指定的「{invitation_topic}」主題與整體資料排序；"
+                "目前沒有資料能確認對方是否具備這項技能或已有出席安排，適合先問問對方是否有興趣。"
+            ),
+            "target_evidence_ids": ["search_context:invitation_topic"],
+            "candidate_evidence_ids": [],
+        })
+        top_reasons = [f"依你指定的「{invitation_topic}」主題排序"]
+        recommendation_reason = (
+            f"主題型推薦：依你指定的「{invitation_topic}」主題與整體資料排序。"
+            "目前沒有資料能確認對方是否具備這項技能或已有出席安排，適合先問問對方是否有興趣。"
+        )
     else:
         tier = "exploratory"
         reason_items.append({
@@ -781,7 +1099,128 @@ def build_directional_reason_v3_from_snapshot(match_doc: dict) -> list[dict]:
     )
 
 
-def _friend_intro_entry(viewer: dict, other: dict, tier: str, *, refine: bool) -> dict:
+def _topic_friend_intro_fallback(
+    viewer: dict,
+    other: dict,
+    tier: str,
+    topic: str,
+    *,
+    requester_id: str = "",
+    query_text: str = "",
+    auto_invite: bool = False,
+) -> dict:
+    """Invite around a requested topic without attributing a skill to either user."""
+    del tier
+    other_context = reason_public_text(other.get("current_context"), 56)
+    query = reason_public_text(query_text, 600)
+    activity_phrase = next(
+        (
+            f"{prefix}{topic}"
+            for prefix in ("一起", "陪我", "跟我", "和我")
+            if f"{prefix}{topic}" in query
+        ),
+        f"一起{topic}",
+    )
+    is_requester = str(viewer.get("user_id") or "") == str(requester_id or "")
+    if is_requester:
+        if other_context:
+            first = f"你想找人{activity_phrase}。這位朋友最近提過「{other_context}」，可以先從這件事認識彼此。"
+        else:
+            first = f"你想找人{activity_phrase}，我找到一位可以先認識看看的人。"
+        second = (
+            "對方是否熟悉這項活動、想不想同行，還要等本人回覆。"
+            if auto_invite
+            else "對方是否熟悉這項活動、想不想同行，還要先問問本人。要我幫你問嗎？"
+        )
+    else:
+        if other_context:
+            first = f"有位朋友想找人{activity_phrase}，對方最近提過「{other_context}」。"
+        else:
+            first = f"有位朋友想找人{activity_phrase}，想先問問你有沒有興趣。"
+        second = "可以先認識、聊聊彼此的想法，再決定要不要一起去。你願意認識看看嗎？"
+    accepted_opening = (
+        f"好消息，{COUNTERPARTY_PLACEHOLDER}也點頭了！"
+        f"可以先聊聊「{topic}」，問問對方對這個主題的想法。"
+    )
+    return {
+        "style_id": "topic_request",
+        "tier": "exploratory",
+        "viewer_text": first + second,
+        "scenario_bridge": activity_phrase,
+        "personality_dynamic": "",
+        "conversation_starter": f"可以先聊聊對{topic}的想法。",
+        "accepted_opening": accepted_opening,
+        "used_evidence_keys": [
+            "search_context.invitation_topic",
+            *(["other.current_context"] if other_context else []),
+        ],
+    }
+
+
+def _refine_topic_friend_intro(
+    viewer: dict,
+    other: dict,
+    fallback: dict,
+    *,
+    topic: str,
+    requester_id: str,
+    auto_invite: bool,
+) -> dict:
+    """Let the model phrase one topic invitation while keeping evidence role-bound."""
+    other_context = reason_public_text(other.get("current_context"), 56)
+    if not other_context:
+        return fallback
+    is_requester = str(viewer.get("user_id") or "") == str(requester_id or "")
+    payload = {
+        "recipient_role": "requester" if is_requester else "invitee",
+        "invitation_topic": topic,
+        "other_person_recent_context": other_context,
+        "invitation_already_sent": bool(is_requester and auto_invite),
+    }
+    prompt = f"""你是交友軟體裡像朋友一樣牽線的阿月。只寫給目前這一位收件人。
+用自然的繁體中文寫 2 到 3 句，不要固定用「有位朋友」開頭。保留想一起做的活動，不要改成只聊活動。
+只能使用提供的活動主題與另一人的公開近況。不能說任何人已經會這項活動、已答應同行或一定合適，也不要加入性格互補。
+如果 recipient_role 是 requester 且 invitation_already_sent=true，介紹找到的人即可，不要再問要不要送出；如果是 invitee，說明邀請來自另一人並詢問是否願意先認識。
+other_person_recent_context 必須原樣出現在 viewer_text，不能補名字、地點、日期、技能或其他事實。
+只輸出 JSON：{{"viewer_text":"","conversation_starter":"","accepted_opening":""}}
+accepted_opening 只在雙方同意後使用，必須保留 {{{{counterparty}}}} 一次，並建議從活動想法開始聊。
+資料：{json.dumps(payload, ensure_ascii=False)}"""
+    try:
+        raw = json.loads(generate_chat_completion(prompt, temperature=0.55, json_output=True).content)
+    except Exception:
+        return fallback
+    text = _short_text(raw.get("viewer_text"), 220) if isinstance(raw, dict) else ""
+    check_text = text if not (is_requester and auto_invite) else f"{text}你有興趣嗎？"
+    if not valid_friend_intro_text(
+        check_text,
+        required_context=other_context,
+        role_bound=True,
+    ):
+        return fallback
+    if is_requester and auto_invite and text.endswith(("？", "?")):
+        return fallback
+    starter = _short_text(raw.get("conversation_starter"), 72)
+    opening = valid_accepted_opening_text(
+        raw.get("accepted_opening"), required_context=other_context,
+    )
+    return {
+        **fallback,
+        "viewer_text": text,
+        "conversation_starter": starter or fallback["conversation_starter"],
+        "accepted_opening": opening or fallback["accepted_opening"],
+    }
+
+
+def _friend_intro_entry(
+    viewer: dict,
+    other: dict,
+    tier: str,
+    *,
+    refine: bool,
+    search_context: dict | None = None,
+    requester_id: str = "",
+    auto_invite: bool = False,
+) -> dict:
     """Create one V4 projection from one recipient's point of view.
 
     The identifiers are stored only with the proposal so the runtime can prove
@@ -799,8 +1238,34 @@ def _friend_intro_entry(viewer: dict, other: dict, tier: str, *, refine: bool) -
         or ""
     )
     style_id = match_reason_style_id(viewer, other, context_revision=context_revision)
+    search_context = safe_search_context(search_context)
+    invitation_topic = str(search_context.get("invitation_topic") or "").strip()
     fallback = friend_intro_fallback(viewer, other, tier, style_id=style_id)
-    reason = _refine_directional_reason(viewer, other, tier, fallback) if refine else fallback
+    if invitation_topic:
+        # A topic request is a requester's need, not evidence that the
+        # counterparty has the skill or will attend.  Keep this branch
+        # deterministic so a provider cannot strengthen that claim.
+        fallback = _topic_friend_intro_fallback(
+            viewer, other, tier, invitation_topic,
+            requester_id=requester_id,
+            query_text=search_context.get("query_text", ""),
+            auto_invite=auto_invite,
+        )
+        reason = (
+            _refine_topic_friend_intro(
+                viewer,
+                other,
+                fallback,
+                topic=invitation_topic,
+                requester_id=requester_id,
+                auto_invite=auto_invite,
+            )
+            if refine
+            else fallback
+        )
+        style_id = reason["style_id"]
+    else:
+        reason = _refine_directional_reason(viewer, other, tier, fallback) if refine else fallback
     text = _short_text(reason.get("viewer_text"), 220)
     if not text or any(token in text.lower() for token in ("seed_user", "user_id", "mongo", "資料庫", "物件")):
         reason = fallback
@@ -823,6 +1288,7 @@ def _friend_intro_entry(viewer: dict, other: dict, tier: str, *, refine: bool) -
 
 def build_friend_intro_v4(
     initiator: dict, receiver: dict, vector_score: float, *, refine: bool = False,
+    search_context: dict | None = None, auto_invite: bool = False,
 ) -> dict:
     """Create the two immutable V4 friend-introduction projections.
 
@@ -830,13 +1296,25 @@ def build_friend_intro_v4(
     invitation to the initiator and a separate one to the receiver.  It never
     gets a bidirectional JSON shape that it could accidentally swap.
     """
-    _, items, _, _ = build_validated_match_explanation(initiator, receiver, vector_score)
+    _, items, _, _ = build_validated_match_explanation(
+        initiator, receiver, vector_score, search_context=search_context,
+    )
     tier = next((item.get("text") for item in items if item.get("kind") == "recommendation_tier"), "exploratory")
     if tier not in {"grounded", "exploratory"}:
         tier = "exploratory"
     return {
-        "initiator_preview": _friend_intro_entry(initiator, receiver, tier, refine=refine),
-        "receiver_invitation": _friend_intro_entry(receiver, initiator, tier, refine=refine),
+        "initiator_preview": _friend_intro_entry(
+            initiator, receiver, tier, refine=refine,
+            search_context=search_context,
+            requester_id=str(initiator.get("user_id") or ""),
+            auto_invite=auto_invite,
+        ),
+        "receiver_invitation": _friend_intro_entry(
+            receiver, initiator, tier, refine=refine,
+            search_context=search_context,
+            requester_id=str(initiator.get("user_id") or ""),
+            auto_invite=auto_invite,
+        ),
     }
 
 
@@ -925,9 +1403,22 @@ def generate_matches_for_user(
     report_progress: Callable[[str], bool] | None = None,
     can_commit: Callable[[], bool] | None = None,
     search_job_id: str = "",
+    search_context: dict | None = None,
+    delivery_mode: str = "preview_on_match",
+    origin_room_id: str = "",
 ):
     """Run the existing matching pipeline for either a manual or proactive request."""
-    req = MatchRequest(user_id=user_id)
+    bound_search_context = search_context_for_turn(search_context)
+    bound_delivery_mode = (
+        INVITE_ON_MATCH
+        if str(delivery_mode or "").strip() == INVITE_ON_MATCH
+        and str(bound_search_context.get("invitation_topic") or "").strip()
+        else "preview_on_match"
+    )
+    req = MatchRequest(
+        user_id=user_id,
+        search_context=bound_search_context,
+    )
     candidate_limit = agent_candidate_limit()
     total_start = time.perf_counter()
     print(f"[TIMING][V1 /api/match] start user={req.user_id} candidate_limit={candidate_limit}")
@@ -959,17 +1450,46 @@ def generate_matches_for_user(
     stored_context = str(stored_context_value or "")
     normalized_context = safe_recent_context(stored_context, "交朋友")
     user_doc["current_context"] = normalized_context
-    user_embedding = user_doc.get("context_embedding", [])
-    if not user_embedding or normalized_context != stored_context:
+    query_text = str((req.search_context or {}).get("query_text") or "").strip()
+    if query_text:
+        # A topic-specific search is an ephemeral query.  Keep the profile's
+        # durable context embedding untouched so this request cannot leak into
+        # the next ordinary search.
         step_start = time.perf_counter()
-        user_embedding = get_embedding(normalized_context)
-        # Embedding refresh is derived from the profile version loaded above.
-        # Never let a slow search overwrite a newer profile/context update.
-        profiles_coll.update_one(
-            {"user_id": req.user_id, "current_context": stored_context_value},
-            {"$set": {"context_embedding": user_embedding}},
-        )
-        print(f"[TIMING][V1 /api/match] create missing embedding: {time.perf_counter() - step_start:.3f}s")
+        try:
+            user_embedding = get_embedding(query_text)
+        except Exception as exc:
+            print(f"[match] request-scoped embedding failed: {type(exc).__name__}")
+            raise MatchSearchPipelineError(
+                "vector_search_unavailable", "vector_search",
+            ) from exc
+        print(f"[TIMING][V1 /api/match] create query embedding: {time.perf_counter() - step_start:.3f}s")
+    else:
+        user_embedding = user_doc.get("context_embedding", [])
+        expected_source_hash = context_embedding_source_hash(normalized_context)
+        if (
+            not user_embedding
+            or normalized_context != stored_context
+            or user_doc.get("context_embedding_source_hash") != expected_source_hash
+        ):
+            step_start = time.perf_counter()
+            try:
+                user_embedding = get_embedding(normalized_context)
+            except Exception as exc:
+                print(f"[match] durable context embedding failed: {type(exc).__name__}")
+                raise MatchSearchPipelineError(
+                    "vector_search_unavailable", "vector_search",
+                ) from exc
+            # Embedding refresh is derived from the profile version loaded above.
+            # Never let a slow search overwrite a newer profile/context update.
+            profiles_coll.update_one(
+                {"user_id": req.user_id, "current_context": stored_context_value},
+                {"$set": {
+                    "context_embedding": user_embedding,
+                    "context_embedding_source_hash": expected_source_hash,
+                }},
+            )
+            print(f"[TIMING][V1 /api/match] create missing embedding: {time.perf_counter() - step_start:.3f}s")
     
     step_start = time.perf_counter()
     existing_matches = list(matches_coll.find({"$or": [{"from_user": req.user_id}, {"to_user": req.user_id}]}))
@@ -981,20 +1501,37 @@ def generate_matches_for_user(
             detail="安全關係狀態暫時無法確認，配對搜尋未執行",
         ) from exc
     excluded_users = {req.user_id, *block_exclusions}
+    excluded_pair_keys: set[str] = set()
     current_revision = int(user_doc.get("current_context_revision", 0))
     for m in existing_matches:
         status = m.get("status")
         age = time.time() - float(m.get("created_at", 0))
-        should_exclude = status in {"draft", "pending"} or (
+        pair_key = participant_pair_key(m.get("from_user"), m.get("to_user"))
+        # Pair history is a dedupe/safety boundary.  It is not a global user
+        # lock: a person may have several incoming invitations while their own
+        # waiting-to-reply draft is handled in the Hub.
+        should_exclude_pair = status in {"draft", "pending"} or (
             status == "accepted" and has_verified_acceptance(m)
         )
         if status == "declined":
-            should_exclude = age < 30 * 86400 or int(m.get("context_revision", 0)) == current_revision
-        if should_exclude:
-            excluded_users.add(m["from_user"])
-            excluded_users.add(m["to_user"])
+            should_exclude_pair = age < 30 * 86400 or int(m.get("context_revision", 0)) == current_revision
+        if should_exclude_pair and pair_key:
+            excluded_pair_keys.add(pair_key)
+        if req.user_id in {m.get("from_user"), m.get("to_user")} and should_exclude_pair:
+            other = m.get("to_user") if m.get("from_user") == req.user_id else m.get("from_user")
+            if other:
+                excluded_users.add(other)
     print(f"[TIMING][V1 /api/match] load existing matches: {time.perf_counter() - step_start:.3f}s count={len(existing_matches)}")
     
+    test_cohort = str(user_doc.get("test_match_cohort") or "").strip()
+    candidate_match = {"user_id": {"$nin": list(excluded_users)}}
+    if test_cohort:
+        candidate_match["test_match_cohort"] = test_cohort
+    else:
+        candidate_match["test_match_cohort"] = {"$exists": False}
+        candidate_match["$and"] = [
+            {"user_id": {"$not": {"$regex": MATCH_TEST_ID_PATTERN}}},
+        ]
     pipeline = [
         {
             "$vectorSearch": {
@@ -1006,9 +1543,7 @@ def generate_matches_for_user(
             }
         },
         {
-            "$match": {
-                "user_id": { "$nin": list(excluded_users) }
-            }
+            "$match": candidate_match
         },
         {
             "$addFields": {
@@ -1036,7 +1571,11 @@ def generate_matches_for_user(
     seen_candidates = set(excluded_users)
     for c in raw_candidates:
         candidate_id = c.get("user_id")
-        if not candidate_id or candidate_id in seen_candidates:
+        if (
+            not candidate_id
+            or candidate_id in seen_candidates
+            or participant_pair_key(req.user_id, candidate_id) in excluded_pair_keys
+        ):
             continue
         seen_candidates.add(candidate_id)
         score = c.get("score", 0.0)
@@ -1082,20 +1621,24 @@ def generate_matches_for_user(
             target_stances=target_stances,
             candidate_stances=_trait_stances(candidate_id),
             vector_score=vector_scores.get(candidate_id, 0),
+            search_context=req.search_context,
         )
     qualified_candidates = [
         candidate for candidate in clean_candidates
         if qualification_by_id.get(candidate.get("user_id"), {}).get("eligible")
-        and not reconcile_match_state(candidate["user_id"])
+        and participant_pair_key(req.user_id, candidate["user_id"]) not in excluded_pair_keys
     ]
     if not qualified_candidates:
         return {
             "status": "no_suitable_candidate", "matches": [],
+            "reason_code": "insufficient_common_ground",
+            "search_context": dict(req.search_context or {}),
             "debug_info": [{
                 "user_id": candidate.get("user_id"),
                 "score": round(float(vector_scores.get(candidate.get("user_id"), 0) or 0) * 100, 2),
                 "eligible": False,
                 "reason_codes": qualification_by_id.get(candidate.get("user_id"), {}).get("strong_reason_codes", []),
+                "match_basis": qualification_by_id.get(candidate.get("user_id"), {}).get("match_basis", {}),
             } for candidate in clean_candidates],
         }
     
@@ -1115,6 +1658,9 @@ def generate_matches_for_user(
             "target_user": agent_user_doc,
             "candidates": [strip_agent_payload(c) for c in batch],
             "target_deep_profile": target_deep_profile,
+            # The matchmaker needs the topic/query, never the source-message
+            # identity that is used only for Social-side provenance.
+            "search_context": provider_search_context(req.search_context),
         }
         step_start = time.perf_counter()
         agent_matches = _request_matchmaker_selection(payload, timeout=remaining)
@@ -1132,14 +1678,38 @@ def generate_matches_for_user(
         return {"status": "stale", "matches": [], "debug_info": []}
     step_start = time.perf_counter()
     result_matches = []
+    # User initiated introductions share one daily allowance.  Incoming
+    # proposals are never counted here, and proactive Event scans use their
+    # own bucket in ``event_opportunity_service``.
+    quota_operation_key = str(search_job_id or f"direct:{req.user_id}:{uuid.uuid4().hex}")
+    quota_reserved = False
+    is_user_initiated = str(source or "").strip().lower() not in {
+        "automatic", "background", "event_opportunity", "proactive_event",
+    }
+    if is_user_initiated:
+        quota = reserve_daily_quota(
+            req.user_id, bucket="active", operation_key=quota_operation_key,
+        )
+        if quota.get("status") == "exhausted":
+            return {
+                "status": "quota_exceeded", "matches": [],
+                "reason_code": "daily_active_quota_exceeded", "debug_info": [],
+            }
+        if quota.get("status") == "unavailable":
+            raise MatchSearchPipelineError("quota_unavailable", "proposal_write")
+        quota_reserved = quota.get("status") in {"reserved", "already_reserved"}
     for m in agent_matches[:1]:
         if can_commit is not None and not can_commit():
+            if quota_reserved:
+                release_daily_quota(
+                    req.user_id, bucket="active", operation_key=quota_operation_key,
+                )
             return {"status": "stale", "matches": [], "debug_info": []}
         matched_id = m.get("matched_user_id")
         
         if not matched_id or not qualification_by_id.get(matched_id, {}).get("eligible"):
             continue
-        if reconcile_match_state(matched_id):
+        if participant_pair_key(req.user_id, matched_id) in excluded_pair_keys:
             continue
 
         candidate_doc = next(
@@ -1149,16 +1719,20 @@ def generate_matches_for_user(
         contrast_label = _short_text((candidate_doc.get("big_five") or {}).get("summary"), 16)
         distinctive_tags = validated_distinctive_tags(candidate_doc)
         score_breakdown, reason_items, top_reasons, reason = build_validated_match_explanation(
-            user_doc, candidate_doc, vector_scores.get(matched_id, 0)
+            user_doc, candidate_doc, vector_scores.get(matched_id, 0),
+            search_context=req.search_context,
         )
         receiver_breakdown, receiver_items, _, receiver_reason = build_validated_match_explanation(
-            candidate_doc, user_doc, vector_scores.get(matched_id, 0)
+            candidate_doc, user_doc, vector_scores.get(matched_id, 0),
+            search_context=req.search_context,
         )
         # V4 persists two role-bound friend introductions.  They are created
         # with two separate model calls and never exposed as a two-way public
         # payload, so a role swap cannot leak into the recipient's card.
         friend_intro_v4 = build_friend_intro_v4(
             user_doc, candidate_doc, vector_scores.get(matched_id, 0), refine=True,
+            search_context=req.search_context,
+            auto_invite=bound_delivery_mode == INVITE_ON_MATCH,
         )
         ai_recommendation_reason = str(
             (friend_intro_v4.get("initiator_preview") or {}).get("viewer_text") or reason
@@ -1187,6 +1761,16 @@ def generate_matches_for_user(
             "top_reasons": top_reasons,
             "reason_items": reason_items,
             "recommendation_tier": recommendation_tier,
+            "match_basis": qualification_by_id.get(matched_id, {}).get(
+                "match_basis", {
+                    "level": "insufficient",
+                    "need_evidence": [],
+                    "counterparty_evidence": [],
+                    "concrete_overlap": [],
+                    "cannot_infer": ["對方尚未同意這次介紹或活動安排。"],
+                },
+            ),
+            "search_context": dict(req.search_context or {}),
             "receiver_reason_items": receiver_items,
             "receiver_score_breakdown": receiver_breakdown,
             "match_context_snapshot": {
@@ -1208,23 +1792,48 @@ def generate_matches_for_user(
             "status": "draft",
             "delivery_channel": "mediator_chat",
             "proposal_source": str(source or "manual")[:40],
+            "match_source_kind": (
+                "requested_topic" if str((req.search_context or {}).get("invitation_topic") or "").strip()
+                else "recent_context"
+            ),
             "participant_pair_key": participant_pair_key(req.user_id, matched_id),
+            "live_pair_key": (
+                f"{RELATIONSHIP_MATCH_NAMESPACE}:"
+                f"{participant_pair_key(req.user_id, matched_id)}"
+            ),
             "relationship_establishing": True,
             "context_revision": int(user_doc.get("current_context_revision", 0)),
             "proposal_revision": 0,
             "created_at": time.time(),
             "state_history": [{"from": None, "to": "draft", "actor": req.user_id, "action": "created", "at": time.time()}]
         }
+        match_doc["delivery_mode"] = bound_delivery_mode
+        if str(origin_room_id or "").strip():
+            match_doc["origin_room_id"] = str(origin_room_id).strip()[:240]
         if search_job_id:
             match_doc["search_job_id"] = search_job_id
         if can_commit is not None and not can_commit():
+            if quota_reserved:
+                release_daily_quota(
+                    req.user_id, bucket="active", operation_key=quota_operation_key,
+                )
             return {"status": "stale", "matches": [], "debug_info": []}
         try:
             insert_result = matches_coll.insert_one(match_doc)
         except DuplicateKeyError:
             # Another worker/user established a live proposal after our final
             # read. The unique participant index is the authoritative guard.
+            if quota_reserved:
+                release_daily_quota(
+                    req.user_id, bucket="active", operation_key=quota_operation_key,
+                )
             return {"status": "stale", "matches": [], "debug_info": []}
+        except Exception:
+            if quota_reserved:
+                release_daily_quota(
+                    req.user_id, bucket="active", operation_key=quota_operation_key,
+                )
+            raise
         
         # 查詢候選人的 profile 供前端渲染
         to_doc = profiles_coll.find_one({"user_id": matched_id}, {"_id": 0})
@@ -1243,6 +1852,8 @@ def generate_matches_for_user(
             "big_five": to_doc.get("big_five", {}) if to_doc else {},
             "current_context": to_doc.get("current_context", "") if to_doc else "",
             "target_context": user_doc.get("current_context", ""),
+            "match_basis": qualification_by_id.get(matched_id, {}).get("match_basis", {}),
+            "search_context": dict(req.search_context or {}),
         })
         print(f"  ✅ 建立 draft 配對: {req.user_id} → {matched_id} [{contrast_label}]")
     
@@ -1258,6 +1869,10 @@ def generate_matches_for_user(
         })
     
     print(f"[TIMING][V1 /api/match] total: {time.perf_counter() - total_start:.3f}s user={req.user_id}")
+    if not result_matches and quota_reserved:
+        release_daily_quota(
+            req.user_id, bucket="active", operation_key=quota_operation_key,
+        )
     return {
         "status": "success" if result_matches else "no_suitable_candidate",
         "matches": result_matches,
@@ -1279,24 +1894,38 @@ register_match_search_pipeline(generate_matches_for_user)
 
 @router.post("/request")
 def request_next_match(req: MatchRequest, background_tasks: BackgroundTasks):
-    active = reconcile_match_state(req.user_id)
-    if active:
+    del background_tasks
+    state = load_match_state(req.user_id)
+    active = state.get("active_proposal")
+    # A draft is the one state where the user still has an unanswered
+    # introduction.  Waiting for the other person's reply or receiving an
+    # invitation does not prevent another search; both cards stay visible in
+    # the Hub.  This removes the old implicit "start search = decline" path.
+    if active and state.get("search_blocked"):
         stage = derive_match_stage(active, req.user_id)
         other_id = active["to_user"] if active["from_user"] == req.user_id else active["from_user"]
         _set_match_search(
             req.user_id, stage, req.source, match_id=str(active["_id"]), other_id=other_id
         )
-        return {"status": "already_active", "stage": stage}
+        return {"status": "already_active", "stage": stage, "reason_code": "draft_needs_decision"}
     if not req.confirmed:
         _set_match_search(req.user_id, "awaiting_confirmation", req.source)
         return {
             "status": "awaiting_confirmation",
             "message": "要我現在幫你翻翻名單嗎？你點開始，我才會真的去找。",
         }
-    return start_match_search(
-        req.user_id, source=req.source, force_new=req.force_new,
-        idempotency_key=f"match-request:{req.user_id}:{uuid.uuid4().hex}",
-    )
+    origin_room_id = str(req.origin_room_id or "").strip()
+    if origin_room_id and get_room(origin_room_id, req.user_id) is None:
+        raise HTTPException(status_code=403, detail="來源聊天室不是你的聊天室")
+    kwargs = {
+        "source": req.source,
+        "force_new": req.force_new,
+        "idempotency_key": req.idempotency_key or f"match-request:{req.user_id}:{uuid.uuid4().hex}",
+        "origin_room_id": origin_room_id,
+    }
+    if req.search_context is not None:
+        kwargs["search_context"] = _safe_search_context(req.search_context)
+    return start_match_search(req.user_id, **kwargs)
 
 
 @router.post("/cancel")
@@ -1305,24 +1934,46 @@ def cancel_match_request(req: MatchRequest):
 
 @router.get("/status")
 def get_match_status(user_id: str):
-    relationship_active = reconcile_match_state(user_id)
-    event_active = _single_live_namespace_proposal(
-        user_id, EVENT_INVITATION_NAMESPACE,
+    relationship_live = _live_namespace_proposals(
+        user_id, RELATIONSHIP_MATCH_NAMESPACE,
     )
-    relationship_card = (
-        build_status_proposal_card(relationship_active, user_id)
-        if relationship_active else None
-    )
-    event_card = (
-        build_status_proposal_card(event_active, user_id)
-        if event_active else None
-    )
+    event_live = _live_namespace_proposals(user_id, EVENT_INVITATION_NAMESPACE)
+    relationship_active = relationship_live[0] if relationship_live else None
+    event_active = event_live[0] if event_live else None
+    relationship_card = build_status_proposal_card(relationship_active, user_id) if relationship_active else None
+    event_card = build_status_proposal_card(event_active, user_id) if event_active else None
     search = public_match_search_status(user_id)
     snapshot = get_match_status_snapshot(user_id)
     public_snapshot = {
         key: snapshot.get(key)
-        for key in ("state", "scope", "is_terminal", "chat_opened", "counterparty", "reason_code")
+        for key in (
+            "state", "scope", "is_terminal", "chat_opened", "counterparty",
+            "reason_code", "active_proposal_count", "pending_action_count",
+            "waiting_other_count",
+        )
     }
+    cards = [
+        card for document in [*relationship_live, *event_live]
+        if (card := build_status_proposal_card(document, user_id))
+    ]
+    hub_cards = sorted(
+        [
+            dict(card)
+            for document in [*relationship_live, *event_live]
+            if (card := build_active_proposal_card(document, user_id))
+        ],
+        key=lambda card: (
+            0 if card.get("stage") in {"waiting_user", "incoming_decision"} else 1,
+            -float(card.get("updated_at") or 0),
+        ),
+    )
+    pending_action_count = sum(
+        1 for card in cards if card.get("stage") in {"waiting_user", "incoming_decision"}
+    )
+    waiting_other_count = sum(
+        1 for card in cards if card.get("stage") == "waiting_other"
+    )
+    hub_id = match_hub_room_id(user_id) if match_hub_v1_enabled() else None
     return {
         "search": search,
         "match_search": search,
@@ -1333,6 +1984,16 @@ def get_match_status(user_id: str):
         },
         "status_snapshot": public_snapshot,
         "search_reason_code": search.get("reason_code") or None,
+        "feature_flags": {
+            "match_hub_v1": bool(match_hub_v1_enabled()),
+        },
+        "hub_room_id": hub_id,
+        "pending_action_count": pending_action_count,
+        "waiting_other_count": waiting_other_count,
+        # Participant-bound cards are used only by the Hub UI.  The two
+        # namespace summaries above remain the compatibility/status contract.
+        "hub_cards": hub_cards,
+        "daily_quota": daily_quota_status(user_id),
     }
 
 def _accepted_chat_target(match_doc: dict | None, user_id: str) -> dict:
@@ -1366,9 +2027,11 @@ def get_single_match_state(user_id: str, match_id: str):
     if user_id not in {match_doc.get("from_user"), match_doc.get("to_user")}:
         raise HTTPException(status_code=403, detail="Only a match participant may read this state")
     proposal_namespace = namespace_for_document(match_doc)
+    canonical_state = proposal_card_state(match_doc, user_id)
     response = {
         "match_id": match_id,
-        **proposal_card_state(match_doc, user_id),
+        **canonical_state,
+        "canonical_status": canonical_state.get("status"),
         "proposal_namespace": proposal_namespace,
         "chat_reused": bool(
             match_doc.get("status") == "accepted"
@@ -1377,15 +2040,61 @@ def get_single_match_state(user_id: str, match_id: str):
         ),
         **_accepted_chat_target(match_doc, user_id),
     }
+    source = _proposal_source_projection(match_doc, user_id)
+    response.update(source)
+    response["match_basis"] = _public_match_basis(match_doc)
+    invitation_topic = _short_text(
+        (match_doc.get("search_context") or {}).get("invitation_topic"), 80,
+    )
+    if invitation_topic:
+        response["invitation_topic"] = invitation_topic
+    response["match_source_kind"] = str(
+        match_doc.get("match_source_kind")
+        or ("event" if proposal_namespace == EVENT_INVITATION_NAMESPACE
+            else "requested_topic" if invitation_topic else "recent_context")
+    )
+    destination_room_id = (
+        match_hub_room_id(user_id)
+        if match_hub_v1_enabled()
+        else str((match_doc.get("proposal_delivery_rooms") or {}).get(
+            "initiator" if match_doc.get("from_user") == user_id else "receiver",
+        ) or "")
+    )
+    if destination_room_id and not (
+        match_hub_v1_enabled() and destination_room_id == match_hub_room_id(user_id)
+    ):
+        try:
+            if not isinstance(get_room(destination_room_id, user_id), dict):
+                destination_room_id = ""
+        except Exception:
+            destination_room_id = ""
+    response["destination_room_id"] = destination_room_id
+    response["focus_match_id"] = match_id
+    event_card = public_event_card(match_doc)
+    if event_card:
+        # Event details remain a safe public projection even after the
+        # invitation reaches accepted/declined/expired terminal state.
+        response["event"] = event_card
     # While a proposal is still actionable, hydrate its saved chat card from
     # the canonical viewer-bound projection.  This lets old cards receive copy
     # compatibility fixes without editing message history.
     active_card = build_active_proposal_card(match_doc, user_id)
     if active_card:
         response["viewer_reason"] = active_card.get("viewer_reason", "")
+        if active_card.get("invitation_topic"):
+            response["invitation_topic"] = active_card["invitation_topic"]
         response["decline_reason_options"] = active_card.get("decline_reason_options", [])
         if active_card.get("event"):
             response["event"] = active_card["event"]
+    else:
+        # Historical/terminal state still gets the same viewer-bound reason
+        # when one was saved, without reconstructing a live action card.
+        response["viewer_reason"] = anonymize_counterparty_text(
+            reason_for_viewer(match_doc, user_id),
+            match_doc.get("to_user") if match_doc.get("from_user") == user_id else match_doc.get("from_user"),
+            180,
+        )
+        response["decline_reason_options"] = []
     response["counterparty_nickname"] = proposal_counterparty_nickname(
         match_doc, user_id,
         lambda uid: proposal_display_name(uid, fallback_lookup=public_display_name),
@@ -1394,10 +2103,18 @@ def get_single_match_state(user_id: str, match_id: str):
 
 @router.post("")
 def match_endpoint(req: MatchRequest):
-    return start_match_search(
-        req.user_id, source=req.source, force_new=req.force_new,
-        idempotency_key=f"match-endpoint:{req.user_id}:{uuid.uuid4().hex}",
-    )
+    origin_room_id = str(req.origin_room_id or "").strip()
+    if origin_room_id and get_room(origin_room_id, req.user_id) is None:
+        raise HTTPException(status_code=403, detail="來源聊天室不是你的聊天室")
+    kwargs = {
+        "source": req.source,
+        "force_new": req.force_new,
+        "idempotency_key": req.idempotency_key or f"match-endpoint:{req.user_id}:{uuid.uuid4().hex}",
+        "origin_room_id": origin_room_id,
+    }
+    if req.search_context is not None:
+        kwargs["search_context"] = _safe_search_context(req.search_context)
+    return start_match_search(req.user_id, **kwargs)
 
 def _apply_match_decision(req: MatchDecisionRequest, background_tasks: BackgroundTasks):
     result = decide_match_action(
@@ -1432,6 +2149,14 @@ def _apply_match_decision(req: MatchDecisionRequest, background_tasks: Backgroun
             print(f"[match] accepted navigation unavailable: {type(exc).__name__}")
             accepted = None
         response.update(_accepted_chat_target(accepted, req.user_id))
+        response["focus_match_id"] = req.match_id
+        accepted_namespace = namespace_for_document(accepted or {})
+        if accepted_namespace == EVENT_INVITATION_NAMESPACE and match_hub_v1_enabled():
+            response["destination_room_id"] = match_hub_room_id(req.user_id)
+        elif response.get("other_id"):
+            response["destination_room_id"] = generate_room_id(
+                req.user_id, str(response["other_id"]),
+            )
     return response
 
 

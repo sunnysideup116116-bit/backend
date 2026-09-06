@@ -16,6 +16,16 @@ def generate_room_id(u1, u2):
 # so onboarding, assessment, proactive care, and old clients keep working.
 _AI_ROOM_PREFIX = "ai_room::"
 
+# The match hub is a server-owned, durable surface.  Keep this helper beside
+# the other room-id constructors so every producer and reader uses the same
+# namespace rather than deriving a one-off proposal room id.
+MATCH_HUB_ROOM_KIND = "match_hub"
+
+
+def generate_match_hub_ai_room_id(user_id: str) -> str:
+    """Return the one stable match-hub room id for ``user_id``."""
+    return f"{_AI_ROOM_PREFIX}{user_id}::{MATCH_HUB_ROOM_KIND}"
+
 
 def generate_ai_room_id(user_id: str) -> str:
     """Return a new random AI room id owned by ``user_id``.
@@ -106,6 +116,15 @@ def save_pair_owner_message_once(
         mirror_message_to_appwrite_async(msg)
         queue_push_notification(msg)
     return msg
+
+
+def find_system_message_by_event(room_id: str, *, event_key: str):
+    """Read the durable message using save_system_message_once's ID contract."""
+    digest = hashlib.sha256(f"{room_id}:{event_key}".encode("utf-8")).hexdigest()
+    return messages_coll.find_one(
+        {"_id": f"system-event:{digest}", "room_id": room_id, "sender_id": "ai_assistant"},
+        {"_id": 1, "content": 1, "timestamp": 1},
+    )
 
 
 def save_system_message_once(room_id, content, message_type="text", metadata=None, *, event_key: str):

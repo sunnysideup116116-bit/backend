@@ -8,11 +8,15 @@ from services.calendar_service import ensure_calendar_indexes
 from services.ayue_agent.v3.scheduler import ensure_indexes as ensure_ayue_agent_indexes
 from services.ayue_agent.maps_client import ensure_map_cache_indexes
 from services.profile_skills import ensure_profile_skill_indexes
+from services.profile_task_service import start_profile_retry_worker, stop_profile_retry_worker
 from services.ayue_agent.proactive_scheduler import start_proactive_care_scheduler, stop_proactive_care_scheduler
 from services.ayue_agent.v3.calendar_drafts import ensure_indexes as ensure_calendar_draft_indexes
 from services.ayue_agent.v3.calendar_references import ensure_indexes as ensure_calendar_reference_indexes
 from services.ayue_agent.v3.relationship_references import ensure_indexes as ensure_relationship_reference_indexes
+from services.ayue_agent.v3.relationship_recommendations import ensure_indexes as ensure_relationship_recommendation_indexes
 from services.ayue_agent.v3.place_references import ensure_indexes as ensure_place_reference_indexes
+from services.ayue_agent.v3.place_followups import ensure_indexes as ensure_place_followup_indexes
+from services.proactive_followup_service import ensure_indexes as ensure_proactive_followup_indexes
 from services.match_search_job_service import start_match_search_worker, stop_match_search_worker
 from services.conversation_compaction_service import ensure_conversation_compaction_indexes
 from services.memory_outbox_service import (
@@ -29,6 +33,7 @@ from services.concept_embedding_service import (
     start_concept_embedding_worker, stop_concept_embedding_worker,
 )
 from services.event_opportunity_service import ensure_event_opportunity_indexes
+from services.match_quota_service import ensure_match_quota_indexes
 from services.event_lifecycle_service import (
     start_event_lifecycle_worker, stop_event_lifecycle_worker,
 )
@@ -74,7 +79,10 @@ def setup_calendar_indexes():
     ensure_calendar_draft_indexes()
     ensure_calendar_reference_indexes()
     ensure_relationship_reference_indexes()
+    ensure_relationship_recommendation_indexes()
     ensure_place_reference_indexes()
+    ensure_place_followup_indexes()
+    ensure_proactive_followup_indexes()
     ensure_ayue_agent_indexes()
     ensure_map_cache_indexes()
     ensure_conversation_compaction_indexes()
@@ -83,11 +91,13 @@ def setup_calendar_indexes():
     ensure_context_graph_indexes()
     ensure_match_indexes()
     ensure_event_opportunity_indexes()
+    ensure_match_quota_indexes()
     ensure_event_discovery_job_indexes()
     ensure_event_discovery_cache_indexes()
     ensure_interactive_priority_indexes()
     start_match_search_worker()
     start_memory_outbox_worker()
+    start_profile_retry_worker()
     start_proactive_care_scheduler()
     start_context_graph_worker()
     start_concept_embedding_worker()
@@ -99,6 +109,7 @@ def setup_calendar_indexes():
 def stop_background_services():
     stop_proactive_care_scheduler()
     stop_memory_outbox_worker()
+    stop_profile_retry_worker()
     stop_match_search_worker()
     stop_context_graph_worker()
     stop_concept_embedding_worker()

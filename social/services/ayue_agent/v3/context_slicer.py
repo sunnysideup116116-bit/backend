@@ -34,17 +34,32 @@ def slice_for_agent(
             "calendar_recent_mutation": getattr(turn_ctx, "calendar_recent_mutation", None),
             "recent_place_candidates": getattr(turn_ctx, "recent_place_candidates", None),
             "place_reference_resolution": getattr(turn_ctx, "place_reference_resolution", None),
+            "place_followup": getattr(turn_ctx, "place_followup", None),
             "prior_observations": prior_observations,
         })
 
     if agent_name == "places":
+        followup = getattr(turn_ctx, "place_followup", None)
+        place_followup = None
+        if isinstance(followup, dict):
+            resolved = followup.get("resolved_place")
+            place_followup = {
+                "resolved_place": {
+                    key: resolved[key]
+                    for key in ("reference", "ordinal", "label", "address_summary")
+                    if isinstance(resolved, dict) and resolved.get(key) not in (None, "")
+                },
+                "abandonment_requested": bool(followup.get("abandonment_requested")),
+            }
         return AgentContextSlice(agent="places", payload={
             "message": turn_ctx.message,
             "recent_messages": turn_ctx.recent_messages,
             "user_location": turn_ctx.user_location,
             "clock": clock_dump,
             "prior_observations": prior_observations,
+            "recent_place_reference": getattr(turn_ctx, "recent_place_reference", None),
             "place_reference_resolution": getattr(turn_ctx, "place_reference_resolution", None),
+            "place_followup": place_followup,
         })
 
     if agent_name == "web":
@@ -95,6 +110,7 @@ def slice_for_agent(
                 for key in ("status", "event_title", "counterparty", "user_can_decide")
                 if active_event.get(key) not in (None, "")
             } or None,
+            "focused_match": turn_ctx.focused_match,
             "latest_match_outcome": turn_ctx.latest_match_outcome,
             "clock": clock_dump,
             "prior_observations": prior_observations,
@@ -104,9 +120,12 @@ def slice_for_agent(
         return AgentContextSlice(agent="relationship", payload={
             "message": turn_ctx.message,
             "recent_messages": turn_ctx.recent_messages,
+            "recent_context": turn_ctx.recent_context,
+            "relevant_memories": list(turn_ctx.relevant_memories or []),
             "mentioned_contacts": turn_ctx.mentioned_contacts,
             "mentioned_contact_overflow": turn_ctx.mentioned_contact_overflow,
             "recent_contact_reference": turn_ctx.recent_contact_reference,
+            "recent_recommendation": getattr(turn_ctx, "recent_recommendation", None),
             "clock": clock_dump,
             "prior_observations": prior_observations,
         })
@@ -144,7 +163,9 @@ def slice_for_agent(
             "user_location": turn_ctx.user_location,
             "clock": clock_dump,
             "observations": prior_observations,
+            "recent_place_reference": getattr(turn_ctx, "recent_place_reference", None),
             "place_reference_resolution": getattr(turn_ctx, "place_reference_resolution", None),
+            "place_followup": getattr(turn_ctx, "place_followup", None),
         })
 
     raise ValueError(f"unknown agent: {agent_name}")

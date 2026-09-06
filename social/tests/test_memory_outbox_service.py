@@ -1,15 +1,17 @@
 import unittest
 from unittest.mock import MagicMock, patch
+from bson.objectid import ObjectId
 
 from services import memory_outbox_service as outbox
 from services.memory_service import MemoryWriteError
+from services.message_use_service import metadata_for_use
 
 
 def record(*, attempts=1):
     return {
         "_id": "outbox-1", "lease_token": "lease-1", "attempt_count": attempts,
         "user_id": "owner", "memories": [{"key": "coffee", "label": "咖啡"}],
-        "surface": "profile", "message_id": "message-1", "match_id": None,
+        "surface": "profile", "message_id": str(ObjectId("64b64c8f0000000000000101")), "match_id": None,
     }
 
 
@@ -28,6 +30,11 @@ class MemoryOutboxServiceTests(unittest.TestCase):
     def test_success_marks_the_exact_lease_applied(self):
         claimed = record()
         with patch.object(outbox, "_claim_one", side_effect=[claimed, None]), \
+             patch.object(outbox.messages_coll, "find_one", return_value={
+                 "metadata": {"message_use": {
+                     "version": "message-use-v1", "use": "ordinary",
+                 }},
+             }), \
              patch("services.memory_service.apply_profile_memory_proposals",
                    return_value=[{"key": "coffee"}]) as apply, \
              patch.object(outbox.MEMORY_OUTBOX, "update_one",
@@ -41,6 +48,11 @@ class MemoryOutboxServiceTests(unittest.TestCase):
 
     def test_transient_failure_returns_to_queue_with_backoff(self):
         with patch.object(outbox, "_claim_one", side_effect=[record(attempts=2), None]), \
+             patch.object(outbox.messages_coll, "find_one", return_value={
+                 "metadata": {"message_use": {
+                     "version": "message-use-v1", "use": "ordinary",
+                 }},
+             }), \
              patch("services.memory_service.apply_profile_memory_proposals",
                    side_effect=MemoryWriteError("memory_agent_unavailable")), \
              patch.object(outbox.time, "time", return_value=100.0), \
@@ -53,6 +65,11 @@ class MemoryOutboxServiceTests(unittest.TestCase):
 
     def test_eighth_failure_is_terminal(self):
         with patch.object(outbox, "_claim_one", side_effect=[record(attempts=8), None]), \
+             patch.object(outbox.messages_coll, "find_one", return_value={
+                 "metadata": {"message_use": {
+                     "version": "message-use-v1", "use": "ordinary",
+                 }},
+             }), \
              patch("services.memory_service.apply_profile_memory_proposals",
                    side_effect=MemoryWriteError("graph_write_failed")), \
              patch.object(outbox.time, "time", return_value=100.0), \
@@ -61,6 +78,19 @@ class MemoryOutboxServiceTests(unittest.TestCase):
         update = update_one.call_args.args[1]
         self.assertEqual(update["$set"]["status"], "failed")
         self.assertIn("next_attempt_at", update["$unset"])
+
+    def test_excluded_source_is_retired_without_graph_replay(self):
+        claimed = record()
+        with patch.object(outbox, "_claim_one", side_effect=[claimed, None]), \
+             patch.object(outbox.messages_coll, "find_one", return_value={
+                 "metadata": {"message_use": metadata_for_use("calendar_operation")},
+             }), \
+             patch("services.memory_service.apply_profile_memory_proposals") as apply, \
+             patch.object(outbox.MEMORY_OUTBOX, "update_one") as update_one:
+            result = outbox.process_memory_outbox_once(limit=2)
+        self.assertEqual(result, {"processed": 1, "applied": 0, "failed": 0})
+        apply.assert_not_called()
+        self.assertEqual(update_one.call_args.args[1]["$set"]["status"], "excluded")
 
 
 if __name__ == "__main__":

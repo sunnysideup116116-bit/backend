@@ -61,6 +61,16 @@ class ProductInfoAgentTests(unittest.TestCase):
         self.assertNotIn("reply", result)
         self.assertLessEqual(result["retrieval"]["max_rounds"], MAX_RETRIEVAL_ROUNDS)
 
+    def test_matching_methods_are_grounded_as_three_plain_language_options(self):
+        result = retrieve_product_info("有哪些配對方式？")
+        self.assertEqual(result["coverage"], "sufficient")
+        self.assertIn("matching.methods", result["knowledge_sections"])
+        methods = result["facts"]["matching.methods"]["methods"]
+        self.assertEqual(len(methods), 3)
+        self.assertIn("最近分享的近況", "".join(methods))
+        self.assertIn("指定的活動或主題", "".join(methods))
+        self.assertIn("活動伴", "".join(methods))
+
     def test_unknown_question_is_explicitly_insufficient(self):
         result = retrieve_product_info("What is the weather on Mars in 2099?")
         self.assertEqual(result["coverage"], "insufficient")

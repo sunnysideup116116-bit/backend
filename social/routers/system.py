@@ -13,6 +13,11 @@ from services.ai_service import get_embedding
 from services.profile_projection import safe_recent_context
 from services.language_service import normalize_model_text, normalize_zh_tw
 from services.ayue_agent.proactive_care import normalize_proactive_frequency, schedule_proactive_care
+from services.proactive_followup_service import (
+    cancel_pending_delivery_slot,
+    cancel_pending_followups,
+    is_proactive_care_enabled,
+)
 from services.ayue_agent.v3.scheduler import has_active_public_confirmation
 from services.ayue_agent.v3.debug_trace import get_run as get_debug_run, local_debug_enabled
 from services.ayue_agent.web_tools import web_enabled
@@ -23,6 +28,46 @@ from services.proposal_namespace import namespace_for_document
 from services.demo_cleanup_service import DemoCleanupError, clear_all_demo_state, graph_health
 
 router = APIRouter(prefix="/api", tags=["System"])
+MATCH_TEST_COHORT = "match_v1"
+MATCH_TEST_SHARED_PASSWORD = "12345678"
+MATCH_TEST_OWNER_IDS = {"seed_user_01", "seed_user_04"}
+
+
+def _match_test_email(user_id: str) -> str:
+    seed = re.fullmatch(r"seed_user_(\d+)", user_id)
+    if seed:
+        return f"{int(seed.group(1))}@gmail.com"
+    generated = re.fullmatch(r"match_test_(\d+)", user_id)
+    if generated:
+        return f"matchtest{int(generated.group(1)):02d}@gmail.com"
+    return ""
+
+
+def _match_test_account(profile: dict) -> dict:
+    user_id = str(profile.get("user_id") or "")
+    return {
+        "user_id": user_id,
+        "email": str(profile.get("test_login_email") or _match_test_email(user_id)),
+        "display_name": str(
+            profile.get("display_name") or profile.get("nickname") or user_id
+        )[:40],
+        "topic": str(profile.get("test_match_topic") or "既有測試帳號")[:40],
+        "current_context": safe_recent_context(
+            profile.get("current_context"), "尚無近期情境",
+        ),
+    }
+
+
+def _match_test_status_label(status: str) -> str:
+    return {
+        "draft": "等待發起者決定",
+        "pending": "等待接收者回覆",
+        "accepted": "雙方已同意",
+        "declined": "已婉拒",
+        "withdrawn": "已撤回",
+        "expired": "已過期",
+        "cancelled": "已取消",
+    }.get(status, "狀態待確認")
 
 
 @router.get("/health")
@@ -82,6 +127,7 @@ def init_system(user_id: str):
     is_deep_complete = False
     my_deep_summary = "尚無深層價值觀分析資料"
     proactive_frequency = "3600"
+    proactive_care_enabled = True
     mediator_tone = "friend"
     mediator_tone_selected = False
     probe_mode = "balanced"
@@ -121,6 +167,7 @@ def init_system(user_id: str):
             my_dp_future = dp_display.get("life_philosophy", None) or dp_display.get("ideal_future", None)
             # 回傳完整 deep_profile 物件供前端組合顯示
             my_deep_profile = dp_display
+        proactive_care_enabled = is_proactive_care_enabled(my_doc)
         proactive_frequency = normalize_proactive_frequency(my_doc.get("proactive_frequency", "3600"))
         mediator_tone = my_doc.get("mediator_tone", "friend")
         mediator_tone_selected = bool(my_doc.get("mediator_tone_selected", False))
@@ -158,6 +205,7 @@ def init_system(user_id: str):
         "my_deep_profile": my_deep_profile,
         "my_initial_interest": my_initial_interest,
         "proactive_frequency": proactive_frequency,
+        "proactive_care_enabled": proactive_care_enabled,
         "mediator_tone": mediator_tone,
         "mediator_tone_selected": mediator_tone_selected,
         "probe_mode": probe_mode,
@@ -253,6 +301,116 @@ def get_demo_status(user_id: str):
         "has_pending_confirmation": has_active_public_confirmation(user_id),
         "graph_status": graph_health()["status"],
         "mongo_status": mongo_status,
+    }
+
+
+@router.get("/demo/match-test")
+def get_match_test_overview(user_id: str):
+    """Return login guidance for the isolated match-test cohort only."""
+    viewer = profiles_coll.find_one(
+        {"user_id": user_id},
+        {"_id": 0, "user_id": 1, "test_match_cohort": 1},
+    ) or {}
+    if (
+        user_id not in MATCH_TEST_OWNER_IDS
+        and viewer.get("test_match_cohort") != MATCH_TEST_COHORT
+    ):
+        raise HTTPException(status_code=404, detail="Match test tools unavailable")
+
+    profiles = list(profiles_coll.find(
+        {"$or": [
+            {"test_match_cohort": MATCH_TEST_COHORT},
+            {"user_id": {"$in": sorted(MATCH_TEST_OWNER_IDS)}},
+        ]},
+        {
+            "_id": 0, "user_id": 1, "display_name": 1, "nickname": 1,
+            "current_context": 1, "test_login_email": 1,
+            "test_match_topic": 1,
+        },
+    ))
+    account_by_id = {
+        account["user_id"]: account
+        for account in (_match_test_account(profile) for profile in profiles)
+        if account["user_id"]
+    }
+    primary_ids = sorted(account_by_id)
+    proposal_docs = list(matches_coll.find(
+        {"$or": [
+            {"from_user": {"$in": primary_ids}},
+            {"to_user": {"$in": primary_ids}},
+        ]},
+        {
+            "from_user": 1, "to_user": 1, "status": 1, "revision": 1,
+            "proposal_namespace": 1, "created_at": 1, "updated_at": 1,
+        },
+    ).sort("created_at", -1).limit(50))
+    counterpart_ids = {
+        str(proposal.get(key) or "")
+        for proposal in proposal_docs
+        for key in ("from_user", "to_user")
+        if str(proposal.get(key) or "").startswith(("seed_user_", "match_test_"))
+    }
+    for profile in profiles_coll.find(
+        {"user_id": {"$in": sorted(counterpart_ids - set(account_by_id))}},
+        {
+            "_id": 0, "user_id": 1, "display_name": 1, "nickname": 1,
+            "current_context": 1, "test_login_email": 1,
+            "test_match_topic": 1,
+        },
+    ):
+        account = _match_test_account(profile)
+        account_by_id[account["user_id"]] = account
+
+    proposals = []
+    for proposal in proposal_docs:
+        from_id = str(proposal.get("from_user") or "")
+        to_id = str(proposal.get("to_user") or "")
+        if not (
+            from_id.startswith(("seed_user_", "match_test_"))
+            and to_id.startswith(("seed_user_", "match_test_"))
+        ):
+            continue
+        from_account = account_by_id.get(from_id) or {
+            "user_id": from_id, "email": _match_test_email(from_id),
+            "display_name": from_id,
+        }
+        to_account = account_by_id.get(to_id) or {
+            "user_id": to_id, "email": _match_test_email(to_id),
+            "display_name": to_id,
+        }
+        status = str(proposal.get("status") or "")
+        waiting_id = from_id if status == "draft" else to_id if status == "pending" else ""
+        waiting = account_by_id.get(waiting_id) or (
+            from_account if waiting_id == from_id else to_account if waiting_id else None
+        )
+        proposals.append({
+            "match_id": str(proposal.get("_id") or ""),
+            "namespace": namespace_for_document(proposal),
+            "status": status,
+            "status_label": _match_test_status_label(status),
+            "revision": int(proposal.get("revision", 0) or 0),
+            "from": from_account,
+            "to": to_account,
+            "waiting_for": waiting,
+            "created_at": float(proposal.get("created_at", 0) or 0),
+            "updated_at": float(proposal.get("updated_at", 0) or 0),
+        })
+
+    accounts = sorted(
+        (
+            account for account in account_by_id.values()
+            if account["user_id"] in primary_ids
+        ),
+        key=lambda item: (
+            0 if item["user_id"] in MATCH_TEST_OWNER_IDS else 1,
+            item["user_id"],
+        ),
+    )
+    return {
+        "cohort": MATCH_TEST_COHORT,
+        "shared_password": MATCH_TEST_SHARED_PASSWORD,
+        "accounts": accounts,
+        "proposals": proposals,
     }
 
 
@@ -371,14 +529,39 @@ def get_notifications(user_id: str):
 
 @router.post("/settings")
 def update_settings(req: SettingsRequest):
-    """更新使用者設定（如主動配對頻率）"""
-    proactive_frequency = normalize_proactive_frequency(req.proactive_frequency)
-    existing = profiles_coll.find_one({"user_id": req.user_id}, {"last_user_activity_at": 1}) or {}
-    schedule_proactive_care(
-        req.user_id, proactive_frequency,
-        last_activity=float(existing.get("last_user_activity_at", 0) or 0),
+    """Update the consent-style proactive-care setting.
+
+    ``proactive_frequency`` remains a wire-compatible migration field. The
+    server owns cadence and never exposes a user-selected interval.
+    """
+    existing = profiles_coll.find_one({"user_id": req.user_id}) or {}
+    if req.proactive_care_enabled is not None:
+        enabled = bool(req.proactive_care_enabled)
+        compatibility_frequency = "3600" if enabled else "none"
+    elif req.proactive_frequency is not None:
+        raw_frequency = str(req.proactive_frequency).strip().lower()
+        compatibility_frequency = normalize_proactive_frequency(raw_frequency)
+        known = raw_frequency in {"none", "60", "3600", "86400", "high", "normal", "low", "off", "false", "0"}
+        enabled = known and compatibility_frequency != "none"
+    else:
+        enabled = is_proactive_care_enabled(existing)
+        compatibility_frequency = normalize_proactive_frequency(existing.get("proactive_frequency", "3600"))
+    profiles_coll.update_one(
+        {"user_id": req.user_id},
+        {"$set": {
+            "proactive_care_enabled": enabled,
+            "proactive_frequency": compatibility_frequency,
+        }},
+        upsert=True,
     )
-    return {"status": "success", "proactive_frequency": proactive_frequency}
+    if not enabled:
+        cancel_pending_delivery_slot(req.user_id)
+        cancel_pending_followups(req.user_id, reason="user_disabled")
+    return {
+        "status": "success",
+        "proactive_care_enabled": enabled,
+        "proactive_frequency": compatibility_frequency,
+    }
 
 @router.patch("/profile/location")
 def update_profile_location(req: ProfileLocationRequest):
@@ -511,6 +694,9 @@ def debug_profile_state(user_id: str):
             "pending_private_feedback": 1,
             "pending_date_coordination": 1,
             "proactive_frequency": 1,
+            "proactive_care_enabled": 1,
+            "proactive_care_last_sent_at": 1,
+            "proactive_care_delivery_times": 1,
             "mediator_tone": 1,
             "probe_mode": 1,
             "last_user_activity_at": 1,

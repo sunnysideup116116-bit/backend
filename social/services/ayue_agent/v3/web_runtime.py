@@ -26,7 +26,7 @@ from .web_research import (
     WebResearchResultV1,
     anchor_place_search_query,
     anchor_web_search_query,
-    build_research_result,
+    build_research_result as _build_research_result,
 )
 
 
@@ -49,6 +49,24 @@ def _completed_result(task: SubTask, result: WebResearchResultV1) -> TaskRunnerR
     )])
 
 
+def _places_hours_sufficient(prior_observations: list[dict[str, Any]]) -> bool:
+    """Return whether Places already supplied a complete weekly schedule."""
+    for item in prior_observations or []:
+        if not isinstance(item, dict) or item.get("status") != "ok":
+            continue
+        if item.get("tool") != "places.resolve_place":
+            continue
+        result = item.get("result")
+        place = result.get("place") if isinstance(result, dict) else None
+        hours = place.get("opening_hours") if isinstance(place, dict) else None
+        descriptions = hours.get("weekday_descriptions") if isinstance(hours, dict) else None
+        if isinstance(descriptions, list) and len([
+            value for value in descriptions if str(value or "").strip()
+        ]) >= 7:
+            return True
+    return False
+
+
 def run(
     context_slice: AgentContextSlice,
     *,
@@ -62,6 +80,54 @@ def run(
     """
     aggregate = SubAgentMetrics()
     aggregate.requested_model_tier = "main"
+    prior_observations = context_slice.payload.get("prior_observations") or []
+    observations: list[dict[str, Any]] = []
+    failures: list[str] = []
+    tool_calls_used = 0
+    search_calls_used = 0
+    extract_calls_used = 0
+    last_decision = None
+    stop_reason = "budget_exhausted"
+
+    place_observation_present = any(
+        isinstance(item, dict)
+        and str(item.get("tool") or "") in {"places.search_nearby", "places.resolve_place"}
+        for item in prior_observations
+    )
+    web_mode = task.web_mode or (
+        "place_verification" if place_observation_present else "public_lookup"
+    )
+
+    def record_diagnostics(
+        *, execution_status: str, final_stop_reason: str,
+        filter_diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        services.trace.setdefault("web_research", []).append({
+            "task_id": task.id,
+            "web_mode": web_mode,
+            "execution_status": execution_status,
+            "stop_reason": final_stop_reason,
+            "tool_calls_used": tool_calls_used,
+            "search_calls_used": search_calls_used,
+            "extract_calls_used": extract_calls_used,
+            "normalization_codes": list(
+                getattr(last_decision, "normalization_codes", []) or []
+            )[:4],
+            **(filter_diagnostics or {}),
+        })
+
+    def build_research_result(**kwargs: Any) -> WebResearchResultV1:
+        filter_diagnostics: dict[str, Any] = {}
+        result = _build_research_result(
+            **kwargs,
+            diagnostics=filter_diagnostics,
+        )
+        record_diagnostics(
+            execution_status=result.execution_status,
+            final_stop_reason=result.stop_reason,
+            filter_diagnostics=filter_diagnostics,
+        )
+        return result
 
     def accumulate_metrics(metrics: SubAgentMetrics) -> None:
         aggregate.input_tokens += metrics.input_tokens
@@ -79,8 +145,20 @@ def run(
             aggregate.error = metrics.error
 
     evidence_policy = task.evidence_policy or "casual_discovery"
+    if web_mode == "place_hours_fallback" and _places_hours_sufficient(prior_observations):
+        aggregate.requested_model_tier = "none"
+        record_diagnostics(
+            execution_status="skipped",
+            final_stop_reason="places_hours_sufficient",
+        )
+        return TaskRunnerResult.from_completed([SubTaskResult(
+            task_id=task.id,
+            status=SubTaskStatus.SKIPPED,
+            skip_reason="places_hours_sufficient",
+        )]), aggregate
+
     place_cards = public_place_cards(
-        context_slice.payload.get("prior_observations") or [],
+        prior_observations,
         run_id=services.run_id,
         include_internal=True,
     )[:5]
@@ -100,6 +178,34 @@ def run(
         if item.get("candidate_ref")
     }
     allowed_subject_refs = set(candidate_by_ref)
+    if web_mode == "public_lookup" and place_observation_present:
+        aggregate.error = "web_public_lookup_places_dependency"
+        result = build_research_result(
+            research_question=context_slice.payload.get("message", ""),
+            answer_target=task.task_brief,
+            decision=None,
+            observations=[],
+            execution_status="unavailable",
+            stop_reason="tool_failure",
+            evidence_policy=evidence_policy,
+        )
+        return _completed_result(task, result), aggregate
+    if place_observation_present and not place_candidates:
+        # A Places -> Web task must never degrade into an unbound generic web
+        # search after the selected place failed to resolve or yielded no
+        # verified candidate. The caller receives a typed failure instead.
+        aggregate.error = "place_subject_unavailable"
+        result = build_research_result(
+            research_question=context_slice.payload.get("message", ""),
+            answer_target=task.task_brief,
+            decision=None,
+            observations=[],
+            execution_status="unavailable",
+            stop_reason="tool_failure",
+            allowed_subject_refs=set(),
+            evidence_policy=evidence_policy,
+        )
+        return _completed_result(task, result), aggregate
     if not web_enabled():
         aggregate.error = "web_not_configured"
         result = build_research_result(
@@ -113,14 +219,6 @@ def run(
             evidence_policy=evidence_policy,
         )
         return _completed_result(task, result), aggregate
-
-    observations: list[dict[str, Any]] = []
-    failures: list[str] = []
-    tool_calls_used = 0
-    search_calls_used = 0
-    extract_calls_used = 0
-    last_decision = None
-    stop_reason = "budget_exhausted"
 
     def execute_proposals(
         proposals: list[ToolProposal],

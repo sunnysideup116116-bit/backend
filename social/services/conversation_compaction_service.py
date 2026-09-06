@@ -22,15 +22,20 @@ from services.conversation_compaction_contracts import (
     ConversationCompactionEvaluationV1,
     ConversationCompactionObservabilityV1,
     ConversationSummaryV1,
+    ContinuityRetentionV1,
     SUMMARY_FIELDS,
 )
 from services.profile_task_service import queue_profile_coverage
 from services.public_ai_room_scope import is_owned_public_ai_room
+from services.message_use_service import (
+    is_reusable_for_compaction,
+    message_use,
+)
 
 
 CONVERSATION_COMPACTIONS = db["conversation_compactions"]
 CONVERSATION_COMPACTION_RUNS = db["conversation_compaction_shadow_runs"]
-COMPACTION_POLICY_VERSION = "conversation_compaction_policy_v3"
+COMPACTION_POLICY_VERSION = "conversation_compaction_policy_v4"
 COMPACTION_SOFT_MESSAGE_LIMIT = 30
 COMPACTION_KEEP_RECENT_MESSAGES = 20
 COMPACTION_QUERY_LIMIT = COMPACTION_SOFT_MESSAGE_LIMIT + 1
@@ -184,7 +189,12 @@ def _select_compaction_batch(user_id: str, room_id: str) -> dict[str, Any]:
             **_message_query_after(baseline.model_dump() if baseline else None),
         }
         cursor = messages_coll.find(
-            query, {"sender_id": 1, "timestamp": 1},
+            query,
+            {
+                "sender_id": 1,
+                "timestamp": 1,
+                "metadata.message_use": 1,
+            },
         ).sort([("timestamp", 1), ("_id", 1)]).limit(COMPACTION_QUERY_LIMIT)
         pending = list(cursor)[:COMPACTION_QUERY_LIMIT]
     except Exception:
@@ -235,7 +245,13 @@ def _load_exact_batch(user_id: str, room_id: str, message_ids: list[str]) -> lis
     object_ids = [ObjectId(message_id) for message_id in message_ids]
     messages = list(messages_coll.find(
         {"_id": {"$in": object_ids}, "room_id": room_id},
-        {"sender_id": 1, "content": 1, "metadata.owner_raw_content": 1, "timestamp": 1},
+        {
+            "sender_id": 1,
+            "content": 1,
+            "metadata.owner_raw_content": 1,
+            "metadata.message_use": 1,
+            "timestamp": 1,
+        },
     ))
     by_id = {str(message.get("_id")): message for message in messages}
     ordered = [by_id[message_id] for message_id in message_ids if message_id in by_id]
@@ -250,6 +266,8 @@ def _prompt_messages(user_id: str, messages: list[dict[str, Any]]) -> list[dict[
     projected: list[dict[str, str]] = []
     total = 0
     for message in messages:
+        if not is_reusable_for_compaction(message):
+            continue
         content = message.get("content")
         if message.get("sender_id") == user_id:
             owner_raw = ((message.get("metadata") or {}).get("owner_raw_content"))
@@ -284,6 +302,7 @@ def _source_hash(previous_hash: str | None, messages: list[dict[str, Any]]) -> s
             "timestamp": _message_timestamp(message),
             "content": str(message.get("content") or ""),
             "owner_raw_content": str(((message.get("metadata") or {}).get("owner_raw_content")) or ""),
+            "message_use": message_use(message).value,
         } for message in messages],
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -404,6 +423,19 @@ def _unavailable_evaluation(
     )
 
 
+def _excluded_only_evaluation() -> ConversationCompactionEvaluationV1:
+    """Return a pass projection when a batch contains no reusable content."""
+    return ConversationCompactionEvaluationV1(
+        status="pass",
+        retention=ContinuityRetentionV1(**{field: True for field in SUMMARY_FIELDS}),
+        unsupported_content=False,
+        role_confusion=False,
+        canonical_state_leak=False,
+        confidence=1.0,
+        issue_codes=[],
+    )
+
+
 def _typed_step_failure_code(exc: Exception) -> str:
     if isinstance(exc, json.JSONDecodeError):
         return "invalid_json"
@@ -441,6 +473,7 @@ def conversation_compaction_shadow_metrics() -> dict[str, Any]:
     query = {
         "version": "conversation-compaction-shadow-run-v1",
         "observability.policy_version": COMPACTION_POLICY_VERSION,
+        "observability.generation_result_code": {"$ne": "excluded_only"},
     }
     try:
         total = CONVERSATION_COMPACTION_RUNS.count_documents(query)
@@ -588,6 +621,70 @@ def _store_shadow_run_metadata(
         print(f"Conversation compaction metrics skipped: {type(exc).__name__}")
 
 
+def _store_compaction_record(
+    *,
+    user_id: str,
+    room_id: str,
+    current: dict[str, Any] | None,
+    baseline: ConversationCompactionV1 | None,
+    messages: list[dict[str, Any]],
+    source_hash: str,
+    summary: ConversationSummaryV1,
+    evaluation: ConversationCompactionEvaluationV1,
+    observability: ConversationCompactionObservabilityV1,
+    current_revision: int,
+    prior_source_hash: str | None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """CAS-store one validated compaction record and its aggregate metadata."""
+    stored_at = time.time() if now is None else float(now)
+    last_message = messages[-1]
+    prior_count = (
+        baseline.covered_message_count
+        if baseline
+        else 0
+    )
+    record = ConversationCompactionV1(
+        owner_user_id=user_id,
+        room_id=room_id,
+        revision=current_revision + 1,
+        covered_message_count=prior_count + len(messages),
+        covered_through_message_id=str(last_message["_id"]),
+        covered_through_timestamp=_message_timestamp(last_message),
+        source_hash=source_hash,
+        previous_source_hash=(baseline.source_hash if baseline else None),
+        summary=summary,
+        evaluation=evaluation,
+        observability=observability,
+        created_at=float((current or {}).get("created_at", stored_at) or stored_at),
+        updated_at=stored_at,
+    ).model_dump()
+    record_id = _record_id(user_id, room_id)
+    try:
+        if current_revision == 0:
+            CONVERSATION_COMPACTIONS.insert_one({"_id": record_id, **record})
+        else:
+            updated = CONVERSATION_COMPACTIONS.update_one(
+                {"_id": record_id, "revision": current_revision, "source_hash": prior_source_hash},
+                {"$set": record},
+            )
+            if not updated.modified_count:
+                return {"status": "stale"}
+    except DuplicateKeyError:
+        latest = _load_current_compaction(user_id, room_id) or {}
+        return {"status": "unchanged" if latest.get("source_hash") == source_hash else "stale"}
+    except Exception:
+        return {"status": "storage_unavailable"}
+    _store_shadow_run_metadata(
+        source_hash, record["revision"], evaluation, observability, stored_at,
+    )
+    return {
+        "status": "stored",
+        "revision": record["revision"],
+        "covered_message_count": len(messages),
+    }
+
+
 def run_conversation_compaction_shadow(
     user_id: str, room_id: str, message_ids: list[str],
     prior_revision: int, prior_source_hash: str | None,
@@ -621,6 +718,44 @@ def run_conversation_compaction_shadow(
     prompt_messages = _prompt_messages(user_id, messages)
     metadata = shadow_metadata or {}
     source_hash = _source_hash(baseline_source_hash, messages)
+    if not prompt_messages:
+        # Calendar/assessment/no-memory messages still advance the watermark,
+        # but their contents never reach the compaction model.  Retain a
+        # validated prior summary when available; a legacy/unvalidated summary
+        # is intentionally replaced by an empty safe projection.
+        summary = baseline.summary if baseline else ConversationSummaryV1()
+        observability = ConversationCompactionObservabilityV1(
+            policy_version=COMPACTION_POLICY_VERSION,
+            input_message_count=len(messages),
+            input_char_count=0,
+            summary_item_count=sum(len(summary.model_dump()[field]) for field in SUMMARY_FIELDS),
+            summary_char_count=sum(
+                len(item)
+                for field in SUMMARY_FIELDS
+                for item in summary.model_dump()[field]
+            ),
+            generation_latency_ms=0,
+            evaluation_latency_ms=0,
+            generation_attempt_count=0,
+            evaluation_attempt_count=0,
+            generation_result_code="excluded_only",
+            evaluation_result_code="not_attempted",
+            profile_coverage_status=_safe_metric_code(metadata.get("profile_coverage_status")),
+            profile_requeued_count=min(64, max(0, int(metadata.get("profile_requeued_count", 0) or 0))),
+        )
+        return _store_compaction_record(
+            user_id=user_id,
+            room_id=room_id,
+            current=current,
+            baseline=baseline,
+            messages=messages,
+            source_hash=source_hash,
+            summary=summary,
+            evaluation=_excluded_only_evaluation(),
+            observability=observability,
+            current_revision=current_revision,
+            prior_source_hash=prior_source_hash,
+        )
     generation_started = time.perf_counter()
     summary, generation_attempt_count, generation_result_code = _run_typed_step_with_retry(
         lambda: _generate_summary(prior_summary, messages, user_id),
@@ -691,39 +826,17 @@ def run_conversation_compaction_shadow(
             "result_code": evaluation_result_code,
         }
 
-    last_message = messages[-1]
-    record = ConversationCompactionV1(
-        owner_user_id=user_id,
+    return _store_compaction_record(
+        user_id=user_id,
         room_id=room_id,
-        revision=current_revision + 1,
-        covered_message_count=(baseline.covered_message_count if baseline else 0) + len(messages),
-        covered_through_message_id=str(last_message["_id"]),
-        covered_through_timestamp=_message_timestamp(last_message),
+        current=current,
+        baseline=baseline,
+        messages=messages,
         source_hash=source_hash,
-        previous_source_hash=baseline_source_hash,
         summary=summary,
         evaluation=evaluation,
         observability=observability,
-        created_at=float((current or {}).get("created_at", now) or now),
-        updated_at=now,
-    ).model_dump()
-    record_id = _record_id(user_id, room_id)
-    try:
-        if current_revision == 0:
-            CONVERSATION_COMPACTIONS.insert_one({"_id": record_id, **record})
-        else:
-            updated = CONVERSATION_COMPACTIONS.update_one(
-                {"_id": record_id, "revision": current_revision, "source_hash": prior_source_hash},
-                {"$set": record},
-            )
-            if not updated.modified_count:
-                return {"status": "stale"}
-    except DuplicateKeyError:
-        latest = _load_current_compaction(user_id, room_id) or {}
-        return {"status": "unchanged" if latest.get("source_hash") == source_hash else "stale"}
-    except Exception:
-        return {"status": "storage_unavailable"}
-    _store_shadow_run_metadata(
-        source_hash, record["revision"], evaluation, observability, now,
+        current_revision=current_revision,
+        prior_source_hash=prior_source_hash,
+        now=now,
     )
-    return {"status": "stored", "revision": record["revision"], "covered_message_count": len(messages)}

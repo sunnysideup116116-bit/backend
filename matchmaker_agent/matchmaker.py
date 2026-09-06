@@ -22,6 +22,9 @@ MATCH_LLM_TIMEOUT_SECONDS = 60.0
 MATCH_MAX_OUTPUT_TOKENS = 4096
 MATCH_RETRY_OUTPUT_TOKENS = 8192
 EVENT_HOOK_LLM_TIMEOUT_SECONDS = 15.0
+MAX_INVITATION_TOPIC_CHARS = 80
+MAX_QUERY_TEXT_CHARS = 600
+MAX_SOURCE_MESSAGE_ID_CHARS = 128
 
 
 class MatchEvaluationError(RuntimeError):
@@ -43,6 +46,33 @@ def _match_content(response) -> str:
     if not isinstance(content, str) or not content.strip():
         raise MatchEvaluationError("matchmaker_empty_response")
     return content
+
+
+def safe_search_context(value) -> dict[str, str]:
+    """Keep only bounded search meaning at the Matchmaker boundary."""
+    if not isinstance(value, dict):
+        return {}
+    limits = {
+        "invitation_topic": MAX_INVITATION_TOPIC_CHARS,
+        "query_text": MAX_QUERY_TEXT_CHARS,
+        "source_message_id": MAX_SOURCE_MESSAGE_ID_CHARS,
+    }
+    result = {}
+    for key, limit in limits.items():
+        text = re.sub(r"\s+", " ", str(value.get(key) or "")).strip()[:limit].rstrip()
+        if text:
+            result[key] = text
+    return result
+
+
+def provider_search_context(value) -> dict[str, str]:
+    """Remove source-message identity before search context reaches the LLM."""
+    context = safe_search_context(value)
+    return {
+        key: context[key]
+        for key in ("invitation_topic", "query_text")
+        if context.get(key)
+    }
 
 
 class MatchmakerAgent:
@@ -89,6 +119,10 @@ class MatchmakerAgent:
 12. 這一階段只做選人。推薦文、標籤及分數由後端另行產生，不要重複撰寫。
 13. 僅輸出 outcome 與 matches；不得選擇 candidates 以外的 ID，也不得捏造人物資料。
 
+14. search_context 若有 invitation_topic 或 query_text，代表發起者這一輪的主題需求，
+    不是候選人的技能、興趣、行程或出席證據。可以依此主題選擇有自然對話可能的人，
+    但不可宣稱候選人會該活動、已安排出席或已同意；是否有興趣要留給雙方確認。
+
 發起者 Graph Memory：
 [GRAPH_MEMORY_PLACEHOLDER]
 
@@ -98,7 +132,10 @@ class MatchmakerAgent:
 發起者 Deep Profile：
 [DEEP_PROFILE_PLACEHOLDER]
 """
-    def _match_messages(self, target_user, candidates, graph_memory="", global_heuristics="", target_deep_profile=None):
+    def _match_messages(
+        self, target_user, candidates, graph_memory="", global_heuristics="",
+        target_deep_profile=None, search_context=None,
+    ):
         """Shared prompt for the bounded async endpoint and legacy sync caller."""
         payload = {
             "target_user": target_user,
@@ -108,6 +145,9 @@ class MatchmakerAgent:
         
         if target_deep_profile:
             payload["target_deep_profile"] = target_deep_profile
+        context = provider_search_context(search_context)
+        if context:
+            payload["search_context"] = context
         
         memory_text = graph_memory if graph_memory else "目前圖庫中尚無該使用者的偏好或地雷紀錄。"
         system_content = self.system_prompt.replace("[GRAPH_MEMORY_PLACEHOLDER]", memory_text)
@@ -125,12 +165,18 @@ class MatchmakerAgent:
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
 
-    def match(self, target_user, candidates, graph_memory="", global_heuristics="", target_deep_profile=None):
+    def match(
+        self, target_user, candidates, graph_memory="", global_heuristics="",
+        target_deep_profile=None, search_context=None,
+    ):
         """Legacy synchronous API; never used inside the async HTTP endpoint."""
         try:
             response = self.client.with_options(timeout=MATCH_LLM_TIMEOUT_SECONDS, max_retries=0).chat.completions.create(
                 model=self.model,
-                messages=self._match_messages(target_user, candidates, graph_memory, global_heuristics, target_deep_profile),
+                messages=self._match_messages(
+                    target_user, candidates, graph_memory, global_heuristics,
+                    target_deep_profile, search_context,
+                ),
                 temperature=0.7, max_tokens=MATCH_MAX_OUTPUT_TOKENS,
             )
             return _match_content(response)
@@ -141,7 +187,10 @@ class MatchmakerAgent:
         except Exception:
             return json.dumps({"error": "matchmaker_provider_error"})
 
-    async def match_async(self, target_user, candidates, graph_memory="", global_heuristics="", target_deep_profile=None):
+    async def match_async(
+        self, target_user, candidates, graph_memory="", global_heuristics="",
+        target_deep_profile=None, search_context=None,
+    ):
         """A wall-clock deadline cancels the real async request, not a worker thread."""
         started = time.perf_counter()
         try:
@@ -151,7 +200,10 @@ class MatchmakerAgent:
                     timeout=httpx.Timeout(MATCH_LLM_TIMEOUT_SECONDS, connect=5.0, pool=5.0),
                     max_retries=0,
                 ) as client:
-                    messages = self._match_messages(target_user, candidates, graph_memory, global_heuristics, target_deep_profile)
+                    messages = self._match_messages(
+                        target_user, candidates, graph_memory, global_heuristics,
+                        target_deep_profile, search_context,
+                    )
                     # One retry shares the original wall deadline. Never append
                     # partial model content or turn truncation into an empty match.
                     for attempt, budget in enumerate((MATCH_MAX_OUTPUT_TOKENS, MATCH_RETRY_OUTPUT_TOKENS)):

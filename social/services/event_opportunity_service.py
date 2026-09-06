@@ -17,6 +17,7 @@ from services.ayue_agent.public_relationship_projection import anonymize_counter
 from services.match_reason_service import public_personality_phrase
 from services.mediator_event_service import queue_mediator_event
 from services.match_state_service import verified_accepted_match_query
+from services.match_quota_service import release_daily_quota, reserve_daily_quota
 from services.proposal_namespace import (
     EVENT_INVITATION_NAMESPACE,
     live_proposal_query,
@@ -366,6 +367,20 @@ def create_event_opportunity(
     if existing:
         return {"status": "already_processed", "proposal_status": existing.get("status")}
 
+    # Proactive invitations have a separate once-per-local-day allowance.  It
+    # is reserved only after a real event/candidate pair has passed all safety
+    # and deduplication checks, so empty scans do not consume it.
+    quota = reserve_daily_quota(
+        safe_user_id,
+        bucket="background",
+        operation_key=f"event-opportunity:{opportunity_key}",
+    )
+    if quota.get("status") == "exhausted":
+        return {"status": "quota_exceeded", "reason_code": "daily_background_quota_exceeded"}
+    if quota.get("status") == "unavailable":
+        return {"status": "quota_unavailable", "reason_code": "quota_unavailable"}
+    quota_reserved = quota.get("status") in {"reserved", "already_reserved"}
+
     first_hook = _clean_hook(
         agent_result.get("first_hook") or agent_result.get("hook"),
         second_user,
@@ -396,6 +411,20 @@ def create_event_opportunity(
         "actionable_until": max(session_starts or _positive_timestamps([selected.get("starts_at")]) or [0]),
         "source_url": str(selected.get("source_url") or "")[:500],
     }
+    # The proactive source has a different promise from a user topic search:
+    # the event is real and verified, while mutual attendance is still open.
+    # Keep the two audience directions distinct even when the ranking agent
+    # accidentally returns the same hook twice.
+    if first_hook == second_hook:
+        title = str(event_snapshot.get("title") or "這個活動")[:80]
+        first_hook = f"我看到「{title}」可能和你有關，也想到一位能接上這個話題的人；要不要先讓我幫你問問？"
+        second_hook = f"有位朋友可能會對「{title}」有興趣；你願意先認識對方，再聊聊要不要一起去嗎？"
+    else:
+        title = str(event_snapshot.get("title") or "這個活動")[:80]
+        if title and title not in first_hook:
+            first_hook = f"關於「{title}」，{first_hook}"
+        if title and title not in second_hook:
+            second_hook = f"關於「{title}」，{second_hook}"
     match_doc = {
         "from_user": first_user,
         "to_user": second_user,
@@ -405,7 +434,9 @@ def create_event_opportunity(
         "delivery_channel": "mediator_chat",
         "proposal_namespace": EVENT_INVITATION_NAMESPACE,
         "proposal_source": "event_opportunity",
+        "match_source_kind": "event",
         "participant_pair_key": pair_key,
+        "live_pair_key": f"{EVENT_INVITATION_NAMESPACE}:{pair_key}",
         "event_opportunity_key": opportunity_key,
         "event_snapshot": event_snapshot,
         "reason": first_hook,
@@ -416,6 +447,22 @@ def create_event_opportunity(
             {"viewer_id": second_user, "counterparty_id": first_user, "viewer_text": second_hook},
         ],
         "recommendation_tier": "event_grounded",
+        "match_basis": {
+            "level": "direct",
+            "need_evidence": [str(profiles[first_user].get("current_context") or "")[:90]],
+            "counterparty_evidence": [str(profiles[second_user].get("current_context") or "")[:90]],
+            "concrete_overlap": [str(event_snapshot.get("title") or "近期活動")[:120]],
+            "cannot_infer": [
+                "對方尚未同意參加這個活動。",
+                "活動資訊不代表雙方已安排同行。",
+            ],
+        },
+        "source_summary": " · ".join(
+            item for item in (
+                str(event_snapshot.get("title") or "").strip(),
+                str(event_snapshot.get("venue") or "").strip(),
+            ) if item
+        )[:180],
         "distinctive_tags": list(dict.fromkeys(
             list(selected.get("target_links") or [])
             + list(selected.get("candidate_links") or [])
@@ -444,7 +491,21 @@ def create_event_opportunity(
     try:
         inserted = matches_coll.insert_one(match_doc)
     except DuplicateKeyError:
+        if quota_reserved:
+            release_daily_quota(
+                safe_user_id,
+                bucket="background",
+                operation_key=f"event-opportunity:{opportunity_key}",
+            )
         return {"status": "already_active"}
+    except Exception:
+        if quota_reserved:
+            release_daily_quota(
+                safe_user_id,
+                bucket="background",
+                operation_key=f"event-opportunity:{opportunity_key}",
+            )
+        raise
 
     match_id = str(inserted.inserted_id)
     queued = queue_mediator_event(

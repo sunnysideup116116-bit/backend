@@ -140,6 +140,11 @@ class V3SubAgentTests(unittest.TestCase):
         self.assertNotIn("web.extract", PLACES_AGENT_TOOLS)
         self.assertIn("Places Agent 不呼叫 Web", PLACES_SYSTEM)
 
+    def test_places_agent_keeps_room_scoped_place_pronoun(self):
+        self.assertIn("place_followup.resolved_place", PLACES_SYSTEM)
+        self.assertIn("不可把指涉改成人或配對對象", PLACES_SYSTEM)
+        self.assertIn("不可重新搜尋一批候選", PLACES_SYSTEM)
+
     def test_match_agent_produces_get_status_proposal(self):
         slc = _slice("match", {
             "message": "我的配對進度如何？",
