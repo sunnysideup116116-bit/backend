@@ -41,6 +41,22 @@ class V3ContextSlicerTests(unittest.TestCase):
         self.assertNotIn("active_proposal", s.payload)
         self.assertNotIn("recent_context", s.payload)
 
+    def test_places_slice_receives_recent_candidate_projection_for_continuation(self):
+        self.turn.recent_place_candidates = {
+            "snapshot_version": "v3-place-presentation-v1",
+            "candidates": [{
+                "reference": "place_ref_0123456789abcdef01234567",
+                "ordinal": 1,
+                "label": "旧店",
+                "category": "cafe",
+                "address_summary": "高雄市",
+            }],
+        }
+
+        sliced = slice_for_agent("places", self.turn, prior_observations=[])
+
+        self.assertEqual(sliced.payload["recent_place_candidates"]["candidates"][0]["label"], "旧店")
+
     def test_places_slice_gets_only_safe_abandoned_place_referent(self):
         self.turn.place_followup = {
             "fields": {"date": "2026-09-12", "start_time": "08:30"},

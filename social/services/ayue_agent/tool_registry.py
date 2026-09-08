@@ -157,6 +157,13 @@ class _PlacesNearbyArguments(BaseModel):
     limit: int = Field(default=3, ge=1, le=8)
     ordering: Literal["distance", "balanced"] = "distance"
     use_saved_location: bool = False
+    exclude_previously_presented: bool = Field(
+        default=False,
+        description=(
+            "True only when the user asks for other/new results from the current room's "
+            "place recommendations. The server resolves excluded provider identities."
+        ),
+    )
     enrichments: list[PlaceEnrichment] = Field(default_factory=list, max_length=4)
 
     @field_validator("enrichments")
@@ -476,6 +483,8 @@ class _PlacesNearbyOutput(BaseModel):
     radius_m: int = Field(default=1500, ge=300, le=5000)
     requested_limit: int = Field(default=3, ge=1, le=8)
     ordering: Literal["distance", "balanced"] = "distance"
+    exclude_previously_presented: bool = False
+    excluded_presented_count: int = Field(default=0, ge=0)
     places: list[_PlaceOutput] = Field(default_factory=list)
 
 

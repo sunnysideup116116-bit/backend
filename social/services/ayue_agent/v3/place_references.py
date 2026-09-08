@@ -17,7 +17,11 @@ import secrets
 import threading
 import time
 import unicodedata
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
+from heapq import merge
+from itertools import islice
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -26,7 +30,10 @@ from urllib.parse import urlsplit
 # presentation identity intentionally does not use this TTL.
 PLACE_REFERENCE_TTL_SECONDS = 10 * 60
 MAX_PLACE_REFERENCES = 8
+# Compatibility only: historical snapshots are now traversed in batches,
+# rather than being silently discarded before sorting at this old threshold.
 MAX_PRESENTATION_SCAN = 500
+_SNAPSHOT_BATCH_SIZE = 64
 _REFERENCE_RE = re.compile(r"place_ref_[a-f0-9]{24}")
 _ORDINAL_CHARS = "一二三四五六七八九十"
 _ORDINAL_RE = re.compile(
@@ -92,6 +99,22 @@ _LOCK = threading.RLock()
 _MEMORY: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
 _LOGGER = logging.getLogger(__name__)
 _FALLBACK_WARNING_EMITTED = False
+_READ_SCOPE: ContextVar[dict[str, Any] | None] = ContextVar("place_reference_read_scope", default=None)
+
+
+@contextmanager
+def place_reference_read_scope():
+    """Share immutable reads only while assembling one turn's context.
+
+    This is deliberately not a cross-turn cache: deleted/blocked source
+    messages and newly published or selected places are checked again on the
+    next turn and at ordinary execution boundaries.
+    """
+    token = _READ_SCOPE.set({"snapshots": {}, "sources": {}})
+    try:
+        yield
+    finally:
+        _READ_SCOPE.reset(token)
 
 
 class PlaceReferencePersistenceError(RuntimeError):
@@ -154,6 +177,10 @@ def ensure_indexes() -> None:
         collection.create_index(
             [("user_id", 1), ("room_id", 1), ("published", 1), ("created_at", -1)],
             name="v3_place_presentations_recent",
+        )
+        collection.create_index(
+            [("user_id", 1), ("room_id", 1), ("published", 1), ("selected_at", -1), ("created_at", -1)],
+            name="v3_place_presentations_selected",
         )
         collection.create_index(
             [("user_id", 1), ("room_id", 1), ("candidates.reference", 1)],
@@ -320,30 +347,88 @@ def _mongo_snapshots(
     *,
     include_unpublished: bool = False,
     origin_run_id: str | None = None,
-) -> list[dict[str, Any]]:
+    selected_only: bool = False,
+):
+    """Yield sorted snapshots in bounded server batches; never truncate history."""
     collection = _collection()
     if collection is None:
         if _test_mode_enabled():
-            return _memory_snapshots(user_id, room_id, include_unpublished=include_unpublished)
+            yield from _memory_snapshots(user_id, room_id, include_unpublished=include_unpublished)
+            return
         raise PlaceReferencePersistenceError("place_presentation_store_unavailable")
     query: dict[str, Any] = {"user_id": str(user_id), "room_id": str(room_id)}
     if not include_unpublished:
         query["published"] = True
     if origin_run_id:
         query["origin_run_id"] = str(origin_run_id)
+    if selected_only:
+        query["selected_reference"] = {"$exists": True, "$nin": [None, ""]}
+    order = [("selected_at", -1), ("created_at", -1)] if selected_only else [("created_at", -1)]
+    cursor = None
+    legacy_cursor = None
     try:
-        rows = [dict(item) for item in list(collection.find(query))[:MAX_PRESENTATION_SCAN]]
+        # Current writers use time.time() numbers. Older snapshots can contain
+        # datetime or numeric-string timestamps, which BSON sorts by type
+        # rather than chronological value. Keep the indexed numeric path and
+        # merge the uncommon legacy records using the original conversion.
+        numeric_types = ["double", "int", "long"]
+        fields = [field for field, _direction in order]
+        numeric_query = {**query, "$and": [{field: {"$type": numeric_types}} for field in fields]}
+        legacy_query = {**query, "$or": [{field: {"$not": {"$type": numeric_types}}} for field in fields]}
+        cursor = collection.find(numeric_query).sort(order).batch_size(_SNAPSHOT_BATCH_SIZE)
+        legacy_cursor = collection.find(legacy_query).batch_size(_SNAPSHOT_BATCH_SIZE)
+        sort_key = lambda item: tuple(_selection_timestamp(item, field) for field in fields)
+        legacy_records = sorted((dict(item) for item in legacy_cursor), key=sort_key, reverse=True)
+        for item in merge(cursor, legacy_records, key=sort_key, reverse=True):
+            yield dict(item)
     except Exception as exc:
         raise PlaceReferencePersistenceError("place_presentation_store_unavailable") from exc
-    def _sort_key(item: dict[str, Any]) -> float:
-        value = item.get("created_at", 0)
-        if isinstance(value, datetime):
-            return value.timestamp()
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if legacy_cursor is not None:
+            legacy_cursor.close()
+
+
+def _filter_accessible_snapshots(
+    records: list[dict[str, Any]], source_cache: dict[tuple[str, str], bool],
+) -> list[dict[str, Any]]:
+    """Verify source messages in batches, with the same room/block boundary."""
+    from bson.objectid import ObjectId
+    from database import messages_coll
+
+    pending: dict[str, dict[str, Any]] = {}
+    for record in records:
+        room_id = str(record.get("room_id") or "")
+        source_id = _safe_text(record.get("source_message_id"), 160)
+        key = (room_id, source_id)
+        if key in source_cache:
+            continue
         try:
-            return float(value or 0)
-        except (TypeError, ValueError):
-            return 0.0
-    return sorted(rows, key=_sort_key, reverse=True)
+            object_id = ObjectId(source_id)
+        except Exception:
+            source_cache[key] = False
+            continue
+        pending.setdefault(room_id, {})[source_id] = object_id
+    for room_id, source_ids in pending.items():
+        try:
+            accessible = {
+                str(item["_id"])
+                for item in messages_coll.find({
+                    "_id": {"$in": list(source_ids.values())},
+                    "room_id": room_id,
+                    "sender_id": "ai_assistant",
+                    "is_blocked": {"$ne": True},
+                }, {"_id": 1})
+            }
+        except Exception as exc:
+            raise PlaceReferencePersistenceError("place_source_store_unavailable") from exc
+        for source_id, object_id in source_ids.items():
+            source_cache[(room_id, source_id)] = str(object_id) in accessible
+    return [
+        record for record in records
+        if source_cache.get((str(record.get("room_id") or ""), _safe_text(record.get("source_message_id"), 160)), False)
+    ]
 
 
 def _all_snapshots(
@@ -352,7 +437,13 @@ def _all_snapshots(
     *,
     include_unpublished: bool = False,
     origin_run_id: str | None = None,
+    selected_only: bool = False,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
+    scope = _READ_SCOPE.get()
+    cache_key = (str(user_id), str(room_id), include_unpublished, origin_run_id, selected_only, limit)
+    if scope is not None and cache_key in scope["snapshots"]:
+        return [dict(record) for record in scope["snapshots"][cache_key]]
     if _test_mode_enabled():
         records = _memory_snapshots(
             user_id, room_id, include_unpublished=include_unpublished,
@@ -362,15 +453,35 @@ def _all_snapshots(
                 item for item in records
                 if str(item.get("origin_run_id") or "") == str(origin_run_id)
             ]
+        if selected_only:
+            records = [record for record in records if _selected_candidate_from_record(record) is not None]
+            records.sort(key=lambda item: (_selection_timestamp(item, "selected_at"), _selection_timestamp(item, "created_at")), reverse=True)
+        if limit is not None:
+            records = records[:limit]
     else:
-        records = _mongo_snapshots(
+        iterator = _mongo_snapshots(
             user_id, room_id,
             include_unpublished=include_unpublished,
             origin_run_id=origin_run_id,
+            selected_only=selected_only,
         )
-    if include_unpublished:
-        return records
-    return [record for record in records if _published_source_is_accessible(record)]
+        records = []
+        source_cache = scope["sources"] if scope is not None else {}
+        try:
+            while batch := list(islice(iterator, _SNAPSHOT_BATCH_SIZE)):
+                if selected_only:
+                    batch = [record for record in batch if _selected_candidate_from_record(record) is not None]
+                if not include_unpublished:
+                    batch = _filter_accessible_snapshots(batch, source_cache)
+                records.extend(batch)
+                if limit is not None and len(records) >= limit:
+                    records = records[:limit]
+                    break
+        finally:
+            iterator.close()
+    if scope is not None:
+        scope["snapshots"][cache_key] = records
+    return [dict(record) for record in records]
 
 
 def _published_source_is_accessible(record: dict[str, Any]) -> bool:
@@ -553,6 +664,7 @@ def get_candidate_set(
             user_id, room_id,
             include_unpublished=include_unpublished,
             origin_run_id=origin_run_id,
+            limit=1,
         )
     except PlaceReferencePersistenceError as exc:
         _LOGGER.error(
@@ -640,6 +752,47 @@ def public_projection(record: dict[str, Any] | None) -> dict[str, Any] | None:
     return projection
 
 
+def private_presented_place_identities(
+    user_id: str,
+    room_id: str,
+    *,
+    categories: list[str] | tuple[str, ...] | None = None,
+) -> set[tuple[str, str]]:
+    """Return server-only provider identities already published in this room."""
+    requested_categories = {
+        str(item or "").strip()
+        for item in (categories or [])
+        if str(item or "").strip()
+    }
+    identities: set[tuple[str, str]] = set()
+    for record in _all_snapshots(user_id, room_id):
+        for candidate in (record.get("candidates") or [])[:MAX_PLACE_REFERENCES]:
+            if not isinstance(candidate, dict):
+                continue
+            category = str(candidate.get("category") or "").strip()
+            if requested_categories and category and category not in requested_categories:
+                continue
+            provider = str(candidate.get("provider") or "").strip().lower()
+            identity = (
+                str(candidate.get("provider_place_id") or "").strip()
+                if provider == "google"
+                else str(candidate.get("map_identity") or "").strip()
+            )
+            if provider in {"google", "openstreetmap"} and identity:
+                identities.add((provider, identity))
+    return identities
+
+
+def _selection_timestamp(record: dict[str, Any], field: str) -> float:
+    value = record.get(field, 0)
+    if isinstance(value, datetime):
+        return value.timestamp()
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _selected_candidate_from_record(
     record: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -658,7 +811,8 @@ def get_recent_selected_candidate(
 ) -> tuple[dict[str, Any], str] | None:
     """Return the newest server-selected candidate and its private origin."""
     try:
-        records = _all_snapshots(user_id, room_id)
+        latest_records = _all_snapshots(user_id, room_id, limit=1)
+        records = _all_snapshots(user_id, room_id, selected_only=True, limit=1)
     except PlaceReferencePersistenceError:
         return None
     selected: list[tuple[float, float, dict[str, Any], str]] = []
@@ -666,14 +820,8 @@ def get_recent_selected_candidate(
         candidate = _selected_candidate_from_record(record)
         if candidate is None:
             continue
-        try:
-            selected_at = float(record.get("selected_at") or 0)
-        except (TypeError, ValueError):
-            selected_at = 0.0
-        try:
-            created_at = float(record.get("created_at") or 0)
-        except (TypeError, ValueError):
-            created_at = 0.0
+        selected_at = _selection_timestamp(record, "selected_at")
+        created_at = _selection_timestamp(record, "created_at")
         selected.append((
             selected_at,
             created_at,
@@ -688,11 +836,8 @@ def get_recent_selected_candidate(
     # A successful newer recommendation starts a new selection context. An
     # older selected candidate may still be resolved through an explicit
     # historical-list phrase, but it must not answer a bare "它／那間".
-    latest_record = records[0] if records else {}
-    try:
-        latest_created_at = float(latest_record.get("created_at") or 0)
-    except (TypeError, ValueError):
-        latest_created_at = 0.0
+    latest_record = latest_records[0] if latest_records else {}
+    latest_created_at = _selection_timestamp(latest_record, "created_at")
     latest_origin = _safe_text(latest_record.get("origin_run_id"), 160)
     if origin != latest_origin and _selected_at <= latest_created_at:
         return None
@@ -1119,7 +1264,11 @@ def resolve_message_reference(
     # An explicit category such as "第四間飲料店" identifies the historical
     # list for that category. Do not let an unrelated active selection from a
     # newer category override it; explicit source words still win as usual.
-    source_active_origin = "" if category_scoped and not source_hint else active_origin
+    # A newly published recommendation becomes the default source for a bare
+    # ordinal. An unfinished Calendar draft remains available only when the
+    # user explicitly names that draft; it must not silently pin "the second"
+    # to an older list after the user asked for a new batch.
+    source_active_origin = active_origin if source_hint == "draft" else ""
     source_record, source_error, source_options = _select_source(
         records,
         hint=source_hint,

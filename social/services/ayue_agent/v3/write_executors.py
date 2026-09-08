@@ -337,8 +337,7 @@ def _prepare_date_coordination(
         },
     }, (
         (f"我把「{evidence_span}」理解成「{safe_label}」。" if resolution_kind in {"fuzzy", "phonetic"} else "")
-        + f"好欸～那我先幫你和「{safe_label}」在聊天室放一張約會邀請卡！"
-        + "等她接受之後，你們就可以一起慢慢補上約會細節囉～"
+        + f"要幫你和「{safe_label}」建立約會邀請卡嗎？確認後才會送出。"
     )
 
 
@@ -969,7 +968,8 @@ def prepare_write_confirmation(
             )
             skill_note = f"不一定已經會{topic}。" if skill_requested else ""
             preview = (
-                f"我幫你找一位可能對{topic}有興趣的夥伴，找到後就替你問問願不願意認識。"
+                f"我會依「{topic}」這個邀請需求，找一位可以替你詢問的人選；"
+                "找到後就替你問問願不願意認識，不會先假設對方也喜歡這項活動。"
                 f"{skill_note}要我開始找並送出邀請嗎？"
             )
         elif isinstance(getattr(turn, "active_proposal", None), dict) and (

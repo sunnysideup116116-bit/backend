@@ -119,6 +119,7 @@ def test_detect_requests_do_not_serialize_sync_nlp(monkeypatch):
         "log_message",
         AsyncMock(return_value=True),
     )
+    monkeypatch.setattr(api.chat_log_service, "update_message_status", AsyncMock())
     monkeypatch.setattr(
         api.chat_log_service.rel_service,
         "get_memory_context",

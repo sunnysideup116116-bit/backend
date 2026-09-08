@@ -41,6 +41,13 @@ class MatchQualificationTests(unittest.TestCase):
         self.assertNotEqual(owner_copy["viewer_text"], receiver_copy["viewer_text"])
         self.assertIn("不能確認", owner_copy["viewer_text"])
         self.assertIn("有位朋友", receiver_copy["viewer_text"])
+        sent_copy = topic_friend_intro_fallback(
+            initiator, receiver, "滑雪", requester_id="owner",
+            query_text="我想找人一起滑雪", auto_invite=True,
+        )
+        self.assertIn("邀請已送出", sent_copy["viewer_text"])
+        self.assertIn("正在等對方回覆", sent_copy["viewer_text"])
+        self.assertFalse(sent_copy["viewer_text"].endswith(("？", "?")))
 
     def test_match_reason_style_is_stable_but_not_a_single_global_first_shot(self):
         first = match_reason_style_id("owner", "candidate", context_revision="r1")
@@ -394,14 +401,14 @@ class MatchQualificationTests(unittest.TestCase):
     def test_topic_introductions_are_generated_separately_for_both_roles(self, generate):
         generate.side_effect = [
             type("Reply", (), {"content": json.dumps({
-                "viewer_text": "你想找人一起滑雪。我想到一位最近提過「週末想去雪地走走」的人，可以先從這件事認識彼此。",
-                "conversation_starter": "可以先聊聊想嘗試的雪地活動。",
-                "accepted_opening": "{{counterparty}}也願意認識！他最近提過週末想去雪地走走，可以先聊聊對滑雪的想法。",
+                "viewer_text": "你想找人一起滑雪，我找到一位可以替你詢問的人選。邀請已送出，正在等對方回覆。",
+                "conversation_starter": "配對成功後，可以先聊聊想怎麼體驗滑雪。",
+                "accepted_opening": "{{counterparty}}也願意認識！可以先聊聊對滑雪的想法。",
             }, ensure_ascii=False)})(),
             type("Reply", (), {"content": json.dumps({
-                "viewer_text": "有人正在找人一起滑雪，對方最近提過「最近想找滑雪伴」。可以先認識、聊聊彼此的想法，再決定要不要一起去。你願意認識看看嗎？",
-                "conversation_starter": "可以先聊聊各自想怎麼體驗滑雪。",
-                "accepted_opening": "{{counterparty}}也點頭了！對方最近想找滑雪伴，可以先聊聊彼此的滑雪想法。",
+                "viewer_text": "有人想找人一起滑雪，並邀請你先認識看看。你願意先認識對方嗎？",
+                "conversation_starter": "配對成功後，可以先聊聊各自想怎麼體驗滑雪。",
+                "accepted_opening": "{{counterparty}}也願意認識！可以先聊聊彼此的滑雪想法。",
             }, ensure_ascii=False)})(),
         ]
         result = build_friend_intro_v4(
@@ -418,9 +425,11 @@ class MatchQualificationTests(unittest.TestCase):
         self.assertEqual(generate.call_count, 2)
         requester = result["initiator_preview"]["viewer_text"]
         receiver = result["receiver_invitation"]["viewer_text"]
-        self.assertIn("週末想去雪地走走", requester)
+        self.assertIn("邀請已送出", requester)
+        self.assertNotIn("週末想去雪地走走", requester)
         self.assertFalse(requester.endswith("？"))
-        self.assertIn("最近想找滑雪伴", receiver)
+        self.assertNotIn("最近想找滑雪伴", receiver)
+        self.assertNotIn("有興趣", receiver)
         self.assertTrue(receiver.endswith(("？", "?")))
         self.assertNotEqual(requester, receiver)
         match_doc = {
@@ -434,6 +443,92 @@ class MatchQualificationTests(unittest.TestCase):
         }
         self.assertEqual(reason_for_viewer(match_doc, "owner"), requester)
         self.assertEqual(reason_for_viewer(match_doc, "candidate"), receiver)
+
+    @patch("routers.match.generate_chat_completion")
+    def test_topic_introduction_retries_claims_without_candidate_evidence(self, generate):
+        def reply(viewer_text):
+            return type("Reply", (), {"content": json.dumps({
+                "viewer_text": viewer_text,
+                "conversation_starter": "配對成功後再聊吃東港生魚片的安排。",
+                "accepted_opening": "{{counterparty}}也願意認識！可以先聊聊吃東港生魚片的想法。",
+            }, ensure_ascii=False)})()
+
+        generate.side_effect = [
+            reply("我幫你找到一位也對吃東港生魚片有興趣的人選，邀請已送出，正在等對方回覆。"),
+            reply("你想找人一起吃東港生魚片，我找到一位可以替你詢問的人選。邀請已送出，正在等對方回覆。"),
+            reply("有位也喜歡吃東港生魚片的朋友想認識你，你願意先認識對方嗎？"),
+            reply("有人想找人一起吃東港生魚片，並邀請你先認識看看。你願意先認識對方嗎？"),
+        ]
+        result = build_friend_intro_v4(
+            {"user_id": "owner", "current_context": "最近想找人去安靜的咖啡館聊天"},
+            {"user_id": "candidate", "current_context": "週末想拍照"},
+            0.82,
+            refine=True,
+            search_context={
+                "invitation_topic": "吃東港生魚片",
+                "query_text": "我要找人去吃東港生魚片叫它幫我邀請",
+            },
+            auto_invite=True,
+        )
+        self.assertEqual(generate.call_count, 4)
+        for call in generate.call_args_list:
+            self.assertNotIn("咖啡館", call.args[0])
+            self.assertNotIn("週末想拍照", call.args[0])
+            self.assertIn('"candidate_interest_confirmed": false', call.args[0])
+        for entry in result.values():
+            self.assertNotIn("有興趣", entry["viewer_text"])
+            self.assertNotIn("喜歡", entry["viewer_text"])
+            self.assertNotIn("咖啡館", entry["viewer_text"])
+            self.assertNotIn("週末想拍照", entry["viewer_text"])
+
+    def test_live_topic_card_reprojects_old_unverified_claims(self):
+        match_doc = {
+            "from_user": "owner",
+            "to_user": "candidate",
+            "status": "pending",
+            "delivery_mode": "invite_on_match",
+            "reason_version": "v4_friend_intro",
+            "reason_copy_version": "v8_source_directional",
+            "recommendation_tier": "exploratory",
+            "search_context": {
+                "invitation_topic": "吃東港生魚片",
+                "query_text": "找人去吃東港生魚片",
+            },
+            "match_context_snapshot": {
+                "target": {
+                    "user_id": "owner",
+                    "current_context": "最近想找人去安靜的咖啡館聊天",
+                },
+                "candidate": {
+                    "user_id": "candidate",
+                    "current_context": "週末想拍照",
+                },
+            },
+            "friend_intro_v4": {
+                "initiator_preview": {
+                    "style_id": "topic_request",
+                    "viewer_id": "owner",
+                    "counterparty_id": "candidate",
+                    "counterparty_context_snapshot": "週末想拍照",
+                    "viewer_text": "我找到一位也對吃東港生魚片有興趣的人選，你們可以聊看看。",
+                },
+                "receiver_invitation": {
+                    "style_id": "topic_request",
+                    "viewer_id": "candidate",
+                    "counterparty_id": "owner",
+                    "counterparty_context_snapshot": "最近想找人去安靜的咖啡館聊天",
+                    "viewer_text": "對方最近想去安靜的咖啡館，也想請你吃東港生魚片，你有興趣嗎？",
+                },
+            },
+        }
+        owner = reason_for_viewer(match_doc, "owner")
+        receiver = reason_for_viewer(match_doc, "candidate")
+        self.assertIn("邀請已送出", owner)
+        self.assertIn("邀請你先認識", receiver)
+        for text in (owner, receiver):
+            self.assertNotIn("有興趣", text)
+            self.assertNotIn("咖啡館", text)
+            self.assertNotIn("週末想拍照", text)
 
     @patch("routers.match.get_user_graph_memories", return_value=[])
     def test_requested_topic_does_not_bypass_hard_conflict(self, _graph_memories):

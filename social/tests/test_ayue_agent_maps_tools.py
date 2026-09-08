@@ -134,6 +134,45 @@ class AyueMapsToolsTests(unittest.TestCase):
         self.assertEqual(google.call_args.kwargs["radius_m"], 1500)
         self.assertNotIn("provider_name", result.data["places"][0])
 
+    def test_nearby_continuation_excludes_published_provider_id_before_limit(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="給我其他家")
+        places = [
+            {
+                "name": "旧店", "category": "cafe", "distance_m": 100,
+                "address_summary": "A", "map_url": "https://www.google.com/maps/place/old",
+                "provider": "google", "place_id": "old-place",
+            },
+            {
+                "name": "新店 A", "category": "cafe", "distance_m": 200,
+                "address_summary": "B", "map_url": "https://www.google.com/maps/place/new-a",
+                "provider": "google", "place_id": "new-a",
+            },
+            {
+                "name": "新店 B", "category": "cafe", "distance_m": 300,
+                "address_summary": "C", "map_url": "https://www.google.com/maps/place/new-b",
+                "provider": "google", "place_id": "new-b",
+            },
+        ]
+        with patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.nominatim_search", return_value={
+                 "label": "高雄市鹽埕區", "lat": 22.62, "lon": 120.28,
+             }), \
+             patch(
+                 "services.ayue_agent.tools.private_presented_place_identities",
+                 return_value={("google", "old-place")},
+             ), \
+             patch("services.ayue_agent.tools.search_nearby_places", return_value=places) as google:
+            result = execute_tool(ToolCall(name="places.search_nearby", arguments={
+                "anchor": "高雄市鹽埕區", "categories": ["cafe"], "limit": 2,
+                "exclude_previously_presented": True,
+            }), ctx)
+
+        self.assertTrue(result.ok)
+        self.assertEqual([item["place_id"] for item in result.data["places"]], ["new-a", "new-b"])
+        self.assertEqual(google.call_args.kwargs["limit"], 3)
+        self.assertTrue(result.data["exclude_previously_presented"])
+        self.assertEqual(result.data["excluded_presented_count"], 1)
+
     def test_nearby_forwards_only_requested_enrichments_to_google_search(self):
         ctx = AgentTurnContext(
             user_id="owner", room_id="room", message="rating/open hours",

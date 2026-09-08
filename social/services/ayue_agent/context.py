@@ -311,6 +311,7 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
         get_candidate_set as get_place_candidate_set,
         public_projection as place_candidate_projection,
         recent_selected_projection as recent_place_reference_projection,
+        place_reference_read_scope,
     )
     from .v3.place_followups import (
         PlaceFollowupPersistenceError,
@@ -334,10 +335,11 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     recent_recommendation = relationship_recommendation_projection(
         get_relationship_recommendation(ctx.user_id, ctx.room_id)
     )
-    recent_place_candidates = place_candidate_projection(
-        get_place_candidate_set(ctx.user_id, ctx.room_id)
-    )
-    recent_place_reference = recent_place_reference_projection(ctx.user_id, ctx.room_id)
+    with place_reference_read_scope():
+        recent_place_candidates = place_candidate_projection(
+            get_place_candidate_set(ctx.user_id, ctx.room_id)
+        )
+        recent_place_reference = recent_place_reference_projection(ctx.user_id, ctx.room_id)
     try:
         recent_place_followup = place_followup_projection(
             get_place_followup(ctx.user_id, ctx.room_id)

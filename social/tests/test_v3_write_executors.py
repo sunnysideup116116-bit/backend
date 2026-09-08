@@ -273,7 +273,9 @@ class V3WritePreflightTests(unittest.TestCase):
             payload, reply = prepare_write_confirmation("match.start_search", {}, ctx, turn)
         self.assertEqual(payload["data"]["search_context"]["invitation_topic"], "衝浪")
         self.assertEqual(payload["data"]["delivery_mode"], "invite_on_match")
-        self.assertIn("可能對衝浪有興趣", reply)
+        self.assertIn("可以替你詢問的人選", reply)
+        self.assertIn("不會先假設對方也喜歡", reply)
+        self.assertNotIn("可能對衝浪有興趣", reply)
         self.assertIn("不一定已經會衝浪", reply)
         self.assertIn("開始找並送出邀請", reply)
 

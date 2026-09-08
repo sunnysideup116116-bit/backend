@@ -10,7 +10,7 @@ from services.ayue_agent.v3.contracts import Plan, SubTask
 from services.ayue_agent.v3.planner import (
     _PLANNER_PROMPT_VERSION, _PLANNER_SYSTEM, _decompose_tool_schema, _planner_prompt,
     _planner_validation_retry_hint, _normalize_provider_plan_arguments,
-    _explicit_match_request_intent, plan_turn,
+    _canonicalize_write_intent_briefs, _explicit_match_request_intent, plan_turn,
 )
 from services.ai_service import ToolCallResult
 
@@ -1026,6 +1026,169 @@ class V3PlannerTests(unittest.TestCase):
         self.assertNotIn("web", [task.agent for task in plan.tasks])
         self.assertEqual(provider.call_count, 1)
 
+    def test_mixed_date_invite_preserves_places_brief(self):
+        plan = Plan(
+            write_intent="relationship.date_invitation.v1",
+            tasks=[
+                SubTask(id="r1", agent="relationship", depends_on=[], task_brief="send invite"),
+                SubTask(
+                    id="p1", agent="places", place_mode="discover", depends_on=[],
+                    task_brief="find nearby ice shops",
+                ),
+                SubTask(
+                    id="s1", agent="synthesizer", depends_on=["r1", "p1"],
+                    task_brief="combine",
+                ),
+            ],
+        )
+
+        normalized = _canonicalize_write_intent_briefs(plan)
+
+        self.assertIn("relationship.start_date_coordination", normalized.tasks[0].task_brief)
+        self.assertEqual(normalized.tasks[1].task_brief, "find nearby ice shops")
+        self.assertIn("verified read-only observation", normalized.tasks[2].task_brief)
+
+    def test_invite_boundary_prompt_treats_companion_as_context(self):
+        self.assertIn("想約小凱吃冰，幫我找店", _PLANNER_SYSTEM)
+        self.assertIn("@ 只綁定人", _PLANNER_SYSTEM)
+
+    def test_unknown_presentation_mode_defaults_without_changing_tasks(self):
+        raw = {
+            "mode": "tasks",
+            "write_intent": "none",
+            "presentation_mode": "list",
+            "tasks": [
+                {
+                    "id": "p1", "agent": "places", "place_mode": "discover",
+                    "depends_on": [], "task_brief": "find ice shops",
+                },
+                {
+                    "id": "s1", "agent": "synthesizer", "depends_on": ["p1"],
+                    "task_brief": "reply",
+                },
+            ],
+        }
+
+        normalized, repairs = _normalize_provider_plan_arguments(raw)
+
+        self.assertEqual(normalized["presentation_mode"], "default")
+        self.assertEqual(normalized["tasks"], raw["tasks"])
+        self.assertEqual(repairs, ["unsupported_presentation_mode_defaulted"])
+
+    def test_date_write_itinerary_hint_defaults_without_changing_mixed_tasks(self):
+        raw = {
+            "mode": "tasks",
+            "write_intent": "relationship.date_invitation.v1",
+            "presentation_mode": "itinerary",
+            "tasks": [
+                {
+                    "id": "r1", "agent": "relationship", "depends_on": [],
+                    "task_brief": "prepare the requested invitation",
+                },
+                {
+                    "id": "p1", "agent": "places", "place_mode": "discover",
+                    "depends_on": [], "task_brief": "find ice shops",
+                },
+                {
+                    "id": "s1", "agent": "synthesizer", "depends_on": ["r1", "p1"],
+                    "task_brief": "reply with results and the locked confirmation",
+                },
+            ],
+        }
+
+        normalized, repairs = _normalize_provider_plan_arguments(raw)
+
+        self.assertEqual(normalized["presentation_mode"], "default")
+        self.assertEqual(normalized["tasks"], raw["tasks"])
+        self.assertEqual(repairs, ["date_write_presentation_mode_defaulted"])
+
+    def test_resolved_place_followup_drops_only_string_task_reference(self):
+        raw = {
+            "mode": "tasks",
+            "write_intent": "none",
+            "tasks": [
+                {
+                    "id": "p1", "agent": "places", "place_mode": "reviews",
+                    "depends_on": [], "task_brief": "評估第二間",
+                    "place_reference": "place_ref_model_must_not_authorize",
+                },
+                {
+                    "id": "s1", "agent": "synthesizer", "depends_on": ["p1"],
+                    "task_brief": "回覆",
+                },
+            ],
+        }
+
+        normalized, repairs = _normalize_provider_plan_arguments(
+            raw, resolved_place_reference=True,
+        )
+
+        self.assertNotIn("place_reference", normalized["tasks"][0])
+        self.assertEqual(repairs, ["resolved_place_task_reference_removed"])
+        for resolved, value in ((False, "place_ref_x"), (True, ["place_ref_x"])):
+            with self.subTest(resolved=resolved, value=value):
+                candidate = deepcopy(raw)
+                candidate["tasks"][0]["place_reference"] = value
+                unchanged, codes = _normalize_provider_plan_arguments(
+                    candidate, resolved_place_reference=resolved,
+                )
+                self.assertEqual(unchanged, candidate)
+                self.assertEqual(codes, [])
+
+    def test_resolved_place_followup_repairs_task_reference_without_retry(self):
+        turn = self._turn("第二間你覺得怎樣").model_copy(update={
+            "place_reference_resolution": {
+                "status": "resolved", "reference": "place_ref_server_owned",
+                "ordinal": 2, "label": "高雄婆婆冰旗艦店",
+            },
+        })
+        provider_result = _fc_result(tool_calls=[{
+            "name": "decompose_tasks",
+            "arguments": {
+                "mode": "tasks", "write_intent": "none",
+                "tasks": [
+                    {
+                        "id": "p1", "agent": "places", "place_mode": "reviews",
+                        "depends_on": [], "task_brief": "查第二間評價",
+                        "place_reference": "place_ref_untrusted",
+                    },
+                    {
+                        "id": "s1", "agent": "synthesizer", "depends_on": ["p1"],
+                        "task_brief": "回覆",
+                    },
+                ],
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=provider_result,
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(metrics.retry_count, 0)
+        self.assertEqual(
+            metrics.attempts[0]["repair_codes"],
+            ["resolved_place_task_reference_removed"],
+        )
+
+    def test_place_reference_schema_error_gets_exact_retry_hint(self):
+        from pydantic import ValidationError
+        from services.ayue_agent.v3.planner import _DecomposeTasksArguments
+        with self.assertRaises(ValidationError) as caught:
+            _DecomposeTasksArguments.model_validate({
+                "write_intent": "none",
+                "tasks": [{
+                    "id": "p1", "agent": "places", "place_mode": "details",
+                    "depends_on": [], "task_brief": "查第二間",
+                    "place_reference": "place_ref_x",
+                }],
+            })
+        hint = _planner_validation_retry_hint(caught.exception)
+        self.assertIn("place_reference never belongs inside a task", hint)
+        self.assertIn("top-level place_selection", hint)
+
     def test_date_invitation_intent_rejects_match_precheck_and_retries(self):
         turn = self._turn("幫我約小哲出來")
         wrong_match_plan = _fc_result(tool_calls=[{
@@ -1499,45 +1662,11 @@ class V3PlannerTests(unittest.TestCase):
         ) as provider:
             plan, metrics = plan_turn(turn)
         self.assertIsNone(plan)
-        self.assertEqual(provider.call_count, 2)
-        self.assertEqual(metrics.llm_call_count, 2)
-        self.assertEqual(metrics.retry_count, 1)
-        self.assertEqual(metrics.retry_reason, "provider_error")
-        self.assertEqual(metrics.failure_code, "provider_error")
-
-    def test_timeout_retries_once_then_recovers(self):
-        turn = self._turn("x")
-        valid = _fc_result(tool_calls=[{
-            "name": "decompose_tasks",
-            "arguments": {
-                "write_intent": "none",
-                "tasks": [
-                    {
-                        "id": "c1",
-                        "agent": "calendar",
-                        "depends_on": [],
-                        "task_brief": "查詢行程",
-                    },
-                    {
-                        "id": "s1",
-                        "agent": "synthesizer",
-                        "depends_on": ["c1"],
-                        "task_brief": "回覆使用者",
-                    },
-                ],
-            },
-        }])
-        with patch(
-            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
-            side_effect=[TimeoutError("timeout"), valid],
-        ) as provider:
-            plan, metrics = plan_turn(turn)
-        self.assertIsNotNone(plan)
-        self.assertEqual(provider.call_count, 2)
-        self.assertEqual(metrics.llm_call_count, 2)
-        self.assertEqual(metrics.retry_count, 1)
-        self.assertEqual(metrics.retry_reason, "provider_error")
-        self.assertEqual(metrics.failure_code, "")
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(metrics.llm_call_count, 1)
+        self.assertEqual(metrics.retry_count, 0)
+        self.assertEqual(metrics.retry_reason, "")
+        self.assertEqual(metrics.failure_code, "provider_timeout")
 
     def test_abandoned_place_followup_rejects_match_plan_and_retries_places(self):
         turn = self._turn("算了不用，但給我他的詳細資料").model_copy(update={

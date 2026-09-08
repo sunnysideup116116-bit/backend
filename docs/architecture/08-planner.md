@@ -13,7 +13,7 @@ Planner 透過一次 function calling 輸出 typed arguments，不解析自由�
 
 `presentation_mode` 只能是 `default|itinerary`。一日遊、半日遊或整天安排使用 `itinerary`，且 DAG 必須包含 Places。
 
-Provider 每次都必須輸出 `write_intent`。一般請求為 `none`；明確建立約會邀請卡為 `relationship.date_invitation.v1`，且只允許 root Relationship 加 terminal Synthesizer。Canonical `Plan` 保留 `none` default 供 server-side／舊 fixture 建構相容，但這個 default 不存在於 provider-facing required schema。
+Provider 每次都必須輸出 `write_intent`。一般請求為 `none`；只有明確要阿月現在建立／送出空白約會邀請才用 `relationship.date_invitation.v1`。「想約某人，幫我找店」的邀約是背景，@ 只是 entity binding。Date write 需一個 root Relationship task 與 terminal Synthesizer，可保留 typed read-only siblings。Canonical `Plan` 保留 `none` default 只供 server-side／舊 fixture 相容。
 
 Planner 的 system prompt 使用 compact-v3 版本：保留 routing ownership、direct-chat 邊界、Places／Web／Calendar／Match／Relationship／Profile／ProductInfo 的歧義規則、DAG invariants，以及具體日期＋既有聯絡人＋新活動＋附近晚餐的五節點範例；不注入完整 public persona、voice few-shots 或 Synthesizer reply contract。Planner 專用 context 只送最近 4 則／2,000 字元歷史、精簡 clock 與非空 server projection；這是 input budget 優化，不是第二個 router。Regression budget 為 system prompt ≤6,000 字元、provider schema ≤3,500 字元、兩者合計 ≤9,500 字元；這些不是 provider context-window 上限。
 
@@ -68,7 +68,7 @@ Planner 永遠不能提供 `user_id`、match/proposal/event ID、revision、expe
 
 Planner 無 tool call、function name 錯誤、schema 不符或 provider error 時最多重試一次；schema retry 只提供 allowlisted 欄位規則，例如 required `write_intent`、`evidence_policy` 僅限 Web、`outcome_contract` 僅限 Calendar availability，不回送錯誤值。Provider retry 仍使用同一 requested model tier，不自動切換 main。無效或空 DAG 不再靜默改成 Synthesizer-only；兩次仍失敗時 fail closed，不執行任何工具或副作用。舊 ProductInfo envelope 的少量 protocol drift 只能在 planner compatibility boundary 做 bounded repair；不能用自然語言 regex 猜 intent。
 
-Compatibility normalization 一律先複製 provider arguments，且只接受三類封閉修復：known agent 上錯置但值合法的 `evidence_policy`／Calendar availability `outcome_contract`、精確空 optional placeholder，以及 Relationship 將精確 `relationship.date_invitation.v1` 放到 `outcome_contract` 的單一 relocation case。其他 agent/value、衝突 root intent、`depends_on`／`run_if` drift、unknown agent 與 DAG invariant 不修復。Repair 不消耗 retry，只記 allowlisted code 到 localhost ephemeral debug；normalized payload、owner text 與 raw exception 不進 durable trace 或 public events。
+Compatibility normalization 先複製 provider arguments，只處理 allowlisted 且不授權的格式漂移：known agent 上錯置的 scoped field、精確空 optional placeholder、date intent relocation、呈現模式降級，以及已由 owner+room snapshot 唯一解析時 Places `details|reviews` task 上錯置的字串／空 `place_reference`。後者只移除模型值，執行器仍使用 Server 已解析的引用；其他 agent、容器型 reference、衝突 intent、`depends_on`／`run_if` drift、unknown agent 與 DAG invariant 不修復。Repair 不消耗 retry，只記 allowlisted code 到 localhost ephemeral debug。
 
 ## 4. Routing ownership
 
@@ -92,7 +92,7 @@ Match／Relationship 的路由先看資料形狀，不看「配對」單一詞�
 
 ### Relationship date-card routing
 
-使用者明確要求邀請一位已接受聯絡人並建立共同約會卡時，Planner 必須送 `write_intent="relationship.date_invitation.v1"`，且 DAG 只能是 root Relationship → terminal Synthesizer。Match／Calendar／Places／Web precheck、非 default presentation 或 opportunity 都會使 plan 無效。驗證成功後，Planner 以 server-owned brief 取代 model-written task brief；Relationship Runtime 只看到 `relationship.start_date_coordination`，最多做兩次 function-call protocol attempt，不能先讀聯絡人清單。
+使用者明確要阿月現在建立邀請時，Planner 送 `write_intent="relationship.date_invitation.v1"`。DAG 必須含唯一 root Relationship write task 與 terminal Synthesizer；其他 task 只允許 Places／Web／ProductInfo、typed Calendar availability 或唯讀 Match intent。Relationship brief 改成 server-owned write brief，其他 domain brief 保留；混合回合將唯讀結果與 locked confirmation 同時呈現。
 
 Target 只能來自一個已驗證 mention、current message 的連續名稱 evidence span，或同 owner 15 分鐘 recent-contact reference。唯一 accepted target 才能產生一筆 confirmation；模糊、未知、過期或非 accepted 都 fail closed。確認後只建立空白卡片，日期、地點、活動與 notes 由雙方之後填寫。這條 intent／reference channel 是 server-only ephemeral state，不進 prompt、trace 或 public events。
 

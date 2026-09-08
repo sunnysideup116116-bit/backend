@@ -2,6 +2,8 @@
 風險檢測 API 路由 - Phase 2 修正版 (Guardrail 審計強化)
 """
 
+from app.core.async_io import run_blocking, serialized
+from app.services.kb_service import KBUnavailableError
 import asyncio
 import warnings
 import os
@@ -81,6 +83,7 @@ async def handle_relationship_update(conv_id, sender_id, receiver_id):
         print(f"Relationship background update failed: {e}")
 
 @router.post("/detect", response_model=RiskDetectionResponse)
+@serialized("risk-detect", lambda req, background_tasks: req.conversation_id)
 async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTasks):
     """
     執行風險檢測 (整合 Guardrail 完整審計)
@@ -199,7 +202,7 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
         # ---------------------------------------------------------
         # STEP 2 ~ 8: 核心分析
         # ---------------------------------------------------------
-        rule_result = rule_engine.calculate(req.current_message, computed_features)
+        rule_result = await run_blocking(lambda: rule_engine.calculate(req.current_message, computed_features))
         print(_pretty_format_risk("Step 2: Rule Engine Delta", rule_result['delta'].model_dump()))
         if rule_result.get('triggered_rules'):
             print(f"      |-- Triggered           : {rule_result['triggered_rules']}")
@@ -215,7 +218,7 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
         print(f"      |-- NLP Reasoning       : {str(nlp_result.get('reasoning', ''))[:100]}")
         print(f"      |-- NLP Detected Feats  : {nlp_result.get('detected_features', [])}")
 
-        initial_delta = fusion.fuse(rule_result['delta'], nlp_result['delta'], nlp_confidence=nlp_result.get('confidence', 0.0))
+        initial_delta = await run_blocking(lambda: fusion.fuse(rule_result['delta'], nlp_result['delta'], nlp_confidence=nlp_result.get('confidence', 0.0)))
         # 時段相關的情境規則以「訊息發送時間」為準；未帶則退回處理當下
         msg_time = None
         if req.message_timestamp:
@@ -226,11 +229,11 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
             except ValueError:
                 print(f"   [ Warning ] 無法解析 message_timestamp: {req.message_timestamp}")
 
-        bonus_delta, scenarios = scenario_risk_layer.evaluate(
+        bonus_delta, scenarios = await run_blocking(lambda: scenario_risk_layer.evaluate(
             rule_result, nlp_result, computed_features,
             memory_metrics=relationship_memory, last_summary=last_summary,
             message_time=msg_time
-        )
+        ))
         print(_pretty_format_risk("Step 5: Scenario Bonus Delta", bonus_delta.model_dump()))
         print(f"      |-- Triggered Scenarios : {scenarios if scenarios else 'None'}")
         
@@ -281,14 +284,11 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
         # ---------------------------------------------------------
         # 效能優化：背景執行更新
         # ---------------------------------------------------------
-        # 介入紀錄必須排在所有背景任務之前。BackgroundTasks 是依序執行的，
-        # 若排在 review_guardrail_context（LLM 呼叫，數秒）後面，下一則訊息進來時
-        # get_last_displayed_intervention() 會讀不到這一筆，導致顯示節流失效、
-        # 且已處置豁免的條件①（上一次介入存在）誤判為不成立。
+        # Persist safety decisions before releasing this conversation's lock.
+        # Background writes can otherwise race the next request's throttle read.
         if risk_level != "safe":
             primary_risk_type = max(new_state.model_dump(), key=new_state.model_dump().get)
-            background_tasks.add_task(
-                chat_log_service.log_intervention,
+            await chat_log_service.log_intervention(
                 req.conversation_id, real_msg_id, req.sender_id, req.receiver_id,
                 risk_level, new_state, diag, diag.get('reason', 'normal'), primary_risk_type,
                 intervention_cmd["sender_directive"]["action"], intervention_cmd["receiver_directive"]["action"],
@@ -298,7 +298,7 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
             print(f"      |-- Receiver Action     : {intervention_cmd['receiver_directive']['action']}")
             print(f"      |-- Delivery Status     : {final_delivery_status}")
 
-        background_tasks.add_task(chat_log_service.update_message_status, real_msg_id, is_msg_blocked, final_delivery_status)
+        await chat_log_service.update_message_status(real_msg_id, is_msg_blocked, final_delivery_status)
         background_tasks.add_task(chat_log_service.update_temporal_features, req.conversation_id, req.sender_id, computed_features)
         background_tasks.add_task(
             chat_log_service.log_analysis_detail,
@@ -350,6 +350,8 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
         print("="*70 + "\n")
         return response
 
+    except KBUnavailableError as e:
+        raise HTTPException(status_code=503, detail="Risk knowledge base is temporarily unavailable") from e
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -370,7 +372,7 @@ async def get_risk_state(conversation_id: str, user_id: str):
     prior_state, _ = await state_machine.get_user_state(conversation_id, user_id)
     level = "safe"
     try:
-        response = chat_log_service.db.list_documents(
+        response = await run_blocking(lambda: chat_log_service.db.list_documents(
             database_id=chat_log_service.db_id,
             collection_id="risk_state_history",
             queries=[
@@ -379,7 +381,7 @@ async def get_risk_state(conversation_id: str, user_id: str):
                 Query.order_desc("timestamp"),
                 Query.limit(1)
             ]
-        )
+        ))
         if response.documents:
             doc = response.documents[0]
             d = doc.data if hasattr(doc, 'data') else doc.to_dict()

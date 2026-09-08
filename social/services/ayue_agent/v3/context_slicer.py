@@ -57,6 +57,7 @@ def slice_for_agent(
             "user_location": turn_ctx.user_location,
             "clock": clock_dump,
             "prior_observations": prior_observations,
+            "recent_place_candidates": getattr(turn_ctx, "recent_place_candidates", None),
             "recent_place_reference": getattr(turn_ctx, "recent_place_reference", None),
             "place_reference_resolution": getattr(turn_ctx, "place_reference_resolution", None),
             "place_followup": place_followup,

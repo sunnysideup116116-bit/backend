@@ -1,3 +1,4 @@
+from app.core.async_io import run_blocking, serialized
 import hashlib
 import os
 import json
@@ -57,7 +58,7 @@ class ChatLogService:
                 msg_data["delivered_at"] = datetime.now(timezone.utc).isoformat()
 
             final_id = msg_id if msg_id else ID.unique()
-            return self.db.create_document(self.db_id, "messages", final_id, msg_data)
+            return await run_blocking(lambda: self.db.create_document(self.db_id, "messages", final_id, msg_data))
         except Exception as e:
             print(f"log_message failed: {e}")
             return None
@@ -74,7 +75,7 @@ class ChatLogService:
             if status == "delivered":
                 data["delivered_at"] = now
             
-            return self.db.update_document(self.db_id, "messages", msg_id, data)
+            return await run_blocking(lambda: self.db.update_document(self.db_id, "messages", msg_id, data))
         except Exception as e:
             print(f"update_message_status failed: {e}")
             return None
@@ -89,7 +90,7 @@ class ChatLogService:
                 Query.limit(limit + 5) 
             ]
             
-            response = self.db.list_documents(self.db_id, "messages", queries=queries)
+            response = await run_blocking(lambda: self.db.list_documents(self.db_id, "messages", queries=queries))
             
             # 過濾掉排除的 ID
             docs = [d for d in response.documents if (d.id if hasattr(d, 'id') else d['$id']) != exclude_msg_id]
@@ -117,7 +118,7 @@ class ChatLogService:
                 Query.limit(limit + 5) 
             ]
             
-            response = self.db.list_documents(self.db_id, "messages", queries=queries)
+            response = await run_blocking(lambda: self.db.list_documents(self.db_id, "messages", queries=queries))
             
             # 在 Python 端過濾 delivery_status in ["delivered", "pending_review"]
             # 必須排除 blocked
@@ -144,11 +145,12 @@ class ChatLogService:
             print(f"get_recent_behavior_messages failed: {e}")
             return []
 
+    @serialized("temporal-features", lambda self, conv_id, user_id, temporal: (conv_id, user_id))
     async def update_temporal_features(self, conv_id, user_id, temporal):
         """STEP 1: Update temporal features snapshot (新版欄位補齊)"""
         try:
             queries = [Query.equal("conversation_id", conv_id), Query.equal("user_id", user_id)]
-            response = self.db.list_documents(self.db_id, "temporal_features", queries)
+            response = await run_blocking(lambda: self.db.list_documents(self.db_id, "temporal_features", queries))
             
             data = {
                 "conversation_id": conv_id,
@@ -168,9 +170,9 @@ class ChatLogService:
 
             if response.documents:
                 doc_id = response.documents[0].id if hasattr(response.documents[0], 'id') else response.documents[0]['$id']
-                self.db.update_document(self.db_id, "temporal_features", doc_id, data)
+                await run_blocking(lambda: self.db.update_document(self.db_id, "temporal_features", doc_id, data))
             else:
-                self.db.create_document(self.db_id, "temporal_features", ID.unique(), data)
+                await run_blocking(lambda: self.db.create_document(self.db_id, "temporal_features", ID.unique(), data))
         except Exception as e:
             print(f"update_temporal_features failed: {e}")
 
@@ -197,14 +199,14 @@ class ChatLogService:
                 "guardrail_flagged_words": json.dumps(flagged_words or []),
                 "guardrail_classifier_flag": json.dumps(classifier_flag or {}),
             }
-            self.db.create_document(self.db_id, "risk_analysis_logs_", ID.unique(), data)
+            await run_blocking(lambda: self.db.create_document(self.db_id, "risk_analysis_logs_", ID.unique(), data))
         except Exception as e:
             print(f"log_analysis_detail failed: {e}")
 
     async def get_latest_risk_state_with_time(self, conversation_id: str, user_id: str):
         """Fetch latest risk state and its timestamp"""
         try:
-            response = self.db.list_documents(
+            response = await run_blocking(lambda: self.db.list_documents(
                 database_id=self.db_id,
                 collection_id="risk_state_history",
                 queries=[
@@ -213,7 +215,7 @@ class ChatLogService:
                     Query.order_desc("timestamp"),
                     Query.limit(1)
                 ]
-            )
+            ))
             if response.documents:
                 doc = response.documents[0]
                 d = doc.data if hasattr(doc, 'data') else doc.to_dict()
@@ -225,10 +227,10 @@ class ChatLogService:
         # MongoDB Fallback
         if self.mongo_state_coll is not None:
             try:
-                doc = self.mongo_state_coll.find_one(
+                doc = await run_blocking(lambda: self.mongo_state_coll.find_one(
                     {"conversation_id": conversation_id, "user_id": user_id},
                     sort=[("timestamp", -1)]
-                )
+                ))
                 if doc:
                     state_data = doc.get("risk_state")
                     if isinstance(state_data, str):
@@ -242,7 +244,7 @@ class ChatLogService:
     async def get_recent_risk_state_history(self, conversation_id: str, user_id: str, limit: int = 5):
         """Fetch recent history for trend analysis"""
         try:
-            response = self.db.list_documents(
+            response = await run_blocking(lambda: self.db.list_documents(
                 database_id=self.db_id,
                 collection_id="risk_state_history",
                 queries=[
@@ -251,7 +253,7 @@ class ChatLogService:
                     Query.order_desc("timestamp"),
                     Query.limit(limit)
                 ]
-            )
+            ))
             states = []
             for doc in response.documents:
                 d = doc.data if hasattr(doc, 'data') else doc.to_dict()
@@ -263,9 +265,9 @@ class ChatLogService:
         # MongoDB Fallback
         if self.mongo_state_coll is not None:
             try:
-                docs = list(self.mongo_state_coll.find(
+                docs = await run_blocking(lambda: list(self.mongo_state_coll.find(
                     {"conversation_id": conversation_id, "user_id": user_id}
-                ).sort("timestamp", -1).limit(limit))
+                ).sort("timestamp", -1).limit(limit)))
                 states = []
                 for doc in docs:
                     state_data = doc.get("risk_state")
@@ -291,14 +293,14 @@ class ChatLogService:
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
         try:
-            self.db.create_document(self.db_id, "risk_state_history", ID.unique(), data)
+            await run_blocking(lambda: self.db.create_document(self.db_id, "risk_state_history", ID.unique(), data))
         except Exception as e:
             print(f"save_risk_state_history to Appwrite failed: {e}, falling back to MongoDB")
             
         # MongoDB Fallback
         if self.mongo_state_coll is not None:
             try:
-                self.mongo_state_coll.insert_one(data.copy())
+                await run_blocking(lambda: self.mongo_state_coll.insert_one(data.copy()))
             except Exception as mongo_err:
                 print(f"save_risk_state_history to MongoDB failed: {mongo_err}")
 
@@ -330,7 +332,7 @@ class ChatLogService:
                 "sender_feedback":      None,
                 "receiver_feedback":    None
             }
-            self.db.create_document(self.db_id, "intervention_logs", ID.unique(), log_data)
+            await run_blocking(lambda: self.db.create_document(self.db_id, "intervention_logs", ID.unique(), log_data))
             return True
         except Exception as e:
             print(f"log_intervention failed: {e}")
@@ -343,7 +345,7 @@ class ChatLogService:
         App 或換裝置後還原倒數。若僅由前端自行計時，關閉重開即形同解除。
         """
         try:
-            response = self.db.list_documents(
+            response = await run_blocking(lambda: self.db.list_documents(
                 self.db_id, "intervention_logs",
                 queries=[
                     Query.equal("conversation_id", conversation_id),
@@ -351,7 +353,7 @@ class ChatLogService:
                     Query.order_desc("timestamp"),
                     Query.limit(1)
                 ]
-            )
+            ))
             if not response.documents:
                 return 0
             doc = response.documents[0]
@@ -386,7 +388,7 @@ class ChatLogService:
             return None
         field = f"{role}_action"
         try:
-            response = self.db.list_documents(
+            response = await run_blocking(lambda: self.db.list_documents(
                 self.db_id, "intervention_logs",
                 queries=[
                     Query.equal("conversation_id", conversation_id),
@@ -394,7 +396,7 @@ class ChatLogService:
                     Query.order_desc("timestamp"),
                     Query.limit(20),
                 ]
-            )
+            ))
             for doc in response.documents:
                 data = doc.data if hasattr(doc, 'data') else doc
                 action = data.get(field)
@@ -421,14 +423,14 @@ class ChatLogService:
             return False
 
         try:
-            response = self.db.list_documents(
+            response = await run_blocking(lambda: self.db.list_documents(
                 self.db_id, "intervention_logs",
                 queries=[
                     Query.equal("triggered_by_msg_id", msg_id),
                     Query.order_desc("timestamp"),
                     Query.limit(1)
                 ]
-            )
+            ))
             if not response.documents:
                 return False
 
@@ -438,10 +440,10 @@ class ChatLogService:
             update_data = {f"{role}_feedback": feedback}
             if detail and detail.strip():
                 update_data[f"{role}_feedback_detail"] = detail.strip()[:2000]
-            self.db.update_document(
+            await run_blocking(lambda: self.db.update_document(
                 self.db_id, "intervention_logs", doc_id,
                 update_data
-            )
+            ))
             return True
         except Exception as e:
             print(f"update_intervention_feedback failed: {e}")
@@ -459,14 +461,14 @@ class ChatLogService:
         ))[:50]
         if not requested:
             return {}
-        response = self.db.list_documents(
+        response = await run_blocking(lambda: self.db.list_documents(
             self.db_id,
             "intervention_logs",
             queries=[
                 Query.equal("triggered_by_msg_id", requested),
                 Query.limit(len(requested)),
             ],
-        )
+        ))
         statuses: dict[str, str] = {}
         for doc in response.documents:
             data = doc.data if hasattr(doc, "data") else doc
@@ -486,7 +488,7 @@ class ChatLogService:
         回傳 ['comfortable', 'uncomfortable', ...]（時間倒序），None / 空值會被過濾。
         """
         try:
-            response = self.db.list_documents(
+            response = await run_blocking(lambda: self.db.list_documents(
                 self.db_id, "intervention_logs",
                 queries=[
                     Query.equal("conversation_id", conversation_id),
@@ -494,7 +496,7 @@ class ChatLogService:
                     Query.order_desc("timestamp"),
                     Query.limit(limit),
                 ]
-            )
+            ))
             feedbacks = []
             for doc in response.documents:
                 data = doc.data if hasattr(doc, 'data') else doc
@@ -530,7 +532,7 @@ class ChatLogService:
                 "model": model,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
-            self.db.create_document(self.db_id, "guardrail_context_reviews", ID.unique(), data)
+            await run_blocking(lambda: self.db.create_document(self.db_id, "guardrail_context_reviews", ID.unique(), data))
             return True
         except Exception as e:
             print(f"save_guardrail_context_review failed: {e}")
@@ -539,7 +541,7 @@ class ChatLogService:
     async def get_recent_guardrail_context_reviews(self, conversation_id: str, sender_id: str, limit: int = 5) -> list:
         """Return recent background guardrail judgments for a sender in a conversation."""
         try:
-            response = self.db.list_documents(
+            response = await run_blocking(lambda: self.db.list_documents(
                 self.db_id, "guardrail_context_reviews",
                 queries=[
                     Query.equal("conversation_id", conversation_id),
@@ -547,7 +549,7 @@ class ChatLogService:
                     Query.order_desc("timestamp"),
                     Query.limit(limit),
                 ]
-            )
+            ))
             judgments = []
             for doc in response.documents:
                 data = doc.data if hasattr(doc, 'data') else doc
@@ -570,14 +572,14 @@ class ChatLogService:
         （String，建議 size 2000）；屬性未建立時會回傳明確錯誤而非靜默失敗。
         """
         try:
-            response = self.db.list_documents(
+            response = await run_blocking(lambda: self.db.list_documents(
                 self.db_id, "intervention_logs",
                 queries=[
                     Query.equal("triggered_by_msg_id", msg_id),
                     Query.order_desc("timestamp"),
                     Query.limit(1)
                 ]
-            )
+            ))
             if not response.documents:
                 return {"ok": False, "error": "not_found"}
 
@@ -589,10 +591,10 @@ class ChatLogService:
             if data.get("sender_id") != sender_id:
                 return {"ok": False, "error": "sender_mismatch"}
 
-            self.db.update_document(
+            await run_blocking(lambda: self.db.update_document(
                 self.db_id, "intervention_logs", doc_id,
                 {"sender_appeal_text": appeal_text}
-            )
+            ))
             return {"ok": True, "error": None}
         except Exception as e:
             msg = str(e)
@@ -613,14 +615,14 @@ class ChatLogService:
         （String，建議 size 2000）；屬性未建立時回傳明確錯誤而非靜默失敗。
         """
         try:
-            response = self.db.list_documents(
+            response = await run_blocking(lambda: self.db.list_documents(
                 self.db_id, "intervention_logs",
                 queries=[
                     Query.equal("triggered_by_msg_id", msg_id),
                     Query.order_desc("timestamp"),
                     Query.limit(1)
                 ]
-            )
+            ))
             if not response.documents:
                 return {"ok": False, "error": "not_found"}
 
@@ -632,10 +634,10 @@ class ChatLogService:
             if data.get("receiver_id") != receiver_id:
                 return {"ok": False, "error": "receiver_mismatch"}
 
-            self.db.update_document(
+            await run_blocking(lambda: self.db.update_document(
                 self.db_id, "intervention_logs", doc_id,
                 {"receiver_report_text": report_text}
-            )
+            ))
             return {"ok": True, "error": None}
         except Exception as e:
             msg = str(e)
@@ -663,7 +665,7 @@ class ChatLogService:
         if blocker_id == blocked_id:
             return {"ok": False, "already": False, "error": "self_block"}
         try:
-            existing = self.db.list_documents(
+            existing = await run_blocking(lambda: self.db.list_documents(
                 self.db_id,
                 "user_blocks",
                 queries=[
@@ -671,7 +673,7 @@ class ChatLogService:
                     Query.equal("blocked_id", blocked_id),
                     Query.limit(1),
                 ],
-            )
+            ))
             if existing.documents:
                 return {"ok": True, "already": True, "error": None}
 
@@ -679,7 +681,7 @@ class ChatLogService:
                 f"{blocker_id}\0{blocked_id}".encode("utf-8")
             ).hexdigest()[:32]
             try:
-                self.db.create_document(
+                await run_blocking(lambda: self.db.create_document(
                     self.db_id,
                     "user_blocks",
                     f"block_{pair_digest}",
@@ -690,7 +692,7 @@ class ChatLogService:
                         "source": source,
                         "created_at": datetime.now(timezone.utc).isoformat(),
                     },
-                )
+                ))
             except Exception as error:
                 if getattr(error, "code", None) == 409 or "already exists" in str(error).lower():
                     return {"ok": True, "already": True, "error": None}
@@ -703,7 +705,7 @@ class ChatLogService:
 
     async def remove_user_block(self, blocker_id: str, blocked_id: str) -> dict:
         try:
-            existing = self.db.list_documents(
+            existing = await run_blocking(lambda: self.db.list_documents(
                 self.db_id,
                 "user_blocks",
                 queries=[
@@ -711,13 +713,13 @@ class ChatLogService:
                     Query.equal("blocked_id", blocked_id),
                     Query.limit(25),
                 ],
-            )
+            ))
             if not existing.documents:
                 return {"ok": False, "error": "not_found"}
             for document in existing.documents:
                 data = document.data if hasattr(document, "data") else document
                 document_id = getattr(document, "id", None) or data.get("$id")
-                self.db.delete_document(self.db_id, "user_blocks", document_id)
+                await run_blocking(lambda: self.db.delete_document(self.db_id, "user_blocks", document_id))
             return {"ok": True, "error": None}
         except Exception as error:
             code = self._block_store_error(error)
@@ -733,11 +735,11 @@ class ChatLogService:
             ("blocked_id", "blocker_id", incoming),
         ):
             try:
-                response = self.db.list_documents(
+                response = await run_blocking(lambda: self.db.list_documents(
                     self.db_id,
                     "user_blocks",
                     queries=[Query.equal(field, user_id), Query.limit(500)],
-                )
+                ))
                 for document in response.documents:
                     data = document.data if hasattr(document, "data") else document
                     other = str(data.get(take) or "").strip()
@@ -775,7 +777,7 @@ class ChatLogService:
         if reporter_id == reported_id:
             return {"ok": False, "error": "self_report"}
         try:
-            document = self.db.create_document(
+            document = await run_blocking(lambda: self.db.create_document(
                 self.db_id,
                 "user_reports",
                 ID.unique(),
@@ -789,7 +791,7 @@ class ChatLogService:
                     "status": "pending",
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 },
-            )
+            ))
             data = document.data if hasattr(document, "data") else document
             report_id = getattr(document, "id", None) or data.get("$id")
             return {"ok": True, "report_id": report_id, "error": None}

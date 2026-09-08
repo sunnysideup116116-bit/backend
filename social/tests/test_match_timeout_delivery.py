@@ -6,6 +6,7 @@ import requests
 
 from routers import match as router
 from services import match_search_job_service as jobs
+from services.match_search_context import context_embedding_source_hash
 from tests.test_match_restart_flow import flow
 
 
@@ -17,6 +18,7 @@ from tests.test_match_restart_flow import flow
 def test_timeout_and_invalid_model_output_finish_job_and_deliver_failure(flow, monkeypatch, code):
     flow.matches.update_one({"_id": flow.old_id}, {"$set": {"status": "declined"}})
     target = {**flow.profiles.rows[0], "context_embedding": [0.1]}
+    target["context_embedding_source_hash"] = context_embedding_source_hash(target["current_context"])
     candidate = {"user_id": "candidate", "score": 0.9, "current_context": "週末想看展覽"}
     profiles, matches = Mock(), Mock()
     profiles.find_one.side_effect = lambda query, *_args: target if query.get("user_id") == "owner" else candidate
@@ -27,6 +29,8 @@ def test_timeout_and_invalid_model_output_finish_job_and_deliver_failure(flow, m
     monkeypatch.setattr(router, "matches_coll", matches)
     monkeypatch.setattr(router, "_trait_stances", lambda *_args: {})
     monkeypatch.setattr(router, "candidate_qualification", lambda *_args, **_kwargs: {"eligible": True})
+    embedding = Mock(side_effect=AssertionError("Fresh fixture embedding must reach Matchmaker without refresh"))
+    monkeypatch.setattr(router, "get_embedding", embedding)
     if code == "transport_timeout":
         post = Mock(side_effect=requests.Timeout("not public"))
         expected_code = "matchmaker_timeout"
@@ -55,3 +59,5 @@ def test_timeout_and_invalid_model_output_finish_job_and_deliver_failure(flow, m
     assert "沒有合適" not in queue.call_args.args[1]
     matches.insert_one.assert_not_called()
     post.assert_called_once()
+    embedding.assert_not_called()
+    profiles.aggregate.assert_called_once()

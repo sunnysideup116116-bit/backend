@@ -27,11 +27,13 @@ from services.match_reason_service import (
     V4_REASON_VERSION,
     build_v4_snapshot_fallback,
     contains_invitation_ask,
+    contains_unverified_topic_claim,
     friend_intro_fallback,
     match_reason_style_id,
     public_personality_phrase,
     reason_for_viewer,
     short_public_text as reason_public_text,
+    topic_friend_intro_fallback,
     valid_accepted_opening_text,
     valid_friend_intro_text,
 )
@@ -1124,50 +1126,14 @@ def _topic_friend_intro_fallback(
 ) -> dict:
     """Invite around a requested topic without attributing a skill to either user."""
     del tier
-    other_context = reason_public_text(other.get("current_context"), 56)
-    query = reason_public_text(query_text, 600)
-    activity_phrase = next(
-        (
-            f"{prefix}{topic}"
-            for prefix in ("一起", "陪我", "跟我", "和我")
-            if f"{prefix}{topic}" in query
-        ),
-        f"一起{topic}",
+    return topic_friend_intro_fallback(
+        viewer,
+        other,
+        topic,
+        requester_id=requester_id,
+        query_text=query_text,
+        auto_invite=auto_invite,
     )
-    is_requester = str(viewer.get("user_id") or "") == str(requester_id or "")
-    if is_requester:
-        if other_context:
-            first = f"你想找人{activity_phrase}。這位朋友最近提過「{other_context}」，可以先從這件事認識彼此。"
-        else:
-            first = f"你想找人{activity_phrase}，我找到一位可以先認識看看的人。"
-        second = (
-            "對方是否熟悉這項活動、想不想同行，還要等本人回覆。"
-            if auto_invite
-            else "對方是否熟悉這項活動、想不想同行，還要先問問本人。要我幫你問嗎？"
-        )
-    else:
-        if other_context:
-            first = f"有位朋友想找人{activity_phrase}，對方最近提過「{other_context}」。"
-        else:
-            first = f"有位朋友想找人{activity_phrase}，想先問問你有沒有興趣。"
-        second = "可以先認識、聊聊彼此的想法，再決定要不要一起去。你願意認識看看嗎？"
-    accepted_opening = (
-        f"好消息，{COUNTERPARTY_PLACEHOLDER}也點頭了！"
-        f"可以先聊聊「{topic}」，問問對方對這個主題的想法。"
-    )
-    return {
-        "style_id": "topic_request",
-        "tier": "exploratory",
-        "viewer_text": first + second,
-        "scenario_bridge": activity_phrase,
-        "personality_dynamic": "",
-        "conversation_starter": f"可以先聊聊對{topic}的想法。",
-        "accepted_opening": accepted_opening,
-        "used_evidence_keys": [
-            "search_context.invitation_topic",
-            *(["other.current_context"] if other_context else []),
-        ],
-    }
 
 
 def _refine_topic_friend_intro(
@@ -1180,48 +1146,59 @@ def _refine_topic_friend_intro(
     auto_invite: bool,
 ) -> dict:
     """Let the model phrase one topic invitation while keeping evidence role-bound."""
-    other_context = reason_public_text(other.get("current_context"), 56)
-    if not other_context:
-        return fallback
     is_requester = str(viewer.get("user_id") or "") == str(requester_id or "")
     payload = {
         "recipient_role": "requester" if is_requester else "invitee",
         "invitation_topic": topic,
-        "other_person_recent_context": other_context,
         "invitation_already_sent": bool(is_requester and auto_invite),
+        "candidate_topic_evidence": [],
+        "candidate_interest_confirmed": False,
+        "mutual_acceptance": False,
+        "chat_available": False,
     }
     prompt = f"""你是交友軟體裡像朋友一樣牽線的阿月。只寫給目前這一位收件人。
 用自然的繁體中文寫 2 到 3 句，不要固定用「有位朋友」開頭。保留想一起做的活動，不要改成只聊活動。
-只能使用提供的活動主題與另一人的公開近況。不能說任何人已經會這項活動、已答應同行或一定合適，也不要加入性格互補。
-如果 recipient_role 是 requester 且 invitation_already_sent=true，介紹找到的人即可，不要再問要不要送出；如果是 invitee，說明邀請來自另一人並詢問是否願意先認識。
-other_person_recent_context 必須原樣出現在 viewer_text，不能補名字、地點、日期、技能或其他事實。
+只能使用提供的邀請主題與狀態。candidate_topic_evidence 為空，不得宣稱對方也有興趣、喜歡、想去、會、熟悉或擅長這項活動；也不得宣稱已接受、已答應同行或一定合適。
+不要引用、猜測或加入任何人的舊近況、名字、地點、日期、技能或性格。viewer_text 不得說現在可以開始聊天；聊天只能放在雙方都接受後的 accepted_opening。
+如果 recipient_role 是 requester 且 invitation_already_sent=true，說明已找到一位可以詢問的人選、邀請已送出且正在等回覆，不要再提問；如果是 invitee，說明有人因這個主題邀請他先認識，只詢問是否願意接受這次介紹。
+必須在 viewer_text 和 accepted_opening 中原樣保留 invitation_topic。
 只輸出 JSON：{{"viewer_text":"","conversation_starter":"","accepted_opening":""}}
 accepted_opening 只在雙方同意後使用，必須保留 {{{{counterparty}}}} 一次，並建議從活動想法開始聊。
 資料：{json.dumps(payload, ensure_ascii=False)}"""
-    try:
-        raw = json.loads(generate_chat_completion(prompt, temperature=0.55, json_output=True).content)
-    except Exception:
-        return fallback
-    text = _short_text(raw.get("viewer_text"), 220) if isinstance(raw, dict) else ""
-    check_text = text if not (is_requester and auto_invite) else f"{text}你有興趣嗎？"
-    if not valid_friend_intro_text(
-        check_text,
-        required_context=other_context,
-        role_bound=True,
-    ):
-        return fallback
-    if is_requester and auto_invite and text.endswith(("？", "?")):
-        return fallback
-    starter = _short_text(raw.get("conversation_starter"), 72)
-    opening = valid_accepted_opening_text(
-        raw.get("accepted_opening"), required_context=other_context,
-    )
-    return {
-        **fallback,
-        "viewer_text": text,
-        "conversation_starter": starter or fallback["conversation_starter"],
-        "accepted_opening": opening or fallback["accepted_opening"],
-    }
+    for attempt in range(2):
+        attempt_prompt = prompt if attempt == 0 else prompt + """
+前一次文案未通過事實或狀態檢查。請重寫：只說「找到可以詢問的人選」，不得說對方也有興趣，也不得說現在可以開始聊天。"""
+        try:
+            raw = json.loads(generate_chat_completion(
+                attempt_prompt, temperature=0.45, json_output=True,
+            ).content)
+        except Exception:
+            continue
+        text = _short_text(raw.get("viewer_text"), 220) if isinstance(raw, dict) else ""
+        synthetic_ask = "你願意先認識對方嗎？"
+        check_text = text if not (is_requester and auto_invite) else f"{text}{synthetic_ask}"
+        state_valid = not (is_requester and auto_invite) or (
+            not text.endswith(("？", "?"))
+            and any(token in text for token in ("已送出", "正在等", "等對方回覆", "等待對方回覆"))
+        )
+        if (
+            topic not in text
+            or contains_unverified_topic_claim(text)
+            or not state_valid
+            or not valid_friend_intro_text(check_text, role_bound=True)
+        ):
+            continue
+        starter = _short_text(raw.get("conversation_starter"), 72)
+        opening = valid_accepted_opening_text(
+            raw.get("accepted_opening"), required_context=topic,
+        )
+        return {
+            **fallback,
+            "viewer_text": text,
+            "conversation_starter": starter or fallback["conversation_starter"],
+            "accepted_opening": opening or fallback["accepted_opening"],
+        }
+    return fallback
 
 
 def _friend_intro_entry(
@@ -1280,7 +1257,9 @@ def _friend_intro_entry(
     else:
         reason = _refine_directional_reason(viewer, other, tier, fallback) if refine else fallback
     text = _short_text(reason.get("viewer_text"), 220)
-    required_context = reason_public_text(other.get("current_context"), 56)
+    required_context = (
+        "" if invitation_topic else reason_public_text(other.get("current_context"), 56)
+    )
     required_other_personality = _public_personality_phrase(other)
     required_viewer_personality = _public_personality_phrase(viewer)
     # Validate both provider output and the first fallback before persisting a
@@ -1327,7 +1306,9 @@ def _friend_intro_entry(
         "style_id": style_id,
         "viewer_id": viewer_id,
         "counterparty_id": other_id,
-        "counterparty_context_snapshot": reason_public_text(other.get("current_context"), 56),
+        "counterparty_context_snapshot": (
+            "" if invitation_topic else reason_public_text(other.get("current_context"), 56)
+        ),
         "counterparty_public_personality": _public_personality_phrase(other),
         "viewer_public_personality": _public_personality_phrase(viewer),
         "viewer_text": text,

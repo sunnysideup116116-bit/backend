@@ -2,6 +2,7 @@
 ㄎSafety Intervention Engine - 指令式介入決策中心 (修正模板匹配邏輯)
 """
 
+from app.core.async_io import run_blocking
 import json
 import uuid
 from datetime import datetime, timezone
@@ -51,7 +52,7 @@ class InterventionEngine:
         primary_risk = max(risk_state, key=risk_state.get)
 
         # 取得所有該等級的模板
-        all_templates = KBService.get_interventions_by_level(risk_level)
+        all_templates = await run_blocking(lambda: KBService.get_interventions_by_level(risk_level))
 
         # 2. 取得發送方指令 (確保 template_id 包含 'sender')
         sender_d = self._get_specific_directive(all_templates, primary_risk, "sender")
@@ -85,8 +86,8 @@ class InterventionEngine:
                 message_delta=message_delta,
             )
         if exempted:
-            sender_d = self._apply_state_notice(sender_d, "sender", risk_level)
-            receiver_d = self._apply_state_notice(receiver_d, "receiver", risk_level)
+            sender_d = await run_blocking(self._apply_state_notice, sender_d, "sender", risk_level)
+            receiver_d = await run_blocking(self._apply_state_notice, receiver_d, "receiver", risk_level)
 
         # 4. 顯示節流：狀態式通知也使用自己的 300 秒節流設定。
         if chat_log_service is not None:

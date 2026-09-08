@@ -1,5 +1,6 @@
 import json
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Callable
 
@@ -140,11 +141,62 @@ google_key_pool = GoogleKeyPool(_raw_keys)
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
 
+_OLLAMA_DEADLINE: ContextVar[float | None] = ContextVar("ollama_deadline", default=None)
+
+
+def _apply_ollama_deadline(request) -> None:
+    """Set a request-local transport budget without changing the shared pool."""
+    deadline = _OLLAMA_DEADLINE.get()
+    if deadline is None:
+        return
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Ollama request deadline exhausted")
+    current = request.extensions.get("timeout") or {}
+    request.extensions["timeout"] = {
+        phase: min(float(current[phase]), remaining) if current.get(phase) is not None else remaining
+        for phase in ("connect", "read", "write", "pool")
+    }
+
+
 ollama_client = Client(
     host=OLLAMA_HOST,
     headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else None,
     timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS,
+    event_hooks={"request": [_apply_ollama_deadline]},
 )
+
+
+def _chat_with_deadline(*, deadline_monotonic: float | None = None, **payload):
+    """Keep the deadline local to this call, including lazy stream iteration."""
+    if deadline_monotonic is None:
+        return ollama_client.chat(**payload)
+
+    def check_deadline() -> None:
+        if time.monotonic() >= deadline_monotonic:
+            raise TimeoutError("Ollama request deadline exhausted")
+
+    if payload.get("stream"):
+        def stream():
+            token = _OLLAMA_DEADLINE.set(deadline_monotonic)
+            try:
+                check_deadline()
+                for chunk in ollama_client.chat(**payload):
+                    check_deadline()
+                    yield chunk
+                check_deadline()
+            finally:
+                _OLLAMA_DEADLINE.reset(token)
+        return stream()
+
+    token = _OLLAMA_DEADLINE.set(deadline_monotonic)
+    try:
+        check_deadline()
+        response = ollama_client.chat(**payload)
+        check_deadline()
+        return response
+    finally:
+        _OLLAMA_DEADLINE.reset(token)
 
 
 def get_embedding(text: str) -> list:
@@ -331,8 +383,15 @@ def generate_chat_completion_with_tools(
     system_prompt: str | None = None,
     prefer_fast_model: bool = False,
     on_token: Callable[[str], None] | None = None,
+    deadline_monotonic: float | None = None,
 ) -> ToolCallResult:
-    """Native function-calling path using Ollama's tools parameter."""
+    """Native function calling; zero timing metrics mean not observable.
+
+    Duration covers the entire provider response, including stream iteration.
+    TTFT is observed only for streams. TPS prefers the provider's decoding
+    duration and otherwise uses an observed streaming interval; a non-stream
+    response without decoding timing cannot supply a meaningful TPS.
+    """
     if not OLLAMA_API_KEY:
         raise RuntimeError("缺少 OLLAMA_API_KEY，無法呼叫 Ollama Cloud 聊天模型")
 
@@ -346,36 +405,38 @@ def generate_chat_completion_with_tools(
     started = time.perf_counter()
     first_token_at: float | None = None
     if on_token is None:
-        response = ollama_client.chat(
+        response = _chat_with_deadline(
+            deadline_monotonic=deadline_monotonic,
             model=effective_model,
             messages=_chat_messages(prompt, system_prompt),
             tools=tools,
             options=options,
         )
     else:
-        response = ollama_client.chat(
+        response = _chat_with_deadline(
+            deadline_monotonic=deadline_monotonic,
             model=effective_model,
             messages=_chat_messages(prompt, system_prompt),
             tools=tools,
             options=options,
             stream=True,
         )
-    duration_ms = round((time.perf_counter() - started) * 1000)
-
     content_parts: list[str] = []
     tool_calls_raw: list[dict] = []
     input_tokens = 0
     output_tokens = 0
+    eval_duration_ns = 0
     if on_token is None:
         msg = response.get("message", {})
         content = (msg.get("content") or "").strip()
         tool_calls_raw = msg.get("tool_calls") or []
         input_tokens = int(response.get("prompt_eval_count") or 0)
         output_tokens = int(response.get("eval_count") or 0)
+        eval_duration_ns = int(response.get("eval_duration") or 0)
     else:
         for chunk in response:
             msg = chunk.get("message", {})
-            fragment = (msg.get("content") or "").strip()
+            fragment = msg.get("content") or ""
             if first_token_at is None and (fragment or msg.get("tool_calls")):
                 first_token_at = time.perf_counter()
             if fragment:
@@ -385,9 +446,17 @@ def generate_chat_completion_with_tools(
                 tool_calls_raw = msg.get("tool_calls") or []
             input_tokens = int(chunk.get("prompt_eval_count") or 0) or input_tokens
             output_tokens = int(chunk.get("eval_count") or 0) or output_tokens
+            eval_duration_ns = int(chunk.get("eval_duration") or 0) or eval_duration_ns
         content = "".join(content_parts).strip()
-    ttft_ms = round((first_token_at - started) * 1000) if first_token_at is not None else duration_ms
-    tps = round((output_tokens / max(duration_ms - ttft_ms, 1)) * 1000, 3) if output_tokens else 0.0
+    finished = time.perf_counter()
+    duration_ms = round((finished - started) * 1000)
+    ttft_ms = round((first_token_at - started) * 1000) if first_token_at is not None else 0
+    decode_seconds = (
+        eval_duration_ns / 1_000_000_000
+        if eval_duration_ns > 0
+        else (finished - first_token_at if first_token_at is not None else 0.0)
+    )
+    tps = round(output_tokens / decode_seconds, 3) if output_tokens and decode_seconds > 0 else 0.0
     tool_calls = []
     for tc in tool_calls_raw:
         fn = tc.get("function", {})

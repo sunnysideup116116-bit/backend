@@ -13,8 +13,10 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from config import OLLAMA_REQUEST_TIMEOUT_SECONDS
 from services.ai_service import generate_chat_completion_with_tools
 from services.ayue_agent.contracts import PublicAgentTurnContext
 from services.ayue_agent.product_identity import (
@@ -65,6 +67,28 @@ _KNOWN_PLANNER_AGENTS = frozenset({
     "calendar", "places", "web", "match", "relationship", "profile",
     "product_info", "synthesizer",
 })
+
+
+def _planner_provider_failure(exc: Exception) -> tuple[str, bool]:
+    """Retry only transient transport/server failures, never a spent timeout."""
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+        return "provider_timeout", False
+    status = getattr(exc, "status_code", None)
+    if status is None and isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+    if status in {401, 403}:
+        return "provider_auth_error", False
+    if status == 429:
+        # Immediate retry amplifies throttling; let a later turn retry rather
+        # than sleeping in the Planner or ignoring the provider's cooldown.
+        return "provider_rate_limited", False
+    if status in {500, 502, 503, 504}:
+        return "provider_error", True
+    if isinstance(exc, (ConnectionError, httpx.NetworkError)):
+        return "provider_error", True
+    return "provider_error", False
+
+
 _REPAIR_CODES = frozenset({
     "non_web_evidence_policy_removed",
     "non_calendar_outcome_contract_removed",
@@ -75,6 +99,9 @@ _REPAIR_CODES = frozenset({
     "match_intent_object_normalized",
     "non_match_match_intent_removed",
     "known_counterparty_removed",
+    "unsupported_presentation_mode_defaulted",
+    "date_write_presentation_mode_defaulted",
+    "resolved_place_task_reference_removed",
 })
 
 
@@ -166,10 +193,12 @@ def _planner_validation_retry_hint(exc: Exception) -> str:
     hints: list[str] = []
     if "write_intent" in locations or write_intent_message:
         hints.append(
-            "write_intent is required: use relationship.date_invitation.v1 only for an "
-            "explicit request to create a date invitation card, or relationship.date_coordination_cancel.v1 "
-            "only for an explicit request to cancel a server-referenced date card; both use exactly "
-            "Relationship then Synthesizer and Match is never a precheck. Use none for every other request."
+            "write_intent is required. Use relationship.date_invitation.v1 only when the user explicitly "
+            "asks Ayue to create or send a date invitation now; wanting or planning to invite someone, "
+            "naming or @-mentioning a companion, and asking only for places or advice use none. "
+            "Use relationship.date_coordination_cancel.v1 only for an explicit cancellation. "
+            "A date write requires one Relationship write task and one terminal Synthesizer; independent "
+            "typed read-only tasks may remain, but Match is never a precheck."
         )
     if "match_intent" in locations or any("Match task requires match_intent" in msg for msg in messages):
         hints.append(
@@ -210,6 +239,12 @@ def _planner_validation_retry_hint(exc: Exception) -> str:
             "run_if is only a control edge with source_task_id and required_outcome; "
             "required_outcome is task.finished or an allowlisted calendar outcome; omit run_if rather than sending {}."
         )
+    if "place_reference" in locations:
+        hints.append(
+            "place_reference never belongs inside a task. For an ordinal place follow-up, "
+            "use a Places details or reviews task and put only the user's selection phrase in "
+            "top-level place_selection; the server owns and injects the resolved place identity."
+        )
     if missing_synthesizer:
         hints.append(
             "Keep the required domain tasks and include exactly one terminal "
@@ -237,6 +272,11 @@ def _planner_validation_fields(exc: Exception) -> list[str]:
         if not isinstance(error, dict):
             continue
         location = ".".join(str(part)[:40] for part in (error.get("loc") or ()))
+        message = str(error.get("msg") or "")
+        if not location and "relationship date write intents" in message:
+            location = "plan.write_intent"
+        elif not location and "plan must contain exactly one synthesizer" in message:
+            location = "plan.tasks"
         if location and location not in fields:
             fields.append(location)
     return fields[:8]
@@ -244,6 +284,8 @@ def _planner_validation_fields(exc: Exception) -> list[str]:
 
 def _normalize_provider_plan_arguments(
     arguments: Any,
+    *,
+    resolved_place_reference: bool = False,
 ) -> tuple[Any, list[str]]:
     """Repair only known agent-scoped provider compatibility drift.
 
@@ -256,7 +298,27 @@ def _normalize_provider_plan_arguments(
     if not isinstance(normalized, dict) or not isinstance(normalized.get("tasks"), list):
         return normalized, []
     repair_codes: list[str] = []
+    if (
+        "presentation_mode" in normalized
+        and normalized.get("presentation_mode") not in {"default", "itinerary"}
+    ):
+        # Presentation mode is an editorial hint, not execution authority.
+        # Provider enum drift must not discard an otherwise valid domain DAG.
+        normalized["presentation_mode"] = "default"
+        repair_codes.append("unsupported_presentation_mode_defaulted")
     write_intent = normalized.get("write_intent")
+    if (
+        write_intent in {
+            DATE_INVITATION_WRITE_INTENT,
+            DATE_COORDINATION_CANCEL_WRITE_INTENT,
+        }
+        and normalized.get("presentation_mode", "default") != "default"
+    ):
+        # Date writes always render their confirmation with the locked server
+        # contract. An itinerary hint may accompany a Places sibling, but it
+        # must not invalidate or authorize the DAG.
+        normalized["presentation_mode"] = "default"
+        repair_codes.append("date_write_presentation_mode_defaulted")
     if isinstance(write_intent, str) and (
         write_intent.startswith("match.")
         or write_intent in {"start_search", "cancel_search", "accept", "decline", "cancel"}
@@ -271,6 +333,25 @@ def _normalize_provider_plan_arguments(
         agent = task.get("agent")
         if not isinstance(agent, str) or agent not in _KNOWN_PLANNER_AGENTS:
             continue
+        misplaced_place_reference = task.get("place_reference")
+        if (
+            resolved_place_reference
+            and agent == "places"
+            and task.get("place_mode") in {"details", "reviews"}
+            and "place_reference" in task
+            and (
+                misplaced_place_reference is None
+                or isinstance(misplaced_place_reference, str)
+            )
+        ):
+            # The Planner may mirror the opaque reference it saw in bounded
+            # context into the task. Its value is never authoritative: the
+            # Scheduler already resolved the current utterance against the
+            # owner/room snapshot and supplies that trusted projection to the
+            # Places runtime.
+            task.pop("place_reference", None)
+            if "resolved_place_task_reference_removed" not in repair_codes:
+                repair_codes.append("resolved_place_task_reference_removed")
         # Some providers attach a harmless public-label hint to a task. It is
         # never an authority field and the executor resolves the real target,
         # so remove only this known compatibility drift. Other unknown fields
@@ -418,7 +499,11 @@ class _DecomposeTasksArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["tasks", "direct_chat"] = "tasks"
     write_intent: PlannerWriteIntent = Field(
-        description="Use relationship.date_invitation.v1 only for an explicit date invitation card; use none otherwise.",
+        description=(
+            "Use relationship.date_invitation.v1 only when the user explicitly asks Ayue to create or send "
+            "a date invitation now. A stated wish/plan to invite someone, a companion mention, or a request "
+            "for places/advice alone uses none."
+        ),
     )
     presentation_mode: Literal["default", "itinerary"] = "default"
     tasks: list[SubTask] = Field(default_factory=list, max_length=5)
@@ -429,7 +514,8 @@ class _DecomposeTasksArguments(BaseModel):
         default=None,
         description=(
             "Only when the current message continues a presented place list; "
-            "selection_text must be copied verbatim from the message and refs are not authoritative"
+            "copy only the user's selection phrase. Never put place_reference or candidate_ref in a task; "
+            "refs are server-owned and are not authoritative Planner input"
         ),
     )
 
@@ -563,9 +649,8 @@ _PLANNER_SYSTEM = f"""{AYUE_CORE_IDENTITY}
 - tasks 最多 4 個 domain + 1 個 synth。
 - Relationship 活動→recommend；理由追問→review；名單→lookup。
 - task 只填 id、agent、depends_on、task_brief 與 schema 內欄位；Relationship 語意放 task_brief。約會邀請用頂層 write_intent；不填 observation schema；不要使用 type/task_agent。
-- write_intent 必填；建立空白卡用 relationship.date_invitation.v1，取消卡用 relationship.date_coordination_cancel.v1；兩者走 relationship -> synthesizer。Relationship 驗證 accepted contact 或 server reference；Match 絕不作前置檢查。
+- write_intent 必填；明確命令阿月現在建／送空白邀請才用 relationship.date_invitation.v1；想約背景、人名／@、找店／建議均用 none；取消才用 relationship.date_coordination_cancel.v1。date write 使用 Relationship+Synthesizer，可加明確唯讀 task；Match 絕不作前置檢查。
 - depends_on 只表示下游會消費上游 typed observation、candidate ref 或其他明確 contract；run_if 是不傳遞 observation 的控制條件。獨立查詢放同一層，不為了排序而串接。
-- presentation_mode 僅 default／itinerary；itinerary 是 composition hint。
 
 Agent ownership：
 calendar=本人行程、空檔、建立／修改／取消、共同日期、calendar draft 與 recent mutation 驗證。
@@ -588,7 +673,8 @@ synthesizer=只根據本回合 verified observations 與 bounded context 組最�
 - 外部探索使用 casual_discovery；明確官方查證或醫療／法律／金融／安全風險使用 strict_verification。
 - calendar_draft 的 missing_fields、candidates 補充、修正或選擇用 calendar。`calendar_recent_mutation` 的成功與否只交 calendar 做唯讀驗證，不自行猜測。
 - Calendar 寫入依完整語意：明確「幫我安排／幫我排一下／幫我記進行程」才走 calendar -> synthesizer mutation flow；「我明天五點想去健身」不必然授權，幫我排明天五點去健身才是明確 create。
-- Places 必填 place_mode：discover=清單；details=單店；reviews=口碑。discover 才 search_nearby；details/reviews 綁定 reference，不重新搜尋 Places；延續只信 server resolution。
+- 「想約小凱吃冰，幫我找店」只建 Places；@ 只綁定人，不授權讀寫。
+- Places 必填 place_mode：discover=清單；details=單店；reviews=口碑。discover 才 search_nearby；details/reviews 不重新搜尋 Places；server resolution 綁定，task 不填 place_reference／candidate_ref。
 - 簡短肯定語接唯讀地點重試提議時，依語意建立 Places read -> synthesizer；不得當 Calendar confirmation；無提議則 direct_chat／澄清。
 - 明確／重做 assessment 用 profile；「更認識我／更了解我／多了解我一點」走 profile -> synthesizer，提出 profile.start_assessment(kind=basic) 確認；不可 direct_chat。正常 product_info -> synthesizer DAG。
 - 「怎麼配對／如何配到人」→ product_info；明確「幫我配對／開始找人」→ match。
@@ -817,6 +903,10 @@ _DATE_INVITATION_SYNTHESIZER_BRIEF = (
     "Present only the server-owned confirmation preview or verified write result; "
     "do not ask for date, time, place, activity, budget, or notes."
 )
+_MIXED_DATE_WRITE_SYNTHESIZER_BRIEF = (
+    "Compose every verified read-only observation naturally, then preserve the server-owned "
+    "date-card confirmation preview or verified write result exactly. Do not claim the write completed."
+)
 _DATE_COORDINATION_CANCEL_RELATIONSHIP_BRIEF = (
     "Propose relationship.cancel_date_coordination exactly once for an explicit date-card "
     "cancellation request. Choose only a target_source grounded by the current message or "
@@ -846,14 +936,14 @@ def _canonicalize_write_intent_briefs(plan: Plan) -> Plan:
         if plan.write_intent == DATE_COORDINATION_CANCEL_WRITE_INTENT
         else _DATE_INVITATION_SYNTHESIZER_BRIEF
     )
+    if sum(task.agent != "synthesizer" for task in plan.tasks) > 1:
+        synthesizer_brief = _MIXED_DATE_WRITE_SYNTHESIZER_BRIEF
     tasks = [
-        task.model_copy(update={
-            "task_brief": (
-                relationship_brief
-                if task.agent == "relationship"
-                else synthesizer_brief
-            ),
-        })
+        task.model_copy(update={"task_brief": relationship_brief})
+        if task.agent == "relationship"
+        else task.model_copy(update={"task_brief": synthesizer_brief})
+        if task.agent == "synthesizer"
+        else task
         for task in plan.tasks
     ]
     return plan.model_copy(update={"tasks": tasks})
@@ -925,34 +1015,42 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
     metrics = PlannerMetrics()
     metrics.prompt_version = _PLANNER_PROMPT_VERSION
     started = time.perf_counter()
+    deadline = time.monotonic() + OLLAMA_REQUEST_TIMEOUT_SECONDS
     prompt = _planner_prompt(turn_ctx)
     metrics.prompt_raw = f"SYSTEM:\n{_PLANNER_SYSTEM}\nUSER:\n{prompt}"
     metrics.tools_raw = [_decompose_tool_schema()]
     attempt_prompt = prompt
 
     for attempt in range(1, _PLANNER_MAX_ATTEMPTS + 1):
+        if time.monotonic() >= deadline:
+            metrics.failure_code = "planner_deadline_exceeded"
+            break
         validation_hint = ""
         attempt_started = time.perf_counter()
         metrics.llm_call_count += 1
+        if attempt > 1:
+            metrics.retry_count += 1
         try:
             result = generate_chat_completion_with_tools(
                 attempt_prompt, metrics.tools_raw, temperature=0,
                 system_prompt=_PLANNER_SYSTEM, prefer_fast_model=True,
+                deadline_monotonic=deadline,
             )
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Planner deadline exhausted")
         except Exception as exc:
             duration_ms = round((time.perf_counter() - attempt_started) * 1000)
             metrics.duration_ms += duration_ms
             metrics.error = str(exc)
-            failure_code = "provider_error"
+            failure_code, retryable = _planner_provider_failure(exc)
             metrics.failure_code = failure_code
             _record_planner_attempt(
                 metrics, attempt=attempt, status="provider_error",
                 failure_code=metrics.failure_code, duration_ms=duration_ms,
                 error=metrics.error,
             )
-            if attempt >= _PLANNER_MAX_ATTEMPTS:
+            if not retryable or attempt >= _PLANNER_MAX_ATTEMPTS:
                 break
-            metrics.retry_count += 1
             metrics.retry_reason = failure_code
             attempt_prompt = _planner_retry_prompt(prompt, failure_code)
             continue
@@ -993,7 +1091,14 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                 )
             else:
                 arguments = tc.get("arguments") or {}
-                normalized_arguments, repair_codes = _normalize_provider_plan_arguments(arguments)
+                resolved_place_reference = bool(
+                    isinstance(turn_ctx.place_reference_resolution, dict)
+                    and turn_ctx.place_reference_resolution.get("status") == "resolved"
+                )
+                normalized_arguments, repair_codes = _normalize_provider_plan_arguments(
+                    arguments,
+                    resolved_place_reference=resolved_place_reference,
+                )
                 try:
                     validated = _DecomposeTasksArguments.model_validate(normalized_arguments)
                 except Exception as exc:
@@ -1131,7 +1236,6 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
         if attempt >= _PLANNER_MAX_ATTEMPTS:
             metrics.failure_code = failure_code
             break
-        metrics.retry_count += 1
         metrics.retry_reason = failure_code
         attempt_prompt = _planner_retry_prompt(
             prompt,

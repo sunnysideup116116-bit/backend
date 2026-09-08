@@ -25,6 +25,10 @@ class _Cursor(list):
 
     def sort(self, key=None, direction=None):
         self.sort_calls.append((key, direction))
+        if isinstance(key, list):
+            for field, order in reversed(key):
+                list.sort(self, key=lambda item: str(item.get(field, "")) if field == "_id" else item.get(field, 0) or 0, reverse=order == -1)
+            return self
         if direction == -1 and key:
             list.sort(self, key=lambda item: item.get(key, 0) or 0, reverse=True)
         return self
@@ -186,7 +190,7 @@ class ChatLeafRouterTests(unittest.TestCase):
         query = find.call_args.args[0]
         self.assertEqual(query["room_id"], "room")
         self.assertNotIn("timestamp", query)
-        self.assertEqual(messages.sort_calls, [("timestamp", -1)])
+        self.assertEqual(messages.sort_calls, [([("timestamp", -1), ("_id", -1)], None)])
 
     def test_ai_history_pagination_returns_newest_messages_in_chronological_order(self):
         messages = _Cursor([{"sender_id": "ai_assistant", "content": f"msg-{i}", "timestamp": i} for i in range(31)])
@@ -214,7 +218,7 @@ class ChatLeafRouterTests(unittest.TestCase):
         self.assertFalse(response["has_more"])
         query = find.call_args.args[0]
         self.assertEqual(query["timestamp"], {"$lt": 1234.5})
-        self.assertEqual(messages.sort_calls, [("timestamp", -1)])
+        self.assertEqual(messages.sort_calls, [([("timestamp", -1), ("_id", -1)], None)])
 
     def test_topic_room_history_restores_only_its_own_deep_assessment(self):
         messages = _Cursor([])

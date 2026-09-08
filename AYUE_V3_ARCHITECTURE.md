@@ -84,7 +84,7 @@ Planner 只呼叫 `decompose_tasks`：
 
 - `mode="direct_chat"`：不需要 App/domain/private/external truth 的 bounded conversational reply。
 - `mode="tasks"`：1–5 個 `SubTask`，最多四個 domain tasks，恰好一個 terminal synthesizer。
-- `write_intent` 是 provider-required typed decision：一般請求為 `none`；約會邀請卡為 `relationship.date_invitation.v1`，且 canonical contract 只接受 `relationship -> synthesizer`，不接受 Match 或其他 precheck。
+- `write_intent` 是 provider-required typed decision：一般請求為 `none`；只有明確要阿月建立／送出空白約會邀請才用 `relationship.date_invitation.v1`。Date-card DAG 需一個 root Relationship write task 與 terminal Synthesizer，可加使用者同時要求的 typed read-only siblings；Match 不作 contact precheck。
 
 Agent allowlist：
 
@@ -102,7 +102,7 @@ Planner 使用 compact prompt projection：保留最近 4 則且最多 2,000 字
 
 舊 provider 可能送出 task-free `mode="product_info"`／`product_info_topics`；compatibility boundary 只把它正規化成 `product_info -> synthesizer` DAG。新 Planner、fixture 與文件不得產生舊 envelope。
 
-Provider compatibility normalization 只處理已列入 allowlist 的編碼漂移：known agent 上錯置但值合法的 `evidence_policy`／Calendar `outcome_contract`、精確空 placeholder，以及 Relationship 將 `relationship.date_invitation.v1` 放錯到 `outcome_contract` 的單一 relocation case。Unknown agent、非空無效值、graph／DAG invariant 與衝突 intent 仍 retry once 後 fail closed；repair code 只進 localhost ephemeral debug。Compact-v3 system prompt ≤6,000 字元、provider schema ≤3,500 字元、合計 ≤9,500 字元。
+Provider compatibility normalization 只處理已列入 allowlist 的編碼漂移：known agent 上錯置但值合法的 `evidence_policy`／Calendar `outcome_contract`、精確空 placeholder、Relationship 將 `relationship.date_invitation.v1` 放錯到 `outcome_contract`，以及將無效 `presentation_mode` 或 Relationship 寫入的 `itinerary` 提示降為不授權的 `default` 排版。Unknown agent、非空無效執行值、graph／DAG invariant 與衝突 intent 仍 retry once 後 fail closed；repair code 只進 localhost ephemeral debug。Compact-v3 system prompt ≤6,000 字元、provider schema ≤3,500 字元、合計 ≤9,500 字元。
 
 ### 4.4 DAG execution
 
@@ -129,7 +129,7 @@ Calendar、Web、ProductInfo 回 completed results；Places、Match、Profile �
 
 Synthesizer 只能使用本回合 verified observations。Map URL、source URL、place candidate ref、Web source ref 由 server-owned catalog 綁定；模型不能新增未觀察到的 reference。
 
-格式提示依資訊量自適應：多候選、比較、步驟或清楚分組可用輕量 Markdown；簡單答案維持自然 prose，不要求 Places/Web/itinerary 固定標題。`presentation_mode="itinerary"` 只是 editorial hint，仍使用 ordinary compose contract。Server-owned mutation verification／pending preview 只有在 exclusive transaction 時 bypass Synthesizer；混合回合先組合其他 observations，再附加鎖定回覆，避免安全回覆丟失同回合結果。
+格式提示依資訊量自適應。Places discover 以 `opening`、`candidate_introductions`、`closing` 傳回結構化文案，由 Server 依可信候選順序組成唯一清單；legacy list 只作恢復，店名正規化後仍恢復 provider label。Server-owned pending preview 在混合回合會留下不含 authority 的 transaction state，讓 Synthesizer 組合其他 observations 時不能生成相反狀態，最後再附加鎖定回覆。
 
 LLM routing 使用兩級模型：Planner 與 Places／Match／Relationship／Profile proposal runner 要求 `OLLAMA_FAST_CHAT_MODEL`（未設定時回退 main）；Calendar、Web、Synthesizer 使用 main；ProductInfo bounded path 不呼叫 LLM。Planner 對 function-call protocol failure 最多 retry 一次；provider error 不重試，兩次仍失敗時 fail closed。`llm_call_count` 由每個 owner 真實累計，Scheduler 以 metrics 加總，不以 agent 節點數猜測；retry/failure attempt details 只存在 localhost ephemeral debug。
 
@@ -202,7 +202,7 @@ WRITE proposal / Calendar command batch
 
 Calendar mutation 只使用 `calendar.submit_commands`。一至十筆 authority-free commands 可形成一筆 confirmation；Calendar Runtime resolve canonical target 一次，建立不進 LLM 的 `CalendarMutationPlan`。舊 create/update/cancel tool names 不再註冊，stale confirmation fail closed。
 
-`relationship.start_date_coordination` 只在 validated `write_intent="relationship.date_invitation.v1"` 的精確 `relationship -> synthesizer` DAG 可見。Relationship Runtime 接受 mention、連續原句 name evidence 或同 owner 15 分鐘 recent-contact reference，僅在唯一 accepted contact 可解析時建立一筆確認；確認後透過 `date_coordination_service.create_invite` 建立空白卡片，日期、地點與活動由雙方之後填寫。Target ID、revision 與 resolution metadata 不進 prompt、trace 或 public events。
+`relationship.start_date_coordination` 只在 validated `write_intent="relationship.date_invitation.v1"` 與唯一 Relationship write task 下可見；同層可保留 Places／Web／ProductInfo、typed Calendar availability 或唯讀 Match sibling。Relationship Runtime 僅在唯一 accepted contact 可解析時建立一筆確認；混合回合先組唯讀結果，再附上不可改寫的確認文字。Target ID、revision 與 resolution metadata 不進 prompt、trace 或 public events。
 
 `match.decide_active_event_invitation` 只處理 `proposal_namespace="event_invitation"` 的 live proposal。Planner 只能提出 `interested|declined`；Runtime 從 `active_event_invitation` 綁定 canonical revision，確認後由 `write_executors.py` 呼叫 namespace-aware match domain service。一般 `relationship_match` 與活動邀請各有一個獨立 live slot；任一方接受既有聯絡人的活動邀請時沿用聊天室，不重新建立關係。
 
@@ -216,7 +216,7 @@ Calendar mutation 只使用 `calendar.submit_commands`。一至十筆 authority-
 
 ### Places
 
-只擁有 structured nearby search、hours、price、rating、walking、distance 與 provider-neutral place projection。Search radius 對 OSM 與 Google 都是 hard bound；保存位置只允許粗粒度城市／行政區。`search_nearby` 可選 `rating|hours|price|walking` enrichment，`resolve_place` 可選前三者；預設不要求昂貴欄位，缺少或 partial price 不推測。Walking 以一筆 bounded Routes matrix 呼叫處理最多八個 destination，單一 element 失敗不拖垮其他候選；`measure_distance` 預設 `DRIVE`，明確要求時可用 `WALK`。只有優惠、特殊菜單、活動、臨時歇業公告、社群貼文等 Places 欄位無法建立的目前公開主張才由獨立 Web task 查證。Public place-card rendering 由 `AYUE_PUBLIC_PLACE_CARDS_ENABLED` 控制，目前 demo 預設關閉；關閉時 candidate refs、provider IDs、map URLs 與 Web grounding 仍只在 server-side runtime 內保留。
+只擁有 structured nearby search、hours、price、rating、walking、distance 與 provider-neutral place projection。Search radius 對 OSM 與 Google 都是 hard bound；保存位置只允許粗粒度城市／行政區。`search_nearby` 可選 enrichment，並可在明確換批時設 `exclude_previously_presented=true`；server 從同 room 已發布 snapshot 取 provider identity，扩大一次候選池後先排除、再套顯示數量。Walking 以一筆 bounded Routes matrix 處理最多八個 destination；只有 Places 無法建立的目前公開主張才由獨立 Web task 查證。Public cards 關閉時 provider internals 仍只留在 server-side runtime。
 
 ### Web
 

@@ -10,6 +10,7 @@ from routers.frontend import serve_frontend
 class ServiceHealthTests(unittest.TestCase):
     def test_main_app_root_is_available_with_stubbed_startup_services(self):
         names = (
+            "ensure_chat_read_indexes",
             "ensure_calendar_indexes",
             "ensure_calendar_draft_indexes",
             "ensure_calendar_reference_indexes",

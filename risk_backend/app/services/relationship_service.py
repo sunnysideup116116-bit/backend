@@ -1,3 +1,4 @@
+from app.core.async_io import run_blocking, serialized
 import os
 import json
 import math
@@ -23,6 +24,7 @@ class RelationshipService:
         self.metrics_coll = "relationship_metrics"
         self.summary_coll = "conversation_summaries"
 
+    @serialized("relationship-metrics", lambda self, conv_id, *args, **kwargs: conv_id)
     async def update_metrics(self, conv_id: str, sender_id: str, receiver_id: str):
         """每則訊息觸發：更新 L2 指標 (精準計數與角色修復版)"""
         try:
@@ -31,10 +33,10 @@ class RelationshipService:
             ua_id = participants['user_a_id']
             ub_id = participants['user_b_id']
 
-            response = self.db.list_documents(
+            response = await run_blocking(lambda: self.db.list_documents(
                 self.db_id, self.metrics_coll,
                 queries=[Query.equal("conversation_id", conv_id)]
-            )
+            ))
 
             now = datetime.now(timezone.utc)
             
@@ -81,7 +83,7 @@ class RelationshipService:
                     "last_contact_at": now.isoformat(),
                     "updated_at": now.isoformat()
                 }
-                self.db.update_document(self.db_id, self.metrics_coll, doc_id, update_data)
+                await run_blocking(lambda: self.db.update_document(self.db_id, self.metrics_coll, doc_id, update_data))
                 return total_msgs
             else:
                 # 初始化 (依據 conversations collection 的角色)
@@ -107,7 +109,7 @@ class RelationshipService:
                     "last_contact_at": now.isoformat(),
                     "updated_at": now.isoformat()
                 }
-                self.db.create_document(self.db_id, self.metrics_coll, ID.unique(), new_data)
+                await run_blocking(lambda: self.db.create_document(self.db_id, self.metrics_coll, ID.unique(), new_data))
                 return 1
         except Exception as e:
             print(f"Update relationship metrics failed: {e}")
@@ -121,7 +123,7 @@ class RelationshipService:
         offset = 0
         
         while True:
-            res = self.db.list_documents(
+            res = await run_blocking(lambda: self.db.list_documents(
                 self.db_id, "messages",
                 queries=[
                     Query.equal("conversation_id", conv_id),
@@ -129,7 +131,7 @@ class RelationshipService:
                     Query.limit(limit),
                     Query.offset(offset)
                 ]
-            )
+            ))
             
             if not res.documents:
                 break
@@ -157,7 +159,7 @@ class RelationshipService:
     async def _get_conversation_participants(self, conv_id: str, sender_id: str, receiver_id: str) -> Dict[str, str]:
         """從 conversations 獲取正統的角色分配；缺失時自動 create"""
         try:
-            res = self.db.get_document(self.db_id, "conversations", conv_id)
+            res = await run_blocking(lambda: self.db.get_document(self.db_id, "conversations", conv_id))
             data = res.data if hasattr(res, 'data') else res
             ua = data.get('user_a_id')
             ub = data.get('user_b_id')
@@ -170,11 +172,11 @@ class RelationshipService:
         except Exception as e:
             try:
                 now_iso = datetime.now(timezone.utc).isoformat()
-                self.db.create_document(self.db_id, "conversations", conv_id, {
+                await run_blocking(lambda: self.db.create_document(self.db_id, "conversations", conv_id, {
                     "user_a_id": sender_id,
                     "user_b_id": receiver_id,
                     "last_activity": now_iso,
-                })
+                }))
                 print(f"   [ Info ] Auto-created conversations doc {conv_id} (user_a={sender_id}, user_b={receiver_id})")
                 return {"user_a_id": sender_id, "user_b_id": receiver_id}
             except Exception as create_err:
@@ -210,15 +212,15 @@ class RelationshipService:
     async def get_memory_context(self, conv_id: str) -> dict:
         """獲取 Step 1 所需的記憶上下文"""
         try:
-            metrics_res = self.db.list_documents(
+            metrics_res = await run_blocking(lambda: self.db.list_documents(
                 self.db_id, self.metrics_coll,
                 queries=[Query.equal("conversation_id", conv_id)]
-            )
+            ))
             
-            summary_res = self.db.list_documents(
+            summary_res = await run_blocking(lambda: self.db.list_documents(
                 self.db_id, self.summary_coll,
                 queries=[Query.equal("conversation_id", conv_id), Query.order_desc("version"), Query.limit(1)]
-            )
+            ))
 
             metrics = metrics_res.documents[0].data if metrics_res.documents else None
             summary = summary_res.documents[0].data if summary_res.documents else None
@@ -228,13 +230,14 @@ class RelationshipService:
             print(f"Get memory context failed: {e}")
             return {"metrics": None, "summary": None}
 
+    @serialized("relationship-summary", lambda self, conv_id, *args, **kwargs: conv_id)
     async def generate_rolling_summary(self, conv_id: str, metrics: dict):
         """觸發 LLM 生成 L1 摘要 (區段 Chunk 版，只吃 delivered 訊息)"""
         try:
-            prev_res = self.db.list_documents(
+            prev_res = await run_blocking(lambda: self.db.list_documents(
                 self.db_id, self.summary_coll,
                 queries=[Query.equal("conversation_id", conv_id), Query.order_desc("version"), Query.limit(1)]
-            )
+            ))
             
             last_msg_id = None
             prev_summary_text = "無"
@@ -254,18 +257,18 @@ class RelationshipService:
             ]
             
             if last_msg_id:
-                anchor_msg = self.db.get_document(self.db_id, "messages", last_msg_id)
+                anchor_msg = await run_blocking(lambda: self.db.get_document(self.db_id, "messages", last_msg_id))
                 anchor_data = anchor_msg.data if hasattr(anchor_msg, 'data') else anchor_msg
                 anchor_ts = anchor_data.get('timestamp')
                 queries.append(Query.greater_than("timestamp", anchor_ts))
             
-            chunk_res = self.db.list_documents(self.db_id, "messages", queries=queries)
+            chunk_res = await run_blocking(lambda: self.db.list_documents(self.db_id, "messages", queries=queries))
             if not chunk_res.documents: return
 
             msg_list = [f"{m.data.get('sender_id')}: {m.data.get('content')}" for m in chunk_res.documents]
             msg_chunk_text = "\n".join(msg_list)
 
-            prompt_data = KBService.get_prompt_by_id("memory_summary_v1")
+            prompt_data = await run_blocking(lambda: KBService.get_prompt_by_id("memory_summary_v1"))
             if not prompt_data: return
 
             prompt = prompt_data['template'].format(
@@ -313,7 +316,7 @@ class RelationshipService:
                 "exclusivity_framing": float(scores.get('exclusivity_framing', 0)),
                 "physical_intimacy_reference": float(scores.get('physical_intimacy_reference', 0))
             }
-            self.db.create_document(self.db_id, self.summary_coll, ID.unique(), summary_data)
+            await run_blocking(lambda: self.db.create_document(self.db_id, self.summary_coll, ID.unique(), summary_data))
 
             await self.update_progression_rate(conv_id)
         except Exception as e:
@@ -322,10 +325,10 @@ class RelationshipService:
     async def update_progression_rate(self, conv_id: str):
         """計算最近 3-5 版摘要的進展速度 (符合 3-5 版視窗規格)"""
         try:
-            res_sums = self.db.list_documents(
+            res_sums = await run_blocking(lambda: self.db.list_documents(
                 self.db_id, self.summary_coll,
                 queries=[Query.equal("conversation_id", conv_id), Query.order_desc("version"), Query.limit(5)]
-            )
+            ))
             
             # 規格要求：優先使用 3-5 版。若少於 3 版，先不更新（維持 0.0）
             if len(res_sums.documents) < 3: return
@@ -342,12 +345,12 @@ class RelationshipService:
             days_elapsed = max(0.5, (time_latest - time_earliest).total_seconds() / 86400)
             rate = intimacy_delta / days_elapsed
             
-            res_metrics = self.db.list_documents(self.db_id, self.metrics_coll, [Query.equal("conversation_id", conv_id)])
+            res_metrics = await run_blocking(lambda: self.db.list_documents(self.db_id, self.metrics_coll, [Query.equal("conversation_id", conv_id)]))
             if res_metrics.documents:
                 doc = res_metrics.documents[0]
                 doc_id = doc.id if hasattr(doc, 'id') else doc['$id']
-                self.db.update_document(self.db_id, self.metrics_coll, doc_id, {
+                await run_blocking(lambda: self.db.update_document(self.db_id, self.metrics_coll, doc_id, {
                     "intimacy_progression_rate": round(max(-1.0, min(1.0, rate)), 4)
-                })
+                }))
         except Exception as e:
             print(f"Update progression rate failed: {e}")

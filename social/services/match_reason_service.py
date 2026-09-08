@@ -107,6 +107,16 @@ def contains_invitation_ask(value: Any) -> bool:
     return bool(text and _INVITATION_ASK_RE.search(text))
 
 
+def contains_unverified_topic_claim(value: Any) -> bool:
+    """Reject topic prose that upgrades a search request into another user's fact."""
+    text = short_public_text(value, 260)
+    return any(token in text for token in (
+        "有興趣", "感興趣", "喜歡", "熱愛", "熟悉", "擅長",
+        "已答應", "已經答應", "已同意", "已經同意",
+        "可以聊看看", "可以開始聊", "現在可以聊", "已經可以聊",
+    ))
+
+
 def match_reason_style_id(
     viewer: dict | str,
     other: dict | str,
@@ -208,6 +218,7 @@ def topic_friend_intro_fallback(
     *,
     requester_id: str = "",
     query_text: str = "",
+    auto_invite: bool = False,
 ) -> dict:
     """Role-specific copy for a one-search topic request.
 
@@ -233,35 +244,29 @@ def topic_friend_intro_fallback(
         activity_phrase = safe_topic
         if activity_phrase and not activity_phrase.startswith(("一起", "陪我", "跟我", "和我")):
             activity_phrase = f"一起{activity_phrase}"
-    other_context = short_public_text(other.get("current_context"), 56)
     is_requester = str(viewer.get("user_id") or "") == str(requester_id or "")
     if is_requester:
-        first = (
-            f"你這次想找人{activity_phrase}；"
-            + (f"我想到一位最近提到「{other_context}」的人。" if other_context else "我想到一位可以先認識看看的人。")
-        )
-        text = (
-            first
-            + "目前不能確認對方是否會這件事，或本來就打算一起去；可以先問問對方有沒有興趣。"
-            + "要不要讓我先幫你問問？"
+        first = f"你這次想找人{activity_phrase}；我找到一位可以替你詢問的人選。"
+        text = first + (
+            "邀請已送出，目前正在等對方回覆；在對方接受前，還不能開始聊天或確認同行。"
+            if auto_invite else
+            "目前只確定這是你的邀請需求，還不能確認對方是否願意認識或同行。要不要讓我先幫你問問？"
         )
     else:
-        first = (
-            f"有位朋友想找人{activity_phrase}；"
-            + (f"對方最近提到「{other_context}」。" if other_context else "我想先介紹你們認識看看。")
+        text = (
+            f"有位朋友想找人{activity_phrase}，並邀請你先認識看看。"
+            "目前還沒有替你答應認識或同行；你願意先認識對方嗎？"
         )
-        text = first + "我可以先替你們牽線，再問問彼此有沒有興趣；這不代表你已經會這件事或確定同行。你願意認識看看嗎？"
     return {
         "style_id": "topic_request",
         "tier": "exploratory",
         "viewer_text": text,
         "scenario_bridge": activity_phrase,
         "personality_dynamic": "",
-        "conversation_starter": f"可以先問對方對{activity_phrase}有沒有興趣。",
-        "accepted_opening": f"好消息，{COUNTERPARTY_PLACEHOLDER}也點頭了！可以先聊聊{activity_phrase}的想法。",
+        "conversation_starter": f"配對成功後，可以先問對方想怎麼安排{activity_phrase}。",
+        "accepted_opening": f"好消息，{COUNTERPARTY_PLACEHOLDER}也願意認識你！可以先聊聊{activity_phrase}的想法，再決定要不要同行。",
         "used_evidence_keys": [
             "search_context.invitation_topic",
-            *( ["other.current_context"] if other_context else []),
         ],
     }
 
@@ -398,15 +403,18 @@ def build_v4_snapshot_fallback(match_doc: dict) -> dict:
                 viewer, other, topic,
                 requester_id=str(match_doc.get("from_user") or ""),
                 query_text=query_text,
+                auto_invite=str(match_doc.get("delivery_mode") or "") == "invite_on_match",
             )
             if topic else friend_intro_fallback(viewer, other, tier, style_id=style_id)
         )
         return {
             "copy_version": FRIEND_COPY_VERSION,
-            "style_id": style_id,
+            "style_id": fallback["style_id"],
             "viewer_id": str(viewer.get("user_id") or ""),
             "counterparty_id": str(other.get("user_id") or ""),
-            "counterparty_context_snapshot": short_public_text(other.get("current_context"), 56),
+            "counterparty_context_snapshot": (
+                "" if topic else short_public_text(other.get("current_context"), 56)
+            ),
             "counterparty_public_personality": public_personality_phrase(other),
             "viewer_public_personality": public_personality_phrase(viewer),
             "viewer_text": fallback["viewer_text"],
@@ -442,15 +450,22 @@ def _safe_bound_v4_entry(
         text = short_public_text(entry.get("viewer_text"), 220)
         if not text:
             return ""
+        # A topic belongs to the requester.  Old cards may contain the other
+        # person's unrelated durable context or an LLM-invented interest claim;
+        # neither is authorized evidence for a topic invitation.
+        stale_context = short_public_text(
+            entry.get("counterparty_context_snapshot"), 56,
+        )
+        if contains_unverified_topic_claim(text) or (
+            stale_context and stale_context in text
+        ):
+            return ""
         is_question = text.endswith(("？", "?"))
         if not allow_topic_statement and not is_question:
             return ""
         validation_text = text if is_question else f"{text}你有興趣嗎？"
         if valid_friend_intro_text(
             validation_text,
-            required_context=short_public_text(
-                entry.get("counterparty_context_snapshot"), 56,
-            ),
             role_bound=True,
         ):
             return text

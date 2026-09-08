@@ -14,6 +14,12 @@ cd "$SERVER_ROOT" || exit 1
 
 LOG_DIR="${AYUE_LOG_DIR:-$SERVER_ROOT/.runtime-logs}"
 mkdir -p "$LOG_DIR"
+SERVICE_PIDS=()
+SHUTDOWN_TIMEOUT_SECONDS="${AYUE_SHUTDOWN_TIMEOUT_SECONDS:-10}"
+if [[ ! "$SHUTDOWN_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+    echo "AYUE_SHUTDOWN_TIMEOUT_SECONDS must be a non-negative integer." >&2
+    exit 1
+fi
 
 # Flutter Web development uses a stable local origin. Keep any additional
 # operator-provided origins while allowing the default local development port.
@@ -42,13 +48,21 @@ cleanup_port() {
         echo -e "${YELLOW}👉 Attempting graceful termination...${NC}"
         kill -15 $pids 2>/dev/null || true
         sleep 1
-        pids=$(lsof -t -i:"$port" 2>/dev/null || true)
+        if command -v lsof &>/dev/null; then
+            pids=$(lsof -t -i:"$port" 2>/dev/null || true)
+        else
+            pids=$(fuser "$port"/tcp 2>/dev/null || true)
+        fi
         if [ -n "$pids" ]; then
             echo -e "${YELLOW}👉 Force killing remaining process(es) on Port $port...${NC}"
             kill -9 $pids 2>/dev/null || true
             sleep 1
         fi
-        pids=$(lsof -t -i:"$port" 2>/dev/null || true)
+        if command -v lsof &>/dev/null; then
+            pids=$(lsof -t -i:"$port" 2>/dev/null || true)
+        else
+            pids=$(fuser "$port"/tcp 2>/dev/null || true)
+        fi
         if [ -n "$pids" ]; then
             echo -e "${RED}❌ Failed to free Port $port. Please terminate it manually!${NC}"
             exit 1
@@ -65,26 +79,42 @@ cleanup_port 9001
 
 stop_services() {
     echo -e "\n${YELLOW}🛑 Stopping services...${NC}"
+    local pid deadline=$((SECONDS + SHUTDOWN_TIMEOUT_SECONDS))
     for pid in "${SERVICE_PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             kill -15 "$pid" 2>/dev/null || true
-            kill -9 "$pid" 2>/dev/null || true
         fi
     done
+    local alive
+    while (( SECONDS < deadline )); do
+        alive=0
+        for pid in "${SERVICE_PIDS[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then alive=1; fi
+        done
+        if (( alive == 0 )); then break; fi
+        sleep 0.1
+    done
+    for pid in "${SERVICE_PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo -e "${YELLOW}⚠️  PID $pid exceeded the shutdown deadline; terminating.${NC}"
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+        wait "$pid" 2>/dev/null || true
+    done
     SERVICE_PIDS=()
-    cleanup_port 8000 >/dev/null 2>&1 || true
-    cleanup_port 8001 >/dev/null 2>&1 || true
-    cleanup_port 9001 >/dev/null 2>&1 || true
 }
 
 stop_all() {
+    local exit_status="${1:-0}"
+    trap '' INT TERM
     echo -e "\n\n${YELLOW}🛑 Shutting down all services...${NC}"
     stop_services
     echo -e "${GREEN}👋 Shutdown complete. Have a great day!${NC}"
-    exit 0
+    exit "$exit_status"
 }
 
-trap stop_all INT TERM
+trap 'stop_all 130' INT
+trap 'stop_all 143' TERM
 
 # Readiness Probe Helper Function
 wait_for_health() {
@@ -104,7 +134,7 @@ wait_for_health() {
         count=$((count + 1))
     done
 
-    echo -e "${RED}❌ $service_name failed to respond at $health_url within $max_retries seconds!${NC}"
+    echo -e "${RED}❌ $service_name failed to respond at $health_url after $max_retries attempts!${NC}"
     if [ -f "$log_file" ]; then
         echo -e "${YELLOW}📜 Last 15 lines of $log_file:${NC}"
         tail -n 15 "$log_file"
@@ -123,7 +153,12 @@ start_services() {
             GUARDRAIL_PID=$!
             SERVICE_PIDS+=("$GUARDRAIL_PID")
             echo -e "${GREEN}✅ Guardrail started (PID: $GUARDRAIL_PID). Logs: $LOG_DIR/guardrail.log${NC}"
-            wait_for_health "Guardrail Classifier" "http://127.0.0.1:8081/v1/models" "$LOG_DIR/guardrail.log" 8 || true
+            if ! wait_for_health "Guardrail Classifier" "http://127.0.0.1:8081/v1/models" "$LOG_DIR/guardrail.log" 30; then
+                return 1
+            fi
+        else
+            echo -e "${RED}❌ Guardrail launcher is unavailable.${NC}"
+            return 1
         fi
     fi
 
@@ -168,20 +203,37 @@ start_services() {
     echo -e "${GREEN}   🛡️  Guardrail:      http://localhost:8081/v1/models${NC}"
     echo -e "${GREEN}   ❤️  主系統健康檢查: http://localhost:8000/api/health${NC}"
     echo -e "${GREEN}================================================================${NC}"
-    echo -e "${CYAN}💡 [熱重載] 修改任何 Python 檔存檔後會自動 reload${NC}"
+    echo -e "${CYAN}💡 [熱重載] 依各服務設定啟用；完整套用程式修改請輸入 r${NC}"
     echo -e "${CYAN}💡 [手動刷新] 輸入 'r' 鍵即可手動重新啟動所有服務${NC}"
     echo -e "${CYAN}💡 [退出] 輸入 'q' 或按 Ctrl+C 結束程式${NC}\n"
     return 0
 }
 
 if ! start_services; then
-    stop_all
-    exit 1
+    stop_all 1
 fi
+
+# Closed stdin is normal under a process supervisor. Keep the stack running
+# without spinning on read(EOF), and propagate an owned service's failure.
+monitor_services() {
+    local pid
+    echo -e "${CYAN}Standard input is closed; monitoring services until a signal arrives.${NC}"
+    while true; do
+        for pid in "${SERVICE_PIDS[@]}"; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                echo -e "${RED}❌ Service PID $pid exited unexpectedly.${NC}"
+                stop_all 1
+            fi
+        done
+        sleep 1
+    done
+}
 
 # Interactive Loop for Reloading / Stopping
 while true; do
-    read -r -p "👉 請輸入指令 [r: 重啟所有服務 / q: 退出]: " cmd || true
+    if ! read -r -p "👉 請輸入指令 [r: 重啟所有服務 / q: 退出]: " cmd; then
+        monitor_services
+    fi
     case "${cmd:-}" in
         [rR])
             echo -e "\n${YELLOW}🔄 正在重新啟動所有服務...${NC}"
@@ -189,6 +241,7 @@ while true; do
             sleep 1
             if ! start_services; then
                 echo -e "${RED}❌ 重啟服務失敗！請檢查日誌。${NC}"
+                stop_all 1
             fi
             ;;
         [qQ])

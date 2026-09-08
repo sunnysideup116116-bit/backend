@@ -30,11 +30,11 @@ async def _collect(response):
 EXPECTED_ROUTES = {
     # (method, path): (request body model, ordered query parameters)
     ("GET", "/api/ai_rooms"): (None, ("user_id",)),
-    ("GET", "/api/contacts"): (None, ("user_id",)),
+    ("GET", "/api/contacts"): (None, ("user_id", "unread_for")),
     ("GET", "/api/demo/events/discover/status"): (None, ()),
     ("GET", "/api/mediator/private/{other_id}"): (None, ("user_id",)),
     ("GET", "/api/messages/{contact_id}"): (
-        None, ("user_id", "ai_room_id", "limit", "before"),
+        None, ("user_id", "ai_room_id", "limit", "before", "before_id", "through", "through_id"),
     ),
     ("GET", "/api/pair/risk_blocks"): (None, ("user_id",)),
     ("GET", "/api/pair/risk_state"): (None, ()),

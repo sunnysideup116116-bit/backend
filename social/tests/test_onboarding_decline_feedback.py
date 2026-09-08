@@ -152,11 +152,21 @@ def test_event_options_are_from_saved_public_event_and_counterparty(http_flow):
 
 
 def test_foreign_and_terminal_cards_never_supply_actionable_feedback_options(http_flow):
-    client, matches, _, _, _ = http_flow
+    client, matches, post, save, queue = http_flow
     assert client.get("/api/match/state", params={"user_id": "stranger", "match_id": MATCH_ID}).status_code == 403
     matches.rows[0]["status"] = "declined"
     response = client.get("/api/match/state", params={"user_id": "alice", "match_id": MATCH_ID})
-    assert "decline_reason_options" not in response.json()
+    assert response.status_code == 200
+    assert response.json()["canonical_status"] == "declined"
+    assert response.json()["decline_reason_options"] == []
+    assert response.json()["stage"] == "declined"
+    before = deepcopy(matches.rows)
+    rejected = client.post("/api/match/decision", json=decision_body(reasons=["夜生活"]))
+    assert rejected.status_code == 409
+    assert matches.rows == before
+    post.assert_not_called()
+    save.assert_not_called()
+    queue.assert_not_called()
 
 
 @pytest.mark.parametrize("existing_interest", [None, "", "平常喜歡閱讀"])

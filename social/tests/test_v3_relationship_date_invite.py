@@ -2,7 +2,7 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext, TurnClockV1
+from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext, ToolResult, TurnClockV1
 from services.ayue_agent.public_relationship_projection import (
     ContactNameResolution,
     resolve_accepted_contact_name,
@@ -160,8 +160,9 @@ class RelationshipDateInviteTests(unittest.TestCase):
         self.assertNotIn("target_evidence_span", payload["data"])
         self.assertNotIn("form", payload["data"])
         self.assertIn("我把「小按」理解成「小安」", preview)
-        self.assertIn("好欸～那我先幫你和「小安」在聊天室放一張約會邀請卡！", preview)
-        self.assertIn("一起慢慢補上約會細節囉～", preview)
+        self.assertIn("要幫你和「小安」建立約會邀請卡嗎？", preview)
+        self.assertIn("確認後才會送出", preview)
+        self.assertNotIn("她", preview)
 
     def test_recent_pronoun_requires_reference_and_uses_one_confirmation(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="我想約她")
@@ -177,7 +178,8 @@ class RelationshipDateInviteTests(unittest.TestCase):
                 turn,
             )
         self.assertEqual(payload["data"]["other_id"], "contact-1")
-        self.assertIn("在聊天室放一張約會邀請卡", preview)
+        self.assertIn("要幫你和「小安」建立約會邀請卡嗎？", preview)
+        self.assertIn("確認後才會送出", preview)
 
         with patch("services.ayue_agent.v3.write_executors.get_relationship_reference", return_value=None):
             missing, reply = prepare_write_confirmation(
@@ -280,6 +282,91 @@ class RelationshipDateInviteTests(unittest.TestCase):
 
 
 class RelationshipSchedulerTrajectoryTests(unittest.TestCase):
+    def test_date_invitation_can_share_a_turn_with_places_read(self):
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="room",
+            message="幫我送個邀約給小安，再找附近冰店",
+        )
+        plan = Plan(write_intent="relationship.date_invitation.v1", tasks=[
+            SubTask(id="r1", agent="relationship", depends_on=[], task_brief="建立空白邀請卡"),
+            SubTask(
+                id="p1", agent="places", place_mode="discover", depends_on=[],
+                task_brief="找附近冰店",
+            ),
+            SubTask(
+                id="s1", agent="synthesizer", depends_on=["r1", "p1"],
+                task_brief="整合推薦與確認",
+            ),
+        ])
+        turn = _turn(ctx.message)
+        preview = "要建立空白約會邀請卡嗎？請選擇是否繼續。"
+        combined = f"1. 冰店 A：走路約五分鐘。\n\n{preview}"
+        seen_observations = []
+
+        def fake_synthesize(slice_payload, candidate_cards=None, on_token=None):
+            del candidate_cards, on_token
+            seen_observations.extend(slice_payload.payload.get("observations") or [])
+            return (
+                combined, None, SynthesizerMetrics(
+                    presentation_class="grounded_recommendation",
+                    presentation_messages=[combined],
+                ),
+            )
+
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, PlannerMetrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context", return_value=turn), \
+             patch("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
+                 "relationship": MagicMock(return_value=([
+                     ToolProposal(
+                         tool_name="relationship.start_date_coordination",
+                         arguments={"target_source": "name", "target_evidence_span": "小安"},
+                     ),
+                 ], SubAgentMetrics())),
+                 "places": MagicMock(return_value=([
+                     ToolProposal(
+                         tool_name="places.search_nearby",
+                         arguments={"anchor": "高雄市鹽埕區", "categories": ["cafe"]},
+                     ),
+                 ], SubAgentMetrics())),
+             }), \
+             patch("services.ayue_agent.v3.scheduler.prepare_write_confirmation", return_value=(
+                 {"action": "relationship.start_date_coordination", "arguments": {}, "data": {
+                     "other_id": "contact-1", "safe_label": "小安",
+                 }},
+                 preview,
+             )), \
+             patch("services.ayue_agent.v3.scheduler.execute_tool", return_value=ToolResult(ok=True, data={
+                 "anchor_label": "高雄市鹽埕區", "origin_kind": "explicit",
+                 "distance_basis": "straight_line", "attribution": "Google Maps",
+                 "attribution_url": "https://www.google.com/maps", "requested_categories": ["cafe"],
+                 "requested_cuisine": "", "radius_m": 1500, "requested_limit": 3,
+                 "ordering": "distance", "places": [{
+                     "name": "冰店 A", "category": "cafe", "distance_m": 300,
+                     "address_summary": "高雄市", "map_url": "https://www.google.com/maps/place/a",
+                     "provider": "google", "place_id": "place-a",
+                 }],
+             })), \
+             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.update_many"), \
+             patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one") as insert, \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", side_effect=fake_synthesize):
+            result = run_public_agent_turn_v3(ctx)
+
+        self.assertIn("冰店 A", result.reply)
+        self.assertIn("約會邀請卡", result.reply)
+        insert.assert_called_once()
+        transaction_states = [
+            observation["result"]["transaction_state"]
+            for observation in seen_observations
+            if isinstance(observation.get("result"), dict)
+            and isinstance(observation["result"].get("transaction_state"), dict)
+        ]
+        self.assertEqual(transaction_states, [{
+            "schema_version": "relationship_transaction_state.v1",
+            "action": "create_date_invitation",
+            "status": "pending_confirmation",
+            "counterparty": "小安",
+        }])
+
     def test_live_relationship_runtime_routes_typed_intent_to_single_write_tool(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="我想約小安出去")
         plan = Plan(write_intent="relationship.date_invitation.v1", tasks=[

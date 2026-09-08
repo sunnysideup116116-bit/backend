@@ -176,7 +176,7 @@ def _direct_chat_block_reason(
 
 def _planner_failure_reply(turn: Any) -> str:
     """Return neutral copy when the Planner protocol truly fails."""
-    return "這次我沒有理解完整，所以沒有執行任何操作。你可以換句話告訴我想做什麼。"
+    return "這次規劃沒有完成，所以我沒有執行任何操作。請稍後再試一次。"
 
 
 def _abandon_place_followup_for_turn(turn: Any) -> Any:
@@ -551,6 +551,29 @@ def _observation_dict(task_id: str, result: "SubTaskResult") -> dict[str, Any]:
     }
 
 
+def _pending_relationship_transaction_state(
+    tool_name: str, payload: dict[str, Any],
+) -> dict[str, str] | None:
+    """Project a prompt-safe Relationship state beside a locked preview."""
+    actions = {
+        "relationship.start_date_coordination": "create_date_invitation",
+        "relationship.cancel_date_coordination": "cancel_date_invitation",
+    }
+    action = actions.get(str(tool_name or ""))
+    if action is None:
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    counterparty = str((data or {}).get("safe_label") or "").strip()[:30]
+    state = {
+        "schema_version": "relationship_transaction_state.v1",
+        "action": action,
+        "status": "pending_confirmation",
+    }
+    if counterparty:
+        state["counterparty"] = counterparty
+    return state
+
+
 def _server_owned_date_coordination_reply(
     task_results: dict[str, list[SubTaskResult]],
 ) -> str | None:
@@ -875,24 +898,45 @@ def _server_ordered_place_messages(
     candidate_summaries = []
     for item in candidates[:8]:
         label = str(item.get("label") or "地點").strip()[:80]
-        address = str(item.get("address_summary") or "").strip()[:100]
         candidate_summaries.append({
             "candidate_ref": str(item.get("reference") or ""),
-            "name": label + (f"（{address}）" if address else ""),
+            "name": label,
         })
 
-    # The same server-owned renderer is used by Synthesizer and Scheduler.  A
-    # provider can repeat a candidate list in a different order, so remove only
-    # list-shaped candidate lines before handing the remaining explanation to
-    # that renderer.  Ordinary prose mentioning a place is retained.
-    base_messages = _strip_model_place_list_lines(
-        messages,
-        [str(item.get("label") or "") for item in candidates[:8]],
-    )
+    # The shared renderer is idempotent: it recognizes existing trusted rows,
+    # preserves their descriptions, and reapplies snapshot order. Pre-stripping
+    # would make the saved reply lose candidate-bound prose.
     rendered, _refs, _bindings = synthesizer._server_ordered_place_messages(
-        base_messages, candidate_summaries,
+        messages, candidate_summaries,
     )
     return [str(item).strip()[:2400] for item in rendered if str(item).strip()][:3]
+
+
+def _restore_snapshot_candidate_labels(
+    value: str, snapshot: dict[str, Any] | None,
+    *, extra_labels: list[str] | tuple[str, ...] = (),
+) -> str:
+    """Restore provider labels after public-language normalization."""
+    text = str(value or "")
+    candidates = (snapshot or {}).get("candidates") or []
+    trusted_labels = [
+        str(item.get("label") or "").strip()[:80]
+        for item in candidates
+        if isinstance(item, dict)
+    ]
+    trusted_labels.extend(
+        str(label or "").strip()[:80]
+        for label in extra_labels
+        if str(label or "").strip()
+    )
+    replacements: list[tuple[str, str]] = []
+    for trusted in dict.fromkeys(trusted_labels):
+        normalized = normalize_public_reply(trusted)
+        if trusted and normalized and trusted != normalized:
+            replacements.append((normalized, trusted))
+    for normalized, trusted in sorted(replacements, key=lambda pair: len(pair[0]), reverse=True):
+        text = text.replace(normalized, trusted)
+    return text
 
 
 def _strip_model_place_list_lines(
@@ -1283,13 +1327,19 @@ def _run_sub_task(
                     ),
                 )
                 print(f"  [{task.id}#{index}] result=OK (pending_confirmation for {proposal.tool_name})")
+                transaction_state = _pending_relationship_transaction_state(
+                    proposal.tool_name, payload,
+                )
+                pending_observation = {
+                    "pending_confirmation": True,
+                    "tool_name": proposal.tool_name,
+                    "preview": preview or "",
+                }
+                if transaction_state is not None:
+                    pending_observation["transaction_state"] = transaction_state
                 results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.OK,
                                               tool_name=proposal.tool_name,
-                                              observation={
-                                                  "pending_confirmation": True,
-                                                  "tool_name": proposal.tool_name,
-                                                  "preview": preview or "",
-                                              }))
+                                              observation=pending_observation))
                 continue
             print(f"  [{task.id}#{index}] result=FAILED  guard_code={decision.code.value}")
             results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED,
@@ -1613,6 +1663,7 @@ def run_public_agent_turn_v3(
     total_input_tokens = 0
     total_output_tokens = 0
     all_agent_metrics: list[tuple[str, SubAgentMetrics]] = []
+    place_snapshot: dict[str, Any] | None = None
 
     def _finalize_debug(result: AgentResult) -> AgentResult:
         # Calendar context can outlive the turn that created it. Only a write
@@ -1666,7 +1717,20 @@ def run_public_agent_turn_v3(
         if presentation is None and normalized_reply:
             presentation = build_presentation([normalized_reply], "fallback")
         if presentation is not None:
-            messages = presentation.messages
+            place_labels = tuple(
+                str(projection.get("label") or "").strip()
+                for projection in (
+                    getattr(turn, "place_reference_resolution", None),
+                    getattr(turn, "recent_place_reference", None),
+                )
+                if isinstance(projection, dict) and str(projection.get("label") or "").strip()
+            )
+            messages = [
+                _restore_snapshot_candidate_labels(
+                    message, place_snapshot, extra_labels=place_labels,
+                )
+                for message in presentation.messages
+            ]
             normalized_reply = "\n\n".join(messages)
         result = result.model_copy(update={"reply": normalized_reply, "messages": messages})
         # Confirmation preview hashes must bind the exact text that the HTTP
@@ -2995,18 +3059,28 @@ def run_public_agent_turn_v3(
     server_failure_reply = _server_owned_date_coordination_failure_reply(
         task_results, write_intent=plan.write_intent,
     )
-    if server_reply:
+    domain_tasks = [task for task in plan.tasks if task.agent != "synthesizer"]
+    exclusive_date_transaction = bool(
+        date_write_workflow
+        and len(domain_tasks) == 1
+        and domain_tasks[0].agent == "relationship"
+    )
+    if server_reply and exclusive_date_transaction:
         reply = server_reply
         synth_metrics.reply_source = "verified_observation"
         synth_metrics.presentation_messages = [server_reply]
         synth_metrics.presentation_blocks = None
         synth_metrics.presentation_class = "transaction"
     elif server_failure_reply:
-        reply = server_failure_reply
-        synth_metrics.reply_source = "verified_observation"
-        synth_metrics.presentation_messages = [server_failure_reply]
-        synth_metrics.presentation_blocks = None
-        synth_metrics.presentation_class = "fallback"
+        if exclusive_date_transaction:
+            reply = server_failure_reply
+            synth_metrics.reply_source = "verified_observation"
+            synth_metrics.presentation_messages = [server_failure_reply]
+            synth_metrics.presentation_blocks = None
+            synth_metrics.presentation_class = "fallback"
+        elif server_failure_reply not in reply:
+            reply = "\n\n".join(part for part in (reply, server_failure_reply) if part)
+            synth_metrics.presentation_messages = [reply]
     reply = normalize_public_reply(reply)
     _print_llm_metrics("synthesizer", synth_metrics)
     total_input_tokens += synth_metrics.input_tokens
@@ -3052,7 +3126,7 @@ def run_public_agent_turn_v3(
         if public_cards_enabled else []
     )
     has_new_place_result = bool(discovery_results)
-    place_snapshot: dict[str, Any] | None = None
+    place_snapshot = None
     place_persistence_failed = False
     if has_new_place_result:
         cards_by_ref = {
@@ -3060,11 +3134,21 @@ def run_public_agent_turn_v3(
             for card in candidate_cards
             if str(card.get("candidate_ref") or "")
         }
+        presented_refs = {
+            str(reference)
+            for reference in (synth_metrics.presented_candidate_refs or [])
+            if str(reference) in cards_by_ref
+        }
         # Candidate order is owned by the verified Places projection. Model
-        # authored refs/ordinals are evidence only and cannot reorder it.
+        # authored refs/ordinals may narrow the displayed set, but cannot
+        # reorder it. Persist exactly the candidates visible in this reply.
         ordered_cards = [
             card for card in candidate_cards[:8]
             if str(card.get("candidate_ref") or "") in cards_by_ref
+            and (
+                not presented_refs
+                or str(card.get("candidate_ref") or "") in presented_refs
+            )
         ]
         ordered_ordinals = {
             str(card["candidate_ref"]): index

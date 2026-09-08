@@ -38,6 +38,16 @@ def test_explicit_topic_phrasings_bind_topic_and_original_query(message):
     }
 
 
+@pytest.mark.parametrize(("message", "topic"), [
+    ("我要找人去吃生魚片叫它幫我邀請", "吃生魚片"),
+    ("幫我找個人去吃東港生魚片", "吃東港生魚片"),
+    ("找人去看電影，幫我牽線", "看電影"),
+])
+def test_companion_activity_without_together_binds_topic(message, topic):
+    assert extract_invitation_topic(message) == topic
+    assert search_context_for_turn(message=message)["invitation_topic"] == topic
+
+
 def test_search_context_is_bounded_and_legacy_scope_flags_are_ignored():
     result = safe_search_context({
         "allow_adjacent": True,

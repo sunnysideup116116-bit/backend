@@ -15,11 +15,25 @@ from services.ayue_agent.v3.place_references import (
     clear_runtime_state,
     get_candidate,
     get_candidate_set,
+    private_presented_place_identities,
     public_projection,
     recent_selected_projection,
     replace_presented_candidates,
     resolve_message_reference,
 )
+
+
+class _FakeCursor(list):
+    def sort(self, order):
+        for key, direction in reversed(order):
+            super().sort(key=lambda record: record.get(key, 0), reverse=direction < 0)
+        return self
+
+    def batch_size(self, _size):
+        return self
+
+    def close(self):
+        pass
 
 
 def _cards(*names):
@@ -96,6 +110,23 @@ class V3PlaceReferenceTests(unittest.TestCase):
         resolution = resolve_message_reference("owner", "room", "第二家")
         self.assertEqual(resolution["status"], "resolved")
         self.assertEqual(resolution["candidate"]["label"], "E")
+
+    def test_private_presented_identities_cover_published_same_category_history(self):
+        replace_presented_candidates(
+            "owner", "room", _cards("舊店 A", "舊店 B"), origin_run_id="run-old",
+        )
+        replace_presented_candidates(
+            "owner", "room", _cards("新店 C"), origin_run_id="run-new",
+        )
+
+        identities = private_presented_place_identities(
+            "owner", "room", categories=["cafe"],
+        )
+
+        self.assertEqual(identities, {
+            ("google", "ChIJplace1"),
+            ("google", "ChIJplace2"),
+        })
 
     def test_invalid_ordinal_and_ambiguous_deictic_fail_closed(self):
         replace_presented_candidates("owner", "room", _cards("A", "B", "C"))
@@ -198,12 +229,13 @@ class V3PlaceReferenceTests(unittest.TestCase):
 
         result = resolve_message_reference("owner", "room", "第二間")
         self.assertEqual(result["status"], "resolved")
-        self.assertEqual(result["candidate"]["label"], "舊店 B")
-        self.assertEqual(result["origin_run_id"], "run-old")
+        self.assertEqual(result["candidate"]["label"], "新店 B")
+        self.assertEqual(result["origin_run_id"], "run-new")
 
-        latest = resolve_message_reference("owner", "room", "最新清單的第二間")
-        self.assertEqual(latest["status"], "resolved")
-        self.assertEqual(latest["candidate"]["label"], "新店 B")
+        draft = resolve_message_reference("owner", "room", "原本草稿的第二間")
+        self.assertEqual(draft["status"], "resolved")
+        self.assertEqual(draft["candidate"]["label"], "舊店 B")
+        self.assertEqual(draft["origin_run_id"], "run-old")
 
     def test_calendar_context_allows_place_ordinal_but_rejects_reminder_ordinal(self):
         replace_presented_candidates("owner", "room", _cards("A", "B", "C"))
@@ -331,7 +363,7 @@ class V3PlaceReferenceTests(unittest.TestCase):
                 return self.record
 
             def find(self, _query):
-                return [self.record] if self.record else []
+                return _FakeCursor([self.record] if self.record else [])
 
             def insert_one(self, record):
                 self.record = dict(record)
@@ -357,8 +389,20 @@ class V3PlaceReferenceTests(unittest.TestCase):
 
             def _matches(self, record, query):
                 for key, value in query.items():
-                    if key == "candidates.reference":
+                    if key == "$and":
+                        if not all(self._matches(record, part) for part in value):
+                            return False
+                    elif key == "$or":
+                        if not any(self._matches(record, part) for part in value):
+                            return False
+                    elif key == "candidates.reference":
                         if not any(item.get("reference") == value for item in record["candidates"]):
+                            return False
+                    elif isinstance(value, dict) and "$not" in value:
+                        if self._matches(record, {key: value["$not"]}):
+                            return False
+                    elif isinstance(value, dict) and "$type" in value:
+                        if not isinstance(record.get(key), (int, float)):
                             return False
                     elif isinstance(value, dict) and "$ne" in value:
                         if record.get(key) == value["$ne"]:
@@ -368,7 +412,7 @@ class V3PlaceReferenceTests(unittest.TestCase):
                 return True
 
             def find(self, query):
-                return [record for record in self.records if self._matches(record, query)]
+                return _FakeCursor(record for record in self.records if self._matches(record, query))
 
             def find_one(self, query):
                 matches = self.find(query)
@@ -392,8 +436,8 @@ class V3PlaceReferenceTests(unittest.TestCase):
             "services.ayue_agent.v3.place_references._collection",
             return_value=fake_collection,
         ), patch(
-            "services.ayue_agent.v3.place_references._published_source_is_accessible",
-            return_value=True,
+            "services.ayue_agent.v3.place_references._filter_accessible_snapshots",
+            side_effect=lambda records, _cache: records,
         ):
             replace_presented_candidates(
                 "owner", "room", _cards("A", "B"), origin_run_id="durable-run",

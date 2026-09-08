@@ -80,7 +80,15 @@ def _setup_mocks(machine, prior_state, last_ts_str=None, history=None):
 
 def _run(machine, delta):
     """asyncio.run wrapper for update()."""
-    return asyncio.run(machine.update("conv1", "user1", "msg1", delta))
+    async def update():
+        result = await machine.update("conv1", "user1", "msg1", delta)
+        return result, machine.last_diagnostic
+
+    result, diagnostic = asyncio.run(update())
+    # Diagnostics belong to the task; explicitly bring this test's snapshot
+    # back into its synchronous assertion context.
+    machine.last_diagnostic = diagnostic
+    return result
 
 
 def test_no_history_zero_state(machine):

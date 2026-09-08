@@ -1,10 +1,17 @@
 """Message history and contact-list HTTP adapters for the chat surface."""
 
+import base64
+import logging
+import math
+
+from bson import ObjectId, json_util
+from bson.errors import InvalidId
+from pymongo.errors import PyMongoError
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 from typing import Literal
 
-from database import db, matches_coll, messages_coll, profiles_coll
+from database import db, matches_coll, messages_coll, profiles_coll, notification_threads_coll
 from services.ayue_agent.v3.confirmation import project_match_choice_history
 from models import ClearRequest
 from services.ai_room_service import (
@@ -24,7 +31,7 @@ from services.ayue_agent.onboarding import (
 )
 from services.assessment_session_service import assessment_public_state_for_room
 from services.ayue_agent.public_relationship_projection import (
-    mentioned_contact_refs, display_name as public_display_name,
+    display_name as public_display_name,
 )
 from services.chat_service import generate_room_id
 from services.notification_service import (
@@ -43,6 +50,58 @@ from services.risk_block_service import (
 
 
 router = APIRouter()
+
+
+def ensure_chat_read_indexes() -> None:
+    """Support bounded room history and latest-per-room contact previews."""
+    keys = [("room_id", 1), ("timestamp", -1), ("_id", -1)]
+    try:
+        if any(list(index.get("key", [])) == keys for index in messages_coll.index_information().values()):
+            return
+        messages_coll.create_index(keys, name="chat_room_history_cursor")
+    except PyMongoError:
+        logging.getLogger(__name__).warning("Chat read index is unavailable", exc_info=True)
+
+
+def _encode_message_cursor(message: dict) -> str | None:
+    identifier = message.get("_id")
+    if not isinstance(identifier, (ObjectId, str)):
+        return None
+    return base64.urlsafe_b64encode(json_util.dumps(identifier).encode()).decode().rstrip("=")
+
+
+def _decode_message_cursor(value: str):
+    try:
+        if not value or len(value) > 1024:
+            raise ValueError("invalid cursor")
+        identifier = json_util.loads(base64.b64decode(
+            value + "=" * (-len(value) % 4), altchars=b"-_", validate=True,
+        ).decode())
+        if not isinstance(identifier, (ObjectId, str)):
+            raise ValueError("invalid cursor type")
+        return identifier
+    except (ValueError, TypeError, UnicodeError, InvalidId) as exc:
+        raise HTTPException(status_code=400, detail="無效的訊息分頁游標") from exc
+
+
+def _message_boundary(timestamp: float, identifier: str | None, *, older: bool) -> dict:
+    if not math.isfinite(timestamp):
+        raise HTTPException(status_code=400, detail="無效的訊息時間")
+    if identifier is None:
+        return {"timestamp": {"$lt" if older else "$gte": timestamp}}
+    decoded = _decode_message_cursor(identifier)
+    id_filter = {"_id": {"$lt" if older else "$gte": decoded}}
+    # Legacy rows use ObjectId; idempotent pair writes use string ids. Mongo
+    # comparisons are type-bracketed even though sorting orders both types.
+    # Include the other type when crossing that boundary at the same timestamp.
+    if older and isinstance(decoded, ObjectId):
+        id_filter = {"$or": [id_filter, {"_id": {"$type": "string"}}]}
+    elif not older and isinstance(decoded, str):
+        id_filter = {"$or": [id_filter, {"_id": {"$type": "objectId"}}]}
+    return {"$or": [
+        {"timestamp": {"$lt" if older else "$gt": timestamp}},
+        {"timestamp": timestamp, **id_filter},
+    ]}
 
 
 def _find_accepted_match(user_id: str, other_id: str):
@@ -95,7 +154,14 @@ def get_messages(
     limit: int | None = None,
     before: float | None = None,
     response: Response = None,
+    before_id: str | None = None,
+    through: float | None = None,
+    through_id: str | None = None,
 ):
+    if ((before_id is not None and before is None)
+            or (through_id is not None and through is None)
+            or (through is not None and (before is not None or limit is not None))):
+        raise HTTPException(status_code=400, detail="無效的訊息分頁參數")
     if response is not None:
         # Message history is a live polling resource. Intermediary/CDN caching
         # previously returned old risk metadata and made handled prompts appear
@@ -117,12 +183,15 @@ def get_messages(
         room_id = generate_room_id(user_id, contact_id)
 
     is_ai_contact = contact_id == "ai_assistant"
-    query: dict = {"room_id": room_id, "is_blocked": {"$ne": True}}
+    base_query: dict = {"room_id": room_id, "is_blocked": {"$ne": True}}
+    query = dict(base_query)
     if before is not None:
-        query["timestamp"] = {"$lt": before}
+        query.update(_message_boundary(before, before_id, older=True))
+    elif through is not None:
+        query.update(_message_boundary(through, through_id, older=False))
     # Keep _id available long enough to derive a stable public identity for
     # legacy rows.  _project_public_message_ids removes it before serialization.
-    cursor = messages_coll.find(query).sort("timestamp", -1)
+    cursor = messages_coll.find(query).sort([("timestamp", -1), ("_id", -1)])
     if limit is not None and limit > 0:
         # Fetch one extra message to detect whether older history exists.
         fetched = list(cursor.limit(limit + 1))
@@ -134,6 +203,24 @@ def get_messages(
         # Legacy clients expect ascending order without a limit.
         messages = list(cursor)[::-1]
         has_more = False
+    next_before = None
+    next_before_id = None
+    if messages:
+        oldest = messages[0]
+        timestamp = oldest.get("timestamp")
+        if isinstance(timestamp, (int, float)) and math.isfinite(timestamp):
+            next_before = timestamp
+            next_before_id = _encode_message_cursor(oldest)
+    if through is not None:
+        # Synchronize every loaded row, including metadata updates/deletions,
+        # while allowing newly arrived messages to extend the window.
+        older_query = dict(base_query)
+        older_query.update(_message_boundary(
+            next_before if next_before is not None else through,
+            next_before_id if next_before is not None else through_id,
+            older=True,
+        ))
+        has_more = messages_coll.find_one(older_query, {"_id": 1}) is not None
     messages = _project_public_message_ids(messages)
     messages = _strip_internal_message_use(messages)
     if is_ai_contact:
@@ -156,6 +243,8 @@ def get_messages(
     payload = {
         "messages": messages,
         "has_more": has_more,
+        "next_before": next_before,
+        "next_before_id": next_before_id,
         "public_ayue_onboarding": (
             public_ayue_onboarding_state(user_id)
             if is_ai_contact and not ai_room_id  # onboarding only in legacy room
@@ -195,7 +284,7 @@ def ensure_public_ayue_onboarding_route(req: PublicAyueOnboardingEnsureRequest):
 
 
 @router.get("/contacts")
-def get_contacts(user_id: str):
+def get_contacts(user_id: str, unread_for: str | None = None):
     try:
         excluded_user_ids = risk_block_service.excluded_user_ids(user_id)
     except RiskBlockServiceUnavailable as exc:
@@ -203,6 +292,26 @@ def get_contacts(user_id: str):
             status_code=503,
             detail="安全關係狀態暫時無法確認",
         ) from exc
+    if unread_for is not None:
+        # The pair page only needs one private-unread badge. Keep the existing
+        # contact envelope so older servers/clients remain compatible.
+        if unread_for in excluded_user_ids:
+            return {"contacts": []}
+        match_doc = _find_accepted_match(user_id, unread_for)
+        if not match_doc:
+            return {"contacts": []}
+        role = "from" if match_doc.get("from_user") == user_id else "to"
+        count = int((match_doc.get("private_unread") or {}).get(role, 0) or 0)
+        try:
+            thread = notification_threads_coll.find_one({
+                "user_id": user_id, "surface": MEDIATOR_PRIVATE,
+                "conversation_id": generate_mediator_private_room_id(user_id, unread_for),
+            }, {"_id": 0, "unread_count": 1}) or {}
+            count = max(count, int(thread.get("unread_count") or 0))
+        except Exception:
+            # Match notification_unread_map's established legacy fallback.
+            pass
+        return {"contacts": [{"id": unread_for, "mediator_unread_count": max(0, count)}]}
     user_doc = profiles_coll.find_one({"user_id": user_id})
     ai_locked = user_doc.get("ai_chat_locked", False) if user_doc else False
     matches = [
@@ -232,16 +341,29 @@ def get_contacts(user_id: str):
     ]
     latest_by_room = {}
     if room_ids:
-        for msg in messages_coll.find(
-            {"room_id": {"$in": room_ids}, "is_blocked": {"$ne": True}},
-            {"_id": 0, "room_id": 1, "content": 1},
-        ).sort("timestamp", -1):
-            room = msg.get("room_id")
-            if room and room not in latest_by_room:
-                latest_by_room[room] = msg.get("content", "")
+        latest_by_room = {
+            row["_id"]: row.get("content", "")
+            for row in messages_coll.aggregate([
+                {"$match": {"room_id": {"$in": room_ids}, "is_blocked": {"$ne": True}}},
+                {"$sort": {"room_id": 1, "timestamp": -1, "_id": -1}},
+                {"$group": {"_id": "$room_id", "content": {"$first": {"$ifNull": ["$content", ""]}}}},
+            ])
+        }
+    other_ids = list({
+        item["to_user"] if item["from_user"] == user_id else item["from_user"]
+        for item in matches
+    })
+    profile_by_user = {
+        profile["user_id"]: profile
+        for profile in profiles_coll.find(
+            {"user_id": {"$in": other_ids}},
+            {"_id": 0, "user_id": 1, "current_context": 1,
+             "display_name": 1, "nickname": 1, "name": 1},
+        )
+    } if other_ids else {}
     for match_doc in matches:
         other_id = match_doc["to_user"] if match_doc["from_user"] == user_id else match_doc["from_user"]
-        other_doc = profiles_coll.find_one({"user_id": other_id})
+        other_doc = profile_by_user.get(other_id, {})
         room_id = generate_room_id(user_id, other_id)
         mediator_room_id = generate_mediator_private_room_id(user_id, other_id)
         role = "from" if match_doc.get("from_user") == user_id else "to"
@@ -255,7 +377,7 @@ def get_contacts(user_id: str):
         )
         contacts.append({
             "id": other_id,
-            "name": mentioned_contact_refs(user_id, [other_id])[0]["display_name"],
+            "name": public_display_name(other_id, profile=other_doc),
             "role": "user",
             "context": other_doc.get("current_context", "尚無近期情境") if other_doc else "尚無近期情境",
             "latest_message": latest_by_room.get(room_id, ""),

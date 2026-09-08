@@ -284,21 +284,35 @@ class Plan(BaseModel):
         }:
             relationship_tasks = [task for task in self.tasks if task.agent == "relationship"]
             synthesizer_tasks = [task for task in self.tasks if task.agent == "synthesizer"]
-            if len(self.tasks) != 2 or len(relationship_tasks) != 1 or len(synthesizer_tasks) != 1:
+            if len(relationship_tasks) != 1 or len(synthesizer_tasks) != 1:
                 raise ValueError(
                     "relationship date write intents require exactly one Relationship "
-                    "task and one terminal Synthesizer; Match is never a precheck"
+                    "write task and one terminal Synthesizer"
                 )
             relationship_task = relationship_tasks[0]
             synthesizer_task = synthesizer_tasks[0]
             if relationship_task.depends_on or relationship_task.run_if is not None:
                 raise ValueError(
                     "relationship date write intents Relationship task cannot depend on a precheck"
+            )
+            for task in self.tasks:
+                if task is relationship_task or task is synthesizer_task:
+                    continue
+                read_only_sibling = (
+                    task.agent in {"places", "web", "product_info"}
+                    or (
+                        task.agent == "calendar"
+                        and task.outcome_contract == "calendar.availability.v1"
+                    )
+                    or (
+                        task.agent == "match"
+                        and task.match_intent in {"status", "counterparty", "clarify"}
+                    )
                 )
-            if synthesizer_task.depends_on != [relationship_task.id]:
-                raise ValueError(
-                    "relationship date write intents Synthesizer must depend only on the Relationship task"
-                )
+                if not read_only_sibling:
+                    raise ValueError(
+                        "relationship date write intents allow only typed read-only sibling tasks"
+                    )
             if self.presentation_mode != "default":
                 raise ValueError("relationship date write intents use default presentation")
             if self.opportunity is not None and self.opportunity.signal != "none":

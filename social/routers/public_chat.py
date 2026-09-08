@@ -372,6 +372,7 @@ def _complete_public_turn(
     else:
         saved_reply = save_message(room_id, "ai_assistant", ai_reply)
     place_presentation_published = False
+    place_presentation_failed = False
     if isinstance(saved_reply, dict):
         try:
             mark_message_use(
@@ -421,6 +422,7 @@ def _complete_public_turn(
             except PlaceReferencePersistenceError:
                 published = False
             if not published:
+                place_presentation_failed = True
                 # The assistant row was saved before its source relation could
                 # be committed. Quarantine it so a later turn cannot resolve
                 # an unbound list, and return the same fail-closed copy used by
@@ -445,7 +447,12 @@ def _complete_public_turn(
         persisted_reply = str(saved_reply.get("content") or ai_reply)
         for start in range(0, len(persisted_reply), 120):
             on_token(persisted_reply[start:start + 120])
-    if run_id and isinstance(saved_reply, dict) and saved_reply.get("message_id"):
+    if (
+        run_id
+        and isinstance(saved_reply, dict)
+        and saved_reply.get("message_id")
+        and not place_presentation_failed
+    ):
         mark_public_confirmation_presented(
             user_id=req.user_id,
             origin_run_id=run_id,
@@ -494,7 +501,7 @@ def _complete_public_turn(
         "place_cards": place_cards,
         "presentation_blocks": presentation_blocks,
         "llm_call_metrics": agent_result.llm_call_metrics or [],
-        "choice_prompt": agent_result.choice_prompt,
+        "choice_prompt": None if place_presentation_failed else agent_result.choice_prompt,
         "choice_resolution": agent_result.choice_resolution,
     }
 

@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers import calendar, chat, match, system, frontend
 from routers.match import ensure_match_indexes
+from routers.chat_messages import ensure_chat_read_indexes
 from services.calendar_service import ensure_calendar_indexes
 from services.ayue_agent.v3.scheduler import ensure_indexes as ensure_ayue_agent_indexes
 from services.ayue_agent.maps_client import ensure_map_cache_indexes
@@ -76,6 +77,7 @@ app.include_router(calendar.router)
 
 @app.on_event("startup")
 def setup_calendar_indexes():
+    ensure_chat_read_indexes()
     ensure_calendar_indexes()
     ensure_calendar_draft_indexes()
     ensure_calendar_reference_indexes()
