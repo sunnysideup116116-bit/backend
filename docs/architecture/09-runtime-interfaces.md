@@ -4,6 +4,14 @@
 
 ## 1. 版本名稱先分清楚
 
+### Match 搜尋語意與授權（2026-09-08）
+
+- Planner 的 Match search task 使用 optional `match_search_request`：`kind=general|activity`、`topic`、`invitation_evidence`。這是語意資料，不是 tool arguments 或寫入權限；Match runtime 仍先經既有 Guard。
+- Runtime 將語意交給 `prepare_write_confirmation`。general 清除活動提示；activity 的 topic 必須是本回合 owner 訊息原文，否則澄清且不建確認。沒有語意欄位的 runtime task 安全降為一般搜尋，不回撈舊活動。
+- 一般搜尋和活動伴預設 preview；只有 activity 帶可驗證的本句代送原文，才在 visible preview 明示「開始找並送出邀請」。使用者確認且 preview 已保存後才執行。`delivery_mode` 不再由 topic 存在與否自動授權。
+- 既有 job 的 CAS／idempotency 不變；已送出的邀請不因部署被撤回或倒退。聊天歷史讀取需保留內部 `payload.delivery_mode` 供按鈕標籤投影，public choice 不輸出 payload／evidence。
+- Topic 理由保留公開性格說明或明示缺少共同活動依據；不引用無關近況、私人偏好、不把主題當對方興趣。LLM 改寫邀請文字也不得移除 deterministic 推薦說明。
+
 - **Public V3**：目前唯一公開阿月 runtime 架構。
 - **Private V2**：目前仍在使用的阿月悄悄話 runtime，不是 Public 的 fallback，也不是待移植的舊 Public 架構。
 - `public-v1`、`web_research.v1`、`product_info.v1`、`TurnClockV1`：typed payload 的 schema version；它們不是 Public V1 runtime。
@@ -39,6 +47,14 @@ Final response 使用 `AgentResult`：
 
 ### 2.1 Match / Event HTTP projection
 
+每週 Event 工作以 `event_weekly_runs`／`event_weekly_users` 保存 stage 與逐人進度，三張限制是每批上限。
+`event_delivery_service` 可在使用者離線時沿用現有 Match Hub card projection 冪等保存提案；draft 僅發起者可收到，
+pending 才投遞接收者。投遞收據僅為 server-side metadata，不增加 prompt／public stream 的識別碼權限。
+API 的 completed／outcome 仍描述工作結果，不代表手機已收推播或使用者已接受。
+`GET /api/match/events/discover/status` 的 optional `weekly_progress` 僅含 population_ready、
+population/processed/pending/failed_user_count、created_proposal_count、saved_card_count 與 pending_delivery_count。
+舊週期沒有持久明細時 status=not_recorded、讀取失敗時 unavailable，不以 0 假裝完整統計。
+
 `routers/match.py` 是 App 的 HTTP adapter，不是另一個狀態轉移 owner：
 
 - `POST /api/match/decision` 保留 `expected_status`、`expected_revision` 與 optional `proposal_namespace`，寫入仍只經 match action/decision services。只有成功接受、重新讀到 canonical `accepted` 且 caller 為 participant 時，回傳 optional `other_id` 供 App 導航；`pending/declined/expired` 或 409 不回傳聊天對象身份。
@@ -55,6 +71,13 @@ Final response 使用 `AgentResult`：
 以上是 HTTP/UI 的 additive projection，不擴張 Planner、ToolSpec、Context slice 或 Public stream 的 identifier 權限。
 
 ## 3. Context interface
+
+2026-09-08：HTTP 層透過 memory service 在組 Public request context 前刷新過期的 owner memory cache；
+Context Builder 維持 read-only，relevant_memories 僅含最多 8 筆帶 like/dislike/avoid/require 方向的安全文字。
+短期 want 不進長期偏好。Public Planner 的 user_preferences 只接受這個封閉帶方向格式，供 direct_chat 尊重偏好；
+未帶方向的 legacy strings 不加入 Planner。Synthesizer、Profile 和 Relationship 接收同一份 bounded wording。
+memory API 可選 durable_only（預設 false），供 Social projection 排除 CURRENTLY_WANTS；日期過期的 want 不回傳。
+owner memory cache 具有 300 秒 TTL、失敗退避及 mutation revision CAS；這些 metadata 不進 model prompt。
 
 HTTP 層先組 `AgentTurnContext`；`services/ayue_agent/context.py` 再建立唯一 prompt-safe `PublicAgentTurnContext`。
 
@@ -208,6 +231,10 @@ proposal/search lifecycle. This is semantic Planner ownership; Scheduler does
 not add a keyword or regex rerouter.
 
 ## 6. Tool and Guard interface
+
+`memory.search_my_profile` 沿用原 capability，新增 optional query（最多 120 字，預設空）；argument schema 不接受 user_id。
+輸出保留 summary/current_context/preferences，新增 status=available|unavailable、source=graph|cache、truncated。
+preferences 僅含帶方向文字，Graph 查詢在 LIMIT 前以 owner/durable/query 限制，不能從未命中或 unavailable 推論沒有記憶。
 
 每個公開能力都必須先有 `ToolSpec`：
 

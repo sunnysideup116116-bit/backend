@@ -11,6 +11,7 @@ from bson.objectid import ObjectId
 from database import matches_coll, profiles_coll
 from services.conversation_compaction_service import load_validated_conversation_continuity
 from services.profile_projection import safe_recent_context
+from services.owner_memory_projection import preference_wording
 from services.profile_location import safe_profile_location
 from services.match_state_service import load_match_state
 from services.proposal_namespace import (
@@ -190,14 +191,9 @@ def build_public_context(ctx: AgentTurnContext) -> dict[str, Any]:
             "declined_by_other": bool(decision.get("actor") and decision.get("actor") != ctx.user_id),
             "reason_available": False,
         }
-    preferences = []
-    for item in (profile.get("profile_memory_preview") or [])[:8]:
-        if isinstance(item, dict):
-            label = _clean_text(item.get("label") or item.get("label_zh_tw"), 60)
-        else:
-            label = _clean_text(item, 60)
-        if label:
-            preferences.append(label)
+    preferences = [_clean_text(text, 80) for text in preference_wording(
+        profile.get("profile_memory_preview"), owner_id=ctx.user_id,
+    )]
     return {
         "recent_messages": history,
         "previous_assistant_message": previous_assistant,
@@ -353,12 +349,9 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     if recent_context_draft and now - float(recent_context_draft.get("created_at", 0) or 0) > RECENT_CONTEXT_DRAFT_TTL_SECONDS:
         # Context assembly is read-only, including expired auxiliary drafts.
         recent_context_draft = None
-    memories = []
-    for item in (profile.get("profile_memory_preview") or [])[:8]:
-        label = item.get("label") if isinstance(item, dict) else item
-        label = _clean_text(label, 80)
-        if label:
-            memories.append(label)
+    memories = [_clean_text(text, 80) for text in preference_wording(
+        profile.get("profile_memory_preview"), owner_id=ctx.user_id,
+    )]
     mentioned_ids, validation_overflow = validated_mentioned_contact_ids(ctx.user_id, ctx.mentioned_ids)
     focused_match, focused_authority = _focused_match_projection(ctx)
     match_search = {

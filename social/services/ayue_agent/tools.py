@@ -562,12 +562,13 @@ def _contact_evidence(ctx: AgentTurnContext, contact_refs: list[str]) -> ToolRes
     })
 
 
-def _memory_profile(ctx: AgentTurnContext) -> ToolResult:
+def _memory_profile(ctx: AgentTurnContext, arguments: dict | None = None) -> ToolResult:
+    from services.memory_service import search_owner_memory
     profile = ctx.user_profile or profiles_coll.find_one({"user_id": ctx.user_id}, {"_id": 0}) or {}
+    result = search_owner_memory(ctx.user_id, str((arguments or {}).get("query") or ""), profile)
     return ToolResult(ok=True, data={
-        "summary": profile.get("profile_memory_summary", ""),
+        **result,
         "current_context": safe_recent_context(profile.get("current_context"), ""),
-        "preferences": profile.get("profile_memory_preview", [])[:8],
     })
 
 
@@ -971,7 +972,7 @@ def execute_tool(
         "contact_evidence": lambda: _contact_evidence(ctx, arguments.get("contact_refs") or []),
         "mentioned_contact_summary": lambda: _mentioned_contact_summary(ctx, arguments.get("other_ids") or []),
         "accepted_contact_list": lambda: _accepted_contact_list(ctx),
-        "memory_profile": lambda: _memory_profile(ctx),
+        "memory_profile": lambda: _memory_profile(ctx, arguments),
         "self_profile": lambda: _self_profile(ctx),
         "web_search": lambda: _web_search(ctx, arguments),
         "web_extract": lambda: _web_extract(arguments),

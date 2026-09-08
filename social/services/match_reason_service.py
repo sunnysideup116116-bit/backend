@@ -245,12 +245,18 @@ def topic_friend_intro_fallback(
         if activity_phrase and not activity_phrase.startswith(("一起", "陪我", "跟我", "和我")):
             activity_phrase = f"一起{activity_phrase}"
     is_requester = str(viewer.get("user_id") or "") == str(requester_id or "")
+    other_trait = public_personality_phrase(other)
+    basis = (
+        f"推薦說明：對方{other_trait}；可先了解相處節奏，活動意願仍待確認。"
+        if other_trait else
+        "推薦說明：這次是探索性介紹，目前沒有足夠共同活動依據，仍需先確認彼此意願。"
+    )
     if is_requester:
         first = f"你這次想找人{activity_phrase}；我找到一位可以替你詢問的人選。"
         text = first + (
-            "邀請已送出，目前正在等對方回覆；在對方接受前，還不能開始聊天或確認同行。"
+            "邀請已送出，正在等對方回覆；雙方接受後才能聊天。"
             if auto_invite else
-            "目前只確定這是你的邀請需求，還不能確認對方是否願意認識或同行。要不要讓我先幫你問問？"
+            "還不能確認對方是否願意同行。你願意先認識對方嗎？"
         )
     else:
         text = (
@@ -260,7 +266,8 @@ def topic_friend_intro_fallback(
     return {
         "style_id": "topic_request",
         "tier": "exploratory",
-        "viewer_text": text,
+        "viewer_text": basis + text,
+        "recommendation_basis": basis,
         "scenario_bridge": activity_phrase,
         "personality_dynamic": "",
         "conversation_starter": f"配對成功後，可以先問對方想怎麼安排{activity_phrase}。",

@@ -106,6 +106,7 @@ PENDING_TTL_SECONDS = 72 * 3600
 SEARCH_LOCK_TTL_SECONDS = 5 * 60
 LIVE_MATCH_STATUSES = {"draft", "pending"}
 MATCH_CANDIDATE_POOL_SIZE = 20
+MATCH_VECTOR_RETRIEVAL_LIMIT = 100
 MATCH_MAX_CANDIDATE_BATCHES = 3
 MATCH_SELECTION_TIMEOUT_SECONDS = 120.0
 MATCH_TEST_ID_PATTERN = r"^(?:seed_user_|match_test_)"
@@ -1194,7 +1195,9 @@ accepted_opening 只在雙方同意後使用，必須保留 {{{{counterparty}}}}
         )
         return {
             **fallback,
-            "viewer_text": text,
+            # Keep the verified explanation even when the model only rewrites
+            # the invitation/status. It may not invent candidate interests.
+            "viewer_text": str(fallback.get("recommendation_basis") or "") + text,
             "conversation_starter": starter or fallback["conversation_starter"],
             "accepted_opening": opening or fallback["accepted_opening"],
         }
@@ -1584,8 +1587,11 @@ def generate_matches_for_user(
                 "index": "vector_index",
                 "path": "context_embedding",
                 "queryVector": user_embedding,
-                "numCandidates": 50,
-                "limit": MATCH_CANDIDATE_POOL_SIZE
+                # Post-filtering excludes blocked/history/test accounts. Fetch
+                # a wider bounded window before that filter; only the existing
+                # 20-person pool proceeds to qualification and model ranking.
+                "numCandidates": MATCH_VECTOR_RETRIEVAL_LIMIT * 5,
+                "limit": MATCH_VECTOR_RETRIEVAL_LIMIT
             }
         },
         {

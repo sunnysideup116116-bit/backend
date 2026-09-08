@@ -1290,13 +1290,24 @@ async def apply_memory(req: MemoryApplyRequest):
         print(f"[MEMORY][9001 apply] graph_write_failed user={req.user_id} error={exc}")
         return {"memories": [], "status": "error", "error_code": type(exc).__name__}
 @app.get("/api/memory/{user_id}")
-async def list_memories(user_id: str, limit: int = 12):
+async def list_memories(user_id: str, limit: int = 12, durable_only: bool = False, query: str = ""):
     try:
+        words = re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9_]+", str(query or "").lower()[:120])
+        terms = list(dict.fromkeys(term for word in words for term in
+                     ([word[i:i + 2] for i in range(len(word) - 1)] if re.fullmatch(r"[\u4e00-\u9fff]+", word) else [word])))[:24]
+        safe_limit = max(1, min(limit, 30))
         URI, AUTH, DATABASE = _neo4j_config()
         with GraphDatabase.driver(URI, auth=AUTH) as driver:
             with driver.session(database=DATABASE) as session:
                 rows = session.run("""
                     MATCH (u:User {id:$user_id})-[r:PREFERS|AVOIDS|CURRENTLY_WANTS]->(c:Concept)
+                    WHERE type(r) <> 'CURRENTLY_WANTS'
+                       OR (NOT $durable_only AND coalesce(r.expires_at, 0) > $now)
+                    WITH c, r, reduce(score=0, term IN $terms |
+                        score + CASE WHEN toLower(coalesce(c.label, c.key, '')) CONTAINS term
+                                          OR toLower(coalesce(c.key, '')) CONTAINS term
+                                     THEN 1 ELSE 0 END) AS relevance
+                    WHERE size($terms)=0 OR relevance > 0
                     RETURN c.key AS key,
                            coalesce(c.label, c.key) AS label,
                            CASE type(r)
@@ -1308,9 +1319,12 @@ async def list_memories(user_id: str, limit: int = 12):
                            coalesce(c.kind, 'preference') AS category,
                            1.0 AS confidence,
                            coalesce(r.last_seen_at, 0) AS last_seen_at
+                    ORDER BY relevance DESC, CASE WHEN stance='dislike' THEN 0 ELSE 1 END,
+                             last_seen_at DESC, key ASC
                     LIMIT $limit
-                """, user_id=user_id, limit=max(1,min(limit,30)))
-                return {"status": "success", "memories": [dict(row) for row in rows]}
+                """, user_id=user_id, limit=safe_limit + 1, durable_only=durable_only, now=time.time(), terms=terms)
+                items = [dict(row) for row in rows]
+                return {"status": "success", "memories": items[:safe_limit], "truncated": len(items) > safe_limit}
     except Exception as exc:
         print(f"[MEMORY][9001] graph_read_failed user={user_id} error={exc}")
         return {"status": "error", "error_code": "graph_read_failed", "memories": []}

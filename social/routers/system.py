@@ -156,6 +156,9 @@ def init_system(user_id: str):
     my_initial_interest = None
     my_doc = profiles_coll.find_one({"user_id": user_id})
     if my_doc:
+        from services.memory_service import refresh_owner_memory_profile
+        my_doc = refresh_owner_memory_profile(user_id, my_doc)
+    if my_doc:
         dp = my_doc.get("deep_profile", {})
         if dp and dp.get("summary"):
             dp_display = normalize_model_text(dp)
@@ -173,21 +176,6 @@ def init_system(user_id: str):
         mediator_tone_selected = bool(my_doc.get("mediator_tone_selected", False))
         probe_mode = my_doc.get("probe_mode", "balanced")
         profile_memories = normalize_model_text(my_doc.get("profile_memory_preview", []))
-        if not profile_memories:
-            try:
-                from services.memory_service import get_user_graph_memories, memory_summary
-                graph_memories = get_user_graph_memories(user_id, limit=12)
-                if graph_memories:
-                    profile_memories = graph_memories
-                    profiles_coll.update_one(
-                        {"user_id": user_id},
-                        {"$set": {
-                            "profile_memory_preview": graph_memories,
-                            "profile_memory_summary": memory_summary(graph_memories),
-                        }}
-                    )
-            except Exception:
-                pass
         context_revision = int(my_doc.get("current_context_revision", 0))
         match_search = my_doc.get("match_search", {"status": "idle"})
         onboarding_completed = bool(my_doc.get("onboarding_completed", False))
@@ -633,26 +621,10 @@ def undo_recent_context(req: ClearRequest):
 
 @router.get("/profile/memories")
 def get_profile_memories(user_id: str):
-    doc = profiles_coll.find_one({"user_id": user_id}, {"profile_memory_preview": 1, "profile_memory_summary": 1}) or {}
-    memories = doc.get("profile_memory_preview", [])
-    summary = doc.get("profile_memory_summary", "")
-    try:
-        from services.memory_service import get_graph_memory_snapshot, memory_summary
-        snapshot = get_graph_memory_snapshot(user_id, limit=12)
-        if snapshot["available"]:
-            memories = snapshot["items"]
-            summary = memory_summary(memories)
-            profiles_coll.update_one(
-                {"user_id": user_id},
-                {"$set": {
-                    "profile_memory_preview": memories,
-                    "profile_memory_summary": summary,
-                    "profile_memory_synced_at": time.time(),
-                }},
-            )
-    except Exception:
-        pass
-    return {"memories": memories, "summary": summary}
+    from services.memory_service import refresh_owner_memory_profile
+    doc = profiles_coll.find_one({"user_id": user_id}) or {}
+    doc = refresh_owner_memory_profile(user_id, {**doc, "user_id": user_id}, force=True)
+    return {"memories": doc.get("profile_memory_preview", []), "summary": doc.get("profile_memory_summary", "")}
 
 @router.post("/profile/memories/action")
 def profile_memory_action(req: ProfileMemoryActionRequest):

@@ -111,7 +111,7 @@ def extract_invitation_topic(value: Any) -> str:
         r"(?P<topic>[^。！？!?，,；;]{1,60}?)(?:的人|的對象|的伴|的朋友|的)$",
         # ``幫我找一個也會衝浪的人`` / ``想配到會衝浪的人``
         r"(?:幫我\s*)?(?:想\s*)?(?:找|配到|配對到|配對|介紹)(?:一個|一位|個|位)?"
-        r"(?P<topic>(?:(?:也?會|能|可以|懂得|有)\s*)?[^。！？!?，,]{1,60}?)"
+        r"(?P<topic>(?:也?會|懂得)\s*[^。！？!?，,]{1,60}?)"
         r"(?:的人|的對象|的伴|的朋友)",
         # ``我要找對攝影有興趣的人``.  This pattern is intentionally before
         # the broader together/陪伴 pattern so ``對…有興趣`` is normalized to

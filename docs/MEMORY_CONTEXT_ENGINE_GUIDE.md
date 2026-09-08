@@ -167,6 +167,27 @@ Saved owner message
 
 ### 2.5 Public Context
 
+常駐 8 筆以外的記憶：`memory.search_my_profile(query="主題 同義詞")` 經 Profile agent 與中央 Guard，
+由 owning memory service 唯讀查 9001。Graph 先限制本人 durable relations，再依 query 字詞（中文 bigram／英文詞）
+匹配 label/key 與排序，最後限制回傳 8 筆，另讀一筆判定 truncated。空 query 是一般偏好列表，不宣稱全部。
+這是字詞檢索加模型提出的同義詞，不是新的語意 embedding 搜尋；未命中不能證明本人從未提過。
+結果只含帶方向的安全文字、available/unavailable、graph/cache 與 truncated，不含 owner/key/id；
+查詢不覆寫一般 preview。服務不可用沿用 bounded cache 並明確標 unavailable/truncated。
+Planner 對偏好回想與個人化建議安排 Profile 補查。Planner／Synthesizer 明定未確認的 assistant 推測不是 owner 事實。
+
+2026-09-08：Public HTTP adapter 與 init 在進入 Context 前呼叫共用 `refresh_owner_memory_profile`。
+Mongo preview 非空也會在 300 秒後刷新；Graph failure 保留快取並於聊天路徑退避 30 秒，設定頁可強制刷新。
+Graph read 使用 1 秒 connect／2 秒 read timeout 與 `durable_only=true`，僅取 PREFERS／AVOIDS；
+CURRENTLY_WANTS 留在近期狀態，預設 Graph API 也不回傳已過期短期意圖。
+所有新 cache refresh 以 profile_memory_revision 做 CAS，成功偏好寫入／action 會失效該 revision；
+disable／correct 先移除對應 cache key，較晚的旧讀取不得恢復它。Graph read failure 不以新學的單批資料覆蓋全部 cache。
+
+`owner_memory_projection.preference_wording` 將 typed stance 投影為「喜歡／不喜歡／避免／需要：標籤」，
+最多 8 筆；排除異 owner、want、disabled、未帶 stance 的舊文字及不安全標籤。
+Public Planner 的 direct-chat 路徑只接收這個帶方向的封閉文字格式；Profile／Relationship slice 與 Synthesizer
+沿用同一份 relevant_memories，防止普通聊天漏掉偏好。Context Builder 自身仍只讀、不刷新或寫 DB。
+Concept.kind 的 interest／preference 與 User relation 的 PREFERS／AVOIDS 是不同欄位；本次未改分類 UI。
+
 `services/ayue_agent/context.py` 是 Public V3 唯一 Context Builder。現在的 budget：
 
 - 最近 32 則訊息，合計最多 8,000 字元。

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import datetime
+import math
+from datetime import datetime, timedelta
 from typing import Any
 
 from pymongo import ReturnDocument
@@ -68,18 +69,38 @@ def _public_snapshot(job: dict[str, Any] | None) -> dict[str, Any]:
 
 def event_discovery_job_snapshot() -> dict[str, Any]:
     try:
-        return _public_snapshot(_jobs.find_one({"_id": _JOB_ID}))
+        job = _jobs.find_one({"_id": _JOB_ID})
+        result = _public_snapshot(job)
+        if job and job.get("job_kind") == "weekly_cycle" and job.get("job_token"):
+            from services.event_weekly_service import weekly_progress
+            try:
+                result["weekly_progress"] = weekly_progress(job["job_token"])
+            except Exception:
+                result["weekly_progress"] = {"status": "unavailable"}
+        return result
     except Exception:
         return {"state": "unavailable", "run_number": 0,
                 "started_at": 0.0, "finished_at": 0.0}
+
+
+def event_job_is_current(job: dict, worker_id: str) -> bool:
+    return bool(_jobs.find_one({
+        "_id": _JOB_ID, "job_token": job.get("job_token"),
+        "state": "running", "lease_owner": worker_id,
+        "lease_expires_at": {"$gt": time.time()},
+    }, {"_id": 1}))
 
 
 def enqueue_event_discovery_job(
     *, region: str = DEFAULT_REGION, window_days: int = DEFAULT_WINDOW_DAYS,
     categories: list[str] | tuple[str, ...] = SUPPORTED_CATEGORIES,
     source: str = "demo", schedule_key: str = "", job_kind: str = "discovery",
+    not_before: float | None = None,
 ) -> dict[str, Any]:
     now = time.time()
+    scheduled_at = float(not_before) if not_before is not None else 0.0
+    if not_before is not None and (not math.isfinite(scheduled_at) or scheduled_at <= now):
+        raise ValueError("not_before must be a finite future timestamp")
     clean_categories = list(dict.fromkeys(
         str(value).strip() for value in categories
         if str(value).strip() in SUPPORTED_CATEGORIES
@@ -96,6 +117,8 @@ def enqueue_event_discovery_job(
             "categories": clean_categories, "queued_at": now,
             "job_kind": "weekly_cycle" if job_kind == "weekly_cycle" else "discovery",
             "stage": "queued",
+            "retry_count": 0, "retry_at": scheduled_at,
+            "scheduled_for": scheduled_at,
             "started_at": 0.0, "finished_at": 0.0,
             "lease_owner": "", "lease_expires_at": 0.0,
             "outcome": "", "error_code": "", "error_codes": [],
@@ -130,7 +153,9 @@ def enqueue_weekly_event_discovery_if_due(now: datetime | None = None) -> dict[s
     import os
     weekday = max(0, min(int(os.getenv("EVENT_DISCOVERY_WEEKDAY", "0") or 0), 6))
     hour = max(0, min(int(os.getenv("EVENT_DISCOVERY_HOUR", "8") or 8), 23))
-    if now.weekday() != weekday or now.hour != hour:
+    now = now.astimezone(TAIPEI) if now.tzinfo else now.replace(tzinfo=TAIPEI)
+    due = (now - timedelta(days=now.weekday())).replace(hour=hour, minute=0, second=0, microsecond=0) + timedelta(days=weekday)
+    if now < due:
         return None
     schedule_key = now.strftime("%G-W%V")
     return enqueue_event_discovery_job(
@@ -151,7 +176,7 @@ def claim_event_discovery_job(worker_id: str, lease_seconds: int = 1200) -> dict
         {
             "_id": _JOB_ID,
             "$or": [
-                {"state": "queued"},
+                {"state": "queued", "$or": [{"retry_at": {"$lte": now}}, {"retry_at": {"$exists": False}}]},
                 {"state": "running", "lease_expires_at": {"$lte": now}},
             ],
         },
@@ -228,13 +253,17 @@ def finish_event_discovery_job(job: dict[str, Any], result: dict[str, Any]) -> N
 
 
 def fail_event_discovery_job(job: dict[str, Any], exc: Exception) -> None:
+    retry_count = int(job.get("retry_count", 0)) + 1
+    retry = job.get("job_kind") == "weekly_cycle" and retry_count <= 3
     _jobs.update_one(
         {"_id": _JOB_ID, "job_token": job.get("job_token"),
          "lease_owner": job.get("lease_owner")},
         {"$set": {
-            "state": "failed", "finished_at": time.time(),
+            "state": "queued" if retry else "failed", "finished_at": 0.0 if retry else time.time(),
+            "retry_count": retry_count,
+            "retry_at": time.time() + min(1800, 60 * 2 ** min(retry_count, 5)),
             "lease_owner": "", "lease_expires_at": 0.0,
             "outcome": "failed", "error_code": type(exc).__name__,
-            "stage": "failed",
+            "stage": "retry_wait" if retry else "failed",
         }},
     )

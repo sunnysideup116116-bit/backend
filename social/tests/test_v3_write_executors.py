@@ -272,12 +272,12 @@ class V3WritePreflightTests(unittest.TestCase):
             assess.return_value = MagicMock(state="ready", reason_codes=())
             payload, reply = prepare_write_confirmation("match.start_search", {}, ctx, turn)
         self.assertEqual(payload["data"]["search_context"]["invitation_topic"], "衝浪")
-        self.assertEqual(payload["data"]["delivery_mode"], "invite_on_match")
-        self.assertIn("可以替你詢問的人選", reply)
+        self.assertNotIn("delivery_mode", payload["data"])
+        self.assertIn("先給你看人選與推薦說明", reply)
         self.assertIn("不會先假設對方也喜歡", reply)
         self.assertNotIn("可能對衝浪有興趣", reply)
         self.assertIn("不一定已經會衝浪", reply)
-        self.assertIn("開始找並送出邀請", reply)
+        self.assertIn("現在只開始搜尋", reply)
 
     def test_activity_search_does_not_add_a_skill_warning(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="幫我找人一起滑雪")
@@ -286,8 +286,8 @@ class V3WritePreflightTests(unittest.TestCase):
             assess.return_value = MagicMock(state="ready", reason_codes=())
             payload, reply = prepare_write_confirmation("match.start_search", {}, ctx, turn)
         self.assertEqual(payload["data"]["search_context"]["invitation_topic"], "滑雪")
-        self.assertEqual(payload["data"]["delivery_mode"], "invite_on_match")
-        self.assertIn("找到後就替你問問", reply)
+        self.assertNotIn("delivery_mode", payload["data"])
+        self.assertIn("你看完再決定是否送出邀請", reply)
         self.assertNotIn("不一定已經會", reply)
 
     def test_match_decision_preview_binds_proposal_revision(self):

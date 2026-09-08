@@ -84,6 +84,15 @@ class RunCondition(BaseModel):
     )
 
 
+class MatchSearchRequest(BaseModel):
+    """Semantic request only; an invitation still requires a bound confirmation."""
+
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["general", "activity"] = "general"
+    topic: str = Field(default="", max_length=80)
+    invitation_evidence: str = Field(default="", max_length=120)
+
+
 class SubTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -109,6 +118,10 @@ class SubTask(BaseModel):
     match_intent: MatchIntent | None = Field(
         default=None,
         description="Match only. User intent, never state permission.",
+    )
+    match_search_request: MatchSearchRequest | None = Field(
+        default=None,
+        description="Search only: general or activity; topic and invitation_evidence are exact spans from the current user message. Empty invitation_evidence means preview only.",
     )
     evidence_policy: Literal["casual_discovery", "strict_verification"] | None = Field(
         default=None,

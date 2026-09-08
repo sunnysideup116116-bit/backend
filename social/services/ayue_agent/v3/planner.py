@@ -584,7 +584,7 @@ def _decompose_tool_schema() -> dict[str, Any]:
         # Keep this internal classification out of the compact provider schema;
         # the canonical SubTask contract infers it from the task brief.
         task_schema.get("properties", {}).pop("relationship_intent", None)
-        for field_name in ("evidence_policy", "web_mode", "outcome_contract", "run_if", "match_intent"):
+        for field_name in ("evidence_policy", "web_mode", "outcome_contract", "run_if", "match_intent", "match_search_request"):
             field_schema = task_schema.get("properties", {}).get(field_name)
             if not isinstance(field_schema, dict):
                 continue
@@ -602,11 +602,11 @@ def _decompose_tool_schema() -> dict[str, Any]:
         # The system prompt carries the full routing policy.  Keep the
         # provider schema compact so native tool calling remains within the
         # planner's request budget; canonical Pydantic validation is unchanged.
-        for field_name in ("relationship_intent", "match_intent", "evidence_policy", "web_mode", "outcome_contract", "run_if"):
+        for field_name in ("relationship_intent", "match_intent", "match_search_request", "evidence_policy", "web_mode", "outcome_contract", "run_if"):
             field_schema = task_schema.get("properties", {}).get(field_name)
             if isinstance(field_schema, dict):
                 field_schema.pop("description", None)
-                if field_name == "run_if":
+                if field_name in {"run_if", "match_search_request"}:
                     for nested in field_schema.get("properties", {}).values():
                         if isinstance(nested, dict):
                             nested.pop("description", None)
@@ -641,9 +641,10 @@ _PLANNER_SYSTEM = f"""{AYUE_CORE_IDENTITY}
 
 你是公開阿月 V3 Planner，只做語意 routing 與靜態 sub-task DAG。
 不執行工具、不回答 domain／產品事實、不產生 user、proposal、event ID、revision、confirmation 或 tool arguments。
-只呼叫 decompose_tasks 一次，不輸出普通文字；輸出必須符合提供的 schema。
+只呼叫 decompose_tasks 一次，不輸出普通文字；遵守 schema。
 
 輸出規則：
+- 偏好回想／建議用 profile 補查；使用者未確認的推測不是事實。
 - mode=direct_chat 只適用於不需要 App、domain、private、external truth 或 workflow 的聊天；tasks 為空，direct_reply 不超過160字。
 - 任一子需求需要 state、產品能力、特定對方聊天內容、行事曆、配對、profile、relationship、places 或外部資料，就用 mode=tasks；不得只答聊天部分或只輸出 synthesizer。
 - tasks 最多 4 個 domain + 1 個 synth。
@@ -663,7 +664,7 @@ product_info=阿月／App 的能力、流程、限制、隱私與 Public／Priva
 synthesizer=只根據本回合 verified observations 與 bounded context 組最終回覆。
 
 關鍵 routing：
-- 以上規則以完整語意判斷，不使用關鍵字或 regex router；不確定時保留 tasks 讓既有 domain flow 處理。
+- 依語意判斷，不使用關鍵字或 regex router。
 - web_mode：public_lookup=獨立公開查詢；place_verification=綁定店家查證；place_hours_fallback=Places 營業時間不足才補查。
 - 結構化 hours、price、rating、walking 使用 places -> synthesizer；不自動加 web，資訊不足才補查。
 - 區域／場館／品牌活動走 web(public_lookup) -> synthesizer；延續問句沿用 recent_messages。
@@ -678,11 +679,11 @@ synthesizer=只根據本回合 verified observations 與 bounded context 組最�
 - 簡短肯定語接唯讀地點重試提議時，依語意建立 Places read -> synthesizer；不得當 Calendar confirmation；無提議則 direct_chat／澄清。
 - 明確／重做 assessment 用 profile；「更認識我／更了解我／多了解我一點」走 profile -> synthesizer，提出 profile.start_assessment(kind=basic) 確認；不可 direct_chat。正常 product_info -> synthesizer DAG。
 - 「怎麼配對／如何配到人」→ product_info；明確「幫我配對／開始找人」→ match。
-- 「我想配對／幫我找人」→開始；「配得怎樣／對方回了嗎」→進度。
 - 「幫我約人」若找新人走 Match；在活動語境詢問現有聯絡人中誰適合同行，或追問上一個推薦理由，走 Relationship recommend/review。撤回約會邀請走 Relationship date-card cancellation。
 - 有 recent_recommendation 且追問上一個建議時判斷 review；活動改變時重新 recommend，不把快照當成新事實。
-- 配對狀態／取消搜尋／開始找人→ match -> synthesizer；write_intent=none。Match 必填 match_intent：status、counterparty、start_search、restart_search、cancel_search、clarify。人物／主題／活動邀請的接受／婉拒／撤回都到「阿月牽線」卡片，不建聊天確認。
-- match_intent：明確要找新的人→start_search；明確再找一位→restart_search（保留等待中的邀請）；換掉指定牽線卡→請到 Hub 先處理該卡；取消搜尋→只停止 queued/running 搜尋。單次搜尋由一次確認與一次 job 完成，Planner 不拆兩個寫入 task。
+- 配對→ match -> synthesizer，write_intent=none。match_intent 必填：status/counterparty/start_search/restart_search/cancel_search/clarify。接受／婉拒／撤回邀請只在阿月牽線卡片操作。
+- 找新人 start_search；再找一位 restart_search（保留等待邀請）；換卡到 Hub；取消搜尋 cancel_search 只停 queued/running。一次搜尋一個 task。
+- 搜尋填 match_search_request：kind=general（適合認識等找人條件）或 activity；topic 填本句活動原文。invitation_evidence 只填本句明確代送邀請的原文，否則空；找伴不等於送邀請。
 - 「約會卡可以取消嗎」是 ProductInfo 能力問句，不建立操作；只有「幫我取消／撤回約會卡」等命令才用 write_intent=relationship.date_coordination_cancel.v1。Relationship 依 recent_action_reference 或 date_coordination_summary（零張說明、單張確認、多張指定）提出 cancel；過期／不唯一回 clarification，不查 Match。
 - opportunity.signal="social_opening" 只用於間接表達想找人一起參與、尚未要求從既有聯絡人挑選或開始找新人的情況；evidence_span 必須是 current message 的連續原文，confidence >= 0.8。從既有聯絡人挑選用 relationship；找新的人用 match；單純寒暄、孤單或負面情緒使用 signal="none"。
 - Web task brief 保留原始命題、地點／日期與 evidence class。活動名稱、場地有直接來源但時間不完整時保留 partial 並標示待確認，不湊數。
@@ -795,6 +796,12 @@ def _planner_prompt(turn_ctx: PublicAgentTurnContext) -> str:
         "clock": _planner_clock(turn_ctx),
     }
     recent_messages = _planner_recent_messages(turn_ctx)
+    # Only the owner projector's explicit polarity protocol is admitted;
+    # untyped legacy memory strings are not routing context.
+    preferences = [value for value in turn_ctx.relevant_memories
+                   if isinstance(value, str) and value.startswith(("喜歡：", "不喜歡：", "避免：", "需要："))][:8]
+    if preferences:
+        payload["user_preferences"] = [_prompt_json_value(value[:80]) for value in preferences]
     if recent_messages:
         payload["recent_messages"] = recent_messages
     if turn_ctx.conversation_continuity is not None:

@@ -291,6 +291,8 @@ def _complete_public_turn(
     history_truncated = len(fetched_history) > 32
     history = list(reversed(fetched_history[:32]))
     user_doc = profiles_coll.find_one({"user_id": req.user_id}) or {}
+    from services.memory_service import refresh_owner_memory_profile
+    user_doc = refresh_owner_memory_profile(req.user_id, user_doc)
     room_session = assessment_session_for_room(
         user_doc, room_id, include_unscoped=not bool(req.ai_room_id),
     )

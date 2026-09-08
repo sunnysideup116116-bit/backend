@@ -132,7 +132,7 @@ POST 立即回 `queued` 或 `already_running`；以回傳的 `run_number` 對照
 `GET /api/match/events/discover/status`，讀取同一輪的 stage 與結果，不能把排隊成功當成探索完成。
 Worker 的手動 discovery 與 weekly cycle 都以 `request_invitation_scan=False` 呼叫搜尋服務，
 不觸發舊的同 process auto-scan hook；即使打開舊相容旗標也不會因這兩條搜尋路徑提前發送邀請。
-Weekly cycle 仍在 relevance readiness 通過後明確掃描一次。直接呼叫搜尋服務的舊 Python caller 保留原預設相容行為。
+Weekly cycle 在 relevance readiness 通過後依持久使用者清單分批掃描。直接呼叫搜尋服務的舊 Python caller 保留原預設相容行為。
 專責的 `social/event_worker.py` 會領取工作、定期續租並執行搜尋；目前正式啟動路徑是由
 `social/main.py` 的 FastAPI startup 呼叫 `start_event_discovery_worker()`，在 Social :8000 進程內建立 daemon thread。
 worker 中斷後，租約到期的
@@ -162,10 +162,17 @@ generic error 是 Planner provider 回傳非字串 optional 欄位，使舊 norm
 EVENT_WEEKLY_CYCLE_ENABLED=off
 ```
 
-`on` 時由同一嵌入式 Event Worker 在每週一依序執行：限定範圍清理 Event 庫存、搜尋並建圖、
-等待 Concept embedding/relevance 投影完成，最後掃描並產生活動邀請。若 relevance 在有界時間內未完成，
-cycle 回報 `partial` 並跳過邀請，不會用不完整 Graph 強行配對。手動 Demo 仍保留三個獨立按鈕，不會因單獨執行 discovery
-而自動清理或發送邀請。
+`on` 時由同一嵌入式 Event Worker 在每週一台灣時間 08:00 執行；若當時停機，同週恢復後補跑一次，使用 ISO week key 去重。
+正式工作帶持久 run id，先以現有 Event identity 去重增補未來 30 天活動，再由 lifecycle 清過期資料，
+保留仍有效的庫存與既有邀請；不在搜尋前整庫 reset。搜尋本身保留既有 Event-only reconciliation／每類上限，
+這是增量更新，不是兩份 Graph inventory 的原子切換。手動 Demo reset 仍是獨立操作。
+`event_weekly_runs` 保存 discovery、cleanup 與結果 checkpoint；`event_weekly_users` 保存每人順序、嘗試次數與結果。
+`GET /api/match/events/discover/status` 的 weekly_progress 回傳當輪人口、處理、失敗與卡片投遞計數；
+歷史完整結果留在 runs，不因下一次 singleton 排入而被覆蓋；升級前無明細的週期標為 not_recorded。
+租約接手沿用 run id，已完成 discovery 不重跑；中斷在插入 match 後可用 event_cycle_id/requester 找回原結果。
+relevance 未完成時保留 checkpoint 並有界重試，未準備好不掃描；整個 weekly job 最多重試三次，之後明確 failed。
+單人暫時錯誤最多嘗試三次，仍失敗則計入 partial，不阻擋其他人。少數活動類別不足可以繼續使用已驗證活動。
+手動 discovery 不自動清理或發送邀請。
 
 上表的 `off` 是新環境的安全預設，不代表目前整合環境的有效值。部署狀態請以未提交的
 `social/.env` 與 Event Worker startup log 為準；不得為了記錄開關而把正式 `.env` 納入 Git。
@@ -532,14 +539,27 @@ Cooldown 也是 namespace-scoped：只有 `event_invitation` 的 `last_decision.
 一般 relationship decline 不阻擋活動邀請，活動 decline 也不改變一般配對候選資格。
 發起者自行取消 pending invitation 不算對方拒絕。
 
-自動 scan 預設：
+每週持久 scan 預設：
 
-- 每輪最多建立 3 個 proposal。
-- 每輪最多掃描 30 位使用者。
+- 每批最多建立 3 個 proposal；達到上限接續下一批，不是整週只有 3 張。
+- 每批最多取 30 位待處理者；整週清單涵蓋建立快照時的 profile 使用者，資格於建立前重新驗證。
 - 排除已有 live Event invitation 的人；一般 match proposal 不阻擋。
-- 每週 rotation，避免固定從相同使用者開始。
+- 依最後一次活動提案建立時間排序，沒收到過提案者優先，同順位用該次 run 的穩定雜湊排序。
 - 同 pair 明確 decline 後預設七天不再建立 Event invitation。
 - 已 accepted 的同一 pair 日後仍可收到其他 Event invitation。
+
+手動 `scan_event_opportunities` 維持原有單批限制。每週流程沿用相同 create facade、背景 daily quota、
+封鎖、Event live slot 與 pair cooldown，分批不代表放寬資格或保證每人都能配成。
+
+### 11.3 離線投遞與恢復
+
+Social startup 會啟動 `event_delivery_service`，預設每 10 秒領取最多 10 張待投遞 Event 提案。
+以 canonical match 恢復漏掉的 inbox enqueue；draft 只送發起者，pending 才送接收者。
+寫入沿用現有 Match Hub card projection 及固定 room/match event key，與 App polling 競態不新增第二张卡。
+確認 messages 存在才移除對應使用者的 proposal inbox 項目並標記 event_delivery 收據；錯誤以有界指數退避重試，
+終態與 suppressed 提案不領取。發現持久卡即表示可在 App 讀取，不代表推播已到達手機或使用者已讀。
+`EVENT_DELIVERY_WORKER_ENABLED=off` 可停用新 worker；其依賴 Match Hub V1，Hub 關閉時不投遞。
+新增 thread 由原 `start_all.sh` 的 Social lifecycle 啟停，不增加 port 或獨立啟動命令。
 
 ## 12. Frontend Card
 

@@ -103,8 +103,11 @@ def _execute_job(job: dict, worker_id: str) -> dict:
         "categories": list(job.get("categories") or []),
     }
     if job.get("job_kind") == "weekly_cycle":
+        from services.event_discovery_job_service import event_job_is_current
         return run_weekly_event_cycle(
             **arguments,
+            run_id=str(job.get("job_token") or ""),
+            is_current=lambda: not _stop_event.is_set() and event_job_is_current(job, worker_id),
             stage_callback=lambda stage: update_event_discovery_job_stage(
                 job, worker_id, stage,
             ),

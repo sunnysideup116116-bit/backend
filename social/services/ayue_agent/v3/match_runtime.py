@@ -220,6 +220,10 @@ def run(context_slice: Any, *, task: Any, services: Any) -> tuple[TaskRunnerResu
     services.trace["guard_results"].append(decision.code.value)
     if decision.code is not GuardResultCode.WRITE_REQUIRES_CONFIRMATION:
         return _result(task.id, "這次操作沒有通過安全檢查，沒有執行變更。", "guard_rejected", failed=True), metrics
+    if tool == "match.start_search":
+        request = getattr(task, "match_search_request", None)
+        # An omitted semantic result must not resurrect an activity from history.
+        args = {"search_request": request.model_dump() if request else {"kind": "general"}}
     payload, preview = prepare_write_confirmation(tool, args, turn._raw_ctx, turn)
     if payload is None:
         audit.update(action=tool, outcome="preflight_rejected")

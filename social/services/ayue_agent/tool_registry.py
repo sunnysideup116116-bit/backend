@@ -386,11 +386,19 @@ class _ContactEvidenceListOutput(BaseModel):
     unavailable_refs: list[str] = Field(default_factory=list, max_length=3)
 
 
+class _MemorySearchArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(default="", max_length=120)
+
+
 class _MemoryOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     summary: str = ""
     current_context: str = ""
     preferences: list[Any] = Field(default_factory=list)
+    status: Literal["available", "unavailable"] = "available"
+    source: Literal["graph", "cache"] = "cache"
+    truncated: bool = False
 
 
 class _ClockOutput(BaseModel):
@@ -639,9 +647,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "memory.search_my_profile": ToolSpec(
         "memory.search_my_profile", ToolRisk.READ, "memory_profile",
-        "讀取本人已儲存的偏好與近期情境。",
+        "按主題搜尋本人長期偏好；query 可含相關主題與同義詞，空字串查一般偏好。查無結果不代表從未說過；truncated 表示只回部分。",
         "我確認一下我替你記住的事情…",
         output_model=_MemoryOutput,
+        planner_arguments_model=_MemorySearchArguments,
+        executor_arguments_model=_MemorySearchArguments,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
     "web.search": ToolSpec(
         "web.search", ToolRisk.READ, "web_search",

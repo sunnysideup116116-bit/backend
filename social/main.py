@@ -35,6 +35,7 @@ from services.concept_embedding_service import (
     start_concept_embedding_worker, stop_concept_embedding_worker,
 )
 from services.event_opportunity_service import ensure_event_opportunity_indexes
+from services.event_delivery_service import start_event_delivery_worker, stop_event_delivery_worker
 from services.match_quota_service import ensure_match_quota_indexes
 from services.event_lifecycle_service import (
     start_event_lifecycle_worker, stop_event_lifecycle_worker,
@@ -107,10 +108,12 @@ def setup_calendar_indexes():
     start_concept_embedding_worker()
     start_event_lifecycle_worker()
     start_event_discovery_worker()
+    start_event_delivery_worker()
 
 
 @app.on_event("shutdown")
 def stop_background_services():
+    stop_event_delivery_worker()
     stop_proactive_care_scheduler()
     stop_memory_outbox_worker()
     stop_profile_retry_worker()

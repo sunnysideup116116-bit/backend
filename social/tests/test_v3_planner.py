@@ -844,7 +844,7 @@ class V3PlannerTests(unittest.TestCase):
             set(task_schema["properties"]),
             {
                 "id", "agent", "depends_on", "task_brief", "place_mode", "evidence_policy",
-                "web_mode", "outcome_contract", "run_if", "match_intent",
+                "web_mode", "outcome_contract", "run_if", "match_intent", "match_search_request",
             },
         )
         self.assertEqual(

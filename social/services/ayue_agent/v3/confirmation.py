@@ -130,7 +130,7 @@ def project_match_choice_history(messages: list[dict], *, user_id: str, room_id:
             "_id": {"$in": list(dict.fromkeys(ids))}, "user_id": user_id,
             "room_id": room_id, "surface": SURFACE_PUBLIC, "interaction_mode": INTERACTION_BUBBLE,
             "tool_name": {"$in": ["match.decide_active_proposal", "match.start_search", "match.cancel_search"]},
-        }, {"_id": 1, "tool_name": 1, "arguments": 1, "status": 1, "selected_choice": 1, "expires_at": 1})
+        }, {"_id": 1, "tool_name": 1, "arguments": 1, "payload.delivery_mode": 1, "status": 1, "selected_choice": 1, "expires_at": 1})
         projections = {}
         for record in rows:
             public = public_choice_projection(record)

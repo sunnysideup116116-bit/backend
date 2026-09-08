@@ -951,6 +951,26 @@ def prepare_write_confirmation(
             message_id=getattr(ctx, "message_id", None),
             history=getattr(ctx, "recent_history", None),
         )
+        semantic_request = (arguments or {}).get("search_request")
+        invitation_evidence = ""
+        if isinstance(semantic_request, dict):
+            # Classifications are not write authority. Ground the requested
+            # activity in this turn, then persist the user's visible preview.
+            from services.match_search_context import bounded_search_text
+            message = bounded_search_text(getattr(ctx, "message", ""), 600)
+            topic_span = bounded_search_text(semantic_request.get("topic"), 80)
+            if semantic_request.get("kind") == "activity":
+                if not topic_span or topic_span not in message:
+                    return None, "你這次想找人一起做什麼活動？確認活動後，我會先找人選給你看。"
+                search_context = safe_search_context({
+                    "invitation_topic": topic_span, "query_text": message,
+                    "source_message_id": getattr(ctx, "message_id", ""),
+                })
+                span = bounded_search_text(semantic_request.get("invitation_evidence"), 120)
+                if span and span in message:
+                    invitation_evidence = span
+            else:
+                search_context = {}
         data = {"search_context": search_context} if search_context else {}
         topic = str(search_context.get("invitation_topic") or "").strip()
         if topic:
@@ -958,7 +978,9 @@ def prepare_write_confirmation(
             # record.  The worker accepts it only alongside this same topic,
             # so an old proposal or a client supplied boolean cannot authorize
             # an automatic message to the other participant.
-            data["delivery_mode"] = INVITE_ON_MATCH
+            if invitation_evidence:
+                data["delivery_mode"] = INVITE_ON_MATCH
+                data["invitation_evidence"] = invitation_evidence
             query_text = str(search_context.get("query_text") or "")
             skill_requested = bool(
                 re.search(
@@ -971,6 +993,10 @@ def prepare_write_confirmation(
                 f"我會依「{topic}」這個邀請需求，找一位可以替你詢問的人選；"
                 "找到後就替你問問願不願意認識，不會先假設對方也喜歡這項活動。"
                 f"{skill_note}要我開始找並送出邀請嗎？"
+            ) if invitation_evidence else (
+                f"我會依你想找人一起{topic}的需求搜尋，先給你看人選與推薦說明。"
+                f"不會先假設對方也喜歡或擅長這項活動。{skill_note}"
+                "你看完再決定是否送出邀請；現在只開始搜尋，可以嗎？"
             )
         elif isinstance(getattr(turn, "active_proposal", None), dict) and (
             getattr(turn, "active_proposal", {}).get("stage") == "waiting_other"
