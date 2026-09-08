@@ -520,7 +520,7 @@ stateDiagram-v2
 ```
 
 - 每位使用者可同時有一張 live `relationship_match` 與一張 live `event_invitation`。
-- 只有同 namespace 的 live `draft/pending` 阻擋新提案。
+- Event scan 排除已有 live Event invitation 的人；一般配對的多卡片／搜尋阻擋由 Match domain 決定，不把 Event slot 規則推廣成所有一般邀請只能一張。
 - `accepted/declined/expired` 都是終態。
 - 所有 transition 使用 expected status、revision CAS 與 idempotency key。
 - 只有 transition 成功後才發通知或開聊天室。
@@ -555,7 +555,7 @@ Cooldown 也是 namespace-scoped：只有 `event_invitation` 的 `last_decision.
 
 Social startup 會啟動 `event_delivery_service`，預設每 10 秒領取最多 10 張待投遞 Event 提案。
 以 canonical match 恢復漏掉的 inbox enqueue；draft 只送發起者，pending 才送接收者。
-寫入沿用現有 Match Hub card projection 及固定 room/match event key，與 App polling 競態不新增第二张卡。
+寫入沿用現有 Match Hub card projection 及固定 room/match event key，與 App polling 競態不新增第二張卡。
 確認 messages 存在才移除對應使用者的 proposal inbox 項目並標記 event_delivery 收據；錯誤以有界指數退避重試，
 終態與 suppressed 提案不領取。發現持久卡即表示可在 App 讀取，不代表推播已到達手機或使用者已讀。
 `EVENT_DELIVERY_WORKER_ENABLED=off` 可停用新 worker；其依賴 Match Hub V1，Hub 關閉時不投遞。
@@ -585,7 +585,7 @@ Social startup 會啟動 `event_delivery_service`，預設每 10 秒領取最多
 會從 canonical match 重新 hydrate 相同公開 Event projection。
 `GET /api/match/status` 另以 `active_proposals.relationship_match` 與
 `active_proposals.event_invitation` 同時投影兩個不含 identifier 的 live 摘要；既有
-`active_proposal_card` 保留為 relationship slot 的相容 alias。操作用 match ID 仍只來自 mediator card。
+`active_proposal_card` 等欄位保留為相容 alias；現行 HTTP `hub_cards`／Hub 卡片可同時呈現多張提案，操作 ID 只來自 server 驗證的卡片，不由模型創造。
 
 Flutter 以「活動牽線提案」呈現公開 Event snapshot，顯示活動名稱、類別／地區、場地及最多八個場次。
 Unix timestamp 以秒解讀並固定轉為台灣時間；只有日期的資料不補出 `00:00` 或 `23:59`。
@@ -723,7 +723,7 @@ POST /api/match/events/lifecycle/run
 | --- | --- | --- |
 | `TAVILY_API_KEY` | empty | 沒有 key 就不能搜尋／抽取 |
 | `TAVILY_PROJECT` | empty | 選填 project ID |
-| `EVENT_WEEKLY_CYCLE_ENABLED` | `off` | 每週一完整 reset → discovery → invitation scan 開關 |
+| `EVENT_WEEKLY_CYCLE_ENABLED` | `off` | 每週一增量 discovery → 過期清理 → readiness → 分批 invitation scan；同週補跑與 checkpoint 接續 |
 | `EVENT_WORKER_RECONCILE_SECONDS` | `60` | Change Stream 斷線／漏失通知時的低頻復原間隔，限制 10 至 300 秒 |
 | `EVENT_DISCOVERY_REGION` | `高雄` | 試行地區 |
 | `EVENT_DISCOVERY_WINDOW_DAYS` | `30` | 搜尋天數，上限 60 |
@@ -743,9 +743,10 @@ POST /api/match/events/lifecycle/run
 | `EVENT_URL_HEALTHCHECK_ENABLED` | `on` | 寫入前驗證未成功抽取的來源網址仍可存取 |
 | `CONCEPT_EMBEDDING_WORKER_ENABLED` | `on` | 背景向量補齊 |
 | `EVENT_OPPORTUNITY_AUTO_SCAN_ENABLED` | `off` | 舊的同 process scan request 相容開關；每週 cycle 不依賴此開關 |
-| `EVENT_OPPORTUNITY_MAX_PROPOSALS_PER_SCAN` | `3` | 每輪 proposal 上限 |
-| `EVENT_OPPORTUNITY_MAX_USERS_PER_SCAN` | `30` | 每輪使用者上限 |
+| `EVENT_OPPORTUNITY_MAX_PROPOSALS_PER_SCAN` | `3` | 手動 scan 上限／weekly 每批建立上限，不是每週總量 |
+| `EVENT_OPPORTUNITY_MAX_USERS_PER_SCAN` | `30` | 手動 scan 上限／weekly 每批使用者數，weekly 會接續快照清單 |
 | `EVENT_PAIR_DECLINE_COOLDOWN_DAYS` | `7` | 同一 unordered pair 明確 decline 後的 Event invitation cooldown |
+| `EVENT_DELIVERY_WORKER_ENABLED` | `on` | 離線保存 Hub 提案與投遞收據；依賴 Hub V1 |
 | `EVENT_LIFECYCLE_WORKER_ENABLED` | `on` | Event lifecycle worker |
 | `EVENT_PROPOSAL_EXPIRY_INTERVAL_SECONDS` | `300` | Mongo live Event proposal 到期檢查間隔 |
 | `EVENT_GRAPH_CLEANUP_INTERVAL_SECONDS` | `86400` | Neo4j 過期 Event 清理間隔 |
@@ -833,7 +834,7 @@ cd Server
 - 正式 `Server/social/.env` 已設定 `EVENT_WEEKLY_CYCLE_ENABLED=on`；該私有檔案不進 Git。
 - `EVENT_DISCOVERY_WEEKDAY`／`EVENT_DISCOVERY_HOUR` 未覆寫，因此沿用週一 `0`、Asia/Taipei 08:00 的程式預設。
 - `start_all.sh` 啟動紀錄已確認 Event Worker thread、worker id 與 MongoDB Change Stream wake-up 均 active。
-- Google `gemini-embedding-2` free-tier 若回 429，Concept worker 會 bounded pause/retry；weekly cycle 在等待上限內仍未完成 relevance 時回 `partial` 並跳過邀請。這是 provider quota 狀態，不得誤判為提案 state machine 或 Event Worker 未啟動。
+- Google `gemini-embedding-2` free-tier 若回 429，Concept worker 會 bounded pause/retry；此為當時舊流程的觀察。現行 durable weekly cycle 若 readiness 等待仍失敗，保留 checkpoint、有界重試，超過 job 重試上限明確 failed，不把未掃描人口當成 completed。這是 provider quota 狀態，不得誤判為提案 state machine 或 Event Worker 未啟動。
 
 ### 17.3 健康檢查
 
@@ -972,7 +973,7 @@ LIMIT 30
 | `pair_cooldown` | 同一 pair 最近七天曾明確婉拒 |
 | Event 跑完後 `User=0` | Event pipeline 不刪 User；檢查是否曾執行舊版 projection rebuild 或全圖清除。用 16.2 的 atomic rebuild 從 Mongo 恢復 |
 | lifecycle 出現 Mongo code 121 | 先 dry-run 並套用 16.1 migration，讓既有 validator 接受 `expired` |
-| 卡片不出現 | 檢查 mediator event、proposal status、前端 polling 與 match hydration |
+| 卡片不出現 | 檢查 canonical proposal、event_delivery 收據／retry_at、Hub message，再查前端同步；不必靠使用者輪詢才保存 Event 卡片 |
 | PowerShell 中文亂碼 | PowerShell 5.1 response decoding；資料庫通常仍是 UTF-8 正常文字 |
 
 ## 20. Tests

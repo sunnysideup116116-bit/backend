@@ -1,6 +1,6 @@
 # 05. 媒婆服務、圖記憶與 Context Engine
 
-> 本篇說明 port 9001 媒婆服務（candidate 排序＋Neo4j 記憶）與主服務的記憶／profile pipeline。完整資料邊界請見根目錄 `MEMORY_CONTEXT_ENGINE_GUIDE.md`。
+> 本篇說明 port 9001 媒婆服務（candidate 排序＋Neo4j 記憶）與主服務的記憶／profile pipeline。完整資料邊界請見 [Memory 指南](../MEMORY_CONTEXT_ENGINE_GUIDE.md)。
 
 ## 1. 媒婆服務（matchmaker_agent, port 9001）
 
@@ -28,9 +28,9 @@
 
 `/api/match` 的處理流程（`agent_api.py:match_endpoint`）：
 
-1. 平行讀取發起者 graph memory、候選人 graph memories、全域法則（Neo4j 讀取失敗時回傳占位文字，不中斷）。
+1. 平行讀取發起者 graph memory、候選人 graph memories、全域法則（strict Graph read；逾時／不可用回傳明確失敗，不以占位資料繼續配對）。
 2. 每個 candidate 附加自己的 `graph_memory` 欄位（**candidate 的記憶只代表 candidate**）。
-3. `agent.match(...)` 呼叫 LLM；解析 JSON 失敗或格式不符 → HTTP 502 `Invalid matchmaker response`（呼叫端不能把 provider 失敗當成「沒有合適人選」）。
+3. `agent.match_async(...)` 呼叫 LLM；解析 JSON 失敗或格式不符 → HTTP 502 `Invalid matchmaker response`（呼叫端不能把 provider 失敗當成「沒有合適人選」）。
 4. `matches` 最多保留 1 筆，`matched_user_id` 必須存在。
 
 ## 2. Neo4j 圖記憶模型
@@ -65,7 +65,8 @@
 ### 3.2 Durable memory facade（`memory_service.py`）
 
 - `apply_profile_memory_proposals`：validated durable-memory write facade，只走媒婆 `/api/memory/apply`。主服務不直接連 Neo4j；9001 不可用、endpoint 缺失或回應無效時，寫入 bounded `profile_memory_outbox` 待重試並明確回 `MemoryWriteError`。
-- `get_user_graph_memories`：讀回 active 偏好並投影成 `profile_memory_preview`（Mongo read projection，**不是第二個 source of truth**）。
+- `refresh_owner_memory_profile`：聊天／init 的共用 lazy refresh，300 秒 TTL、Graph 失敗保留 cache 並於聊天路徑退避 30 秒，設定頁可 force refresh。以 `profile_memory_revision` CAS 避免晚到讀取復活已停用記憶。
+- `get_graph_memory_snapshot` 讀 durable-only 偏好；`profile_memory_preview` 最多 12 筆，是 Mongo read projection，**不是第二個 source of truth**。
 - `apply_memory_action`：透過 `/api/memory/action` 執行 disable／restore／correct，再同步 read projection。
 - `_sync_memory_projection`：把圖記憶壓縮成 ≤12 筆的 Mongo 投影與摘要。
 - `memory_outbox_service.py`：以 Mongo lease、bounded exponential backoff 與最多八次嘗試重送已驗證 proposals；不重新讀 raw chat。9001 以單一 transaction 寫入 observation marker 與全部 edges，讓 duplicate delivery 可安全結案。
@@ -75,13 +76,13 @@
 
 ### 3.3 Context Engine 邊界（現況）
 
-`context.py:build_public_agent_turn_context` 每回合組 bounded context（`relevant_memories` ≤8 筆等）。新 Context Engine 若建置，只能輸出 bounded、versioned typed bundle；Public／Private runtime 各自套用 privacy adapter。Retrieval 必須先做 owner／room／accepted-relation 硬隔離，再做相關度排序、budget、dedup；失敗時回 bounded empty projection 與 error code，不得改抓 raw data。
+`context.py:build_public_agent_turn_context` 每回合組 bounded context（原文最多 32 則／8,000 字元、帶方向 `relevant_memories` ≤8 筆）。`memory.search_my_profile(query)` 可向 Graph 補查 preview 以外的本人 durable 偏好；先 query 匹配再限 8 筆，回傳 unavailable/truncated，未命中不代表從未提過。新 Context Engine 若建置，只能輸出 bounded、versioned typed bundle；Public／Private runtime 各自套用 privacy adapter。Retrieval 必須先做 owner／room／accepted-relation 硬隔離，再做相關度排序、budget、dedup；失敗時回 bounded empty projection 與 error code，不得改抓 raw data。
 
 ## 4. 配對狀態真相（canonical lifecycle）
 
 - Lifecycle：`draft → pending → accepted`；`declined`／`expired` 為終態。
 - `match_decision_service.py:apply_match_decision` 是唯一 CAS 轉移：`status + proposal_revision` 條件更新（`find_one_and_update`），stale 回報最新狀態且不覆寫；`idempotency_key` 存於 `last_decision`，重放回 `idempotent: true`。
-- 只有同 namespace 的 live `draft/pending` 阻擋新提案；`relationship_match` 與 `event_invitation` 各有一個獨立 slot，可同時存在。`accepted` relationship 是已建立的聯絡關係。
+- 一般與 Event 的 namespace／名額政策分開；Hub 可同時有多張卡。本人發起的未決 draft 或 queued/running 搜尋阻擋新搜尋，等待對方及收到邀請不一律阻擋。`accepted` 是已建立聯絡關係，不是 live proposal。
 - Durable search job 會綁定建立時的 `current_context_revision`。若 concurrent recent-context extraction 在搜尋中提交新 revision，worker 會以 Mongo CAS 將同一 job 最多重排一次並從最新 snapshot 重跑；queued/running 狀態持續可見。第二次仍變動才終止為 stale，並投遞 idempotent `match_search_failed` 說明，不得無聲消失或無限重跑。
 - 效果（通知、開聊天室、Event 開場卡、GIF、opt-in feedback）只在 transition 成功後執行（`match_action_service.apply_transition_effects`）；effect 失敗不讓已提交 transition 被重送。Event invitation 對既有 accepted pair 沿用 canonical chat，並以 match-scoped key 冪等保存一次公開活動介紹，不建立第二個 relationship anchor。
 

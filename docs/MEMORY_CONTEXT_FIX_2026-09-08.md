@@ -1,6 +1,6 @@
 # Owner memory / Context 修正與配對理由複驗
 
-本輪處理使用者指定的第 1、2 點，並測第 4 點；第 3 點分類 UI 未修改。保留前一輪未提交的 Event 變更。本輪同樣尚未 commit／push。
+本文件保留 9/8 第一階段 Memory／Context 驗證快照。後續已完成分類 UI（prefer／avoid）、query 補查與配對修正，並推送後端 e06f9a1／前端 7b86365 工作分支；尚未合併 main。下文第一階段測試數量不代表最新總數，最新 Social 為 1773 passed、4 skipped。
 
 ## 修正
 
@@ -38,9 +38,9 @@
 
 未修改 Graph 偏好、未新增測試偏好、未執行全庫 migration。快取刷新只更新投影與 freshness/revision metadata。
 
-第 4 點：目前 10 張有效提案（7 張一般、3 張活動），20 個內部 viewer-bound reason 投影沒有空字串；配對理由／暱稱前端元件回歸也通過。本輪没有建立新配對或以真機 APK 驗收，不把非空理由證據等同所有文案品質都完美。
+第 4 點：目前 10 張有效提案（7 張一般、3 張活動），20 個內部 viewer-bound reason 投影沒有空字串；配對理由／暱稱前端元件回歸也通過。第一階段沒有建立新配對或以真機 APK 驗收，不把非空理由證據等同所有文案品質都完美。
 
-## 後续
+## 後續
 
-- UI 的 interest／preference 為 Concept.kind；PREFERS／AVOIDS 是使用者關係。若第 3 點產品要顯示「偏好／避免」，應使用 stance/relation，而不是 kind；本輪依要求暫不改畫面。
+- UI 後續已改為 prefer／avoid，依 stance/relation 投影；Concept.kind 仍分類 interest／activity／partner_trait 等，不改 Graph 分類。
 - 真實自然語言回答是否每次善用偏好，仍需使用者聊天驗收；此次證明資料已正確進入模型輸入，不宣稱模型必然遵循每一筆記憶。

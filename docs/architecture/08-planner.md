@@ -78,7 +78,7 @@ Planner 依完整語意選 agent；Python 不另建 keyword router：
 - 附近地點、距離、地址、地圖卡，以及 Places 可投影的結構化地點事實（營業／目前開放、價位、評分、步行距離／時間）→ `places`。
 - Places task 的 `place_mode` 由 Planner 依完整語意決定：推薦多店用 `discover`；第二間怎樣／地址／營業時間用 `details`；好不好吃／好不好喝／口碑用 `reviews`。後兩者沿用 server-owned selected place，不重新 search nearby。
 - 近期／外部資訊、活動、新聞、公開文章、論壇、社群或 URL → `web`。
-- singleton active-proposal/search lifecycle（這一輪最多一筆提案的搜尋、進度、狀態、決策或單一對象摘要）→ `match`。
+- 搜尋、進度、多卡片牽線收件匣狀態或受限單一對象摘要 → `match`；提案決策引導到 Hub。搜尋 task 的 `match_search_request` 區分 general/activity、綁定本句 topic 與代送 invitation_evidence；預設先看提案，不以 topic 自動授權送邀請。
 - accepted／已建立聯絡對象 aggregate（清單、總數、比較、挑選、`@` 對象與互動摘要）→ `relationship`。「我目前配對到哪些人」「我現在有配到誰」「總共幾位」均屬此類，不因含「目前／配對」改送 `match`。
 - 本人 profile、近期情境、記憶、開始／重做性格探索 → `profile`。
 - 阿月／App 的能力、流程、限制、隱私、媒合、Calendar 或 assessment 產品行為 → `product_info`。
@@ -88,7 +88,7 @@ ProductInfo 是正常 domain task。Planner 只在 `task_brief` 保留使用者 
 
 明確要求開始／重試配對必須建立 Match task，不能只輸出 `opportunity.social_opening`。Opportunity 只是有原句 evidence span 且 confidence ≥0.8 的柔性建議，不建立 confirmation。
 
-Match／Relationship 的路由先看資料形狀，不看「配對」單一詞彙：0～多位已建立聯絡對象的 aggregate query 由 Relationship 擁有；這一輪唯一 active proposal 的 lifecycle query 由 Match 擁有。Planner 只做此語意分流，Scheduler 不以中文 keyword／regex 重寫 route。
+Match／Relationship 的路由先看資料形狀，不看「配對」單一詞彙：0～多位已建立聯絡對象的 aggregate query 由 Relationship 擁有；搜尋與多張牽線提案的 lifecycle query 由 Match 擁有。Planner 只做此語意分流，Scheduler 不以中文 keyword／regex 重寫 route。
 
 ### Relationship date-card routing
 

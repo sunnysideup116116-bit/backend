@@ -17,6 +17,15 @@
    └────────────────────┘           └────────────────────┘           └────────────────────┘
 ```
 
+## Event／Memory／配對現況
+
+本功能基線為後端 `e06f9a1`、前端 `7b86365`（已推工作分支，未合併 main）。
+
+- [配對 runtime](docs/architecture/subagent-match.md)：多卡片 Hub、一般／活動語意、先看提案與明確代送授權、選擇性婉拒原因。
+- [Memory／Context](docs/MEMORY_CONTEXT_ENGINE_GUIDE.md)：Neo4j durable relations、Mongo 12 筆 cache、Context 8 筆方向文字與 query 補查、room-scoped compaction。
+- [Event weekly](docs/EVENT_DRIVEN_MATCHMAKER_GUIDE.md)：週一增量探索、過期清理、readiness、有界重試、全人口分批與離線投遞；不是每週僅三張或整庫 reset。
+- [驗收與限制](docs/MATCH_SEARCH_CONSENT_FIX_2026-09-08.md)：Social 1773 passed、4 skipped；使用者已確認最後修正。測試快照不保證未來模型／排程永不失敗。
+
 ## Port 總覽
 
 | Port | 服務 | 入口 | 說明 |

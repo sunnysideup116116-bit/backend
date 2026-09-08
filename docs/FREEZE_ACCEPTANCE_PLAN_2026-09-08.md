@@ -2,7 +2,14 @@
 
 目的：驗證已存、可讀、正確使用、可撤銷與可靠投遞。回覆流暢不等於資料正確；每項保留實際結果，不提前打勾。
 
-## 本次實作驗證基線
+## 最新狀態（2026-09-09 文件核對）
+
+- 使用者已確認 Memory／Context 基本體驗、一般／活動配對及最後 Hub 拒絕原因正常；後端 e06f9a1、前端 7b86365 已推到「專案教室電腦」。尚未合併 main。
+- 最新完整 Social：1773 passed、4 skipped、133 subtests。Flutter 最近 Hub／拒絕原因組 63 passed；暱稱／即時狀態組此前 65 passed，兩組有重疊。
+- 下方 A–E 是可重跑的驗收清單，不能因使用者整體回報 OK 就推定每個故障注入／同義詞／未來排程測項均逐一完成。
+- 已知限制：Matchmaker 晚間跨日 fixture、模型偶發格式失敗安全退出、缺少向量的候選，以及活動覆蓋不足；詳見配對修正紀錄。合併前仍需檢查 main 差異與組員更新。
+
+## 第一階段實作驗證基線（歷史快照）
 
 memory.search_my_profile 已由讀固定快取改成 owner-scoped Graph 主題查詢，並保留 unavailable/truncated。
 Planner／Synthesizer 已加入未確認推測不得當本人事實的規則。提示長度回歸曾發現超過 6000 字元，
@@ -16,7 +23,7 @@ Planner／Synthesizer 已加入未確認推測不得當本人事實的規則。�
 - Python compile、shell syntax、diff whitespace 通過。GitNexus 累積 tracked diff 含前輪 Event／Memory，
   回報 critical；不等於全部屬本輪，且新增未暫存檔案另由原始碼及測試核對。尚未 commit／push。
 
-下列人工驗收尚未完成，尤其模型是否正確處理假設與同義詞，不能由提示文字測試代替。
+下列是驗收規格，不是逐項完成證明；模型是否正確處理假設與同義詞，不能只由提示文字測試代替。已回報結果以上方最新狀態及修正紀錄為準。
 
 ## 準備
 

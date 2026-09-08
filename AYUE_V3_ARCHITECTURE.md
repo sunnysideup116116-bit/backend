@@ -97,7 +97,7 @@ calendar | places | web | match | relationship | profile | product_info | synthe
 
 Planner 只有在下游會消費上游 typed observation、candidate ref 或其他明確 contract 時才建立 `depends_on`；獨立請求放在同一層平行執行，不為了排列順序製造依賴。需要等待但不傳遞資料時使用 bounded `run_if` control edge。
 
-Planner 使用 compact prompt projection：保留最近 4 則且最多 2,000 字元的歷史，移除已在 `message` 中重複的最新 user message；clock 只投影本地日期／時間、時區、星期與實際出現的相對日期 reference。缺少的 optional state 不送入 prompt，active proposal 不包含 revision。這只縮短 Planner input，不改 PublicAgentTurnContext 的全域 12 則／6,000 字元 budget 或其他 specialist slice。
+Planner 使用 compact prompt projection：保留最近 4 則且最多 2,000 字元的歷史，移除已在 `message` 中重複的最新 user message；clock 只投影本地日期／時間、時區、星期與實際出現的相對日期 reference。缺少的 optional state 不送入 prompt，active proposal 不包含 revision。這只縮短 Planner input，不改 PublicAgentTurnContext 的全域 32 則／8,000 字元 budget 或其他 specialist slice。
 
 目前 compact-v3 prompt 將「具體日期＋從既有聯絡人挑一位＋新活動＋附近晚餐」明定為 `calendar`、平行 gated 的 `relationship`／`web`、依賴 Web activity venue 的 `places`，以及 terminal `synthesizer`。任一子需求需要 domain state 或 external truth 時，整回合不得使用 direct chat 或 provider-authored synth-only plan。Planner schema 失敗最多重試一次，並只附加欄位級 allowlisted 修正提示；無效／空 DAG 不靜默降級成 Synthesizer-only。
 
@@ -140,7 +140,7 @@ LLM routing 使用兩級模型：Planner 與 Places／Match／Relationship／Pro
 
 `services/ayue_agent/context.py` 是 Public Context 唯一 owner：
 
-- recent messages ≤12；總字元 ≤6,000；relevant memories ≤8。
+- recent messages ≤32；總字元 ≤8,000；relevant memories ≤8。
 - 已通過驗證的 `ConversationSummaryV1` 只作 owner-scoped 對話延續；watermark 之前的訊息不再重複送入 prompt。摘要不可取代 Profile、Match、Calendar 或 Memory 的 canonical state。
 - 一般配對與活動邀請分別投影為 `active_proposal` 與 `active_event_invitation`；兩者可同時存在，且 specialist slice 不含 match ID、event ID 或其他 authority-bearing identity。
 - 不輸出 raw Mongo/Neo4j document、`seed_user_*`、未公開 ID、對方私人記憶或對方行事曆。
@@ -189,7 +189,7 @@ WRITE proposal / Calendar command batch
   -> canonical domain service（CAS + idempotency）
 ```
 
-`calendar.submit_commands`、`match.start_search`、`match.cancel_search`、`profile.start_assessment`、探索結果 commit 與卡片建立前的約會協調使用一般 AI 泡泡內按鈕；`match.decide_active_proposal`／`match.decide_active_event_invitation` 已有媒人卡片，維持原卡片與文字備援。一般文字會自動取消同房泡泡選擇並繼續進 Planner，不會被當成確認權限。
+`calendar.submit_commands`、`match.start_search`、`match.cancel_search`、`profile.start_assessment`、探索結果 commit 與卡片建立前的約會協調使用一般 AI 泡泡內按鈕；`match.decide_active_proposal`／`match.decide_active_event_invitation` 已有媒人卡片，只在 Hub 經 HTTP CAS 操作，不再建立聊天文字決策確認。一般文字會自動取消同房泡泡選擇並繼續進 Planner，不會被當成確認權限。
 
 目前 WRITE capabilities：
 
@@ -205,7 +205,7 @@ Calendar mutation 只使用 `calendar.submit_commands`。一至十筆 authority-
 
 `relationship.start_date_coordination` 只在 validated `write_intent="relationship.date_invitation.v1"` 與唯一 Relationship write task 下可見；同層可保留 Places／Web／ProductInfo、typed Calendar availability 或唯讀 Match sibling。Relationship Runtime 僅在唯一 accepted contact 可解析時建立一筆確認；混合回合先組唯讀結果，再附上不可改寫的確認文字。Target ID、revision 與 resolution metadata 不進 prompt、trace 或 public events。
 
-`match.decide_active_event_invitation` 只處理 `proposal_namespace="event_invitation"` 的 live proposal。Planner 只能提出 `interested|declined`；Runtime 從 `active_event_invitation` 綁定 canonical revision，確認後由 `write_executors.py` 呼叫 namespace-aware match domain service。一般 `relationship_match` 與活動邀請各有一個獨立 live slot；任一方接受既有聯絡人的活動邀請時沿用聊天室，不重新建立關係。
+`match.decide_active_proposal`／`match.decide_active_event_invitation` 保留為相容 executor 定義，不是目前聊天 Match 可見工具。提案接受／婉拒／撤回只在 Hub 卡片經 namespace-aware HTTP CAS 執行；Hub 可同時有多張卡，一般與 Event 名額政策分開。本人未決 draft 及 queued/running 搜尋阻擋新搜尋，等待對方／收到邀請不一律阻擋。既有聯絡人的 Event 接受沿用聊天室，不重新建立關係。
 
 ## 8. Domain specialists
 
@@ -233,7 +233,7 @@ ProductInfo 是 first-class read-only DAG specialist。它最多兩輪、最多�
 
 ### Match / Relationship / Profile
 
-- Match 讀 canonical 的 singleton proposal/status／單一對象摘要，搜尋與決策走 confirmation/CAS；不擁有 accepted contacts aggregate 清單或總數。
+- Match 讀 canonical 多卡片／搜尋狀態及受限單一對象摘要，搜尋走 confirmation，卡片決策走 Hub HTTP CAS；不擁有 accepted contacts aggregate 清單或總數。
 - Relationship 只讀 accepted relations 與 server 驗證 mentions 的 public projection；擁有已接受／已建立聯絡人的清單、總數、現有聯絡人比較與 bounded 範圍內的推薦。
 - Relationship 的唯一寫入面是建立空白約會邀請卡。它需要 Planner 的 typed write intent、最多兩次 function-call protocol attempt、唯一 accepted target 與一次 confirmation；一般 Relationship task 仍只看三個 READ functions。
 - Planner 依資料形狀分流這兩個 owner：「目前配到哪些人／總共幾位／現在有配到誰」仍是 Relationship aggregate；只有這一輪唯一 proposal 的搜尋、進度、狀態或決策才是 Match。Scheduler 不以中文 keyword／regex 重寫 route。
@@ -249,7 +249,7 @@ draft -> pending -> accepted
 draft/pending -> expired
 ```
 
-- 只有 live `draft/pending` 阻擋新的 active proposal。
+- 本人發起的未決 draft 與 queued/running 搜尋阻擋新搜尋；等待對方／收到邀請不一律阻擋。每 job 最多一張提案，Hub 可同時有多張卡；Event scan 的 live-event 排除與一般名額分開。
 - `accepted` 是已建立聯絡關係，不是 active proposal。
 - `match_decision_service.py` 擁有 status+revision CAS；stale 回最新狀態，不覆寫終態。
 - `match_action_service.py` 只在 transition 成功後執行通知、聊天室、feedback 等 effects；effect 失敗不讓已提交 transition 被重送。
@@ -315,7 +315,7 @@ run_started | tool_started | tool_finished | final | error
 - Context slices 與 Public/Private privacy isolation。
 - Guard codes、tool schema/output、duplicate、budgets。
 - Confirmation、CAS、idempotency、stale、concurrency。
-- 一般／Event 獨立 proposal slot、搜尋進度同頁刷新、viewer-bound nickname／decline options、舊快取卡過濾與 accepted Event 開場卡冪等性。
+- 一般／Event 名額分離與多卡片收件匣、搜尋進度同頁刷新、viewer-bound nickname／decline options、舊快取卡過濾與 accepted Event 開場卡冪等性。
 - Owner memory opt-in feedback、outbox retry、disable／restore／correct，以及 legacy／新版 AI room compaction ownership、watermark 與 continuity gate。
 - Web research/finish、late extract projection、URL/source/subject binding。
 - Calendar command/preflight/draft/reference/verification。

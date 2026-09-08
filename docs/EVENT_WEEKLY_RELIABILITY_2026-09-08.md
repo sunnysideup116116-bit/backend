@@ -1,5 +1,7 @@
 # Event 每週流程可靠性修正與驗證（2026-09-08）
 
+> 這是分階段執行紀錄。現行程式已隨後端 e06f9a1 推到工作分支；文中的早期 commit／測試數量／run 16 是當時快照，不代表目前未提交。main 尚未合併。
+
 基線：Server 3efae74；本輪變更尚未 commit／push。前端及其他記憶 Bug 未修改。
 
 ## 已實作
@@ -47,9 +49,9 @@ GitNexus 修改前完成 impact：Event create 為 HIGH；週期 worker 為 LOW�
 （2026-09-08 19:00 Asia/Taipei）。last_schedule_key 保持 2026-W37，不改週一 08:00 排程。
 16 個排程／worker 隔離測試通過，包含未到時間不可 claim、不得覆寫已排入工作、非法時間拒絕。
 這是完整增量活動刷新→過期清理→向量 readiness→分批配對工作；19:00 是可開始時間，不是完成時間。
-當時 Server 必須在線；離線時佇列會保留，恢復後才領取。尚未記錄本次執行結果，不能提前宣稱成功。
+當時 Server 必須在線；離線時佇列會保留，恢復後才領取。本次最終結果已於 9/8 晚間確認：run 17 在 20:40:43 完成，outcome=partial（活動類別覆蓋不足）；active events=28、readiness ready／pending=0。全人口快照 66 人：54 no_match、9 already_active、3 created、0 failed，新提案已保存 Hub 卡片。19:00 是排程可領取時間；首次可見 claim 約 19:40，延遲原因未單獨定位，不能宣稱準點完成或每人必定配到。
 
 - 下週真實活動搜尋與全人口掃描尚未發生；目前該流程經隔離回歸驗證，不宣稱所有使用者必定配到。
-- 新增服務可補送既有 canonical Event proposal，但仍需新版 App 在 Match Hub 檢視；此次沒有真機 UI 驗收。
+- 新增服務可補送既有 canonical Event proposal；後續使用者已回報 Hub 卡片、雙方接受與活動開場正常。這不等於手機推播到達／已讀或未來排程已驗證。
 - 另觀察到既有文字正規化把「看表演」變成「看錶演」；記為後續獨立文字 Bug，本輪未修改語言服務。
-- 前面記憶分類、同步及 stance 缺失繼續追蹤於工作區 artifacts/match-memory-event-followup-2026-09-08.md。
+- 後續記憶分類／同步與配對收尾已記於 [Memory 紀錄](MEMORY_CONTEXT_FIX_2026-09-08.md)及 [配對紀錄](MATCH_SEARCH_CONSENT_FIX_2026-09-08.md)；未修改的文字正規化問題仍獨立追蹤。

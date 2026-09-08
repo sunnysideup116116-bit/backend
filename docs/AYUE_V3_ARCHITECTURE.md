@@ -1,6 +1,6 @@
 # 公開阿月 V3：現行架構
 
-> 本文件只描述目前程式，不保存已完成的 Public V1/V2 migration 計畫或舊 prompt 快照。層與層之間的精確 typed interface 請見 [`docs/architecture/09-runtime-interfaces.md`](./docs/architecture/09-runtime-interfaces.md)；各 domain 行為請見 `docs/architecture/subagent-*.md`。
+> 本文件只描述目前程式，不保存已完成的 Public V1/V2 migration 計畫或舊 prompt 快照。層與層之間的精確 typed interface 請見 [`docs/architecture/09-runtime-interfaces.md`](./architecture/09-runtime-interfaces.md)；各 domain 行為請見 `docs/architecture/subagent-*.md`。
 
 ## 1. Current baseline
 
@@ -176,7 +176,7 @@ Guard 檢查：
 
 同一 `tool + normalized executor arguments` 在同一 Public run 不重跑。每回合最多建立一筆 pending side effect。
 
-目前 25 個 capabilities：18 READ、7 WRITE。完整表見 [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)。
+目前 25 個 capabilities：18 READ、7 WRITE。完整表見 [`docs/architecture/04-tool-registry.md`](./architecture/04-tool-registry.md)。
 
 ## 7. Confirmation 與 writes
 
@@ -191,7 +191,7 @@ WRITE proposal / Calendar command batch
   -> canonical domain service（CAS + idempotency）
 ```
 
-一般 AI 泡泡按鈕只用於 Calendar、配對搜尋啟動／取消、assessment start／commit 與卡片建立前的約會協調。一般／活動配對決策已有媒人卡片，維持原卡片和文字備援；一般文字只會自動取消同房泡泡選擇並繼續對話。
+一般 AI 泡泡按鈕只用於 Calendar、配對搜尋啟動／取消、assessment start／commit 與卡片建立前的約會協調。一般／活動配對決策已有媒人卡片，只在 Hub 經 HTTP CAS 操作，不建立聊天文字決策確認；一般文字只會自動取消同房泡泡選擇並繼續對話。
 
 目前 WRITE capabilities：
 
@@ -207,7 +207,7 @@ Calendar mutation 只使用 `calendar.submit_commands`。一至十筆 authority-
 
 `relationship.start_date_coordination` 只在 validated `write_intent="relationship.date_invitation.v1"` 的精確 `relationship -> synthesizer` DAG 可見。Relationship Runtime 接受 mention、連續原句 name evidence 或同 owner 15 分鐘 recent-contact reference，僅在唯一 accepted contact 可解析時建立一筆確認；確認後透過 `date_coordination_service.create_invite` 建立空白卡片，日期、地點與活動由雙方之後填寫。Target ID、revision 與 resolution metadata 不進 prompt、trace 或 public events。
 
-`match.decide_active_event_invitation` 只處理 `proposal_namespace="event_invitation"` 的 live proposal。Planner 只能提出 `interested|declined`；Runtime 從 `active_event_invitation` 綁定 canonical revision，確認後由 `write_executors.py` 呼叫 namespace-aware match domain service。一般 `relationship_match` 與活動邀請各有一個獨立 live slot；任一方接受既有聯絡人的活動邀請時沿用聊天室，不重新建立關係。
+`match.decide_active_proposal`／`match.decide_active_event_invitation` 保留為相容 executor 定義，不是目前聊天 Match 可見工具。提案接受／婉拒／撤回只在 Hub 卡片經 namespace-aware HTTP CAS 執行；Hub 可同時有多張卡，一般與 Event 名額政策分開。本人未決 draft 及 queued/running 搜尋阻擋新搜尋，等待對方／收到邀請不一律阻擋。既有聯絡人的 Event 接受沿用聊天室，不重新建立關係。
 
 ## 8. Domain specialists
 
@@ -235,7 +235,7 @@ ProductInfo 是 first-class read-only DAG specialist。它最多兩輪、最多�
 
 ### Match / Relationship / Profile
 
-- Match 讀 canonical 的 singleton proposal/status／單一對象摘要，搜尋與決策走 confirmation/CAS；不擁有 accepted contacts aggregate 清單或總數。
+- Match 讀 canonical 多卡片／搜尋狀態及受限單一對象摘要，搜尋走 confirmation，卡片決策走 Hub HTTP CAS；不擁有 accepted contacts aggregate 清單或總數。
 - Relationship 只讀 accepted relations 與 server 驗證 mentions 的 public projection；擁有已接受／已建立聯絡人的清單、總數、現有聯絡人比較與 bounded 範圍內的推薦。
 - Relationship 的唯一寫入面是建立空白約會邀請卡。它需要 Planner 的 typed write intent、最多兩次 function-call protocol attempt、唯一 accepted target 與一次 confirmation；一般 Relationship task 仍只看三個 READ functions。
 - Planner 依資料形狀分流這兩個 owner：「目前配到哪些人／總共幾位／現在有配到誰」仍是 Relationship aggregate；只有這一輪唯一 proposal 的搜尋、進度、狀態或決策才是 Match。Scheduler 不以中文 keyword／regex 重寫 route。
@@ -251,7 +251,7 @@ draft -> pending -> accepted
 draft/pending -> expired
 ```
 
-- 只有 live `draft/pending` 阻擋新的 active proposal。
+- 本人發起的未決 draft 與 queued/running 搜尋阻擋新搜尋；等待對方／收到邀請不一律阻擋。每 job 最多一張提案，Hub 可同時有多張卡；Event scan 的 live-event 排除與一般名額分開。
 - `accepted` 是已建立聯絡關係，不是 active proposal。
 - `match_decision_service.py` 擁有 status+revision CAS；stale 回最新狀態，不覆寫終態。
 - `match_action_service.py` 只在 transition 成功後執行通知、聊天室、feedback 等 effects；effect 失敗不讓已提交 transition 被重送。
@@ -317,26 +317,26 @@ run_started | tool_started | tool_finished | final | error
 - Context slices 與 Public/Private privacy isolation。
 - Guard codes、tool schema/output、duplicate、budgets。
 - Confirmation、CAS、idempotency、stale、concurrency。
-- 一般／Event 獨立 proposal slot、搜尋進度同頁刷新、viewer-bound nickname／decline options、舊快取卡過濾與 accepted Event 開場卡冪等性。
+- 一般／Event 名額分離與多卡片收件匣、搜尋進度同頁刷新、viewer-bound nickname／decline options、舊快取卡過濾與 accepted Event 開場卡冪等性。
 - Owner memory opt-in feedback、outbox retry、disable／restore／correct，以及 legacy／新版 AI room compaction ownership、watermark 與 continuity gate。
 - Web research/finish、late extract projection、URL/source/subject binding。
 - Calendar command/preflight/draft/reference/verification。
 - ProductInfo retrieval/observation/progress/debug。
 - JSON/NDJSON compatibility、trace/event allowlists。
 
-標準指令見 [`docs/architecture/06-testing.md`](./docs/architecture/06-testing.md)。
+標準指令見 [`docs/architecture/06-testing.md`](./architecture/06-testing.md)。
 
 ## 13. Current documentation index
 
-- [`docs/architecture/01-project-overview.md`](./docs/architecture/01-project-overview.md)：onboarding 與服務邊界。
-- [`docs/architecture/02-python-modules.md`](./docs/architecture/02-python-modules.md)：模組 owner map。
-- [`docs/architecture/03-v3-runtime-lifecycle.md`](./docs/architecture/03-v3-runtime-lifecycle.md)：單回合 lifecycle。
-- [`docs/architecture/04-tool-registry.md`](./docs/architecture/04-tool-registry.md)：25 個 ToolSpec（18 READ、7 WRITE）。
-- [`docs/architecture/05-matchmaker-and-memory.md`](./docs/architecture/05-matchmaker-and-memory.md)：9001、Neo4j 與 profile memory pipeline。
-- [`docs/architecture/06-testing.md`](./docs/architecture/06-testing.md)：測試策略。
-- [`docs/architecture/07-guard.md`](./docs/architecture/07-guard.md)：Central Guard。
-- [`docs/architecture/08-planner.md`](./docs/architecture/08-planner.md)：Planner DAG contract。
-- [`docs/architecture/09-runtime-interfaces.md`](./docs/architecture/09-runtime-interfaces.md)：HTTP、Context、Planner、runner、Tool/Guard、write 與 observation interfaces。
+- [`docs/architecture/01-project-overview.md`](./architecture/01-project-overview.md)：onboarding 與服務邊界。
+- [`docs/architecture/02-python-modules.md`](./architecture/02-python-modules.md)：模組 owner map。
+- [`docs/architecture/03-v3-runtime-lifecycle.md`](./architecture/03-v3-runtime-lifecycle.md)：單回合 lifecycle。
+- [`docs/architecture/04-tool-registry.md`](./architecture/04-tool-registry.md)：25 個 ToolSpec（18 READ、7 WRITE）。
+- [`docs/architecture/05-matchmaker-and-memory.md`](./architecture/05-matchmaker-and-memory.md)：9001、Neo4j 與 profile memory pipeline。
+- [`docs/architecture/06-testing.md`](./architecture/06-testing.md)：測試策略。
+- [`docs/architecture/07-guard.md`](./architecture/07-guard.md)：Central Guard。
+- [`docs/architecture/08-planner.md`](./architecture/08-planner.md)：Planner DAG contract。
+- [`docs/architecture/09-runtime-interfaces.md`](./architecture/09-runtime-interfaces.md)：HTTP、Context、Planner、runner、Tool/Guard、write 與 observation interfaces。
 - `docs/architecture/subagent-*.md`：各 domain specialist 的現行行為。
 
 修改 runtime contract、tool list、state machine、stream/debug envelope 或 environment flag 時，必須同步更新本文件、interfaces 文件與對應 domain 文件。

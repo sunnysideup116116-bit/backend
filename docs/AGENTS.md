@@ -1,6 +1,6 @@
 # Dating-App Agent Rules
 
-本文件適用於 `Dating-App/` 下所有程式。任何接手本專案的 coding agent，在修改前必須先閱讀本文件與 [`AYUE_V3_ARCHITECTURE.md`](./AYUE_V3_ARCHITECTURE.md)（內容為現行 V3 sub-agent 架構）。修改 runtime contract、sub-agent registration、Context slice、Tool/Guard 或 HTTP projection 時，另須閱讀 [`docs/architecture/09-runtime-interfaces.md`](./docs/architecture/09-runtime-interfaces.md)。修改長期建議、Graph Memory 或 Context Engine 時，另須閱讀 [`MEMORY_CONTEXT_ENGINE_GUIDE.md`](./MEMORY_CONTEXT_ENGINE_GUIDE.md)。
+本文件適用於 `Dating-App/` 下所有程式。任何接手本專案的 coding agent，在修改前必須先閱讀本文件與 [`AYUE_V3_ARCHITECTURE.md`](./AYUE_V3_ARCHITECTURE.md)（內容為現行 V3 sub-agent 架構）。修改 runtime contract、sub-agent registration、Context slice、Tool/Guard 或 HTTP projection 時，另須閱讀 [`architecture/09-runtime-interfaces.md`](./architecture/09-runtime-interfaces.md)。修改長期建議、Graph Memory 或 Context Engine 時，另須閱讀 [`MEMORY_CONTEXT_ENGINE_GUIDE.md`](./MEMORY_CONTEXT_ENGINE_GUIDE.md)。
 
 ## 目標與範圍
 
@@ -99,7 +99,7 @@
 ### 8. 配對狀態與產品真相
 
 - Canonical lifecycle：`draft → pending → accepted`；`declined/expired` 為終態。
-- `accepted` 是已建立聯絡關係，不是仍在進行中的 proposal。只有 live `draft/pending` 阻擋新的 active proposal。
+- `accepted` 是已建立聯絡關係，不是仍在進行中的 proposal。本人發起的未決 draft 與 queued/running 搜尋阻擋新搜尋；waiting-other／收到邀請不一律阻擋。Hub 可同時有多張卡，Event scan 的 live-event 排除與一般名額政策分開。
 - 歷史邀請不可因新邀請消失，也不可重新變成可操作卡片。
 - 配對是先縮小候選集合，再由 matchmaker 排序，不是隨機挑選；沒有合適人選時可以回報沒有結果。
 - 使用者面向文字使用「對象／人選／對方／旅伴」，禁止稱人為「物件」或「配對物件」。

@@ -31,14 +31,14 @@
 | `calendar.get_next_my_event` | `calendar_next_event` | 無 | 最近 90 天唯一下一筆有效行程或 not_found | NONE |
 | `calendar.verify_recent_mutation` | `calendar_mutation_verification` | 無 | 最近一次 calendar mutation 的 verified outcome | NONE |
 | `calendar.find_my_event` | `calendar_event_find` | `event_hint`、`date_hint`、`companion_hint`、`limit`(1–30) | found/not_found/ambiguous + candidates[]（含 companion 公開名稱） | PLANNER_GROUNDED |
-| `match.get_status` | `match_status` | 無 | 唯一單一 proposal／配對狀態 snapshot（state/scope/chat_opened/revision 等）；不提供 accepted contacts aggregate | NONE |
+| `match.get_status` | `match_status` | 無 | 多卡片與搜尋狀態 snapshot（含 active/pending/waiting 計數）；不提供 accepted contacts aggregate | NONE |
 | `match.get_counterparty_summary` | `counterparty_summary` | 無 | 唯一目前有效或已接受配對的單一公開對象摘要（非 accepted 時匿名化）；不提供 accepted contacts aggregate、總數或整體比較 | NONE |
 | `profile.get_recent_context` | `recent_context` | 無 | 本人已保存近期情境 + revision | NONE |
 | `profile.get_self_summary` | `self_profile` | 無 | 本人 profile 投影（Big Five、deep profile、偏好、missing_sections） | NONE |
 | `relationship.get_verified_evidence` | `relationship_evidence` | 無（executor 注入 `other_id`） | 已接受配對的可驗證互動摘要 | MENTIONED_RELATIONSHIP |
 | `relationship.get_mentioned_contact_summary` | `mentioned_contact_summary` | 無（executor 注入 `other_ids` ≤3） | @ 對象的公開摘要 | MENTIONED_CONTACTS |
 | `relationship.list_accepted_contacts` | `accepted_contact_list` | 無 | 已接受／已建立聯絡人最小公開清單（≤8 + truncated；`total_count` 有值時可回答精確總數；truncated 時不得宣稱推薦涵蓋全部聯絡人） | NONE |
-| `memory.search_my_profile` | `memory_profile` | 無 | 本人記憶摘要 + 近期情境 + preferences(≤8) | NONE |
+| `memory.search_my_profile` | `memory_profile` | optional `query`（≤120 字） | 本人 durable 偏好(≤8)、summary、current_context、status/source/truncated；query 先篩再限額，失敗沿用 cache | PLANNER_GROUNDED |
 | `web.search` | `web_search` | `query`(2–300)、`recency`、`use_saved_location` | results[]（title/url/snippet/published_date） | PLANNER_GROUNDED |
 | `web.extract` | `web_extract` | `urls`(1–2)、`query` | pages[]（url/content/truncated） | PLANNER_GROUNDED |
 | `places.search_nearby` | `places_nearby` | `anchor`、`categories`(1–3, 5 種)、`cuisine`、`radius_m`(300–5000)、`limit`(1–8)、`ordering`、`use_saved_location` | 地點卡 list（name/category/distance_m/map_url/place_id/photo_url 等） | PLANNER_GROUNDED |
@@ -59,7 +59,7 @@
 | `profile.start_assessment` | `assessment_start` | `kind`(basic/deep) | `_start_assessment` → session 啟動 |
 | `calendar.submit_commands` | `calendar_commands` | `commands`（1–10 個 authority-free `CalendarCommand`；`target_selector` 僅篩選既有 update/cancel 目標） | Calendar Runtime deterministic preflight → server-owned `CalendarMutationPlan` → `_execute_calendar_mutation_plans`，依序執行、stop-on-failure |
 
-互動呈現分流：`calendar.submit_commands`、`match.start_search`、`match.cancel_search`、`profile.start_assessment`、`relationship.start_date_coordination` 使用一般 AI 泡泡內的 `bubble_buttons_v1` 確認；`match.decide_active_proposal` 與 `match.decide_active_event_invitation` 已有自己的媒人卡片，維持原卡片與 `legacy_text` 備援，不加入通用確認按鈕。
+互動呈現分流：`calendar.submit_commands`、`match.start_search`、`match.cancel_search`、`profile.start_assessment`、`relationship.start_date_coordination` 使用一般 AI 泡泡內的 `bubble_buttons_v1` 確認；提案接受／婉拒／撤回只在 Hub 卡片操作。Registry 保留的 `match.decide_active_proposal`／`match.decide_active_event_invitation` 是相容 executor 定義，現行 Match 聊天 surface 不暴露，也不建立 legacy 文字決策確認。
 
 ## 4. 工具可見性（哪些 agent 看得到哪些工具）
 
@@ -70,7 +70,7 @@
 - `places_agent` 只看 `PLACES_TOOLS`；`web_agent` 只看 `WEB_TOOLS`。Web 的 research workflow 不放在 Tool Registry 或 Places Agent。
 - `relationship.get_mentioned_contact_summary` 只在 server 驗證過 accepted @ mention 的回合才可見（`planner_tool_names(can_read_mentioned_contacts=...)`）。
 - `relationship.start_date_coordination` 不在一般 Relationship 可見工具中；只有 Planner 產生已驗證的 `write_intent="relationship.date_invitation.v1"` 時，Relationship Runtime 才暴露這一個寫入 function。
-- `match.decide_active_proposal` 與 `match.decide_active_event_invitation` 分屬一般配對與活動邀請；Match Agent 依 context 中的 active namespace 選擇，不得用其中一個改寫另一個。
+- Match 聊天可見工具為 get_status、get_counterparty_summary、start_search、cancel_search；卡片決策走帶 namespace/status/revision 的 HTTP domain service，不由模型選擇 authority。
 - 明確配對請求（例如「再配對一次」）必須由 Planner 建立 `match` task；`opportunity.social_opening` 只產生短期溫和提議 observation，不建立 confirmation。
 
 ## 5. 執行與驗證流程

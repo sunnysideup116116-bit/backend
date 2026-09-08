@@ -60,7 +60,7 @@ Agent 必須依序閱讀：
 
 1. [`AGENTS.md`](../AGENTS.md)
 2. [`AYUE_V3_ARCHITECTURE.md`](../AYUE_V3_ARCHITECTURE.md)
-3. [`docs/architecture/09-runtime-interfaces.md`](./architecture/09-runtime-interfaces.md)
+3. [`docs/architecture/09-runtime-interfaces.md`](./09-runtime-interfaces.md)
 4. 要整合的 domain 文件，例如 `subagent-match.md`、`subagent-calendar.md`、`subagent-relationship.md`
 5. 現行 Pydantic models、FastAPI OpenAPI 與 deterministic tests
 
@@ -108,6 +108,10 @@ Flutter 的 parser 應以 UTF-8 + line splitter 逐行 decode JSON，不可當 S
 
 ### 4.4 配對卡片與 CAS
 
+現行 Flutter 已使用 MatchHubPage 多卡片收件匣。一般認識與找活動伴預設先看提案；明確要求代送才提供搜尋並邀請確認。聊天顯示搜尋進度與 Hub 入口，卡片接受／婉拒／撤回不靠自由文字決定。
+
+Hub 婉拒必先顯示選擇性原因視窗，只送勾選的 explicit_reasons；取消對話框不送決策。重新進房保留 canonical choice label／status／revision，不復活舊卡。此變更須更新 Flutter／重建 APK，不能只重啟 Server。
+
 新 UI 優先使用：
 
 ```text
@@ -132,7 +136,8 @@ Calendar 畫面自己的 typed CRUD endpoint 可以保留；自然語言 Calenda
 
 ### 4.6 Memory 與 port 9001
 
-- Flutter 只呼叫 port 8000 的產品 API，不直接呼叫 9001 matchmaker／Neo4j endpoints。
+- Flutter 只經固定公開網址 `https://service.misproject.us.ci/` 呼叫 Social 產品 API，不直接呼叫 9001 matchmaker／Neo4j endpoints。
+- 記憶頁依 stance 顯示 prefer／avoid，不把 Concept.kind 當方向。Mongo preview／Context 都有上限，Profile 工具可按 query 補查 Graph；不宣稱常駐 8 筆就是全部記憶。
 - V1 的 `/api/memory/observe` 已刪除，不能移植。
 - Owner profile extraction 由 server 在保存 owner 原句後排入 `profile_skills.py`，再經 `/api/memory/apply` 寫入 9001。
 - Assistant reply、conversation history、tool result、match state 與對方資料都不能成為 owner memory write source。

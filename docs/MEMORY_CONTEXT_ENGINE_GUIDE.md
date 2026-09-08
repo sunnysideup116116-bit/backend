@@ -63,9 +63,9 @@ Hermes ContextEngine concept
 | 狀態 | 目前 owner | 用途 | 不可混入 |
 | --- | --- | --- | --- |
 | 本人近期情境 | Mongo profile 的 `recent_context_state`／`current_context` | 最近、正在或預計進行的本人現實活動 | 配對操作、他人狀態、長期人格判定 |
-| 本人長期記憶 | Neo4j `User-[:PREFERS|AVOIDS|CURRENTLY_WANTS]->Concept` | 明確且可持續的本人偏好、排斥地雷與最新想要活動 | 系統建議、一次性活動、對方特徵 |
+| 本人長期記憶 | Neo4j `User-[:PREFERS\|AVOIDS]->Concept`，Mongo preference_facts 保存證據／生命週期 | 明確且可持續的本人偏好與排斥地雷；CURRENTLY_WANTS 另屬有期限的近期意圖 | 系統建議、一次性活動、對方特徵 |
 | 雙人關係語意 | Mongo `semantic_plans` 與 room-scoped KG triples | 已接受關係中的共同話題、互動節奏與 mediator strategy | 任一方私人悄悄話、跨房間資料 |
-| Agent 每回合 context | `AgentTurnContextV2` | 讓 Planner 在有限 token 與隱私邊界內做當回合決策 | raw Mongo／Neo4j document、內部 ID、對方私人資料 |
+| Agent 每回合 context | `PublicAgentTurnContext` | 讓 Planner 在有限 token 與隱私邊界內做當回合決策 | raw Mongo／Neo4j document、內部 ID、對方私人資料 |
 
 「長期建議」是系統推導出的 recommendation，不是使用者記憶。即使建議來自 Graph Memory，也必須保存到獨立 read model，並保留來源、版本、有效期與可撤銷狀態；禁止寫成 `PREFERS`、`AVOIDS` 或 `CURRENTLY_WANTS`。
 
@@ -80,7 +80,7 @@ Saved owner message
 → programmatic Traditional Chinese projection
 → Mongo revision CAS
 → profile.get_recent_context
-→ AgentTurnContextV2
+→ PublicAgentTurnContext
 ```
 
 - Source of truth：`recent_context_state` 與 `current_context_revision`。
@@ -186,14 +186,14 @@ disable／correct 先移除對應 cache key，較晚的旧讀取不得恢復它�
 最多 8 筆；排除異 owner、want、disabled、未帶 stance 的舊文字及不安全標籤。
 Public Planner 的 direct-chat 路徑只接收這個帶方向的封閉文字格式；Profile／Relationship slice 與 Synthesizer
 沿用同一份 relevant_memories，防止普通聊天漏掉偏好。Context Builder 自身仍只讀、不刷新或寫 DB。
-Concept.kind 的 interest／preference 與 User relation 的 PREFERS／AVOIDS 是不同欄位；本次未改分類 UI。
+Concept.kind（interest／activity／partner_trait 等）與 User relation 的 PREFERS／AVOIDS 是不同欄位。DatingApp 記憶頁現行只呈現 prefer／avoid：like/require → prefer，dislike/avoid → avoid；不把 kind 當偏好方向。
 
 `services/ayue_agent/context.py` 是 Public V3 唯一 Context Builder。現在的 budget：
 
 - 最近 32 則訊息，合計最多 8,000 字元。
 - 本人近期情境一份。
 - 本人長期記憶最多 8 筆。
-- 唯一 live proposal 的安全狀態。
+- 配對搜尋與牽線收件匣的安全狀態；單卡相容欄位不表示帳號只能有一張卡。
 - 經 server 驗證的公開 mention。
 - Asia/Taipei turn clock 與 capability version。
 
@@ -372,7 +372,7 @@ Neo4j 只保留配對與 Event traversal 需要的最小 relation projection。
 2. 定義 versioned memory／context contracts 與 privacy projection。
 3. 將現有 Graph read/write 包在 repository 或 domain service，保留 API 相容。
 4. 建立 retrieval／ranking／budgeting 的 deterministic tests。
-5. 用 shadow mode 比較舊 `AgentTurnContextV2` 與新 bundle 的選取結果；shadow 只記 metadata，不記內容。
+5. 用 shadow mode 比較舊 `PublicAgentTurnContext` 與新 bundle 的選取結果；shadow 只記 metadata，不記內容。
 6. Public runtime adapter 驗證後才切換；V3 失敗仍 fail closed，不回 legacy。
 7. 最後才讓 matchmaker 或 long-term advice 消費新 projection。
 

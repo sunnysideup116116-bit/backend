@@ -7,7 +7,7 @@
 ### `main.py`
 FastAPI app 入口。註冊五個 top-level routers（`frontend`、`chat`、`match`、`system`、`calendar`；`chat` 本身是 aggregate，底下再掛 leaf routers）。
 
-`startup` 時依序建立索引並啟動六個 background worker：
+`startup` 時依序建立索引並啟動下列 background workers：
 
 - `start_match_search_worker()` — 配對搜尋 job 的消費 worker（`match_search_job_service.py`）。
 - `start_proactive_care_scheduler()` — 主動關心排程 loop（`ayue_agent/proactive_scheduler.py`）。
@@ -15,8 +15,11 @@ FastAPI app 入口。註冊五個 top-level routers（`frontend`、`chat`、`mat
 - `start_concept_embedding_worker()` — 補齊 Concept embedding 並刷新 Event relevance projection。
 - `start_event_lifecycle_worker()` — 使過期的 Event proposal 與 Graph Event 進入正確 lifecycle。
 - `start_event_discovery_worker()` — 由 `event_worker.py` 在 Social 進程內建立 daemon thread，消費 Mongo singleton discovery queue。
+- `start_event_delivery_worker()` — 離線保存 canonical Event Hub 卡片、收據與失敗退避。
+- `start_memory_outbox_worker()` — 重送已驗證的 owner memory proposals。
+- `start_profile_retry_worker()` — 依 lease／上限重試可重試的 profile extraction。
 
-`shutdown` 時停止這六個 worker。另外在啟動時建立：calendar、agent run、map cache、profile skill、match、Event queue/cache 與 interactive-priority 索引。
+`shutdown` 時停止上述 workers。另外在啟動時建立：calendar、agent run、map cache、profile skill、match、Event queue/cache 與 interactive-priority 索引。
 
 `event_discovery_service.start_event_discovery_scheduler()` 是已廢止的 no-op compatibility entrypoint；
 現行排程與 queue ownership 在 `event_worker.py`。`EVENT_WEEKLY_CYCLE_ENABLED=off` 只關閉每週自動排程，

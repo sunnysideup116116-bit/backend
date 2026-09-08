@@ -211,9 +211,7 @@ loop (at most three reads and four Relationship model calls), returning a typed
 scoped to the saved owner message that started the run, and revalidated against
 accepted relationships for every follow-up. In ordinary
 lookup mode it returns READ proposals; only a validated date-card `write_intent`
-switches it to the single confirmed WRITE proposal surface. Match owns the singleton pending/live
-proposal status, counterparty summary, and start/retry/decision flow; an accepted
-contact is not an active proposal. A current Match observation never supplies
+switches it to the single confirmed WRITE proposal surface. Match owns search, the multi-card pending/live inbox and bounded counterparty summary; proposal decisions belong to the Hub HTTP surface. An accepted contact is not an active proposal. A current Match observation never supplies
 aggregate accepted-contact count or roster authority.
 
 Successful public replies keep the recommendation envelope in the room-scoped
@@ -223,11 +221,9 @@ after the assistant message is saved; a later reason/revision question reads a
 safe projection and starts a fresh Relationship review, never treating an old
 assistant sentence as new evidence.
 
-The Planner-facing `SubTask.agent` schema describes this as an aggregate-versus-
-singleton boundary. Colloquial questions such as 「我目前配對到哪些人」、
+The Planner-facing `SubTask.agent` schema describes this as a search/invitation versus accepted-contact aggregate boundary. Colloquial questions such as 「我目前配對到哪些人」、
 「我現在有配到誰」 or 「總共幾位」 require Relationship even though
-they contain 「目前」 or 「配對」. Match is reserved for the one active
-proposal/search lifecycle. This is semantic Planner ownership; Scheduler does
+they contain 「目前」 or 「配對」. Match is reserved for search and invitation-inbox lifecycle. This is semantic Planner ownership; Scheduler does
 not add a keyword or regex rerouter.
 
 ## 6. Tool and Guard interface
