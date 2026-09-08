@@ -292,6 +292,7 @@ def _opportunity_key(event_id: str, first_user: str, second_user: str) -> str:
 
 def create_event_opportunity(
     user_id: str, *, excluded_user_ids: set[str] | list[str] | None = None,
+    cycle_id: str = "", can_commit=None,
 ) -> dict[str, Any]:
     """Find one graph bridge and create an anonymous first-party draft."""
     safe_user_id = re.sub(r"\s+", "", str(user_id or ""))[:80]
@@ -488,7 +489,11 @@ def create_event_opportunity(
             verified_accepted_match_query(first_user, second_user), {"_id": 1},
         )),
     }
+    if cycle_id:
+        match_doc.update(event_cycle_id=cycle_id, event_cycle_requester=safe_user_id)
     try:
+        if can_commit is not None and not can_commit():
+            raise RuntimeError("event_cycle_ownership_lost")
         inserted = matches_coll.insert_one(match_doc)
     except DuplicateKeyError:
         if quota_reserved:
@@ -519,6 +524,7 @@ def create_event_opportunity(
     )
     return {
         "status": "created",
+        "match_id": match_id,
         "first_party": "requester" if first_user == safe_user_id else "other",
         "event_title": event_snapshot["title"],
         "queued": bool(queued),

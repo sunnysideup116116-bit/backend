@@ -41,7 +41,7 @@ direct_chat (routers/public_chat.py)
 
 1. **Assessment commit**：探索完成後建立 room-scoped `bubble_buttons_v1` 選擇；只有帶精確 `choice_id` 的按鈕操作可以 commit／cancel。一般文字會自動取消草稿並繼續正常對話；逾期則 expire。
 2. **Active assessment session**：存在進行中的基本／深層探索時，任何訊息都作為該 session 的答案（`advance_assessment_session`），不跑 Planner。
-3. **Confirmation**：Calendar、配對搜尋、assessment start 與卡片建立前的約會協調使用 `bubble_buttons_v1`，以 `user + surface + room + choice_id` 綁定；文字「確認／取消」不具執行權。既有配對提案與活動邀請卡的文字備援仍使用隔離的 `legacy_text` 協議。Calendar Agent 的多個 typed commands 在建立時已合併為一個 server-owned plan，按鈕確認後依序執行。
+3. **Confirmation**：Calendar、配對搜尋、assessment start 與卡片建立前的約會協調使用 `bubble_buttons_v1`，以 `user + surface + room + choice_id` 綁定；文字「確認／取消」不具執行權。配對提案與活動邀請的決策只走 Hub 卡片；保留的 legacy 定義不授權聊天接受／婉拒／撤回。Calendar Agent 的多個 typed commands 在建立時已合併為一個 server-owned plan，按鈕確認後依序執行。
 
 ### 階段 1：Planner 拆解（LLM）
 
@@ -166,7 +166,7 @@ Planner 另使用 compact prompt projection：最近 4 則、合計 2,000 字元
 
 - **Profile extraction**：`public_chat.py` 在回合結束後先把 `message-use-v1` 寫回已保存的 owner 訊息，再由 `profile_task_service` → `profile_skills.py` 只領取 `ordinary` source；message_id 去重，暫時 provider failure 最多三次有限重試，evidence 必須是原句連續子字串；calendar／assessment／no-memory／unknown 不會進入此 pipeline。
 - **Profile retry worker**：Social startup 會啟動 `profile-retry-worker`，每 30 秒最多領取三筆到期的 failed/expired lease；它重讀同一個 owner source，重新驗證用途後才重跑 extractor，第三次失敗即終止。
-- **配對搜尋 job**：`match.start_search` 確認後入 `match_search_jobs` 佇列，`match_search_worker` 消費（claim/lease/progress），完成後呼叫媒婆 9001 `/api/match`，產出唯一 draft proposal，並以 mediator event 通知。
+- **配對搜尋 job**：`match.start_search` 確認後入 `match_search_jobs` 佇列，`match_search_worker` 消費（claim/lease/progress），完成後呼叫媒婆 9001 `/api/match`，每個 job 最多產生一張 draft；明確代送授權的 invite_on_match 才接 canonical accept CAS 轉 pending，並以 mediator event 通知。帳號可有多張等待邀請，決策集中在 Hub。
 - **主動關心**：保存 owner turn 後的 Profile background task 以一次 typed extraction 提出最多三筆 `proactive_followups` 候選；`proactive_scheduler` 每 15 秒掃描到期或 lease 過期候選，依 owner consent、原聊天室、48 小時／七日上限、未回答後七日冷卻、22:00–09:00 靜默、近期活躍與 Calendar busy/free gate 產生一則 grounded care。候選用 durable active slot、source unique key、revision、lease 與固定 message event key 去重；`shadow` 只記錄不送出，`on` 才寫入原聊天室並交給既有 polling marker。
 - **Event discovery**：`POST /api/match/events/discover` 只寫入 Mongo singleton job。`social/main.py` 在 FastAPI startup 以 `start_event_discovery_worker()` 建立同一 Social process 內的 daemon thread，由 `event_worker.py` 使用 Change Stream 喚醒並消費；`EVENT_WEEKLY_CYCLE_ENABLED` 只控制 weekly-cycle enqueue，手動 discovery 不受影響。
 - **Event projection/lifecycle**：Concept embedding worker 補齊 768 維向量並刷新 `EVENT_RELEVANCE`／`EVENT_AVOIDANCE`；Event lifecycle worker 獨立處理 Mongo proposal expiry 與 Graph Event cleanup。

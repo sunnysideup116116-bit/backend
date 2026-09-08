@@ -38,9 +38,11 @@
 
 回傳（`_RecentContextOutput`）：`current_context`、`revision`、`exists`。資料來自已保存的 `current_context`（`safe_recent_context`），不會重新分析。
 
-### 2.3 `memory.search_my_profile`（READ，無參數）
+### 2.3 `memory.search_my_profile`（READ，可選 query）
 
-回傳（`_MemoryOutput`）：`summary`（profile_memory_summary）、`current_context`、`preferences`（`profile_memory_preview` ≤8，typed 渲染：喜歡/不喜歡/需要/避免 前綴）。
+參數 `query` 最多 120 字，預設空；不接受 user_id，由 server 綁定本人。工具經 memory service 查 9001 的 durable relations，先匹配 query 再限 8 筆，因此可查常駐 preview 以外的記憶。這是中文字詞／bigram 與英文詞匹配，可由模型補同義詞，不是新的 embedding 檢索。
+
+回傳 `summary`、`current_context`、`preferences`（帶喜歡／不喜歡／需要／避免方向）、`status=available|unavailable`、`source=graph|cache`、`truncated`。不可用時沿用 bounded cache，不宣稱沒有記憶；空 query 或 truncated 不代表所有偏好。查詢不覆寫一般 preview。
 
 ### 2.4 `profile.start_assessment`（WRITE，需確認）
 

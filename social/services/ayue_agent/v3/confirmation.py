@@ -28,6 +28,7 @@ BUBBLE_BUTTON_ACTIONS = frozenset({
     "match.cancel_search",
     "profile.start_assessment",
     "relationship.start_date_coordination",
+    "relationship.cancel_date_coordination",
     ASSESSMENT_COMMIT_ACTION,
     "private.date.start_coordination",
 })
@@ -63,6 +64,8 @@ def match_choice_labels(record: dict[str, Any]) -> dict[str, str]:
         pair = ("先不找", "開始找並送出邀請") if invite_on_match else ("暫不搜尋", "開始搜尋")
     elif action == "match.cancel_search":
         pair = ("繼續搜尋", "停止搜尋")
+    elif action == "relationship.cancel_date_coordination":
+        pair = ("保留約會卡", "確認取消")
     return {"cancel_label": pair[0], "confirm_label": pair[1]} if pair else {}
 
 
@@ -81,7 +84,10 @@ def match_choice_cancel_reply(record: dict[str, Any]) -> str | None:
         ):
             return "好，這次先不找，也沒有送出邀請。"
         return "這次不開始搜尋。"
-    return {"match.cancel_search": "這次沒有送出停止搜尋。"}.get(action)
+    return {
+        "match.cancel_search": "這次沒有送出停止搜尋。",
+        "relationship.cancel_date_coordination": "這次沒有取消約會卡。",
+    }.get(action)
 
 
 def public_choice_projection(record: dict[str, Any]) -> dict[str, Any]:
@@ -124,7 +130,7 @@ def project_match_choice_history(messages: list[dict], *, user_id: str, room_id:
             "_id": {"$in": list(dict.fromkeys(ids))}, "user_id": user_id,
             "room_id": room_id, "surface": SURFACE_PUBLIC, "interaction_mode": INTERACTION_BUBBLE,
             "tool_name": {"$in": ["match.decide_active_proposal", "match.start_search", "match.cancel_search"]},
-        }, {"_id": 1, "tool_name": 1, "arguments": 1, "status": 1, "selected_choice": 1, "expires_at": 1})
+        }, {"_id": 1, "tool_name": 1, "arguments": 1, "payload.delivery_mode": 1, "status": 1, "selected_choice": 1, "expires_at": 1})
         projections = {}
         for record in rows:
             public = public_choice_projection(record)

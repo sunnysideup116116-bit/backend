@@ -66,39 +66,116 @@ def get_graph_memory_snapshot(user_id: str, limit: int = 20) -> dict:
     """Return a status-aware projection for cache refresh without changing list callers."""
     try:
         response = requests.get(
-            f"{AGENT_URL}/api/memory/{user_id}", params={"limit": limit}, timeout=12,
+            f"{AGENT_URL}/api/memory/{user_id}",
+            params={"limit": limit, "durable_only": "true"}, timeout=(1, 2),
         )
         response.raise_for_status()
         payload = response.json()
-        if payload.get("status") == "error":
+        if not isinstance(payload, dict):
+            return {"available": False, "items": [], "error_code": "invalid_graph_response"}
+        if payload.get("status") != "success":
             return {"available": False, "items": [], "error_code": str(
                 payload.get("error_code") or "graph_read_failed"
             )[:80]}
-        raw_items = payload.get("memories", [])
-        if not isinstance(raw_items, list):
+        raw_items = payload.get("memories")
+        if not isinstance(raw_items, list) or any(not isinstance(item, dict) for item in raw_items):
             return {"available": False, "items": [], "error_code": "invalid_graph_response"}
     except (requests.RequestException, ValueError):
         return {"available": False, "items": [], "error_code": "memory_agent_unavailable"}
     items = [
         {**normalize_memory_item(item), "owner_user_id": user_id}
-        for item in raw_items if normalize_memory_item(item).get("label")
+        for item in raw_items if item.get("stance") in {"like", "dislike", "avoid", "require"}
+        and normalize_memory_item(item).get("label")
     ]
     return {"available": True, "items": items, "error_code": None}
 
 
+def refresh_owner_memory_profile(user_id: str, profile: dict, *, force=False) -> dict:
+    """Refresh stale nonempty projections, with CAS against concurrent mutations.
+
+    The caller passes its already-loaded owner profile. A successful empty
+    Graph response clears stale data; outages keep the cache and retry later.
+    """
+    if not isinstance(profile, dict) or profile.get("user_id") != user_id:
+        return profile
+    now = time.time()
+    synced = float(profile.get("profile_memory_synced_at") or 0)
+    retry_at = float(profile.get("profile_memory_retry_at") or 0)
+    if not force and (now - synced < 300 or retry_at > now):
+        return profile
+    revision = profile.get("profile_memory_revision")
+    guard = {"user_id": user_id, "profile_memory_revision": revision}
+    try:
+        snapshot = get_graph_memory_snapshot(user_id, limit=12)
+        if not snapshot["available"]:
+            if not force:
+                profiles_coll.update_one(guard, {"$set": {"profile_memory_retry_at": now + 30}})
+            latest = profiles_coll.find_one({"user_id": user_id})
+            return latest if isinstance(latest, dict) else profile
+        items = snapshot["items"][:12]
+        values = {"profile_memory_preview": items, "profile_memory_summary": memory_summary(items),
+                  "profile_memory_synced_at": now, "profile_memory_retry_at": 0}
+        updated = profiles_coll.update_one(guard, {"$set": values, "$inc": {"profile_memory_revision": 1}})
+        if updated.modified_count:
+            return {**profile, **values, "profile_memory_revision": int(revision or 0) + 1}
+        # A newer action/refresh won. Never inject the stale remote result.
+        latest = profiles_coll.find_one({"user_id": user_id})
+        return latest if isinstance(latest, dict) else profile
+    except Exception:
+        return profile
+
+
+def _invalidate_memory_projection(user_id, key=None):
+    update = {"$set": {"profile_memory_synced_at": 0, "profile_memory_retry_at": 0},
+              "$inc": {"profile_memory_revision": 1}}
+    if key:
+        update["$pull"] = {"profile_memory_preview": {"key": key}}
+    profiles_coll.update_one({"user_id": user_id}, update)
+
+
+def search_owner_memory(user_id: str, query: str, profile: dict) -> dict:
+    """Query Graph before limiting results; never replace the general cache."""
+    from services.owner_memory_projection import preference_wording
+    try:
+        response = requests.get(f"{AGENT_URL}/api/memory/{user_id}",
+                                params={"limit": 8, "durable_only": "true", "query": query[:120]},
+                                timeout=(1, 3))
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("status") != "success" or not isinstance(payload.get("memories"), list):
+            raise ValueError("invalid_memory_response")
+        words = preference_wording(payload["memories"], owner_id=user_id)
+        return {"preferences": words, "summary": "、".join(words)[:600],
+                "status": "available", "source": "graph", "truncated": bool(payload.get("truncated", False))}
+    except (requests.RequestException, ValueError, TypeError):
+        words = preference_wording(profile.get("profile_memory_preview"), owner_id=user_id)
+        return {"preferences": words, "summary": "、".join(words)[:600],
+                "status": "unavailable", "source": "cache", "truncated": True}
+
+
 def _sync_memory_projection(user_id: str, learned: list[dict]) -> list[dict]:
+    base = profiles_coll.find_one({"user_id": user_id}) or {}
     snapshot = get_graph_memory_snapshot(user_id, limit=12)
-    source = (
-        snapshot["items"] if snapshot["available"]
-        else [normalize_memory_item(item) for item in learned]
-    )
+    if snapshot["available"]:
+        source = snapshot["items"]
+    else:
+        # A failed Graph read must not replace the entire cache with only the
+        # newly learned batch (or wipe it after an action).
+        merged = {str(item.get("key") or item.get("label")): normalize_memory_item(item)
+                  for item in list(base.get("profile_memory_preview") or []) + list(learned)
+                  if isinstance(item, dict) and item.get("stance") in {"like", "dislike", "avoid", "require"}}
+        source = list(merged.values())
     compact = sorted(source,
                      key=lambda x: x.get("last_seen_at", 0), reverse=True)[:12]
-    profiles_coll.update_one({"user_id": user_id}, {"$set": {
+    updated = profiles_coll.update_one({"user_id": user_id, "profile_memory_revision": base.get("profile_memory_revision")}, {"$set": {
         "profile_memory_preview": compact,
         "profile_memory_summary": memory_summary(compact),
-        "profile_memory_synced_at": time.time(),
-    }}, upsert=True)
+        "profile_memory_synced_at": time.time() if snapshot["available"] else 0,
+        "profile_memory_retry_at": 0,
+    }, "$inc": {"profile_memory_revision": 1}})
+    if not updated.modified_count:
+        latest = profiles_coll.find_one({"user_id": user_id}) or {}
+        return list(latest.get("profile_memory_preview") or [])[:12]
     return compact
 
 def apply_profile_memory_proposals(user_id: str, proposals: list[dict], surface: str, message_id: str | None, match_id: str | None = None) -> list[dict]:
@@ -135,6 +212,7 @@ def apply_profile_memory_proposals(user_id: str, proposals: list[dict], surface:
     learned = [normalize_memory_item(item) for item in learned if normalize_memory_item(item).get("label")]
     if not learned:
         return []
+    _invalidate_memory_projection(user_id)
     _sync_memory_projection(user_id, learned)
     if message_id:
         MEMORY_OUTBOX.update_one({"message_id": message_id}, {"$set": {"status": "applied", "updated_at": time.time()}, "$unset": {"last_error_code": ""}})
@@ -155,5 +233,6 @@ def apply_memory_action(user_id: str, key: str, action: str, value: str | None =
         raise MemoryWriteError(str(
             result.get("error_code") or result.get("status") or "memory_action_failed"
         )[:80])
+    _invalidate_memory_projection(user_id, key if action in {"disable", "correct"} else None)
     _sync_memory_projection(user_id, [])
     return result

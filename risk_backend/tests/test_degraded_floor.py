@@ -49,12 +49,15 @@ def _run(delta: RiskState, degraded: bool):
     machine = RiskStateMachine()
     log = FakeLog()
     machine.chat_log_service = log
-    with patch("app.core.risk_state.KBService.get_fusion_config", return_value=CONFIG):
-        state, level = asyncio.run(machine.update(
+    async def update():
+        state, level = await machine.update(
             "conversation", "user", "message", delta,
             degraded_with_flags=degraded,
-        ))
-    return state, level, machine.last_diagnostic, log
+        )
+        return state, level, machine.last_diagnostic, log
+
+    with patch("app.core.risk_state.KBService.get_fusion_config", return_value=CONFIG):
+        return asyncio.run(update())
 
 
 def test_floor_lifts_safe_to_observation():

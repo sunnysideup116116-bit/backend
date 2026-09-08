@@ -402,6 +402,30 @@ class V3SubAgentTests(unittest.TestCase):
         self.assertEqual(proposals[0].arguments["categories"], ["restaurant"])
         self.assertEqual(proposals[1].arguments["categories"], ["cafe"])
 
+    def test_places_agent_can_request_server_owned_continuation_exclusion(self):
+        slc = _slice("places", {
+            "message": "給我其他家",
+            "recent_messages": [],
+            "recent_place_candidates": {"candidates": [{"label": "旧店"}]},
+            "user_location": "高雄市鹽埕區",
+            "clock": _clock().model_dump(),
+            "prior_observations": [],
+        })
+        with patch(
+            "services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "places.search_nearby",
+                "arguments": {
+                    "anchor": "高雄市鹽埕區",
+                    "categories": ["cafe"],
+                    "exclude_previously_presented": True,
+                },
+            }]),
+        ):
+            proposals, _metrics = run_places(slc, task_brief="找新的冰店")
+
+        self.assertTrue(proposals[0].arguments["exclude_previously_presented"])
+
     def test_places_agent_skips_invalid_call_but_keeps_valid_one(self):
         """多 calls 中混入不合法者：合法者必須保留。"""
         slc = _slice("places", {

@@ -21,6 +21,7 @@ from services.ayue_agent.public_relationship_projection import display_name, oth
 
 
 LIVE_STATUSES = {"pending_partner", "active"}
+CANCELLABLE_STATUSES = {"pending_partner", "active", "completed"}
 
 
 def _field(user_id: str) -> str:
@@ -478,6 +479,8 @@ def cancel_coordination_or_event(
     coordination_id: str,
     *,
     expected_revision: int | None = None,
+    expected_status: str | None = None,
+    expected_coordination_revision: int | None = None,
     idempotency_key: str | None = None,
 ) -> dict:
     match = find_accepted_match(user_id, other_id)
@@ -488,8 +491,16 @@ def cancel_coordination_or_event(
         if not idempotency_key or coordination.get("last_action_key") == idempotency_key:
             return public_coordination(coordination)
         raise HTTPException(status_code=409, detail="這筆共同約會已經取消")
-    # 不在此處用「協調單版本」當 CAS；呼叫端鎖的是行程版本。下方 event_query 有 event revision CAS，
-    # match_query 有 status CAS，足以保護。避免表單編輯導致協調單與行程版本分歧時誤判 409。
+    if expected_status is not None and coordination.get("status") != expected_status:
+        raise HTTPException(status_code=409, detail="約會剛剛已變更，請重新確認")
+    if (
+        expected_coordination_revision is not None
+        and int(coordination.get("revision", 1) or 1) != expected_coordination_revision
+    ):
+        raise HTTPException(status_code=409, detail="約會剛剛已變更，請重新確認")
+    # Existing Calendar callers pass expected_revision for the event CAS. The
+    # V3 date-card path additionally passes the coordination revision so a
+    # confirmation cannot cancel a form that changed while it was pending.
 
     event = None
     if coordination.get("calendar_event_id"):
@@ -517,8 +528,10 @@ def cancel_coordination_or_event(
         "date_coordination.coordination_id": coordination_id,
         "date_coordination.status": {"$ne": "cancelled"},
     }
-    # 不在此處用「協調單版本」當 CAS（呼叫端鎖的是行程版本，二者可能因表單編輯而分歧）；
-    # 行程版本已由上方 event revision 檢查保護。
+    if expected_status is not None:
+        match_query["date_coordination.status"] = expected_status
+    if expected_coordination_revision is not None:
+        match_query["date_coordination.revision"] = expected_coordination_revision
     updated_match = matches_coll.find_one_and_update(
         match_query,
         {"$set": coordination_set},
@@ -573,7 +586,15 @@ def cancel_coordination_or_event(
         user_id,
         updated_coordination,
         "date_coordination_cancelled",
-        f"對方已取消你們的共同約會「{activity}」，雙方行事曆已同步更新。",
+        (
+            f"對方已取消你們的共同約會「{activity}」，雙方行事曆已同步更新。"
+            if event
+            else (
+                f"對方已撤回你們的約會邀請「{activity}」。"
+                if coordination.get("status") == "pending_partner"
+                else f"對方已取消你們的共同約會「{activity}」。"
+            )
+        ),
     )
     return public_coordination(updated_coordination)
 

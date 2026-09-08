@@ -8,6 +8,8 @@ from services.ayue_agent.v3.synthesizer import (
     _build_prompt,
     _compose_public_reply_tool_schema,
     _parse_composed_reply,
+    _partition_server_owned_replies,
+    _server_ordered_place_messages,
     _synthesizer_system_prompt,
     _web_research_fallback,
     sanitize_candidate_presentation_messages,
@@ -199,13 +201,243 @@ class V3SynthesizerTests(unittest.TestCase):
             return_value=composed,
         ) as provider:
             reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
-        self.assertIn("推薦地點：\n1. A 店\n2. B 店", reply)
+        self.assertNotIn("推薦地點", reply)
         self.assertIn("我會先這樣比較:", reply)
-        self.assertNotIn("- **A 店**", reply)
-        self.assertNotIn("- **B 店**", reply)
+        self.assertIn("1. **A 店**:距離近,適合直接吃飯。", reply)
+        self.assertIn("2. **B 店**:比較適合吃完後坐著聊。", reply)
         self.assertIsNone(card_decision)
         self.assertEqual(metrics.presentation_blocks, [])
         self.assertIn("多個候選、比較、步驟或清楚分組", provider.call_args.kwargs["system_prompt"])
+
+    def test_typed_candidate_introductions_follow_trusted_order_and_keep_free_prose(self):
+        slc = self._slice([{
+            "task_id": "places1", "status": "ok", "tool": "places.search_nearby",
+            "result": {"places": [{"name": "A 店"}, {"name": "B 店"}]},
+        }])
+        cards = [
+            {"candidate_ref": "place_a", "name": "A 店", "category": "restaurant"},
+            {"candidate_ref": "place_b", "name": "B 店", "category": "cafe"},
+        ]
+        composed = _fc_result(tool_calls=[{
+            "name": "compose_public_reply",
+            "arguments": {
+                "messages": [],
+                "opening": "先給你兩個不同方向。",
+                "closing": "看你比較想吃甜的還是坐久一點。",
+                "presentation_class": "grounded_recommendation",
+                "presented_candidates": [
+                    {"candidate_ref": "place_a", "presented_ordinal": 1},
+                    {"candidate_ref": "place_b", "presented_ordinal": 2},
+                ],
+                "candidate_introductions": [
+                    {"candidate_ref": "place_b", "description": "座位較適合聊天。"},
+                    {"candidate_ref": "place_a", "description": "距離較近，可以先吃冰。"},
+                ],
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=composed,
+        ):
+            reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
+
+        self.assertIsNone(card_decision)
+        self.assertEqual(reply.count("A 店"), 1)
+        self.assertEqual(reply.count("B 店"), 1)
+        self.assertLess(reply.index("1. A 店"), reply.index("2. B 店"))
+        self.assertIn("A 店:距離較近,可以先吃冰。", reply)
+        self.assertIn("B 店:座位較適合聊天。", reply)
+        self.assertIn("先給你兩個不同方向。", reply)
+        self.assertIn("看你比較想吃甜的還是坐久一點。", reply)
+        self.assertEqual(metrics.presented_candidate_refs, ["place_a", "place_b"])
+
+    def test_typed_candidate_opening_cannot_embed_a_second_candidate_list(self):
+        parsed = _parse_composed_reply(
+            _fc_result(tool_calls=[{
+                "name": "compose_public_reply",
+                "arguments": {
+                    "messages": [],
+                    "opening": "1. B 店\n2. A 店",
+                    "candidate_introductions": [
+                        {"candidate_ref": "place_a", "description": "距離較近。"},
+                        {"candidate_ref": "place_b", "description": "適合聊天。"},
+                    ],
+                    "presentation_class": "grounded_recommendation",
+                },
+            }]),
+            [
+                {"candidate_ref": "place_a", "name": "A 店"},
+                {"candidate_ref": "place_b", "name": "B 店"},
+            ],
+            place_cards_enabled=False,
+        )
+        self.assertIsNone(parsed)
+
+    def test_typed_candidate_legacy_free_messages_map_to_opening_and_closing(self):
+        parsed = _parse_composed_reply(
+            _fc_result(tool_calls=[{
+                "name": "compose_public_reply",
+                "arguments": {
+                    "messages": ["先給你兩個方向。", "你想先看哪間？"],
+                    "candidate_introductions": [
+                        {"candidate_ref": "place_a", "description": "距離較近。"},
+                        {"candidate_ref": "place_b", "description": "適合聊天。"},
+                    ],
+                    "presentation_class": "grounded_recommendation",
+                },
+            }]),
+            [
+                {"candidate_ref": "place_a", "name": "A 店"},
+                {"candidate_ref": "place_b", "name": "B 店"},
+            ],
+            place_cards_enabled=False,
+        )
+        self.assertIsNotNone(parsed)
+        messages = parsed[0]
+        self.assertEqual(len(messages), 1)
+        self.assertIn("先給你兩個方向", messages[0])
+        self.assertIn("1. A 店", messages[0])
+        self.assertIn("2. B 店", messages[0])
+        self.assertIn("你想先看哪間", messages[0])
+
+    def test_string_candidate_introduction_uses_explicit_presented_binding(self):
+        parsed = _parse_composed_reply(
+            _fc_result(tool_calls=[{
+                "name": "compose_public_reply",
+                "arguments": {
+                    "messages": [],
+                    "opening": "先給你一間。",
+                    "candidate_introductions": ["**雪波吃茶**（約 300 公尺）—適合喝茶。"],
+                    "presented_candidates": [{
+                        "candidate_ref": "place_a", "presented_ordinal": 1,
+                    }],
+                    "presentation_class": "grounded_recommendation",
+                },
+            }]),
+            [{"candidate_ref": "place_a", "name": "雪波喫茶"}],
+            place_cards_enabled=False,
+        )
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed[0][0].count("雪波吃茶"), 1)
+        self.assertIn("適合喝茶", parsed[0][0])
+
+    def test_string_candidate_introductions_without_exact_bindings_are_rejected(self):
+        parsed = _parse_composed_reply(
+            _fc_result(tool_calls=[{
+                "name": "compose_public_reply",
+                "arguments": {
+                    "messages": [],
+                    "candidate_introductions": ["A 店很好。"],
+                    "presented_candidates": [],
+                    "presentation_class": "grounded_recommendation",
+                },
+            }]),
+            [{"candidate_ref": "place_a", "name": "A 店"}],
+            place_cards_enabled=False,
+        )
+        self.assertIsNone(parsed)
+
+    def test_legacy_normalized_place_name_does_not_create_duplicate_row(self):
+        for trusted, visible in (
+            ("雪波喫茶", "雪波吃茶"),
+            ("Tu酥館台式炸雞鹽埕店", "Tu酥館臺式炸雞鹽埕店"),
+        ):
+            with self.subTest(trusted=trusted):
+                rendered, refs, _bindings = _server_ordered_place_messages(
+                    [f"1. **{visible}**（約 300 公尺）\n2. 另一家（約 400 公尺）"],
+                    [
+                        {"candidate_ref": "place_a", "name": trusted},
+                        {"candidate_ref": "place_b", "name": "另一家"},
+                    ],
+                )
+                self.assertEqual(rendered[0].count(trusted), 1)
+                self.assertNotIn(visible, rendered[0].replace(trusted, ""))
+                self.assertEqual(rendered[0].count("1. "), 1)
+                self.assertEqual(refs, ["place_a", "place_b"])
+
+    def test_pending_relationship_state_remains_visible_without_locked_preview(self):
+        preview = "要幫你和「小凱」建立約會邀請卡嗎？確認後才會送出。"
+        locked, remaining = _partition_server_owned_replies({
+            "observations": [{
+                "task_id": "r1", "status": "ok",
+                "tool": "relationship.start_date_coordination",
+                "result": {
+                    "pending_confirmation": True,
+                    "preview": preview,
+                    "transaction_state": {
+                        "schema_version": "relationship_transaction_state.v1",
+                        "action": "create_date_invitation",
+                        "status": "pending_confirmation",
+                        "counterparty": "小凱",
+                    },
+                },
+            }],
+        })
+
+        self.assertEqual(locked, [preview])
+        state = remaining["observations"][0]["result"]["transaction_state"]
+        self.assertEqual(state["status"], "pending_confirmation")
+        self.assertEqual(state["counterparty"], "小凱")
+        self.assertNotIn("preview", remaining["observations"][0]["result"])
+
+    def test_mixed_relationship_pending_rejects_hub_contradiction(self):
+        preview = "要幫你和「小凱」建立約會邀請卡嗎？確認後才會送出。"
+        slc = self._slice([
+            {
+                "task_id": "r1", "status": "ok",
+                "tool": "relationship.start_date_coordination",
+                "result": {
+                    "pending_confirmation": True,
+                    "preview": preview,
+                    "transaction_state": {
+                        "schema_version": "relationship_transaction_state.v1",
+                        "action": "create_date_invitation",
+                        "status": "pending_confirmation",
+                        "counterparty": "小凱",
+                    },
+                },
+            },
+            {
+                "task_id": "p1", "status": "ok", "tool": "places.search_nearby",
+                "result": {"places": [{"name": "典藏駁二餐廳 ARTCO"}]},
+            },
+        ])
+        cards = [{
+            "candidate_ref": "place_a", "name": "典藏駁二餐廳 ARTCO",
+            "category": "restaurant", "distance_label": "350 公尺",
+        }]
+        composed = _fc_result(tool_calls=[{
+            "name": "compose_public_reply",
+            "arguments": {
+                "messages": [],
+                "opening": "聊天裡不能直接建立邀請，請到阿月牽線。",
+                "candidate_introductions": [{
+                    "candidate_ref": "place_a", "description": "距離約 350 公尺。",
+                }],
+                "presented_candidates": [{
+                    "candidate_ref": "place_a", "presented_ordinal": 1,
+                }],
+                "presentation_class": "grounded_recommendation",
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.synthesizer.public_place_cards_enabled",
+            return_value=False,
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=composed,
+        ):
+            reply, _decision, metrics = synthesize(slc, candidate_cards=cards)
+
+        self.assertNotIn("阿月牽線", reply)
+        self.assertNotIn("不能直接建立", reply)
+        self.assertIn("典藏駁二餐廳 ARTCO", reply)
+        self.assertEqual(reply.count("確認後才會送出"), 1)
+        self.assertIn("要幫你和「小凱」建立約會邀請卡嗎", reply)
+        self.assertEqual(metrics.fallback_reason, "unsupported_claim")
 
     def test_candidate_presentation_sanitizer_preserves_prose(self):
         messages = [
@@ -332,7 +564,7 @@ class V3SynthesizerTests(unittest.TestCase):
             reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
         self.assertEqual(
             reply,
-            "推薦地點：\n1. A 店\n2. B 店\n\nA 店和 B 店都在附近,A 店的距離更近。",
+            "1. A 店\n2. B 店\n\nA 店和 B 店都在附近,A 店的距離更近。",
         )
         self.assertEqual(metrics.reply_source, "llm")
         self.assertIsNone(metrics.fallback_reason)
@@ -365,7 +597,7 @@ class V3SynthesizerTests(unittest.TestCase):
         ):
             reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
         self.assertEqual(metrics.reply_source, "observation_fallback")
-        self.assertEqual(metrics.fallback_reason, "empty_content")
+        self.assertEqual(metrics.fallback_reason, "unsupported_claim")
         self.assertIsNone(card_decision)
         self.assertNotIn("place_invented", reply)
         self.assertNotIn("我還沒能完成完整比較", reply)
@@ -401,7 +633,7 @@ class V3SynthesizerTests(unittest.TestCase):
         # The model's ordinal binding is evidence only. The server keeps the
         # verified candidate order that it renders publicly.
         self.assertEqual(metrics.presented_candidate_refs, ["place_a", "place_b"])
-        self.assertEqual(reply, "推薦地點：\n1. A 店\n2. B 店")
+        self.assertEqual(reply, "1. A 店\n2. B 店")
         self.assertNotIn("1. B 店", reply)
 
     def test_single_resolved_place_is_not_reframed_as_recommendation_list(self):
@@ -601,7 +833,7 @@ class V3SynthesizerTests(unittest.TestCase):
             reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
         self.assertEqual(
             reply,
-            "推薦地點：\n1. A 店\n2. B 店\n3. C 店\n\n附近有 B 店、A 店和 C 店,都可以先參考。",
+            "1. A 店\n2. B 店\n3. C 店\n\n附近有 B 店、A 店和 C 店,都可以先參考。",
         )
         self.assertIsNone(card_decision)
         self.assertEqual(
@@ -2118,6 +2350,45 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertEqual(metrics.reply_source, "llm")
         self.assertIn("欸所以約會卡是啥", provider.call_args.args[0])
         self.assertIn("relationship.date_invitation", provider.call_args.args[0])
+
+    def test_date_card_capability_reply_is_server_owned_and_includes_placement(self):
+        slc = self._slice([{
+            "task_id": "product_info", "status": "ok", "tool": None,
+            "result": {"product_info": {
+                "manifest_version": "v6",
+                "coverage": "sufficient",
+                "knowledge_sections": [
+                    "relationship.date_invitation",
+                    "relationship.date_coordination_cancel",
+                ],
+                "facts": {
+                    "relationship.date_invitation": {
+                        "card_surface": "accepted_pair_chat",
+                        "matching_page_shortcut": "needs_action_only",
+                        "available_in_match_hub": False,
+                    },
+                    "relationship.date_coordination_cancel": {
+                        "requires_confirmation": True,
+                    },
+                },
+            }},
+        }])
+        slc.payload["message"] = "約會卡可以取消嗎"
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=_fc_result(
+                content="可以，約會卡能取消，我會先跟你確認一次再處理。如果已同步到行事曆，也會一併處理。",
+            ),
+        ):
+            reply, card_decision, metrics = synthesize(slc)
+
+        self.assertIn("雙人聊天室", reply)
+        self.assertIn("配對首頁", reply)
+        self.assertIn("需要你處理時", reply)
+        self.assertNotIn("阿月牽線", reply)
+        self.assertIn("確認", reply)
+        self.assertIsNone(card_decision)
+        self.assertEqual(metrics.reply_source, "verified_observation")
 
     def test_date_invitation_product_info_answers_calendar_timing(self):
         slc = self._slice([{

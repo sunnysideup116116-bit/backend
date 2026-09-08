@@ -57,6 +57,7 @@ def slice_for_agent(
             "user_location": turn_ctx.user_location,
             "clock": clock_dump,
             "prior_observations": prior_observations,
+            "recent_place_candidates": getattr(turn_ctx, "recent_place_candidates", None),
             "recent_place_reference": getattr(turn_ctx, "recent_place_reference", None),
             "place_reference_resolution": getattr(turn_ctx, "place_reference_resolution", None),
             "place_followup": place_followup,
@@ -125,6 +126,8 @@ def slice_for_agent(
             "mentioned_contacts": turn_ctx.mentioned_contacts,
             "mentioned_contact_overflow": turn_ctx.mentioned_contact_overflow,
             "recent_contact_reference": turn_ctx.recent_contact_reference,
+            "recent_action_reference": getattr(turn_ctx, "recent_action_reference", None),
+            "date_coordination_summary": getattr(turn_ctx, "date_coordination_summary", None),
             "recent_recommendation": getattr(turn_ctx, "recent_recommendation", None),
             "clock": clock_dump,
             "prior_observations": prior_observations,
@@ -166,6 +169,8 @@ def slice_for_agent(
             "recent_place_reference": getattr(turn_ctx, "recent_place_reference", None),
             "place_reference_resolution": getattr(turn_ctx, "place_reference_resolution", None),
             "place_followup": getattr(turn_ctx, "place_followup", None),
+            "recent_action_reference": getattr(turn_ctx, "recent_action_reference", None),
+            "date_coordination_summary": getattr(turn_ctx, "date_coordination_summary", None),
         })
 
     raise ValueError(f"unknown agent: {agent_name}")

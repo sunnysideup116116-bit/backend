@@ -67,6 +67,24 @@ class _DateCoordinationStartArguments(BaseModel):
         return self
 
 
+class _DateCoordinationCancelArguments(BaseModel):
+    """Authority-free target reference for a confirmed date-card cancel."""
+
+    model_config = ConfigDict(extra="forbid")
+    target_source: Literal[
+        "recent_action", "mention", "name", "focused_card", "summary_singleton",
+    ]
+    target_evidence_span: str = Field(default="", max_length=80)
+
+    @model_validator(mode="after")
+    def _validate_target_reference(self) -> "_DateCoordinationCancelArguments":
+        if self.target_source == "name" and not self.target_evidence_span.strip():
+            raise ValueError("name target requires target_evidence_span")
+        if self.target_source != "name" and self.target_evidence_span:
+            raise ValueError("only name target may provide target_evidence_span")
+        return self
+
+
 class _ProposalDecisionArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     decision: Literal["interested", "declined", "cancelled"]
@@ -139,6 +157,13 @@ class _PlacesNearbyArguments(BaseModel):
     limit: int = Field(default=3, ge=1, le=8)
     ordering: Literal["distance", "balanced"] = "distance"
     use_saved_location: bool = False
+    exclude_previously_presented: bool = Field(
+        default=False,
+        description=(
+            "True only when the user asks for other/new results from the current room's "
+            "place recommendations. The server resolves excluded provider identities."
+        ),
+    )
     enrichments: list[PlaceEnrichment] = Field(default_factory=list, max_length=4)
 
     @field_validator("enrichments")
@@ -361,11 +386,19 @@ class _ContactEvidenceListOutput(BaseModel):
     unavailable_refs: list[str] = Field(default_factory=list, max_length=3)
 
 
+class _MemorySearchArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(default="", max_length=120)
+
+
 class _MemoryOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     summary: str = ""
     current_context: str = ""
     preferences: list[Any] = Field(default_factory=list)
+    status: Literal["available", "unavailable"] = "available"
+    source: Literal["graph", "cache"] = "cache"
+    truncated: bool = False
 
 
 class _ClockOutput(BaseModel):
@@ -458,6 +491,8 @@ class _PlacesNearbyOutput(BaseModel):
     radius_m: int = Field(default=1500, ge=300, le=5000)
     requested_limit: int = Field(default=3, ge=1, le=8)
     ordering: Literal["distance", "balanced"] = "distance"
+    exclude_previously_presented: bool = False
+    excluded_presented_count: int = Field(default=0, ge=0)
     places: list[_PlaceOutput] = Field(default_factory=list)
 
 
@@ -601,11 +636,23 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         executor_arguments_model=_NoArguments,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
+    "relationship.cancel_date_coordination": ToolSpec(
+        "relationship.cancel_date_coordination", ToolRisk.WRITE, "date_coordination_cancel",
+        "取消一張由 server context 指定的約會卡；只提出確認，不接受模型提供的 coordination ID、對象 ID、狀態或 revision。",
+        "我先確認要不要取消這張約會卡…",
+        requires_confirmation=True,
+        planner_arguments_model=_DateCoordinationCancelArguments,
+        executor_arguments_model=_NoArguments,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
+    ),
     "memory.search_my_profile": ToolSpec(
         "memory.search_my_profile", ToolRisk.READ, "memory_profile",
-        "讀取本人已儲存的偏好與近期情境。",
+        "按主題搜尋本人長期偏好；query 可含相關主題與同義詞，空字串查一般偏好。查無結果不代表從未說過；truncated 表示只回部分。",
         "我確認一下我替你記住的事情…",
         output_model=_MemoryOutput,
+        planner_arguments_model=_MemorySearchArguments,
+        executor_arguments_model=_MemorySearchArguments,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
     "web.search": ToolSpec(
         "web.search", ToolRisk.READ, "web_search",

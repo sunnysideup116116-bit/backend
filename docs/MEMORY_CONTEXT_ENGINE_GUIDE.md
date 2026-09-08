@@ -63,9 +63,9 @@ Hermes ContextEngine concept
 | 狀態 | 目前 owner | 用途 | 不可混入 |
 | --- | --- | --- | --- |
 | 本人近期情境 | Mongo profile 的 `recent_context_state`／`current_context` | 最近、正在或預計進行的本人現實活動 | 配對操作、他人狀態、長期人格判定 |
-| 本人長期記憶 | Neo4j `User-[:PREFERS|AVOIDS|CURRENTLY_WANTS]->Concept` | 明確且可持續的本人偏好、排斥地雷與最新想要活動 | 系統建議、一次性活動、對方特徵 |
+| 本人長期記憶 | Neo4j `User-[:PREFERS\|AVOIDS]->Concept`，Mongo preference_facts 保存證據／生命週期 | 明確且可持續的本人偏好與排斥地雷；CURRENTLY_WANTS 另屬有期限的近期意圖 | 系統建議、一次性活動、對方特徵 |
 | 雙人關係語意 | Mongo `semantic_plans` 與 room-scoped KG triples | 已接受關係中的共同話題、互動節奏與 mediator strategy | 任一方私人悄悄話、跨房間資料 |
-| Agent 每回合 context | `AgentTurnContextV2` | 讓 Planner 在有限 token 與隱私邊界內做當回合決策 | raw Mongo／Neo4j document、內部 ID、對方私人資料 |
+| Agent 每回合 context | `PublicAgentTurnContext` | 讓 Planner 在有限 token 與隱私邊界內做當回合決策 | raw Mongo／Neo4j document、內部 ID、對方私人資料 |
 
 「長期建議」是系統推導出的 recommendation，不是使用者記憶。即使建議來自 Graph Memory，也必須保存到獨立 read model，並保留來源、版本、有效期與可撤銷狀態；禁止寫成 `PREFERS`、`AVOIDS` 或 `CURRENTLY_WANTS`。
 
@@ -80,7 +80,7 @@ Saved owner message
 → programmatic Traditional Chinese projection
 → Mongo revision CAS
 → profile.get_recent_context
-→ AgentTurnContextV2
+→ PublicAgentTurnContext
 ```
 
 - Source of truth：`recent_context_state` 與 `current_context_revision`。
@@ -167,12 +167,33 @@ Saved owner message
 
 ### 2.5 Public Context
 
+常駐 8 筆以外的記憶：`memory.search_my_profile(query="主題 同義詞")` 經 Profile agent 與中央 Guard，
+由 owning memory service 唯讀查 9001。Graph 先限制本人 durable relations，再依 query 字詞（中文 bigram／英文詞）
+匹配 label/key 與排序，最後限制回傳 8 筆，另讀一筆判定 truncated。空 query 是一般偏好列表，不宣稱全部。
+這是字詞檢索加模型提出的同義詞，不是新的語意 embedding 搜尋；未命中不能證明本人從未提過。
+結果只含帶方向的安全文字、available/unavailable、graph/cache 與 truncated，不含 owner/key/id；
+查詢不覆寫一般 preview。服務不可用沿用 bounded cache 並明確標 unavailable/truncated。
+Planner 對偏好回想與個人化建議安排 Profile 補查。Planner／Synthesizer 明定未確認的 assistant 推測不是 owner 事實。
+
+2026-09-08：Public HTTP adapter 與 init 在進入 Context 前呼叫共用 `refresh_owner_memory_profile`。
+Mongo preview 非空也會在 300 秒後刷新；Graph failure 保留快取並於聊天路徑退避 30 秒，設定頁可強制刷新。
+Graph read 使用 1 秒 connect／2 秒 read timeout 與 `durable_only=true`，僅取 PREFERS／AVOIDS；
+CURRENTLY_WANTS 留在近期狀態，預設 Graph API 也不回傳已過期短期意圖。
+所有新 cache refresh 以 profile_memory_revision 做 CAS，成功偏好寫入／action 會失效該 revision；
+disable／correct 先移除對應 cache key，較晚的旧讀取不得恢復它。Graph read failure 不以新學的單批資料覆蓋全部 cache。
+
+`owner_memory_projection.preference_wording` 將 typed stance 投影為「喜歡／不喜歡／避免／需要：標籤」，
+最多 8 筆；排除異 owner、want、disabled、未帶 stance 的舊文字及不安全標籤。
+Public Planner 的 direct-chat 路徑只接收這個帶方向的封閉文字格式；Profile／Relationship slice 與 Synthesizer
+沿用同一份 relevant_memories，防止普通聊天漏掉偏好。Context Builder 自身仍只讀、不刷新或寫 DB。
+Concept.kind（interest／activity／partner_trait 等）與 User relation 的 PREFERS／AVOIDS 是不同欄位。DatingApp 記憶頁現行只呈現 prefer／avoid：like/require → prefer，dislike/avoid → avoid；不把 kind 當偏好方向。
+
 `services/ayue_agent/context.py` 是 Public V3 唯一 Context Builder。現在的 budget：
 
 - 最近 32 則訊息，合計最多 8,000 字元。
 - 本人近期情境一份。
 - 本人長期記憶最多 8 筆。
-- 唯一 live proposal 的安全狀態。
+- 配對搜尋與牽線收件匣的安全狀態；單卡相容欄位不表示帳號只能有一張卡。
 - 經 server 驗證的公開 mention。
 - Asia/Taipei turn clock 與 capability version。
 
@@ -351,7 +372,7 @@ Neo4j 只保留配對與 Event traversal 需要的最小 relation projection。
 2. 定義 versioned memory／context contracts 與 privacy projection。
 3. 將現有 Graph read/write 包在 repository 或 domain service，保留 API 相容。
 4. 建立 retrieval／ranking／budgeting 的 deterministic tests。
-5. 用 shadow mode 比較舊 `AgentTurnContextV2` 與新 bundle 的選取結果；shadow 只記 metadata，不記內容。
+5. 用 shadow mode 比較舊 `PublicAgentTurnContext` 與新 bundle 的選取結果；shadow 只記 metadata，不記內容。
 6. Public runtime adapter 驗證後才切換；V3 失敗仍 fail closed，不回 legacy。
 7. 最後才讓 matchmaker 或 long-term advice 消費新 projection。
 

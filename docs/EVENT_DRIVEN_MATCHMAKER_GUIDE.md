@@ -132,7 +132,7 @@ POST 立即回 `queued` 或 `already_running`；以回傳的 `run_number` 對照
 `GET /api/match/events/discover/status`，讀取同一輪的 stage 與結果，不能把排隊成功當成探索完成。
 Worker 的手動 discovery 與 weekly cycle 都以 `request_invitation_scan=False` 呼叫搜尋服務，
 不觸發舊的同 process auto-scan hook；即使打開舊相容旗標也不會因這兩條搜尋路徑提前發送邀請。
-Weekly cycle 仍在 relevance readiness 通過後明確掃描一次。直接呼叫搜尋服務的舊 Python caller 保留原預設相容行為。
+Weekly cycle 在 relevance readiness 通過後依持久使用者清單分批掃描。直接呼叫搜尋服務的舊 Python caller 保留原預設相容行為。
 專責的 `social/event_worker.py` 會領取工作、定期續租並執行搜尋；目前正式啟動路徑是由
 `social/main.py` 的 FastAPI startup 呼叫 `start_event_discovery_worker()`，在 Social :8000 進程內建立 daemon thread。
 worker 中斷後，租約到期的
@@ -162,10 +162,17 @@ generic error 是 Planner provider 回傳非字串 optional 欄位，使舊 norm
 EVENT_WEEKLY_CYCLE_ENABLED=off
 ```
 
-`on` 時由同一嵌入式 Event Worker 在每週一依序執行：限定範圍清理 Event 庫存、搜尋並建圖、
-等待 Concept embedding/relevance 投影完成，最後掃描並產生活動邀請。若 relevance 在有界時間內未完成，
-cycle 回報 `partial` 並跳過邀請，不會用不完整 Graph 強行配對。手動 Demo 仍保留三個獨立按鈕，不會因單獨執行 discovery
-而自動清理或發送邀請。
+`on` 時由同一嵌入式 Event Worker 在每週一台灣時間 08:00 執行；若當時停機，同週恢復後補跑一次，使用 ISO week key 去重。
+正式工作帶持久 run id，先以現有 Event identity 去重增補未來 30 天活動，再由 lifecycle 清過期資料，
+保留仍有效的庫存與既有邀請；不在搜尋前整庫 reset。搜尋本身保留既有 Event-only reconciliation／每類上限，
+這是增量更新，不是兩份 Graph inventory 的原子切換。手動 Demo reset 仍是獨立操作。
+`event_weekly_runs` 保存 discovery、cleanup 與結果 checkpoint；`event_weekly_users` 保存每人順序、嘗試次數與結果。
+`GET /api/match/events/discover/status` 的 weekly_progress 回傳當輪人口、處理、失敗與卡片投遞計數；
+歷史完整結果留在 runs，不因下一次 singleton 排入而被覆蓋；升級前無明細的週期標為 not_recorded。
+租約接手沿用 run id，已完成 discovery 不重跑；中斷在插入 match 後可用 event_cycle_id/requester 找回原結果。
+relevance 未完成時保留 checkpoint 並有界重試，未準備好不掃描；整個 weekly job 最多重試三次，之後明確 failed。
+單人暫時錯誤最多嘗試三次，仍失敗則計入 partial，不阻擋其他人。少數活動類別不足可以繼續使用已驗證活動。
+手動 discovery 不自動清理或發送邀請。
 
 上表的 `off` 是新環境的安全預設，不代表目前整合環境的有效值。部署狀態請以未提交的
 `social/.env` 與 Event Worker startup log 為準；不得為了記錄開關而把正式 `.env` 納入 Git。
@@ -513,7 +520,7 @@ stateDiagram-v2
 ```
 
 - 每位使用者可同時有一張 live `relationship_match` 與一張 live `event_invitation`。
-- 只有同 namespace 的 live `draft/pending` 阻擋新提案。
+- Event scan 排除已有 live Event invitation 的人；一般配對的多卡片／搜尋阻擋由 Match domain 決定，不把 Event slot 規則推廣成所有一般邀請只能一張。
 - `accepted/declined/expired` 都是終態。
 - 所有 transition 使用 expected status、revision CAS 與 idempotency key。
 - 只有 transition 成功後才發通知或開聊天室。
@@ -532,14 +539,27 @@ Cooldown 也是 namespace-scoped：只有 `event_invitation` 的 `last_decision.
 一般 relationship decline 不阻擋活動邀請，活動 decline 也不改變一般配對候選資格。
 發起者自行取消 pending invitation 不算對方拒絕。
 
-自動 scan 預設：
+每週持久 scan 預設：
 
-- 每輪最多建立 3 個 proposal。
-- 每輪最多掃描 30 位使用者。
+- 每批最多建立 3 個 proposal；達到上限接續下一批，不是整週只有 3 張。
+- 每批最多取 30 位待處理者；整週清單涵蓋建立快照時的 profile 使用者，資格於建立前重新驗證。
 - 排除已有 live Event invitation 的人；一般 match proposal 不阻擋。
-- 每週 rotation，避免固定從相同使用者開始。
+- 依最後一次活動提案建立時間排序，沒收到過提案者優先，同順位用該次 run 的穩定雜湊排序。
 - 同 pair 明確 decline 後預設七天不再建立 Event invitation。
 - 已 accepted 的同一 pair 日後仍可收到其他 Event invitation。
+
+手動 `scan_event_opportunities` 維持原有單批限制。每週流程沿用相同 create facade、背景 daily quota、
+封鎖、Event live slot 與 pair cooldown，分批不代表放寬資格或保證每人都能配成。
+
+### 11.3 離線投遞與恢復
+
+Social startup 會啟動 `event_delivery_service`，預設每 10 秒領取最多 10 張待投遞 Event 提案。
+以 canonical match 恢復漏掉的 inbox enqueue；draft 只送發起者，pending 才送接收者。
+寫入沿用現有 Match Hub card projection 及固定 room/match event key，與 App polling 競態不新增第二張卡。
+確認 messages 存在才移除對應使用者的 proposal inbox 項目並標記 event_delivery 收據；錯誤以有界指數退避重試，
+終態與 suppressed 提案不領取。發現持久卡即表示可在 App 讀取，不代表推播已到達手機或使用者已讀。
+`EVENT_DELIVERY_WORKER_ENABLED=off` 可停用新 worker；其依賴 Match Hub V1，Hub 關閉時不投遞。
+新增 thread 由原 `start_all.sh` 的 Social lifecycle 啟停，不增加 port 或獨立啟動命令。
 
 ## 12. Frontend Card
 
@@ -565,7 +585,7 @@ Cooldown 也是 namespace-scoped：只有 `event_invitation` 的 `last_decision.
 會從 canonical match 重新 hydrate 相同公開 Event projection。
 `GET /api/match/status` 另以 `active_proposals.relationship_match` 與
 `active_proposals.event_invitation` 同時投影兩個不含 identifier 的 live 摘要；既有
-`active_proposal_card` 保留為 relationship slot 的相容 alias。操作用 match ID 仍只來自 mediator card。
+`active_proposal_card` 等欄位保留為相容 alias；現行 HTTP `hub_cards`／Hub 卡片可同時呈現多張提案，操作 ID 只來自 server 驗證的卡片，不由模型創造。
 
 Flutter 以「活動牽線提案」呈現公開 Event snapshot，顯示活動名稱、類別／地區、場地及最多八個場次。
 Unix timestamp 以秒解讀並固定轉為台灣時間；只有日期的資料不補出 `00:00` 或 `23:59`。
@@ -703,7 +723,7 @@ POST /api/match/events/lifecycle/run
 | --- | --- | --- |
 | `TAVILY_API_KEY` | empty | 沒有 key 就不能搜尋／抽取 |
 | `TAVILY_PROJECT` | empty | 選填 project ID |
-| `EVENT_WEEKLY_CYCLE_ENABLED` | `off` | 每週一完整 reset → discovery → invitation scan 開關 |
+| `EVENT_WEEKLY_CYCLE_ENABLED` | `off` | 每週一增量 discovery → 過期清理 → readiness → 分批 invitation scan；同週補跑與 checkpoint 接續 |
 | `EVENT_WORKER_RECONCILE_SECONDS` | `60` | Change Stream 斷線／漏失通知時的低頻復原間隔，限制 10 至 300 秒 |
 | `EVENT_DISCOVERY_REGION` | `高雄` | 試行地區 |
 | `EVENT_DISCOVERY_WINDOW_DAYS` | `30` | 搜尋天數，上限 60 |
@@ -723,9 +743,10 @@ POST /api/match/events/lifecycle/run
 | `EVENT_URL_HEALTHCHECK_ENABLED` | `on` | 寫入前驗證未成功抽取的來源網址仍可存取 |
 | `CONCEPT_EMBEDDING_WORKER_ENABLED` | `on` | 背景向量補齊 |
 | `EVENT_OPPORTUNITY_AUTO_SCAN_ENABLED` | `off` | 舊的同 process scan request 相容開關；每週 cycle 不依賴此開關 |
-| `EVENT_OPPORTUNITY_MAX_PROPOSALS_PER_SCAN` | `3` | 每輪 proposal 上限 |
-| `EVENT_OPPORTUNITY_MAX_USERS_PER_SCAN` | `30` | 每輪使用者上限 |
+| `EVENT_OPPORTUNITY_MAX_PROPOSALS_PER_SCAN` | `3` | 手動 scan 上限／weekly 每批建立上限，不是每週總量 |
+| `EVENT_OPPORTUNITY_MAX_USERS_PER_SCAN` | `30` | 手動 scan 上限／weekly 每批使用者數，weekly 會接續快照清單 |
 | `EVENT_PAIR_DECLINE_COOLDOWN_DAYS` | `7` | 同一 unordered pair 明確 decline 後的 Event invitation cooldown |
+| `EVENT_DELIVERY_WORKER_ENABLED` | `on` | 離線保存 Hub 提案與投遞收據；依賴 Hub V1 |
 | `EVENT_LIFECYCLE_WORKER_ENABLED` | `on` | Event lifecycle worker |
 | `EVENT_PROPOSAL_EXPIRY_INTERVAL_SECONDS` | `300` | Mongo live Event proposal 到期檢查間隔 |
 | `EVENT_GRAPH_CLEANUP_INTERVAL_SECONDS` | `86400` | Neo4j 過期 Event 清理間隔 |
@@ -813,7 +834,7 @@ cd Server
 - 正式 `Server/social/.env` 已設定 `EVENT_WEEKLY_CYCLE_ENABLED=on`；該私有檔案不進 Git。
 - `EVENT_DISCOVERY_WEEKDAY`／`EVENT_DISCOVERY_HOUR` 未覆寫，因此沿用週一 `0`、Asia/Taipei 08:00 的程式預設。
 - `start_all.sh` 啟動紀錄已確認 Event Worker thread、worker id 與 MongoDB Change Stream wake-up 均 active。
-- Google `gemini-embedding-2` free-tier 若回 429，Concept worker 會 bounded pause/retry；weekly cycle 在等待上限內仍未完成 relevance 時回 `partial` 並跳過邀請。這是 provider quota 狀態，不得誤判為提案 state machine 或 Event Worker 未啟動。
+- Google `gemini-embedding-2` free-tier 若回 429，Concept worker 會 bounded pause/retry；此為當時舊流程的觀察。現行 durable weekly cycle 若 readiness 等待仍失敗，保留 checkpoint、有界重試，超過 job 重試上限明確 failed，不把未掃描人口當成 completed。這是 provider quota 狀態，不得誤判為提案 state machine 或 Event Worker 未啟動。
 
 ### 17.3 健康檢查
 
@@ -952,7 +973,7 @@ LIMIT 30
 | `pair_cooldown` | 同一 pair 最近七天曾明確婉拒 |
 | Event 跑完後 `User=0` | Event pipeline 不刪 User；檢查是否曾執行舊版 projection rebuild 或全圖清除。用 16.2 的 atomic rebuild 從 Mongo 恢復 |
 | lifecycle 出現 Mongo code 121 | 先 dry-run 並套用 16.1 migration，讓既有 validator 接受 `expired` |
-| 卡片不出現 | 檢查 mediator event、proposal status、前端 polling 與 match hydration |
+| 卡片不出現 | 檢查 canonical proposal、event_delivery 收據／retry_at、Hub message，再查前端同步；不必靠使用者輪詢才保存 Event 卡片 |
 | PowerShell 中文亂碼 | PowerShell 5.1 response decoding；資料庫通常仍是 UTF-8 正常文字 |
 
 ## 20. Tests

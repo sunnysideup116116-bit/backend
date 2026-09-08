@@ -54,12 +54,31 @@ def test_only_event_invitation_does_not_block_search(flow):
     assert match_opportunity.assess_match_opportunity(flow.profiles.rows[0], "owner", explicit_search=True).state == "ready"
 
 
-def test_ambiguous_live_proposals_block_all_search_entrypoints(flow):
-    flow.matches.insert_one({"from_user": "owner", "to_user": "third", "status": "draft", "created_at": 300})
-    assert state.load_match_state("owner")["ambiguous"]
-    assert state.get_match_status_snapshot("owner")["reason_code"] == "ambiguous_live_match"
+def test_multiple_hub_cards_are_distinct_and_only_undecided_draft_blocks_search(flow):
+    draft_id = flow.matches.insert_one({
+        "from_user": "owner", "to_user": "third", "status": "draft", "created_at": 300,
+        "proposal_namespace": "relationship_match", "proposal_revision": 0,
+    }).inserted_id
+    current = state.load_match_state("owner")
+    assert not current["ambiguous"]
+    assert current["search_blocked"]
+    assert {row["_id"] for row in current["active_proposals"]} == {flow.old_id, draft_id}
+    snapshot = state.get_match_status_snapshot("owner")
+    assert snapshot["reason_code"] is None
+    assert snapshot["state"] == "waiting_user"
+    assert snapshot["active_proposal_count"] == 2
+    assert snapshot["pending_action_count"] == 1
+    assert snapshot["waiting_other_count"] == 1
     assert jobs.enqueue_match_search("owner", source="test", idempotency_key="blocked") == {"status": "already_active"}
     assert not flow.jobs.rows
+    # Two outgoing invitations can coexist. Once neither card awaits this
+    # user's draft decision, a new search must preserve both waiting cards.
+    flow.matches.update_one({"_id": draft_id}, {"$set": {"status": "pending"}})
+    before = deepcopy(flow.matches.rows)
+    assert not state.load_match_state("owner")["search_blocked"]
+    assert jobs.enqueue_match_search("owner", source="test", idempotency_key="allowed") == {"status": "queued"}
+    assert len(flow.jobs.rows) == 1
+    assert flow.matches.rows == before
 
 
 def test_old_locks_do_not_block_reads_and_cleanup_is_worker_only(flow):

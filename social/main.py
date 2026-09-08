@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers import calendar, chat, match, system, frontend
 from routers.match import ensure_match_indexes
+from routers.chat_messages import ensure_chat_read_indexes
 from services.calendar_service import ensure_calendar_indexes
 from services.ayue_agent.v3.scheduler import ensure_indexes as ensure_ayue_agent_indexes
 from services.ayue_agent.maps_client import ensure_map_cache_indexes
@@ -13,6 +14,7 @@ from services.ayue_agent.proactive_scheduler import start_proactive_care_schedul
 from services.ayue_agent.v3.calendar_drafts import ensure_indexes as ensure_calendar_draft_indexes
 from services.ayue_agent.v3.calendar_references import ensure_indexes as ensure_calendar_reference_indexes
 from services.ayue_agent.v3.relationship_references import ensure_indexes as ensure_relationship_reference_indexes
+from services.ayue_agent.v3.date_coordination_references import ensure_indexes as ensure_date_coordination_reference_indexes
 from services.ayue_agent.v3.relationship_recommendations import ensure_indexes as ensure_relationship_recommendation_indexes
 from services.ayue_agent.v3.place_references import ensure_indexes as ensure_place_reference_indexes
 from services.ayue_agent.v3.place_followups import ensure_indexes as ensure_place_followup_indexes
@@ -33,6 +35,7 @@ from services.concept_embedding_service import (
     start_concept_embedding_worker, stop_concept_embedding_worker,
 )
 from services.event_opportunity_service import ensure_event_opportunity_indexes
+from services.event_delivery_service import start_event_delivery_worker, stop_event_delivery_worker
 from services.match_quota_service import ensure_match_quota_indexes
 from services.event_lifecycle_service import (
     start_event_lifecycle_worker, stop_event_lifecycle_worker,
@@ -75,10 +78,12 @@ app.include_router(calendar.router)
 
 @app.on_event("startup")
 def setup_calendar_indexes():
+    ensure_chat_read_indexes()
     ensure_calendar_indexes()
     ensure_calendar_draft_indexes()
     ensure_calendar_reference_indexes()
     ensure_relationship_reference_indexes()
+    ensure_date_coordination_reference_indexes()
     ensure_relationship_recommendation_indexes()
     ensure_place_reference_indexes()
     ensure_place_followup_indexes()
@@ -103,10 +108,12 @@ def setup_calendar_indexes():
     start_concept_embedding_worker()
     start_event_lifecycle_worker()
     start_event_discovery_worker()
+    start_event_delivery_worker()
 
 
 @app.on_event("shutdown")
 def stop_background_services():
+    stop_event_delivery_worker()
     stop_proactive_care_scheduler()
     stop_memory_outbox_worker()
     stop_profile_retry_worker()

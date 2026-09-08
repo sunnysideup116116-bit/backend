@@ -52,7 +52,7 @@ CAPABILITY_MANIFEST: dict[str, Any] = {
         "查看、新增、修改及取消你自己的行程；共同約會的變動會同步通知對方，寫入前會先確認",
         "可以在你明確指定一位已建立聯絡的對象後，先向你確認，再在你們聊天室建立一張空白約會邀請卡；不代填日期、時間、地點或活動，也不代表對方已接受",
         "確認正式配對進度、對方是否接受與公開共同點，並從已接受聯絡人中整理適合一起參與活動的人選",
-        "依既有資料幫你尋找合適的人選",
+        "依既有資料幫你尋找合適的人選；阿月牽線會保留多張人物、主題或活動卡，方便你逐張查看",
         "查詢最新公開資訊並附上來源",
         "依地名查附近餐廳、咖啡廳、景點或公園，以及估算兩地直線距離",
     ],
@@ -76,6 +76,23 @@ CAPABILITY_MANIFEST: dict[str, Any] = {
             "creates_empty_card_only": True,
             "waits_for_partner_acceptance": True,
             "participants_fill_details_later": True,
+        },
+        # Keep card placement and the optional entry point explicit.  This is
+        # a separate projection so old clients that compare the original
+        # date_invitation object byte-for-byte remain compatible.
+        "date_card_surface": {
+            "card_surface": "accepted_pair_chat",
+            "matching_page_shortcut": "needs_action_only",
+            "available_in_match_hub": False,
+            "can_cancel_from_public_ayue": True,
+            "cancel_requires_confirmation": True,
+        },
+        "date_coordination_cancel": {
+            "available_in_public_ayue": True,
+            "requires_server_referenced_date_card": True,
+            "requires_confirmation": True,
+            "checks_current_status_and_revision": True,
+            "calendar_event_cancellation_is_synchronized": True,
         },
     },
     "terminology": {
@@ -163,6 +180,16 @@ _PRODUCT_KNOWLEDGE_SECTIONS: dict[str, dict[str, Any]] = {
             "may_return_no_suitable_candidate": CAPABILITY_MANIFEST["matching"]["may_return_no_suitable_candidate"],
         },
     },
+    "matching.inbox": {
+        "domain": "matching",
+        "facts": {
+            "multi_card_inbox": True,
+            "accept_decline_withdraw_on_hub_cards": True,
+            "waiting_invitations_do_not_block_new_search": True,
+            "replace_card_requires_explicit_card_action": True,
+            "cancel_search_only_stops_queued_or_running_search": True,
+        },
+    },
     "matching.limitations": {
         "domain": "matching",
         "facts": {
@@ -172,7 +199,24 @@ _PRODUCT_KNOWLEDGE_SECTIONS: dict[str, dict[str, Any]] = {
     },
     "relationship.date_invitation": {
         "domain": "relationship",
-        "facts": copy.deepcopy(CAPABILITY_MANIFEST["relationship"]["date_invitation"]),
+        "facts": {
+            **copy.deepcopy(CAPABILITY_MANIFEST["relationship"]["date_invitation"]),
+            **copy.deepcopy(CAPABILITY_MANIFEST["relationship"]["date_card_surface"]),
+        },
+    },
+    "relationship.date_card_surface": {
+        "domain": "relationship",
+        "facts": copy.deepcopy(CAPABILITY_MANIFEST["relationship"]["date_card_surface"]),
+    },
+    "relationship.date_coordination_cancel": {
+        "domain": "relationship",
+        "facts": {
+            "available_in_public_ayue": True,
+            "requires_server_referenced_date_card": True,
+            "requires_confirmation": True,
+            "checks_current_status_and_revision": True,
+            "calendar_event_cancellation_is_synchronized": True,
+        },
     },
     "calendar.confirmation": {
         "domain": "calendar",
@@ -283,8 +327,14 @@ PRODUCT_INFO_FAILURE_FALLBACKS: dict[str, str] = {
         "如果我發現適合的活動，也會問你要不要認識活動伴。真的開始搜尋前，我會先跟你確認。"
     ),
     "date_invitation": (
-        "沒錯喔～你指定一位已建立聯絡的對象後，我會先請你確認；確認後只會在你們聊天室放一張空白邀請卡，"
-        "等對方接受，再由你們一起填寫約會資料，等雙方都確認完成後，就會同步到行事曆囉～"
+        "沒錯喔～你指定一位已建立聯絡的對象後，我會先請你確認；確認後只會在你們的雙人聊天室放一張空白邀請卡，"
+        "配對首頁只會在需要你處理時提供入口，不會放進「阿月牽線」；等對方接受，再由你們一起填寫約會資料，"
+        "等雙方都確認完成後，就會同步到行事曆囉～"
+    ),
+    "date_coordination_cancel": (
+        "可以喔～約會卡會放在你和對方的雙人聊天室；配對首頁只會在需要你處理時提供入口。"
+        "如果要取消，我會先確認是哪一張、重新檢查目前狀態，再請你確認。"
+        "若已同步到行事曆，取消時也會同步更新雙方行事曆。"
     ),
 }
 
@@ -299,6 +349,7 @@ def product_info_answer(topics: list[str] | None = None) -> list[str]:
         "matching.overview": "matching_principles",
         "matching.methods": "matching_methods",
         "matching.selection": "matching_principles",
+        "relationship.date_coordination_cancel": "date_coordination_cancel",
     }
     seen_fallbacks: set[str] = set()
     for topic in selected:
@@ -361,6 +412,17 @@ def product_info_projection(topics: list[str] | None = None) -> dict[str, Any]:
     if "date_invitation" in selected:
         facts["date_invitation"] = copy.deepcopy(
             CAPABILITY_MANIFEST["relationship"]["date_invitation"]
+        )
+        facts["date_card_surface"] = copy.deepcopy(
+            CAPABILITY_MANIFEST["relationship"]["date_card_surface"]
+        )
+    if "date_coordination_cancel" in selected:
+        facts["date_coordination_cancel"] = copy.deepcopy(
+            CAPABILITY_MANIFEST["relationship"].get("date_coordination_cancel", {
+                "available_in_public_ayue": True,
+                "requires_server_referenced_date_card": True,
+                "requires_confirmation": True,
+            })
         )
     return {
         "manifest_version": CAPABILITY_MANIFEST_VERSION,

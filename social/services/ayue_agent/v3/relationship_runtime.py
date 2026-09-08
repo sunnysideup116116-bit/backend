@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .contracts import (
+    DATE_COORDINATION_CANCEL_WRITE_INTENT,
     DATE_INVITATION_WRITE_INTENT,
     AgentContextSlice,
     SubTask,
@@ -285,6 +286,13 @@ DATE_INVITATION_PROTOCOL_FAILURE_REPLY = (
     "我知道你要建立邀請卡，但我剛才沒能安全確認邀請對象。"
     "請直接說名字或 @ 對方再試一次。"
 )
+DATE_COORDINATION_CANCEL_PROTOCOL_FAILURE_CODE = (
+    "relationship_date_coordination_cancel_provider_protocol_failed"
+)
+DATE_COORDINATION_CANCEL_PROTOCOL_FAILURE_REPLY = (
+    "我知道你要取消約會卡，但我剛才沒能安全確認是哪一張。"
+    "請說對方名字或從約會卡上指定後再試一次。"
+)
 
 
 def run(
@@ -298,6 +306,10 @@ def run(
     )
     if write_intent == DATE_INVITATION_WRITE_INTENT:
         proposals, metrics = relationship_agent.run_date_invitation(
+            context_slice, task_brief=task.task_brief,
+        )
+    elif write_intent == DATE_COORDINATION_CANCEL_WRITE_INTENT:
+        proposals, metrics = relationship_agent.run_date_coordination_cancel(
             context_slice, task_brief=task.task_brief,
         )
     elif task.relationship_intent in {"recommend", "review"}:

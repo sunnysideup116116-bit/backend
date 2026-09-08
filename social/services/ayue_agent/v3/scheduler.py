@@ -31,8 +31,7 @@ from services.ayue_agent.match_opportunity import (
     claim_guidance_offer,
     decline_guidance_offer,
 )
-from services.match_search_context import extract_invitation_topic
-from services.ayue_agent.product_identity import PUBLIC_PENDING_CANCEL_REPLY, PUBLIC_PLANNER_INVALID_REPLY
+from services.ayue_agent.product_identity import PUBLIC_PENDING_CANCEL_REPLY
 from services.assessment_session_service import (
     active_assessment_session, advance_assessment_session,
     assessment_cancel_choice, assessment_commit_choice,
@@ -43,7 +42,8 @@ from database import db, messages_coll
 from services.ai_service import get_effective_chat_model
 
 from .contracts import (
-    DATE_INVITATION_WRITE_INTENT, AgentContextSlice, GuardDecision, GuardResultCode, Plan, SubTask,
+    DATE_COORDINATION_CANCEL_WRITE_INTENT, DATE_INVITATION_WRITE_INTENT,
+    AgentContextSlice, GuardDecision, GuardResultCode, Plan, SubTask,
     SubTaskResult, SubTaskStatus, ToolProposal, normalize_plan_for_execution,
 )
 from .context_slicer import slice_for_agent
@@ -125,39 +125,6 @@ MAX_TOTAL_READS = 9
 _ASSESSMENT_START_CONFIRMATIONS = frozenset({"開始", "開始吧", "開始啊", "開始阿"})
 
 
-def _new_match_topic_hint(turn: Any) -> str:
-    """Resolve the common ``拍人像，可以幫我約人嗎`` routing ambiguity.
-
-    This is a bounded hint for Planner output repair, not an authority gate:
-    it only applies when an activity topic and an explicit new-person cue are
-    both present in the current turn or its immediately adjacent history. A
-    named/@-mentioned contact therefore remains a Relationship request.
-    """
-    message = str(getattr(turn, "message", "") or "")
-    topic = extract_invitation_topic(message)
-    if not topic or "@" in message:
-        return ""
-    history = list(getattr(turn, "recent_messages", None) or [])
-    texts = [message] + [
-        str(item.get("content") or "")
-        for item in history
-        if isinstance(item, dict)
-        and (
-            item.get("role") == "user"
-            or (
-                not item.get("role")
-                and str(item.get("sender_id") or "") not in {"ai_assistant", "assistant", "system"}
-            )
-        )
-    ]
-    new_cue = re.search(r"找人|配對|牽線|新人|新朋友|新的人|找新的", " ".join(texts))
-    if not new_cue:
-        return ""
-    if re.search(r"已認識|已經認識|現有聯絡人|@", message):
-        return ""
-    return topic
-
-
 def _assessment_start_confirmation_requested(message: str, pending: list[dict[str, Any]]) -> bool:
     """Accept bounded start wording only for an assessment confirmation."""
     compact = re.sub(r"\s+", "", str(message or "")).lower()
@@ -167,7 +134,7 @@ def _assessment_start_confirmation_requested(message: str, pending: list[dict[st
 
 
 def _direct_chat_fast_path_enabled() -> bool:
-    return os.getenv("AYUE_V3_SIMPLE_CHAT_FAST_PATH", "off").strip().lower() in {
+    return os.getenv("AYUE_V3_SIMPLE_CHAT_FAST_PATH", "on").strip().lower() in {
         "1", "true", "on",
     }
 
@@ -191,8 +158,6 @@ def _direct_chat_block_reason(
             return reason
     if getattr(turn, "recent_context_draft", None):
         return "active_draft"
-    if getattr(turn, "active_proposal", None):
-        return "active_match_proposal"
     if active_offer:
         return "active_match_guidance"
     if getattr(turn, "mentioned_contact_overflow", False):
@@ -210,24 +175,8 @@ def _direct_chat_block_reason(
 
 
 def _planner_failure_reply(turn: Any) -> str:
-    """Return a state-aware clarification without inferring write authority."""
-    message = re.sub(r"\s+", "", str(getattr(turn, "message", "") or ""))
-    match_context = bool(re.search(
-        r"配對|媒合|牽線|找.{0,3}人|約人|人選|對方|"
-        r"查看?狀態|進度|接受|婉拒|拒絕|撤回|取消搜尋|不要找|繼續等",
-        message,
-    ))
-    if not match_context:
-        return PUBLIC_PLANNER_INVALID_REPLY
-    active = getattr(turn, "active_proposal", None) or {}
-    if active:
-        return "目前有一張牽線提案，接受、婉拒或撤回請到「阿月牽線」卡片上操作；我也可以替你查看狀態。"
-    search = getattr(turn, "match_search", None) or {}
-    if search.get("cancellable"):
-        return "目前仍在搜尋人選。你是想查看進度，還是取消這次搜尋？"
-    if re.search(r"配對|媒合|牽線|找.{0,3}人|約人|人選", message):
-        return "你是想了解配對方式，還是要我現在開始找人？直接選一個就好。"
-    return PUBLIC_PLANNER_INVALID_REPLY
+    """Return neutral copy when the Planner protocol truly fails."""
+    return "這次規劃沒有完成，所以我沒有執行任何操作。請稍後再試一次。"
 
 
 def _abandon_place_followup_for_turn(turn: Any) -> Any:
@@ -252,6 +201,7 @@ def _privacy_safe_planner_attempts(metrics: PlannerMetrics) -> list[dict[str, An
         {
             "attempt": int(item.get("attempt", 0) or 0),
             "status": str(item.get("status") or "")[:40],
+            "stage": str(item.get("stage") or "")[:40],
             "failure_code": str(item.get("failure_code") or "")[:80],
             "validation_fields": list(item.get("validation_fields") or [])[:8],
             "repair_codes": list(item.get("repair_codes") or [])[:4],
@@ -601,17 +551,50 @@ def _observation_dict(task_id: str, result: "SubTaskResult") -> dict[str, Any]:
     }
 
 
+def _pending_relationship_transaction_state(
+    tool_name: str, payload: dict[str, Any],
+) -> dict[str, str] | None:
+    """Project a prompt-safe Relationship state beside a locked preview."""
+    actions = {
+        "relationship.start_date_coordination": "create_date_invitation",
+        "relationship.cancel_date_coordination": "cancel_date_invitation",
+    }
+    action = actions.get(str(tool_name or ""))
+    if action is None:
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    counterparty = str((data or {}).get("safe_label") or "").strip()[:30]
+    state = {
+        "schema_version": "relationship_transaction_state.v1",
+        "action": action,
+        "status": "pending_confirmation",
+    }
+    if counterparty:
+        state["counterparty"] = counterparty
+    return state
+
+
 def _server_owned_date_coordination_reply(
     task_results: dict[str, list[SubTaskResult]],
 ) -> str | None:
     """Keep a date-card preview authoritative over model composition."""
     for results in task_results.values():
         for result in results:
-            if result.status is not SubTaskStatus.OK:
-                continue
-            if result.tool_name != "relationship.start_date_coordination":
+            if result.tool_name not in {
+                "relationship.start_date_coordination",
+                "relationship.cancel_date_coordination",
+            }:
                 continue
             observation = result.observation or {}
+            # A rejected preflight is just as authoritative as a successful
+            # preview: it carries the canonical state/target explanation that
+            # Synthesizer must not embellish with a Hub redirect.
+            if result.status is SubTaskStatus.FAILED and result.error_code == "preflight_rejected":
+                preview = str(observation.get("preview") or "").strip()
+                if preview:
+                    return preview
+            if result.status is not SubTaskStatus.OK:
+                continue
             if observation.get("pending_confirmation"):
                 preview = str(observation.get("preview") or "").strip()
                 if preview:
@@ -625,17 +608,23 @@ def _server_owned_date_coordination_failure_reply(
     write_intent: str,
 ) -> str | None:
     """Return the fixed, bounded failure copy for the typed write runtime."""
-    if write_intent != DATE_INVITATION_WRITE_INTENT:
+    if write_intent not in {
+        DATE_INVITATION_WRITE_INTENT,
+        DATE_COORDINATION_CANCEL_WRITE_INTENT,
+    }:
         return None
     for results in task_results.values():
         for result in results:
             failure = result.observation.get("failure") if isinstance(result.observation, dict) else None
-            if (
-                result.error_code == relationship_runtime.DATE_INVITATION_PROTOCOL_FAILURE_CODE
-                and isinstance(failure, dict)
-                and failure.get("code") == relationship_runtime.DATE_INVITATION_PROTOCOL_FAILURE_CODE
-            ):
-                return relationship_runtime.DATE_INVITATION_PROTOCOL_FAILURE_REPLY
+            failure_codes = {
+                relationship_runtime.DATE_INVITATION_PROTOCOL_FAILURE_CODE:
+                    relationship_runtime.DATE_INVITATION_PROTOCOL_FAILURE_REPLY,
+                relationship_runtime.DATE_COORDINATION_CANCEL_PROTOCOL_FAILURE_CODE:
+                    relationship_runtime.DATE_COORDINATION_CANCEL_PROTOCOL_FAILURE_REPLY,
+            }
+            reply = failure_codes.get(str(result.error_code or ""))
+            if reply and isinstance(failure, dict) and failure.get("code") == str(result.error_code):
+                return reply
     return None
 
 
@@ -644,7 +633,10 @@ def _server_owned_confirmed_date_reply(results: list[dict[str, Any]]) -> str | N
     for result in results:
         if not isinstance(result, dict):
             continue
-        if result.get("tool_name") != "relationship.start_date_coordination":
+        if result.get("tool_name") not in {
+            "relationship.start_date_coordination",
+            "relationship.cancel_date_coordination",
+        }:
             continue
         if not result.get("ok"):
             continue
@@ -906,24 +898,45 @@ def _server_ordered_place_messages(
     candidate_summaries = []
     for item in candidates[:8]:
         label = str(item.get("label") or "地點").strip()[:80]
-        address = str(item.get("address_summary") or "").strip()[:100]
         candidate_summaries.append({
             "candidate_ref": str(item.get("reference") or ""),
-            "name": label + (f"（{address}）" if address else ""),
+            "name": label,
         })
 
-    # The same server-owned renderer is used by Synthesizer and Scheduler.  A
-    # provider can repeat a candidate list in a different order, so remove only
-    # list-shaped candidate lines before handing the remaining explanation to
-    # that renderer.  Ordinary prose mentioning a place is retained.
-    base_messages = _strip_model_place_list_lines(
-        messages,
-        [str(item.get("label") or "") for item in candidates[:8]],
-    )
+    # The shared renderer is idempotent: it recognizes existing trusted rows,
+    # preserves their descriptions, and reapplies snapshot order. Pre-stripping
+    # would make the saved reply lose candidate-bound prose.
     rendered, _refs, _bindings = synthesizer._server_ordered_place_messages(
-        base_messages, candidate_summaries,
+        messages, candidate_summaries,
     )
     return [str(item).strip()[:2400] for item in rendered if str(item).strip()][:3]
+
+
+def _restore_snapshot_candidate_labels(
+    value: str, snapshot: dict[str, Any] | None,
+    *, extra_labels: list[str] | tuple[str, ...] = (),
+) -> str:
+    """Restore provider labels after public-language normalization."""
+    text = str(value or "")
+    candidates = (snapshot or {}).get("candidates") or []
+    trusted_labels = [
+        str(item.get("label") or "").strip()[:80]
+        for item in candidates
+        if isinstance(item, dict)
+    ]
+    trusted_labels.extend(
+        str(label or "").strip()[:80]
+        for label in extra_labels
+        if str(label or "").strip()
+    )
+    replacements: list[tuple[str, str]] = []
+    for trusted in dict.fromkeys(trusted_labels):
+        normalized = normalize_public_reply(trusted)
+        if trusted and normalized and trusted != normalized:
+            replacements.append((normalized, trusted))
+    for normalized, trusted in sorted(replacements, key=lambda pair: len(pair[0]), reverse=True):
+        text = text.replace(normalized, trusted)
+    return text
 
 
 def _strip_model_place_list_lines(
@@ -1189,6 +1202,22 @@ def _run_sub_task(
                     },
                 },
             )], agent_metrics
+        if (
+            task.agent == "relationship"
+            and planner_write_intent == DATE_COORDINATION_CANCEL_WRITE_INTENT
+        ):
+            failure_code = relationship_runtime.DATE_COORDINATION_CANCEL_PROTOCOL_FAILURE_CODE
+            return [SubTaskResult(
+                task_id=task.id,
+                status=SubTaskStatus.FAILED,
+                error_code=failure_code,
+                observation={
+                    "failure": {
+                        "code": failure_code,
+                        "message": relationship_runtime.DATE_COORDINATION_CANCEL_PROTOCOL_FAILURE_REPLY,
+                    },
+                },
+            )], agent_metrics
         error_code = (
             "sub_agent_invalid_proposal"
             if agent_metrics and agent_metrics.rejected_calls
@@ -1292,18 +1321,25 @@ def _run_sub_task(
                             "match.start_search",
                             "match.cancel_search",
                             "match.decide_active_proposal",
+                            "relationship.cancel_date_coordination",
                         }
                         else None
                     ),
                 )
                 print(f"  [{task.id}#{index}] result=OK (pending_confirmation for {proposal.tool_name})")
+                transaction_state = _pending_relationship_transaction_state(
+                    proposal.tool_name, payload,
+                )
+                pending_observation = {
+                    "pending_confirmation": True,
+                    "tool_name": proposal.tool_name,
+                    "preview": preview or "",
+                }
+                if transaction_state is not None:
+                    pending_observation["transaction_state"] = transaction_state
                 results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.OK,
                                               tool_name=proposal.tool_name,
-                                              observation={
-                                                  "pending_confirmation": True,
-                                                  "tool_name": proposal.tool_name,
-                                                  "preview": preview or "",
-                                              }))
+                                              observation=pending_observation))
                 continue
             print(f"  [{task.id}#{index}] result=FAILED  guard_code={decision.code.value}")
             results.append(SubTaskResult(task_id=task.id, status=SubTaskStatus.FAILED,
@@ -1627,6 +1663,7 @@ def run_public_agent_turn_v3(
     total_input_tokens = 0
     total_output_tokens = 0
     all_agent_metrics: list[tuple[str, SubAgentMetrics]] = []
+    place_snapshot: dict[str, Any] | None = None
 
     def _finalize_debug(result: AgentResult) -> AgentResult:
         # Calendar context can outlive the turn that created it. Only a write
@@ -1680,7 +1717,20 @@ def run_public_agent_turn_v3(
         if presentation is None and normalized_reply:
             presentation = build_presentation([normalized_reply], "fallback")
         if presentation is not None:
-            messages = presentation.messages
+            place_labels = tuple(
+                str(projection.get("label") or "").strip()
+                for projection in (
+                    getattr(turn, "place_reference_resolution", None),
+                    getattr(turn, "recent_place_reference", None),
+                )
+                if isinstance(projection, dict) and str(projection.get("label") or "").strip()
+            )
+            messages = [
+                _restore_snapshot_candidate_labels(
+                    message, place_snapshot, extra_labels=place_labels,
+                )
+                for message in presentation.messages
+            ]
             normalized_reply = "\n\n".join(messages)
         result = result.model_copy(update={"reply": normalized_reply, "messages": messages})
         # Confirmation preview hashes must bind the exact text that the HTTP
@@ -1811,7 +1861,7 @@ def run_public_agent_turn_v3(
             )
             return _finalize_debug(AgentResult(
                 handled=True,
-                reply="邀請的接受、婉拒或撤回已移到「阿月牽線」的卡片上，請到專區查看後再操作。",
+                reply="人物、主題或活動牽線邀請的接受、婉拒或撤回已移到「阿月牽線」的卡片上，請到專區查看後再操作。",
                 presentation_class="transaction",
                 conversation_intent="match_hub_redirect",
                 agent_run_id=run_id,
@@ -1939,8 +1989,16 @@ def run_public_agent_turn_v3(
             "task_id": "confirm", "status": "ok", "tool": None,
             "result": results, "error_code": None, "skip_reason": None,
         }])
+        date_confirmation = any(
+            isinstance(item, dict)
+            and str(item.get("tool_name") or "") in {
+                "relationship.start_date_coordination",
+                "relationship.cancel_date_coordination",
+            }
+            for item in results
+        )
         reply, _card_decision, synth_metrics = synthesizer.synthesize(
-            synth_slice, on_token=emit_token_fragment,
+            synth_slice, on_token=None if date_confirmation else emit_token_fragment,
         )
         server_reply = _server_owned_confirmed_date_reply(results)
         if server_reply:
@@ -2159,7 +2217,7 @@ def run_public_agent_turn_v3(
             mgr.cancel_legacy(user_id=ctx.user_id)
         return _finalize_debug(AgentResult(
             handled=True,
-            reply="邀請的接受、婉拒或撤回已移到「阿月牽線」的卡片上，請到專區查看後再操作。",
+            reply="人物、主題或活動牽線邀請的接受、婉拒或撤回已移到「阿月牽線」的卡片上，請到專區查看後再操作。",
             presentation_class="transaction",
             conversation_intent="match_hub_redirect",
             agent_run_id=run_id,
@@ -2395,6 +2453,7 @@ def run_public_agent_turn_v3(
         print(f"  total_tokens={total_input_tokens + total_output_tokens} (in={total_input_tokens} out={total_output_tokens})")
         print(f"  [llm] total_calls={_metric_call_count(planner_metrics)}")
         trace["planner_failure"] = {
+            "stage": "fallback",
             "failure_code": planner_metrics.failure_code,
             "retry_count": planner_metrics.retry_count,
             "retry_reason": planner_metrics.retry_reason,
@@ -2406,13 +2465,7 @@ def run_public_agent_turn_v3(
             "fallback_reason": "planner_invalid",
         }
         _persist_trace(run_id, ctx, trace)
-        match_requested = any(
-            isinstance(call, dict) and isinstance(call.get("arguments"), dict)
-            and any(isinstance(task, dict) and task.get("agent") == "match" for task in (call["arguments"].get("tasks") if isinstance(call["arguments"].get("tasks"), list) else []))
-            for call in (planner_metrics.tool_calls_raw or [])
-        )
-        reply = ("這次未能解析配對操作，沒有執行變更。" + match_runtime.safe_status_reply(ctx.user_id)
-                 if match_requested else _planner_failure_reply(turn))
+        reply = _planner_failure_reply(turn)
         return _finalize_debug(AgentResult(
             handled=True, reply=reply,
             agent_run_id=run_id,
@@ -2422,34 +2475,6 @@ def run_public_agent_turn_v3(
         ))
 
     plan = normalize_plan_for_execution(plan, turn.message)
-    topic_hint = _new_match_topic_hint(turn)
-    if topic_hint and not any(task.agent == "match" for task in plan.tasks) and (
-        getattr(plan, "write_intent", "none") == DATE_INVITATION_WRITE_INTENT
-        or any(task.agent == "relationship" for task in plan.tasks)
-        or getattr(plan, "mode", "tasks") == "direct_chat"
-    ):
-        # A recent conversation that clearly asked for a new person wins over
-        # the provider's ambiguous ``date invitation`` classification. Keep
-        # one ordinary Match search and let its confirmation bind the topic.
-        plan = Plan(
-            mode="tasks",
-            write_intent="none",
-            tasks=[
-                SubTask(
-                    id="match",
-                    agent="match",
-                    match_intent="start_search",
-                    task_brief=f"找可能願意聊聊{topic_hint}的新朋友",
-                ),
-                SubTask(
-                    id="synthesizer",
-                    agent="synthesizer",
-                    depends_on=["match"],
-                    task_brief="呈現一次搜尋的確認與安全說明",
-                ),
-            ],
-        )
-        trace.setdefault("match_diagnostics", {})["topic_routing_repair"] = topic_hint
     plan, hours_fallback_injected = _ensure_place_hours_fallback(plan, turn.message)
     trace["place_diagnostics"]["hours_fallback_injected"] = hours_fallback_injected
     trace["place_diagnostics"]["task_modes"] = {
@@ -3017,8 +3042,12 @@ def run_public_agent_turn_v3(
         )
         for item in prior
     )
+    date_write_workflow = plan.write_intent in {
+        DATE_INVITATION_WRITE_INTENT,
+        DATE_COORDINATION_CANCEL_WRITE_INTENT,
+    }
     synth_token_callback = (
-        None if candidate_cards or has_grounded_observation
+        None if candidate_cards or has_grounded_observation or date_write_workflow
         else emit_token_fragment
     )
     reply, card_decision, synth_metrics = synthesizer.synthesize(
@@ -3030,18 +3059,28 @@ def run_public_agent_turn_v3(
     server_failure_reply = _server_owned_date_coordination_failure_reply(
         task_results, write_intent=plan.write_intent,
     )
-    if server_reply:
+    domain_tasks = [task for task in plan.tasks if task.agent != "synthesizer"]
+    exclusive_date_transaction = bool(
+        date_write_workflow
+        and len(domain_tasks) == 1
+        and domain_tasks[0].agent == "relationship"
+    )
+    if server_reply and exclusive_date_transaction:
         reply = server_reply
         synth_metrics.reply_source = "verified_observation"
         synth_metrics.presentation_messages = [server_reply]
         synth_metrics.presentation_blocks = None
         synth_metrics.presentation_class = "transaction"
     elif server_failure_reply:
-        reply = server_failure_reply
-        synth_metrics.reply_source = "verified_observation"
-        synth_metrics.presentation_messages = [server_failure_reply]
-        synth_metrics.presentation_blocks = None
-        synth_metrics.presentation_class = "fallback"
+        if exclusive_date_transaction:
+            reply = server_failure_reply
+            synth_metrics.reply_source = "verified_observation"
+            synth_metrics.presentation_messages = [server_failure_reply]
+            synth_metrics.presentation_blocks = None
+            synth_metrics.presentation_class = "fallback"
+        elif server_failure_reply not in reply:
+            reply = "\n\n".join(part for part in (reply, server_failure_reply) if part)
+            synth_metrics.presentation_messages = [reply]
     reply = normalize_public_reply(reply)
     _print_llm_metrics("synthesizer", synth_metrics)
     total_input_tokens += synth_metrics.input_tokens
@@ -3087,7 +3126,7 @@ def run_public_agent_turn_v3(
         if public_cards_enabled else []
     )
     has_new_place_result = bool(discovery_results)
-    place_snapshot: dict[str, Any] | None = None
+    place_snapshot = None
     place_persistence_failed = False
     if has_new_place_result:
         cards_by_ref = {
@@ -3095,11 +3134,21 @@ def run_public_agent_turn_v3(
             for card in candidate_cards
             if str(card.get("candidate_ref") or "")
         }
+        presented_refs = {
+            str(reference)
+            for reference in (synth_metrics.presented_candidate_refs or [])
+            if str(reference) in cards_by_ref
+        }
         # Candidate order is owned by the verified Places projection. Model
-        # authored refs/ordinals are evidence only and cannot reorder it.
+        # authored refs/ordinals may narrow the displayed set, but cannot
+        # reorder it. Persist exactly the candidates visible in this reply.
         ordered_cards = [
             card for card in candidate_cards[:8]
             if str(card.get("candidate_ref") or "") in cards_by_ref
+            and (
+                not presented_refs
+                or str(card.get("candidate_ref") or "") in presented_refs
+            )
         ]
         ordered_ordinals = {
             str(card["candidate_ref"]): index

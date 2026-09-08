@@ -11,6 +11,7 @@ from bson.objectid import ObjectId
 from database import matches_coll, profiles_coll
 from services.conversation_compaction_service import load_validated_conversation_continuity
 from services.profile_projection import safe_recent_context
+from services.owner_memory_projection import preference_wording
 from services.profile_location import safe_profile_location
 from services.match_state_service import load_match_state
 from services.proposal_namespace import (
@@ -190,14 +191,9 @@ def build_public_context(ctx: AgentTurnContext) -> dict[str, Any]:
             "declined_by_other": bool(decision.get("actor") and decision.get("actor") != ctx.user_id),
             "reason_available": False,
         }
-    preferences = []
-    for item in (profile.get("profile_memory_preview") or [])[:8]:
-        if isinstance(item, dict):
-            label = _clean_text(item.get("label") or item.get("label_zh_tw"), 60)
-        else:
-            label = _clean_text(item, 60)
-        if label:
-            preferences.append(label)
+    preferences = [_clean_text(text, 80) for text in preference_wording(
+        profile.get("profile_memory_preview"), owner_id=ctx.user_id,
+    )]
     return {
         "recent_messages": history,
         "previous_assistant_message": previous_assistant,
@@ -297,6 +293,12 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
         get_reference as get_relationship_reference,
         public_projection as relationship_reference_projection,
     )
+    from .v3.date_coordination_references import (
+        authority_projection as date_coordination_authority_projection,
+        date_coordination_summary,
+        get_reference as get_date_coordination_reference,
+        public_projection as date_coordination_reference_projection,
+    )
     from .v3.relationship_recommendations import (
         get_snapshot as get_relationship_recommendation,
         public_projection as relationship_recommendation_projection,
@@ -305,6 +307,7 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
         get_candidate_set as get_place_candidate_set,
         public_projection as place_candidate_projection,
         recent_selected_projection as recent_place_reference_projection,
+        place_reference_read_scope,
     )
     from .v3.place_followups import (
         PlaceFollowupPersistenceError,
@@ -317,13 +320,22 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     recent_contact_reference = relationship_reference_projection(
         get_relationship_reference(ctx.user_id)
     )
+    try:
+        recent_action_record = get_date_coordination_reference(ctx.user_id, ctx.room_id)
+    except Exception:
+        # A convenience reference outage must not block ordinary chat or other
+        # read-only domain flows; cancellation fails closed without it.
+        recent_action_record = None
+    recent_action_reference = date_coordination_reference_projection(recent_action_record)
+    date_summary, date_summary_authority = date_coordination_summary(ctx.user_id)
     recent_recommendation = relationship_recommendation_projection(
         get_relationship_recommendation(ctx.user_id, ctx.room_id)
     )
-    recent_place_candidates = place_candidate_projection(
-        get_place_candidate_set(ctx.user_id, ctx.room_id)
-    )
-    recent_place_reference = recent_place_reference_projection(ctx.user_id, ctx.room_id)
+    with place_reference_read_scope():
+        recent_place_candidates = place_candidate_projection(
+            get_place_candidate_set(ctx.user_id, ctx.room_id)
+        )
+        recent_place_reference = recent_place_reference_projection(ctx.user_id, ctx.room_id)
     try:
         recent_place_followup = place_followup_projection(
             get_place_followup(ctx.user_id, ctx.room_id)
@@ -337,12 +349,9 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     if recent_context_draft and now - float(recent_context_draft.get("created_at", 0) or 0) > RECENT_CONTEXT_DRAFT_TTL_SECONDS:
         # Context assembly is read-only, including expired auxiliary drafts.
         recent_context_draft = None
-    memories = []
-    for item in (profile.get("profile_memory_preview") or [])[:8]:
-        label = item.get("label") if isinstance(item, dict) else item
-        label = _clean_text(label, 80)
-        if label:
-            memories.append(label)
+    memories = [_clean_text(text, 80) for text in preference_wording(
+        profile.get("profile_memory_preview"), owner_id=ctx.user_id,
+    )]
     mentioned_ids, validation_overflow = validated_mentioned_contact_ids(ctx.user_id, ctx.mentioned_ids)
     focused_match, focused_authority = _focused_match_projection(ctx)
     match_search = {
@@ -383,6 +392,8 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
         place_followup=recent_place_followup,
         recent_context_draft=recent_context_draft,
         recent_contact_reference=recent_contact_reference,
+        recent_action_reference=recent_action_reference,
+        date_coordination_summary=date_summary,
         recent_recommendation=recent_recommendation,
         mentioned_contacts=mentioned_contact_refs(ctx.user_id, mentioned_ids),
         mentioned_contact_overflow=bool(ctx.mention_overflow or validation_overflow),
@@ -390,6 +401,10 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     )
     turn._active_proposal_authority = active_authority  # type: ignore[attr-defined]
     turn._focused_match_authority = focused_authority  # type: ignore[attr-defined]
+    turn._recent_action_reference_authority = date_coordination_authority_projection(  # type: ignore[attr-defined]
+        recent_action_record
+    )
+    turn._date_coordination_summary_authority = date_summary_authority  # type: ignore[attr-defined]
     turn._match_state = match_state  # type: ignore[attr-defined]
     return turn
 

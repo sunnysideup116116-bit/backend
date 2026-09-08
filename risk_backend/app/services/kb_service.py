@@ -6,6 +6,8 @@ Knowledge Base 服務 - Appwrite 版本
 的 KB database 讀取，統一後端儲存層。對外 method 簽章與回傳結構與舊版一致。
 """
 import json
+from copy import deepcopy
+from concurrent.futures import Future
 import os
 import threading
 import time
@@ -22,6 +24,15 @@ load_dotenv()
 _CACHE_TTL = float(os.getenv("KB_CACHE_TTL_SECONDS", "300"))
 _cache: dict[str, tuple[float, list]] = {}
 _cache_lock = threading.Lock()
+_config_lock = threading.Lock()
+_inflight: dict[tuple[int, str], Future] = {}
+_cache_generation = 0
+# Explicit connect/read bounds also cover each page of a KB refresh.
+_REQUEST_TIMEOUT = (3.0, 5.0)
+
+
+class KBUnavailableError(RuntimeError):
+    """No complete, current KB snapshot was available for this query."""
 
 
 class KBService:
@@ -34,11 +45,14 @@ class KBService:
     def _ensure_config(cls):
         if cls._endpoint is not None:
             return
-        config = get_appwrite_config()
-        cls._endpoint = config.endpoint
-        cls._project_id = config.project_id
-        cls._api_key = config.api_key
-        cls._kb_db_id = config.kb_db_id
+        with _config_lock:
+            if cls._endpoint is not None:
+                return
+            config = get_appwrite_config()
+            cls._project_id = config.project_id
+            cls._api_key = config.api_key
+            cls._kb_db_id = config.kb_db_id
+            cls._endpoint = config.endpoint
 
     @classmethod
     def _headers(cls):
@@ -52,29 +66,47 @@ class KBService:
     @staticmethod
     def _list(collection_id, queries=None, limit=100):
         """從 Appwrite KB database 列出 documents（含 TTL 快取）。"""
-        if _CACHE_TTL <= 0:
-            return KBService._fetch(collection_id, queries, limit)
-
         key = f"{collection_id}|{json.dumps(queries, sort_keys=True, default=str)}|{limit}"
         now = time.monotonic()
         with _cache_lock:
             hit = _cache.get(key)
-            if hit and now - hit[0] < _CACHE_TTL:
-                return hit[1]
+            if _CACHE_TTL > 0 and hit and now - hit[0] < _CACHE_TTL:
+                return deepcopy(hit[1])
+            generation = _cache_generation
+            flight_key = (generation, key)
+            flight = _inflight.get(flight_key)
+            owner = flight is None
+            if owner:
+                flight = _inflight[flight_key] = Future()
 
-        result = KBService._fetch(collection_id, queries, limit)
-
-        # _fetch 失敗時會回空 list；不快取失敗，讓下次請求可以立即重試。
-        if result:
+        if not owner:
+            return deepcopy(flight.result())
+        try:
+            result = KBService._fetch(collection_id, queries, limit)
+            # Empty successful collections are valid. Failures never masquerade
+            # as empty rules, partial pages, or a fresh stale snapshot.
             with _cache_lock:
-                _cache[key] = (now, result)
-        return result
+                if _CACHE_TTL > 0 and generation == _cache_generation:
+                    _cache[key] = (time.monotonic(), deepcopy(result))
+            flight.set_result(result)
+            return deepcopy(result)
+        except Exception as exc:
+            error = exc if isinstance(exc, KBUnavailableError) else KBUnavailableError(
+                f"Unable to refresh KB collection {collection_id}"
+            )
+            flight.set_exception(error)
+            raise error from exc
+        finally:
+            with _cache_lock:
+                _inflight.pop(flight_key, None)
 
     @classmethod
     def clear_cache(cls):
         """清除所有 KB 快取，讓下一次查詢重新讀取 Appwrite。"""
+        global _cache_generation
         with _cache_lock:
             _cache.clear()
+            _cache_generation += 1
 
     @staticmethod
     def _fetch(collection_id, queries=None, limit=100):
@@ -91,6 +123,8 @@ class KBService:
         results = []
         seen_ids = set()
         offset = 0
+        if limit < 1:
+            raise ValueError("KB page limit must be positive")
         while True:
             serialized_queries = [
                 query if isinstance(query, str) else json.dumps(query)
@@ -110,12 +144,16 @@ class KBService:
                 headers=headers,
                 params=params,
                 verify=verify_ssl,
+                timeout=_REQUEST_TIMEOUT,
             )
             if r.status_code != 200:
-                print(f"[KB] list {collection_id} -> {r.status_code} {r.text[:200]}")
-                return results
+                raise KBUnavailableError(f"KB collection {collection_id} returned HTTP {r.status_code}")
             data = r.json()
-            docs = data.get("documents", [])
+            docs = data.get("documents")
+            total = data.get("total")
+            if not isinstance(docs, list) or not isinstance(total, int) or total < 0:
+                raise KBUnavailableError(f"Malformed KB page for {collection_id}")
+            prior_count = len(results)
             for doc in docs:
                 document_id = doc.get("$id")
                 if document_id and document_id in seen_ids:
@@ -124,10 +162,13 @@ class KBService:
                     seen_ids.add(document_id)
                 clean = {k: v for k, v in doc.items() if not k.startswith("$")}
                 results.append(clean)
-            total = data.get("total", 0)
             offset += len(docs)
-            if not docs or offset >= total:
+            if docs and len(results) == prior_count:
+                raise KBUnavailableError(f"Repeated KB pagination for {collection_id}")
+            if offset >= total:
                 break
+            if not docs or len(results) == prior_count:
+                raise KBUnavailableError(f"Incomplete KB pagination for {collection_id}")
 
         # 防禦性客戶端過濾：若 Appwrite REST endpoint 未正確套用 queries 參數，在此二次過濾
         if queries:
@@ -167,6 +208,8 @@ class KBService:
             for f in docs:
                 KBService._parse_json_fields(f, ["logic_config"])
             return docs
+        except KBUnavailableError:
+            raise
         except Exception as e:
             print(f"[KB] get_features failed: {e}")
             return []
@@ -179,6 +222,8 @@ class KBService:
             for r in docs:
                 KBService._parse_json_fields(r, ["condition_logic", "bonus_actions"])
             return docs
+        except KBUnavailableError:
+            raise
         except Exception as e:
             print(f"[KB] get_scenario_rules failed: {e}")
             return []
@@ -197,6 +242,8 @@ class KBService:
             for r in docs:
                 KBService._parse_json_fields(r, ["conditions", "actions"])
             return docs
+        except KBUnavailableError:
+            raise
         except Exception as e:
             print(f"[KB] get_rules failed: {e}")
             return []
@@ -214,6 +261,8 @@ class KBService:
                 limit=1,
             )
             return docs[0] if docs else None
+        except KBUnavailableError:
+            raise
         except Exception as e:
             print(f"[KB] get_prompt failed: {e}")
             return None
@@ -240,6 +289,8 @@ class KBService:
             config = docs[0]
             KBService._parse_json_fields(config, ["thresholds", "weights"])
             return config
+        except KBUnavailableError:
+            raise
         except Exception as e:
             print(f"[KB] get_fusion_config failed: {e}")
             return None
@@ -255,6 +306,8 @@ class KBService:
             for t in docs:
                 KBService._parse_json_fields(t, ["message_template", "ui_behavior"])
             return docs
+        except KBUnavailableError:
+            raise
         except Exception as e:
             print(f"[KB] get_interventions_by_level failed: {e}")
             return []

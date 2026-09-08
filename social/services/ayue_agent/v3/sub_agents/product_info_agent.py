@@ -35,6 +35,7 @@ _PRODUCT_INFO_STEP_TEXT = "我先整理一下產品資訊…"
 _SECTION_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("capabilities.overview", ("能做什麼", "可以幹嘛", "你是做什麼", "功能", "capabilit", "what can you do", "capabilities")),
     ("relationship.date_invitation", ("邀請卡", "約會邀請", "空白卡", "建立空白卡", "幫我約", "date invitation")),
+    ("relationship.date_coordination_cancel", ("取消約會", "撤回約會", "取消邀請卡", "約會卡取消", "cancel date")),
     ("identity.overview", ("阿月是誰", "你是誰", "身份", "同一個", "另一個阿月", "same ayue", "same_identity", "identity")),
     ("surfaces.public", ("主聊天室", "公開阿月", "public", "這裡", "surface_scope")),
     ("surfaces.private", ("悄悄話", "雙人聊天室", "private", "私訊", "where_to_ask")),
@@ -57,6 +58,7 @@ _SECTION_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 _SECTION_HINTS += (
     ("capabilities.overview", ("\u80fd\u505a\u4ec0\u9ebc", "\u53ef\u4ee5\u5e79\u561b", "\u529f\u80fd")),
     ("relationship.date_invitation", ("\u9080\u8acb\u5361", "\u7d04\u6703\u9080\u8acb", "\u7a7a\u767d\u5361", "\u5efa\u7acb\u7a7a\u767d\u5361", "\u5e6b\u6211\u7d04")),
+    ("relationship.date_coordination_cancel", ("\u53d6\u6d88\u7d04\u6703", "\u64a4\u56de\u7d04\u6703", "\u53d6\u6d88\u9080\u8acb\u5361", "\u7d04\u6703\u5361\u53d6\u6d88")),
     ("identity.overview", ("\u963f\u6708\u662f\u8ab0", "\u4f60\u662f\u8ab0", "\u8eab\u4efd", "\u540c\u4e00\u500b", "\u53e6\u4e00\u500b\u963f\u6708")),
     ("surfaces.public", ("\u4e3b\u804a\u5929\u5ba4", "\u516c\u958b\u963f\u6708")),
     ("surfaces.private", ("\u6084\u6084\u8a71", "\u96d9\u4eba\u804a\u5929\u5ba4", "\u79c1\u8a0a")),
@@ -88,6 +90,18 @@ def _select_sections(text: str) -> list[str]:
     for section_id, hints in _SECTION_HINTS:
         if any(hint.casefold() in lowered for hint in hints):
             selected.append(section_id)
+
+    # A natural question may put the card noun and the cancellation verb in
+    # any order (for example, 「約會卡可以取消嗎」).  ProductInfo must retrieve
+    # the complete card contract together: creation, placement/shortcut and
+    # cancellation rules are one answer surface even when the wording only
+    # names one of them.
+    date_card_terms = ("約會卡", "約會邀請", "邀請卡", "date invitation")
+    if any(term.casefold() in lowered for term in date_card_terms):
+        selected.extend((
+            "relationship.date_invitation",
+            "relationship.date_coordination_cancel",
+        ))
 
     # Questions about why confirmation is needed despite known preferences
     # require both facts even when the provider paraphrases one half.

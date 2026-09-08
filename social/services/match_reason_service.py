@@ -52,6 +52,26 @@ _INTERNAL_REFERENCE_RE = re.compile(
     r"(?:@?seed_user_[\w-]+|@?demo_user|@?user[_-]?\d+)", re.IGNORECASE,
 )
 
+# This is a copy-contract check, rather than an intent router.  The match
+# pipeline already decided that a proposal is an invitation; this helper only
+# verifies that provider prose still contains a natural invitation question.
+# Keep the accepted forms together so generation, fallback and read-time
+# projection cannot drift apart (notably 「想先認識」 and 「願不願意先認識」).
+_INVITATION_ASK_RE = re.compile(
+    r"(?:"
+    r"想\s*(?:先\s*)?認識"
+    r"|願意\s*(?:先\s*)?認識"
+    r"|願不願意\s*(?:先\s*)?認識"
+    r"|要不要\s*(?:先\s*)?認識"
+    r"|有興趣"
+    r"|想\s*(?:讓我|請我)?\s*(?:幫你(?:們)?\s*)?(?:問問?|牽線|牽個線)"
+    r"|要不要\s*(?:讓我|請我)?\s*(?:幫你(?:們)?\s*)?(?:問問?|牽線|牽個線)"
+    r"|要我\s*(?:先\s*)?(?:幫你(?:們)?\s*)?(?:問問?|牽線|牽個線)"
+    r"|想\s*(?:跟|和)\s*對方\s*(?:聊|認識)"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def short_public_text(value: Any, limit: int = 220) -> str:
     text = re.sub(r"\s+", " ", normalize_zh_tw(str(value or ""))).strip()
@@ -79,6 +99,22 @@ def public_personality_phrase(profile: dict) -> str:
     if isinstance(value, (int, float)) and value >= 7:
         return "願意傾聽"
     return short_public_text(traits.get("summary"), 32)
+
+
+def contains_invitation_ask(value: Any) -> bool:
+    """Return whether copy contains one approved invitation ask shape."""
+    text = short_public_text(value, 260)
+    return bool(text and _INVITATION_ASK_RE.search(text))
+
+
+def contains_unverified_topic_claim(value: Any) -> bool:
+    """Reject topic prose that upgrades a search request into another user's fact."""
+    text = short_public_text(value, 260)
+    return any(token in text for token in (
+        "有興趣", "感興趣", "喜歡", "熱愛", "熟悉", "擅長",
+        "已答應", "已經答應", "已同意", "已經同意",
+        "可以聊看看", "可以開始聊", "現在可以聊", "已經可以聊",
+    ))
 
 
 def match_reason_style_id(
@@ -182,6 +218,7 @@ def topic_friend_intro_fallback(
     *,
     requester_id: str = "",
     query_text: str = "",
+    auto_invite: bool = False,
 ) -> dict:
     """Role-specific copy for a one-search topic request.
 
@@ -207,35 +244,36 @@ def topic_friend_intro_fallback(
         activity_phrase = safe_topic
         if activity_phrase and not activity_phrase.startswith(("一起", "陪我", "跟我", "和我")):
             activity_phrase = f"一起{activity_phrase}"
-    other_context = short_public_text(other.get("current_context"), 56)
     is_requester = str(viewer.get("user_id") or "") == str(requester_id or "")
+    other_trait = public_personality_phrase(other)
+    basis = (
+        f"推薦說明：對方{other_trait}；可先了解相處節奏，活動意願仍待確認。"
+        if other_trait else
+        "推薦說明：這次是探索性介紹，目前沒有足夠共同活動依據，仍需先確認彼此意願。"
+    )
     if is_requester:
-        first = (
-            f"你這次想找人{activity_phrase}；"
-            + (f"我想到一位最近提到「{other_context}」的人。" if other_context else "我想到一位可以先認識看看的人。")
-        )
-        text = (
-            first
-            + "目前不能確認對方是否會這件事，或本來就打算一起去；可以先問問對方有沒有興趣。"
-            + "要不要讓我先幫你問問？"
+        first = f"你這次想找人{activity_phrase}；我找到一位可以替你詢問的人選。"
+        text = first + (
+            "邀請已送出，正在等對方回覆；雙方接受後才能聊天。"
+            if auto_invite else
+            "還不能確認對方是否願意同行。你願意先認識對方嗎？"
         )
     else:
-        first = (
-            f"有位朋友想找人{activity_phrase}；"
-            + (f"對方最近提到「{other_context}」。" if other_context else "我想先介紹你們認識看看。")
+        text = (
+            f"有位朋友想找人{activity_phrase}，並邀請你先認識看看。"
+            "目前還沒有替你答應認識或同行；你願意先認識對方嗎？"
         )
-        text = first + "我可以先替你們牽線，再問問彼此有沒有興趣；這不代表你已經會這件事或確定同行。你願意認識看看嗎？"
     return {
         "style_id": "topic_request",
         "tier": "exploratory",
-        "viewer_text": text,
+        "viewer_text": basis + text,
+        "recommendation_basis": basis,
         "scenario_bridge": activity_phrase,
         "personality_dynamic": "",
-        "conversation_starter": f"可以先問對方對{activity_phrase}有沒有興趣。",
-        "accepted_opening": f"好消息，{COUNTERPARTY_PLACEHOLDER}也點頭了！可以先聊聊{activity_phrase}的想法。",
+        "conversation_starter": f"配對成功後，可以先問對方想怎麼安排{activity_phrase}。",
+        "accepted_opening": f"好消息，{COUNTERPARTY_PLACEHOLDER}也願意認識你！可以先聊聊{activity_phrase}的想法，再決定要不要同行。",
         "used_evidence_keys": [
             "search_context.invitation_topic",
-            *( ["other.current_context"] if other_context else []),
         ],
     }
 
@@ -277,10 +315,7 @@ def valid_friend_intro_text(
         return ""
     if not text.endswith(("？", "?")):
         return ""
-    if not any(token in text for token in (
-        "想認識", "願意認識", "要不要一起", "想一起", "願意一起",
-        "有興趣", "牽個線", "牽線", "問問他", "幫你問",
-    )):
+    if not contains_invitation_ask(text):
         return ""
     return text
 
@@ -375,15 +410,18 @@ def build_v4_snapshot_fallback(match_doc: dict) -> dict:
                 viewer, other, topic,
                 requester_id=str(match_doc.get("from_user") or ""),
                 query_text=query_text,
+                auto_invite=str(match_doc.get("delivery_mode") or "") == "invite_on_match",
             )
             if topic else friend_intro_fallback(viewer, other, tier, style_id=style_id)
         )
         return {
             "copy_version": FRIEND_COPY_VERSION,
-            "style_id": style_id,
+            "style_id": fallback["style_id"],
             "viewer_id": str(viewer.get("user_id") or ""),
             "counterparty_id": str(other.get("user_id") or ""),
-            "counterparty_context_snapshot": short_public_text(other.get("current_context"), 56),
+            "counterparty_context_snapshot": (
+                "" if topic else short_public_text(other.get("current_context"), 56)
+            ),
             "counterparty_public_personality": public_personality_phrase(other),
             "viewer_public_personality": public_personality_phrase(viewer),
             "viewer_text": fallback["viewer_text"],
@@ -419,15 +457,22 @@ def _safe_bound_v4_entry(
         text = short_public_text(entry.get("viewer_text"), 220)
         if not text:
             return ""
+        # A topic belongs to the requester.  Old cards may contain the other
+        # person's unrelated durable context or an LLM-invented interest claim;
+        # neither is authorized evidence for a topic invitation.
+        stale_context = short_public_text(
+            entry.get("counterparty_context_snapshot"), 56,
+        )
+        if contains_unverified_topic_claim(text) or (
+            stale_context and stale_context in text
+        ):
+            return ""
         is_question = text.endswith(("？", "?"))
         if not allow_topic_statement and not is_question:
             return ""
         validation_text = text if is_question else f"{text}你有興趣嗎？"
         if valid_friend_intro_text(
             validation_text,
-            required_context=short_public_text(
-                entry.get("counterparty_context_snapshot"), 56,
-            ),
             role_bound=True,
         ):
             return text
@@ -491,10 +536,37 @@ def reason_for_viewer(match_doc: dict, user_id: str) -> str:
         if text:
             return text
         fallback = build_v4_snapshot_fallback(match_doc)
-        return _safe_bound_v4_entry(
+        text = _safe_bound_v4_entry(
             fallback.get(role_key), user_id, other_id,
             allow_topic_statement=allow_topic_statement,
         ) if fallback else ""
+        if text:
+            return text
+        # A live V4 proposal may have been written by an older worker before
+        # the immutable snapshot was added.  Preserve the role binding and
+        # return a complete, privacy-safe minimum introduction instead of the
+        # title-only/empty card that older readers produced.
+        viewer = {"user_id": user_id}
+        other = {"user_id": other_id}
+        minimum = friend_intro_fallback(
+            viewer, other,
+            str(match_doc.get("recommendation_tier") or "exploratory"),
+            style_id="warm_intro",
+        )
+        if role_key == "receiver_invitation":
+            minimum["viewer_text"] = "有位朋友想和你認識看看；你願意先認識對方嗎？"
+        else:
+            minimum["viewer_text"] = "我想到一位可以先認識看看的人；你會想先認識對方嗎？"
+        return _safe_bound_v4_entry(
+            {
+                "viewer_id": user_id,
+                "counterparty_id": other_id,
+                **minimum,
+            },
+            user_id,
+            other_id,
+            allow_topic_statement=allow_topic_statement,
+        ) or "我想到一位可以先認識看看的人；你願意先認識對方嗎？"
 
     entries = match_doc.get("directional_reason_v3") or []
     if isinstance(entries, list):

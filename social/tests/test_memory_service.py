@@ -25,7 +25,8 @@ class MemoryServiceTests(unittest.TestCase):
     def test_sync_clears_stale_preview_when_graph_is_available_and_empty(self):
         with patch("services.memory_service.get_graph_memory_snapshot", return_value={
             "available": True, "items": [], "error_code": None,
-        }), patch("services.memory_service.profiles_coll.update_one") as update:
+        }), patch("services.memory_service.profiles_coll.find_one", return_value={"user_id": "owner"}), \
+                patch("services.memory_service.profiles_coll.update_one") as update:
             result = _sync_memory_projection("owner", [{"key": "stale", "label": "舊記憶"}])
         self.assertEqual(result, [])
         self.assertEqual(update.call_args.args[1]["$set"]["profile_memory_preview"], [])

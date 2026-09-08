@@ -62,7 +62,7 @@ def test_list_separates_collection_query_and_limit_cache_keys(monkeypatch):
 
 def test_list_refetches_after_ttl_expires(monkeypatch):
     calls = []
-    ticks = iter([100.0, 104.0, 106.0])
+    ticks = iter([100.0, 100.0, 104.0, 106.0, 106.0])
 
     def fake_fetch(collection_id, queries=None, limit=100):
         calls.append(collection_id)
@@ -79,6 +79,7 @@ def test_list_refetches_after_ttl_expires(monkeypatch):
 
 
 def test_empty_fetch_result_is_not_cached(monkeypatch):
+    """A successful empty collection is cached; an error is a separate result."""
     calls = []
 
     def fake_fetch(collection_id, queries=None, limit=100):
@@ -89,7 +90,7 @@ def test_empty_fetch_result_is_not_cached(monkeypatch):
 
     assert KBService._list("kb_rules") == []
     assert KBService._list("kb_rules") == []
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
 def test_clear_cache_forces_next_request_to_refetch(monkeypatch):
@@ -137,7 +138,8 @@ def test_fetch_uses_query_pagination_and_reads_beyond_appwrite_default_25(
         def json(self):
             return {"total": 27, "documents": self._documents}
 
-    def fake_get(url, *, headers, params, verify):
+    def fake_get(url, *, headers, params, verify, timeout):
+        assert timeout == (3.0, 5.0)
         decoded = [json.loads(value) for key, value in params if key == "queries[]"]
         offset = next(
             query["values"][0]

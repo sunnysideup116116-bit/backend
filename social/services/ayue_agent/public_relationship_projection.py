@@ -77,12 +77,13 @@ def anonymize_counterparty_payload(
     return value
 
 
-def display_name(user_id: str | None) -> str:
+def display_name(user_id: str | None, *, profile: dict[str, Any] | None = None) -> str:
     if not user_id:
         return "對方"
-    profile = profiles_coll.find_one(
-        {"user_id": user_id}, {"_id": 0, "display_name": 1, "nickname": 1, "name": 1},
-    ) or {}
+    if profile is None:
+        profile = profiles_coll.find_one(
+            {"user_id": user_id}, {"_id": 0, "display_name": 1, "nickname": 1, "name": 1},
+        ) or {}
     value = str(profile.get("display_name") or profile.get("nickname") or profile.get("name") or "").strip()
     if not value or value == user_id or value.startswith(("seed_user_", "demo_user", "user_")):
         return "對方"

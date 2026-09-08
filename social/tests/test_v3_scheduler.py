@@ -36,7 +36,8 @@ from services.ayue_agent.v3.scheduler import (
     _direct_chat_block_reason, _planner_failure_reply,
     _dependency_completed, _ensure_place_hours_fallback,
     _prior_observations_for, _public_place_cards,
-    _resolve_presentation_blocks, _server_ordered_place_messages,
+    _resolve_presentation_blocks, _restore_snapshot_candidate_labels,
+    _server_ordered_place_messages,
     _strip_model_place_list_lines,
     _condition_skip_reason, _run_registered_places, _topological_layers,
     run_public_agent_turn_v3,
@@ -386,9 +387,9 @@ class V3SchedulerTests(unittest.TestCase):
             ), "pending_confirmation")
             self.assertEqual(_direct_chat_block_reason(
                 plan, turn, [], {"fingerprint": "fp"}), "active_match_guidance")
-            self.assertEqual(_direct_chat_block_reason(
+            self.assertIsNone(_direct_chat_block_reason(
                 plan, turn.model_copy(update={"active_proposal": {"status": "pending"}}), [], None,
-            ), "active_match_proposal")
+            ))
 
     def test_assessment_start_wording_only_confirms_assessment_pending(self):
         self.assertTrue(_assessment_start_confirmation_requested(
@@ -821,8 +822,8 @@ class V3SchedulerTests(unittest.TestCase):
         ) as persist:
             result = run_public_agent_turn_v3(ctx)
 
-        self.assertIn("了解配對方式", result.reply)
-        self.assertNotIn("沒接好", result.reply)
+        self.assertNotIn("了解配對方式", result.reply)
+        self.assertIn("沒有執行任何操作", result.reply)
         trace = persist.call_args.args[2]
         self.assertEqual(trace["planner_failure"]["attempts"][0]["validation_fields"], ["write_intent"])
         self.assertNotIn("raw_content", trace["planner_failure"]["attempts"][0])
@@ -2593,13 +2594,26 @@ class V3SchedulerWriteTests(unittest.TestCase):
                 {"reference": "place_ref_b", "ordinal": 2, "label": "店 B", "address_summary": "乙地址"},
             ],
         }
-        messages = ["推薦地點：\n1. 店 B\n2. 店 A\n\n我比較推薦店 B。"]
+        messages = ["推薦地點：\n1. 店 B：適合聊天\n2. 店 A：距離較近\n\n我比較推薦店 B。"]
         rendered = _server_ordered_place_messages(messages, snapshot)
         self.assertEqual(len(rendered), 1)
         self.assertEqual(
             rendered[0],
-            "推薦地點：\n1. 店 A（甲地址）\n2. 店 B（乙地址）\n\n我比較推薦店 B。",
+            "1. 店 A：距離較近\n2. 店 B：適合聊天\n\n我比較推薦店 B。",
         )
+
+    def test_final_normalization_restores_provider_place_labels(self):
+        snapshot = {"candidates": [
+            {"ordinal": 1, "label": "雪波喫茶"},
+            {"ordinal": 2, "label": "Tu酥館台式炸雞鹽埕店"},
+        ]}
+        normalized = "1. 雪波吃茶\n2. Tu酥館臺式炸雞鹽埕店"
+        restored = _restore_snapshot_candidate_labels(normalized, snapshot)
+        self.assertEqual(restored, "1. 雪波喫茶\n2. Tu酥館台式炸雞鹽埕店")
+        detail = _restore_snapshot_candidate_labels(
+            "雪波吃茶這間適合喝茶。", None, extra_labels=["雪波喫茶"],
+        )
+        self.assertEqual(detail, "雪波喫茶這間適合喝茶。")
 
     def test_scheduler_sanitizer_uses_main_name_alias_and_preserves_prose(self):
         sanitized = _strip_model_place_list_lines(

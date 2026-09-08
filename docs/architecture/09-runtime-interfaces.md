@@ -4,6 +4,14 @@
 
 ## 1. 版本名稱先分清楚
 
+### Match 搜尋語意與授權（2026-09-08）
+
+- Planner 的 Match search task 使用 optional `match_search_request`：`kind=general|activity`、`topic`、`invitation_evidence`。這是語意資料，不是 tool arguments 或寫入權限；Match runtime 仍先經既有 Guard。
+- Runtime 將語意交給 `prepare_write_confirmation`。general 清除活動提示；activity 的 topic 必須是本回合 owner 訊息原文，否則澄清且不建確認。沒有語意欄位的 runtime task 安全降為一般搜尋，不回撈舊活動。
+- 一般搜尋和活動伴預設 preview；只有 activity 帶可驗證的本句代送原文，才在 visible preview 明示「開始找並送出邀請」。使用者確認且 preview 已保存後才執行。`delivery_mode` 不再由 topic 存在與否自動授權。
+- 既有 job 的 CAS／idempotency 不變；已送出的邀請不因部署被撤回或倒退。聊天歷史讀取需保留內部 `payload.delivery_mode` 供按鈕標籤投影，public choice 不輸出 payload／evidence。
+- Topic 理由保留公開性格說明或明示缺少共同活動依據；不引用無關近況、私人偏好、不把主題當對方興趣。LLM 改寫邀請文字也不得移除 deterministic 推薦說明。
+
 - **Public V3**：目前唯一公開阿月 runtime 架構。
 - **Private V2**：目前仍在使用的阿月悄悄話 runtime，不是 Public 的 fallback，也不是待移植的舊 Public 架構。
 - `public-v1`、`web_research.v1`、`product_info.v1`、`TurnClockV1`：typed payload 的 schema version；它們不是 Public V1 runtime。
@@ -39,6 +47,14 @@ Final response 使用 `AgentResult`：
 
 ### 2.1 Match / Event HTTP projection
 
+每週 Event 工作以 `event_weekly_runs`／`event_weekly_users` 保存 stage 與逐人進度，三張限制是每批上限。
+`event_delivery_service` 可在使用者離線時沿用現有 Match Hub card projection 冪等保存提案；draft 僅發起者可收到，
+pending 才投遞接收者。投遞收據僅為 server-side metadata，不增加 prompt／public stream 的識別碼權限。
+API 的 completed／outcome 仍描述工作結果，不代表手機已收推播或使用者已接受。
+`GET /api/match/events/discover/status` 的 optional `weekly_progress` 僅含 population_ready、
+population/processed/pending/failed_user_count、created_proposal_count、saved_card_count 與 pending_delivery_count。
+舊週期沒有持久明細時 status=not_recorded、讀取失敗時 unavailable，不以 0 假裝完整統計。
+
 `routers/match.py` 是 App 的 HTTP adapter，不是另一個狀態轉移 owner：
 
 - `POST /api/match/decision` 保留 `expected_status`、`expected_revision` 與 optional `proposal_namespace`，寫入仍只經 match action/decision services。只有成功接受、重新讀到 canonical `accepted` 且 caller 為 participant 時，回傳 optional `other_id` 供 App 導航；`pending/declined/expired` 或 409 不回傳聊天對象身份。
@@ -55,6 +71,13 @@ Final response 使用 `AgentResult`：
 以上是 HTTP/UI 的 additive projection，不擴張 Planner、ToolSpec、Context slice 或 Public stream 的 identifier 權限。
 
 ## 3. Context interface
+
+2026-09-08：HTTP 層透過 memory service 在組 Public request context 前刷新過期的 owner memory cache；
+Context Builder 維持 read-only，relevant_memories 僅含最多 8 筆帶 like/dislike/avoid/require 方向的安全文字。
+短期 want 不進長期偏好。Public Planner 的 user_preferences 只接受這個封閉帶方向格式，供 direct_chat 尊重偏好；
+未帶方向的 legacy strings 不加入 Planner。Synthesizer、Profile 和 Relationship 接收同一份 bounded wording。
+memory API 可選 durable_only（預設 false），供 Social projection 排除 CURRENTLY_WANTS；日期過期的 want 不回傳。
+owner memory cache 具有 300 秒 TTL、失敗退避及 mutation revision CAS；這些 metadata 不進 model prompt。
 
 HTTP 層先組 `AgentTurnContext`；`services/ayue_agent/context.py` 再建立唯一 prompt-safe `PublicAgentTurnContext`。
 
@@ -109,6 +132,8 @@ mode=tasks
   恰好 1 個 terminal synthesizer
 ```
 
+Date-card write 需恰好一個 root Relationship write task 和 terminal Synthesizer。同回合其他 siblings 只能是 typed read-only：Places、Web、ProductInfo、`calendar.availability.v1` 或 Match `status|counterparty|clarify`。其他 Relationship、Profile、Calendar mutation 與 Match write 均拒絕，全回合仍最多一筆 pending side effect。
+
 `SubTask` contract：
 
 ```json
@@ -140,7 +165,7 @@ Provider 輸出的 `mode="tasks"` 必須包含至少一個 domain task，除非�
 
 ### 4.1 Provider compatibility boundary
 
-Planner 在 canonical validation 前先複製 provider arguments，且只處理 allowlisted drift：known agent 上錯置但值合法的 `evidence_policy`／Calendar availability `outcome_contract`、精確空 optional placeholder、known Relationship task 將精確 `relationship.date_invitation.v1` 放到 `outcome_contract` 的單一 relocation case，以及 provider 把字串型 `match_intent`／`outcome_contract` 誤放在明確非 Match／非 Calendar task 時移除該無權欄位。最後一種相容處理不會替 task 取得 Match 或 Calendar authority；object/list 等畸形值仍 fail closed。其他 agent/value、衝突 root intent、unknown agent、`depends_on`／`run_if` drift 與 DAG invariant 不修復。成功修復不消耗 retry，只把 bounded repair code 投影到 localhost ephemeral debug；normalized payload、owner text 與 raw exception 不進 durable trace 或 public events。
+Planner 在 canonical validation 前先複製 provider arguments，且只處理 allowlisted drift：known agent 上錯置但值合法的 scoped fields、精確空 optional placeholder、date intent relocation、呈現模式降級，以及 Server 已唯一解析地點時 Places `details|reviews` task 上錯置的字串／空 `place_reference`。模型提供的 reference 永遠不採信；Scheduler 與 Places runtime 使用 owner+room snapshot 的解析結果。其他 agent、容器型 reference、衝突 intent、unknown agent、控制邊與 DAG invariant 不修復。成功修復不消耗 retry，只記 bounded repair code。
 
 ## 5. Runtime registration interface
 
@@ -186,9 +211,7 @@ loop (at most three reads and four Relationship model calls), returning a typed
 scoped to the saved owner message that started the run, and revalidated against
 accepted relationships for every follow-up. In ordinary
 lookup mode it returns READ proposals; only a validated date-card `write_intent`
-switches it to the single confirmed WRITE proposal surface. Match owns the singleton pending/live
-proposal status, counterparty summary, and start/retry/decision flow; an accepted
-contact is not an active proposal. A current Match observation never supplies
+switches it to the single confirmed WRITE proposal surface. Match owns search, the multi-card pending/live inbox and bounded counterparty summary; proposal decisions belong to the Hub HTTP surface. An accepted contact is not an active proposal. A current Match observation never supplies
 aggregate accepted-contact count or roster authority.
 
 Successful public replies keep the recommendation envelope in the room-scoped
@@ -198,14 +221,16 @@ after the assistant message is saved; a later reason/revision question reads a
 safe projection and starts a fresh Relationship review, never treating an old
 assistant sentence as new evidence.
 
-The Planner-facing `SubTask.agent` schema describes this as an aggregate-versus-
-singleton boundary. Colloquial questions such as 「我目前配對到哪些人」、
+The Planner-facing `SubTask.agent` schema describes this as a search/invitation versus accepted-contact aggregate boundary. Colloquial questions such as 「我目前配對到哪些人」、
 「我現在有配到誰」 or 「總共幾位」 require Relationship even though
-they contain 「目前」 or 「配對」. Match is reserved for the one active
-proposal/search lifecycle. This is semantic Planner ownership; Scheduler does
+they contain 「目前」 or 「配對」. Match is reserved for search and invitation-inbox lifecycle. This is semantic Planner ownership; Scheduler does
 not add a keyword or regex rerouter.
 
 ## 6. Tool and Guard interface
+
+`memory.search_my_profile` 沿用原 capability，新增 optional query（最多 120 字，預設空）；argument schema 不接受 user_id。
+輸出保留 summary/current_context/preferences，新增 status=available|unavailable、source=graph|cache、truncated。
+preferences 僅含帶方向文字，Graph 查詢在 LIMIT 前以 owner/durable/query 限制，不能從未命中或 unavailable 推論沒有記憶。
 
 每個公開能力都必須先有 `ToolSpec`：
 
@@ -248,7 +273,7 @@ Calendar 的唯一公開 mutation capability 是 `calendar.submit_commands`。Ca
 
 ### 7.1 Relationship date-card write
 
-`relationship.start_date_coordination` 是 Relationship-owned confirmed write。它只在 provider-required `write_intent="relationship.date_invitation.v1"` 通過 exact `relationship -> synthesizer` DAG 驗證後可見；Match 不是合法 precheck。Scheduler 只透過 task-bound `GuardedReadExecutor.runtime_state["planner_write_intent"]` 傳遞這個 server-only ephemeral intent，不把它放進 prompt、trace 或 public event。
+`relationship.start_date_coordination` 是 Relationship-owned confirmed write。它只在 provider-required `write_intent="relationship.date_invitation.v1"` 與唯一 Relationship write task 驗證後可見；Match 不是合法 contact precheck。可與上述 typed read-only siblings 同回合執行，但只有 Relationship task 看得到 date-card write function。Scheduler 透過 task-bound `runtime_state["planner_write_intent"]` 傳遞 server-only intent，不把它放進 prompt、trace 或 public event。
 
 Date-card 模式只暴露這一個 function，最多兩次 provider attempt，只接受一個 grounded target proposal。Target 來源限 validated mention、current-message 的連續 name evidence span，或同 owner 15 分鐘 recent-contact reference；server 只在 accepted contacts 中做 bounded unique resolution。模糊、未知、過期或非 accepted 都 fail closed。Pending preview 不含模型提供的 ID／revision；確認後由 canonical `date_coordination_service.create_invite` 建立空白卡片，雙方之後自行填寫細節。
 
@@ -280,9 +305,15 @@ degradation paths and must not run before normal composition or discard
 successful sibling-domain observations.
 
 For ordinary Places/Places+Web recommendations, the active compose contract
-contains only `messages: list[str]`, `presentation_class`, `card_intent`,
+contains `messages: list[str]`, optional `opening` / `closing`, `presentation_class`, `card_intent`,
 `selected_candidate_refs`, `recommended_candidate_refs`, and
-`discussed_candidate_refs`. Model-authored `blocks` and `card_mode` are not
+`discussed_candidate_refs`, plus `presented_candidates` and
+`candidate_introductions[{candidate_ref, description}]`. For a multi-place
+discover reply, `messages` is empty; `opening` / `closing` own the free prose while introductions bind each
+grounded explanation to a server-supplied candidate ref. A bounded provider compatibility adapter accepts string introductions only when an equal-length, contiguous `presented_candidates` list supplies the exact refs; otherwise it fails closed. The server applies
+the trusted candidate set/order once, keeps one numbered list without a
+mandatory heading, and falls back to the trusted name/objective detail when an
+introduction is omitted. Legacy list-shaped messages are recognized only for bounded recovery; normalized aliases such as `喫/吃` and `台/臺` are matched, then the provider label is restored. Model-authored `blocks` and `card_mode` are not
 part of this ordinary schema. The server derives `card_mode` from
 `card_intent` and validated refs, then emits the card-only presentation
 projection from its own candidate catalog. A legacy top-level `blocks` field
@@ -290,7 +321,8 @@ may be discarded for compatibility, but its nested shape is never used as an
 ordinary card binding. Itinerary uses the same ordinary compose contract as
 other presentation modes; `presentation_mode="itinerary"` is only an editorial
 hint and does not require a block-based rendering schema. Selected refs are
-the only model-to-server binding for optional cards; map URLs and other card
+the only model-to-server binding for optional cards; candidate introductions
+bind prose only and never grant card or write authority. Map URLs and other card
 fields remain server-owned. `messages` are public reply strings, not chat
 transcript objects. A narrow compatibility adapter may retain only bounded
 `role="assistant"` string content from an older provider shape;
@@ -342,6 +374,8 @@ composes the remaining observations, and appends the locked reply afterward.
 Unknown list items remain in the cloned observation; arbitrary observation
 `message` fields never become server-owned replies.
 
+Cards-off place discovery 仍發布一份 server-ordered 編號清單供後續 ordinal 解析，但不強制標題。Candidate rows 保留模型的 grounded 逐店介紹，依可信店名重排後只呈現一次；單一候選不強制編號。
+
 `AYUE_V3_WEB_PLACE_BOOTSTRAP_FAST_PATH` is an opt-in latency optimization for
 `casual_discovery` Places -> Web turns. If enabled, Web performs at most two
 server-anchored candidate searches through `GuardedReadExecutor` before its
@@ -356,6 +390,7 @@ Places tool arguments remain authority-free and optional: `enrichments=[]`
 defaults to no expensive Google fields; `search_nearby` supports `rating`,
 `hours`, `price`, and `walking`, while `resolve_place` supports `rating`,
 `hours`, and `price`.
+`search_nearby.exclude_previously_presented=true` 只用於模型判斷的換批延續。Places executor 讀同 room 已發布的同類候選 identity，最多要求十筆 provider candidates，先排除舊 identity，再套公開數量上限；模型看不到 provider IDs。
 The executor normalizes/deduplicates these enums before cache keys and provider
 calls. The typed place projection may include rating/count, bounded current
 opening-hours data, validated price level/range endpoints, and per-candidate

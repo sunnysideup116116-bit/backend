@@ -96,9 +96,6 @@ def test_contacts_hide_blocked_relationships_from_both_directions():
         {"from_user": "alice", "to_user": "bob", "status": "accepted"},
         {"from_user": "alice", "to_user": "carol", "status": "accepted"},
     ]
-    message_cursor = MagicMock()
-    message_cursor.sort.return_value = []
-
     def profile(query, *_):
         user_id = query.get("user_id")
         return {"user_id": user_id, "current_context": "context"}
@@ -113,16 +110,16 @@ def test_contacts_hide_blocked_relationships_from_both_directions():
         return_value=accepted,
     ), patch.object(
         chat_messages.messages_coll,
+        "aggregate",
+        return_value=[],
+    ), patch.object(
+        chat_messages.profiles_coll,
         "find",
-        return_value=message_cursor,
+        return_value=[{"user_id": "carol", "name": "Carol", "current_context": "context"}],
     ), patch.object(
         chat_messages.profiles_coll,
         "find_one",
         side_effect=profile,
-    ), patch.object(
-        chat_messages,
-        "mentioned_contact_refs",
-        side_effect=lambda _, ids: [{"display_name": ids[0]}],
     ):
         response = chat_messages.get_contacts("alice")
 

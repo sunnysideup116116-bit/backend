@@ -17,7 +17,8 @@ _SYSTEM = """你是公開阿月的關係子代理，負責已接受／已建立�
 - review 代表使用者質疑上一個推薦或要求換人；重新核對當前活動與推薦依據，不要替上一句硬辯。
 - relationship.list_accepted_contacts 是 bounded list。若 observation 的 truncated=true，total_count 有值時可以回答精確總數；但只能說返回清單中的比較或推薦，不能聲稱某人是所有已接受聯絡人中的最佳人選。
 - 只有詢問 pending proposal 是否接受、目前配對進度，或明確開始／重新搜尋時，才交給 Match Agent。
-- accepted contact 有公開名稱時，交給 Synthesizer 使用該名稱；不要自行把 accepted contact 改稱為模糊的「對方」。"""
+- accepted contact 有公開名稱時，交給 Synthesizer 使用該名稱；不要自行把 accepted contact 改稱為模糊的「對方」。
+- 約會卡的建立與取消是兩個獨立 workflow；取消可使用 server 提供的 recent_action_reference、明確名字／@ 對象或 Hub 指定卡片。若沒有 reference、名字或 @，只有一張有效約會卡時選 `summary_singleton`；零張或多張時不要猜。不要把約會卡當成 Match 邀請。"""
 _READ_TOOLS = frozenset({
     "relationship.get_verified_evidence",
     "relationship.get_mentioned_contact_summary",
@@ -28,6 +29,7 @@ _RECOMMENDATION_TOOLS = frozenset({
     "relationship.get_contact_evidence",
 })
 _DATE_INVITATION_TOOL = "relationship.start_date_coordination"
+_DATE_COORDINATION_CANCEL_TOOL = "relationship.cancel_date_coordination"
 _DATE_INVITATION_SYSTEM = """你是公開阿月的 Relationship write specialist。
 這是已由 Planner 確認的空白約會邀請卡建立任務。只可呼叫
 `relationship.start_date_coordination` 一次，不可先查聯絡人清單。
@@ -40,6 +42,21 @@ _DATE_INVITATION_RETRY_HINT = (
     "Protocol correction: call relationship.start_date_coordination exactly once "
     "with one grounded target reference. Do not call a read function, emit multiple "
     "calls, or output ordinary text."
+)
+_DATE_COORDINATION_CANCEL_SYSTEM = """你是公開阿月的 Relationship date-card cancellation specialist。
+這是已由 Planner 確認的約會卡取消任務。只可呼叫
+`relationship.cancel_date_coordination` 一次，不可先查聯絡人或 Match 狀態。
+若 current message 明確 @ 一位對象，選 `mention`；若 current message 明確寫出
+對象名字，選 `name` 並把連續原文名字放進 `target_evidence_span`；若使用者說
+「可以取消嗎」且 context 有 recent_action_reference，選 `recent_action`；若使用者
+從 Hub 指定了卡片，選 `focused_card`；若沒有上述指涉且
+`date_coordination_summary.count=1`，選 `summary_singleton`。不要填入 ID、status 或 revision；無法安全
+判斷時不要猜。
+"""
+_DATE_COORDINATION_CANCEL_RETRY_HINT = (
+    "Protocol correction: call relationship.cancel_date_coordination exactly once with one "
+    "grounded target_source (recent_action, mention, name, focused_card, or summary_singleton). Do not call a "
+    "read function, emit multiple calls, or output ordinary text."
 )
 
 
@@ -170,5 +187,18 @@ def run_date_invitation(
         context_slice=context_slice,
         task_brief=task_brief,
         retry_hint=_DATE_INVITATION_RETRY_HINT,
+        max_attempts=2,
+    )
+
+
+def run_date_coordination_cancel(
+    context_slice: AgentContextSlice, *, task_brief: str,
+) -> tuple[list, SubAgentMetrics]:
+    return run_required_sub_agent(
+        tool_name=_DATE_COORDINATION_CANCEL_TOOL,
+        system_line=_DATE_COORDINATION_CANCEL_SYSTEM,
+        context_slice=context_slice,
+        task_brief=task_brief,
+        retry_hint=_DATE_COORDINATION_CANCEL_RETRY_HINT,
         max_attempts=2,
     )

@@ -146,10 +146,14 @@ def wait_for_event_relevance() -> dict[str, Any]:
 
 def run_weekly_event_cycle(
     *, region: str, window_days: int, categories: list[str],
-    stage_callback=None,
+    stage_callback=None, run_id: str = "", is_current=None,
 ) -> dict[str, Any]:
     """Run reset -> discovery -> opportunity scan as one worker-owned job."""
     notify = stage_callback or (lambda _stage: None)
+    if run_id:
+        from services.event_weekly_service import run_durable_cycle
+        return run_durable_cycle(run_id, is_current or (lambda: True), notify,
+                                 region=region, window_days=window_days, categories=categories)
     notify("resetting")
     reset_result = reset_event_inventory()
 

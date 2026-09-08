@@ -46,6 +46,10 @@ The website uses a 120-second request timeout. Flutter should use the same initi
 - When place cards are disabled, incomplete, or unsupported, the text/Markdown answer remains complete.
 - Remote image failure shows a neutral placeholder and never removes the surrounding message.
 
+## Memory display
+
+The memory page renders prefer for like/require and avoid for dislike/avoid. Concept.kind (interest/activity/partner_trait etc.) is a separate backend classification, not a third direction. Missing direction is not guessed. Backend cache is bounded and topic retrieval may return truncated/unavailable; the UI must not claim a complete list or successful Graph write from a match decision alone.
+
 ## Assessment controls
 
 `active` means answers continue in chat. `awaiting_commit` means a completed draft exists but has not replaced the prior profile. Exiting uses the narrow typed cancel action; Flutter must not translate arbitrary button labels into agent commands. A completed profile is updated only after the separate server confirmation flow.
@@ -60,7 +64,9 @@ The website maps durable search steps into a single collapsible in-chat card. Fl
 
 A concurrent recent-context revision change does not immediately erase the card: the worker atomically requeues the same job once at `loading_profile`, so the public state remains queued/running and the next attempt uses the latest profile snapshot. A second mismatch is terminal and produces a visible `match_search_failed` message. The client must not treat `stale` as a successful or still-running search, but the backend must never leave it as a silent outcome.
 
-General relationship matching and Event invitations occupy independent live slots: `relationship_match` and `event_invitation`. Hydrating one namespace must not hide, overwrite, or terminate the other. The compatibility `active_proposal_card` alias represents only the relationship slot; new clients use `active_proposals` or the card's `proposal_namespace`.
+General relationship matching and Event invitations use separate namespace/quota policies. The Hub can show multiple person/topic/event cards; one job yields at most one new proposal, not one proposal per account. Hydrating one namespace must not hide another. New clients use canonical `hub_cards` and each card's namespace; singleton aliases are compatibility only.
+
+General acquaintance and activity-companion searches default to preview-before-invitation. Only an explicit, grounded request to send after finding someone exposes the search-and-invite confirmation. Reloaded choice labels derive from the saved delivery_mode, not reply text. The source chat shows progress and the Hub entry; decisions are on Hub cards.
 
 ## Match proposal decision
 
@@ -75,7 +81,7 @@ The initiator's pending cancellation maps to action `cancel`; receiver rejection
 
 The proposal introduction may display the viewer-bound `counterparty_nickname` before the anonymous reason. It is UI-only public profile data: never parse it as Markdown, feed it back into model context, expose an account ID as a fallback, or use it to generate decline reasons. Event cards additionally retain the bounded public Event snapshot, `chat_reused`, date precision, safe source URL, and up to eight sessions across history/cache hydration.
 
-Decline is explicitly split into **decline without recording** and **record selected reasons and decline**. Only the latter sends the server-provided, viewer-bound `decline_reason_options` as `explicit_reasons`; dismissing the dialog leaves the card unchanged. The client must not infer reasons from private profile data or claim that Neo4j succeeded merely because the match transition succeeded.
+Hub's “先不用” opens the existing optional-reason dialog before a decision request. “先不拒絕” cancels without a request. Decline is explicitly split into **decline without recording** and **record selected reasons and decline**. Only the latter sends the server-provided, viewer-bound `decline_reason_options` as `explicit_reasons`; dismissing the dialog leaves the card unchanged. The client must not infer reasons from private profile data or claim that Neo4j succeeded merely because the match transition succeeded.
 
 After both parties accept an Event invitation, the canonical pair room displays one idempotent `event_invitation_accepted` system card containing the public activity introduction, including when the pair already had a chat. Historical/cache loading suppresses only the obsolete, namespace-less `incoming_match_intro` mediator card that previously produced a duplicate reason-less proposal; it must not suppress ordinary text prefaces or the actionable namespaced proposal.
 

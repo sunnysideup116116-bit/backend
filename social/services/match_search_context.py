@@ -111,7 +111,7 @@ def extract_invitation_topic(value: Any) -> str:
         r"(?P<topic>[^。！？!?，,；;]{1,60}?)(?:的人|的對象|的伴|的朋友|的)$",
         # ``幫我找一個也會衝浪的人`` / ``想配到會衝浪的人``
         r"(?:幫我\s*)?(?:想\s*)?(?:找|配到|配對到|配對|介紹)(?:一個|一位|個|位)?"
-        r"(?P<topic>(?:(?:也?會|能|可以|懂得|有)\s*)?[^。！？!?，,]{1,60}?)"
+        r"(?P<topic>(?:也?會|懂得)\s*[^。！？!?，,]{1,60}?)"
         r"(?:的人|的對象|的伴|的朋友)",
         # ``我要找對攝影有興趣的人``.  This pattern is intentionally before
         # the broader together/陪伴 pattern so ``對…有興趣`` is normalized to
@@ -120,6 +120,13 @@ def extract_invitation_topic(value: Any) -> str:
         r"(?:有興趣|感興趣|有點興趣)(?:的人|的對象|的伴|的朋友)?",
         r"(?:找人|找個人|找一位|找個對象|想找|想要找|我要找)"
         r"[^。！？!?，,]{0,24}?(?:一起|陪我)(?P<topic>[^。！？!?，,]{1,80})",
+        # ``找人去吃生魚片`` / ``幫我找個人去看電影`` describe the
+        # requested activity even without the literal word ``一起``.  Stop
+        # before a trailing request to invite/contact the person so that text
+        # such as ``叫它幫我邀請`` never becomes part of the topic label.
+        r"(?:找人|找個人|找一位|找個對象)\s*(?:一起\s*|去\s*)?"
+        r"(?P<topic>(?:吃|喝|看|逛|玩|參加|學|練|爬|走)[^。！？!?，,]{1,60}?)"
+        r"(?=(?:叫|請|讓)(?:阿月|它|他|她|你)?幫我(?:邀請|問問|牽線)|[。！？!?，,]|$)",
         r"(?:一起|陪我)(?P<topic>[^。！？!?，,]{1,80})",
         r"(?:想|要)(?:去|做|玩|看|逛|參加|學|練)(?P<topic>[^。！？!?，,]{1,80})",
         # A short follow-up such as ``是對攝影有興趣的`` commonly arrives

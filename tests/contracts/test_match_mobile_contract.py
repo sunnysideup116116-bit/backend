@@ -77,7 +77,8 @@ class MatchMobileContractTests(unittest.TestCase):
         end = source.index("async function cancelPendingMatch", start)
         decision_source = source[start:end]
         self.assertIn("expected_status: expectedStatus", decision_source)
-        self.assertNotIn("expected_revision", decision_source)
+        self.assertIn("expectedRevision = null", decision_source)
+        self.assertIn("expected_revision: expectedRevision", decision_source)
         self.assertIn("res.status === 409", decision_source)
         self.assertIn("refreshMatchStatus", decision_source)
 

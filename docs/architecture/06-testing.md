@@ -4,14 +4,16 @@
 
 ## 1. 基本指令
 
-在 `social/` 下執行：
+在 Server 根目錄使用已安裝 requirements-test 的 Python：
 
-```powershell
-$env:AYUE_SKIP_DOTENV = "1"
-$env:MONGO_URI = "mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=50&connectTimeoutMS=50"
-..\.project-venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
-..\.project-venv\Scripts\python.exe -m compileall -q .
+```bash
+venv/bin/python scripts/run_offline_tests.py social
+venv/bin/python scripts/run_offline_tests.py matchmaker
+venv/bin/python scripts/run_offline_tests.py contracts
+bash -n start_all.sh
 ```
+
+Windows 可將 Python 路徑換成 `.project-venv\\Scripts\\python.exe`。runner 使用 pytest，停用 dotenv 並封鎖外部 network/DNS；只用 unittest discover 會漏掉 pytest function/fixture 測試，不可當完整驗證。
 
 列出目前測試：
 
@@ -41,7 +43,7 @@ rg --files tests -g "test_*.py" | Sort-Object
 
 ## 3. Domain 與 API
 
-- 配對／Event：`test_match_*`、`test_event_*`、`test_inline_match_proposals.py`、`test_proposal_nickname.py`、`test_accepted_match_integrity.py`，覆蓋 qualification、job、一般／Event 獨立 slot、同頁 progress、viewer hydration、directional reason、暱稱、婉拒選項、CAS／stale／終態、既有聊天重用與單一 Event 開場卡。
+- 配對／Event：`test_match_*`、`test_event_*`、`test_inline_match_proposals.py`、`test_proposal_nickname.py`、`test_accepted_match_integrity.py`，覆蓋 qualification、job、一般／Event 名額分離與 Hub 多卡片、同頁 progress、viewer hydration、directional reason、暱稱、婉拒選項、CAS／stale／終態、既有聊天重用與單一 Event 開場卡。
 - 行事曆／共同約會：`test_calendar_*`、`test_date_coordination_service.py`、`test_private_calendar.py`。
 - Profile／Memory：`test_profile_*`、`test_memory_service.py`、`test_memory_outbox_service.py`、`test_conversation_compaction_service.py`、`test_assessment_session_service.py`，特別驗證 owner evidence span、message-id idempotency、bounded retry、relation-preserving restore，以及 legacy／新版 owner room 的 watermark 與 continuity gate。
 - Private Ayue：`test_private_v2.py`、`test_private_context_projection.py`、`test_private_mediator_extraction.py`、`test_private_redirect.py`、`test_semantic_plan_service_fixes.py`；覆蓋 relationship semantic projection、600 字元單位更新門檻與 raw Graph 欄位隔離，且不得和 Public V3 混用 context 或 runtime。
@@ -70,7 +72,14 @@ rg --files tests -g "test_*.py" | Sort-Object
 
 新增 fallback、result code 或 trace 欄位時，必須同步更新 allowlist 與 privacy test。修真實失敗案例時，先把案例匿名化加入 trajectory fixture，再修 contract、projection 或 prompt；不要新增自然語言 keyword router。
 
-## 5. 交付檢查
+## 5. 最近驗證快照（2026-09-08，非永久保證）
+
+- 完整 Social：1773 passed、4 skipped、133 subtests；後續本輪只改 Markdown。
+- Flutter Hub／拒絕原因：63 passed；另外卡片暱稱／即時狀態組曾 65 passed，兩組有重疊，不可相加當成獨立測試總數。
+- Matchmaker：23 點後全套 75 passed、1 failed；期限測試 fixture 的一小時區間跨日卻只有第一天 evidence，先被 date_evidence_mismatch 擋下。固定白天時間重跑該項通過；未改生產程式或隱藏此失敗。
+- 使用者已確認最後配對／拒絕畫面正常；未涵蓋的故障注入及未來排程不可自動視為人工驗收完成。詳見修正紀錄與 freeze 計畫。
+
+## 6. 交付檢查
 
 - 相關 deterministic tests 通過，並記錄完整 suite 是否有既有環境型失敗。
 - Python compile 通過。

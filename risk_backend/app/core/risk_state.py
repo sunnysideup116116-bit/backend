@@ -2,6 +2,9 @@
 風險狀態機 - 智慧決策版 (完全資料驅動 + Pydantic V2 規範化)
 """
 
+from app.core.async_io import run_blocking
+from app.core.async_io import serialized
+from contextvars import ContextVar
 import math
 from datetime import datetime
 from typing import Dict, Optional, Tuple, List
@@ -21,11 +24,21 @@ LEVEL_ORDER = {
 class RiskStateMachine:
     def __init__(self):
         self.chat_log_service = ChatLogService()
-        self.last_diagnostic = {}
+        self._diagnostic = ContextVar("risk_diagnostic", default=None)
+
+    @property
+    def last_diagnostic(self):
+        # Each request owns its snapshot even while another request is saving.
+        return dict(self._diagnostic.get() or {})
+
+    @last_diagnostic.setter
+    def last_diagnostic(self, value):
+        self._diagnostic.set(dict(value))
 
     async def get_user_state(self, conversation_id: str, user_id: str) -> Tuple[RiskState, Optional[str]]:
         return await self.chat_log_service.get_latest_risk_state_with_time(conversation_id, user_id)
 
+    @serialized("risk-state", lambda self, conversation_id, user_id, *args, **kwargs: (conversation_id, user_id))
     async def update(
         self,
         conversation_id: str,
@@ -42,7 +55,7 @@ class RiskStateMachine:
         """
         prior, last_ts_str = await self.get_user_state(conversation_id, user_id)
         #！！！！改Config改這邊！！！！
-        config = KBService.get_fusion_config("threshold_v2_rule_heavy")
+        config = await run_blocking(lambda: KBService.get_fusion_config("threshold_v2_rule_heavy"))
         
         msg_decay = 0.9
         if config:

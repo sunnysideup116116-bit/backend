@@ -138,6 +138,14 @@ class PublicAgentTurnContext(BaseModel):
     # Short-lived, server-owned recommendation context for a reason/revision
     # follow-up. Candidate identity remains opaque and room scoped.
     recent_recommendation: dict[str, Any] | None = None
+    # Short-lived, room-scoped projection of the latest date coordination card.
+    # Coordination/match IDs and CAS values stay on the executor-only authority
+    # attached by Context Builder.
+    recent_action_reference: dict[str, Any] | None = None
+    # Bounded summary of the user's valid date cards. Public copy contains
+    # labels/status/actions only; per-card IDs and CAS values stay on the
+    # executor-only authority attached by Context Builder.
+    date_coordination_summary: dict[str, Any] | None = None
     capability_manifest_version: str = "v2"
     match_opportunity_state: str = "not_ready"
     guidance_directive: str = "none"

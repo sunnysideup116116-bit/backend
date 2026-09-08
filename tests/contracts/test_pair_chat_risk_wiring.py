@@ -3,7 +3,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 SERVER_ROOT = Path(__file__).resolve().parents[2]
@@ -122,21 +122,21 @@ class PairChatRiskWiringTests(unittest.TestCase):
         collection.update_one.return_value = types.SimpleNamespace(upserted_id="created")
         database_module = types.ModuleType("database")
         database_module.messages_coll = collection
-        previous = sys.modules.get("database")
-        sys.modules["database"] = database_module
-        try:
+        mirror = types.ModuleType("services.appwrite_mirror")
+        mirror.mirror_message_to_appwrite_async = MagicMock()
+        push = types.ModuleType("services.push_service")
+        push.queue_push_notification = MagicMock()
+        with patch.dict(sys.modules, {
+            "database": database_module,
+            "services.appwrite_mirror": mirror,
+            "services.push_service": push,
+        }):
             spec = importlib.util.spec_from_file_location(
                 "pair_chat_service_for_contract", CHAT_SERVICE_PATH,
             )
             module = importlib.util.module_from_spec(spec)
             assert spec.loader is not None
             spec.loader.exec_module(module)
-        finally:
-            if previous is None:
-                sys.modules.pop("database", None)
-            else:
-                sys.modules["database"] = previous
-
         first = module.save_pair_owner_message_once(
             "owner_other", "owner", "hello",
             client_message_id="attempt-1",

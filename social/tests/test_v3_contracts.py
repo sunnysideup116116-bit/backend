@@ -140,6 +140,43 @@ class V3ContractsTests(unittest.TestCase):
                 tasks=[calendar, relationship, synth],
             )
 
+    def test_date_invitation_intent_allows_independent_places_read(self):
+        relationship = SubTask(
+            id="r1", agent="relationship", depends_on=[], task_brief="create empty card",
+        )
+        places = SubTask(
+            id="p1", agent="places", place_mode="discover", depends_on=[],
+            task_brief="find nearby ice shops",
+        )
+        synth = SubTask(
+            id="s1", agent="synthesizer", depends_on=["r1", "p1"],
+            task_brief="present search and confirmation",
+        )
+
+        plan = Plan(
+            write_intent=DATE_INVITATION_WRITE_INTENT,
+            tasks=[relationship, places, synth],
+        )
+
+        self.assertEqual([task.agent for task in plan.tasks], ["relationship", "places", "synthesizer"])
+
+    def test_date_invitation_intent_rejects_non_read_only_sibling(self):
+        relationship = SubTask(
+            id="r1", agent="relationship", depends_on=[], task_brief="create empty card",
+        )
+        profile = SubTask(
+            id="p1", agent="profile", depends_on=[], task_brief="start assessment",
+        )
+        synth = SubTask(
+            id="s1", agent="synthesizer", depends_on=["r1", "p1"], task_brief="reply",
+        )
+
+        with self.assertRaises(ValidationError):
+            Plan(
+                write_intent=DATE_INVITATION_WRITE_INTENT,
+                tasks=[relationship, profile, synth],
+            )
+
         direct_relationship = relationship.model_copy(update={"depends_on": []})
         with self.assertRaises(ValidationError):
             Plan(

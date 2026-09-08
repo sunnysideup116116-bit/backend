@@ -197,7 +197,21 @@ def check_and_trigger_date_activation(room_id: str, user_id: str, contact_id: st
     from services.ai_service import detect_date_activation
     from services.date_coordination_service import create_invite
     if match_doc and detect_date_activation(message):
-        create_invite(match_doc, user_id, contact_id)
+        coordination = create_invite(match_doc, user_id, contact_id)
+        if coordination:
+            try:
+                from services.ayue_agent.v3.date_coordination_references import remember_date_coordination
+                remember_date_coordination(
+                    user_id,
+                    room_id,
+                    match_doc,
+                    coordination,
+                    other_id=contact_id,
+                )
+            except Exception:
+                # The reference is convenience state. The pair-card write is
+                # already committed and remains canonical if storage is down.
+                pass
 
 
 def ai_process_date_coordination_step(room_id: str, user_id: str, contact_id: str, message: str, match_doc: dict):
@@ -277,6 +291,8 @@ def _complete_public_turn(
     history_truncated = len(fetched_history) > 32
     history = list(reversed(fetched_history[:32]))
     user_doc = profiles_coll.find_one({"user_id": req.user_id}) or {}
+    from services.memory_service import refresh_owner_memory_profile
+    user_doc = refresh_owner_memory_profile(req.user_id, user_doc)
     room_session = assessment_session_for_room(
         user_doc, room_id, include_unscoped=not bool(req.ai_room_id),
     )
@@ -358,6 +374,7 @@ def _complete_public_turn(
     else:
         saved_reply = save_message(room_id, "ai_assistant", ai_reply)
     place_presentation_published = False
+    place_presentation_failed = False
     if isinstance(saved_reply, dict):
         try:
             mark_message_use(
@@ -407,6 +424,7 @@ def _complete_public_turn(
             except PlaceReferencePersistenceError:
                 published = False
             if not published:
+                place_presentation_failed = True
                 # The assistant row was saved before its source relation could
                 # be committed. Quarantine it so a later turn cannot resolve
                 # an unbound list, and return the same fail-closed copy used by
@@ -431,7 +449,12 @@ def _complete_public_turn(
         persisted_reply = str(saved_reply.get("content") or ai_reply)
         for start in range(0, len(persisted_reply), 120):
             on_token(persisted_reply[start:start + 120])
-    if run_id and isinstance(saved_reply, dict) and saved_reply.get("message_id"):
+    if (
+        run_id
+        and isinstance(saved_reply, dict)
+        and saved_reply.get("message_id")
+        and not place_presentation_failed
+    ):
         mark_public_confirmation_presented(
             user_id=req.user_id,
             origin_run_id=run_id,
@@ -480,7 +503,7 @@ def _complete_public_turn(
         "place_cards": place_cards,
         "presentation_blocks": presentation_blocks,
         "llm_call_metrics": agent_result.llm_call_metrics or [],
-        "choice_prompt": agent_result.choice_prompt,
+        "choice_prompt": None if place_presentation_failed else agent_result.choice_prompt,
         "choice_resolution": agent_result.choice_resolution,
     }
 

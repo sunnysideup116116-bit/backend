@@ -185,6 +185,30 @@ class DateCoordinationDomainTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 409)
         rollback.assert_called_once()
 
+    def test_date_card_cancel_rejects_changed_status_before_any_write(self):
+        match = self._match(status="active", revision=4)
+        with patch(
+            "services.date_coordination_service.find_accepted_match",
+            return_value=match,
+        ), patch(
+            "services.date_coordination_service.matches_coll.find_one_and_update",
+        ) as match_write, patch(
+            "services.date_coordination_service.calendar_events_coll.update_one",
+        ) as event_write:
+            with self.assertRaises(HTTPException) as raised:
+                cancel_coordination_or_event(
+                    "owner",
+                    "other",
+                    "coord",
+                    expected_status="pending_partner",
+                    expected_coordination_revision=4,
+                    idempotency_key="run:stale-status",
+                )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        match_write.assert_not_called()
+        event_write.assert_not_called()
+
     # --- withdraw_reschedule ---
 
     def _reschedule_match(self):

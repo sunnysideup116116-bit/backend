@@ -54,6 +54,10 @@ from .google_places_client import (
     measure_distance_matrix, resolve_place as resolve_google_place,
     search_nearby_places,
 )
+from .v3.place_references import (
+    PlaceReferencePersistenceError,
+    private_presented_place_identities,
+)
 
 
 def _calendar_events(user_id: str, clock: TurnClockV1 | None = None, arguments: dict | None = None) -> ToolResult:
@@ -558,12 +562,13 @@ def _contact_evidence(ctx: AgentTurnContext, contact_refs: list[str]) -> ToolRes
     })
 
 
-def _memory_profile(ctx: AgentTurnContext) -> ToolResult:
+def _memory_profile(ctx: AgentTurnContext, arguments: dict | None = None) -> ToolResult:
+    from services.memory_service import search_owner_memory
     profile = ctx.user_profile or profiles_coll.find_one({"user_id": ctx.user_id}, {"_id": 0}) or {}
+    result = search_owner_memory(ctx.user_id, str((arguments or {}).get("query") or ""), profile)
     return ToolResult(ok=True, data={
-        "summary": profile.get("profile_memory_summary", ""),
+        **result,
         "current_context": safe_recent_context(profile.get("current_context"), ""),
-        "preferences": profile.get("profile_memory_preview", [])[:8],
     })
 
 
@@ -735,6 +740,7 @@ _PLACE_FAILURE_MESSAGES = {
     "google_places_access_denied": "\u76ee\u524d\u7121\u6cd5\u4f7f\u7528\u5730\u5716\u670d\u52d9",
     "maps_disabled": "\u5730\u5716\u67e5\u8a62\u76ee\u524d\u672a\u555f\u7528",
     "google_places_disabled": "\u5730\u5716\u67e5\u8a62\u76ee\u524d\u672a\u555f\u7528",
+    "place_history_unavailable": "\u66ab\u6642\u7121\u6cd5\u8b80\u53d6\u524d\u4e00\u8f2a\u63a8\u85a6",
 }
 _PLACE_FAILURE_SUBJECT_FIELDS = {
     "places.search_nearby": "anchor",
@@ -795,6 +801,39 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
     categories = [str(item) for item in (arguments.get("categories") or [])]
     cuisine = str(arguments.get("cuisine") or "").strip()
     safe_limit = int(arguments.get("limit") or 3)
+    exclude_previously_presented = bool(arguments.get("exclude_previously_presented"))
+    excluded_identities: set[tuple[str, str]] = set()
+    if exclude_previously_presented:
+        try:
+            excluded_identities = private_presented_place_identities(
+                ctx.user_id,
+                ctx.room_id,
+                categories=categories,
+            )
+        except PlaceReferencePersistenceError:
+            return ToolResult(
+                ok=False,
+                error_code="place_history_unavailable",
+                user_message="我現在無法確認前一輪已推薦的店家，請稍後再試。",
+            )
+    provider_limit = min(10, max(safe_limit, safe_limit + len(excluded_identities)))
+
+    def _without_presented(places: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        fresh: list[dict[str, Any]] = []
+        for place in places:
+            provider = str(place.get("provider") or "").strip().lower()
+            identity = (
+                str(place.get("place_id") or "").strip()
+                if provider == "google"
+                else str(place.get("map_url") or "").strip()
+            )
+            if identity and (provider, identity) in excluded_identities:
+                continue
+            fresh.append(place)
+            if len(fresh) >= safe_limit:
+                break
+        return fresh
+
     data = None
     # Google is an optional presentation enhancement. Its failure must never
     # take away the existing OpenStreetMap place discovery capability.
@@ -803,7 +842,7 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
             point = device_location or nominatim_search(anchor)
             google_places = search_nearby_places(
                 str(point.get("label") or anchor), float(point["lat"]), float(point["lon"]), categories,
-                limit=safe_limit, cuisine=cuisine,
+                limit=provider_limit, cuisine=cuisine,
                 radius_m=int(arguments.get("radius_m") or 1500),
                 enrichments=arguments.get("enrichments") or [],
             )
@@ -813,6 +852,7 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
                 {key: value for key, value in place.items() if key != "provider_name"}
                 for place in google_places
             ]
+            google_places = _without_presented(google_places)
             data = {
                 "anchor_label": str(point.get("label") or anchor),
                 "distance_basis": "straight_line",
@@ -823,6 +863,8 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
                 "radius_m": int(arguments.get("radius_m") or 1500),
                 "requested_limit": safe_limit,
                 "ordering": str(arguments.get("ordering") or "distance"),
+                "exclude_previously_presented": exclude_previously_presented,
+                "excluded_presented_count": len(excluded_identities),
                 "places": google_places,
             }
         except (MapClientError, GooglePlacesError, KeyError, TypeError, ValueError):
@@ -831,12 +873,13 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
         try:
             data = nearby_places(
                 anchor, categories,
-                radius_m=int(arguments.get("radius_m") or 1500), limit=safe_limit,
+                radius_m=int(arguments.get("radius_m") or 1500), limit=provider_limit,
                 latitude=(device_location or {}).get("latitude"),
                 longitude=(device_location or {}).get("longitude"),
             )
         except MapClientError as exc:
             return ToolResult(ok=False, error_code=exc.code, user_message="")
+        data = {**data, "places": _without_presented(list(data.get("places") or []))}
     return ToolResult(ok=True, data={
         **data,
         "origin_kind": origin_kind,
@@ -845,6 +888,8 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
         "radius_m": int(arguments.get("radius_m") or 1500),
         "requested_limit": safe_limit,
         "ordering": str(arguments.get("ordering") or "distance"),
+        "exclude_previously_presented": exclude_previously_presented,
+        "excluded_presented_count": len(excluded_identities),
     })
 
 
@@ -927,7 +972,7 @@ def execute_tool(
         "contact_evidence": lambda: _contact_evidence(ctx, arguments.get("contact_refs") or []),
         "mentioned_contact_summary": lambda: _mentioned_contact_summary(ctx, arguments.get("other_ids") or []),
         "accepted_contact_list": lambda: _accepted_contact_list(ctx),
-        "memory_profile": lambda: _memory_profile(ctx),
+        "memory_profile": lambda: _memory_profile(ctx, arguments),
         "self_profile": lambda: _self_profile(ctx),
         "web_search": lambda: _web_search(ctx, arguments),
         "web_extract": lambda: _web_extract(arguments),

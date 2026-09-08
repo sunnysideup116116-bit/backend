@@ -555,6 +555,10 @@ class AyueAgentStreamTests(unittest.TestCase):
                  handled=True, reply=canonical, messages=[canonical],
                  presentation_class="grounded_recommendation",
                  agent_run_id="b" * 32, place_presentation_required=True,
+                 choice_prompt={
+                     "id": "choice-1", "state": "pending",
+                     "selected": None, "expires_at": 1e18,
+                 },
              )), \
              patch("routers.public_chat.mark_message_use_from_turn"), \
              patch("routers.public_chat.mark_message_use"), \
@@ -563,7 +567,7 @@ class AyueAgentStreamTests(unittest.TestCase):
                  "message_id": "assistant-message", "content": canonical,
              }), \
              patch("routers.public_chat.publish_place_presentation", return_value=False), \
-             patch("routers.public_chat.mark_public_confirmation_presented"):
+             patch("routers.public_chat.mark_public_confirmation_presented") as mark_confirmation:
             response = _complete_public_turn(
                 req, "room", [], background_tasks=None, user_message_id="owner-message",
                 on_token=callbacks.append,
@@ -572,6 +576,8 @@ class AyueAgentStreamTests(unittest.TestCase):
         self.assertEqual(callbacks, [])
         self.assertNotIn("A 店", response["reply"])
         self.assertIn("暫時無法保存候選清單", response["reply"])
+        self.assertIsNone(response["choice_prompt"])
+        mark_confirmation.assert_not_called()
 
     def test_public_stream_does_not_publish_tokens_without_opt_in(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="說點什麼")

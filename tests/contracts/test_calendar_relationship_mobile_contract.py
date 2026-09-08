@@ -1,3 +1,4 @@
+import ast
 import unittest
 from pathlib import Path
 
@@ -42,10 +43,16 @@ class CalendarRelationshipMobileContractTests(unittest.TestCase):
 
     def test_coordination_index_does_not_mix_sparse_and_partial_options(self):
         source = CALENDAR_SERVICE.read_text(encoding="utf-8")
-        start = source.index('"coordination_id", unique=True')
-        index_call = source[start:source.index(")", start) + 1]
-        self.assertIn('partialFilterExpression={"source_type": "date"}', index_call)
-        self.assertNotIn("sparse=True", index_call)
+        call = next(node for node in ast.walk(ast.parse(source))
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "create_index" and node.args
+                    and isinstance(node.args[0], ast.Constant) and node.args[0].value == "coordination_id")
+        options = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
+        self.assertEqual(options["partialFilterExpression"], {
+            "source_type": "date", "coordination_id": {"$type": "string"},
+        })
+        self.assertTrue(options["unique"])
+        self.assertFalse(options.get("sparse", False))
 
     def test_quiz_is_limited_to_accepted_matches_and_topic_route_is_absent(self):
         source = QUIZ.read_text(encoding="utf-8")

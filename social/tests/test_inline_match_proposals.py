@@ -7,6 +7,7 @@ from bson import ObjectId
 import pytest
 
 from services import proactive_delivery_service as delivery, chat_service, ai_room_service
+from services import match_action_service as actions
 from services.match_card_projection import project_match_card_history
 from tests.match_flow_store import Collection
 from tests.test_match_restart_flow import flow
@@ -91,17 +92,29 @@ def test_fallback_skips_legacy_proposal_rooms(monkeypatch):
     assert ai_room_service.most_recent_ai_room("owner", include_proposal_rooms=False) == "ai_room::owner::conversation"
 
 
-def test_text_withdrawal_updates_all_saved_cards_only_after_confirmation(flow):
+def test_saved_cards_update_only_after_explicit_hub_decision(flow):
     card = {"sender_id": "ai_assistant", "message_type": "mediator_card", "metadata": {
         "event_type": "match_proposal", "match_id": str(flow.old_id), "stage": "waiting_other",
         "matches": [{"match_id": str(flow.old_id), "proposal_revision": 2}],
     }}
     saved = [deepcopy(card), deepcopy(card)]
+    initial_writes = flow.matches.writes
     preview = flow.send("撤回這張提案", "dismiss_proposal")
+    assert preview.choice_prompt is None
+    assert "阿月牽線" in preview.reply
+    assert not flow.choices.rows and not flow.jobs.rows
+    assert flow.matches.writes == initial_writes
     before = project_match_card_history(saved, "owner", collection=flow.matches)
     assert all(row["metadata"]["canonical_status"] == "pending" for row in before)
-    done = flow.send(choice=preview.choice_prompt["id"], action="confirm")
-    assert done.match_state_changed
+    # The chat redirect carries no write authority. The explicit Hub card
+    # action uses the canonical compare-and-set service shared with its API.
+    done = actions.decide_match(
+        user_id="owner", match_id=str(flow.old_id), action="cancel",
+        expected_status="pending", expected_revision=2,
+        expected_namespace="relationship_match",
+    )
+    assert done["new_status"] == "declined"
+    assert not done["idempotent"]
     writes = flow.matches.writes
     after = project_match_card_history(saved, "owner", collection=flow.matches)
     assert all(row["metadata"]["canonical_status"] == "declined" for row in after)
@@ -112,11 +125,22 @@ def test_text_withdrawal_updates_all_saved_cards_only_after_confirmation(flow):
     assert "canonical_status" not in saved[0]["metadata"]
 
 
-def test_cancel_confirmation_keeps_original_card_actionable(flow):
-    card = {"metadata": {"event_type": "match_proposal", "match_id": str(flow.old_id)}}
+def test_withdrawal_redirect_followup_keeps_original_card_actionable(flow):
+    card = {"metadata": {"event_type": "match_proposal", "match_id": str(flow.old_id), "actions": ["cancel"]}}
+    initial = deepcopy(flow.matches.rows)
+    initial_writes = flow.matches.writes
     preview = flow.send("撤回", "dismiss_proposal")
-    flow.send(choice=preview.choice_prompt["id"], action="cancel")
-    assert project_match_card_history([card], "owner", collection=flow.matches)[0]["metadata"]["canonical_status"] == "pending"
+    assert preview.choice_prompt is None
+    assert "阿月牽線" in preview.reply
+    followup = flow.send("那先不要撤回", "dismiss_proposal")
+    assert followup.choice_prompt is None
+    assert not followup.match_state_changed
+    assert not flow.choices.rows and not flow.jobs.rows
+    projected = project_match_card_history([card], "owner", collection=flow.matches)[0]["metadata"]
+    assert projected["canonical_status"] == "pending"
+    assert projected["actions"] == ["cancel"]
+    assert flow.matches.rows == initial
+    assert flow.matches.writes == initial_writes
 
 
 def test_foreign_or_missing_card_cannot_expose_an_actionable_state(flow):

@@ -113,7 +113,7 @@ def run(context_slice: Any, *, task: Any, services: Any) -> tuple[TaskRunnerResu
         audit["outcome"] = "hub_only_redirect"
         return _result(
             task.id,
-            "邀請的接受、婉拒或撤回請在「阿月牽線」的這張卡片上操作；我沒有替你改變邀請狀態。",
+            "人物、主題或活動牽線邀請的接受、婉拒或撤回請在「阿月牽線」的這張卡片上操作；我沒有替你改變邀請狀態。",
             "hub_only_decision",
         ), metrics
     if intent not in INTENT_TOOLS or intent == "clarify":
@@ -220,6 +220,10 @@ def run(context_slice: Any, *, task: Any, services: Any) -> tuple[TaskRunnerResu
     services.trace["guard_results"].append(decision.code.value)
     if decision.code is not GuardResultCode.WRITE_REQUIRES_CONFIRMATION:
         return _result(task.id, "這次操作沒有通過安全檢查，沒有執行變更。", "guard_rejected", failed=True), metrics
+    if tool == "match.start_search":
+        request = getattr(task, "match_search_request", None)
+        # An omitted semantic result must not resurrect an activity from history.
+        args = {"search_request": request.model_dump() if request else {"kind": "general"}}
     payload, preview = prepare_write_confirmation(tool, args, turn._raw_ctx, turn)
     if payload is None:
         audit.update(action=tool, outcome="preflight_rejected")

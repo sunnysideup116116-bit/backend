@@ -11,6 +11,8 @@ Context Builder
 → Final Reply
 ```
 
+現行 Event／Memory／配對說明集中在 [Match runtime](architecture/subagent-match.md)、[Memory 指南](MEMORY_CONTEXT_ENGINE_GUIDE.md) 與 [Event 指南](EVENT_DRIVEN_MATCHMAKER_GUIDE.md)。配對為多卡片 Hub，搜尋先確認、預設先看提案；Memory 常駐集合有限且可主題補查，Event weekly 有持久進度與離線投遞。測試和部署快照見 [收尾紀錄](MATCH_SEARCH_CONSENT_FIX_2026-09-08.md)，不是 main 已合併的聲明。
+
 目前包含：
 
 - 公開阿月 V3 sub-agent runtime 與 NDJSON progress streaming
@@ -28,32 +30,32 @@ Context Builder
 
 | 文件 | 內容 |
 | --- | --- |
-| [01-project-overview.md](./docs/architecture/01-project-overview.md) | 系統定位、兩個服務、公開阿月 vs 悄悄話、主要資料流 |
-| [02-python-modules.md](./docs/architecture/02-python-modules.md) | 每個 Python 模組在做什麼（routers / services 對照表） |
-| [03-v3-runtime-lifecycle.md](./docs/architecture/03-v3-runtime-lifecycle.md) | 一回合完整生命週期：Planner → Guard → 工具 → Synthesizer、確認流程、trace |
-| [04-tool-registry.md](./docs/architecture/04-tool-registry.md) | 23 個現行工具的契約、執行流程與新增工具檢查清單 |
-| [05-matchmaker-and-memory.md](./docs/architecture/05-matchmaker-and-memory.md) | port 9001 媒婆、Neo4j 圖記憶、profile pipeline、配對狀態真相 |
-| [06-testing.md](./docs/architecture/06-testing.md) | 測試指令、分類與必覆蓋面向 |
-| [07-guard.md](./docs/architecture/07-guard.md) | Central Guard：審核什麼、GuardResultCode 全表、被拒絕後的處理 |
-| [08-planner.md](./docs/architecture/08-planner.md) | Planner：decompose_tasks 契約、拆解規則、fail closed、與 sub-agents 分工 |
-| [09-runtime-interfaces.md](./docs/architecture/09-runtime-interfaces.md) | HTTP、Context、Planner、RuntimeRegistration、Tool/Guard、Observation 與寫入介面 |
-| [subagent-calendar.md](./docs/architecture/subagent-calendar.md) | 行事曆子代理：能做什麼、呼叫哪些 function、端到端範例 |
-| [subagent-match.md](./docs/architecture/subagent-match.md) | 配對子代理：狀態查詢、搜尋 job、提案 CAS、主動牽線 |
-| [subagent-places.md](./docs/architecture/subagent-places.md) | 地點子代理：附近地點、距離、地點卡、OSM/Google provider |
-| [subagent-web.md](./docs/architecture/subagent-web.md) | Web 子代理：Tavily 查詢、證據等級、活動探索與 Places 串接 |
-| [subagent-relationship.md](./docs/architecture/subagent-relationship.md) | 關係子代理：@ 驗證、已接受聯絡人、可驗證互動摘要與空白約會邀請卡 |
-| [subagent-profile.md](./docs/architecture/subagent-profile.md) | 個人檔案子代理：self summary、記憶、性格探索 session |
-| [subagent-product-info.md](./docs/architecture/subagent-product-info.md) | 產品資訊子代理：bounded knowledge retrieval、`product_info.v1` observation 與 progress/debug |
+| [01-project-overview.md](./architecture/01-project-overview.md) | 系統定位、兩個服務、公開阿月 vs 悄悄話、主要資料流 |
+| [02-python-modules.md](./architecture/02-python-modules.md) | 每個 Python 模組在做什麼（routers / services 對照表） |
+| [03-v3-runtime-lifecycle.md](./architecture/03-v3-runtime-lifecycle.md) | 一回合完整生命週期：Planner → Guard → 工具 → Synthesizer、確認流程、trace |
+| [04-tool-registry.md](./architecture/04-tool-registry.md) | 23 個現行工具的契約、執行流程與新增工具檢查清單 |
+| [05-matchmaker-and-memory.md](./architecture/05-matchmaker-and-memory.md) | port 9001 媒婆、Neo4j 圖記憶、profile pipeline、配對狀態真相 |
+| [06-testing.md](./architecture/06-testing.md) | 測試指令、分類與必覆蓋面向 |
+| [07-guard.md](./architecture/07-guard.md) | Central Guard：審核什麼、GuardResultCode 全表、被拒絕後的處理 |
+| [08-planner.md](./architecture/08-planner.md) | Planner：decompose_tasks 契約、拆解規則、fail closed、與 sub-agents 分工 |
+| [09-runtime-interfaces.md](./architecture/09-runtime-interfaces.md) | HTTP、Context、Planner、RuntimeRegistration、Tool/Guard、Observation 與寫入介面 |
+| [subagent-calendar.md](./architecture/subagent-calendar.md) | 行事曆子代理：能做什麼、呼叫哪些 function、端到端範例 |
+| [subagent-match.md](./architecture/subagent-match.md) | 配對子代理：狀態查詢、搜尋 job、提案 CAS、主動牽線 |
+| [subagent-places.md](./architecture/subagent-places.md) | 地點子代理：附近地點、距離、地點卡、OSM/Google provider |
+| [subagent-web.md](./architecture/subagent-web.md) | Web 子代理：Tavily 查詢、證據等級、活動探索與 Places 串接 |
+| [subagent-relationship.md](./architecture/subagent-relationship.md) | 關係子代理：@ 驗證、已接受聯絡人、可驗證互動摘要與空白約會邀請卡 |
+| [subagent-profile.md](./architecture/subagent-profile.md) | 個人檔案子代理：self summary、記憶、性格探索 session |
+| [subagent-product-info.md](./architecture/subagent-product-info.md) | 產品資訊子代理：bounded knowledge retrieval、`product_info.v1` observation 與 progress/debug |
 
 其他規範文件：
 
 - [AYUE_V3_ARCHITECTURE.md](./AYUE_V3_ARCHITECTURE.md)：實際 runtime、tool、state、API 與 App 遷移方式（內容為 V3 sub-agent 架構）
 - [AGENTS.md](./AGENTS.md)：後續 coding agent 必須遵守的邊界與擴充規則
 - [MEMORY_CONTEXT_ENGINE_GUIDE.md](./MEMORY_CONTEXT_ENGINE_GUIDE.md)：長期建議、Neo4j Graph Memory 與 Context Engine 的資料邊界、Hermes Agent 參考方式和實作順序
-- [FLUTTER_V1_TO_V3_AGENT_GUIDE.md](./docs/FLUTTER_V1_TO_V3_AGENT_GUIDE.md)：從舊 V1 Demo 搬到目前 V3 時，給 Flutter 整合 agent 的替換策略、API 差異與驗收清單
-- [docs/architecture/](./docs/architecture/)：以現行程式為準的架構與 sub-agent 文件；已完成的 migration／Phase 計畫不保留為現況文件
+- [FLUTTER_V1_TO_V3_AGENT_GUIDE.md](./architecture/FLUTTER_V1_TO_V3_AGENT_GUIDE.md)：從舊 V1 Demo 搬到目前 V3 時，給 Flutter 整合 agent 的替換策略、API 差異與驗收清單
+- [docs/architecture/](./architecture/)：以現行程式為準的架構與 sub-agent 文件；已完成的 migration／Phase 計畫不保留為現況文件
 
-版本名稱約定：`Public V3` 是目前公開阿月架構；`Private V2` 是仍在使用且隔離的悄悄話 runtime。`public-v1`、`web_research.v1`、`product_info.v1` 等名稱是 typed payload 的 schema version，不代表舊 Public runtime。已移除的 Public V1/V2 文件與 prompt 範例不再保留；需要理解層與層之間的 contract 時，以 [09-runtime-interfaces.md](./docs/architecture/09-runtime-interfaces.md) 為入口。
+版本名稱約定：`Public V3` 是目前公開阿月架構；`Private V2` 是仍在使用且隔離的悄悄話 runtime。`public-v1`、`web_research.v1`、`product_info.v1` 等名稱是 typed payload 的 schema version，不代表舊 Public runtime。已移除的 Public V1/V2 文件與 prompt 範例不再保留；需要理解層與層之間的 contract 時，以 [09-runtime-interfaces.md](./architecture/09-runtime-interfaces.md) 為入口。
 
 ## 專案結構
 

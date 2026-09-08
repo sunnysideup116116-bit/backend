@@ -9,6 +9,8 @@ _TOOLS = frozenset({
     "profile.start_assessment", "memory.search_my_profile",
 })
 
+_SYSTEM += "\n回答特定偏好或個人化建議時，使用 memory.search_my_profile；query 用主題與必要同義詞，不能只依前8筆判斷沒有記憶。status=unavailable 或 truncated 必須保留限制，不得宣稱全部或從未說過。"
+
 
 def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[list, SubAgentMetrics]:
     return run_sub_agents(
