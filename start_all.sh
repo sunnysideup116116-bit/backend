@@ -12,6 +12,28 @@ NC='\033[0;37m' # No Color
 SERVER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$SERVER_ROOT" || exit 1
 
+# Validate provider and perform non-generative GPT checks BEFORE touching ports.
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "Usage: ./start_all.sh [ollama|gpt] (default: ollama)"
+    echo "GPT reads allowlisted settings from Server/.env; shell overrides win. See GPT_MODE.md."
+    exit 0
+fi
+if (( $# > 1 )); then
+    echo "Usage: ./start_all.sh [ollama|gpt]" >&2
+    exit 2
+fi
+export AYUE_LLM_PROVIDER="${1:-${AYUE_LLM_PROVIDER:-ollama}}"
+case "$AYUE_LLM_PROVIDER" in
+    ollama) ;;
+    gpt)
+        if ! "$SERVER_ROOT/.local-venv/social/bin/python" \
+            "$SERVER_ROOT/social/services/codex_chat_provider.py"; then
+            exit 1
+        fi
+        ;;
+    *) echo "Usage: ./start_all.sh [ollama|gpt]" >&2; exit 2 ;;
+esac
+
 LOG_DIR="${AYUE_LOG_DIR:-$SERVER_ROOT/.runtime-logs}"
 mkdir -p "$LOG_DIR"
 SERVICE_PIDS=()

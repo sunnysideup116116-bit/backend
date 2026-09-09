@@ -291,6 +291,8 @@ Observation 不是 user-facing prose。Synthesizer 是一般 DAG 的唯一 final
 
 ### Provider model tier and call telemetry
 
+GPT 個人實驗模式由 `start_all.sh gpt` 啟用，僅切換共用 Social `ai_service`。`AYUE_GPT_MODEL`／`AYUE_GPT_FAST_MODEL` 決定 main／fast，空 fast 回 main；Ollama runtime override 不套用 GPT。每次呼叫的 slice 使用獨立 ephemeral Codex thread；工具是 `outputSchema` 約束及本地驗證的 proposal，仍走相同 Guard。GPT 緩衝成功最終內容後才以 ≤120 字元片段呼叫 callback，非即時 token stream；token counts 取已觀測 usage，0 代表未觀測，TTFT/TPS 未觀測。`temperature`／`max_tokens` 無對應 app-server turn 欄位而不套用；整體 deadline 保留。操作、限制及實驗用途見 [`../../GPT_MODE.md`](../../GPT_MODE.md)。
+
 `OLLAMA_FAST_CHAT_MODEL` 是可選的 fast tier；未設定時回退到 `OLLAMA_CHAT_MODEL`。Planner 與 Places／Match／Relationship／Profile proposal runners 要求 fast tier；Calendar、Web、Synthesizer 使用 main tier。ProductInfo retrieval 本身是 bounded typed path；Synthesizer 可用該 projection 搭配使用者的實際問題自然組合回答，固定產品文案只作 provider failure fallback。Runtime model override 優先於這些 tier，且不自動在 fast 失敗後重試 main。
 
 每個 LLM owner 的 metrics 都回報 `llm_call_count` 與 `requested_model_tier`。Planner 對 `missing_tool_call`、`wrong_function_name`、`invalid_arguments` 或 `provider_error` 最多做一次 bounded retry；Provider retry 維持同一 requested tier，不自動切換 main，第二次仍失敗便 fail closed。Planner 的 `retry_count`、`retry_reason`、`failure_code` 與 bounded `attempts` 只投影到 localhost ephemeral debug；durable trace 不保存 prompt 或 raw output。Web 的 bounded retry／finish attempts 會累計真實 provider call 數，Scheduler 的 `trace.llm_call_count` 是 Planner、所有 sub-agent 與 Synthesizer counters 的總和；它不再以 agent 節點數估算呼叫次數。

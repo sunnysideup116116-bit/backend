@@ -259,6 +259,17 @@ class DateInviteResponseRequest(BaseModel):
     coordination_id: str
     accepted: bool
 
+
+class PlacesAutocompleteRequest(BaseModel):
+    input: str = Field(min_length=1, max_length=160)
+    session_token: str | None = Field(default=None, max_length=128)
+
+
+class PlacesDetailsRequest(BaseModel):
+    place_id: str = Field(min_length=1, max_length=180)
+    session_token: str = Field(min_length=1, max_length=128)
+
+
 class CalendarEventCreateRequest(BaseModel):
     user_id: str
     title: str = Field(min_length=1, max_length=120)

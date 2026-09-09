@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ from config import (
 )
 from services.language_service import normalize_model_text, normalize_zh_tw
 from services.ayue_agent.product_identity import PUBLIC_AYUE_PERSONA
+from services import codex_chat_provider
+from services.gpt_settings import LLM_OWNER_NAMES
 import threading
 import time
 
@@ -44,12 +47,25 @@ def get_runtime_model_override() -> dict:
 
 def _resolve_chat_model(
     *, explicit_model: str | None = None, prefer_fast_model: bool = False,
+    model_owner: str | None = None,
 ) -> str:
     """Resolve process-wide override before per-call tier preferences."""
+    if model_owner is not None and model_owner not in LLM_OWNER_NAMES:
+        raise ValueError(f"Unknown LLM owner: {model_owner}")
+    if codex_chat_provider.selected_provider() == "gpt":
+        return codex_chat_provider.selected_model(
+            fast=prefer_fast_model, owner=model_owner,
+        )
     if _RUNTIME_MODEL_OVERRIDE:
         return _RUNTIME_MODEL_OVERRIDE
     if explicit_model:
         return explicit_model
+    if model_owner is not None:
+        owner_model = os.environ.get(
+            f"AYUE_OLLAMA_{model_owner.upper()}_MODEL", "",
+        ).strip()
+        if owner_model:
+            return owner_model
     if prefer_fast_model:
         return OLLAMA_FAST_CHAT_MODEL
     return OLLAMA_CHAT_MODEL
@@ -57,11 +73,13 @@ def _resolve_chat_model(
 
 def get_effective_chat_model(
     *, requested_model_tier: str = "main", explicit_model: str | None = None,
+    model_owner: str | None = None,
 ) -> str:
     """Return the model name that a debug/telemetry surface will actually use."""
     return _resolve_chat_model(
         explicit_model=explicit_model,
         prefer_fast_model=requested_model_tier == "fast",
+        model_owner=model_owner,
     )
 
 
@@ -284,13 +302,30 @@ def generate_chat_completion(
 
     on_token: Callable[[str], None] | None = None,
 
+    model_owner: str | None = None,
+
 ) -> ChatResult:
+
+    if codex_chat_provider.selected_provider() == "gpt":
+        result = codex_chat_provider.generate(
+            prompt, model=_resolve_chat_model(
+                explicit_model=model, model_owner=model_owner,
+            ),
+            system_prompt=system_prompt, json_output=json_output, on_token=on_token,
+        )
+        return ChatResult(
+            content=result["content"] if json_output else normalize_zh_tw(result["content"]),
+            input_tokens=result.get("input_tokens", 0), output_tokens=result.get("output_tokens", 0),
+            duration_ms=result["duration_ms"], prompt=prompt,
+        )
 
     if not OLLAMA_API_KEY:
 
         raise RuntimeError("缺少 OLLAMA_API_KEY，無法呼叫 Ollama Cloud 聊天模型")
 
-    effective_model = _resolve_chat_model(explicit_model=model)
+    effective_model = _resolve_chat_model(
+        explicit_model=model, model_owner=model_owner,
+    )
 
     payload = {
 
@@ -384,6 +419,7 @@ def generate_chat_completion_with_tools(
     prefer_fast_model: bool = False,
     on_token: Callable[[str], None] | None = None,
     deadline_monotonic: float | None = None,
+    model_owner: str | None = None,
 ) -> ToolCallResult:
     """Native function calling; zero timing metrics mean not observable.
 
@@ -392,11 +428,22 @@ def generate_chat_completion_with_tools(
     duration and otherwise uses an observed streaming interval; a non-stream
     response without decoding timing cannot supply a meaningful TPS.
     """
+    if codex_chat_provider.selected_provider() == "gpt":
+        effective_model = _resolve_chat_model(
+            prefer_fast_model=prefer_fast_model, model_owner=model_owner,
+        )
+        result = codex_chat_provider.generate(
+            prompt, model=effective_model, system_prompt=system_prompt, tools=tools,
+            deadline_monotonic=deadline_monotonic, on_token=on_token,
+        )
+        return ToolCallResult(**result, prompt=prompt, model_name=effective_model)
+
     if not OLLAMA_API_KEY:
         raise RuntimeError("缺少 OLLAMA_API_KEY，無法呼叫 Ollama Cloud 聊天模型")
 
     effective_model = _resolve_chat_model(
         explicit_model=model, prefer_fast_model=prefer_fast_model,
+        model_owner=model_owner,
     )
     options: dict = {"temperature": temperature, "num_predict": max_tokens}
     if _RUNTIME_THINKING_LEVEL and _RUNTIME_THINKING_LEVEL != "off":

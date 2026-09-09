@@ -739,6 +739,7 @@ def decide(
         try:
             result = generate_chat_completion_with_tools(
                 attempt_prompt, tools, temperature=0, system_prompt=_SYSTEM,
+                model_owner="web",
             )
         except Exception as exc:
             error_code, retryable = _provider_error_code(exc)

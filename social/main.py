@@ -2,7 +2,8 @@ import os
 import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import calendar, chat, match, system, frontend
+from services.codex_chat_provider import shutdown as shutdown_codex_provider
+from routers import calendar, chat, match, places, system, frontend
 from routers.match import ensure_match_indexes
 from routers.chat_messages import ensure_chat_read_indexes
 from services.calendar_service import ensure_calendar_indexes
@@ -73,6 +74,7 @@ app.add_middleware(
 app.include_router(frontend.router)
 app.include_router(chat.router)
 app.include_router(match.router)
+app.include_router(places.router)
 app.include_router(system.router)
 app.include_router(calendar.router)
 
@@ -113,6 +115,7 @@ def setup_calendar_indexes():
 
 @app.on_event("shutdown")
 def stop_background_services():
+    shutdown_codex_provider()
     stop_event_delivery_worker()
     stop_proactive_care_scheduler()
     stop_memory_outbox_worker()

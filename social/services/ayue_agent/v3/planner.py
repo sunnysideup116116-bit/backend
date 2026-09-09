@@ -1042,6 +1042,7 @@ def plan_turn(turn_ctx: PublicAgentTurnContext) -> tuple[Plan | None, PlannerMet
                 attempt_prompt, metrics.tools_raw, temperature=0,
                 system_prompt=_PLANNER_SYSTEM, prefer_fast_model=True,
                 deadline_monotonic=deadline,
+                model_owner="planner",
             )
             if time.monotonic() >= deadline:
                 raise TimeoutError("Planner deadline exhausted")

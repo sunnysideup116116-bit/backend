@@ -168,6 +168,7 @@ def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[CalendarA
         metrics.llm_call_count += 1
         result = base_agent.generate_chat_completion_with_tools(
             prompt, tools, temperature=0, system_prompt=system_prompt,
+            model_owner="calendar",
         )
         metrics.input_tokens = result.input_tokens
         metrics.output_tokens = result.output_tokens

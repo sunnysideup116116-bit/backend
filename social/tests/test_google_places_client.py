@@ -2,9 +2,11 @@ import unittest
 from unittest.mock import patch
 
 from services.ayue_agent.google_places_client import (
+    autocomplete_places,
     google_routes_enabled,
     measure_distance_matrix,
     measure_walking_matrix,
+    place_details,
     resolve_place,
     search_nearby_places,
 )
@@ -43,6 +45,57 @@ class GooglePlacesCuisineTests(unittest.TestCase):
                 p2.__exit__(*args)
                 p1.__exit__(*args)
         return _CombinedCtx()
+
+    def test_autocomplete_uses_server_key_without_browser_key(self):
+        import config
+
+        payload = {
+            "suggestions": [{
+                "placePrediction": {
+                    "placeId": "ChIJautocomplete",
+                    "text": {"text": "台北車站"},
+                    "structuredFormat": {
+                        "mainText": {"text": "台北車站"},
+                        "secondaryText": {"text": "台北市中正區"},
+                    },
+                },
+            }],
+        }
+        with patch.object(config, "AYUE_GOOGLE_PLACE_CARDS_ENABLED", True), \
+             patch.object(config, "GOOGLE_PLACES_SERVER_API_KEY", "server-test-key"), \
+             patch.object(config, "GOOGLE_MAPS_BROWSER_API_KEY", ""), \
+             patch(
+                 "services.ayue_agent.google_places_client.requests.post",
+                 return_value=_FakeResponse(payload),
+             ) as post:
+            suggestions = autocomplete_places("台北車")
+        self.assertEqual(suggestions[0]["place_id"], "ChIJautocomplete")
+        self.assertEqual(suggestions[0]["address"], "台北市中正區")
+        self.assertEqual(
+            post.call_args.kwargs["headers"]["X-Goog-Api-Key"],
+            "server-test-key",
+        )
+
+    def test_place_details_uses_the_same_session_token(self):
+        import config
+
+        payload = {
+            "id": "ChIJdetails",
+            "displayName": {"text": "台北車站"},
+            "formattedAddress": "台北市中正區",
+            "location": {"latitude": 25.0478, "longitude": 121.5170},
+            "types": ["train_station"],
+            "googleMapsUri": "https://www.google.com/maps/place/x",
+        }
+        with patch.object(config, "AYUE_GOOGLE_PLACE_CARDS_ENABLED", True), \
+             patch.object(config, "GOOGLE_PLACES_SERVER_API_KEY", "server-test-key"), \
+             patch(
+                 "services.ayue_agent.google_places_client.requests.get",
+                 return_value=_FakeResponse(payload),
+             ) as get:
+            place = place_details("ChIJdetails", session_token="session-1")
+        self.assertEqual(place["name"], "台北車站")
+        self.assertEqual(get.call_args.kwargs["params"], {"sessionToken": "session-1"})
 
     def test_routes_capability_does_not_require_browser_card_configuration(self):
         import config

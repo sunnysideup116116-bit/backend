@@ -4,6 +4,7 @@
 
 ## 1. Current baseline
 
+- `start_all.sh [ollama|gpt]` 選擇 Social 共用 completion provider，預設 Ollama。GPT 為個人實驗模式，透過官方 Codex app-server managed ChatGPT OAuth；每次呼叫使用獨立 ephemeral thread 與 `environments: []`，`outputSchema` 只產生提案，既有 Guard／confirmation／executor 維持權限。啟動前先非生成式驗證登入及模型，再清 ports。Risk、Matchmaker 自身模型與 embeddings 不切換；詳見 [`../GPT_MODE.md`](../GPT_MODE.md)。
 - Public Ayue 永遠走 V3 sub-agent runtime；唯一 orchestrator 是 `social/services/ayue_agent/v3/scheduler.py`。
 - Match 的一般認識／指定活動由 Planner `match_search_request` 分類，runtime 驗證本句 topic/evidence 並建立確認；活動搜尋預設先看提案，明確要求代送才提供搜尋並邀請確認。歷史 choice 依 canonical delivery_mode 顯示標籤。Topic 卡片保留公開推薦說明，沒有共同活動證據時明示探索性，不捏造對方興趣。既有邀請狀態不回寫；詳見 `MATCH_SEARCH_CONSENT_FIX_2026-09-08.md`。
 - Event discovery 由 Social startup 的嵌入式 Event Worker 執行。每週一 08:00（台灣時間）或同週錯過後補跑，ISO week key 防重複；EVENT_WEEKLY_CYCLE_ENABLED 控制排程。正式 weekly job 使用持久 run id：先增量搜尋未來 30 天活動，再清過期庫存，等待向量準備後依 event_weekly_users 清單分批找夥伴。三張為每批上限，所有 snapshot 使用者都有評估／跳過／失敗結果；event_weekly_runs 保存 stage checkpoint 與結果，租約接手可接續。類別覆蓋不足不阻擋有資料的活動，relevance 不可用則保留進度、有界重試。保留有效活動、User、一般配對與已決定歷史；手動 reset 仍獨立。event_delivery_service 在離線時也保存 Match Hub 提案，draft 只送第一方、pending 才送第二方，以固定卡片 key 去重並於保存後 ack。上述 workers 均由 start_all.sh 的 Social lifecycle 啟停，不增加 port。

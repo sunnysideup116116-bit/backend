@@ -2117,6 +2117,7 @@ def synthesize(
         metrics.llm_call_count += 1
         result = generate_chat_completion_with_tools(
             prompt, tools, temperature=0.65, system_prompt=system_prompt,
+            model_owner="synthesizer",
             on_token=(
                 on_token
                 if not tools

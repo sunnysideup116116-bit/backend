@@ -62,3 +62,38 @@ class AiServicePromptRoleTests(unittest.TestCase):
                 "override request", [], prefer_fast_model=True,
             )
             self.assertEqual(chat.call_args.kwargs["model"], "override-model")
+
+    def test_ollama_owner_model_and_empty_fallback(self):
+        with patch.object(ai_service, "OLLAMA_API_KEY", "test"), \
+             patch.object(ai_service, "OLLAMA_CHAT_MODEL", "main-model"), \
+             patch.object(ai_service, "OLLAMA_FAST_CHAT_MODEL", "fast-model"), \
+             patch.object(ai_service, "_RUNTIME_MODEL_OVERRIDE", None), \
+             patch.dict(ai_service.os.environ, {
+                 "AYUE_OLLAMA_PLANNER_MODEL": "planner-model",
+                 "AYUE_OLLAMA_WEB_MODEL": "",
+             }, clear=False), \
+             patch.object(ai_service.ollama_client, "chat", return_value=self._response()) as chat:
+            ai_service.generate_chat_completion_with_tools(
+                "planner", [], prefer_fast_model=True, model_owner="planner",
+            )
+            self.assertEqual(chat.call_args.kwargs["model"], "planner-model")
+            ai_service.generate_chat_completion_with_tools(
+                "web", [], model_owner="web",
+            )
+            self.assertEqual(chat.call_args.kwargs["model"], "main-model")
+
+    def test_explicit_ollama_model_precedes_owner_model(self):
+        with patch.object(ai_service, "OLLAMA_API_KEY", "test"), \
+             patch.object(ai_service, "_RUNTIME_MODEL_OVERRIDE", None), \
+             patch.dict(ai_service.os.environ, {
+                 "AYUE_OLLAMA_PLANNER_MODEL": "planner-model",
+             }, clear=False), \
+             patch.object(ai_service.ollama_client, "chat", return_value=self._response()) as chat:
+            ai_service.generate_chat_completion_with_tools(
+                "planner", [], model="explicit-model", model_owner="planner",
+            )
+            self.assertEqual(chat.call_args.kwargs["model"], "explicit-model")
+
+    def test_unknown_owner_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "Unknown LLM owner"):
+            ai_service.get_effective_chat_model(model_owner="unknown")

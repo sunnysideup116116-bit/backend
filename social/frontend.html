@@ -675,6 +675,16 @@
         .date-form-field textarea { resize: vertical; min-height: 60px; }
         .date-form-field input:focus, .date-form-field textarea:focus { border-color: #d47f57 !important; box-shadow: 0 0 0 3px rgba(233,150,108,.13) !important; }
         .date-form-field .date-field-invalid { border-color: #c85149 !important; background: #fff4f3 !important; }
+        .date-location-suggestions { display: grid; gap: 5px; margin-top: 5px; }
+        .date-location-suggestion {
+            width: 100%; padding: 8px 10px; text-align: left; border: 1px solid #e5c8b6 !important;
+            border-radius: 8px; background: #fff8f2 !important; color: #604032 !important;
+            box-shadow: none !important; font-size: 11px !important;
+        }
+        .date-location-suggestion:hover { background: #ffe9da !important; }
+        .date-location-suggestion strong { display: block; font-size: 12px; }
+        .date-location-suggestion span { display: block; margin-top: 2px; color: #8a6250; }
+        .date-location-attribution { color: #9b7461; font-size: 10px; }
         .date-confirmation-progress {
             display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px 17px 2px;
         }
@@ -1402,8 +1412,6 @@
         let publicAyueSending = false;
         let pendingAssessmentAction = null;
         let assessmentUiState = {state: null, kind: null, revision: null};
-        let googlePlaceCardsConfig = null;
-        let googleMapsLibraryPromise = null;
 
         function updateAssessmentControls(data = {}) {
             const bar = document.getElementById("assessment-control-bar");
@@ -1473,30 +1481,6 @@
         }
 
         installRoomInputAdapter();
-
-        async function loadGooglePlacesUi() {
-            if (googleMapsLibraryPromise) return googleMapsLibraryPromise;
-            googleMapsLibraryPromise = (async () => {
-                const response = await fetch("/api/client-config");
-                const config = await response.json();
-                googlePlaceCardsConfig = config || {};
-                if (!config?.google_place_cards_enabled || !config?.google_maps_browser_api_key) {
-                    throw new Error("place_cards_disabled");
-                }
-                if (!window.google?.maps) {
-                    await new Promise((resolve, reject) => {
-                        const script = document.createElement("script");
-                        script.async = true;
-                        script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(config.google_maps_browser_api_key)}&v=weekly&libraries=places`;
-                        script.onload = resolve;
-                        script.onerror = reject;
-                        document.head.appendChild(script);
-                    });
-                }
-                await window.google.maps.importLibrary("places");
-            })();
-            return googleMapsLibraryPromise;
-        }
 
         const PLACE_CARD_LABELS = {
             restaurant: ["餐廳", "🍽️"], cafe: ["咖啡廳", "☕"], bar: ["酒吧", "🍸"],
@@ -1627,60 +1611,6 @@
             wrapper.replaceChildren(preview, body);
         }
 
-        function upgradeGooglePlaceCard(wrapper, card) {
-            if (card.provider !== "google" || !/^[A-Za-z0-9_-]{3,180}$/.test(String(card.place_id || ""))) return;
-            // The custom card already shows embed iframe + Place Details
-            // fields (rating / opening hours) from the backend. Per migration
-            // plan §3.4 the Web Component is an optional upgrade that should
-            // only trigger on user interaction, not automatically, so it
-            // never replaces a working card with "Place info couldn't load".
-            // The card is clickable to opt into the richer Web Component.
-            wrapper.style.cursor = "pointer";
-            wrapper.addEventListener("click", function onceClick() {
-                wrapper.removeEventListener("click", onceClick);
-                loadGooglePlacesUi().then(() => {
-                    const details = document.createElement("gmp-place-details-compact");
-                    details.setAttribute("orientation", "horizontal");
-                    details.setAttribute("truncation-preferred", "");
-                    const request = document.createElement("gmp-place-details-place-request");
-                    request.setAttribute("place", card.place_id);
-                    const content = document.createElement("gmp-place-content-config");
-                    ["gmp-place-media", "gmp-place-rating", "gmp-place-type", "gmp-place-price", "gmp-place-open-now-status", "gmp-place-attribution"].forEach(tag => {
-                        const element = document.createElement(tag);
-                        if (tag === "gmp-place-media") element.setAttribute("lightbox-preferred", "");
-                        content.appendChild(element);
-                    });
-                    details.append(request, content);
-                    // Stage off-DOM; only swap in on confirmed successful
-                    // render so the working custom card is never destroyed.
-                    const stage = document.createElement("div");
-                    stage.style.position = "absolute";
-                    stage.style.left = "-9999px";
-                    stage.style.width = "100%";
-                    stage.appendChild(details);
-                    document.body.appendChild(stage);
-                    let settled = false;
-                    const finish = () => {
-                        if (settled) return;
-                        settled = true;
-                        const text = (details.shadowRoot && details.shadowRoot.textContent) || "";
-                        if (text.trim() && !text.includes("couldn't load")) {
-                            wrapper.replaceChildren(details);
-                            wrapper.classList.remove("place-card-custom");
-                        }
-                        stage.remove();
-                    };
-                    if (details.shadowRoot) {
-                        new MutationObserver(() => {
-                            const text = (details.shadowRoot && details.shadowRoot.textContent) || "";
-                            if (text.trim()) finish();
-                        }).observe(details.shadowRoot, { childList: true, subtree: true, characterData: true });
-                    }
-                    setTimeout(finish, 4000);
-                }).catch(() => {});
-            }, { once: true });
-        }
-
         function appendPlaceCards(container, cards) {
             const safeCards = Array.isArray(cards) ? cards.filter(card =>
                 card && ["openstreetmap", "google"].includes(card.provider)
@@ -1693,7 +1623,6 @@
                 wrapper.className = "place-card place-card-custom";
                 renderCustomPlaceCard(wrapper, card);
                 list.appendChild(wrapper);
-                upgradeGooglePlaceCard(wrapper, card);
             });
             container.appendChild(list);
         }
@@ -1823,7 +1752,7 @@
                         <div class="text-xs text-emerald-400 mb-1">已確認約會 #${i+1}</div>
                         <div class="text-sm">時間: ${d.form.time || '未定'}</div>
                         <div class="text-sm">地點: ${d.form.activity || '未定'}</div>
-                        <div class="text-sm">預算: ${d.form.budget || '未定'}</div>
+                        <div class="text-sm">備註: ${d.form.notes || '未填寫'}</div>
                     </div>
                 `).join('');
             }
@@ -1844,7 +1773,7 @@
                   document.getElementById("date-date-val").textContent = form.date || "尚未決定";
                     document.getElementById("date-time-val").textContent = form.time || "尚未決定";
                   document.getElementById("date-activity-val").textContent = form.activity || "尚未決定";
-                  document.getElementById("date-budget-val").textContent = form.budget || "尚未決定";
+                  document.getElementById("date-notes-val").textContent = form.notes || "尚未填寫";
                   
                   let confirmedByMe = confirmations && confirmations[currentUserId];
                   document.getElementById("date-confirm-btn").textContent = confirmedByMe ? "已確認" : "確認約會";
@@ -2693,9 +2622,10 @@
                     coordinationField('結束', 'end_time', form.end_time, 'HH:MM', 'time'),
                     coordinationField('活動', 'activity', form.activity, '例如：看電影'),
                     coordinationField('地點', 'location', form.location, '例如：信義威秀'),
-                    coordinationField('預算', 'budget', form.budget, '例如：500'),
+                    coordinationField('備註', 'notes', form.notes, '例如：交通、訂位或其他想先說好的事'),
                 );
                 card.appendChild(formBox);
+                attachGoogleLocationAutocomplete(card);
                 const mine = metadata.confirmations && metadata.confirmations[currentUserId];
                 const save = document.createElement('button');
                 save.className = 'bg-sky-700 text-xs px-3 py-2 rounded';
@@ -2745,6 +2675,143 @@
             textarea.rows = 2;
             field.append(caption, textarea);
             return field;
+        }
+
+        function attachGoogleLocationAutocomplete(card) {
+            const locationInput = card.querySelector('[data-date-field="location"]');
+            if (!locationInput || locationInput.dataset.placeAutocompleteBound) return;
+            locationInput.dataset.placeAutocompleteBound = "true";
+            locationInput.placeholder = "搜尋地點，例如：台北車站";
+            locationInput.setAttribute("aria-label", "搜尋地點");
+            const field = locationInput.closest("label");
+            if (!field) return;
+            const suggestions = document.createElement("div");
+            suggestions.className = "date-location-suggestions";
+            field.appendChild(suggestions);
+            let timer;
+            let requestId = 0;
+            let placeSessionToken = null;
+
+            const newPlaceSessionToken = () => {
+                if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+                return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 18)}`;
+            };
+
+            const clearSuggestions = () => {
+                requestId += 1;
+                suggestions.replaceChildren();
+            };
+            const chooseSuggestion = async item => {
+                const name = String(item.name || "").trim();
+                const description = String(item.description || item.address || name).trim();
+                const placeId = String(item.place_id || "").trim();
+                const sessionToken = placeSessionToken;
+                let resolved = item;
+                if (placeId && sessionToken) {
+                    try {
+                        const response = await fetch("/api/places/details", {
+                            method: "POST",
+                            headers: {"Content-Type": "application/json"},
+                            body: JSON.stringify({
+                                place_id: placeId,
+                                session_token: sessionToken,
+                            }),
+                        });
+                        const data = await response.json();
+                        if (response.ok && data.place) resolved = data.place;
+                    } catch (_) {
+                        // Keep the selected prediction usable if Details is unavailable.
+                    }
+                }
+                const resolvedName = String(resolved.name || name).trim();
+                const resolvedAddress = String(resolved.address || "").trim();
+                const resolvedDescription = String(
+                    resolved.description || description,
+                ).trim();
+                const location = resolvedAddress || resolvedDescription || resolvedName;
+                locationInput.value = location;
+                locationInput.dataset.placeAutocompleteSuppress = "true";
+                locationInput.dispatchEvent(new Event("input", {bubbles: true}));
+                const activityInput = card.querySelector('[data-date-field="activity"]');
+                if (activityInput && !activityInput.value.trim() && resolvedName) {
+                    activityInput.value = resolvedName;
+                    activityInput.dispatchEvent(new Event("input", {bubbles: true}));
+                }
+                placeSessionToken = null;
+                clearSuggestions();
+                setDateFeedback(card, `已選擇地點：${location}`, "success");
+            };
+            const search = async () => {
+                if (locationInput.dataset.placeAutocompleteSuppress) {
+                    delete locationInput.dataset.placeAutocompleteSuppress;
+                    return;
+                }
+                const query = locationInput.value.trim();
+                if (query.length < 2) {
+                    placeSessionToken = null;
+                    clearSuggestions();
+                    return;
+                }
+                placeSessionToken ??= newPlaceSessionToken();
+                const currentRequest = ++requestId;
+                suggestions.replaceChildren();
+                const loading = document.createElement("span");
+                loading.className = "date-location-attribution";
+                loading.textContent = "正在搜尋 Google 地點…";
+                suggestions.appendChild(loading);
+                try {
+                    const response = await fetch("/api/places/autocomplete", {
+                        method: "POST",
+                        headers: {"Content-Type": "application/json"},
+                        body: JSON.stringify({
+                            input: query,
+                            session_token: placeSessionToken,
+                        }),
+                    });
+                    const data = await response.json();
+                    if (currentRequest !== requestId) return;
+                    if (!response.ok) throw new Error(data.detail || "地點搜尋失敗");
+                    suggestions.replaceChildren();
+                    const items = Array.isArray(data.suggestions) ? data.suggestions : [];
+                    items.forEach(item => {
+                        const button = document.createElement("button");
+                        button.type = "button";
+                        button.className = "date-location-suggestion";
+                        const name = document.createElement("strong");
+                        name.textContent = String(item.name || item.description || "地點");
+                        const address = document.createElement("span");
+                        address.textContent = String(item.address || item.description || "");
+                        button.append(name, address);
+                        button.addEventListener("click", () => chooseSuggestion(item));
+                        suggestions.appendChild(button);
+                    });
+                    if (!items.length) {
+                        const empty = document.createElement("span");
+                        empty.className = "date-location-attribution";
+                        empty.textContent = "找不到符合的 Google 地點。";
+                        suggestions.appendChild(empty);
+                    } else {
+                        const attribution = document.createElement("span");
+                        attribution.className = "date-location-attribution";
+                        attribution.textContent = "Google 地點建議";
+                        suggestions.appendChild(attribution);
+                    }
+                } catch (error) {
+                    if (currentRequest !== requestId) return;
+                    suggestions.replaceChildren();
+                    const failure = document.createElement("span");
+                    failure.className = "date-location-attribution";
+                    const code = String(error.message || error);
+                    failure.textContent = code.includes("google_places_rate_limited")
+                        ? "Google 地點搜尋目前達到請求上限，請稍後再試。"
+                        : `地點搜尋暫時無法使用：${code}`;
+                    suggestions.appendChild(failure);
+                }
+            };
+            locationInput.addEventListener("input", () => {
+                window.clearTimeout(timer);
+                timer = window.setTimeout(search, 260);
+            });
         }
 
         function dateApiError(data, fallback) {
@@ -2799,7 +2866,7 @@
         }
 
         function sameDateForm(left = {}, right = {}) {
-            return ["date", "start_time", "end_time", "activity", "location", "budget", "notes"]
+            return ["date", "start_time", "end_time", "activity", "location", "notes"]
                 .every(key => String(left[key] || "").trim() === String(right[key] || "").trim());
         }
 
@@ -2962,10 +3029,10 @@
                     dateField("結束時間 *", "end_time", form.end_time, "time", "選擇時間"),
                     dateField("想做什麼", "activity", form.activity, "text", "例如：看電影"),
                     dateField("地點", "location", form.location, "text", "例如：信義威秀"),
-                    dateField("預算", "budget", form.budget, "text", "例如：每人 500 元"),
                     dateTextarea("備註", "notes", form.notes, "交通、訂位或其他想先說好的事")
                 );
                 card.appendChild(formBox);
+                attachGoogleLocationAutocomplete(card);
 
                 const mine = Boolean(metadata.confirmations?.[currentUserId]);
                 const partnerConfirmed = Object.entries(metadata.confirmations || {})
@@ -3406,8 +3473,8 @@ if (metadata.event_type === "date_coordination_form") {
                                 <input id="date-form-activity" class="w-full bg-black/40 border border-white/20 rounded-lg px-3 py-2 text-sm text-white focus:border-fuchsia-500 focus:outline-none transition" value="${form.activity || ''}" placeholder="例如：看電影、信義威秀">
                             </div>
                             <div>
-                                <label class="block text-xs text-fuchsia-300 mb-1">預算 / 其他備註</label>
-                                <input id="date-form-budget" class="w-full bg-black/40 border border-white/20 rounded-lg px-3 py-2 text-sm text-white focus:border-fuchsia-500 focus:outline-none transition" value="${form.budget || ''}" placeholder="例如：大約 500 元">
+                                <label class="block text-xs text-fuchsia-300 mb-1">備註</label>
+                                <input id="date-form-notes" class="w-full bg-black/40 border border-white/20 rounded-lg px-3 py-2 text-sm text-white focus:border-fuchsia-500 focus:outline-none transition" value="${form.notes || ''}" placeholder="例如：交通、訂位或其他想先說好的事">
                             </div>
                         </div>
                     `;
@@ -3421,7 +3488,7 @@ if (metadata.event_type === "date_coordination_form") {
                         const newForm = {
                             time: document.getElementById("date-form-time").value,
                             activity: document.getElementById("date-form-activity").value,
-                            budget: document.getElementById("date-form-budget").value
+                            notes: document.getElementById("date-form-notes").value
                         };
                         updateDateForm(metadata.match_id, newForm);
                         updateBtn.textContent = "✅ 已送出修改";
@@ -3460,7 +3527,7 @@ if (metadata.event_type === "date_coordination_form") {
                             <div class="font-bold text-emerald-400 mb-2">🎉 約會正式成立！</div>
                             <div>時間：${form.time || '未指定'}</div>
                             <div>地點：${form.activity || '未指定'}</div>
-                            <div>預算：${form.budget || '未指定'}</div>
+                            <div>備註：${form.notes || '未填寫'}</div>
                         </div>
                     `;
                 } else if (metadata.event_type === "feedback_request") {
@@ -6907,7 +6974,7 @@ if (metadata.event_type === "date_coordination_form") {
             <div><span class="text-gray-400">日期：</span><span id="date-date-val" class="font-semibold text-gray-800"></span></div>
               <div><span class="text-gray-400">時間：</span><span id="date-time-val" class="font-semibold text-gray-800"></span></div>
             <div><span class="text-gray-400">活動：</span><span id="date-activity-val" class="font-semibold text-gray-800"></span></div>
-            <div><span class="text-gray-400">預算：</span><span id="date-budget-val" class="font-semibold text-gray-800"></span></div>
+            <div><span class="text-gray-400">備註：</span><span id="date-notes-val" class="font-semibold text-gray-800"></span></div>
         </div>
         <div class="mt-6 flex justify-end gap-3">
             <button onclick="document.getElementById('date-modal').classList.add('hidden')" class="px-4 py-2 rounded bg-white/10 hover:bg-white/20 text-sm transition">關閉</button>

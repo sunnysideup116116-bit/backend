@@ -147,6 +147,7 @@ def _repair_categories(tool_name: str, arguments: dict[str, Any]) -> dict[str, A
 def run_sub_agents(
     *, tool_names: frozenset[str], system_line: str,
     context_slice: AgentContextSlice, task_brief: str,
+    model_owner: str | None = None,
 ) -> tuple[list[ToolProposal], SubAgentMetrics]:
     """Call the LLM with function calling and parse ALL tool calls into proposals.
 
@@ -171,6 +172,7 @@ def run_sub_agents(
         result = generate_chat_completion_with_tools(
             prompt, tools, temperature=0, system_prompt=system_prompt,
             prefer_fast_model=True,
+            model_owner=model_owner,
         )
         metrics.input_tokens = result.input_tokens
         metrics.output_tokens = result.output_tokens
@@ -219,6 +221,7 @@ def run_required_sub_agent(
     *, tool_name: str, system_line: str,
     context_slice: AgentContextSlice, task_brief: str,
     retry_hint: str, max_attempts: int = 2,
+    model_owner: str | None = None,
 ) -> tuple[list[ToolProposal], SubAgentMetrics]:
     """Run a bounded function-call loop for a typed single-tool capability.
 
@@ -244,6 +247,7 @@ def run_required_sub_agent(
             result = generate_chat_completion_with_tools(
                 prompt, tools, temperature=0, system_prompt=system_prompt,
                 prefer_fast_model=True,
+                model_owner=model_owner,
             )
         except Exception as exc:
             metrics.error = str(exc)

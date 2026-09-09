@@ -45,4 +45,5 @@ def run(
     return run_sub_agents(
         tool_names=tool_names or _TOOLS, system_line=_SYSTEM,
         context_slice=context_slice, task_brief=task_brief,
+        model_owner="places",
     )

@@ -50,6 +50,20 @@ class AyueV3UiContractTests(unittest.TestCase):
         for marker in markers:
             self.assertIn(marker, source)
 
+    def test_date_form_uses_notes_and_google_places_autocomplete(self):
+        source = FRONTEND.read_text(encoding="utf-8")
+        self.assertIn('dateTextarea("備註", "notes"', source)
+        self.assertIn("coordinationField('備註', 'notes'", source)
+        self.assertNotIn('dateField("預算", "budget"', source)
+        self.assertIn("attachGoogleLocationAutocomplete(card)", source)
+        self.assertIn("/api/places/autocomplete", source)
+        self.assertNotIn("date-location-picker-button", source)
+        self.assertNotIn("openGoogleLocationPicker", source)
+        self.assertNotIn("maps.googleapis.com/maps/api/js", source)
+        self.assertIn("locationInput.value = location", source)
+        self.assertIn("chooseSuggestion", source)
+        self.assertIn("Google 地點建議", source)
+
     def test_contract_forbids_state_inference_from_reply_copy(self):
         contract = CONTRACT.read_text(encoding="utf-8")
         self.assertIn("must not infer", contract.lower())

@@ -126,6 +126,7 @@ def finish_recommendation(
             temperature=0,
             system_prompt=system_prompt,
             prefer_fast_model=True,
+            model_owner="relationship",
         )
     except Exception as exc:
         metrics.error = str(exc)
@@ -175,6 +176,7 @@ def run(context_slice: AgentContextSlice, *, task_brief: str) -> tuple[list, Sub
     return run_sub_agents(
         tool_names=tools, system_line=system_line,
         context_slice=context_slice, task_brief=task_brief,
+        model_owner="relationship",
     )
 
 
@@ -188,6 +190,7 @@ def run_date_invitation(
         task_brief=task_brief,
         retry_hint=_DATE_INVITATION_RETRY_HINT,
         max_attempts=2,
+        model_owner="relationship",
     )
 
 
@@ -201,4 +204,5 @@ def run_date_coordination_cancel(
         task_brief=task_brief,
         retry_hint=_DATE_COORDINATION_CANCEL_RETRY_HINT,
         max_attempts=2,
+        model_owner="relationship",
     )

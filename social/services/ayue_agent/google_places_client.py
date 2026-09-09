@@ -9,7 +9,7 @@ import threading
 import time
 import unicodedata
 from typing import Any, Iterable
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import requests
 
@@ -17,6 +17,17 @@ import config
 
 
 _TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+_AUTOCOMPLETE_URL = "https://places.googleapis.com/v1/places:autocomplete"
+_PLACE_DETAILS_URL = "https://places.googleapis.com/v1/places"
+_PLACE_DETAILS_FIELD_MASK = (
+    "id,displayName,formattedAddress,location,types,googleMapsUri"
+)
+_AUTOCOMPLETE_FIELD_MASK = (
+    "suggestions.placePrediction.placeId,"
+    "suggestions.placePrediction.text,"
+    "suggestions.placePrediction.structuredFormat,"
+    "suggestions.placePrediction.types"
+)
 # Field mask drives billing. Keep the ordinary projection bounded. The optional
 # rating/userRatingCount/currentOpeningHours/price fields are optional fields
 # and are appended only for an explicitly requested enrichment.
@@ -65,6 +76,14 @@ def google_place_cards_enabled() -> bool:
     )
 
 
+def google_places_autocomplete_enabled() -> bool:
+    """Autocomplete uses the server key and never exposes a browser key."""
+    return bool(
+        getattr(config, "AYUE_GOOGLE_PLACE_CARDS_ENABLED", False)
+        and getattr(config, "GOOGLE_PLACES_SERVER_API_KEY", "")
+    )
+
+
 def google_routes_enabled() -> bool:
     """Routes is server-to-server and does not depend on the browser map key."""
     return bool(
@@ -75,6 +94,176 @@ def google_routes_enabled() -> bool:
 
 def google_place_enrichments_enabled() -> bool:
     return bool(getattr(config, "AYUE_GOOGLE_PLACE_ENRICHMENTS_ENABLED", False))
+
+
+def autocomplete_places(
+    query: str, *, session_token: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return a bounded public projection from Google Places Autocomplete (New).
+
+    The Google credential stays server-side.  The frontend receives only the
+    text needed to render a candidate and the provider place id for a later
+    server-owned resolution flow.
+    """
+    if not google_places_autocomplete_enabled():
+        raise GooglePlacesError("google_places_autocomplete_disabled")
+    cleaned = _clean(query, 160)
+    if len(cleaned) < 2:
+        return []
+    token = _clean(session_token, 128) if session_token else ""
+    cache_key = _cache_key(
+        "g_autocomplete", {"query": cleaned.lower(), "session_token": token},
+    )
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return [dict(item) for item in cached]
+    body: dict[str, Any] = {
+        "input": cleaned,
+        "languageCode": "zh-TW",
+        "includedRegionCodes": ["tw"],
+    }
+    if token:
+        body["sessionToken"] = token
+    try:
+        response = requests.post(
+            _AUTOCOMPLETE_URL,
+            headers={
+                "X-Goog-Api-Key": str(config.GOOGLE_PLACES_SERVER_API_KEY),
+                "X-Goog-FieldMask": _AUTOCOMPLETE_FIELD_MASK,
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=(3, 8),
+        )
+    except requests.Timeout as exc:
+        raise GooglePlacesError("google_places_timeout") from exc
+    except requests.RequestException as exc:
+        raise GooglePlacesError("google_places_unavailable") from exc
+    if not response.ok:
+        if response.status_code in {401, 403}:
+            raise GooglePlacesError("google_places_access_denied")
+        if response.status_code == 429:
+            raise GooglePlacesError("google_places_rate_limited")
+        raise GooglePlacesError("google_places_unavailable")
+    try:
+        suggestions = response.json().get("suggestions") or []
+    except ValueError as exc:
+        raise GooglePlacesError("google_places_invalid_response") from exc
+
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for suggestion in suggestions:
+        prediction = suggestion.get("placePrediction") if isinstance(suggestion, dict) else None
+        if not isinstance(prediction, dict):
+            continue
+        place_id = _clean(prediction.get("placeId") or prediction.get("place"), 180)
+        if place_id.startswith("places/"):
+            place_id = place_id.split("/", 1)[1]
+        if not place_id or place_id in seen:
+            continue
+        text = prediction.get("text") or {}
+        structured = prediction.get("structuredFormat") or {}
+        main_text = structured.get("mainText") if isinstance(structured, dict) else {}
+        secondary_text = structured.get("secondaryText") if isinstance(structured, dict) else {}
+        name = _clean(
+            main_text.get("text") if isinstance(main_text, dict) else "",
+            120,
+        )
+        description = _clean(
+            text.get("text") if isinstance(text, dict) else text,
+            180,
+        )
+        address = _clean(
+            secondary_text.get("text") if isinstance(secondary_text, dict) else "",
+            140,
+        )
+        if not name:
+            name = description
+        if not description:
+            description = "、".join(value for value in (name, address) if value)
+        if not description:
+            continue
+        seen.add(place_id)
+        results.append({
+            "provider": "google",
+            "place_id": place_id,
+            "name": name,
+            "address": address,
+            "description": description,
+        })
+        if len(results) >= 5:
+            break
+    _cache_put(cache_key, [dict(item) for item in results], 60)
+    return results
+
+
+def place_details(
+    place_id: str, *, session_token: str,
+) -> dict[str, Any] | None:
+    """Resolve one selected prediction and terminate its New API session."""
+    if not google_places_autocomplete_enabled():
+        raise GooglePlacesError("google_places_autocomplete_disabled")
+    cleaned_id = _clean(place_id, 180)
+    cleaned_token = _clean(session_token, 36)
+    if cleaned_id.startswith("places/"):
+        cleaned_id = cleaned_id.split("/", 1)[1]
+    if not cleaned_id or not cleaned_token:
+        raise GooglePlacesError("google_places_details_input_invalid")
+    try:
+        response = requests.get(
+            f"{_PLACE_DETAILS_URL}/{quote(cleaned_id, safe='')}",
+            headers={
+                "X-Goog-Api-Key": str(config.GOOGLE_PLACES_SERVER_API_KEY),
+                "X-Goog-FieldMask": _PLACE_DETAILS_FIELD_MASK,
+            },
+            params={"sessionToken": cleaned_token},
+            timeout=(3, 8),
+        )
+    except requests.Timeout as exc:
+        raise GooglePlacesError("google_places_timeout") from exc
+    except requests.RequestException as exc:
+        raise GooglePlacesError("google_places_unavailable") from exc
+    if not response.ok:
+        if response.status_code in {401, 403}:
+            raise GooglePlacesError("google_places_access_denied")
+        if response.status_code == 429:
+            raise GooglePlacesError("google_places_rate_limited")
+        raise GooglePlacesError("google_places_unavailable")
+    try:
+        item = response.json()
+    except ValueError as exc:
+        raise GooglePlacesError("google_places_invalid_response") from exc
+    if not isinstance(item, dict):
+        return None
+    display = item.get("displayName") or {}
+    name = _clean(
+        display.get("text") if isinstance(display, dict) else display,
+        120,
+    )
+    address = _clean(item.get("formattedAddress"), 180)
+    location = item.get("location") if isinstance(item.get("location"), dict) else {}
+    try:
+        latitude = float(location["latitude"])
+        longitude = float(location["longitude"])
+    except (KeyError, TypeError, ValueError):
+        latitude = None
+        longitude = None
+    map_url = _safe_google_maps_url(item.get("googleMapsUri"))
+    if not name and not address:
+        return None
+    result: dict[str, Any] = {
+        "provider": "google",
+        "place_id": cleaned_id,
+        "name": name or address,
+        "address": address,
+        "description": "，".join(value for value in (name, address) if value),
+        "map_url": map_url,
+        "types": [str(value) for value in (item.get("types") or [])][:8],
+    }
+    if latitude is not None and longitude is not None:
+        result["latitude"] = latitude
+        result["longitude"] = longitude
+    return result
 
 
 def _clean(value: Any, limit: int) -> str:

@@ -1,5 +1,8 @@
 import os
 from dotenv import load_dotenv
+from services.gpt_settings import load_gpt_settings
+
+load_gpt_settings()
 
 if os.getenv("AYUE_SKIP_DOTENV", "").strip().lower() not in {"1", "true", "on"}:
     social_env = os.path.abspath(os.path.join(os.path.dirname(__file__), ".env"))
