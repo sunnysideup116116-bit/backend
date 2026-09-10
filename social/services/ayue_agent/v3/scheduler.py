@@ -2652,6 +2652,11 @@ def run_public_agent_turn_v3(
                     direct_reason = f"reply_{direct_validation.reason or 'invalid'}"
                 else:
                     direct_messages = [direct_validation.reply]
+        # A Planner tool result is complete JSON, not incremental user prose.
+        # Stream clients use the existing plain-text Synthesizer path after
+        # routing; never replay a completed Planner answer as fake live tokens.
+        if direct_reason is None and on_token is not None:
+            direct_reason = "streaming_composition"
         if direct_reason is not None:
             planner_metrics.direct_chat_fallback_reason = direct_reason
             trace["direct_chat_fallback_reason"] = direct_reason

@@ -262,6 +262,12 @@ class V3SchedulerTests(unittest.TestCase):
         ctx = self._ctx("哈囉")
         plan = Plan(mode="direct_chat", tasks=[], direct_reply="这是簡體中文。")
         tokens: list[str] = []
+        def compose(_slice, *, candidate_cards=None, on_token=None):
+            self.assertIsNotNone(on_token)
+            on_token("這是")
+            self.assertEqual(tokens, ["這是"])
+            on_token("簡體中文。")
+            return "這是簡體中文。", None, _synth_metrics()
         with patch.dict("os.environ", {"AYUE_V3_SIMPLE_CHAT_FAST_PATH": "on"}), \
              patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
              patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
@@ -270,10 +276,12 @@ class V3SchedulerTests(unittest.TestCase):
              patch("services.ayue_agent.v3.scheduler.active_guidance_offer", return_value=None), \
              patch("services.ayue_agent.v3.scheduler.active_assessment_session", return_value=None), \
              patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.synthesizer.synthesize", side_effect=compose) as synth, \
              patch("services.ayue_agent.v3.scheduler.time.sleep"), \
              patch("services.ayue_agent.v3.scheduler._persist_trace"):
             result = run_public_agent_turn_v3(ctx, on_token=tokens.append)
         self.assertEqual(result.reply, "這是簡體中文。")
+        synth.assert_called_once()
         self.assertTrue(tokens)
         self.assertEqual("".join(tokens), result.reply)
         self.assertTrue(all(len(fragment) <= 120 for fragment in tokens))

@@ -470,8 +470,8 @@ class RelationshipSchedulerTrajectoryTests(unittest.TestCase):
              )) as synth:
             result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
-        # Public replies pass through the existing punctuation normalizer.
-        self.assertEqual(result.reply, preview.replace("？", "?"))
+        # Public replies preserve the preview's full-width punctuation.
+        self.assertEqual(result.reply, preview)
         self.assertFalse(result.reply == "planner_invalid")
         insert.assert_called_once()
         synth.assert_called_once()
@@ -526,7 +526,7 @@ class RelationshipSchedulerTrajectoryTests(unittest.TestCase):
              )):
             result = run_public_agent_turn_v3(ctx)
         expected_reply = "已在你和「小安」的聊天室建立空白約會邀請卡；等待對方接受。"
-        self.assertEqual(result.reply, expected_reply.replace("；", ";"))
+        self.assertEqual(result.reply, expected_reply)
         accept_offer.assert_not_called()
 
 

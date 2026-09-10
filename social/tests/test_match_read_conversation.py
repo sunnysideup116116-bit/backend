@@ -1,5 +1,4 @@
 from unittest.mock import Mock
-import unicodedata
 
 import pytest
 
@@ -28,7 +27,7 @@ def test_verified_reads_are_composed_for_the_current_question(monkeypatch, quest
     provider = Mock(return_value=ToolCallResult(content=answer, tool_calls=[]))
     monkeypatch.setattr(synth, "generate_chat_completion_with_tools", provider)
     reply, _, metrics = synth.synthesize(context(question), on_token=Mock())
-    assert reply == unicodedata.normalize("NFKC", answer)
+    assert reply == answer
     assert metrics.used_llm
     assert provider.call_args.kwargs["on_token"] is None
     assert question in provider.call_args.args[0]

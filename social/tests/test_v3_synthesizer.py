@@ -202,9 +202,9 @@ class V3SynthesizerTests(unittest.TestCase):
         ) as provider:
             reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
         self.assertNotIn("推薦地點", reply)
-        self.assertIn("我會先這樣比較:", reply)
-        self.assertIn("1. **A 店**:距離近,適合直接吃飯。", reply)
-        self.assertIn("2. **B 店**:比較適合吃完後坐著聊。", reply)
+        self.assertIn("我會先這樣比較：", reply)
+        self.assertIn("1. **A 店**：距離近，適合直接吃飯。", reply)
+        self.assertIn("2. **B 店**：比較適合吃完後坐著聊。", reply)
         self.assertIsNone(card_decision)
         self.assertEqual(metrics.presentation_blocks, [])
         self.assertIn("多個候選、比較、步驟或清楚分組", provider.call_args.kwargs["system_prompt"])
@@ -248,8 +248,8 @@ class V3SynthesizerTests(unittest.TestCase):
         self.assertEqual(reply.count("A 店"), 1)
         self.assertEqual(reply.count("B 店"), 1)
         self.assertLess(reply.index("1. A 店"), reply.index("2. B 店"))
-        self.assertIn("A 店:距離較近,可以先吃冰。", reply)
-        self.assertIn("B 店:座位較適合聊天。", reply)
+        self.assertIn("A 店：距離較近，可以先吃冰。", reply)
+        self.assertIn("B 店：座位較適合聊天。", reply)
         self.assertIn("先給你兩個不同方向。", reply)
         self.assertIn("看你比較想吃甜的還是坐久一點。", reply)
         self.assertEqual(metrics.presented_candidate_refs, ["place_a", "place_b"])
@@ -564,7 +564,7 @@ class V3SynthesizerTests(unittest.TestCase):
             reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
         self.assertEqual(
             reply,
-            "1. A 店\n2. B 店\n\nA 店和 B 店都在附近,A 店的距離更近。",
+            "1. A 店\n2. B 店\n\nA 店和 B 店都在附近，A 店的距離更近。",
         )
         self.assertEqual(metrics.reply_source, "llm")
         self.assertIsNone(metrics.fallback_reason)
@@ -833,7 +833,7 @@ class V3SynthesizerTests(unittest.TestCase):
             reply, card_decision, metrics = synthesize(slc, candidate_cards=cards)
         self.assertEqual(
             reply,
-            "1. A 店\n2. B 店\n3. C 店\n\n附近有 B 店、A 店和 C 店,都可以先參考。",
+            "1. A 店\n2. B 店\n3. C 店\n\n附近有 B 店、A 店和 C 店，都可以先參考。",
         )
         self.assertIsNone(card_decision)
         self.assertEqual(

@@ -44,6 +44,7 @@ from services.event_lifecycle_service import (
 from event_worker import (
     start_event_discovery_worker, stop_event_discovery_worker,
 )
+from registration_voice import router as registration_voice_router
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -77,6 +78,7 @@ app.include_router(match.router)
 app.include_router(places.router)
 app.include_router(system.router)
 app.include_router(calendar.router)
+app.include_router(registration_voice_router)
 
 @app.on_event("startup")
 def setup_calendar_indexes():

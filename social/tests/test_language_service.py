@@ -17,9 +17,17 @@ class PublicLanguageNormalizationTests(unittest.TestCase):
         value = "### 查詢結果\n\n- **第一筆**：內容\n- 第二筆\n\n### 參考來源\n\n1. `官方頁面`"
         normalized = normalize_public_reply(value)
         self.assertIn("### 查詢結果\n\n", normalized)
-        self.assertIn("- **第一筆**:內容\n- 第二筆", normalized)
+        self.assertIn("- **第一筆**：內容\n- 第二筆", normalized)
         self.assertIn("\n\n### 參考來源", normalized)
         self.assertEqual(normalize_public_reply(normalized), normalized)
+
+    def test_final_keeps_streamed_full_width_punctuation(self):
+        reply = "喜歡書店，還是散步？都可以！時間：週末；地點（再討論）。"
+        self.assertEqual(normalize_public_reply(reply), reply)
+
+    def test_mixed_prose_and_opaque_fragments_keep_punctuation(self):
+        reply = '說明：請看 `a,b:c`，網址 https://example.com/?x=1&y=2 和 {"x":"，"}。'
+        self.assertEqual(normalize_public_reply(reply), reply)
 
 
 if __name__ == "__main__":

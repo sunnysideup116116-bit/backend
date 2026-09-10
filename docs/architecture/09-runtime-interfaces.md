@@ -36,6 +36,8 @@ run_started | tool_started | tool_finished | final | error
 
 這是未協商能力時的預設 contract。只有明確送出 `X-Ayue-Stream-Tokens: v1` 的 client 會另外收到 bounded `token` event；未送 header 的既有 client 不受影響。
 
+協商 token 的一般 direct-chat 使用 Planner 後的純文字 Synthesizer callback（額外一次模型呼叫），避免重播已完成的 Planner 文字。工具／結構化輸出仍須先驗證；final 保持 canonical，前端不得另新增重複泡泡。
+
 `subagent_started`、prompt、tool arguments、tool result、raw exception 與 debug payload 都不是 public HTTP interface。它們不得被前端保存成聊天訊息。
 
 Final response 使用 `AgentResult`：
@@ -291,7 +293,7 @@ Observation 不是 user-facing prose。Synthesizer 是一般 DAG 的唯一 final
 
 ### Provider model tier and call telemetry
 
-GPT 個人實驗模式由 `start_all.sh gpt` 啟用，僅切換共用 Social `ai_service`。`AYUE_GPT_MODEL`／`AYUE_GPT_FAST_MODEL` 決定 main／fast，空 fast 回 main；Ollama runtime override 不套用 GPT。每次呼叫的 slice 使用獨立 ephemeral Codex thread；工具是 `outputSchema` 約束及本地驗證的 proposal，仍走相同 Guard。GPT 緩衝成功最終內容後才以 ≤120 字元片段呼叫 callback，非即時 token stream；token counts 取已觀測 usage，0 代表未觀測，TTFT/TPS 未觀測。`temperature`／`max_tokens` 無對應 app-server turn 欄位而不套用；整體 deadline 保留。操作、限制及實驗用途見 [`../../GPT_MODE.md`](../../GPT_MODE.md)。
+GPT 個人實驗模式由 `start_all.sh gpt` 啟用，僅切換共用 Social `ai_service`。`AYUE_GPT_MODEL`／`AYUE_GPT_FAST_MODEL` 決定 main／fast，空 fast 回 main；Ollama runtime override 不套用 GPT。每次呼叫的 slice 使用獨立 ephemeral Codex thread；工具是 `outputSchema` 約束及本地驗證的 proposal，仍走相同 Guard。GPT 工具／JSON 輸出緩衝並驗證後才以 ≤120 字元片段呼叫 callback；無工具純文字只串流 matching thread／turn／item 的 final_answer delta，沒有明確 final phase 的內容仍緩衝，詳見 GPT_MODE.md；token counts 取已觀測 usage，0 代表未觀測，TTFT/TPS 未觀測。`temperature`／`max_tokens` 無對應 app-server turn 欄位而不套用；整體 deadline 保留。操作、限制及實驗用途見 [`../../GPT_MODE.md`](../../GPT_MODE.md)。
 
 `OLLAMA_FAST_CHAT_MODEL` 是可選的 fast tier；未設定時回退到 `OLLAMA_CHAT_MODEL`。Planner 與 Places／Match／Relationship／Profile proposal runners 要求 fast tier；Calendar、Web、Synthesizer 使用 main tier。ProductInfo retrieval 本身是 bounded typed path；Synthesizer 可用該 projection 搭配使用者的實際問題自然組合回答，固定產品文案只作 provider failure fallback。Runtime model override 優先於這些 tier，且不自動在 fast 失敗後重試 main。
 

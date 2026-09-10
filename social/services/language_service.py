@@ -59,7 +59,10 @@ _PUBLIC_REPLY_PROTECTED = re.compile(
 
 def _normalize_public_reply_line(value: str) -> str:
     """Normalize one visible reply line without destroying Markdown layout."""
-    text = unicodedata.normalize("NFKC", str(value or ""))
+    # Display prose must preserve the punctuation already shown while streaming.
+    # NFKC folds ，：！？ into ASCII; NFC keeps their width while canonicalizing
+    # equivalent Unicode sequences. Identifier/key normalization is unchanged.
+    text = unicodedata.normalize("NFC", str(value or ""))
     text = _OPENCC.convert(text) if _OPENCC else text.translate(_FALLBACK_S2T)
     return re.sub(r"[ \t\f\v]+", " ", text).strip()
 

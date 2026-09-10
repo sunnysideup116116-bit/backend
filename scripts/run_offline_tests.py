@@ -11,7 +11,10 @@ import sys
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("suite", choices=("social", "risk", "matchmaker", "contracts"))
+    parser.add_argument(
+        "suite",
+        choices=("social", "risk", "matchmaker", "contracts", "voice"),
+    )
     args, pytest_args = parser.parse_known_args()
     root = Path(__file__).resolve().parents[1]
     os.environ.update({
@@ -49,16 +52,24 @@ def main() -> int:
     socket.socket.connect = offline_connect
     socket.socket.connect_ex = offline_connect_ex
     socket.getaddrinfo = offline_resolve
-    folders = {"social": "social", "risk": "risk_backend", "matchmaker": "matchmaker_agent", "contracts": "."}
+    folders = {
+        "social": "social",
+        "risk": "risk_backend",
+        "matchmaker": "matchmaker_agent",
+        "contracts": ".",
+        "voice": "registration_voice",
+    }
     working = root / folders[args.suite]
     os.chdir(working)
     sys.path.insert(0, str(working))
     sys.path.insert(0, str(root / "social") if args.suite == "contracts" else str(working))
+    sys.path.insert(0, str(root))
     tests = {
         "social": ["tests", "--ignore=tests/test_google_maps_live_smoke.py", "--ignore=tests/test_private_scope_live.py", "--ignore=tests/test_ayue_persona_live.py"],
         "risk": ["tests", "--ignore=tests/test_audit_pipeline_timing.py"],
         "matchmaker": [str(path) for path in sorted(working.glob("test_*.py"))],
         "contracts": ["tests"],
+        "voice": ["tests"],
     }
     import pytest
     return pytest.main(["-q", *tests[args.suite], *pytest_args])

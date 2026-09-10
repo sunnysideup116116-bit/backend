@@ -69,6 +69,8 @@ Public UI 使用 `POST /api/direct_chat/stream`；`POST /api/direct_chat` 保留
 4. 保存 final assistant message 一次。
 5. 非 assessment owner message 才背景排入 profile extraction。
 
+Token opt-in（`X-Ayue-Stream-Tokens: v1`）的一般 direct-chat 在 Planner 驗證後改走純文字 Synthesizer，讓 provider delta 能在 final 前送達，而非只重播完整 Planner 回覆。這增加一次模型呼叫；未 opt-in／JSON 仍保留 direct-chat 快速路徑。工具及結構化內容維持先驗證後輸出，不能串流 raw tool JSON。真正首字時間仍取決於 provider 與代理，不以 callback 單元測試宣稱實機延遲。
+
 ### 4.2 Planner 前的特殊入口
 
 Scheduler 先處理：

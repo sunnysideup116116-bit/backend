@@ -308,7 +308,7 @@ class DateCoordinationCancelTests(unittest.TestCase):
         ):
             result = run_public_agent_turn_v3(ctx)
 
-        self.assertEqual(result.reply, preview.replace("？", "?"))
+        self.assertEqual(result.reply, preview)
         self.assertIsNotNone(result.choice_prompt)
         self.assertEqual(result.choice_prompt["confirm_label"], "確認取消")
         record = confirmations.find({})[0]

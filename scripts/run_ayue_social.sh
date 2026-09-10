@@ -20,6 +20,7 @@ if command -v ss >/dev/null 2>&1 && ss -ltn "sport = :$port" | tail -n +2 | grep
 fi
 
 cd "$service_root"
+export PYTHONPATH="$server_root${PYTHONPATH:+:$PYTHONPATH}"
 reload_args=()
 if [[ "${AYUE_SOCIAL_RELOAD:-off}" == "on" ]]; then
     reload_args+=(--reload)
