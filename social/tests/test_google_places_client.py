@@ -95,7 +95,14 @@ class GooglePlacesCuisineTests(unittest.TestCase):
              ) as get:
             place = place_details("ChIJdetails", session_token="session-1")
         self.assertEqual(place["name"], "台北車站")
-        self.assertEqual(get.call_args.kwargs["params"], {"sessionToken": "session-1"})
+        self.assertEqual(
+            get.call_args.kwargs["params"],
+            {
+                "sessionToken": "session-1",
+                "languageCode": "zh-TW",
+                "regionCode": "TW",
+            },
+        )
 
     def test_routes_capability_does_not_require_browser_card_configuration(self):
         import config

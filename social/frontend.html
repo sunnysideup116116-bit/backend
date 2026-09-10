@@ -2663,9 +2663,9 @@
             return field;
         }
 
-        function dateTextarea(label, name, value, placeholder = "") {
+        function dateTextarea(label, name, value, placeholder = "", wide = true) {
             const field = document.createElement("label");
-            field.className = "date-form-field date-form-field-wide";
+            field.className = `date-form-field${wide ? " date-form-field-wide" : ""}`;
             const caption = document.createElement("span");
             caption.textContent = label;
             const textarea = document.createElement("textarea");
@@ -2728,15 +2728,17 @@
                 const resolvedDescription = String(
                     resolved.description || description,
                 ).trim();
-                const location = resolvedAddress || resolvedDescription || resolvedName;
+                const details = resolvedAddress || resolvedDescription;
+                const location = !resolvedName
+                    ? details
+                    : !details || details === resolvedName
+                        ? resolvedName
+                        : details.includes(resolvedName)
+                            ? details
+                            : `${resolvedName}\n${details}`;
                 locationInput.value = location;
                 locationInput.dataset.placeAutocompleteSuppress = "true";
                 locationInput.dispatchEvent(new Event("input", {bubbles: true}));
-                const activityInput = card.querySelector('[data-date-field="activity"]');
-                if (activityInput && !activityInput.value.trim() && resolvedName) {
-                    activityInput.value = resolvedName;
-                    activityInput.dispatchEvent(new Event("input", {bubbles: true}));
-                }
                 placeSessionToken = null;
                 clearSuggestions();
                 setDateFeedback(card, `已選擇地點：${location}`, "success");
@@ -3028,7 +3030,7 @@
                     dateField("開始時間 *", "start_time", form.start_time, "time", "選擇時間"),
                     dateField("結束時間 *", "end_time", form.end_time, "time", "選擇時間"),
                     dateField("想做什麼", "activity", form.activity, "text", "例如：看電影"),
-                    dateField("地點", "location", form.location, "text", "例如：信義威秀"),
+                    dateTextarea("地點", "location", form.location, "例如：信義威秀\n台北市信義區", false),
                     dateTextarea("備註", "notes", form.notes, "交通、訂位或其他想先說好的事")
                 );
                 card.appendChild(formBox);
@@ -3469,8 +3471,12 @@ if (metadata.event_type === "date_coordination_form") {
                                 <input id="date-form-time" class="w-full bg-black/40 border border-white/20 rounded-lg px-3 py-2 text-sm text-white focus:border-fuchsia-500 focus:outline-none transition" value="${form.time || ''}" placeholder="例如：週末下午">
                             </div>
                             <div>
-                                <label class="block text-xs text-fuchsia-300 mb-1">約會活動 / 地點</label>
-                                <input id="date-form-activity" class="w-full bg-black/40 border border-white/20 rounded-lg px-3 py-2 text-sm text-white focus:border-fuchsia-500 focus:outline-none transition" value="${form.activity || ''}" placeholder="例如：看電影、信義威秀">
+                                <label class="block text-xs text-fuchsia-300 mb-1">想做什麼</label>
+                                <input id="date-form-activity" class="w-full bg-black/40 border border-white/20 rounded-lg px-3 py-2 text-sm text-white focus:border-fuchsia-500 focus:outline-none transition" value="${form.activity || ''}" placeholder="例如：看電影">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-fuchsia-300 mb-1">地點</label>
+                                <textarea id="date-form-location" rows="2" class="w-full bg-black/40 border border-white/20 rounded-lg px-3 py-2 text-sm text-white focus:border-fuchsia-500 focus:outline-none transition" placeholder="地點名稱\n地址">${form.location || ''}</textarea>
                             </div>
                             <div>
                                 <label class="block text-xs text-fuchsia-300 mb-1">備註</label>
@@ -3488,6 +3494,7 @@ if (metadata.event_type === "date_coordination_form") {
                         const newForm = {
                             time: document.getElementById("date-form-time").value,
                             activity: document.getElementById("date-form-activity").value,
+                            location: document.getElementById("date-form-location").value,
                             notes: document.getElementById("date-form-notes").value
                         };
                         updateDateForm(metadata.match_id, newForm);

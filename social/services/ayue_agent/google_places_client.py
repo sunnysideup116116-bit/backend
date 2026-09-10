@@ -216,7 +216,11 @@ def place_details(
                 "X-Goog-Api-Key": str(config.GOOGLE_PLACES_SERVER_API_KEY),
                 "X-Goog-FieldMask": _PLACE_DETAILS_FIELD_MASK,
             },
-            params={"sessionToken": cleaned_token},
+            params={
+                "sessionToken": cleaned_token,
+                "languageCode": "zh-TW",
+                "regionCode": "TW",
+            },
             timeout=(3, 8),
         )
     except requests.Timeout as exc:
