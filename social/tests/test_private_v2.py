@@ -7,13 +7,15 @@ from services.ayue_agent.private_v2 import (
     PrivateAgentDecision,
     PrivateAgentTurnContextV2,
     _compose,
+    _search_shared_history,
     run_private_agent_turn_v2,
 )
 
 
 def _context():
     return PrivateAgentTurnContextV2(
-        user_id="owner", other_id="other", room_id="private", message="幫我看一下我們最近聊什麼",
+        user_id="owner", other_id="other", room_id="private",
+        message="幫我看一下我們最近聊什麼",
         pair_revision=1, viewer_profile={"recent_context": "想去旅行"},
         counterparty_shareable={"display_name": "小晴", "recent_context": "喜歡咖啡"},
         counterparty_advisory={"private_secret": "never expose"},
@@ -24,6 +26,20 @@ def _context():
 
 
 class PrivateV2Tests(unittest.TestCase):
+    def test_full_shared_history_search_is_room_bound_and_bounded(self):
+        cursor = MagicMock()
+        cursor.sort.return_value.limit.return_value = [
+            {"sender_id": "owner", "content": "我們聊過籃球", "timestamp": 1},
+        ]
+        collection = MagicMock()
+        collection.find.return_value = cursor
+        with patch("services.ayue_agent.private_v2.messages_coll", collection):
+            result = _search_shared_history(_context(), "籃球")
+        query = collection.find.call_args.args[0]
+        self.assertEqual(query["room_id"], "other_owner")
+        self.assertEqual(query["content"]["$regex"], "籃球")
+        self.assertEqual(result["messages"][0]["role"], "本人")
+
     def test_composer_never_receives_counterparty_advisory(self):
         ctx = _context()
         with patch("services.ayue_agent.private_v2.generate_chat_completion", return_value="可以從最近看的電影延伸聊聊。") as model:

@@ -13,7 +13,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "suite",
-        choices=("social", "risk", "matchmaker", "contracts", "voice"),
+        choices=("social", "risk", "matchmaker", "contracts", "voice", "app-voice"),
     )
     args, pytest_args = parser.parse_known_args()
     root = Path(__file__).resolve().parents[1]
@@ -58,6 +58,7 @@ def main() -> int:
         "matchmaker": "matchmaker_agent",
         "contracts": ".",
         "voice": "registration_voice",
+        "app-voice": "app_voice_assistant",
     }
     working = root / folders[args.suite]
     os.chdir(working)
@@ -70,6 +71,7 @@ def main() -> int:
         "matchmaker": [str(path) for path in sorted(working.glob("test_*.py"))],
         "contracts": ["tests"],
         "voice": ["tests"],
+        "app-voice": ["tests"],
     }
     import pytest
     return pytest.main(["-q", *tests[args.suite], *pytest_args])

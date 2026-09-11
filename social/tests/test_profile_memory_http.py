@@ -40,3 +40,49 @@ def test_memory_action_failure_is_an_http_error_not_false_success():
             system.profile_memory_action(request)
     assert raised.value.status_code == 503
     assert raised.value.detail["code"] == "not_found"
+
+
+def test_voice_memory_add_uses_validated_owner_memory_pipeline():
+    request = system.ProfileMemoryAddRequest(
+        user_id="owner",
+        label="喜歡 打籃球",
+        stance="like",
+        request_id="voice-request-123",
+    )
+    learned = {
+        "key": "voice_key",
+        "label": "打籃球",
+        "stance": "like",
+        "category": "preference",
+    }
+    with patch(
+        "services.memory_service.apply_profile_memory_proposals",
+        return_value=[learned],
+    ) as apply:
+        result = system.add_profile_memory(request)
+
+    assert result == {"status": "success", "memory": learned}
+    args = apply.call_args.args
+    assert args[0] == "owner"
+    assert args[1][0]["label"] == "打籃球"
+    assert args[1][0]["stance"] == "like"
+    assert args[1][0]["confidence"] == 1.0
+    assert args[2] == "app_voice"
+    assert args[3] == "voice-memory:owner:voice-request-123"
+
+
+def test_voice_memory_add_rejects_a_skipped_graph_write():
+    request = system.ProfileMemoryAddRequest(
+        user_id="owner",
+        label="測試偏好",
+        stance="like",
+        request_id="voice-request-456",
+    )
+    with patch(
+        "services.memory_service.apply_profile_memory_proposals",
+        return_value=[],
+    ):
+        with pytest.raises(HTTPException) as raised:
+            system.add_profile_memory(request)
+    assert raised.value.status_code == 422
+    assert raised.value.detail["code"] == "memory_rejected"

@@ -69,6 +69,7 @@ class PrivateToolSpec(BaseModel):
 PRIVATE_TOOL_REGISTRY = {
     "private.relationship.get_pair_summary": PrivateToolSpec(name="private.relationship.get_pair_summary", risk="read", description="讀取這段已接受關係中可公開、共同或已同意分享的摘要。", progress_text="我整理一下你們已確認的共同資訊…"),
     "private.relationship.get_shared_history": PrivateToolSpec(name="private.relationship.get_shared_history", risk="read", description="讀取這一對在共同聊天室的近期對話脈絡。", progress_text="我回看一下你們最近聊到哪裡…"),
+    "private.relationship.search_shared_history": PrivateToolSpec(name="private.relationship.search_shared_history", risk="read", description="依使用者提供的主題關鍵字搜尋這一對共同聊天室的本人可見歷史，最多回傳二十則。", progress_text="我找一下你們以前聊到這個主題的內容…"),
     "private.calendar.get_counterparty_availability": PrivateToolSpec(name="private.calendar.get_counterparty_availability", risk="read", description="確認對方在指定期間的 busy/free 時段；不可讀取行程內容。", progress_text="我確認一下對方那段時間是否已有安排…"),
     "private.date.start_coordination": PrivateToolSpec(name="private.date.start_coordination", risk="write", description="發起雙方同意的約會協調；會通知對方，必須先確認。", progress_text="我準備先問對方是否願意一起協調約會…", requires_confirmation=True),
 }
@@ -161,6 +162,7 @@ Private 沒有 Places 搜尋能力；一般店家資訊或餐廳搜尋要 redire
 
 語意 boundary examples（只作 few-shot guidance，不得轉成程式 keyword/regex router）：
 她剛剛這句是什麼意思？→ shared history/advice
+找我們以前聊過籃球的訊息。→ search shared history
 我要怎麼回她？→ conversation coaching
 我們最近是不是變冷了？→ shared history/advice
 我是不是太積極？→ relationship advice
@@ -211,7 +213,7 @@ def _legacy_planner_prompt(ctx: PrivateAgentTurnContextV2, observations: list[di
 你正在協助一位已接受配對中的使用者。本人與對方資料已分開標示；對方 advisory 僅能影響 strategy（warm/playful/calm/direct），不可出現在事實、工具參數或回答裡。
 只能使用 visible_tools。對方行事曆只能查 busy/free。開始約會協調會打擾對方，必須輸出 confirmation，不能直接 tool_call。問趣事功能目前暫停，不可提議或執行；被問到時自然說功能先收起來，並改為協助想開場。一般建議、看共同聊天、問對方是誰或近況可用 read tools；沒有需要讀取時輸出 final。不可輸出 ID、revision、資料庫欄位、私人資料或工具內部資訊。
 reply 只能依 safe context 與 observations 作答，以繁體中文、1 到 3 句；不可提及工具、模型、系統、權限、私人資料、ID、revision 或資料庫。對方行事曆只能說 busy/free。
-只輸出 JSON：{{"kind":"final|tool_call|confirmation","intent":"advice|pair_summary|shared_history|availability|date_coordination|unclear","tool_name":null,"arguments":{{"scope":""}},"confidence":0.0,"evidence_span":"使用者原句子字串","strategy":"warm|playful|calm|direct","reply":""}}。
+只輸出 JSON：{{"kind":"final|tool_call|confirmation","intent":"advice|pair_summary|shared_history|history_search|availability|date_coordination|unclear","tool_name":null,"arguments":{{"scope":"","query":""}},"confidence":0.0,"evidence_span":"使用者原句子字串","strategy":"warm|playful|calm|direct","reply":""}}。
 安全 context：{json.dumps(safe, ensure_ascii=False)}"""
 
 
@@ -275,11 +277,38 @@ def _viewer_availability(ctx: PrivateAgentTurnContextV2, scope: str) -> dict[str
     return {"access": True, "busy": busy, "truncated": truncated}
 
 
+def _search_shared_history(ctx: PrivateAgentTurnContextV2, query: str) -> dict[str, Any]:
+    term = re.sub(r"\s+", " ", str(query or "")).strip()[:80]
+    if len(term) < 2:
+        return {"query": term, "messages": [], "needs_query": True}
+    raw = list(messages_coll.find(
+        {
+            "room_id": generate_room_id(ctx.user_id, ctx.other_id),
+            "content": {"$regex": re.escape(term), "$options": "i"},
+        },
+        {"_id": 0, "sender_id": 1, "content": 1, "timestamp": 1},
+    ).sort("timestamp", -1).limit(20))[::-1]
+    messages = []
+    for item in raw:
+        content = re.sub(r"\s+", " ", str(item.get("content") or "")).strip()[:500]
+        if not content:
+            continue
+        sender = item.get("sender_id")
+        messages.append({
+            "role": "本人" if sender == ctx.user_id else "對方",
+            "content": content,
+            "timestamp": str(item.get("timestamp") or "")[:40],
+        })
+    return {"query": term, "messages": messages, "needs_query": False}
+
+
 def _execute_read(name: str, ctx: PrivateAgentTurnContextV2, arguments: dict[str, str]) -> tuple[bool, dict[str, Any], str | None]:
     if name == "private.relationship.get_pair_summary":
         return True, _safe_pair_summary(ctx), None
     if name == "private.relationship.get_shared_history":
         return True, {"messages": ctx.shared_history}, None
+    if name == "private.relationship.search_shared_history":
+        return True, _search_shared_history(ctx, str(arguments.get("query") or "")), None
     if name == "private.calendar.get_counterparty_availability":
         return True, _availability(ctx, str(arguments.get("scope") or "")), None
     if name == "private.calendar.get_viewer_availability":
@@ -610,7 +639,10 @@ def run_private_agent_turn_v2(
                     trace["guard"].append("tool_not_allowed")
                     result = AgentResult(handled=True, reply=compose_reply(decision.strategy), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2", fallback_reason="tool_not_allowed")
                     break
-                arguments = {"scope": str(decision.arguments.get("scope") or "")[:80]}
+                arguments = {
+                    "scope": str(decision.arguments.get("scope") or "")[:80],
+                    "query": str(decision.arguments.get("query") or "")[:80],
+                }
                 key = spec.name + json.dumps(arguments, ensure_ascii=False, sort_keys=True)
                 if key in seen:
                     trace["guard"].append("duplicate_observation_reused")

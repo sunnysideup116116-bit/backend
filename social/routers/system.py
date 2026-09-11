@@ -1,13 +1,14 @@
 import random
 import requests
 import hmac
+import hashlib
 import ipaddress
 import os
 import re
 import time
 import config
 from fastapi import APIRouter, Header, HTTPException, Request
-from models import ClearRequest, SettingsRequest, MediatorToneRequest, ProfileMemoryActionRequest, ProfileLocationRequest, ModelSettingsRequest
+from models import ClearRequest, SettingsRequest, MediatorToneRequest, ProfileMemoryActionRequest, ProfileMemoryAddRequest, ProfileLocationRequest, ModelSettingsRequest
 from database import db, profiles_coll, matches_coll, messages_coll
 from services.ai_service import get_embedding
 from services.profile_projection import safe_recent_context
@@ -636,6 +637,51 @@ def profile_memory_action(req: ProfileMemoryActionRequest):
             "code": exc.error_code,
             "message": "記憶設定暫時無法更新，請稍後再試。",
         }) from exc
+
+
+@router.post("/profile/memories/add")
+def add_profile_memory(req: ProfileMemoryAddRequest):
+    from services.memory_service import (
+        MemoryWriteError,
+        apply_profile_memory_proposals,
+        normalize_memory_item,
+    )
+
+    normalized = normalize_memory_item({
+        "label": normalize_zh_tw(req.label, max_length=40),
+    }).get("label", "")
+    if not normalized:
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_label_invalid",
+            "message": "這則記憶內容無法保存。",
+        })
+    key = "voice_" + hashlib.sha256(
+        f"{req.stance}:{normalized.lower()}".encode("utf-8"),
+    ).hexdigest()[:16]
+    try:
+        learned = apply_profile_memory_proposals(
+            req.user_id,
+            [{
+                "key": key,
+                "label": normalized,
+                "stance": req.stance,
+                "category": "preference",
+                "confidence": 1.0,
+            }],
+            "app_voice",
+            f"voice-memory:{req.user_id}:{req.request_id}",
+        )
+    except MemoryWriteError as exc:
+        raise HTTPException(status_code=503, detail={
+            "code": exc.error_code,
+            "message": "阿月記憶暫時無法新增，請稍後再試。",
+        }) from exc
+    if not learned:
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_rejected",
+            "message": "這則內容不適合存成阿月記憶。",
+        })
+    return {"status": "success", "memory": learned[0]}
 
 @router.get("/debug/profile_skill_runs")
 def debug_profile_skill_runs(user_id: str, limit: int = 12):

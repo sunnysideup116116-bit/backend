@@ -227,6 +227,13 @@ class ProfileMemoryActionRequest(BaseModel):
     action: str
     value: str | None = None
 
+
+class ProfileMemoryAddRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=128)
+    label: str = Field(min_length=1, max_length=40)
+    stance: Literal["like", "dislike", "require", "avoid"] = "like"
+    request_id: str = Field(min_length=8, max_length=120)
+
 class ProfileLocationRequest(BaseModel):
     user_id: str
     city: str = Field(default="", max_length=20)

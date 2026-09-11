@@ -24,6 +24,7 @@ class PrivateAgentDecision(BaseModel):
         "advice",
         "pair_summary",
         "shared_history",
+        "history_search",
         "availability",
         "date_coordination",
         "out_of_scope",
