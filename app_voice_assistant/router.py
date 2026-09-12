@@ -26,6 +26,8 @@ from .contracts import (
     safe_context,
 )
 from .duplex_runtime import run_duplex_session
+from .contextual import bind_target
+from .capabilities import CATALOG
 from .limiter import AppVoiceLimiter, AppVoiceTicketStore, fingerprint, new_process_secret
 from .provider import AppVoiceProvider
 from .settings import AppVoiceSettings
@@ -140,6 +142,9 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
         return {
             "enabled": runtime.settings.enabled,
             "protocol_version": 3,
+            "action_catalog_version": CATALOG["version"],
+            "screen_context_version": 1,
+            "structured_action_results": True,
             "demo_only": runtime.settings.demo_only,
             "android_on_device_stt": True,
             "gemini_fallback_available": runtime.provider.gemini_available,
@@ -381,6 +386,11 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                 if proposal.intent == "assistant.reply":
                     await reply(proposal.reply, code="conversation")
                     return
+                bound, target_error = bind_target(proposal.intent, proposal.arguments, context)
+                if target_error:
+                    await reply("請重新讀取目前畫面並指定項目。", code=target_error)
+                    return
+                proposal = VoiceProposal(proposal.intent, bound, proposal.reply, proposal.base_revision)
                 if not context_allows_proposal(context, proposal):
                     await reply(
                         "這項功能沒有被你授權，可以在「阿月語音助理」設定裡調整。",

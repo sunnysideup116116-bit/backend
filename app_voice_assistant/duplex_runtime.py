@@ -11,6 +11,8 @@ from typing import Any, Awaitable, Callable
 
 from fastapi import WebSocket
 from .language import display_transcript
+from .capabilities import CATALOG, ACTIONS, available_actions
+from .contextual import bind_target, safe_result
 
 from .contracts import (
     VoiceProposal,
@@ -69,7 +71,9 @@ def _proposal_from_function(call: Any, *, revision: int) -> VoiceProposal | None
     name = str(call.name or "")
     intent = ""
     arguments: dict[str, Any] = {}
-    if name in {"read_shared_dates", "respond_date_invitation", "update_shared_date", "confirm_shared_date"}:
+    if name == "select_screen_target":
+        intent = "ui.target.select"
+    elif name in {"read_shared_dates", "respond_date_invitation", "update_shared_date", "confirm_shared_date"}:
         intent = {"read_shared_dates": "date.query", "respond_date_invitation": "date.respond", "update_shared_date": "date.update", "confirm_shared_date": "date.confirm"}[name]
         arguments = {"contact_name": raw.get("contact_name", "")}
         if name == "respond_date_invitation":
@@ -177,6 +181,8 @@ def _proposal_from_function(call: Any, *, revision: int) -> VoiceProposal | None
             "contact_name": raw.get("contact_name"),
             "message": raw.get("message"),
         }
+    if "target_ref" in raw:
+        arguments["target_ref"] = raw["target_ref"]
     return validate_proposal(
         {
             "intent": intent,
@@ -222,7 +228,7 @@ async def run_duplex_session(
     seen_tool_calls: set[str] = set()
     tool_response_cache: dict[str, tuple[str, dict[str, Any]]] = {}
     background_actions: dict[str, VoiceProposal] = {}
-    queued_background_results: list[tuple[str, str]] = []
+    queued_background_results: list[tuple[str | dict[str, Any], str]] = []
     progress_turn_pending = False
     private_read_authorized = False
     last_delegated_proposal: VoiceProposal | None = None
@@ -322,6 +328,8 @@ async def run_duplex_session(
             await tool_response(call, {
                 "status": "ok",
                 "permissions": permissions,
+                "catalog_version": CATALOG["version"],
+                "available_actions": available_actions(ACTIONS, permissions),
                 "feature_status": (
                     dict(context.get("feature_status") or {})
                     if can_read_status
@@ -346,12 +354,15 @@ async def run_duplex_session(
             await tool_response(call, {
                 "status": "ok",
                 "scope": str(context.get("scope") or "global"),
+                "revision": context.get("revision", 0),
+                "screen": context.get("screen", {}),
                 "media_count": int(context.get("media_count") or 0),
                 "can_publish": context.get("can_publish") is True,
                 "message": "只描述安全畫面狀態，不推測畫面文字或私人內容。",
             })
             return
         if name in {
+            "select_screen_target",
             "read_shared_dates", "respond_date_invitation", "update_shared_date", "confirm_shared_date",
             "navigate_app",
             "open_app_page",
@@ -413,6 +424,12 @@ async def run_duplex_session(
                     "message": "這個操作不在 App 安全白名單內。",
                 })
                 return
+            bound, target_error = bind_target(proposal.intent, proposal.arguments, context)
+            if target_error:
+                await tool_response(call, {"status": "needs_input", "error_code": target_error,
+                                           "message": "請重新讀取目前畫面，選擇已授權且仍有效的項目。"})
+                return
+            proposal = VoiceProposal(proposal.intent, bound, proposal.reply, proposal.base_revision)
             if not context_allows_proposal(context, proposal):
                 await tool_response(call, {
                     "status": "permission_denied",
@@ -666,11 +683,12 @@ async def run_duplex_session(
         first_chunk = None
         suppress_current_turn = False
 
-    async def deliver_background_result(message: str, source: str) -> None:
+    async def deliver_background_result(message: str | dict[str, Any], source: str) -> None:
+        rendered = json.dumps(message, ensure_ascii=False) if isinstance(message, dict) else safe_reply(message)[:1200]
         await live.send_text(
             "[DELEGATED_AYUE_RESULT]\n"
             f"source={source}\n"
-            f"{safe_reply(message)[:1200]}\n"
+            f"{rendered}\n"
             "這是已完成的工具結果。請理解重點後，直接以阿月第一人稱自然回答使用者，"
             "不要逐字照念、不要說你在轉述、不要提到有多個阿月，"
             "也不要增加結果沒有的事實或承諾。",
@@ -906,6 +924,10 @@ async def run_duplex_session(
                     if pending and (
                         next_context["scope"] != pending.scope
                         or next_context["revision"] != pending.revision
+                        or (
+                            pending.proposal.arguments.get("target_ref")
+                            and bind_target(pending.proposal.intent, pending.proposal.arguments, next_context)[1] is not None
+                        )
                     ):
                         pending = None
                     context = next_context
@@ -920,6 +942,8 @@ async def run_duplex_session(
                     else:
                         last_delegated_proposal = proposal
                         last_delegated_expires_at = time.time() + 120
+                    if control.get("result_version") == 1:
+                        result_text = safe_result(control)
                     if progress_turn_pending or current_response_id is not None:
                         queued_background_results.append((result_text, source))
                     else:
@@ -930,11 +954,7 @@ async def run_duplex_session(
                 if target:
                     success = control.get("success") is True
                     next_reply_code = "action_completed" if success else "action_failed"
-                    result_response = {
-                        "status": "success" if success else "failed",
-                        "message": str(control.get("message") or "")[:12000]
-                        or ("操作已完成。" if success else "操作沒有完成。"),
-                    }
+                    result_response = safe_result(control)
                     tool_response_cache[target.call_id] = (
                         target.name,
                         dict(result_response),

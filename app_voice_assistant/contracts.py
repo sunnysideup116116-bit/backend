@@ -7,40 +7,11 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any
 
+from .capabilities import ACTIONS
+from .contextual import safe_screen, REF
 
-ALLOWED_INTENTS = frozenset({
-    "date.query", "date.respond", "date.update", "date.confirm",
-    "app.navigate",
-    "profile.open",
-    "profile.patch",
-    "profile.request_commit",
-    "settings.open",
-    "settings.set",
-    "post.open_draft",
-    "post.replace_caption",
-    "post.append_caption",
-    "post.select_recent_photos",
-    "post.request_publish",
-    "calendar.query",
-    "calendar.create",
-    "calendar.update",
-    "calendar.cancel",
-    "personality.explore",
-    "ayue.public_query",
-    "ayue.private_query",
-    "contacts.query",
-    "self.query",
-    "memory.query",
-    "memory.add",
-    "ui.choice.activate",
-    "chat.open",
-    "chat.request_send",
-    "match.query",
-    "match.ayue_query",
-    "assistant.reply",
-    "assistant.cancel",
-    "assistant.close",
-})
+
+ALLOWED_INTENTS = frozenset(ACTIONS)
 PROFILE_FIELDS = frozenset({
     "name", "phone", "age", "region", "city", "district", "userinfo",
 })
@@ -250,6 +221,7 @@ def safe_context(value: Any) -> dict[str, Any]:
     self_name = "" if _EMAIL_RE.search(raw_self_name) else raw_self_name
     return {
         "scope": str(raw.get("scope") or "global")[:40],
+        "screen": safe_screen(raw.get("screen"), permissions),
         "revision": max(0, integer("revision")),
         "media_count": max(0, min(integer("media_count"), 5)),
         "can_publish": raw.get("can_publish") is True,
@@ -268,45 +240,7 @@ def safe_context(value: Any) -> dict[str, Any]:
 
 
 def permission_for_intent(intent: str) -> str | None:
-    if intent == "date.query":
-        return "calendar_read"
-    if intent in {"date.respond", "date.update", "date.confirm"}:
-        return "calendar_write"
-    if intent == "app.navigate":
-        return "navigation"
-    if intent in {"contacts.query", "chat.open"}:
-        return "chat_list"
-    if intent == "chat.request_send":
-        return "chat_send"
-    if intent in {"self.query", "memory.query"}:
-        return "memory_read"
-    if intent == "memory.add":
-        return "memory_write"
-    if intent == "match.query":
-        return "match_read"
-    if intent == "ayue.private_query":
-        return "private_ayue"
-    if intent == "ayue.public_query":
-        return "public_ayue"
-    if intent == "calendar.query":
-        return "calendar_read"
-    if intent in {"calendar.create", "calendar.update", "calendar.cancel"}:
-        return "calendar_write"
-    if intent == "personality.explore":
-        return "public_ayue"
-    if intent.startswith("profile."):
-        return "profile"
-    if intent == "settings.set" or intent == "settings.open":
-        return "settings"
-    if intent == "post.request_publish":
-        return "post_publish"
-    if intent == "post.select_recent_photos":
-        return "gallery"
-    if intent.startswith("post."):
-        return "post_draft"
-    if intent == "match.ayue_query":
-        return "match_ayue"
-    return None
+    return ACTIONS.get(intent, {}).get("permission")
 
 
 def context_allows_intent(context: dict[str, Any], intent: str) -> bool:
@@ -426,11 +360,7 @@ def context_allows_proposal(context: dict[str, Any], proposal: VoiceProposal) ->
 
 
 def requires_confirmation(proposal: VoiceProposal) -> bool:
-    if proposal.intent in {
-        "profile.request_commit", "post.request_publish", "chat.request_send",
-        "calendar.create", "calendar.update", "calendar.cancel", "memory.add",
-        "date.respond", "date.update", "date.confirm",
-    }:
+    if ACTIONS.get(proposal.intent, {}).get("confirmation"):
         return True
     return (
         proposal.intent == "settings.set"
@@ -509,7 +439,14 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
         return None
     raw_args = value.get("arguments") if isinstance(value.get("arguments"), dict) else {}
     args: dict[str, Any] = {}
-    if intent in {"date.query", "date.respond", "date.update", "date.confirm"}:
+    target_ref = raw_args.get("target_ref")
+    if target_ref is not None and (not isinstance(target_ref, str) or not REF.fullmatch(target_ref)
+                                   or not ACTIONS[intent]["target_kinds"]):
+        return None
+    if intent == "ui.target.select":
+        if not target_ref:
+            return None
+    elif intent in {"date.query", "date.respond", "date.update", "date.confirm"}:
         target = re.sub(r"\s+", " ", str(raw_args.get("contact_name") or "")).strip()[:80]
         args = {"contact_name": target}
         if intent == "date.respond":
@@ -568,7 +505,7 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
         }
     elif intent == "calendar.update":
         target = re.sub(r"\s+", " ", str(raw_args.get("target") or "")).strip()[:80]
-        if not target:
+        if not target and not target_ref:
             return None
         clean: dict[str, str] = {"target": target}
         event_date = str(raw_args.get("date") or "").strip()
@@ -592,7 +529,7 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
         args = clean
     elif intent == "calendar.cancel":
         target = re.sub(r"\s+", " ", str(raw_args.get("target") or "")).strip()[:80]
-        if not target:
+        if not target and not target_ref:
             return None
         args["target"] = target
     elif intent == "personality.explore":
@@ -643,13 +580,13 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
         args["action"] = action
     elif intent == "chat.open":
         contact_name = re.sub(r"\s+", " ", str(raw_args.get("contact_name") or "")).strip()[:40]
-        if not contact_name:
+        if not contact_name and not target_ref:
             return None
         args["contact_name"] = contact_name
     elif intent == "chat.request_send":
         contact_name = re.sub(r"\s+", " ", str(raw_args.get("contact_name") or "")).strip()[:40]
         message = re.sub(r"\s+", " ", str(raw_args.get("message") or "")).strip()[:500]
-        if not contact_name or not message:
+        if (not contact_name and not target_ref) or not message:
             return None
         args = {"contact_name": contact_name, "message": message}
     elif intent == "profile.patch":
@@ -704,6 +641,8 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
         if not question:
             return None
         args["question"] = question
+    if target_ref:
+        args["target_ref"] = target_ref
     reply = safe_reply(value.get("reply"))
     if not reply:
         reply = "好的，我已整理好這個操作。"
