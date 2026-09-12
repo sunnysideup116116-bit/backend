@@ -132,7 +132,14 @@ def _sync_card(match: dict, coordination: dict) -> None:
     try:
         messages_coll.update_one(
             {"_id": ObjectId(card_id)},
-            {"$set": {"content": content, "message_type": "mediator_card", "metadata": _card_metadata(coordination, event_type)}},
+            {"$set": {
+                "content": content,
+                "message_type": "mediator_card",
+                "metadata": _card_metadata(coordination, event_type),
+                # An edited shared plan is new activity in the chat timeline.
+                # Keep its identity, but also bring it into the latest page.
+                "timestamp": datetime.now(timezone.utc).timestamp(),
+            }},
         )
     except Exception as exc:
         print(f"Date card sync skipped: {exc}")
