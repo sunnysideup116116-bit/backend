@@ -341,7 +341,14 @@ def test_match_progress_and_hub_actions_stay_in_the_matching_domain():
         "接受第一個", context=safe_context({"scope": "match_hub"}),
     )
 
-    for proposal in (progress, overview, hub, decision):
+    for proposal in (progress, overview):
+        assert proposal is not None
+        assert proposal.intent == "match.query"
+        assert proposal.arguments == {"view": "status"}
+    assert hub is not None
+    assert hub.intent == "match.query"
+    assert hub.arguments == {"view": "hub"}
+    for proposal in (decision,):
         assert proposal is not None
         assert proposal.intent == "ayue.public_query"
         assert proposal.arguments["domain"] == "matching"
@@ -349,8 +356,8 @@ def test_match_progress_and_hub_actions_stay_in_the_matching_domain():
 
 def test_direct_match_reads_do_not_require_public_ayue_but_writes_still_gate():
     progress = validate_proposal({
-        "intent": "ayue.public_query",
-        "arguments": {"domain": "matching", "question": "配對進度如何"},
+        "intent": "match.query",
+        "arguments": {"view": "status"},
     }, base_revision=0)
     decision = validate_proposal({
         "intent": "ayue.public_query",
@@ -377,6 +384,18 @@ def test_direct_match_reads_do_not_require_public_ayue_but_writes_still_gate():
     assert decision is not None and not context_allows_proposal(read_only, decision)
     assert context_allows_proposal(writable, decision)
     assert general is not None and not context_allows_proposal(read_only, general)
+    assert validate_proposal({
+        "intent": "match.query", "arguments": {"view": "decision"},
+    }, base_revision=0) is None
+
+
+def test_opening_match_hub_is_a_direct_read_not_plain_navigation():
+    proposal = deterministic_proposal(
+        "打開阿月牽線", context=safe_context({"scope": "global"}),
+    )
+    assert proposal is not None
+    assert proposal.intent == "match.query"
+    assert proposal.arguments == {"view": "hub"}
 
 
 def test_new_sensitive_permissions_default_to_off_for_legacy_contexts():
@@ -416,6 +435,7 @@ def test_voice_permissions_status_and_voice_config_are_strictly_allowlisted():
         "voice_name": "Achird",
         "speech_speed": "fast",
         "response_language": "zh-TW",
+        "input_language": "zh-en",
     }
 
 

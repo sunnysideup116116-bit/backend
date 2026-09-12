@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from registration_voice.key_pool import GoogleApiKeyPool
 
 from .settings import AppVoiceSettings
+from .language import input_language_codes
 
 
 def _live_tools(types: Any) -> list[Any]:
@@ -39,7 +40,7 @@ def _live_tools(types: Any) -> list[Any]:
                         "enum": [
                             "chat", "matching", "profile", "settings",
                             "profile_edit", "voice_settings", "calendar",
-                            "matching_ayue", "match_hub", "memory", "create_post",
+                            "matching_ayue", "memory", "create_post",
                         ],
                     },
                 },
@@ -229,10 +230,29 @@ def _live_tools(types: Any) -> list[Any]:
             },
         ),
         types.FunctionDeclaration(
+            name="read_match_status",
+            description=(
+                "Read the signed-in user's canonical matching progress, result, accepted contacts, "
+                "and pending invitation counts directly through the App. Never delegate this read "
+                "to Matching or Public Ayue."
+            ),
+            parameters_json_schema=empty,
+        ),
+        types.FunctionDeclaration(
+            name="read_match_hub",
+            description=(
+                "Open the canonical Ayue Match Hub and read its current and historical invitation "
+                "cards directly through the App. Use for opening, viewing, or reading Match Hub. "
+                "Never use navigate_app or delegate this read to another Ayue."
+            ),
+            parameters_json_schema=empty,
+        ),
+        types.FunctionDeclaration(
             name="ask_matching_ayue",
             description=(
-                "Send a question specifically about matching, introductions, match progress, "
-                "dating coordination, or a feature owned by the matching Ayue conversation."
+                "Legacy compatibility for matching advice or search requests that need a public "
+                "Ayue conversation. Never use for match progress, status, results, or Match Hub; "
+                "use read_match_status or read_match_hub instead."
             ),
             parameters_json_schema={
                 "type": "object",
@@ -244,9 +264,9 @@ def _live_tools(types: Any) -> list[Any]:
         types.FunctionDeclaration(
             name="ask_public_ayue",
             description=(
-                "Delegate a domain question or request to Public Ayue, which owns matching, "
-                "web, places, memory, and self-profile tools. Calendar is never delegated; "
-                "use the dedicated calendar functions instead."
+                "Delegate a reasoning or write request to Public Ayue for matching, web, places, "
+                "memory, or self-profile. Never use for match status or Match Hub reads; use the "
+                "dedicated match read functions. Calendar is never delegated."
             ),
             parameters_json_schema={
                 "type": "object",
@@ -297,10 +317,30 @@ def _live_tools(types: Any) -> list[Any]:
             },
         ),
         types.FunctionDeclaration(
+            name="read_shared_dates",
+            description="Read actual date invitations and shared date forms directly. Empty contact_name lists invitations awaiting the user; supply a contact name to read that person's latest shared date, including sent invitations and completed dates. Always call before any shared date write.",
+            parameters_json_schema={"type": "object", "additionalProperties": False, "properties": {"contact_name": {"type": "string", "maxLength": 80}}},
+        ),
+        types.FunctionDeclaration(
+            name="respond_date_invitation",
+            description="Accept or decline an actual date invitation just read with read_shared_dates. This only accepts starting coordination, not the final date. Requires spoken confirmation.",
+            parameters_json_schema={"type": "object", "additionalProperties": False, "properties": {"contact_name": {"type": "string", "maxLength": 80}, "accepted": {"type": "boolean"}}, "required": ["contact_name", "accepted"]},
+        ),
+        types.FunctionDeclaration(
+            name="update_shared_date",
+            description="Fill or adjust a shared date form just read with read_shared_dates. Supply only requested changes; preserve other fields. Ask for missing date/start/end before submitting an incomplete form. A completed date becomes a reschedule proposal. Both people must confirm the new arrangement.",
+            parameters_json_schema={"type": "object", "additionalProperties": False, "properties": {"contact_name": {"type": "string", "maxLength": 80}, "changes": {"type": "object", "additionalProperties": False, "properties": {key: {"type": "string"} for key in ("date", "start_time", "end_time", "activity", "location", "notes", "budget")}}}, "required": ["contact_name", "changes"]},
+        ),
+        types.FunctionDeclaration(
+            name="confirm_shared_date",
+            description="Confirm only the signed-in user's side of the shared date form just read. Read out the date, time and plan first. Never confirm for the other person. Requires spoken confirmation.",
+            parameters_json_schema={"type": "object", "additionalProperties": False, "properties": {"contact_name": {"type": "string", "maxLength": 80}}, "required": ["contact_name"]},
+        ),
+        types.FunctionDeclaration(
             name="read_memories",
             description=(
                 "Read the signed-in user's own active items from Ayue Memory directly. "
-                "Use an empty query to list the current memories."
+                "Always read on every memory question, never infer absence from session context. Use an empty query for general questions; query is a topic keyword, not the user's entire question."
             ),
             parameters_json_schema={
                 "type": "object",
@@ -431,6 +471,11 @@ def _live_tools(types: Any) -> list[Any]:
 
 def _system_instruction(voice_config: dict[str, str]) -> str:
     today = datetime.now(ZoneInfo("Asia/Taipei")).date().isoformat()
+    input_preference = {
+        "zh-en": "使用者主要說台灣華語與英文，允許中英混用。",
+        "zh-TW": "使用者主要說台灣華語，英文人名或專有名詞保留原文。",
+        "en-US": "使用者主要說英文，不要把不清楚的英文猜成其他語言。",
+    }.get(voice_config.get("input_language", "zh-en"), "使用者主要說台灣華語與英文。")
     language = {
         "zh-TW": "台灣繁體中文",
         "zh-CN": "簡體中文",
@@ -451,6 +496,7 @@ def _system_instruction(voice_config: dict[str, str]) -> str:
     return f"""
 你是 Folks App 裡的語音助理「阿月」。語氣自然、溫暖、簡短，像真人對話，不要播報腔。
 固定使用 {language} 回覆，語速是 {speed}。
+{input_preference} 辨識不清楚時請使用者重說，不要猜成其他語言或據此執行操作。中文轉錄使用台灣繁體；英文保留原文與單字間空白。
 目前台灣日期是 {today}；將「今天、明天、下週」換算成 YYYY-MM-DD 後再呼叫行事曆工具。
 {identity_note}
 
@@ -462,13 +508,15 @@ def _system_instruction(voice_config: dict[str, str]) -> str:
 使用者問目前在哪一頁、這個畫面可以做什麼時，呼叫 describe_current_screen。
 本人行事曆、行程、空檔或衝突的唯讀問題，直接呼叫 read_calendar。新增行程呼叫 create_calendar_event；修改日期、時間、地點或備註呼叫 update_calendar_event；取消既有行程呼叫 cancel_calendar_event。所有行事曆功能都由 App 直接處理，不要交給配對阿月或 ask_public_ayue，寫入一定要等待確認。
 使用者要開始個性／人格／性格探索時，呼叫 personality_exploration_turn。工具回覆探索問題後，使用者下一句自然口語就是答案，必須繼續呼叫同一工具送回原本永久對話，直到探索完成或使用者明確說停止探索。不要在中途改成自己聊天。
-配對進度、配對狀態、阿月牽線的目前／歷史邀請、朗讀牽線內容，以及接受、婉拒或撤回牽線，都呼叫 ask_public_ayue 並使用 matching domain；App 會優先直接讀取或操作 canonical 配對 API，不要自己編答案，也不要說你正在詢問另一個阿月。接受、婉拒與撤回必須等待工具回覆要求的口頭確認。既有 ask_matching_ayue 只作舊 Client 相容。
-需要開始／取消配對或新增／修改／取消行事曆時才交給公開對話流程（寫入行事曆使用 calendar domain）。當 feature_status.visible_choice_pending=true，代表公開阿月或阿月悄悄話畫面已有可操作按鈕；使用者下一句說確認／確定／同意／好時固定呼叫 activate_visible_choice(action=confirm)，說取消／不要／不同意時固定呼叫 activate_visible_choice(action=cancel)。不可呼叫 send_chat_message、ask_public_ayue 或 ask_private_ayue 把這些詞當成新訊息。App 會用卡片原本的 choice_id 執行同一個按鈕 callback。
+配對進度、配對狀態、結果或已配對對象一律呼叫 read_match_status，直接讀 App 的 canonical 狀態；不要呼叫 ask_public_ayue／ask_matching_ayue，也不要先說「我問配對阿月」。使用者要求打開、查看或朗讀阿月牽線時，一律呼叫 read_match_hub；它會同時開啟頁面並讀取目前／歷史邀請。只有接受、婉拒或撤回牽線才呼叫 ask_public_ayue 並使用 matching domain，且必須等待工具回覆要求的口頭確認。既有 ask_matching_ayue 只作舊 Client 相容。
+只有開始／取消配對才交給公開對話流程。當 feature_status.visible_choice_pending=true，代表畫面已有可操作按鈕；使用者下一句說確認／確定／同意／好時呼叫 activate_visible_choice(action=confirm)，說取消／不要／不同意時呼叫 activate_visible_choice(action=cancel)。如果已有 confirmation_required，優先 confirm_pending_action。不可把確認詞當成新聊天訊息。
+約會邀請與配對牽線是不同功能。問有沒有約會邀請，固定 read_shared_dates；不要讀 Match Hub。修改共同約會時間、地點、活動、行程或接受約會邀請，先 read_shared_dates，說明實際對象與安排，再使用 respond_date_invitation、update_shared_date、confirm_shared_date。App 會直接填原本的共同表單，不要求使用者自行操作。接受邀請只開始協調；本人確認完成也可能仍在等對方，不得宣稱雙方已同意。資訊不足時先問缺少的日期／起訖時間；如使用者要求推薦雙方空檔，可使用已授權的 ask_private_ayue 查共同 busy/free，得到建議後再讀表單並提出變更，不能猜測對方有空。
+read_match_hub 的「目前待回覆／等待對方／歷史已接受／歷史已拒絕／已取消過期／狀態不明」分類必須保留；歷史卡片不算新的待確認邀請。
 附近地點工具若回覆沒有定位也沒有手動所在地，先請使用者說城市與區域；取得後呼叫 patch_profile 開啟編輯個人資料並填入 city、district（可判定時也填 region），等待 request_profile_save 完整確認成功，再以原問題重試 places。不可虛構所在地。
 使用者針對一位已接受對象詢問共同聊天、關係脈絡、對方話語含義、回覆建議或雙方空檔時，呼叫 ask_private_ayue。若沒有明確對象名稱，先用一句話追問，不可猜人。要求打開指定真人聊天室時呼叫 open_chat。
 使用者問「我的好友有誰／聊天裡有誰／我配對到誰／可以傳給誰」時，呼叫 list_contacts，讀取 App 的真實已接受配對名單；不可回答你看不到，也不可憑空編名字。使用者說「傳訊息給／告訴／回覆／幫我問 某人 某內容」時呼叫 send_chat_message，把口述名稱原樣交給 App 解析；名稱不完整時先呼叫 list_contacts 或依工具回傳的候選人追問，不可要求使用者自己去聊天頁查。
 使用者問「我是誰／我叫什麼」時呼叫 read_self_profile(detail=name)；問「你對我了解多少／描述我」時呼叫 read_self_profile(detail=summary)。這些資料由 App 直接讀本人 profile、個性摘要與現有阿月記憶，不可交給配對阿月。
-使用者問「你記得我什麼／阿月記住的事／我的偏好」時呼叫 read_memories，不可交給 ask_public_ayue。使用者明確說「記住我喜歡／不喜歡／需要／避免某事」時呼叫 add_memory；新增會要求「確認新增阿月記憶」，成功後才可說已記住。
+使用者每次問「你記得我什麼／阿月記住的事／我的偏好」時都呼叫 read_memories；泛問時 query 必須為空字串，不能把整句問話當成搜尋詞，不可憑 session 沒有記憶就說不存在。工具若說暫時讀不到，也不可說沒有記憶。不可交給 ask_public_ayue。使用者明確說「記住我喜歡／不喜歡／需要／避免某事」時呼叫 add_memory；新增成功後才可說已記住。
 使用者說「我想和／跟 XXX 安排約會或見面」時，固定呼叫 ask_private_ayue，contact_name 使用 XXX、question 保留完整原句；App 會自動開啟該對象既有的阿月悄悄話並在同一頁完成安排流程，不可改成一般配對問答或公開阿月。
 只有使用者明確要求把一段文字傳給指定聯絡人時才呼叫 send_chat_message；產生或修改草稿不可呼叫。傳送一定要等待「確認傳送訊息」。
 如果工具回覆 confirmation_required，只能逐字說出 spoken_prompt；不可在前面再問「要關閉嗎」，不可重複口令，說完就等待使用者。使用者回覆後只呼叫 confirm_pending_action，不得重複原本的操作工具。
@@ -530,7 +578,11 @@ class AppVoiceDuplexSession:
                         ),
                     ),
                 ),
-                input_audio_transcription=types.AudioTranscriptionConfig(),
+                input_audio_transcription=types.AudioTranscriptionConfig(
+                    language_hints=types.LanguageHints(language_codes=input_language_codes(
+                        self.voice_config.get("input_language", "zh-en"),
+                    )),
+                ),
                 output_audio_transcription=types.AudioTranscriptionConfig(),
                 realtime_input_config=types.RealtimeInputConfig(
                     automatic_activity_detection=types.AutomaticActivityDetection(

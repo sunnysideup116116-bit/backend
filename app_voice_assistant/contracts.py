@@ -9,6 +9,7 @@ from typing import Any
 
 
 ALLOWED_INTENTS = frozenset({
+    "date.query", "date.respond", "date.update", "date.confirm",
     "app.navigate",
     "profile.open",
     "profile.patch",
@@ -34,6 +35,7 @@ ALLOWED_INTENTS = frozenset({
     "ui.choice.activate",
     "chat.open",
     "chat.request_send",
+    "match.query",
     "match.ayue_query",
     "assistant.reply",
     "assistant.cancel",
@@ -241,6 +243,7 @@ def safe_context(value: Any) -> dict[str, Any]:
     voice_name = str(config_raw.get("voice_name") or "Achird")
     speech_speed = str(config_raw.get("speech_speed") or "normal")
     response_language = str(config_raw.get("response_language") or "zh-TW")
+    input_language = str(config_raw.get("input_language") or "zh-en")
     raw_self_name = re.sub(
         r"\s+", " ", str(config_raw.get("self_name") or ""),
     ).strip()[:40]
@@ -258,12 +261,17 @@ def safe_context(value: Any) -> dict[str, Any]:
             "response_language": (
                 response_language if response_language in VOICE_LANGUAGES else "zh-TW"
             ),
+            "input_language": input_language if input_language in {"zh-en", "zh-TW", "en-US"} else "zh-en",
             **({"self_name": self_name} if self_name else {}),
         },
     }
 
 
 def permission_for_intent(intent: str) -> str | None:
+    if intent == "date.query":
+        return "calendar_read"
+    if intent in {"date.respond", "date.update", "date.confirm"}:
+        return "calendar_write"
     if intent == "app.navigate":
         return "navigation"
     if intent in {"contacts.query", "chat.open"}:
@@ -274,6 +282,8 @@ def permission_for_intent(intent: str) -> str | None:
         return "memory_read"
     if intent == "memory.add":
         return "memory_write"
+    if intent == "match.query":
+        return "match_read"
     if intent == "ayue.private_query":
         return "private_ayue"
     if intent == "ayue.public_query":
@@ -310,6 +320,8 @@ def context_allows_intent(context: dict[str, Any], intent: str) -> bool:
 def _direct_matching_access(
     context: dict[str, Any], proposal: VoiceProposal,
 ) -> tuple[bool, bool]:
+    if proposal.intent == "match.query":
+        return True, False
     if proposal.intent not in {"match.ayue_query", "ayue.public_query"}:
         return False, False
     if (
@@ -365,7 +377,7 @@ def context_allows_proposal(context: dict[str, Any], proposal: VoiceProposal) ->
         return False
     if not isinstance(permissions, dict):
         return False
-    if proposal.intent in {"calendar.update", "calendar.cancel"}:
+    if proposal.intent in {"calendar.update", "calendar.cancel", "date.respond", "date.update", "date.confirm"}:
         return permissions.get("calendar_read") is True
     if proposal.intent == "ayue.private_query":
         if permissions.get("chat_content") is not True:
@@ -417,6 +429,7 @@ def requires_confirmation(proposal: VoiceProposal) -> bool:
     if proposal.intent in {
         "profile.request_commit", "post.request_publish", "chat.request_send",
         "calendar.create", "calendar.update", "calendar.cancel", "memory.add",
+        "date.respond", "date.update", "date.confirm",
     }:
         return True
     return (
@@ -426,6 +439,8 @@ def requires_confirmation(proposal: VoiceProposal) -> bool:
 
 
 def confirmation_phrase(proposal: VoiceProposal) -> str:
+    if proposal.intent.startswith("date."):
+        return "確認共同約會操作"
     if proposal.intent == "calendar.create":
         return "確認新增行程"
     if proposal.intent == "calendar.update":
@@ -494,7 +509,33 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
         return None
     raw_args = value.get("arguments") if isinstance(value.get("arguments"), dict) else {}
     args: dict[str, Any] = {}
-    if intent == "app.navigate":
+    if intent in {"date.query", "date.respond", "date.update", "date.confirm"}:
+        target = re.sub(r"\s+", " ", str(raw_args.get("contact_name") or "")).strip()[:80]
+        args = {"contact_name": target}
+        if intent == "date.respond":
+            if raw_args.get("accepted") not in (True, False) or not isinstance(raw_args.get("accepted"), bool):
+                return None
+            args["accepted"] = raw_args["accepted"]
+        if intent == "date.update":
+            changes = raw_args.get("changes")
+            allowed = {"date", "start_time", "end_time", "activity", "location", "notes", "budget"}
+            if not isinstance(changes, dict) or not changes or set(changes) - allowed:
+                return None
+            clean = {}
+            for key, item in changes.items():
+                if not isinstance(item, str) or len(item) > (500 if key == "notes" else 120):
+                    return None
+                clean[key] = item.strip()
+            try:
+                if "date" in clean:
+                    date.fromisoformat(clean["date"])
+            except ValueError:
+                return None
+            for key in ("start_time", "end_time"):
+                if key in clean and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", clean[key]):
+                    return None
+            args["changes"] = clean
+    elif intent == "app.navigate":
         destination = str(raw_args.get("destination") or "").strip()
         if destination not in NAVIGATION_DESTINATIONS:
             return None
@@ -590,6 +631,11 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
         if not label or stance not in {"like", "dislike", "require", "avoid"}:
             return None
         args = {"label": label, "stance": stance}
+    elif intent == "match.query":
+        view = str(raw_args.get("view") or "").strip()
+        if view not in {"status", "hub"}:
+            return None
+        args = {"view": view}
     elif intent == "ui.choice.activate":
         action = str(raw_args.get("action") or "").strip()
         if action not in {"confirm", "cancel"}:
@@ -736,6 +782,27 @@ def deterministic_proposal(
         )
     if compact in {"取消", "停止", "算了", "不要了"}:
         return VoiceProposal("assistant.cancel", {}, "好的，這次操作已取消。", revision)
+    if any(term in compact for term in ("約會邀請", "共同約會", "dateinvitation", "dateinvites", "shareddate")) and not any(
+        term in compact for term in ("接受", "拒絕", "改", "調整", "確認", "accept", "decline", "update", "confirm", "change")
+    ):
+        return VoiceProposal("date.query", {"contact_name": ""}, "我查看你的約會邀請與共同安排。", revision)
+    if any(phrase in compact for phrase in (
+        "配對進度", "媒合進度", "搜尋進度", "配對狀態", "媒合狀態",
+        "配對結果", "配對好了嗎", "媒合好了嗎", "配到誰", "配對到誰",
+        "有要確認", "待確認的配對", "找到人了嗎", "找到對象了嗎",
+    )):
+        return VoiceProposal(
+            "match.query", {"view": "status"},
+            "我直接查看目前配對狀態。", revision,
+        )
+    if any(phrase in compact for phrase in (
+        "打開阿月牽線", "開啟阿月牽線", "查看阿月牽線", "阿月牽線內容",
+        "朗讀阿月牽線", "牽線邀請內容", "有哪些牽線", "有哪些邀請",
+    )):
+        return VoiceProposal(
+            "match.query", {"view": "hub"},
+            "我直接打開並讀取阿月牽線。", revision,
+        )
     navigation = {
         "打開聊天": "chat", "開啟聊天": "chat", "去聊天頁面": "chat",
         "打開配對": "matching", "開啟配對": "matching", "去配對頁面": "matching",
@@ -745,7 +812,6 @@ def deterministic_proposal(
         "打開語音助理設定": "voice_settings", "阿月語音助理設定": "voice_settings",
         "打開行事曆": "calendar", "開啟行事曆": "calendar",
         "打開配對阿月": "matching_ayue", "開啟配對阿月": "matching_ayue",
-        "打開阿月牽線": "match_hub", "開啟阿月牽線": "match_hub",
         "打開阿月記住的事": "memory", "查看阿月記憶": "memory",
         "打開發文頁": "create_post", "我要發文": "create_post",
     }

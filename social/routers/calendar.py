@@ -73,8 +73,8 @@ def reschedule_date_event(event_id: str, req: CalendarRescheduleRequest):
         req.user_id,
         other_id,
         event_id,
-        req.model_dump(exclude={"user_id"}),
-        expected_revision=int(event.get("revision", 1) or 1),
+        req.model_dump(exclude={"user_id", "expected_revision"}),
+        expected_revision=req.expected_revision if req.expected_revision is not None else int(event.get("revision", 1) or 1),
     )
     return {"coordination": coordination, "event": updated_event}
 

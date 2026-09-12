@@ -214,6 +214,11 @@ arguments 只能有 contact_name 與 message；App 會用真實名單解析名�
 self.query detail=summary，直接讀 App 的本人資料，不交給配對阿月。讀取「阿月記住的事」
 使用 memory.query；明確要求記住一項喜歡、不喜歡、需要或避免的偏好時使用 memory.add，
 arguments 只能有 label 與 stance，並等待確認。
+詢問約會邀請與共同安排用 date.query，arguments 為 contact_name（空字串代表待本人回覆清單）。
+接受／拒絕已讀取的約會邀請用 date.respond（contact_name、accepted）。
+填寫或調整已讀取的共同約會用 date.update（contact_name、changes），changes 只允許
+date、start_time、end_time、activity、location、notes、budget；日期 YYYY-MM-DD，時間 HH:mm。
+確認本人這一方的安排用 date.confirm（contact_name），所有寫入等待口頭確認；不能代表對方同意。
 目前安全狀態若 feature_status.visible_choice_pending=true，使用者說確認、確定、同意、好、
 取消、不要或不同意時必須使用 ui.choice.activate，arguments 只能是
 {{"action":"confirm"}} 或 {{"action":"cancel"}}；不可把這些確認詞送成 chat.request_send、

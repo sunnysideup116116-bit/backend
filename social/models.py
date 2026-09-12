@@ -321,6 +321,7 @@ class CalendarEventUpdateRequest(BaseModel):
 
 class CalendarRescheduleRequest(BaseModel):
     user_id: str
+    expected_revision: int | None = Field(default=None, ge=1)
     date: str
     start_time: str
     end_time: str

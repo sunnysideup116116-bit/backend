@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from fastapi import WebSocket
+from .language import display_transcript
 
 from .contracts import (
     VoiceProposal,
@@ -22,6 +23,7 @@ from .contracts import (
     safe_reply,
     validate_proposal,
     visible_choice_action,
+    deterministic_proposal,
 )
 
 
@@ -45,13 +47,13 @@ class PendingToolResult:
 
 
 def _append_transcript(current: str, incoming: str) -> str:
-    text = incoming.strip()
+    # Live transcription delivers deltas, including meaningful word spaces.
+    # Trimming each delta turns "Hello " + "world" into "Helloworld".
+    text = incoming
     if not text:
         return current
     if not current or text.startswith(current):
         return text[:2000]
-    if current.endswith(text):
-        return current
     return f"{current}{text}"[:2000]
 
 
@@ -67,7 +69,14 @@ def _proposal_from_function(call: Any, *, revision: int) -> VoiceProposal | None
     name = str(call.name or "")
     intent = ""
     arguments: dict[str, Any] = {}
-    if name == "navigate_app":
+    if name in {"read_shared_dates", "respond_date_invitation", "update_shared_date", "confirm_shared_date"}:
+        intent = {"read_shared_dates": "date.query", "respond_date_invitation": "date.respond", "update_shared_date": "date.update", "confirm_shared_date": "date.confirm"}[name]
+        arguments = {"contact_name": raw.get("contact_name", "")}
+        if name == "respond_date_invitation":
+            arguments["accepted"] = raw.get("accepted")
+        if name == "update_shared_date":
+            arguments["changes"] = raw.get("changes")
+    elif name == "navigate_app":
         intent = "app.navigate"
         arguments["destination"] = raw.get("destination")
     elif name == "open_app_page":
@@ -124,6 +133,12 @@ def _proposal_from_function(call: Any, *, revision: int) -> VoiceProposal | None
     elif name == "personality_exploration_turn":
         intent = "personality.explore"
         arguments["message"] = raw.get("message")
+    elif name == "read_match_status":
+        intent = "match.query"
+        arguments["view"] = "status"
+    elif name == "read_match_hub":
+        intent = "match.query"
+        arguments["view"] = "hub"
     elif name == "ask_matching_ayue":
         intent = "match.ayue_query"
         arguments["question"] = raw.get("question")
@@ -337,6 +352,7 @@ async def run_duplex_session(
             })
             return
         if name in {
+            "read_shared_dates", "respond_date_invitation", "update_shared_date", "confirm_shared_date",
             "navigate_app",
             "open_app_page",
             "patch_profile",
@@ -350,6 +366,8 @@ async def run_duplex_session(
             "update_calendar_event",
             "cancel_calendar_event",
             "personality_exploration_turn",
+            "read_match_status",
+            "read_match_hub",
             "ask_matching_ayue",
             "ask_public_ayue",
             "ask_private_ayue",
@@ -376,6 +394,13 @@ async def run_duplex_session(
                 call,
                 revision=int(context.get("revision") or 0),
             )
+            # Correct routing for a current, explicit memory question even if
+            # Live mistakenly delegates it to the public persona.
+            direct = deterministic_proposal(last_user_transcript, context=context)
+            if direct is not None and direct.intent == "memory.query" and name in {
+                "ask_public_ayue", "ask_matching_ayue", "read_self_profile", "read_memories",
+            }:
+                proposal = direct
             if _identity_question(last_user_transcript):
                 await tool_response(call, {
                     "status": "conversation_only",
@@ -685,7 +710,7 @@ async def run_duplex_session(
             if interim and interim.text and not suppress_current_turn:
                 await send_event({
                     "type": "user_transcript",
-                    "text": str(interim.text)[:2000],
+                    "text": display_transcript(str(interim.text)),
                     "final": False,
                 })
             incoming = content.input_transcription
@@ -696,7 +721,7 @@ async def run_duplex_session(
                 )
                 await send_event({
                     "type": "user_transcript",
-                    "text": last_user_transcript,
+                    "text": display_transcript(last_user_transcript),
                     "final": incoming.finished is True,
                 })
             if content.interrupted:
@@ -711,7 +736,7 @@ async def run_duplex_session(
                     await send_event({
                         "type": "assistant_transcript",
                         "response_id": current_response_id,
-                        "text": current_transcript[:240],
+                        "text": display_transcript(current_transcript, traditional=(context.get("voice_config") or {}).get("response_language", "zh-TW") == "zh-TW"),
                     })
             if content.model_turn:
                 for part in content.model_turn.parts or []:
@@ -738,7 +763,7 @@ async def run_duplex_session(
                         current_audio_allowed = limiter.allow_tts(identity)
                         await send_event({
                             "type": "assistant_reply",
-                            "text": current_transcript[:240] or "阿月正在回答…",
+                            "text": display_transcript(current_transcript, traditional=(context.get("voice_config") or {}).get("response_language", "zh-TW") == "zh-TW") or "阿月正在回答…",
                             "code": next_reply_code,
                             "response_id": current_response_id,
                             "speech_mode": "gemini_live_duplex",
@@ -907,7 +932,7 @@ async def run_duplex_session(
                     next_reply_code = "action_completed" if success else "action_failed"
                     result_response = {
                         "status": "success" if success else "failed",
-                        "message": str(control.get("message") or "")[:200]
+                        "message": str(control.get("message") or "")[:12000]
                         or ("操作已完成。" if success else "操作沒有完成。"),
                     }
                     tool_response_cache[target.call_id] = (

@@ -182,6 +182,7 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                 "voice_personality_exploration", "visible_choice_action",
                 "direct_self_profile", "direct_memory_read",
                 "direct_memory_add",
+                "direct_shared_dates", "date_invitation_response", "shared_date_form_update",
             ],
         }
 

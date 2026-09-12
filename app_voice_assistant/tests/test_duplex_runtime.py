@@ -2,7 +2,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
-from app_voice_assistant.duplex_runtime import run_duplex_session
+from app_voice_assistant.duplex_runtime import _proposal_from_function, run_duplex_session
 
 
 def message(*, tool_calls=None, content=None, cancellation=None, go_away=None):
@@ -540,6 +540,71 @@ def test_matching_ayue_gets_one_progress_cue_then_reads_background_result():
         await task
 
     asyncio.run(scenario())
+
+
+def test_match_status_is_a_direct_app_tool_without_delegated_progress_cue():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket,
+            provider=FakeProvider(live),
+            limiter=FakeLimiter(),
+            identity="test",
+            initial_context={
+                "scope": "global",
+                "revision": 0,
+                "permissions": {"match_read": True},
+            },
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="direct-match-status",
+            name="read_match_status",
+            args={},
+        )]))
+        await wait_until(lambda: any(
+            item.get("intent") == "match.query" for item in events
+        ))
+        action = next(item for item in events if item.get("intent") == "match.query")
+        assert action["arguments"] == {"view": "status"}
+        assert live.tool_responses == []
+        assert not any("DELEGATED_AYUE_RESULT" in text for text in live.text)
+        await socket.incoming.put({
+            "type": "websocket.receive",
+            "text": json.dumps({
+                "type": "action_result",
+                "action_id": action["action_id"],
+                "success": True,
+                "message": "目前正在配對，進度 64%。",
+            }),
+        })
+        await wait_until(lambda: bool(live.tool_responses))
+        assert live.tool_responses[-1] == (
+            "direct-match-status",
+            "read_match_status",
+            {"status": "success", "message": "目前正在配對，進度 64%。"},
+        )
+        assert not any("DELEGATED_AYUE_RESULT" in text for text in live.text)
+        await socket.incoming.put({
+            "type": "websocket.receive",
+            "text": json.dumps({"type": "stop"}),
+        })
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_match_hub_live_tool_maps_to_the_direct_read_contract():
+    proposal = _proposal_from_function(
+        SimpleNamespace(name="read_match_hub", args={}), revision=7,
+    )
+    assert proposal is not None
+    assert proposal.intent == "match.query"
+    assert proposal.arguments == {"view": "hub"}
+    assert proposal.base_revision == 7
 
 
 def test_english_progress_prompt_never_mentions_another_ayue():

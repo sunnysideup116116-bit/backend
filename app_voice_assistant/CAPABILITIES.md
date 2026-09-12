@@ -2,9 +2,45 @@
 
 這份文件記錄 Folks App 全域吉祥物語音助理目前已完成的能力、操作安全規則、啟用條件，以及目前尚未支援的範圍。
 
+## 2026-09-12：暱稱與中英辨識偏好
+
+- 開場姓名改讀 Appwrite 個人資料文件的 `name`（沿用 profile cache），不再拿登入帳號的 `AppSession.user.name` 當暱稱。例如登入名稱 `a`、個資暱稱 `candy`，語音 session 會帶入 `candy`。最多等待兩秒；讀不到就用不帶姓名的招呼，不猜測、不退回錯誤帳號名稱。帳號變更、停止或重開 session 會撤銷舊姓名讀取。
+- 設定「辨識語言偏好」提供 `中文＋English`（預設）、`中文優先（繁體顯示）`、`English 優先`，與「回覆語言」分開保存。更改後重新開啟語音套用。
+- 目前 SDK 使用 `AudioTranscriptionConfig.language_hints.language_codes` 傳送 `zh-TW`／`en-US`。在本專案使用的 Gemini Live 模型上，不傳音訊的真實握手已成功接受中英雙語提示；這證明設定可被接受，不等於已驗證實際辨識準確率。
+- Google 把語言碼定義為辨識提示，並非嚴格的語言封鎖。不能承諾完全不辨識其他語言；不清楚時要求重說。參考：[AudioTranscriptionConfig](https://ai.google.dev/api/live#AudioTranscriptionConfig)、[Live 語言說明](https://ai.google.dev/gemini-api/docs/live-api/capabilities#change-voice-and-language)。
+- 輸入的中文逐字稿統一使用既有繁體轉換服務顯示；英文保留原文與單字空白。繁體轉換只處理完整累積的顯示文字，不修改原始音訊、工具 ID 或逐段原文串接。Android 裝置端 STT 備援在英文模式使用 `en-US`，其他模式使用 `zh-TW`；雙語自動提示屬 Gemini Live 功能。
+- 本次驗證：44 項 Flutter 語音測試、64 項 App Voice Server 測試通過；包含 `a`／`candy` 不一致、姓名讀取失敗、停止後遲到結果、設定保存與繁體／英文空白。
+
+## 2026-09-12：共同約會、邀請分類與雙模式介面
+
+最新決定：全域語音阿月只限原生 Android App。Windows、Linux、Web（包含 Android 瀏覽器）均隱藏水獺與設定入口，coordinator 也阻止啟動、重連與喊醒流程；直接進入語音設定頁只顯示 Android 限定提示。註冊頁的獨立語音功能不在本次修改範圍。
+
+全螢幕只保留聊天室標題列的小頭像，隱藏原本可拖曳的浮動水獺；使用縮小按鈕返回簡易模式。訊息泡泡使用完全不透明底色，文字明確使用主題前景色與中等字重。準備中／連線中等中央提示為 13sp 中性色小字，無紅色除錯樣式或底線。全域浮層有自己的 Overlay 與 Material，確保位於 Navigator 上方時文字與按鈕提示正常。
+
+本次平台與全螢幕修正：41 項語音測試通過（包含瀏覽器／桌面停用、實際 MaterialApp.builder 結構下的中性色小字及模式切換）；相關 Dart 靜態分析無問題。
+
+歷史瀏覽器驗證（最新 Android 限定決定前）：IAB 曾驗證右上角水獺正常呈現；這不代表目前 Web 仍可使用語音。最新 Web 建置應隱藏語音阿月。
+
+- 說「有沒有約會邀請」會直接讀 `/api/relationship/date/pending`，包含等待本人接受／拒絕的邀請，以及尚待本人確認的共同安排。它與阿月牽線的配對邀請不同，不再混用。此清單不包含已成立或等待對方回覆的約會；指定對象可讀 `/api/relationship/date/state` 查看完整最新狀態。
+- 支援 `read_shared_dates`、`respond_date_invitation`、`update_shared_date`、`confirm_shared_date`。可以說「查看和小安的共同約會」「接受小安的約會邀請」「改成週日晚上七點到九點看電影」「確認和小安的安排」，由語音直接操作既有共享表單與 API。
+- 修改只覆蓋指定的日期、起訖時間、活動、地點、備註或預算，保留其他欄位。時間未填齊時會要求補充；已成立的共同約會改走原本改期流程，原行程保留到雙方重新確認。
+- 寫入前要先讀取對象的安排，Client 保存本人／對象、coordination ID、revision、狀態與表單快照；口頭確認後重新讀取比對，過期、換帳號、版本變更時不執行。模型只提供自然稱呼與允許欄位，不提供 user ID 或 coordination ID。成功後開啟原本雙人聊天室呈現共同卡片，並更新行事曆 revision。
+- 接受邀請只表示願意開始協調；確認安排只代表登入使用者這一方。不能代表對方接受、確認，也不會將「等待對方」朗讀成約會已成立。
+- 使用既有 `calendar_read`／`calendar_write` 權限，設定中改標示「行事曆與約會邀請」與「修改行程與共同約會」。提出雙方空檔建議仍依既有私人阿月授權與 busy/free 工具；目前沒有背景全自動排程，也不會在缺乏資料時猜測對方空檔。
+- 阿月牽線按 canonical status 分組朗讀：目前待你回覆、目前等待對方、歷史已接受、歷史已拒絕、歷史撤回／過期／失效，以及狀態不明。歷史不計為新邀請。
+- 記憶泛問一律讀最新記憶清單；不再拿整句「你記得我什麼」做字面過濾。有記憶但主題不吻合時會說明並提供現有主題，不回報成完全沒有記憶。Live 誤選公開阿月工具時，明確的記憶問題會改回 direct memory query。
+- Live 工具回覆原本只保留 200 字，現調整為最多 12,000 字，保留邀請分類與記憶資料供模型回答。逐段 transcription 保留英文單字間空白；完整回覆顯示上限為 2,000 字。
+- **簡易模式**：可拖曳水獺與回覆泡泡，僅顯示阿月回覆，講完後保留內容，可捲動閱讀、展開或關閉。
+- **全螢幕模式**：半透明漸層覆蓋原 App，顯示使用者與阿月的本次對話，自動跟隨最新內容（手動往上閱讀時暫停跟隨），可縮回簡易模式。原 Navigator 保持掛載，語音導航與資料更新仍正常執行。
+- 對話最多保留本次 100 則於記憶體，結束語音／登出即清除，不新增持久化錄音或聊天紀錄。這不是跨語音 session 的長期對話記憶；長期偏好仍使用「阿月記住的事」。
+
+本次驗證：Flutter 全套 602 項通過；最後的共同約會／API 追加回歸 27 項通過。App Voice Server 62 項通過，Social 約會領域與改期 HTTP 14 項通過。`dart analyze lib test` 無錯誤，僅兩個既有 style info。Android debug APK 建置成功；透過 `start_all.sh` 啟動的完整 Server 健康，正式 capability 已回報 `direct_shared_dates`、`date_invitation_response` 與 `shared_date_form_update`。本次沒有連接 Android 裝置，未宣稱實際麥克風或雙真人帳號端到端驗證。
+
+GitNexus 檢查目前整個未提交工作區（含本次之前已有的聊天、配對、個資同步修改）：DatingApp 49 個 symbols／16 條流程、Server 67 個 symbols／17 條流程，均為 CRITICAL。這是累積跨頁／契約影響，不代表每項修改皆為 CRITICAL；新建的約會 controller 與測試檔另由上述回歸覆蓋。
+
 ## 產品定位
 
-目前版本是 Android 優先、Web 預覽支援、畢業專題展示用途的全域語音助理。使用者完成登入與個人資料後，畫面會顯示 `NavBar 愛心.webp` 水獺吉祥物；點擊吉祥物後開啟小型浮動氣泡並進入前景對話模式。目前工作區暫時關閉測試帳號 allowlist，但仍只應使用專題測試或非敏感資料。
+目前版本是原生 Android 專用、畢業專題展示用途的全域語音助理。Android 使用者完成登入與個人資料後，畫面會顯示 `NavBar 愛心.webp` 水獺吉祥物；點擊吉祥物後開啟小型浮動氣泡並進入前景對話模式。目前工作區暫時關閉測試帳號 allowlist，但仍只應使用專題測試或非敏感資料。
 
 語音助理只會提出白名單內的操作。Server 不會直接寫入個人資料、設定或貼文，真正的操作仍由 Flutter 使用目前登入中的 `AppSession` 與既有 service 執行。
 
@@ -12,7 +48,7 @@
 
 ### 全域吉祥物與語音介面
 
-- 在 Android 與支援 Web Speech API 的瀏覽器上，登入且 `profileReady` 後於所有 route 顯示水獺吉祥物。
+- 僅原生 Android 在登入且 `profileReady` 後顯示水獺；全螢幕時隱藏浮動水獺。
 - 吉祥物可自由拖曳到 SafeArea 內的位置；位置會以比例保存，旋轉或改變視窗尺寸後仍會留在畫面內。
 - 設定頁提供「阿月語音助理」入口；在專屬頁關閉整體功能後，會立即停止語音工作階段並隱藏吉祥物，仍可從設定頁重新開啟。
 - 點擊吉祥物一次即可展開小型浮動氣泡並開始前景對話，不必每一輪都重新按開始。
@@ -23,9 +59,9 @@
 - 設定頁提供「喊醒測試」與「重新啟動」，並在記憶體中顯示最近一次手機辨識候選；結果不持久化、不送到 App Voice Server。
 - Android 全雙工模式在氣泡開啟期間會持續收音，不用每一輪按開始或停止；Gemini Server VAD 判斷說話開始與結束。
 - 說「關閉語音模式」之外，「你休息一下／休息吧／先不要聽／不要聽了／停止聆聽／安靜一下」等明確表示不再聆聽的語句也會結束模式；裝置端文字模式立即關閉，Gemini 全雙工模式由 `close_voice_mode` 收尾。
-- 浮動氣泡仍保留立即送出與關閉按鈕，供吵雜環境或辨識失敗時手動操作。
+- 簡易氣泡保留展開、關閉與麥克風中斷後重新啟動按鈕。
 - 顯示待命、連線、聆聽、處理、朗讀與失敗狀態。
-- 顯示 Gemini 即時輸入轉錄，並獨立顯示「麥克風正在收音」、「已聽到你」、「可直接打斷」與「麥克風沒有收音」。
+- 全螢幕模式顯示即時輸入／輸出轉錄，兩種模式皆提供麥克風狀態；簡易泡泡不顯示使用者逐字稿。
 - 浮動氣泡不再顯示「Gemini 自然聲音／本機聲音」標籤；聲音選擇集中在專屬設定頁。
 - App 切到背景、登出、帳號 session 改變或關閉助理時，會停止 STT、TTS 與 WebSocket。
 - Android 在 AI 朗讀期間仍持續將麥克風 PCM 送入同一個 Gemini Live session；Server 收到 `interrupted` 後立即要求 Client pause、flush 舊 AudioTrack 緩衝。
@@ -37,7 +73,7 @@
 ### 語音輸入
 
 - Android protocol v3 預設使用持續 PCM 輸入與 Gemini Live input transcription；裝置端 `speech_to_text` 只作為舊 Server／非全雙工備援。
-- Web 使用瀏覽器提供的 SpeechRecognition；不支援此 API 的瀏覽器會顯示明確錯誤，不會假裝已開始聆聽。
+- Web 的歷史 SpeechRecognition adapter 保留在程式中，但全域語音平台閘道已阻止使用。
 - Gemini Live 提供 interim/final input transcription，Server VAD 靜音門檻為 450 ms，比原本裝置 STT 的兩秒 pause 更快結束回合。
 - 裝置端的 `no_match`、語音逾時與暫時忙碌只會重新聆聽，不會再被誤判成缺少離線模型。
 - 裝置沒有可用的離線中文辨識時，可改用 Gemini PCM16 音訊回退。
@@ -50,10 +86,10 @@
 - Android 預設使用單一持久 `gemini-3.1-flash-live-preview` audio-to-audio session，同時承載輸入音訊、VAD、轉錄、function call 與 24 kHz PCM16 回覆。
 - Android 原生層使用 `AudioTrack.MODE_STREAM` 即時排入 PCM；「打斷」會 pause、flush 並丟棄舊 response ID 音訊。
 - AudioTrack 輸出使用 `USAGE_VOICE_COMMUNICATION`，手機音量鍵調整「通話音量」；「使用手機擴音」只改變通訊輸出裝置，不改回媒體模式。錄音端保留 `VOICE_COMMUNICATION` 與 AEC。
-- Web 預覽與不支援 PCM 串流的平台仍使用完整 Gemini TTS WAV；不會回退本機聲音。
+- Android 的非 PCM 備援使用完整 Gemini TTS WAV；不會回退本機聲音。Web／桌面不開放語音工作階段。
 - 預設聲音為 Gemini `Achird`，提示要求自然、溫暖的台灣華語、正常稍快對話速度、短停頓且避免播報腔。
 - 聲線選單已對齊 Gemini Live 官方 30 種 prebuilt voices，包含 `Zephyr`、`Puck`、`Charon`、`Kore`、`Aoede`、`Achird`、`Sulafat` 等；語速可選較慢／正常／稍快，會以 Live system instruction 控制自然 pace，不是後製固定倍速。
-- 回覆語言可限制台灣繁體中文、簡體中文或英文；Gemini Live 的輸入語言仍由模型自動辨識。
+- 回覆語言可設定台灣繁體中文、簡體中文或英文；輸入語言另有中英混合／中文優先／英文優先的辨識提示。
 - Server 要求 AI 以一至兩個自然短句回答；非確認型 action 只朗讀執行後的最終結果，不再先念提案、完成後又念一次。
 - Gemini Live session 會保留 resumption handle 並處理 GoAway；重連後會以上一輪第一個 PCM chunk 指紋丟棄 Gemini 重播的舊回合。
 - 每次回覆與音訊都綁定唯一 `response_id`；Client 只播放目前回覆一次，會忽略重複及過期音訊。
@@ -73,7 +109,7 @@
 - 新增的私人悄悄話、聊天內容、傳送訊息、配對操作、行事曆寫入與精確位置預設關閉；既有低風險能力保留原設定。
 - 權限同時由 Flutter executor 與 Server action gateway 驗證；關閉後模型不能只靠 function call 繞過。
 - 狀態頁顯示定位、訊息通知、AI 主動關心、流體玻璃與深色模式。使用者問「你有什麼權限」時，Gemini 會呼叫 `get_voice_capabilities`，只取得 allowlist 內的布林狀態。
-- 聲音、語速與回覆語言在下一個語音 session 建立時套用。
+- 聲音、語速、回覆語言與辨識語言偏好在下一個語音 session 建立時套用。
 - 「使用手機擴音」預設開啟並儲存於本機；切換後從下一次 Gemini Live 回覆套用，關閉時仍是通話模式，但交由 Android 系統選擇聽筒或外接路由。
 - 聲音與語言下拉選單擴寬向左取得空間，當前選項與選單項目均固定單行，較長名稱不會再換行擠高設定列。
 
@@ -181,9 +217,9 @@ AI 指示不得自行虛構同行者、精確地點或沒有被使用者說出�
 - 成功後清除本機草稿並朗讀「發布完成了」。
 - 失敗時保留草稿，且不會回報發布成功。
 
-### 詢問配對阿月
+### 配對狀態與配對阿月
 
-- Gemini Live 仍以 matching domain 表達配對需求，但 Flutter 會先分類：配對進度與阿月牽線改讀 canonical API；只有配對建議、開始／取消搜尋等需要對話推理的需求才進入公開阿月聊天室。
+- Gemini Live 提供獨立 `read_match_status` 與 `read_match_hub` function，分別轉成 `match.query(view=status|hub)`；這兩種唯讀操作直接等待 Flutter 回傳 canonical 結果，不建立背景阿月委派，也不先播放「我找一下」。只有配對建議、開始／取消搜尋等需要對話推理的需求才進入公開阿月聊天室。
 - 語音阿月先說「我找一下，稍等一下」，Flutter 會以既有動畫切到配對分頁，再開啟固定的 `MatchChatPage`；使用者可以在同一個聊天室看到自己的問題、處理狀態與逐段串流回覆。
 - 中間提示不再說「配對阿月／阿月悄悄話」，只說「我找一下，稍等一下」；簡體與英文模式分別使用對應語言，不會在 English 模式突然播中文提示。
 - 語音委派不傳 `ai_room_id`、不呼叫建立聊天室，固定沿用原本的永久公開阿月對話；連續追問不會每次新增聊天室。
@@ -197,8 +233,8 @@ AI 指示不得自行虛構同行者、精確地點或沒有被使用者說出�
 - 行事曆寫入改為 `calendar.create`、`calendar.update`、`calendar.cancel` 三個 App Voice 直接 function；`ask_public_ayue` schema 已移除 calendar domain，Server 會拒絕舊的公開阿月行事曆委派。
 - 新增行程只接受 title、YYYY-MM-DD、HH:mm 與可選地點／備註；未說結束時間時預設一小時。修改／取消只讓模型提供自然名稱 `target`，Flutter 讀取本人行事曆後解析唯一事件，模型不能提供 event ID。
 - 三種寫入都需要 `calendar_write` 與 30 秒 Server confirmation；修改／取消因需要先解析事件，另需 `calendar_read`。個人行程使用 canonical PATCH／cancel API；雙人約會改期沿用既有 reschedule API，不繞過對方確認狀態。
-- 「配對進度／狀態／結果」直接呼叫 `/api/match/status`，朗讀搜尋狀態、百分比、目前處理階段、待本人回覆數與等待對方數；需要 `match_read`，不需要先問公開阿月，也不依賴 `public_ayue`／`match_ayue` 權限。
-- 「我配對到誰、是否有要確認」會同時讀 `/api/match/status` 與 `/api/contacts`：朗讀已接受且可聊天的對象名稱、待本人確認與等待對方的數量。有待確認時自動開阿月牽線；沒有待確認但已有配對對象時自動切到聊天分頁。
+- 「配對進度／狀態／結果」使用 `read_match_status` 直接呼叫 `/api/match/status`，朗讀搜尋狀態、百分比、目前處理階段、待本人回覆數與等待對方數；需要 `match_read`，不需要先問公開阿月，也不依賴 `public_ayue`／`match_ayue` 權限。唯讀狀態不強迫切頁，需要看邀請時可接著說「打開阿月牽線」。
+- 「我配對到誰、是否有要確認」同一個 direct read 會讀 `/api/match/status` 與 `/api/contacts`：朗讀已接受且可聊天的對象名稱、待本人確認與等待對方的數量。
 - `ask_public_ayue` 僅用於 matching、web、places、memory 或 profile；會切到永久公開阿月聊天室並使用畫面本身的 `streamPublicMessage`，讓問題與回覆即時可見，但不會為每次查詢新增聊天室。
 - 可查看配對進度、牽線卡與已接受對象；可使用公開 Web 搜尋、頁面摘要、附近餐廳／咖啡廳／景點、營業資訊、評分、價位與距離；可讀取本人阿月記憶及自我摘要。
 - 配對對話內的確認仍由既有 choice 協定負責；語音以目前可見按鈕的原 `choice_id` 執行 callback，避免把「確認」當成新問題而重複產生確認卡。
@@ -227,7 +263,7 @@ AI 指示不得自行虛構同行者、精確地點或沒有被使用者說出�
 
 ### 本人身分與阿月記憶
 
-- 建立語音 session 時會從現有 `AppSession` 帶入非 Email 的登入顯示名稱；Gemini 問候可自然稱呼使用者。Email 形式的值會在 Server allowlist 邊界移除，不當成名字。
+- 建立語音 session 前會讀本人個人資料的暱稱；不使用登入帳號名稱。Email 形式的值仍會在 Server allowlist 邊界移除，不當成名字。
 - 「我是誰／我叫什麼」使用 `read_self_profile(detail=name) → self.query`；「你對我了解多少／描述我」使用 `detail=summary`，由 Flutter 直接讀本人 Appwrite profile 與既有 matching analysis，只回傳暱稱、年齡、地區、自介、個性摘要與近期狀態，不交給配對阿月。
 - 「你記得我什麼／阿月記住的事／我的偏好」使用 `read_memories → memory.query`，直接讀現有 `/api/profile/memories`；可依短 query 過濾，最多朗讀八則，不進公開阿月聊天室。
 - 「記住我喜歡／不喜歡／需要／避免⋯」使用 `add_memory → memory.add`。寫入需要新增的 `memory_write` 權限與「確認新增阿月記憶」；成功後呼叫 `/api/profile/memories/add`，再沿用既有 Matchmaker Graph 驗證、敏感偏好拒絕、idempotency 與 profile projection 更新流程，並開啟「阿月記住的事」頁。
@@ -235,7 +271,7 @@ AI 指示不得自行虛構同行者、精確地點或沒有被使用者說出�
 
 ### 阿月牽線直接讀取與操作
 
-- 說「阿月牽線裡有什麼／朗讀所有邀請」會動畫開啟既有 `MatchHubPage`，直接讀 `/api/match/status` 的 live cards；有 Hub history 時最多讀取最近 20 個引用，並逐一以 `/api/match/state` 驗證後才朗讀暱稱／主題／活動、狀態與本人可見理由。
+- 說「打開／查看阿月牽線」或「朗讀所有邀請」固定使用 `read_match_hub`：先直接讀 `/api/match/status` 的 live cards 與 Hub history，再動畫開啟既有 `MatchHubPage`；歷史最多取最近 20 個引用，並逐一以 `/api/match/state` 驗證後才朗讀暱稱／主題／活動、狀態與本人可見理由。切換主分頁、push 或 page scope 未完成時不再假稱「已開啟」；歷史失敗也會明確說明，不會誤報成沒有邀請。
 - 說「接受第一個／婉拒小美／撤回第二則」時，只以序號或本人可見暱稱解析目前可操作卡片；模型不能提供 `match_id`。
 - 寫入前保存 30 秒待確認，綁定 canonical `match_id`、`expected_status`、`expected_revision` 與 namespace。使用者口頭說「確認」後才呼叫既有 `/api/match/decision`，重複確認不會再送第二次。
 - 接受、婉拒或撤回完成後，已開啟的阿月牽線頁會收到帳號分區 refresh signal 並立即更新；3 秒 polling 保留作斷線備援。
@@ -293,7 +329,7 @@ Server 可回傳：
 ### Gemini Live function call 安全閘道
 
 - 一般問候、「你是誰」與不需要操作 App 的問題直接回答，不呼叫工具。
-- 操作工具包含 `navigate_app`、`describe_current_screen`、`read_calendar`、`read_self_profile`、`read_memories`、`add_memory`、個資／設定／貼文工具、`ask_public_ayue`、`ask_private_ayue`、`activate_visible_choice`、`list_contacts`、`open_chat`、`send_chat_message` 與相容用 `ask_matching_ayue`；所有 arguments 都由 schema 限定。
+- 操作工具包含 `navigate_app`、`describe_current_screen`、`read_calendar`、`read_match_status`、`read_match_hub`、`read_self_profile`、`read_memories`、`add_memory`、個資／設定／貼文工具、`ask_public_ayue`、`ask_private_ayue`、`activate_visible_choice`、`list_contacts`、`open_chat`、`send_chat_message` 與相容用 `ask_matching_ayue`；所有 arguments 都由 schema 限定。
 - 所有 function arguments 仍必須通過現有 `validate_proposal`、scope、revision、圖片與發布狀態驗證；Gemini 不能指定 route、API、user ID 或檔案路徑。
 - 確認時 Gemini 只能呼叫 `confirm_pending_action`，Server 以自己保留的 pending action 比對口頭「確認／確定／confirm」；若模型誤重送原設定工具，Server 也不會產生第二個確認。委派型確認會送回原 domain 的 pending 狀態機。
 - function call ID、tool response 與 Flutter action ID 會去重；重連重放相同 call 時回傳已快取結果，不重複執行。
@@ -328,8 +364,7 @@ Server 可回傳：
 
 ### 平台限制
 
-- Android 是主要支援平台；Web 為預覽支援，必須使用提供 SpeechRecognition、允許麥克風且位於安全來源的瀏覽器。
-- 尚未正式支援 iOS、macOS、Windows 或 Linux 語音入口。
+- 僅原生 Android 可用；Web、Windows、Linux、iOS、macOS 都不提供可用的全域語音入口。
 - 不支援語音的平台仍可使用原本的手動操作，但不顯示吉祥物語音入口。
 - 尚未完成 Android 實機內建喇叭器、有線耳機、藍牙 SCO 與不同廠牌 AEC 測試；目前已通過 Android APK 原生編譯，不等於實機回音效果已驗證。
 
@@ -396,6 +431,8 @@ Server 可回傳：
 關閉 allowlist 不會關閉 Gemini 免費層的用量限制，也不會把免費服務變成適合真實敏感個資的生產環境。因為 session API 目前只接收 Client 傳來的 `userId`、沒有獨立驗證 Appwrite JWT，公開環境關閉 allowlist 也會提高額度遭濫用的風險；完成展示後應重新開啟。
 
 ## 驗證紀錄
+
+- 2026-09-12 語音配對補修：Flutter 全量 504 項通過；App Voice Server 全量 56 項通過；Social 離線回歸 1852 項通過、4 項跳過、133 組 subtests 通過。另以真實 `MainPageController`／`MatchHubPage` fixture 驗證 direct `match.query`、牽線卡內容、導航完成與失敗不假稱成功；瀏覽器自動化當下沒有可用 Chrome／IAB session，因此未將裝置麥克風或真人資料頁冒稱 E2E 成功。
 
 - Flutter 完整測試：589 項通過；新增覆蓋 final transcript 在 Gemini 工具之前直接觸發公開／私人阿月可見卡片的原 `choice_id` callback、錯誤聊天 action 的短暫抑制、本人顯示名稱進入 Live context，以及直接讀本人資料、讀取與新增阿月記憶；並包含真實聯絡人列舉、口述收件人解析、route 生命週期、Live PCM 與既有完整 UI 回歸。
 - App Voice Server 測試：53 項通過；涵蓋 visible choice 確認／取消固定解析、Gemini 錯叫聊天工具時強制改走按鈕 action、本人資料與記憶 intent、登入顯示名稱的安全 context 過濾，以及既有直接行事曆、配對總覽、牽線決策、口頭確認與全雙工契約。
