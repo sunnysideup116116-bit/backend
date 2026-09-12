@@ -47,7 +47,24 @@ Final response 使用 `AgentResult`：
 - `sources`、`place_cards`、`presentation_blocks` 都是 bounded typed projection。
 - `agent_run_id` 是不含內容的 opaque correlation ID，只能用來對應 localhost debug run。
 
-### 2.1 Match / Event HTTP projection
+### 2.1 Mobile profile mirror HTTP projection
+
+The settings page owns the explicit profile-edit flow; it is not a Public
+Ayue tool, Planner task, or agent-authored write. Appwrite remains the
+canonical store for the account's public profile. After the Appwrite update,
+Flutter sends the same allowlisted fields to `PATCH /api/profile` using the
+Appwrite Account `$id` as `user_id`.
+
+The endpoint upserts Mongo `profiles` by `user_id` and accepts only `name`,
+`gender`, `phone`, `age`, `region`, `photo_id`, `interest`, and `userinfo`.
+`name` additionally updates the legacy `display_name` projection, and
+`interest` additionally updates the matching projection
+`initial_interest`. This mirror is for server-side fallback and matching
+reads; it does not create a second identity or expand the Public V3 tool
+registry. Coarse location remains a separate `PATCH /api/profile/location`
+contract.
+
+### 2.2 Match / Event HTTP projection
 
 每週 Event 工作以 `event_weekly_runs`／`event_weekly_users` 保存 stage 與逐人進度，三張限制是每批上限。
 `event_delivery_service` 可在使用者離線時沿用現有 Match Hub card projection 冪等保存提案；draft 僅發起者可收到，
@@ -62,7 +79,7 @@ population/processed/pending/failed_user_count、created_proposal_count、saved_
 - `POST /api/match/decision` 保留 `expected_status`、`expected_revision` 與 optional `proposal_namespace`，寫入仍只經 match action/decision services。只有成功接受、重新讀到 canonical `accepted` 且 caller 為 participant 時，回傳 optional `other_id` 供 App 導航；`pending/declined/expired` 或 409 不回傳聊天對象身份。
 - `GET /api/match/state` 也只向 accepted participants 回傳 `other_id`。兩個 HTTP 投影都必須通過既有 `has_verified_acceptance`：只有裸 `status=accepted`、沒有 pending→accepted 同意證據的舊匯入資料不得取得導航身份。成功接受後若導航欄位因讀取暫時失敗而缺少，App 可補讀一次 state，不能重送 decision 當作導航重試。導航資訊讀取失敗不把已提交的 consent 變成失敗。
 - 一般與 Event 提案的 `GET /api/match/state`、AI 聊天歷史增加 UI-only `counterparty_nickname`；依 canonical match 與 viewer 換邊，只公開對方暱稱。未送出的 draft 不向接收方公開。`public_nickname_service` 只讀 Appwrite `dating_db.user_profiles.name`（使用 name-only query、30 秒／256 筆 process cache、短 timeout、不跟隨 redirect），不可用時才回退 Mongo 公開稱呼；舊 seed 帳號以 ID 當 name 的佔位值也可回退。一般帳號明確空／不安全的 name 不復活舊 alias。暱稱最多 30 字，ID／聯絡方式不作 fallback。
-- Flutter 以原生 `Text` 在配對理由前加入「這次的牽線對象是『暱稱』」，不解析名字為 Markdown／連結。Hydration 與歷史投影保留終態／revision 保護；lookup 失敗只省略稱呼，不重新開啟按鈕、不改寫已保存訊息。這是 consent 前公開暱稱的 UI 例外，不包含導航 ID、contact 資料，不擴張 prompt／Graph／婉拒理由。
+- Flutter 以原生 `Text` 在配對理由前加入「這次的牽線對象是『暱稱』」，不解析名字為 Markdown／連結。Hydration 與歷史投影保留終態／revision 保護；lookup 失敗只省略稱呼，不重新開啟按鈕、不改寫已保存訊息。這是 consent 前公開暱稱的 UI 例外，不包含導航 ID、contact 資料，不擴張 prompt／Graph／婉拒理由。Appwrite 仍是暱稱 canonical source；Mongo `name`／`display_name` 只作同步後的 fallback projection。
 - `chat_reused=true` 表示活動邀請沿用同 pair 的既有聊天室。Event 公開卡片的 title、venue、region、category、Unix-seconds timestamps、date/datetime 精度、bounded sessions 與安全來源 URL 由既有 `public_event_card` 投影；它們在 Flutter hydration 後仍保留，內部 Event ID 和私人資料不顯示。
 - Event invitation 進入 `accepted` 後，match action service 以 match-scoped event key 在 canonical pair room 冪等保存一張 `event_invitation_accepted` system card。內容只帶同一份 `public_event_card` 與雙方通知 projection；新關係與既有 `chat_reused` 關係都會看到活動名稱、時間、地點與安全來源，不建立第二個 relationship anchor。舊版曾把 receiver preface 保存成缺少理由的 mediator card；新投遞不再建立該卡，Flutter 載入歷史／快取時也只過濾 `incoming_match_intro` mediator card，不影響一般文字 preface 或 actionable proposal。
 - Actionable `GET /api/match/state` 增加 `decline_reason_options: string[]`，只來自建立提案時保存的對方公開資料／活動類別，依 viewer 換邊並匿名化，最多六項；不讀對方私人記憶。Flutter 優先讀此欄位，明確空陣列不回退舊標籤；缺欄位的舊卡才相容 `matches[0].distinctive_tags`。此欄位不是 Planner input，也不是自動寫入偏好的授權。
@@ -71,6 +88,13 @@ population/processed/pending/failed_user_count、created_proposal_count、saved_
 - `GET /api/match/events/discover/status` 回同一 singleton 的公開 snapshot。外層 `status=success` 只表示讀取成功；工作進度看 `state/stage`，`state=completed` 後再看 `outcome/coverage/error_codes`。Mongo 不可用時，排隊或進度讀取回 HTTP 503 / `event_queue_unavailable`。不公開 job token、lease owner 或原始搜尋內容。
 
 以上是 HTTP/UI 的 additive projection，不擴張 Planner、ToolSpec、Context slice 或 Public stream 的 identifier 權限。
+
+### 2.3 Assessment reliability / pair-chat authorship（2026-09-12）
+
+- `POST /api/chat` 的 optional `client_message_id` 綁定一次回答／重試；`initialize=true` 只開始或讀回本次探索的問題，不消耗回答題數。Domain owner 仍是 `assessment_session_service.py`，不新增 Public intent router。
+- Provider 失敗回 HTTP 200＋`status="error"`、`outcome="provider_error"`、`error_code`、`retryable`，既有 `reply`／`is_complete`／assessment metadata 保留。錯誤分類為 `timeout`、`rate_limited`、`provider_auth`、`model_unavailable`、`connection_error`、`provider_unavailable`、`invalid_json`、`invalid_schema`、`empty_reply`、`invalid_reply` 或 `provider_error`。沒有成功解析與驗證就不更新 draft／revision／turn count；原始 exception 不進 HTTP 或聊天文字。
+- Assessment context 只包含本 session 的 typed draft、明確提供的 interest、上一題及最多三組 bounded Q&A；不擴大 PublicAgentTurnContext 或 Profile extraction 的來源權限。答案重送可讀回 last reply；完成、取消、過期後 temporary Q&A 清除。詳細 client retry／provider budget 見 `../api/ayue-v3-mobile-bootstrap.md`。
+- Pair `POST /api/direct_chat` 成功傳訊回 `reply=""`、`opening_assist=false`，包含第一句及雙方第一次發言；風險檢查、真人訊息冪等保存及背景協調保持不變。一般配對的 shared opening 在 accepted transition 後由 domain service 寫入 `sender_id=ai_assistant`、`message_type=system`、`metadata.event_type=match_pair_opening`，以 match-scoped key 去重。Event 仍只寫既有 `event_invitation_accepted` 開場；私人 `match_connected` 提醒不當 shared reason 轉貼。
 
 ## 3. Context interface
 

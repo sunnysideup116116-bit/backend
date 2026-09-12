@@ -8,12 +8,16 @@ temporary assessment fields directly.
 from __future__ import annotations
 
 import re
+import logging
 import time
 import uuid
 from typing import Any, Literal
 
 from database import db, profiles_coll
 from services.ai_service import analyze_big_five, analyze_deep_profile
+from services.assessment_provider import (
+    AssessmentProviderError, classify_assessment_error, validate_assessment_response,
+)
 from services.language_service import normalize_zh_tw
 
 
@@ -29,6 +33,7 @@ _ASSESSMENT_START_KEY_RE = re.compile(
 )
 _CONFIRMATIONS_COLL = db["v3_pending_confirmations"]
 _AGENT_RUNS_COLL = db["agent_runs"]
+logger = logging.getLogger(__name__)
 
 
 def _compact(message: str) -> str:
@@ -244,7 +249,12 @@ def _latest_session_outcome(user_id: str, status: str, reply: str) -> dict[str, 
     return _outcome_with_session(status, reply, _session(latest))
 
 
-def _first_question(kind: AssessmentKind) -> str:
+def _first_question(kind: AssessmentKind, initial_interest: str | None = None) -> str:
+    interest = _safe_text(initial_interest, 80)
+    if interest:
+        if kind == "big_five":
+            return f"你提到平常喜歡「{interest}」。如果難得空出半天做這件事，你通常會怎麼安排？"
+        return f"你提到平常喜歡「{interest}」。做這件事時，哪個部分會讓你覺得最有意義？"
     if kind == "big_five":
         return "好，我們用幾個輕鬆的問題慢慢認識你。臨時多出一段空閒時，你通常會先排好計畫，還是隨興看看想做什麼？"
     return "好，我們從你在意的生活開始聊。最近做過哪一件事，會讓你覺得這段時間過得很值得？"
@@ -346,6 +356,9 @@ def _terminal_update(
             },
             "$unset": {
                 "agentic_assessment_session.draft": "",
+                "agentic_assessment_session.recent_turns": "",
+                "agentic_assessment_session.last_reply": "",
+                "agentic_assessment_session.initial_interest": "",
                 "temp_big_five": "", "temp_deep_profile": "",
                 "interaction_count": "", "interaction_count_deep": "",
             },
@@ -360,6 +373,7 @@ def start_assessment_session(
     *,
     idempotency_key: str,
     room_id: str | None = None,
+    initial_interest: str | None = None,
 ) -> dict[str, Any]:
     """Create exactly one active draft session; completed profile stays untouched."""
     if kind not in ASSESSMENT_KINDS:
@@ -369,7 +383,7 @@ def start_assessment_session(
     existing = _open_session(profile, now)
     if existing:
         if existing.get("start_idempotency_key") == idempotency_key and existing.get("status") == "active":
-            return {"status": "already_started", "reply": _first_question(kind), "session": existing}
+            return {"status": "already_started", "reply": existing.get("last_reply") or _first_question(kind), "session": existing}
         return {
             "status": "already_active",
             "reply": f"你目前正在進行{assessment_label(str(existing.get('kind')))}；想先離開的話，回覆「結束測驗」。",
@@ -381,6 +395,9 @@ def start_assessment_session(
         "draft": {}, "created_at": now, "updated_at": now,
         "expires_at": now + ASSESSMENT_SESSION_TTL_SECONDS,
         "start_idempotency_key": idempotency_key,
+        "initial_interest": _safe_text(initial_interest, 120),
+        "last_reply": _first_question(kind, initial_interest),
+        "recent_turns": [],
     }
     normalized_room_id = str(room_id or "").strip()
     if normalized_room_id:
@@ -406,12 +423,12 @@ def start_assessment_session(
         },
     )
     if getattr(result, "modified_count", 0):
-        return {"status": "started", "session": session, "reply": _first_question(kind)}
+        return {"status": "started", "session": session, "reply": session["last_reply"]}
     latest = profiles_coll.find_one({"user_id": user_id}) or {}
     current = _open_session(latest, now)
     if current:
         if current.get("start_idempotency_key") == idempotency_key and current.get("status") == "active":
-            return {"status": "already_started", "session": current, "reply": _first_question(kind)}
+            return {"status": "already_started", "session": current, "reply": current.get("last_reply") or _first_question(kind)}
         return {
             "status": "already_active", "session": current,
             "reply": f"你目前正在進行{assessment_label(str(current.get('kind')))}；想先離開的話，回覆「結束測驗」。",
@@ -472,37 +489,50 @@ def advance_assessment_session(
         outcome = expire_assessment_session(user_id, session_id, str(session.get("kind") or ""))
         return {**outcome, "reply": "剛剛那段探索已經過期；想重新開始時再跟我說就好。"}
     if message_id and session.get("last_message_id") == message_id:
-        return _outcome_with_session("duplicate", "我有收到這個回答，會接著從目前進度繼續。", session)
+        return _outcome_with_session("duplicate", session.get("last_reply") or "我有收到這個回答，會接著從目前進度繼續。", session)
 
     kind = str(session.get("kind") or "")
     previous = session.get("draft") if isinstance(session.get("draft"), dict) else {}
     turn_count = _safe_revision(session.get("turn_count"))
-    if kind == "big_five":
-        try:
-            # Assessment turns intentionally do not inherit the completed
-            # profile, conversation context, or durable memory.  The only
-            # model inputs are this saved owner message and this session's
-            # typed draft.
-            raw = analyze_big_five(message, previous, turn_count, None)
-        except Exception:
-            raw = None
-        projected = _clean_big_five((raw or {}).get("big_five"), previous)
-    elif kind == "deep_profile":
-        try:
-            raw = analyze_deep_profile(message, previous, turn_count, None)
-        except Exception:
-            raw = None
-        projected = _clean_deep_profile((raw or {}).get("deep_profile"), previous)
-    else:
+    if kind not in ASSESSMENT_KINDS:
         return {"status": "stale", "reply": "這段探索剛剛已結束；你想聊別的也可以。"}
-    if not isinstance(raw, dict):
-        return _outcome_with_session("provider_error", "我剛剛沒有聽清楚，想請你換個方式說說看？", session)
-    reply = _safe_reply(raw.get("reply"))
-    if not reply:
-        return _outcome_with_session("provider_error", "我剛剛沒有聽清楚，想請你換個方式說說看？", session)
-    complete = bool(raw.get("is_complete"))
-    if complete and not _complete_projection_is_valid(kind, projected):
-        return _outcome_with_session("provider_error", "我想再多聽一點你的想法，才不會草率替你整理結果。", session)
+    # Own-session context only, not the completed profile, other rooms, Neo4j
+    # preferences, or Mongo long-term memory. Keep each context bounded.
+    recent = session.get("recent_turns")
+    recent = [turn for turn in recent[-3:] if isinstance(turn, dict)] if isinstance(recent, list) else []
+    question = str(session.get("last_reply") or "")[:360]
+    context = {
+        "previous_question": question,
+        "initial_interest": str(session.get("initial_interest") or "")[:120],
+        "recent_turns": recent,
+    }
+    try:
+        analyzer = analyze_big_five if kind == "big_five" else analyze_deep_profile
+        raw = analyzer(message, previous, turn_count, None, assessment_context=context)
+        validate_assessment_response(raw, kind)
+        clean = _clean_big_five if kind == "big_five" else _clean_deep_profile
+        projected = clean(raw[kind], previous)
+        reply = _safe_reply(raw["reply"])
+        if not reply:
+            raise AssessmentProviderError("empty_reply")
+        complete = raw["is_complete"]
+        if complete and not _complete_projection_is_valid(kind, projected):
+            raise AssessmentProviderError("invalid_schema")
+    except Exception as exc:
+        error = classify_assessment_error(exc)
+        logger.warning(
+            "assessment_turn_failed kind=%s code=%s revision=%s",
+            kind, error.code, _safe_revision(session.get("revision")),
+        )
+        return {
+            **_outcome_with_session(
+                "provider_error",
+                "阿月的回覆服務暫時無法完成，這次回答尚未計入探索進度。請稍後重試，不需要改寫回答。",
+                session,
+            ),
+            "error_code": error.code,
+            "retryable": error.retryable,
+        }
 
     revision = _safe_revision(session.get("revision"))
     base_query: dict[str, Any] = {
@@ -521,6 +551,10 @@ def advance_assessment_session(
         "agentic_assessment_session.updated_at": now,
         "agentic_assessment_session.expires_at": now + ASSESSMENT_SESSION_TTL_SECONDS,
         "agentic_assessment_session.last_message_id": message_id,
+        "agentic_assessment_session.last_reply": _completion_reply(kind, projected) if complete else reply,
+        "agentic_assessment_session.recent_turns": (
+            recent + [{"question": question, "answer": str(message)[:800]}]
+        )[-3:],
     }
     if complete:
         set_fields["agentic_assessment_session.status"] = "awaiting_commit"
@@ -535,7 +569,7 @@ def advance_assessment_session(
     latest = profiles_coll.find_one({"user_id": user_id}, {"_id": 0, "agentic_assessment_session": 1}) or {}
     latest_session = _session(latest)
     if message_id and latest_session and latest_session.get("last_message_id") == message_id:
-        return _outcome_with_session("duplicate", "我有收到這個回答，會接著從目前進度繼續。", latest_session)
+        return _outcome_with_session("duplicate", latest_session.get("last_reply") or "我有收到這個回答，會接著從目前進度繼續。", latest_session)
     return _outcome_with_session("stale", "這段探索剛剛有新的變動，我先不重複記錄這次回答。", latest_session)
 
 
@@ -590,6 +624,9 @@ def commit_assessment_session(
             },
             "$unset": {
                 "agentic_assessment_session.draft": "",
+                "agentic_assessment_session.recent_turns": "",
+                "agentic_assessment_session.last_reply": "",
+                "agentic_assessment_session.initial_interest": "",
                 "temp_big_five": "", "temp_deep_profile": "",
                 "interaction_count": "", "interaction_count_deep": "",
             },
@@ -608,6 +645,7 @@ def commit_assessment_session(
 def handle_assessment_ui_message(
     user_id: str, kind: AssessmentKind, message: str, *, initial_interest: str | None = None,
     initialize: bool = False,
+    message_id: str | None = None,
 ) -> dict[str, Any]:
     """Compatibility facade for the existing /api/chat onboarding UI.
 
@@ -636,6 +674,12 @@ def handle_assessment_ui_message(
     now = time.time()
     profile = profiles_coll.find_one({"user_id": user_id}) or {}
     session = _session(profile)
+    if (
+        not initialize and message_id and session
+        and session.get("kind") == kind and session.get("status") == "completed"
+        and session.get("commit_idempotency_key") == f"onboarding-ui-commit:{session.get('session_id')}:{message_id}"
+    ):
+        return _outcome_with_session("already_committed", "這份新結果已經套用完成。", session)
     if session and session.get("status") in ACTIVE_SESSION_STATUSES and _session_expired(session, now):
         expire_assessment_session(user_id, str(session.get("session_id")), str(session.get("kind")))
         session = None
@@ -645,7 +689,7 @@ def handle_assessment_ui_message(
             return commit_assessment_session(
                 user_id, str(session.get("session_id")),
                 expected_revision=_safe_revision(session.get("revision")),
-                idempotency_key=f"onboarding-ui-commit:{session.get('session_id')}",
+                idempotency_key=f"onboarding-ui-commit:{session.get('session_id')}" + (f":{message_id}" if message_id else ""),
             )
         if choice == "cancel":
             cancelled = cancel_assessment_session(user_id, str(session.get("session_id")), str(session.get("kind")))
@@ -656,7 +700,10 @@ def handle_assessment_ui_message(
     if session and session.get("status") == "active" and session.get("kind") != kind:
         return {"status": "already_active", "reply": f"你目前正在進行{assessment_label(str(session.get('kind')))}；想先離開的話，回覆「結束測驗」。", "kind": session.get("kind")}
     if not session or session.get("status") != "active":
-        started = start_assessment_session(user_id, kind, idempotency_key=f"onboarding-ui:{kind}")
+        started = start_assessment_session(
+            user_id, kind, idempotency_key=f"onboarding-ui:{kind}",
+            initial_interest=initial_interest,
+        )
         if started.get("status") not in {"started", "already_started"}:
             return started
         session = started.get("session") or {}
@@ -666,7 +713,7 @@ def handle_assessment_ui_message(
                 "revision": _safe_revision(session.get("revision")), "draft": session.get("draft") or {},
             }
     elif initialize:
-        return _outcome_with_session("already_started", _first_question(kind), session) | {
+        return _outcome_with_session("already_started", session.get("last_reply") or _first_question(kind, session.get("initial_interest")), session) | {
             "draft": session.get("draft") or {},
         }
     if assessment_cancel_choice(message):
@@ -674,7 +721,9 @@ def handle_assessment_ui_message(
         if cancelled.get("session_state") == "cancelled":
             return {**cancelled, "reply": "好，這段探索先停在這裡；原本已完成的資料我會保留。", "kind": kind}
         return cancelled
-    return advance_assessment_session(user_id, str(session.get("session_id")), message)
+    return advance_assessment_session(
+        user_id, str(session.get("session_id")), message, message_id=message_id,
+    )
 
 
 def reset_assessment_session(user_id: str, kind: AssessmentKind) -> dict[str, Any]:

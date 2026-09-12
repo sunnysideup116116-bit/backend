@@ -21,6 +21,7 @@ def chat_endpoint(req: ChatRequest):
     outcome = handle_assessment_ui_message(
         req.user_id, req.state, req.message,
         initial_interest=req.initial_interest, initialize=req.initialize,
+        **({"message_id": req.client_message_id} if req.client_message_id else {}),
     )
     # Keep the established response keys. The payload now comes from the same
     # typed draft/commit state that Public Ayue uses.
@@ -28,13 +29,17 @@ def chat_endpoint(req: ChatRequest):
     ui_projection = assessment_ui_projection(profile, req.state)
     completed = outcome.get("status") in {"committed", "already_committed"}
     payload = {
-        "status": "success",
-        "reply": str(outcome.get("reply") or "你可以換個方式說說看？"),
+        "status": "error" if outcome.get("status") == "provider_error" else "success",
+        "outcome": outcome.get("status"),
+        "reply": str(outcome.get("reply") or "回覆服務暫時無法完成，請稍後重試。"),
         "is_complete": completed,
         "assessment_state": ui_projection.get("assessment_state"),
         "assessment_kind": ui_projection.get("assessment_kind"),
         "assessment_revision": ui_projection.get("assessment_revision"),
     }
+    if outcome.get("status") == "provider_error":
+        payload["error_code"] = outcome.get("error_code", "provider_error")
+        payload["retryable"] = outcome.get("retryable", False)
     if req.state == "big_five":
         payload["big_five"] = ui_projection.get("value")
     else:

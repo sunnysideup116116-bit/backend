@@ -17,6 +17,7 @@ class ChatRequest(BaseModel):
     state: str # "big_five" or "deep_profile"
     initial_interest: str = None
     initialize: bool = False
+    client_message_id: str | None = Field(default=None, min_length=1, max_length=160)
 
 class MatchRequest(BaseModel):
     user_id: str
@@ -238,6 +239,21 @@ class ProfileLocationRequest(BaseModel):
     user_id: str
     city: str = Field(default="", max_length=20)
     district: str = Field(default="", max_length=20)
+
+
+class ProfileUpdateRequest(BaseModel):
+    """Editable Appwrite profile fields mirrored into Mongo profiles."""
+
+    user_id: str = Field(min_length=1, max_length=128)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    gender: Literal["male", "female"] | None = None
+    phone: str | None = Field(default=None, max_length=30)
+    age: int | None = Field(default=None, ge=18, le=120)
+    region: str | None = Field(default=None, max_length=20)
+    photo_id: str | None = Field(default=None, max_length=128)
+    interest: str | None = Field(default=None, max_length=120)
+    userinfo: str | None = Field(default=None, max_length=500)
+
 
 class ModelSettingsRequest(BaseModel):
     model: str | None = None

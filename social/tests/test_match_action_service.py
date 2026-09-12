@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import patch
+import pytest
 
 from fastapi import BackgroundTasks
 from models import MatchDecisionRequest
@@ -7,6 +8,14 @@ from routers.match import _apply_match_decision
 from services import match_action_service
 from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext
 from services.ayue_agent.v3.write_executors import _decide_active_proposal
+
+
+@pytest.fixture(autouse=True)
+def isolate_shared_opening_persistence():
+    # Existing transition tests stub effects; shared-message storage has its
+    # own mongomock/idempotency coverage in test_pair_chat_opening.py.
+    with patch("services.match_action_service.save_system_message_once"):
+        yield
 
 
 class MatchActionServiceTests(unittest.TestCase):

@@ -365,6 +365,43 @@ def accepted_opening_for_viewer(
     return f"好，{counterparty_label}也點頭了！先自然打聲招呼，分享一件最近讓你開心的小事，會比一開始問得太正式舒服。"
 
 
+def shared_match_opening(match_doc: dict, first_label: str, second_label: str) -> str:
+    """A shared welcome, using only role-bound public proposal evidence.
+
+    Private directional accepted_opening prose stays in each mediator room.
+    No fresh model call, live profile memory, or inferred mutual interest is
+    needed to deliver the shared opener reliably at the consent boundary.
+    """
+    projection = match_doc.get("friend_intro_v4")
+    contexts: list[str] = []
+    if isinstance(projection, dict):
+        for role, viewer, other in (
+            ("initiator_preview", match_doc.get("from_user"), match_doc.get("to_user")),
+            ("receiver_invitation", match_doc.get("to_user"), match_doc.get("from_user")),
+        ):
+            entry = projection.get(role)
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("viewer_id") != viewer or entry.get("counterparty_id") != other:
+                continue
+            context = short_public_text(entry.get("counterparty_context_snapshot"), 48)
+            if context and context not in contexts:
+                contexts.append(context)
+    topic_box = match_doc.get("search_context")
+    topic = short_public_text(
+        topic_box.get("invitation_topic") if isinstance(topic_box, dict) else "", 48,
+    )
+    if topic:
+        basis = f"這次是從「{topic}」的邀請牽上線，可以先交流想法，再決定要不要同行。"
+    elif contexts:
+        topics = "、".join(f"「{item}」" for item in contexts)
+        basis = f"這次介紹從提案中提到的{topics}出發，想讓你們先聊聊彼此的想法。"
+    else:
+        basis = "這次先讓你們探索是否聊得來，不預設一定合拍。"
+    question = "這件事最吸引你的是哪個部分？" if topic or contexts else "如果有半天空閒，你最想怎麼度過？"
+    return f"阿月：{first_label}、{second_label}，你們都願意認識彼此了！{basis}\n先從一個輕鬆的問題開始：{question}"
+
+
 def _snapshot_profiles(match_doc: dict) -> tuple[dict, dict]:
     snapshot = match_doc.get("match_context_snapshot") or {}
     if not isinstance(snapshot, dict):

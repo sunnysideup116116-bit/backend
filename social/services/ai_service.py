@@ -18,6 +18,7 @@ from config import (
 )
 from services.language_service import normalize_model_text, normalize_zh_tw
 from services.ayue_agent.product_identity import PUBLIC_AYUE_PERSONA
+from services.assessment_provider import assessment_dialogue_prompt, request_assessment_json
 from services import codex_chat_provider
 from services.gpt_settings import LLM_OWNER_NAMES
 import threading
@@ -521,7 +522,29 @@ def generate_chat_completion_with_tools(
 
 
 
-def analyze_big_five(text: str, previous_data: dict, interaction_count: int, initial_interest: str = None) -> dict:
+def _generate_assessment_json(prompt: str, kind: str, temperature: float) -> dict:
+    model = _resolve_chat_model()
+
+    def call(deadline: float) -> str:
+        if codex_chat_provider.selected_provider() == "gpt":
+            return codex_chat_provider.generate(
+                prompt, model=model, json_output=True, deadline_monotonic=deadline,
+            )["content"]
+        token = _OLLAMA_DEADLINE.set(deadline)
+        try:
+            return generate_chat_completion(
+                prompt, temperature=temperature, json_output=True, max_tokens=2048,
+            ).content
+        finally:
+            _OLLAMA_DEADLINE.reset(token)
+
+    return normalize_model_text(request_assessment_json(call, kind=kind, model=model))
+
+
+def analyze_big_five(
+    text: str, previous_data: dict, interaction_count: int, initial_interest: str = None,
+    *, assessment_context: dict | None = None,
+) -> dict:
 
     prev_str = json.dumps(previous_data, ensure_ascii=False) if previous_data else "無"
 
@@ -548,6 +571,8 @@ def analyze_big_five(text: str, previous_data: dict, interaction_count: int, ini
     【目前已知的性格數值】
 
     {prev_str}
+
+    {assessment_dialogue_prompt(assessment_context)}
 
     請根據使用者這一次的回覆，微調這些數值與 summary。若有尚未確認的特質，請維持原本數值並註明。
 
@@ -581,17 +606,7 @@ def analyze_big_five(text: str, previous_data: dict, interaction_count: int, ini
 
     """
 
-    try:
-
-        chat_result = generate_chat_completion(prompt, temperature=0.5, json_output=True)
-
-        return normalize_model_text(json.loads(chat_result.content))
-
-    except Exception as e:
-
-        print(f"analyze_big_five error: {e}")
-
-        return {"reply": f"系統錯誤：{str(e)}", "big_five": previous_data, "is_complete": False}
+    return _generate_assessment_json(prompt, "big_five", 0.5)
 
 
 
@@ -829,7 +844,10 @@ def summarize_context(message: str, previous_context: str = None) -> str:
 
 
 
-def analyze_deep_profile(text: str, previous_data: dict, interaction_count: int, user_context: dict = None) -> dict:
+def analyze_deep_profile(
+    text: str, previous_data: dict, interaction_count: int, user_context: dict = None,
+    *, assessment_context: dict | None = None,
+) -> dict:
 
     """深層價值觀分析：探索使用者的核心價值觀、人生目標與深層需求"""
 
@@ -859,6 +877,8 @@ def analyze_deep_profile(text: str, previous_data: dict, interaction_count: int,
 
 {context_prompt}
 
+    {assessment_dialogue_prompt(assessment_context)}
+
     【目前已知的深層價值觀】
 
     {prev_str}
@@ -873,7 +893,7 @@ def analyze_deep_profile(text: str, previous_data: dict, interaction_count: int,
 
     2. 每次只丟出「一個」具體問題。請試著從對方的「近期情境或興趣」去延伸，自然地引導出他的價值觀與人生方向，而不是直接生硬地問。
 
-    3.【極度重要】若這是第一輪對話，請直接從【使用者現有資料】（尤其是近期情境/興趣）作為切入點來發問！絕對不要一開始就問「最重要的事情是什麼」或「未來有什麼規劃」這種太廣泛的問題，請從具體、輕鬆的生活話題延伸。
+    3. 若提供本次探索的興趣或上一題，請從那裡接續；沒有提供時，從具體、輕鬆的生活問題延伸，不要假設有其他資料。
 
     4. 針對使用者的前置回覆，先給予簡短共鳴後再發問。
 
@@ -911,17 +931,7 @@ def analyze_deep_profile(text: str, previous_data: dict, interaction_count: int,
 
     """
 
-    try:
-
-        chat_result = generate_chat_completion(prompt, temperature=0.6, json_output=True)
-
-        return normalize_model_text(json.loads(chat_result.content))
-
-    except Exception as e:
-
-        print(f"analyze_deep_profile error: {e}")
-
-        return {"reply": f"系統錯誤：{str(e)}", "deep_profile": previous_data, "is_complete": False}
+    return _generate_assessment_json(prompt, "deep_profile", 0.6)
 
 def detect_date_activation(message: str) -> bool:
     keywords = ['約', '見面', '出來', '看電影', '吃飯', '喝杯', '聚', 'meet', 'movie', 'date', 'hang out']

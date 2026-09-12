@@ -871,61 +871,17 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
         ai_process_date_coordination_step, room_id, req.user_id, req.contact_id, req.message, match_doc,
     )
 
-    # Ayue may provide one opening assist when a newly matched pair sends its
-    # first message. Once either participant has already spoken in this room,
-    # pair chat must remain person-to-person and must never impersonate the
-    # receiver with another generated reply.
-    pair_message_count = messages_coll.count_documents({
-        "room_id": room_id,
-        "sender_id": {"$in": [req.user_id, req.contact_id]},
-        "message_type": "text",
-        "is_blocked": {"$ne": True},
-    })
+    # Pair messages always belong to the person who sent them, including the
+    # very first turn. Ayue's shared opener is persisted at mutual acceptance,
+    # under ai_assistant, never synthesized as the recipient's reply here.
     message_count = mark_post_chat_activity(match_doc, room_id)
-    if pair_message_count > 1:
-        if match_doc and message_count >= 2:
-            track_message_metrics(room_id)
-        if match_doc and message_count >= 6:
-            background_tasks.add_task(summarize_relationship, match_doc["_id"], room_id)
-        return {
-            "reply": "",
-            "opening_assist": False,
-            "feedback_scheduled": True,
-            "risk_assessment": risk_projection,
-            "ui_priority": risk_projection["ui_priority"],
-        }
-
-    target_doc = profiles_coll.find_one({"user_id": req.contact_id}) or {}
-    history = list(messages_coll.find(
-        {"room_id": room_id, "is_blocked": {"$ne": True}},
-    ).sort("timestamp", -1).limit(20))[::-1]
-    prompt = (
-        "你是聊天中的阿月，請自然協助使用者和對方聊天。保持簡潔、真誠，不要假裝知道未提供的事。\n"
-        f"對方公開資料：{json.dumps(target_doc.get('big_five', {}), ensure_ascii=False)}\n"
-        + "\n".join(
-            f"{'使用者' if item.get('sender_id') == req.user_id else '對方'}：{item.get('content', '')}"
-            for item in history
-        )
-        + f"\n使用者最新訊息：{req.message}"
-    )
-    try:
-        reply = generate_chat_completion(prompt, temperature=0.7, json_output=False).content
-    except Exception as exc:
-        print(f"Chat error (User {req.contact_id}): {type(exc).__name__}")
-        reply = "我先陪你把這段聊完，剛剛回覆沒有成功，再試一次就好。"
-    save_message(
-        room_id,
-        req.contact_id,
-        reply,
-        metadata={"event_type": "conversation_opening_assist"},
-    )
     if match_doc and message_count >= 2:
         track_message_metrics(room_id)
     if match_doc and message_count >= 6:
         background_tasks.add_task(summarize_relationship, match_doc["_id"], room_id)
     return {
-        "reply": reply,
-        "opening_assist": True,
+        "reply": "",
+        "opening_assist": False,
         "feedback_scheduled": True,
         "risk_assessment": risk_projection,
         "ui_priority": risk_projection["ui_priority"],

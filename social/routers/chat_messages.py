@@ -342,11 +342,19 @@ def get_contacts(user_id: str, unread_for: str | None = None):
     latest_by_room = {}
     if room_ids:
         latest_by_room = {
-            row["_id"]: row.get("content", "")
+            row["_id"]: (
+                "傳送了一張圖片"
+                if str(row.get("message_type") or "text") == "image"
+                else str(row.get("content") or "")
+            )
             for row in messages_coll.aggregate([
                 {"$match": {"room_id": {"$in": room_ids}, "is_blocked": {"$ne": True}}},
                 {"$sort": {"room_id": 1, "timestamp": -1, "_id": -1}},
-                {"$group": {"_id": "$room_id", "content": {"$first": {"$ifNull": ["$content", ""]}}}},
+                {"$group": {
+                    "_id": "$room_id",
+                    "content": {"$first": {"$ifNull": ["$content", ""]}},
+                    "message_type": {"$first": {"$ifNull": ["$message_type", "text"]}},
+                }},
             ])
         }
     other_ids = list({

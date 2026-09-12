@@ -1,7 +1,8 @@
 """Read public Appwrite nicknames for proposal UI, never for model context.
 
 Appwrite owns registered profile names; Mongo display names remain a fallback
-for seed/legacy accounts. This adapter does not synchronize or mutate profiles.
+for synchronized, seed, and legacy projections. This adapter does not
+synchronize or mutate profiles.
 """
 
 from collections import OrderedDict

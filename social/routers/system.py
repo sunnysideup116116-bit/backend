@@ -8,7 +8,16 @@ import re
 import time
 import config
 from fastapi import APIRouter, Header, HTTPException, Request
-from models import ClearRequest, SettingsRequest, MediatorToneRequest, ProfileMemoryActionRequest, ProfileMemoryAddRequest, ProfileLocationRequest, ModelSettingsRequest
+from models import (
+    ClearRequest,
+    SettingsRequest,
+    MediatorToneRequest,
+    ProfileMemoryActionRequest,
+    ProfileMemoryAddRequest,
+    ProfileLocationRequest,
+    ProfileUpdateRequest,
+    ModelSettingsRequest,
+)
 from database import db, profiles_coll, matches_coll, messages_coll
 from services.ai_service import get_embedding
 from services.profile_projection import safe_recent_context
@@ -561,6 +570,39 @@ def update_profile_location(req: ProfileLocationRequest):
         upsert=True,
     )
     return {"status": "success", "location": location}
+
+
+@router.patch("/profile")
+def update_profile(req: ProfileUpdateRequest):
+    """Mirror editable Appwrite profile fields into the Mongo profile document."""
+    fields = req.model_dump(exclude={"user_id"}, exclude_unset=True)
+    for key, value in list(fields.items()):
+        if isinstance(value, str):
+            fields[key] = value.strip()
+
+    if "name" in fields and not fields["name"]:
+        raise HTTPException(status_code=422, detail="name cannot be empty")
+    if "interest" in fields:
+        # Mongo's matching pipeline uses ``initial_interest`` while Appwrite's
+        # registration document calls the same value ``interest``.
+        fields["initial_interest"] = fields["interest"]
+    if "name" in fields:
+        # Keep legacy/seed profile readers useful when Appwrite is unavailable.
+        fields["display_name"] = fields["name"]
+
+    if not fields:
+        raise HTTPException(status_code=422, detail="profile update is empty")
+
+    profiles_coll.update_one(
+        {"user_id": req.user_id},
+        {"$set": fields},
+        upsert=True,
+    )
+    return {
+        "status": "success",
+        "user_id": req.user_id,
+        "updated_fields": sorted(fields),
+    }
 
 @router.post("/settings/mediator")
 def update_mediator_tone(req: MediatorToneRequest):

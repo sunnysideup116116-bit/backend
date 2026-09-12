@@ -18,7 +18,7 @@ from services.chat_service import generate_room_id, save_system_message_once
 from services.event_card_projection import public_event_card
 from services.giphy_service import schedule_match_celebration_gifs
 from services.match_decision_service import apply_match_decision
-from services.match_reason_service import accepted_opening_for_viewer
+from services.match_reason_service import accepted_opening_for_viewer, shared_match_opening
 from services.match_state_service import derive_match_stage, reconcile_live_match
 from services.mediator_event_service import queue_mediator_event
 from services.preference_store import upsert_preference_facts
@@ -170,6 +170,26 @@ def apply_transition_effects(
             return
         initiator_doc = profiles_coll.find_one({"user_id": from_id}) or {}
         target_doc = profiles_coll.find_one({"user_id": to_id}) or {}
+        if namespace != EVENT_INVITATION_NAMESPACE:
+            try:
+                save_system_message_once(
+                    generate_room_id(from_id, to_id),
+                    shared_match_opening(
+                        match_doc,
+                        _safe_profile_label(initiator_doc, from_id),
+                        _safe_profile_label(target_doc, to_id),
+                    ),
+                    message_type="system",
+                    metadata={
+                        "event_type": "match_pair_opening",
+                        "proposal_namespace": namespace,
+                        "match_id": match_id,
+                        "notification_recipients": [from_id, to_id],
+                    },
+                    event_key=f"match:{match_id}:pair-opening",
+                )
+            except Exception as exc:
+                print(f"[match] shared chat opening failed: {type(exc).__name__}")
         for user_id, other_id in ((from_id, to_id), (to_id, from_id)):
             other_doc = target_doc if other_id == to_id else initiator_doc
             other_label = _safe_profile_label(other_doc, other_id)

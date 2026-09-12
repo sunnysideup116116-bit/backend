@@ -6,6 +6,7 @@
 
 - `start_all.sh [ollama|gpt]` 選擇 Social 共用 completion provider，預設 Ollama。GPT 為個人實驗模式，透過官方 Codex app-server managed ChatGPT OAuth；每次呼叫使用獨立 ephemeral thread 與 `environments: []`，`outputSchema` 只產生提案，既有 Guard／confirmation／executor 維持權限。啟動前先非生成式驗證登入及模型，再清 ports。Risk、Matchmaker 自身模型與 embeddings 不切換；詳見 [`../GPT_MODE.md`](../GPT_MODE.md)。
 - Public Ayue 永遠走 V3 sub-agent runtime；唯一 orchestrator 是 `social/services/ayue_agent/v3/scheduler.py`。
+- Appwrite remains the canonical owner of account profile fields and photos. The explicit settings-page edit flow mirrors its allowlisted profile payload into Mongo `profiles` for matching and fallback projections; this is outside the Public V3 tool/runtime write surface.
 - Match 的一般認識／指定活動由 Planner `match_search_request` 分類，runtime 驗證本句 topic/evidence 並建立確認；活動搜尋預設先看提案，明確要求代送才提供搜尋並邀請確認。歷史 choice 依 canonical delivery_mode 顯示標籤。Topic 卡片保留公開推薦說明，沒有共同活動證據時明示探索性，不捏造對方興趣。既有邀請狀態不回寫；詳見 `MATCH_SEARCH_CONSENT_FIX_2026-09-08.md`。
 - Event discovery 由 Social startup 的嵌入式 Event Worker 執行。每週一 08:00（台灣時間）或同週錯過後補跑，ISO week key 防重複；EVENT_WEEKLY_CYCLE_ENABLED 控制排程。正式 weekly job 使用持久 run id：先增量搜尋未來 30 天活動，再清過期庫存，等待向量準備後依 event_weekly_users 清單分批找夥伴。三張為每批上限，所有 snapshot 使用者都有評估／跳過／失敗結果；event_weekly_runs 保存 stage checkpoint 與結果，租約接手可接續。類別覆蓋不足不阻擋有資料的活動，relevance 不可用則保留進度、有界重試。保留有效活動、User、一般配對與已決定歷史；手動 reset 仍獨立。event_delivery_service 在離線時也保存 Match Hub 提案，draft 只送第一方、pending 才送第二方，以固定卡片 key 去重並於保存後 ack。上述 workers 均由 start_all.sh 的 Social lifecycle 啟停，不增加 port。
 - Public 失敗時 fail closed。Rollback 只能透過 deployment／commit rollback，不存在 request-level legacy fallback、rollout allowlist 或第二套 public router。
@@ -81,6 +82,8 @@ Scheduler 先處理：
 - 逾期、stale 或已被其他 worker claim 的 confirmation。
 
 這些狀態不進 Planner，避免一般對話重新解讀 authority-bearing action。
+
+Assessment 由 `assessment_session_service.py` 擁有。初始化只回本 session 的一個問題，不把前端控制文字當回答；後續模型只讀 typed draft、本次提供的興趣、上一題及最多三組問答，不讀已完成性格或其他房間／長期記憶。Provider JSON／schema／空回覆與連線錯誤由 `assessment_provider.py` 分類，有界重試後仍失敗就保留 revision／題數；不再用「沒聽清楚」假裝正常追問。Onboarding HTTP 以 `status=error`＋`error_code` 呈現，Flutter 保留答案供同 ID 重試；取消、過期及提交會清除 temporary dialogue。詳見 [`api/ayue-v3-mobile-bootstrap.md`](./api/ayue-v3-mobile-bootstrap.md)。
 
 ### 4.3 Planner
 
@@ -258,9 +261,10 @@ draft/pending -> expired
 - `accepted` 是已建立聯絡關係，不是 active proposal。
 - `match_decision_service.py` 擁有 status+revision CAS；stale 回最新狀態，不覆寫終態。
 - `match_action_service.py` 只在 transition 成功後執行通知、聊天室、feedback 等 effects；effect 失敗不讓已提交 transition 被重送。
+- 雙人 direct chat 從第一句開始都只保存真人發出的訊息，不再呼叫模型並以收件者 ID 自動代回。一般配對在雙方接受後，以 `match:{match_id}:pair-opening` 冪等保存一則署名阿月的 shared system message；使用既有公開提案依據與暱稱簡短破冰，不重新呼叫模型、不把私人 directional opening 或長期記憶公開。Event 沿用原本活動開場，不另加一般開場；每人的私人媒人提醒保持獨立。
 - `POST /api/match/decision` 與 `GET /api/match/state` 的 HTTP adapter 只在 canonical match 已 `accepted`、具有 `has_verified_acceptance` 證據且 caller 是 participant 時，增加導航用 `other_id`。此欄位不進 tool observation、Public prompt、stream 或 Event snapshot；導航讀取失敗也不改變已提交的接受結果。
 - Flutter 活動卡保留 canonical `proposal_namespace`、公開 `event` 與 `chat_reused`。日期以台灣時間呈現並尊重 date/datetime 精度；雙方同意後直接開啟對應聊天室，既有 pair 沿用原聊天室。後端以 match-scoped event key 在 canonical pair room 冪等保存安全的 Event 開場 system card，讓新／既有 pair 都能從同一份活動 snapshot 接著聊，且不建立第二個 relationship anchor。舊的卡片終態與 revision 保護不變。
-- 提案 HTTP state 與 AI 聊天歷史提供 viewer-bound、UI-only `counterparty_nickname`，讓一般／活動配對理由介紹對方暱稱。由 `public_nickname_service.py` 唯讀 Appwrite 公開 `name`，缺資料／不可用時回退 Mongo seed/legacy 公開稱呼，不同步或寫入 profile。歷史訊息只投影、不重存；名字不進新 model context、Graph 或婉拒原因，導航仍需雙方同意。
+- 提案 HTTP state 與 AI 聊天歷史提供 viewer-bound、UI-only `counterparty_nickname`，讓一般／活動配對理由介紹對方暱稱。由 `public_nickname_service.py` 唯讀 Appwrite 公開 `name`，缺資料／不可用時回退 Mongo 同步後或 seed/legacy 公開稱呼；該 adapter 本身不同步或寫入 profile。歷史訊息只投影、不重存；名字不進新 model context、Graph 或婉拒原因，導航仍需雙方同意。
 - 婉拒原因由 viewer-bound `decline_reason_options` 提供；使用者可只婉拒、不記錄。只有本人勾選並同意記錄的 `explicit_reasons` 才進既有 feedback normalizer，再共用 `/api/memory/apply` 寫入 `AVOIDS -> Concept` 與 Social preference facts。空選擇、撤回、stale 不寫偏好，不從對方特質推論；UI 的「已送出」不等同 Graph 成功收據。
 
 ## 10. Profile、Memory 與 Context Engine

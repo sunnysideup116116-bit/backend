@@ -129,13 +129,13 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.matches_coll.find", return_value=[]), \
              patch("routers.public_chat.matches_coll.find_one", return_value=None), \
              patch("routers.public_chat.find_accepted_match", return_value={"_id": "match-1"}), \
-             patch("routers.public_chat.generate_chat_completion", side_effect=RuntimeError("provider down")), \
+             patch("routers.public_chat.generate_chat_completion", side_effect=RuntimeError("provider down")) as generate, \
              patch("routers.public_chat.mark_post_chat_activity", return_value=0):
             response = direct_chat(req, BackgroundTasks())
 
-        self.assertEqual(response["reply"], "我先陪你把這段聊完，剛剛回覆沒有成功，再試一次就好。")
-        self.assertTrue(response["opening_assist"])
-        self.assertNotIn("銝", response["reply"])
+        self.assertEqual(response["reply"], "")
+        self.assertFalse(response["opening_assist"])
+        generate.assert_not_called()
 
     def test_non_public_ai_opening_assist_runs_only_for_first_pair_message(self):
         req = DirectChatRequest(user_id="owner", contact_id="other", message="第二句")

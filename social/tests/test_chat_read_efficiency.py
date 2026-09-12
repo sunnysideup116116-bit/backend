@@ -70,6 +70,46 @@ def test_contacts_return_only_one_preview_per_room_and_batch_profiles(mongo):
     assert routes.profiles_coll.find_one_calls == 1
 
 
+def test_contact_previews_render_latest_image_and_preserve_text_blocked_and_empty(mongo):
+    for other in ("text", "image", "blocked", "empty"):
+        accepted(mongo, other)
+
+    text_room = routes.generate_room_id("owner", "text")
+    mongo.messages.insert_many([
+        {"room_id": text_room, "content": "較早文字", "timestamp": 1},
+        {"room_id": text_room, "content": "最新文字", "timestamp": 2},
+    ])
+
+    image_room = routes.generate_room_id("owner", "image")
+    mongo.messages.insert_many([
+        {"room_id": image_room, "content": "較早文字", "timestamp": 1},
+        {
+            "room_id": image_room,
+            "content": "",
+            "message_type": "image",
+            "timestamp": 2,
+        },
+    ])
+
+    blocked_room = routes.generate_room_id("owner", "blocked")
+    mongo.messages.insert_one({
+        "room_id": blocked_room,
+        "content": "不應顯示",
+        "timestamp": 1,
+        "is_blocked": True,
+    })
+
+    contacts = {
+        contact["id"]: contact
+        for contact in routes.get_contacts("owner")["contacts"][1:]
+    }
+
+    assert contacts["text"]["latest_message"] == "最新文字"
+    assert contacts["image"]["latest_message"] == "傳送了一張圖片"
+    assert contacts["blocked"]["latest_message"] == ""
+    assert contacts["empty"]["latest_message"] == ""
+
+
 def test_contact_previews_follow_deletion_and_preserve_block_exclusions(mongo, monkeypatch):
     for other in ("alice", "bob"):
         accepted(mongo, other)
