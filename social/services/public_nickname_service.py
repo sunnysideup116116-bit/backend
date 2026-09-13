@@ -33,9 +33,31 @@ _cache: OrderedDict[str, tuple[float, str | None]] = OrderedDict()
 _cache_lock = threading.Lock()
 
 
+def _nickname_endpoint() -> str:
+    """Resolve this deployment's loopback HTTP redirect before credentials.
+
+    Port 80 redirects to loopback HTTPS, whose certificate is issued for the
+    App's canonical hostname. Use that existing fixed origin directly, never
+    a response-controlled Location and never disable TLS verification.
+    Explicit alternative development ports/endpoints remain unchanged.
+    """
+    try:
+        parsed = urlparse(_ENDPOINT)
+        if (
+            parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+            and parsed.port in {None, 80} and parsed.path.rstrip("/") == "/v1"
+            and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment
+        ):
+            return "https://appwrite.misproject.us.ci/v1"
+    except ValueError:
+        return ""
+    return _ENDPOINT
+
+
 def _read_appwrite_nickname(user_id: str) -> str | None:
     """None means unavailable; an empty name must not revive a stale alias."""
-    endpoint = urlparse(_ENDPOINT)
+    base_url = _nickname_endpoint()
+    endpoint = urlparse(base_url)
     if (
         not _PROJECT_ID or not _API_KEY or not endpoint.hostname
         or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment
@@ -54,7 +76,7 @@ def _read_appwrite_nickname(user_id: str) -> str | None:
     name = None
     try:
         response = requests.get(
-            f"{_ENDPOINT}/databases/dating_db/collections/user_profiles/documents/{user_id}",
+            f"{base_url}/databases/dating_db/collections/user_profiles/documents/{user_id}",
             headers={"X-Appwrite-Project": _PROJECT_ID, "X-Appwrite-Key": _API_KEY},
             params={"queries[]": json.dumps({"method": "select", "values": ["name"]})},
             timeout=(1.0, 2.0),

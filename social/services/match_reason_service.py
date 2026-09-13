@@ -366,11 +366,11 @@ def accepted_opening_for_viewer(
 
 
 def shared_match_opening(match_doc: dict, first_label: str, second_label: str) -> str:
-    """A shared welcome, using only role-bound public proposal evidence.
+    """Fallback welcome when personalized generation is unavailable.
 
     Private directional accepted_opening prose stays in each mediator room.
-    No fresh model call, live profile memory, or inferred mutual interest is
-    needed to deliver the shared opener reliably at the consent boundary.
+    This fallback makes no model call and never reads live profile memory or
+    infers mutual interest. The normal composer lives in pair_opening_service.
     """
     projection = match_doc.get("friend_intro_v4")
     contexts: list[str] = []
@@ -399,7 +399,8 @@ def shared_match_opening(match_doc: dict, first_label: str, second_label: str) -
     else:
         basis = "這次先讓你們探索是否聊得來，不預設一定合拍。"
     question = "這件事最吸引你的是哪個部分？" if topic or contexts else "如果有半天空閒，你最想怎麼度過？"
-    return f"阿月：{first_label}、{second_label}，你們都願意認識彼此了！{basis}\n先從一個輕鬆的問題開始：{question}"
+    greeting = f"{first_label}、{second_label}，" if first_label and second_label and "對方" not in (first_label, second_label) else ""
+    return f"阿月：{greeting}你們都願意認識彼此了！{basis}\n先從一個輕鬆的問題開始：{question}"
 
 
 def _snapshot_profiles(match_doc: dict) -> tuple[dict, dict]:

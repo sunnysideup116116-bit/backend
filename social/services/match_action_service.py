@@ -14,11 +14,13 @@ from typing import Any, Callable
 import requests
 
 from database import matches_coll, profiles_coll
-from services.chat_service import generate_room_id, save_system_message_once
+from services.chat_service import generate_room_id, save_system_message_once, find_system_message_by_event
 from services.event_card_projection import public_event_card
 from services.giphy_service import schedule_match_celebration_gifs
 from services.match_decision_service import apply_match_decision
-from services.match_reason_service import accepted_opening_for_viewer, shared_match_opening
+from services.match_reason_service import accepted_opening_for_viewer
+from services.pair_opening_service import compose_pair_opening
+from services.public_nickname_service import proposal_display_name
 from services.match_state_service import derive_match_stage, reconcile_live_match
 from services.mediator_event_service import queue_mediator_event
 from services.preference_store import upsert_preference_facts
@@ -171,25 +173,32 @@ def apply_transition_effects(
         initiator_doc = profiles_coll.find_one({"user_id": from_id}) or {}
         target_doc = profiles_coll.find_one({"user_id": to_id}) or {}
         if namespace != EVENT_INVITATION_NAMESPACE:
-            try:
-                save_system_message_once(
-                    generate_room_id(from_id, to_id),
-                    shared_match_opening(
-                        match_doc,
-                        _safe_profile_label(initiator_doc, from_id),
-                        _safe_profile_label(target_doc, to_id),
-                    ),
-                    message_type="system",
-                    metadata={
-                        "event_type": "match_pair_opening",
-                        "proposal_namespace": namespace,
-                        "match_id": match_id,
-                        "notification_recipients": [from_id, to_id],
-                    },
-                    event_key=f"match:{match_id}:pair-opening",
-                )
-            except Exception as exc:
-                print(f"[match] shared chat opening failed: {type(exc).__name__}")
+            def deliver_shared_opening():
+                try:
+                    room_id = generate_room_id(from_id, to_id)
+                    event_key = f"match:{match_id}:pair-opening"
+                    if find_system_message_by_event(room_id, event_key=event_key):
+                        return
+                    # Names stay out of the model input; Appwrite is canonical,
+                    # with the same safe Mongo fallback as the proposal UI.
+                    first_label = proposal_display_name(from_id, fallback_lookup=lambda _: _safe_profile_label(initiator_doc, from_id))
+                    second_label = proposal_display_name(to_id, fallback_lookup=lambda _: _safe_profile_label(target_doc, to_id))
+                    content, outcome = compose_pair_opening(match_doc, first_label, second_label)
+                    save_system_message_once(
+                        room_id, content, message_type="system",
+                        metadata={
+                            "event_type": "match_pair_opening",
+                            "proposal_namespace": namespace,
+                            "match_id": match_id,
+                            "notification_recipients": [from_id, to_id],
+                            "opening_version": "v2_personalized",
+                            "opening_outcome": outcome,
+                        },
+                        event_key=event_key,
+                    )
+                except Exception as exc:
+                    print(f"[match] shared chat opening failed: {type(exc).__name__}")
+            _schedule_or_run(schedule_task, deliver_shared_opening)
         for user_id, other_id in ((from_id, to_id), (to_id, from_id)):
             other_doc = target_doc if other_id == to_id else initiator_doc
             other_label = _safe_profile_label(other_doc, other_id)

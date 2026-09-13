@@ -261,7 +261,7 @@ draft/pending -> expired
 - `accepted` 是已建立聯絡關係，不是 active proposal。
 - `match_decision_service.py` 擁有 status+revision CAS；stale 回最新狀態，不覆寫終態。
 - `match_action_service.py` 只在 transition 成功後執行通知、聊天室、feedback 等 effects；effect 失敗不讓已提交 transition 被重送。
-- 雙人 direct chat 從第一句開始都只保存真人發出的訊息，不再呼叫模型並以收件者 ID 自動代回。一般配對在雙方接受後，以 `match:{match_id}:pair-opening` 冪等保存一則署名阿月的 shared system message；使用既有公開提案依據與暱稱簡短破冰，不重新呼叫模型、不把私人 directional opening 或長期記憶公開。Event 沿用原本活動開場，不另加一般開場；每人的私人媒人提醒保持獨立。
+- 雙人 direct chat 從第一句開始都只保存真人發出的訊息，不再呼叫模型並以收件者 ID 自動代回。一般配對在雙方接受後，由 `pair_opening_service.py` 依本次公開邀請主題、role-bound 提案性格／情境與公開 match basis 生成短引介及一個具體問題；只呼叫一次模型，15 秒 transport budget，透過原本 background scheduler 執行，不阻塞接受回應。暱稱沿用 Appwrite-first `proposal_display_name`，只在生成後代入，不進模型；查不到時改用「你們」。結果以 `match:{match_id}:pair-opening` 冪等保存為阿月的 shared system message，已保存則不重生成；無依據或 provider／schema 失敗才使用 fallback。不把私人 directional opening 或長期記憶公開。Event 沿用原本活動開場，不另加一般開場；每人的私人媒人提醒保持獨立。
 - `POST /api/match/decision` 與 `GET /api/match/state` 的 HTTP adapter 只在 canonical match 已 `accepted`、具有 `has_verified_acceptance` 證據且 caller 是 participant 時，增加導航用 `other_id`。此欄位不進 tool observation、Public prompt、stream 或 Event snapshot；導航讀取失敗也不改變已提交的接受結果。
 - Flutter 活動卡保留 canonical `proposal_namespace`、公開 `event` 與 `chat_reused`。日期以台灣時間呈現並尊重 date/datetime 精度；雙方同意後直接開啟對應聊天室，既有 pair 沿用原聊天室。後端以 match-scoped event key 在 canonical pair room 冪等保存安全的 Event 開場 system card，讓新／既有 pair 都能從同一份活動 snapshot 接著聊，且不建立第二個 relationship anchor。舊的卡片終態與 revision 保護不變。
 - 提案 HTTP state 與 AI 聊天歷史提供 viewer-bound、UI-only `counterparty_nickname`，讓一般／活動配對理由介紹對方暱稱。由 `public_nickname_service.py` 唯讀 Appwrite 公開 `name`，缺資料／不可用時回退 Mongo 同步後或 seed/legacy 公開稱呼；該 adapter 本身不同步或寫入 profile。歷史訊息只投影、不重存；名字不進新 model context、Graph 或婉拒原因，導航仍需雙方同意。

@@ -1,5 +1,7 @@
 # 雙人聊天室開場與 Profiling 錯誤回覆修正
 
+> 本篇是 09-12 的修正紀錄。共同開場已於 09-13 改為 Appwrite-first 暱稱及模型客製化，現況見 [後續修正](PAIR_OPENING_PERSONALIZATION_2026-09-13.md)；profiling 不變。
+
 ## 原因與修正
 
 1. `public_chat.direct_chat` 原本在共同聊天室第一則真人文字後呼叫 LLM，並用 **收件者的 sender_id** 保存生成文字。它不是僅限測試帳號的分支。現在第一句起只保存真人送出的內容；一般配對在 accepted transition 後，以阿月身份保存一則 match-scoped、冪等的共同開場。公開依據由既有提案投影取得；私人 directional opening 仍留在各自媒人房間，Event 保留自己的活動開場而不重複新增。

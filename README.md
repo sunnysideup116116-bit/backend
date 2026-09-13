@@ -26,6 +26,7 @@
 - [Event weekly](docs/EVENT_DRIVEN_MATCHMAKER_GUIDE.md)：週一增量探索、過期清理、readiness、有界重試、全人口分批與離線投遞；不是每週僅三張或整庫 reset。
 - [驗收與限制](docs/MATCH_SEARCH_CONSENT_FIX_2026-09-08.md)：Social 1773 passed、4 skipped；使用者已確認最後修正。測試快照不保證未來模型／排程永不失敗。
 - [雙人開場／Profiling 修正](docs/PAIR_CHAT_PROFILING_FIX_2026-09-12.md)：移除首句代回、共同開場冪等保存、測驗錯誤分類與同 ID 重試；含本次驗證及歷史日誌限制。
+- [客製化開場與暱稱](docs/PAIR_OPENING_PERSONALIZATION_2026-09-13.md)：Appwrite-first 名稱、接受後背景模型生成、單一具體問題及失敗降級。
 
 ## Port 總覽
 
