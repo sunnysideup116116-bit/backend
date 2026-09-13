@@ -90,5 +90,7 @@ def test_appwrite_names_override_empty_mongo_and_delivery_is_deduplicated(monkey
     assert message["sender_id"] == "ai_assistant"
     assert message["metadata"]["opening_outcome"] == "generated"
     assert db.messages.count_documents({}) == 1
-    assert lookup.call_count == 2
+    # Both private connected notifications now use the same canonical reader
+    # as the shared opener (the real reader caches its HTTP lookups).
+    assert lookup.call_count == 4
     model.assert_called_once()

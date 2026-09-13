@@ -108,7 +108,7 @@ class PublicAgentTurnContext(BaseModel):
     user_id: str
     room_id: str
     message: str
-    recent_messages: list[dict[str, str]] = Field(default_factory=list)
+    recent_messages: list[dict[str, Any]] = Field(default_factory=list)
     history_projection_status: Literal["complete", "recent_only_budget_limited"] = "complete"
     conversation_continuity: ConversationSummaryV1 | None = None
     recent_context: str = ""
@@ -138,6 +138,9 @@ class PublicAgentTurnContext(BaseModel):
     # Public references only. Their executor-side IDs remain on AgentTurnContext.
     mentioned_contacts: list[dict[str, str]] = Field(default_factory=list)
     mentioned_contact_overflow: bool = False
+    # Owner-only and person-scoped. Populated only for one explicitly resolved
+    # contact and exposed solely to the relationship sub-agent.
+    owner_relationship_memories: list[dict[str, Any]] = Field(default_factory=list)
     # Short-lived, prompt-safe relationship referent. The executor-side ID is
     # kept in v3.relationship_references and is never part of this model.
     recent_contact_reference: dict[str, Any] | None = None
@@ -230,6 +233,7 @@ class AgentResult(BaseModel):
     sources: list[dict[str, str]] = Field(default_factory=list)
     place_cards: list[dict[str, str]] = Field(default_factory=list)
     presentation_blocks: list[PresentationBlock] = Field(default_factory=list, max_length=12)
+    interaction_blocks_v1: list[dict[str, Any]] = Field(default_factory=list, max_length=4)
     llm_call_metrics: list[dict[str, Any]] = Field(default_factory=list)
     # Safe, UI-only projections. Authority-bearing arguments remain solely in
     # the confirmation store and never enter prompts or debug traces.

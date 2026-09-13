@@ -877,11 +877,15 @@ def claim_delivery_slot(user_id: str, candidate_id: str, *, now: float | None = 
                 "proactive_care_delivery_times": 1,
                 "proactive_care_delivery_claim_until": 1,
                 "proactive_care_pending_delivery": 1,
+                "last_automatic_relationship_prompt_at": 1,
             },
         ) or {}
     except Exception:
         return None
     if not is_proactive_care_enabled(profile):
+        return None
+    last_automatic_prompt = float(profile.get("last_automatic_relationship_prompt_at", 0) or 0)
+    if last_automatic_prompt and current - last_automatic_prompt < 3600:
         return None
     pending = profile.get("proactive_care_pending_delivery")
     if isinstance(pending, dict) and pending.get("event_key"):
@@ -911,6 +915,8 @@ def claim_delivery_slot(user_id: str, candidate_id: str, *, now: float | None = 
         query["proactive_care_enabled"] = True
     if last_sent:
         query["proactive_care_last_sent_at"] = last_sent
+    if last_automatic_prompt:
+        query["last_automatic_relationship_prompt_at"] = last_automatic_prompt
     try:
         result = profiles_coll.find_one_and_update(
             query,
@@ -1022,6 +1028,7 @@ def commit_delivery_slot(
             {
                 "$set": {
                     "proactive_care_last_sent_at": now,
+                    "last_automatic_relationship_prompt_at": now,
                     "proactive_care_delivery_updated_at": now,
                     "proactive_care_last_delivery_message_id": message_id,
                     "proactive_care_delivery": {

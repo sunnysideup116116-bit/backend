@@ -218,6 +218,51 @@ class V3ConfirmationTests(unittest.TestCase):
             persisted_content="最終預覽",
         ))
 
+    def test_interaction_layout_is_part_of_presentation_fingerprint(self):
+        from services.ayue_agent.v3.test_store import MemoryCollection
+
+        manager = ConfirmationManager(MemoryCollection())
+        manager.create_confirmation(
+            user_id="owner", agent_name="calendar", tool_name="calendar.submit_commands",
+            arguments={}, payload={"plans": []}, origin_run_id="run-layout",
+            preview="要新增行程嗎？", room_id="room",
+        )
+        expected = [
+            {"type": "text", "message_index": 0},
+            {"type": "confirmation", "slot": "primary_write_confirmation"},
+        ]
+        self.assertTrue(manager.bind_final_preview(
+            user_id="owner", origin_run_id="run-layout", final_content="你確認一下。",
+            interaction_blocks_v1=expected,
+        ))
+        self.assertFalse(manager.mark_presented(
+            user_id="owner", origin_run_id="run-layout", message_id="message-layout",
+            persisted_content="你確認一下。", interaction_blocks_v1=[],
+        ))
+        self.assertTrue(manager.mark_presented(
+            user_id="owner", origin_run_id="run-layout", message_id="message-layout",
+            persisted_content="你確認一下。", interaction_blocks_v1=expected,
+        ))
+
+    def test_public_choice_projection_contains_server_owned_display(self):
+        from services.ayue_agent.v3.confirmation import public_choice_projection
+
+        projection = public_choice_projection({
+            "_id": "choice", "status": "pending", "expires_at": 100,
+            "tool_name": "calendar.submit_commands",
+            "preview_text": "要新增 9/19 19:00「晚餐」嗎？",
+        })
+        self.assertEqual(projection["display"]["title"], "確認行事曆變更")
+        self.assertIn("晚餐", projection["display"]["summary"])
+
+        assessment = public_choice_projection({
+            "_id": "assessment-choice", "status": "pending", "expires_at": 100,
+            "tool_name": "profile.commit_assessment",
+            "preview_text": "這是新的探索草稿，請選擇是否套用。",
+        })
+        self.assertEqual(assessment["display"]["title"], "套用探索結果")
+        self.assertIn("更新個人資料", assessment["display"]["consequence"])
+
     def test_supersede_and_confirm_race_never_cancels_executing_mutation(self):
         from services.ayue_agent.v3.test_store import MemoryCollection
 

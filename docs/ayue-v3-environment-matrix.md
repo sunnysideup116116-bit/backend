@@ -34,6 +34,12 @@ The table records variable names and public defaults only. Secret values from `s
 | `GOOGLE_EMBEDDING_MODEL` | yes | `models/gemini-embedding-2` | `social.env`, existing Server env, example | Non-empty |
 | `AYUE_DEFAULT_TIMEZONE` | no | `Asia/Taipei` | example/runtime | Valid IANA timezone |
 | `AYUE_CALENDAR_STATE_MONGO` | no | `on` | example/runtime | Boolean |
+| `AYUE_GOOGLE_CALENDAR_ENABLED` | no | `off` | `social.env`, example | Boolean; missing credentials keep only this integration unavailable |
+| `AYUE_GOOGLE_CALENDAR_ALLOWED_USER_IDS` | no | empty | deployment config | Comma-separated Appwrite owner IDs; empty allows all only when enabled |
+| `GOOGLE_CALENDAR_CLIENT_ID` | when Google Calendar enabled | none | deployment secret | OAuth web client ID; never exposed to unrelated clients |
+| `GOOGLE_CALENDAR_CLIENT_SECRET` | when Google Calendar enabled | none | deployment secret | OAuth web client secret; server-only and never printed |
+| `GOOGLE_CALENDAR_TOKEN_KEY` | when Google Calendar enabled | none | deployment secret | Valid Fernet key used for token encryption at rest |
+| `GOOGLE_CALENDAR_REDIRECT_URI` | when Google Calendar enabled | canonical service callback | example/runtime | Must equal `https://service.misproject.us.ci/api/integrations/google-calendar/callback` |
 | `AYUE_RELATIONSHIP_REFERENCE_MONGO` | no | implementation default | deployment config | Boolean |
 | `AYUE_PROFILE_SKILLS_MODE` | no | `on` | `social.env`, example | Boolean |
 | `AYUE_PROFILE_SKILLS_USER_ALLOWLIST` | no | empty | `social.env`, example | Comma-separated owner IDs |

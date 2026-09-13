@@ -40,15 +40,17 @@ def test_read_composition_cannot_claim_unexecuted_mutations(monkeypatch, bad_rep
     reply, _, metrics = synth.synthesize(context("真的嘛"))
     assert reply != bad_reply
     assert "沒有合適" in reply
-    assert metrics.fallback_reason == "unsupported_claim"
+    assert metrics.fallback_reason == "synthesizer_emergency"
 
 
 def test_provider_failure_keeps_verified_status_and_answers_followup(monkeypatch):
-    monkeypatch.setattr(synth, "generate_chat_completion_with_tools", Mock(side_effect=RuntimeError("offline")))
+    provider = Mock(side_effect=RuntimeError("offline"))
+    monkeypatch.setattr(synth, "generate_chat_completion_with_tools", provider)
     reply, _, metrics = synth.synthesize(context("是嗎"))
     assert "重新確認" in reply and "上一次" in reply
     assert "沒接好" not in reply
-    assert metrics.fallback_reason == "provider_error"
+    assert provider.call_count == 2
+    assert metrics.fallback_reason == "synthesizer_emergency"
 
 
 def test_write_clarifications_still_bypass_model_composition(monkeypatch):

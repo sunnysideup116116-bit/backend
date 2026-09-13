@@ -773,6 +773,73 @@ class ConversationCompactionServiceTests(unittest.TestCase):
         unfiltered, _ = ayue_context._history(ctx)
         self.assertEqual(len(unfiltered), 12)
 
+    def test_history_excludes_saved_current_message_by_id_and_content_fallback(self):
+        prior = _message(1, "ai_assistant", "你剛剛在看 A 店和 B 店。")
+        current = _message(2, "owner", "幫我查第二間")
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="ai_assistant_owner",
+            message="幫我查第二間", message_id=str(current["_id"]),
+            recent_history=[prior, current],
+        )
+        by_id, _ = ayue_context._history(
+            ctx, exclude_message_id=ctx.message_id, current_message=ctx.message,
+        )
+        by_content, _ = ayue_context._history(
+            ctx.model_copy(update={"message_id": None}), current_message=ctx.message,
+        )
+        for projected in (by_id, by_content):
+            self.assertEqual(len(projected), 1)
+            self.assertEqual(projected[0]["role"], "assistant")
+            self.assertEqual(projected[0]["content"], "你剛剛在看 A 店和 B 店。")
+            self.assertEqual(projected[0]["sent_at"], "1970-01-01T08:00:01+08:00")
+            self.assertEqual(projected[0]["timezone"], "Asia/Taipei")
+            self.assertFalse(projected[0]["truncated"])
+
+    def test_history_projects_visible_confirmation_copy_and_state_only(self):
+        message = _message(1, "ai_assistant", "我把行程整理好了。")
+        message["metadata"] = {"choice_prompt": {
+            "id": "secret-choice-id",
+            "state": "auto_cancelled",
+            "display": {
+                "title": "確認行事曆變更",
+                "summary": "09/26 12:00–18:00 特攝機甲創作祭大出動FEST 2",
+                "consequence": "確認後才會寫入行事曆",
+            },
+            "executor_payload": {"event_id": "secret-event-id"},
+        }}
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="ai_assistant_owner", message="不是，是這個活動",
+            recent_history=[message],
+        )
+
+        history, _ = ayue_context._history(ctx)
+
+        self.assertEqual(len(history), 1)
+        content = history[0]["content"]
+        self.assertIn("因使用者繼續對話而取消，尚未執行", content)
+        self.assertIn("特攝機甲創作祭大出動FEST 2", content)
+        self.assertNotIn("secret-choice-id", content)
+        self.assertNotIn("secret-event-id", content)
+
+    def test_history_excludes_current_before_applying_twelve_message_budget(self):
+        prior = [
+            _message(index, "owner" if index % 2 else "ai_assistant", f"prior-{index}")
+            for index in range(1, 14)
+        ]
+        current = _message(14, "owner", "current")
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="ai_assistant_owner", message="current",
+            message_id=str(current["_id"]), recent_history=[*prior, current],
+        )
+
+        history, _ = ayue_context._history(
+            ctx, exclude_message_id=ctx.message_id, current_message=ctx.message,
+        )
+
+        self.assertEqual(len(history), 12)
+        self.assertEqual(history[0]["content"], "prior-2")
+        self.assertEqual(history[-1]["content"], "prior-13")
+
     def test_context_builder_uses_validated_continuity_and_falls_back_without_it(self):
         messages = [_message(index, "owner" if index % 2 else "ai_assistant") for index in range(1, 13)]
         ctx = AgentTurnContext(
@@ -795,7 +862,9 @@ class ConversationCompactionServiceTests(unittest.TestCase):
              common_patches[0], common_patches[1], common_patches[2], common_patches[3]:
             activated = ayue_context.build_public_agent_turn_context(ctx)
         self.assertEqual(activated.conversation_continuity.active_topics, ["週末旅行"])
-        self.assertEqual(len(activated.recent_messages), 7)
+        # A validated older summary no longer hides raw messages that still
+        # fit inside the bounded recent window.
+        self.assertEqual(len(activated.recent_messages), 12)
 
         with patch.object(ayue_context, "load_validated_conversation_continuity", return_value=None), \
              patch.object(ayue_context, "load_match_state", return_value={"active_proposal": None, "ambiguous": False, "search": {"status": "idle"}}), \

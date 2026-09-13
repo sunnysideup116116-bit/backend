@@ -12,7 +12,7 @@ from services.ayue_agent.v3.sub_agents.calendar_agent import CalendarAgentResult
 from services.ayue_agent.v3 import calendar_runtime
 from services.ayue_agent.v3.contracts import (
     AgentContextSlice, Plan, PlaceSelection, SubTask, SubTaskResult, SubTaskStatus, ToolProposal,
-    RunCondition,
+    RunCondition, TemporalClarification,
 )
 from services.ayue_agent.v3.planner import PlannerMetrics
 from services.ayue_agent.v3.confirmation import ConfirmationManager
@@ -29,17 +29,19 @@ from services.ayue_agent.v3.place_followups import (
     save_followup,
 )
 from services.ayue_agent.v3.sub_agents.base import SubAgentMetrics
+from services.ayue_agent.v3.runtime_registry import TaskRunnerResult
 from services.ai_service import ToolCallResult
 from services.ayue_agent.v3.scheduler import (
     _abandon_place_followup_for_turn, _apply_card_decision,
     _assessment_start_confirmation_requested,
-    _direct_chat_block_reason, _planner_failure_reply,
+    _direct_chat_block_reason,
     _dependency_completed, _ensure_place_hours_fallback,
-    _prior_observations_for, _public_place_cards,
+    _prior_observations_for, _public_place_cards, _public_sources,
     _resolve_presentation_blocks, _restore_snapshot_candidate_labels,
     _server_ordered_place_messages,
     _strip_model_place_list_lines,
     _condition_skip_reason, _run_registered_places, _topological_layers,
+    _web_activity_anchor_available,
     run_public_agent_turn_v3,
 )
 
@@ -76,6 +78,36 @@ def _place_cards(*names):
 
 
 class V3SchedulerTests(unittest.TestCase):
+    def test_public_sources_prioritize_support_and_deduplicate_tracking_urls(self):
+        result = {
+            "schema_version": "web_research.v1",
+            "findings": [{
+                "claim": "主要結論", "relation": "direct",
+                "source_urls": ["https://events.example.com/detail?id=2"],
+            }],
+            "primary_activity": {
+                "title": "活動", "venue": "場地",
+                "source_urls": ["https://venue.example.org/program"],
+            },
+            "sources": [
+                {"title": "次要來源", "url": "https://other.example.net/story"},
+                {"title": "主要來源", "url": "https://events.example.com/detail?id=2"},
+                {"title": "追蹤參數重複", "url": "https://events.example.com/detail?id=2&utm_source=chat"},
+                {"title": "場地日程", "url": "https://venue.example.org/program#date"},
+            ],
+        }
+
+        sources = _public_sources([{
+            "tool": None,
+            "result": result,
+        }])
+
+        self.assertEqual(
+            [item["title"] for item in sources],
+            ["主要來源", "場地日程", "次要來源"],
+        )
+        self.assertEqual(sources[0]["url"], "https://events.example.com/detail?id=2")
+
     def _ctx(self, message="幫我看看行程和附近餐廳"):
         return AgentTurnContext(user_id="owner", room_id="room", message=message)
 
@@ -131,15 +163,10 @@ class V3SchedulerTests(unittest.TestCase):
     def test_reviews_places_runtime_hides_and_rejects_nearby_search(self):
         task = SubTask(
             id="p1", agent="places", place_mode="reviews", depends_on=[],
-            task_brief="查已選店家的口味評論",
+            task_brief="查原大禮街香雞排（高雄市鹽埕區大禮街）的口味評論",
         )
         context_slice = AgentContextSlice(agent="places", payload={
             "message": "它好不好吃？",
-            "recent_place_reference": {
-                "reference": "place_ref_0123456789abcdef01234567",
-                "label": "原大禮街香雞排",
-                "address_summary": "高雄市鹽埕區大禮街",
-            },
         })
         proposals = [
             ToolProposal(tool_name="places.search_nearby", arguments={
@@ -218,6 +245,126 @@ class V3SchedulerTests(unittest.TestCase):
             ]
         }
         self.assertEqual(_condition_skip_reason(plan.tasks[1], mixed), "condition_unavailable")
+
+    def test_places_web_dependency_requires_validated_activity_anchor(self):
+        web = SubTask(id="w1", agent="web", task_brief="找活動")
+        places = SubTask(
+            id="p1", agent="places", depends_on=["w1"],
+            task_brief="搜尋活動附近晚餐",
+        )
+        task_by_id = {"w1": web, "p1": places}
+        findings_only = {"w1": [SubTaskResult(
+            task_id="w1", status=SubTaskStatus.OK,
+            observation={
+                "schema_version": "web_research.v1",
+                "findings": [{"claim": "有公開活動線索"}],
+                "primary_activity": None,
+            },
+        )]}
+        self.assertFalse(_web_activity_anchor_available(
+            places, findings_only, task_by_id,
+        ))
+
+        anchored = {"w1": [SubTaskResult(
+            task_id="w1", status=SubTaskStatus.OK,
+            observation={
+                "schema_version": "web_research.v1",
+                "findings": [{"claim": "有公開活動線索"}],
+                "primary_activity": {
+                    "title": "週六市集", "venue": "駁二",
+                    "source_urls": ["https://example.com/activity"],
+                },
+            },
+        )]}
+        self.assertTrue(_web_activity_anchor_available(
+            places, anchored, task_by_id,
+        ))
+        self.assertIsNone(_web_activity_anchor_available(
+            web, findings_only, task_by_id,
+        ))
+
+    def test_missing_web_activity_anchor_skips_places_without_tool_call(self):
+        ctx = self._ctx("下週六找個活動，再排附近晚餐")
+        plan = Plan(tasks=[
+            SubTask(id="w1", agent="web", task_brief="找公開活動"),
+            SubTask(
+                id="p1", agent="places", depends_on=["w1"],
+                task_brief="搜尋活動附近晚餐",
+            ),
+            SubTask(
+                id="s1", agent="synthesizer", depends_on=["w1", "p1"],
+                task_brief="整理活動與晚餐",
+            ),
+        ])
+        turn = self._direct_turn(ctx.message)
+        captured = {}
+
+        def web_runner(_slice, *, task_brief):
+            del task_brief
+            return TaskRunnerResult.from_completed([SubTaskResult(
+                task_id="w1",
+                status=SubTaskStatus.OK,
+                observation={
+                    "schema_version": "web_research.v1",
+                    "status": "partial",
+                    "coverage": "direct_partial",
+                    "findings": [{
+                        "claim": "駁二週六有公開活動線索",
+                        "relation": "direct",
+                    }],
+                    "primary_activity": None,
+                    "sources": [{"url": "https://example.com/activity"}],
+                    "limitations": ["場地待確認"],
+                },
+            )]), _sub_metrics()
+
+        places_runner = MagicMock()
+
+        def synth(context_slice, candidate_cards=None, on_token=None):
+            del candidate_cards, on_token
+            captured["observations"] = context_slice.payload["observations"]
+            return (
+                "我先找到駁二的活動線索；場地還無法確定，所以尚未搜尋附近晚餐。",
+                None,
+                _synth_metrics(),
+            )
+
+        with patch(
+            "services.ayue_agent.v3.scheduler.plan_turn",
+            return_value=(plan, _planner_metrics()),
+        ), patch(
+            "services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
+            return_value=turn,
+        ), patch(
+            "services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS",
+            {"web": web_runner, "places": places_runner},
+        ), patch(
+            "services.ayue_agent.v3.scheduler.synthesizer.synthesize",
+            side_effect=synth,
+        ), patch(
+            "services.ayue_agent.v3.scheduler.ConfirmationManager.list_active",
+            return_value=[],
+        ), patch(
+            "services.ayue_agent.v3.scheduler.execute_tool",
+        ) as execute_tool, patch(
+            "services.ayue_agent.v3.scheduler._persist_trace",
+        ) as persist_trace:
+            result = run_public_agent_turn_v3(ctx)
+
+        self.assertIn("尚未搜尋附近晚餐", result.reply)
+        places_runner.assert_not_called()
+        execute_tool.assert_not_called()
+        anchor_failures = [
+            item for item in captured["observations"]
+            if isinstance(item.get("result"), dict)
+            and item["result"].get("activity_anchor_unavailable")
+        ]
+        self.assertEqual(len(anchor_failures), 1)
+        trace = persist_trace.call_args.args[2]
+        self.assertEqual(
+            trace["place_diagnostics"]["places_skip_reason"],
+            "missing_activity_anchor",
+        )
 
     def test_calendar_availability_result_emits_closed_outcome_without_replacing_events(self):
         task = SubTask(
@@ -556,6 +703,7 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertNotIn("ObjectId", str(observation["result"]))
         self.assertNotIn("Traceback", str(observation["result"]))
 
+    @unittest.skip("retired: public chat no longer persists place candidate snapshots")
     def test_presented_places_replace_server_owned_set_in_public_order(self):
         clear_place_reference_state()
         ctx = self._ctx("幫我找附近飲料")
@@ -570,9 +718,12 @@ class V3SchedulerTests(unittest.TestCase):
             metrics.presented_candidate_refs = [
                 candidate_cards[1]["candidate_ref"],
                 candidate_cards[0]["candidate_ref"],
-                candidate_cards[2]["candidate_ref"],
             ]
-            return ("1. 不二 TEA&NO.1\n2. 樺達奶茶\n3. 鹽埕小熊奶茶", None, metrics)
+            metrics.presented_candidate_bindings = [
+                {"candidate_ref": reference, "presented_ordinal": ordinal}
+                for ordinal, reference in enumerate(metrics.presented_candidate_refs, start=1)
+            ]
+            return ("不二 TEA&NO.1 適合先喝，樺達奶茶則可以當備案。", None, metrics)
 
         try:
             with patch(
@@ -608,8 +759,9 @@ class V3SchedulerTests(unittest.TestCase):
             record = get_place_candidate_set("owner", "room")
             self.assertEqual(
                 [item["label"] for item in record["candidates"]],
-                ["樺達奶茶", "不二 TEA&NO.1", "鹽埕小熊奶茶"],
+                ["不二 TEA&NO.1", "樺達奶茶"],
             )
+            self.assertNotIn("鹽埕小熊奶茶", result.reply)
             self.assertNotIn("provider_place_id", str(record["candidates"][0]["reference"]))
         finally:
             clear_place_reference_state()
@@ -724,27 +876,26 @@ class V3SchedulerTests(unittest.TestCase):
             result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
 
-    def test_planner_returns_none_yields_fail_closed(self):
+    def test_planner_returns_none_uses_synthesizer_for_safe_natural_reply(self):
         ctx = self._ctx("嗨")
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(None, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build:
-            mock_build.return_value = MagicMock()
-            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
+                   return_value=self._direct_turn(ctx.message)), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=(
+                 "我剛剛還沒整理好，你可以再傳一次。", None, _synth_metrics(),
+             )) as synthesize:
             result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
         self.assertEqual(result.agent_mode, "v3")
-        self.assertIsNotNone(result.fallback_reason)
-
-    def test_unrelated_planner_failure_does_not_surface_active_match_state(self):
-        turn = self._direct_turn(
-            "幫我看明天的行程",
-            active_proposal={
-                "status": "pending",
-                "allowed_actions": ["cancelled"],
-            },
-        )
-        self.assertNotIn("提案", _planner_failure_reply(turn))
-        self.assertNotIn("配對", _planner_failure_reply(turn))
+        self.assertIsNone(result.fallback_reason)
+        self.assertIn("再傳一次", result.reply)
+        synthesize.assert_called_once()
+        observation = synthesize.call_args.args[0].payload["observations"][0]["result"]
+        self.assertEqual(observation, {
+            "schema_version": "planner_failure.v1",
+            "safe_state": "no_actions_executed",
+            "retryable": True,
+        })
 
     def test_abandoned_place_followup_is_cleared_but_referent_stays_for_turn(self):
         saved = save_followup(
@@ -779,25 +930,27 @@ class V3SchedulerTests(unittest.TestCase):
             side_effect=RuntimeError("private provider payload"),
         ), patch(
             "services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
-        ) as mock_build, patch(
+            return_value=self._direct_turn(ctx.message),
+        ), patch(
             "services.ayue_agent.v3.scheduler.execute_tool",
         ) as execute_tool, patch(
             "services.ayue_agent.v3.scheduler.execute_write",
         ) as execute_write, patch(
             "services.ayue_agent.v3.synthesizer.synthesize",
+            return_value=(
+                "我還沒整理好這個安排，也沒有變更任何內容。", None, _synth_metrics(),
+            ),
         ) as synthesize, patch(
             "services.ayue_agent.v3.scheduler._LOGGER.error",
         ) as log_error:
-            mock_build.return_value = MagicMock()
-            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             result = run_public_agent_turn_v3(ctx)
 
         self.assertTrue(result.handled)
-        self.assertEqual(result.fallback_reason, "planner_invalid")
-        self.assertNotIn("卡住了", result.reply)
+        self.assertIsNone(result.fallback_reason)
+        self.assertIn("沒有變更", result.reply)
         execute_tool.assert_not_called()
         execute_write.assert_not_called()
-        synthesize.assert_not_called()
+        synthesize.assert_called_once()
         log_error.assert_called_once()
         self.assertIn("RuntimeError", repr(log_error.call_args))
         self.assertNotIn("private provider payload", repr(log_error.call_args))
@@ -827,15 +980,23 @@ class V3SchedulerTests(unittest.TestCase):
             return_value=turn,
         ), patch(
             "services.ayue_agent.v3.scheduler._persist_trace",
-        ) as persist:
+        ) as persist, patch(
+            "services.ayue_agent.v3.synthesizer.synthesize",
+            return_value=(
+                "我還沒整理好這個請求，你可以再說一次。", None, _synth_metrics(),
+            ),
+        ) as synthesize:
             result = run_public_agent_turn_v3(ctx)
 
         self.assertNotIn("了解配對方式", result.reply)
-        self.assertIn("沒有執行任何操作", result.reply)
+        self.assertIn("再說一次", result.reply)
+        self.assertIsNone(result.fallback_reason)
+        synthesize.assert_called_once()
         trace = persist.call_args.args[2]
         self.assertEqual(trace["planner_failure"]["attempts"][0]["validation_fields"], ["write_intent"])
         self.assertNotIn("raw_content", trace["planner_failure"]["attempts"][0])
 
+    @unittest.skip("retired: Planner rebuilds Calendar continuation from chat, not clarification drafts")
     def test_calendar_two_turn_missing_time_continuation_keeps_canonical_draft(self):
         """Exercise Planner → Calendar → preflight across the real turn boundary."""
         clear_draft("owner")
@@ -899,6 +1060,7 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertEqual(plan["form"]["end_time"], "16:00")
         self.assertIsNone(get_draft("owner"))
 
+    @unittest.skip("retired: Planner rebuilds Calendar continuation from chat, not clarification drafts")
     def test_calendar_two_turn_nested_fields_provider_output_keeps_date_and_derives_end(self):
         """Provider fields wrapper must survive draft continuation end-to-end."""
         clear_draft("owner")
@@ -976,6 +1138,7 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertIn("逛霧時代", preview)
         self.assertNotIn("日期", preview)
 
+    @unittest.skip("retired: Planner rebuilds Calendar continuation from chat, not clarification drafts")
     def test_calendar_two_turn_lowercase_two_weeks_duration_keeps_title_and_date(self):
         """Real regression: date/title from turn one survive a time-only turn."""
         clear_draft("owner")
@@ -1039,6 +1202,7 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertEqual(form["end_time"], "10:00")
         self.assertIsNone(get_draft("owner"))
 
+    @unittest.skip("retired: public Calendar target references are no longer reused across turns")
     def test_calendar_update_target_binding_survives_time_shift_followup(self):
         """A resolved update target remains bound across a time-only clarification."""
         clear_draft("owner")
@@ -1149,6 +1313,7 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertEqual(payload["plans"][0]["form"]["date"], "2026-08-12")
         self.assertIsNone(get_draft("owner"))
 
+    @unittest.skip("retired: missing fields are returned but no clarification draft is persisted")
     def test_calendar_smoke_missing_end_time_reaches_clarification(self):
         """The exact smoke phrase must preserve the old end-time clarification."""
         clear_draft("owner")
@@ -1202,6 +1367,7 @@ class V3SchedulerTests(unittest.TestCase):
         self.assertEqual(command_result["clarification"]["missing_fields"], ["end_time"])
         self.assertEqual((get_draft("owner") or {}).get("missing_fields"), ["end_time"])
 
+    @unittest.skip("retired: incomplete Calendar drafts are no longer public cross-turn state")
     def test_calendar_distinct_create_replaces_incomplete_create_draft(self):
         """A new create must not inherit fields from an earlier create draft."""
         clear_draft("owner")
@@ -1392,6 +1558,12 @@ class V3SchedulerTests(unittest.TestCase):
             [ToolProposal(tool_name="calendar.list_my_events", arguments={})], _sub_metrics(),
         ))
         web_runner = MagicMock(return_value=([], _sub_metrics()))
+        seen_synth_payload = {}
+
+        def compose_condition_stop(context_slice, candidate_cards=None, on_token=None):
+            seen_synth_payload.update(context_slice.payload)
+            return "那天已經有安排，我們可以改挑別的時段。", None, _synth_metrics()
+
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
              patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
              patch.dict("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
@@ -1401,7 +1573,7 @@ class V3SchedulerTests(unittest.TestCase):
              patch("services.ayue_agent.v3.scheduler.execute_tool", return_value=MagicMock(
                  ok=True, data={"events": [{"title": "已有安排"}], "range": "下週六"}, error_code=None,
              )), \
-             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=("有事，先不安排", None, _synth_metrics())):
+             patch("services.ayue_agent.v3.synthesizer.synthesize", side_effect=compose_condition_stop):
             mock_build.return_value = self._direct_turn(ctx.message)
             result = run_public_agent_turn_v3(ctx, on_progress=events.append)
         self.assertTrue(result.handled)
@@ -1410,6 +1582,116 @@ class V3SchedulerTests(unittest.TestCase):
             event.get("type") == "tool_started" and event.get("task_id") == "w1"
             for event in events
         ))
+        outcomes = seen_synth_payload["execution_outcomes"]
+        web_outcome = next(item for item in outcomes if item["task_id"] == "w1")
+        self.assertEqual(web_outcome["state"], "condition_stopped")
+        self.assertEqual(seen_synth_payload["web_execution_failures"], [])
+        self.assertIsNone(result.fallback_reason)
+
+    def test_busy_calendar_fit_policy_still_runs_downstream_search(self):
+        ctx = self._ctx("這週六如果有空，找個活動，再排附近晚餐")
+        plan = Plan(tasks=[
+            SubTask(
+                id="c1",
+                agent="calendar",
+                depends_on=[],
+                task_brief="查詢這週六行程",
+                outcome_contract="calendar.availability.v1",
+            ),
+            SubTask(
+                id="w1",
+                agent="web",
+                depends_on=[],
+                task_brief="找這週六的活動",
+                run_if={"source_task_id": "c1", "required_outcome": "task.finished"},
+            ),
+            SubTask(id="s1", agent="synthesizer", depends_on=["w1"], task_brief="彈性安排"),
+        ])
+        events: list[dict] = []
+        calendar_runner = MagicMock(return_value=(
+            [ToolProposal(tool_name="calendar.list_my_events", arguments={})], _sub_metrics(),
+        ))
+        web_runner = MagicMock(return_value=(
+            [ToolProposal(tool_name="web.search", arguments={"query": "高雄 9/19 活動"})],
+            _sub_metrics(),
+        ))
+        seen_synth_payload = {}
+        executed_tools: list[str] = []
+
+        def fake_execute(call, *_args, **_kwargs):
+            executed_tools.append(call.name)
+            if call.name == "calendar.list_my_events":
+                return MagicMock(
+                    ok=True,
+                    data={"events": [{"title": "上午健身", "start_time": "10:00", "end_time": "11:00"}]},
+                    error_code=None,
+                )
+            return MagicMock(
+                ok=True,
+                data={"results": [{"title": "週末市集", "url": "https://example.com/event"}]},
+                error_code=None,
+            )
+
+        def compose_flexible(context_slice, candidate_cards=None, on_token=None):
+            seen_synth_payload.update(context_slice.payload)
+            return "上午行程結束後，可以去週末市集，再排附近晚餐。", None, _synth_metrics()
+
+        with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, _planner_metrics())), \
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
+             patch.dict("services.ayue_agent.v3.scheduler._SUB_AGENT_RUNNERS", {
+                 "web": web_runner,
+             }, clear=False), \
+             patch("services.ayue_agent.v3.calendar_runtime.run_calendar", side_effect=calendar_runner), \
+             patch("services.ayue_agent.v3.scheduler.execute_tool", side_effect=fake_execute), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", side_effect=compose_flexible):
+            mock_build.return_value = self._direct_turn(ctx.message)
+            result = run_public_agent_turn_v3(ctx, on_progress=events.append)
+
+        self.assertTrue(result.handled)
+        web_runner.assert_called_once()
+        self.assertIn("web.search", executed_tools)
+        web_outcome = next(
+            item for item in seen_synth_payload["execution_outcomes"]
+            if item["task_id"] == "w1"
+        )
+        self.assertEqual(web_outcome["state"], "completed")
+        self.assertIsNone(result.fallback_reason)
+
+    def test_temporal_clarification_reaches_synthesizer_without_domain_tools(self):
+        ctx = self._ctx("這週六有什麼安排？")
+        plan = Plan(
+            tasks=[SubTask(
+                id="temporal_clarification", agent="synthesizer", depends_on=[],
+                task_brief="Ask a natural date clarification.",
+            )],
+            temporal_clarification=TemporalClarification(
+                source_text="這週六",
+                candidates=[
+                    {"id": "stated_period", "date": "2026-09-12", "relation": "past"},
+                    {"id": "next_occurrence", "date": "2026-09-19", "relation": "future"},
+                ],
+            ),
+        )
+        seen = {}
+
+        def compose(context_slice, candidate_cards=None, on_token=None):
+            seen.update(context_slice.payload)
+            return "你指的是剛過的 9/12，還是接下來的 9/19？", None, _synth_metrics()
+
+        with patch(
+            "services.ayue_agent.v3.scheduler.plan_turn",
+            return_value=(plan, _planner_metrics()),
+        ), patch(
+            "services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
+            return_value=self._direct_turn(ctx.message),
+        ), patch(
+            "services.ayue_agent.v3.synthesizer.synthesize", side_effect=compose,
+        ):
+            result = run_public_agent_turn_v3(ctx)
+        observation = seen["observations"][0]
+        self.assertEqual(observation["result"]["schema_version"], "temporal_clarification.v1")
+        self.assertIn("9/19", result.reply)
+        self.assertIsNone(result.fallback_reason)
 
     def test_product_info_progress_events_are_user_visible(self):
         ctx = self._ctx("所以一定會配到剛好要跟我做同一件事的人嗎")
@@ -1451,9 +1733,11 @@ class V3SchedulerTests(unittest.TestCase):
         def capture(event):
             events.append(event)
         with patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(None, _planner_metrics())), \
-             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build:
-            mock_build.return_value = MagicMock()
-            mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
+                   return_value=self._direct_turn(ctx.message)), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=(
+                 "我還沒整理好，你可以再傳一次。", None, _synth_metrics(),
+             )):
             run_public_agent_turn_v3(ctx, on_progress=capture)
         event_types = [e["type"] for e in events]
         self.assertIn("run_started", event_types)
@@ -1936,6 +2220,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
 
         insert.assert_not_called()
 
+    @unittest.skip("retired: place selection is resolved into task_brief instead of a hidden reference")
     def test_explicit_arrange_place_continuation_reaches_confirmation_without_write(self):
         message = "第二個好了，幫我安排明天早上五點到六點"
         ctx = self._ctx(message)
@@ -2018,6 +2303,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
         self.assertTrue(observations[0]["result"]["pending_confirmation"])
         execute_write.assert_not_called()
 
+    @unittest.skip("retired: public place snapshot/ordinal continuation was removed")
     def test_plain_text_recommendation_then_second_candidate_schedule(self):
         """The public text order and the later Calendar target share one snapshot."""
         clear_draft("owner")
@@ -2038,10 +2324,18 @@ class V3SchedulerWriteTests(unittest.TestCase):
         )
 
         def first_synth(_slice, candidate_cards=None, on_token=None):
+            metrics = _synth_metrics()
+            metrics.presented_candidate_refs = [
+                card["candidate_ref"] for card in candidate_cards
+            ]
+            metrics.presented_candidate_bindings = [
+                {"candidate_ref": reference, "presented_ordinal": ordinal}
+                for ordinal, reference in enumerate(metrics.presented_candidate_refs, start=1)
+            ]
             return (
                 "- 樺達奶茶\n- 不二 TEA&NO.1\n- 鹽埕小熊奶茶",
                 None,
-                _synth_metrics(),
+                metrics,
             )
 
         try:
@@ -2071,8 +2365,9 @@ class V3SchedulerWriteTests(unittest.TestCase):
                     first_ctx, on_token=streamed_tokens.append,
                 )
 
-            self.assertIn("1. 樺達奶茶", first_result.reply)
-            self.assertIn("2. 不二 TEA&NO.1", first_result.reply)
+            self.assertIn("- 樺達奶茶", first_result.reply)
+            self.assertIn("- 不二 TEA&NO.1", first_result.reply)
+            self.assertNotIn("1. 樺達奶茶", first_result.reply)
             self.assertEqual(streamed_tokens, [])
             first_snapshot = get_place_candidate_set("owner", "room")
             self.assertEqual(
@@ -2141,6 +2436,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
             clear_draft("owner")
             clear_place_reference_state()
 
+    @unittest.skip("retired: invalid ordinals no longer create a hidden Calendar/place draft")
     def test_invalid_place_ordinal_preserves_time_in_calendar_draft(self):
         replace_presented_candidates(
             "owner", "room",
@@ -2203,6 +2499,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
         clear_draft("owner")
         clear_place_followup_state()
 
+    @unittest.skip("retired: place follow-up state is rebuilt from visible chat")
     def test_place_followup_continuation_reuses_room_scoped_time_fields(self):
         clear_draft("owner")
         clear_place_followup_state()
@@ -2266,6 +2563,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
         self.assertIsNone(get_place_followup("owner", "room"))
         self.assertTrue(result.handled)
 
+    @unittest.skip("retired: Places now re-resolves the concrete public name")
     def test_trusted_place_followup_continuation_does_not_requery_places(self):
         clear_draft("owner")
         clear_place_followup_state()
@@ -2341,6 +2639,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
         self.assertTrue(result.handled)
         self.assertIsNone(get_place_followup("owner", "room"))
 
+    @unittest.skip("retired: public place follow-up state is no longer persisted")
     def test_place_resolution_origin_is_saved_only_in_private_followup_state(self):
         clear_place_followup_state()
         snapshot = replace_presented_candidates(
@@ -2496,6 +2795,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
             ))
         return result, runner, create_confirmation, read_executor, seen
 
+    @unittest.skip("retired: hidden place_selection no longer forces Calendar retries")
     def test_place_selection_read_only_calendar_response_retries_into_typed_create(self):
         result, runner, create_confirmation, read_executor, _seen = self._run_place_selection_calendar_retry(
             CalendarAgentResult(commands=[CalendarCommand(
@@ -2515,6 +2815,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
         )
         self.assertEqual(calendar_metric["call_count"], 2)
 
+    @unittest.skip("retired: hidden place message resolver was removed from public chat")
     def test_nonliteral_place_selection_uses_full_message_resolver(self):
         result, runner, create_confirmation, read_executor, _seen = self._run_place_selection_calendar_retry(
             CalendarAgentResult(commands=[CalendarCommand(
@@ -2537,6 +2838,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
         self.assertEqual(form["start_time"], "08:30")
         self.assertEqual(form["end_time"], "10:00")
 
+    @unittest.skip("retired: hidden place_selection no longer controls Calendar retries")
     def test_place_selection_two_read_only_calendar_responses_fail_closed(self):
         result, runner, create_confirmation, read_executor, seen = self._run_place_selection_calendar_retry(
             CalendarAgentResult(reads=[ToolProposal(
@@ -2595,7 +2897,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
                 turn = MagicMock(message=message, recent_messages=recent_messages)
                 self.assertEqual(_place_recheck_query(turn, command), "")
 
-    def test_scheduler_place_list_removes_reversed_model_rows_before_shared_render(self):
+    def test_scheduler_preserves_validated_model_prose_without_reordering(self):
         snapshot = {
             "candidates": [
                 {"reference": "place_ref_a", "ordinal": 1, "label": "店 A", "address_summary": "甲地址"},
@@ -2607,7 +2909,7 @@ class V3SchedulerWriteTests(unittest.TestCase):
         self.assertEqual(len(rendered), 1)
         self.assertEqual(
             rendered[0],
-            "1. 店 A：距離較近\n2. 店 B：適合聊天\n\n我比較推薦店 B。",
+            "推薦地點：\n1. 店 B：適合聊天\n2. 店 A：距離較近\n\n我比較推薦店 B。",
         )
 
     def test_final_normalization_restores_provider_place_labels(self):
@@ -2815,11 +3117,22 @@ class V3SchedulerTraceTests(unittest.TestCase):
         planner_metrics.retry_count = 1
         planner_metrics.retry_reason = "missing_tool_call"
         planner_metrics.failure_code = "missing_tool_call"
+        synth_metrics = _synth_metrics()
+        synth_metrics.llm_call_count = 1
         with patch.dict("os.environ", {"AYUE_LOCAL_DEBUG_TRACE": "on"}), \
              patch("services.ayue_agent.v3.scheduler.plan_turn", return_value=(None, planner_metrics)), \
-             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build:
-            mock_build.return_value = MagicMock()
-            mock_build.return_value.clock = MagicMock(model_dump=lambda **_kwargs: {})
+             patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
+                   return_value=PublicAgentTurnContext(
+                       user_id="owner", room_id="room", message=ctx.message,
+                       clock=TurnClockV1(
+                           timezone="Asia/Taipei", utc_iso="2026-09-13T04:00:00+00:00",
+                           local_iso="2026-09-13T12:00:00+08:00", local_date="2026-09-13",
+                           local_time="12:00", weekday_zh_tw="星期日",
+                       ),
+                   )), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=(
+                 "我還沒整理好，你可以再傳一次。", None, synth_metrics,
+             )):
             result = run_public_agent_turn_v3(ctx, debug_enabled=True)
             debug_run = get_run(result.agent_run_id, "owner")
 
@@ -2828,7 +3141,7 @@ class V3SchedulerTraceTests(unittest.TestCase):
         self.assertEqual(planner_event["failure_code"], "missing_tool_call")
         self.assertEqual(planner_event["retry_count"], 1)
         self.assertEqual(planner_event["metrics"]["llm_call_count"], 2)
-        self.assertEqual(debug_run["events"][-1]["response"]["llm_call_count"], 2)
+        self.assertEqual(debug_run["events"][-1]["response"]["llm_call_count"], 3)
 
     def test_local_debug_trace_marks_direct_chat_fast_path(self):
         from services.ayue_agent.v3.debug_trace import get_run
@@ -2964,12 +3277,18 @@ class V3SchedulerTraceTests(unittest.TestCase):
             mock_build.return_value = MagicMock()
             mock_build.return_value.clock = MagicMock(model_dump=lambda: {})
             mock_build.return_value.user_id = "owner"
+            mock_build.return_value.recent_messages = []
+            mock_build.return_value.history_projection_status = "complete"
             run_public_agent_turn_v3(ctx)
         self.assertEqual(persist.call_count, 1)
         payload = persist.call_args.args[2]
         self.assertIn("plan", payload)
         self.assertIn("tool_results", payload)
         self.assertIn("event_sequence", payload)
+        self.assertEqual(payload["context_diagnostics"]["history_message_count"], 0)
+        self.assertEqual(payload["context_diagnostics"]["history_char_count"], 0)
+        self.assertEqual(payload["place_diagnostics"]["presentation_style"], "prose")
+        self.assertIn("binding_validation", payload["place_diagnostics"])
         self.assertNotIn("message", payload)
         self.assertNotIn("prompt", payload)
 
@@ -3155,6 +3474,64 @@ class V3SchedulerAssessmentTests(unittest.TestCase):
         self.assertTrue(result.handled)
         self.assertEqual(result.assessment_state, "active")
         self.assertEqual(result.assessment_kind, "big_five")
+        plan.assert_not_called()
+
+    def test_completed_assessment_uses_synthesized_confirmation_layout(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="我喜歡戶外活動")
+        session = {
+            "session_id": "s1", "kind": "big_five", "expires_at": 1e18, "revision": 2,
+        }
+        blocks = [
+            {"type": "text", "message_index": 0},
+            {"type": "confirmation", "slot": "primary_write_confirmation"},
+            {"type": "text", "message_index": 1},
+        ]
+        metrics = SynthesizerMetrics(
+            input_tokens=10,
+            output_tokens=8,
+            duration_ms=20,
+            presentation_messages=["你的探索結果整理好了。", "想修改的話也可以直接說。"],
+            interaction_blocks_v1=blocks,
+        )
+        with patch("services.ayue_agent.v3.scheduler.build_public_agent_turn_context") as mock_build, \
+             patch("services.ayue_agent.v3.scheduler.awaiting_assessment_commit", return_value=None), \
+             patch("services.ayue_agent.v3.scheduler.active_assessment_session", return_value=session), \
+             patch("services.ayue_agent.v3.scheduler.advance_assessment_session", return_value={
+                 "status": "awaiting_commit", "session_state": "awaiting_commit",
+                 "kind": "big_five", "revision": 3,
+                 "reply": "這是新的草稿，回覆「確認」才會套用；想保留原本資料可回覆「取消」。",
+             }), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.create_confirmation") as create, \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.choice_for_run", return_value={
+                 "id": "assessment-choice", "state": "pending", "expires_at": 1e18,
+             }), \
+             patch("services.ayue_agent.v3.scheduler.ConfirmationManager.bind_final_preview", return_value=True), \
+             patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=(
+                 "你的探索結果整理好了。\n\n想修改的話也可以直接說。", None, metrics,
+             )) as synthesize, \
+             patch("services.ayue_agent.v3.scheduler.plan_turn") as plan:
+            mock_build.return_value = PublicAgentTurnContext(
+                user_id="owner",
+                room_id="room",
+                message=ctx.message,
+                clock=TurnClockV1(
+                    timezone="Asia/Taipei",
+                    utc_iso="2026-09-13T04:00:00+00:00",
+                    local_iso="2026-09-13T12:00:00+08:00",
+                    local_date="2026-09-13",
+                    local_time="12:00",
+                    weekday_zh_tw="星期日",
+                ),
+            )
+            result = run_public_agent_turn_v3(ctx)
+
+        self.assertEqual(result.assessment_state, "awaiting_commit")
+        self.assertEqual(result.interaction_blocks_v1, blocks)
+        self.assertEqual(result.choice_prompt["id"], "assessment-choice")
+        self.assertIn("想修改", result.reply)
+        create.assert_called_once()
+        self.assertEqual(create.call_args.kwargs["tool_name"], "profile.commit_assessment")
+        synthesize.assert_called_once()
         plan.assert_not_called()
 
     def test_awaiting_commit_confirm_commits(self):

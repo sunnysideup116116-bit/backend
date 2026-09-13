@@ -6,6 +6,7 @@ from services.ayue_agent.private_v2 import (
     PRIVATE_TOOL_REGISTRY,
     PrivateAgentDecision,
     PrivateAgentTurnContextV2,
+    _bounded_history,
     _compose,
     _search_shared_history,
     run_private_agent_turn_v2,
@@ -26,6 +27,40 @@ def _context():
 
 
 class PrivateV2Tests(unittest.TestCase):
+    def test_recent_shared_history_uses_the_expanded_bounded_window(self):
+        rows = [
+            {"_id": f"m-{index}", "sender_id": "owner", "content": "訊息" * 20, "timestamp": index}
+            for index in range(40)
+        ]
+        cursor = MagicMock()
+        cursor.sort.return_value.limit.return_value = rows
+        collection = MagicMock()
+        collection.find.return_value = cursor
+        with patch("services.ayue_agent.private_v2.messages_coll", collection):
+            result = _bounded_history(
+                "pair-room", owner_id="owner", other_id="other",
+                limit=40, char_budget=16000,
+            )
+        cursor.sort.return_value.limit.assert_called_once_with(40)
+        self.assertEqual(len(result), 40)
+        self.assertIn("message_id", result[0])
+        self.assertIn("timestamp", result[0])
+
+    def test_history_budget_keeps_the_newest_messages(self):
+        cursor = MagicMock()
+        cursor.sort.return_value.limit.return_value = [
+            {"_id": "new", "sender_id": "owner", "content": "最新" * 80, "timestamp": 3},
+            {"_id": "old", "sender_id": "other", "content": "較舊" * 80, "timestamp": 2},
+        ]
+        collection = MagicMock()
+        collection.find.return_value = cursor
+        with patch("services.ayue_agent.private_v2.messages_coll", collection):
+            result = _bounded_history(
+                "pair-room", owner_id="owner", other_id="other", limit=40, char_budget=100,
+            )
+        self.assertEqual([item["message_id"] for item in result], ["new"])
+        self.assertEqual(result[0]["truncated"], "true")
+
     def test_full_shared_history_search_is_room_bound_and_bounded(self):
         cursor = MagicMock()
         cursor.sort.return_value.limit.return_value = [

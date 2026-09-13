@@ -423,6 +423,16 @@ def backfill_missing_proactive_due_times(*, now: float | None = None, limit: int
 def _loop(interval_seconds: float) -> None:
     while not _STOP_EVENT.wait(interval_seconds):
         try:
+            # Date follow-ups run first so a same-minute general candidate
+            # cannot consume the shared automatic-prompt spacing window.
+            from services.post_date_followup_service import run_post_date_followups_once
+
+            date_stats = run_post_date_followups_once()
+            if any(date_stats.get(key, 0) for key in ("delivered", "shadowed", "expired", "skipped")):
+                print(
+                    "[POST_DATE_FOLLOWUP] "
+                    + " ".join(f"{key}={int(value)}" for key, value in date_stats.items())
+                )
             run_due_proactive_care_once()
         except Exception as exc:
             print(f"Proactive care scheduler skipped: {type(exc).__name__}")

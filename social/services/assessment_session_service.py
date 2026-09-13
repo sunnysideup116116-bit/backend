@@ -374,6 +374,7 @@ def start_assessment_session(
     idempotency_key: str,
     room_id: str | None = None,
     initial_interest: str | None = None,
+    opening_question: str | None = None,
 ) -> dict[str, Any]:
     """Create exactly one active draft session; completed profile stays untouched."""
     if kind not in ASSESSMENT_KINDS:
@@ -389,6 +390,7 @@ def start_assessment_session(
             "reply": f"你目前正在進行{assessment_label(str(existing.get('kind')))}；想先離開的話，回覆「結束測驗」。",
             "session": existing,
         }
+    first_reply = _safe_reply(opening_question) or _first_question(kind, initial_interest)
     session = {
         "version": "v1", "session_id": uuid.uuid4().hex, "user_id": user_id,
         "kind": kind, "status": "active", "revision": 0, "turn_count": 0,
@@ -396,7 +398,7 @@ def start_assessment_session(
         "expires_at": now + ASSESSMENT_SESSION_TTL_SECONDS,
         "start_idempotency_key": idempotency_key,
         "initial_interest": _safe_text(initial_interest, 120),
-        "last_reply": _first_question(kind, initial_interest),
+        "last_reply": first_reply,
         "recent_turns": [],
     }
     normalized_room_id = str(room_id or "").strip()

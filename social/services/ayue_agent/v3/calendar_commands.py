@@ -1000,7 +1000,13 @@ def _preflight_one(
             form=form,
             safe_label=f"{interval_label} {form['title']}",
         )
-        preview = f"要新增 {interval_label}「{form['title']}」嗎？"
+        location = str(form.get("location") or "").strip()
+        location_text = (
+            f"（地點：{location}）"
+            if location and location != str(form.get("title") or "").strip()
+            else ""
+        )
+        preview = f"要新增 {interval_label}「{form['title']}」{location_text}嗎？"
         if conflicts:
             preview += f" 這會和你現有的 {len(conflicts)} 筆行程重疊；仍要這樣安排嗎？"
         return CalendarPreflightResult(status="ready", plans=[plan], preview=preview)

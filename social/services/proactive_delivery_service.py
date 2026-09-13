@@ -148,6 +148,25 @@ def proactive_check(user_id: str, conversation_active: bool = False) -> dict:
     if not user_doc:
         return {"has_new": False}
 
+    post_date_doc = profiles_coll.find_one_and_update(
+        {"user_id": user_id, "post_date_followup_delivery.message": {"$exists": True}},
+        {"$unset": {"post_date_followup_delivery": ""}},
+        projection={"post_date_followup_delivery": 1},
+        return_document=ReturnDocument.BEFORE,
+    )
+    post_date = (post_date_doc or {}).get("post_date_followup_delivery") or {}
+    if not isinstance(post_date, dict):
+        post_date = {}
+    if post_date.get("message") and post_date.get("other_id"):
+        return {
+            "has_new": True,
+            "surface": "relationship_private",
+            "type": "post_date_followup",
+            "other_id": post_date["other_id"],
+            "message": post_date["message"],
+            "metadata": {"event_type": "post_date_followup"},
+        }
+
     queue_due_feedback(user_id)
     notice_doc = profiles_coll.find_one_and_update(
         {"user_id": user_id, "memory_notices.0": {"$exists": True}},

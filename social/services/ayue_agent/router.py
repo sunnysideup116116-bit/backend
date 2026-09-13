@@ -49,35 +49,37 @@ def _concise_public_reply(
     max_chars: int | None = None,
     max_sentences: int | None = None,
 ) -> str:
-    """Bound ordinary chat length without truncating verified structured answers.
-
-    Ordinary replies allow up to three sentences and 160 characters.  The
-    larger envelope is reserved for grounded, structured details.
-    """
+    """Bound public prose without imposing a fixed conversational template."""
     text = re.sub(r"[ \t]+", " ", str(reply or "")).strip()
-    limit = max_chars if max_chars is not None else (240 if preserve_details else 160)
-    sentence_limit = (
-        max_sentences if max_sentences is not None else (5 if preserve_details else 3)
-    )
+    limit = max_chars if max_chars is not None else 3_600
+    sentence_limit = max_sentences
     sentences = [
         part.strip()
         for part in re.split(r"(?<=[。！？!?])", text)
         if part.strip()
     ]
-    if len(text) <= limit and len(sentences) <= sentence_limit:
+    suffix = "……"
+    if len(text) <= limit and (
+        sentence_limit is None or len(sentences) <= sentence_limit
+    ):
         return text
     selected: list[str] = []
     for sentence in sentences:
         candidate = "".join(selected) + sentence
-        if len(candidate) > limit or len(selected) >= sentence_limit:
+        if len(candidate) > limit or (
+            sentence_limit is not None and len(selected) >= sentence_limit
+        ):
             break
         selected.append(sentence)
     if selected:
-        return "".join(selected)
+        selected_text = "".join(selected)
+        if selected_text != text:
+            return selected_text[: max(0, limit - len(suffix))].rstrip() + suffix
+        return selected_text
     shortened = text[:limit]
     for marker in ("。", "！", "？", "；", "，", ","):
         position = shortened.rfind(marker)
         if position >= max(24, limit // 2):
             shortened = shortened[:position]
             break
-    return shortened.rstrip("，,；;：: ") + "。"
+    return shortened[: max(0, limit - len(suffix))].rstrip("，,；;：: ") + suffix

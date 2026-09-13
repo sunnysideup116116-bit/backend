@@ -148,8 +148,7 @@ class RelationshipDateInviteTests(unittest.TestCase):
             "resolved_fuzzy", other_id="contact-1", display_name="小安", kind="fuzzy",
         )
         with patch("services.ayue_agent.v3.write_executors.resolve_accepted_contact_name", return_value=resolved), \
-             patch("services.date_coordination_service.find_accepted_match", return_value=_accepted_match()), \
-             patch("services.ayue_agent.v3.write_executors.remember_contact"):
+             patch("services.date_coordination_service.find_accepted_match", return_value=_accepted_match()):
             payload, preview = prepare_write_confirmation(
                 "relationship.start_date_coordination",
                 {"target_source": "name", "target_evidence_span": "小按"},
@@ -164,16 +163,20 @@ class RelationshipDateInviteTests(unittest.TestCase):
         self.assertIn("確認後才會送出", preview)
         self.assertNotIn("她", preview)
 
-    def test_recent_pronoun_requires_reference_and_uses_one_confirmation(self):
+    def test_recent_pronoun_uses_planner_resolved_name_from_public_chat(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="我想約她")
-        turn = types.SimpleNamespace(_mentioned_ids=[], mentioned_contact_overflow=False)
-        reference = {"other_id": "contact-1", "safe_label": "小安"}
-        with patch("services.ayue_agent.v3.write_executors.get_relationship_reference", return_value=reference), \
-             patch("services.date_coordination_service.find_accepted_match", return_value=_accepted_match()), \
-             patch("services.ayue_agent.v3.write_executors.remember_contact"):
+        turn = types.SimpleNamespace(
+            _mentioned_ids=[], mentioned_contact_overflow=False,
+            recent_messages=[{"role": "assistant", "content": "可以考慮約小安一起去。"}],
+        )
+        resolved = ContactNameResolution(
+            "resolved_exact", other_id="contact-1", display_name="小安", kind="exact",
+        )
+        with patch("services.ayue_agent.v3.write_executors.resolve_accepted_contact_name", return_value=resolved), \
+             patch("services.date_coordination_service.find_accepted_match", return_value=_accepted_match()):
             payload, preview = prepare_write_confirmation(
                 "relationship.start_date_coordination",
-                {"target_source": "recent_contact"},
+                {"target_source": "name", "target_evidence_span": "小安"},
                 ctx,
                 turn,
             )
@@ -181,15 +184,14 @@ class RelationshipDateInviteTests(unittest.TestCase):
         self.assertIn("要幫你和「小安」建立約會邀請卡嗎？", preview)
         self.assertIn("確認後才會送出", preview)
 
-        with patch("services.ayue_agent.v3.write_executors.get_relationship_reference", return_value=None):
-            missing, reply = prepare_write_confirmation(
-                "relationship.start_date_coordination",
-                {"target_source": "recent_contact"},
-                ctx,
-                turn,
-            )
+        missing, reply = prepare_write_confirmation(
+            "relationship.start_date_coordination",
+            {"target_source": "name", "target_evidence_span": "另一人"},
+            ctx,
+            turn,
+        )
         self.assertIsNone(missing)
-        self.assertIn("不確定", reply)
+        self.assertIn("找不到", reply)
 
     def test_confirmation_executes_existing_domain_service_with_empty_card_input(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="確認")
@@ -199,8 +201,7 @@ class RelationshipDateInviteTests(unittest.TestCase):
                  "coordination_id": "coord-1", "status": "pending_partner", "form": {},
              }) as create_invite, \
              patch("services.ayue_agent.v3.write_executors._claim_once", return_value=True), \
-             patch("services.ayue_agent.v3.write_executors._finish"), \
-             patch("services.ayue_agent.v3.write_executors.remember_contact"):
+             patch("services.ayue_agent.v3.write_executors._finish"):
             ok, reply, code = execute_write(
                 "relationship.start_date_coordination",
                 {},
@@ -219,7 +220,8 @@ class RelationshipDateInviteTests(unittest.TestCase):
             )
         self.assertTrue(ok)
         self.assertIsNone(code)
-        self.assertIn("邀請卡已經放進聊天室", reply)
+        self.assertIn("空白約會邀請卡已建立", reply)
+        self.assertIn("等待對方接受", reply)
         create_invite.assert_called_once_with(
             match,
             "owner",
@@ -270,14 +272,11 @@ class RelationshipDateInviteTests(unittest.TestCase):
         self.assertNotIn("other_id", projection)
         self.assertIsNone(relationship_references.get_reference("other-owner"))
 
-    def test_recent_reference_is_visible_only_to_relationship_slice(self):
+    def test_legacy_recent_reference_is_hidden_from_agent_slices(self):
         turn = _turn(recent={"display_name": "小安", "expires_in_seconds": 600})
         relationship_slice = slice_for_agent("relationship", turn, prior_observations=[])
         calendar_slice = slice_for_agent("calendar", turn, prior_observations=[])
-        self.assertEqual(
-            relationship_slice.payload["recent_contact_reference"]["display_name"],
-            "小安",
-        )
+        self.assertNotIn("recent_contact_reference", relationship_slice.payload)
         self.assertNotIn("recent_contact_reference", calendar_slice.payload)
 
 
@@ -406,7 +405,43 @@ class RelationshipSchedulerTrajectoryTests(unittest.TestCase):
         )
         insert.assert_called_once()
 
-    def test_two_write_protocol_failures_return_fixed_clarification_without_confirmation(self):
+    def test_missing_invitee_accepts_one_natural_clarification_without_retry(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="幫我建約會卡")
+        plan = Plan(write_intent="relationship.date_invitation.v1", tasks=[
+            SubTask(id="r1", agent="relationship", depends_on=[], task_brief="建立約會卡，但對象尚未指定"),
+            SubTask(id="s1", agent="synthesizer", depends_on=["r1"], task_brief="自然追問對象"),
+        ])
+        turn = _turn(ctx.message)
+        clarification = "你想邀請哪一位聯絡人？"
+        seen = {}
+
+        def fake_synthesize(context_slice, **_kwargs):
+            seen.update(context_slice.payload["observations"][0])
+            return clarification, None, SynthesizerMetrics(
+                presentation_class="conversation", presentation_messages=[clarification],
+            )
+
+        with patch(
+            "services.ayue_agent.v3.scheduler.plan_turn", return_value=(plan, PlannerMetrics()),
+        ), patch(
+            "services.ayue_agent.v3.scheduler.build_public_agent_turn_context", return_value=turn,
+        ), patch(
+            "services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools",
+            return_value=ToolCallResult(content=clarification, tool_calls=[]),
+        ) as provider, patch(
+            "services.ayue_agent.v3.synthesizer.synthesize", side_effect=fake_synthesize,
+        ), patch(
+            "services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one",
+        ) as insert:
+            result = run_public_agent_turn_v3(ctx)
+
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(result.reply, clarification)
+        self.assertEqual(seen["status"], "skipped")
+        self.assertEqual(seen["skip_reason"], "needs_clarification")
+        insert.assert_not_called()
+
+    def test_two_write_protocol_failures_are_naturalized_without_confirmation(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="幫我約小安")
         plan = Plan(write_intent="relationship.date_invitation.v1", tasks=[
             SubTask(id="r1", agent="relationship", depends_on=[], task_brief="建立空白邀請卡"),
@@ -423,17 +458,16 @@ class RelationshipSchedulerTrajectoryTests(unittest.TestCase):
                  ],
              ) as provider, \
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=(
-                 "不應由模型自由猜測。", None, SynthesizerMetrics(
+                 "這次邀請還沒有準備好，你可以直接告訴我想邀請誰。", None, SynthesizerMetrics(
                      presentation_class="conversation", fallback_reason="",
                  ),
              )) as synth, \
              patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one") as insert:
             result = run_public_agent_turn_v3(ctx)
         self.assertEqual(provider.call_count, 2)
-        self.assertIn("我知道你要建立邀請卡", result.reply)
-        self.assertIn("安全確認邀請對象", result.reply)
-        self.assertIn("@", result.reply)
-        self.assertIn("再試一次", result.reply)
+        self.assertEqual(result.reply, "這次邀請還沒有準備好，你可以直接告訴我想邀請誰。")
+        observation = synth.call_args.args[0].payload["observations"][0]
+        self.assertEqual(observation["status"], "failed")
         self.assertFalse(result.reply == "planner_invalid")
         insert.assert_not_called()
         synth.assert_called_once()
@@ -464,19 +498,27 @@ class RelationshipSchedulerTrajectoryTests(unittest.TestCase):
              patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.update_many"), \
              patch("services.ayue_agent.v3.scheduler._CONFIRMATIONS.insert_one") as insert, \
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=(
-                "模型不應改寫 server preview。", None, SynthesizerMetrics(
-                    presentation_class="conversation", fallback_reason="",
+                "好，我把邀請確認放在下面。", None, SynthesizerMetrics(
+                    presentation_class="transaction", fallback_reason="",
+                    presentation_messages=["好，我把邀請確認放在下面。"],
+                    interaction_blocks_v1=[
+                        {"type": "text", "message_index": 0},
+                        {"type": "confirmation", "slot": "primary_write_confirmation"},
+                    ],
                 ),
              )) as synth:
             result = run_public_agent_turn_v3(ctx)
         self.assertTrue(result.handled)
-        # Public replies preserve the preview's full-width punctuation.
-        self.assertEqual(result.reply, preview)
+        self.assertEqual(result.reply, "好，我把邀請確認放在下面。")
+        self.assertEqual(
+            [block.get("type") for block in result.interaction_blocks_v1 or []],
+            ["text", "confirmation"],
+        )
         self.assertFalse(result.reply == "planner_invalid")
         insert.assert_called_once()
         synth.assert_called_once()
 
-    def test_confirmed_date_write_uses_server_reply_not_model_claim(self):
+    def test_confirmed_date_write_uses_natural_model_copy_with_server_facts(self):
         collection = MemoryCollection()
         manager = ConfirmationManager(collection)
         choice_id = manager.create_confirmation(
@@ -520,12 +562,12 @@ class RelationshipSchedulerTrajectoryTests(unittest.TestCase):
                  True, "已在你和「小安」的聊天室建立空白約會邀請卡；等待對方接受。", None,
              )), \
              patch("services.ayue_agent.v3.synthesizer.synthesize", return_value=(
-                 "模型錯誤宣稱已寄出完整邀請。", None, SynthesizerMetrics(
-                     presentation_class="conversation", fallback_reason="",
+                 "約會邀請卡已經建好，現在等小安回覆。", None, SynthesizerMetrics(
+                     presentation_class="transaction", fallback_reason="",
                  ),
              )):
             result = run_public_agent_turn_v3(ctx)
-        expected_reply = "已在你和「小安」的聊天室建立空白約會邀請卡；等待對方接受。"
+        expected_reply = "約會邀請卡已經建好，現在等小安回覆。"
         self.assertEqual(result.reply, expected_reply)
         accept_offer.assert_not_called()
 

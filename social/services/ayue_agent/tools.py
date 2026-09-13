@@ -619,6 +619,7 @@ def _accepted_contact_list(ctx: AgentTurnContext) -> ToolResult:
         "contacts": contacts,
         "truncated": truncated,
         "total_count": total_count,
+        "names_complete": all(item.get("display_name") not in {None, "", "對方"} for item in contacts),
     })
 
 
@@ -707,8 +708,9 @@ def _self_profile(ctx: AgentTurnContext) -> ToolResult:
         name: float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
         for name, value in scores.items()
     }
+    from services.public_nickname_service import contact_display_name
     data = {
-        "display_name": _owner_profile_text(profile.get("display_name") or profile.get("nickname") or profile.get("name"), 30),
+        "display_name": contact_display_name(ctx.user_id, profile),
         "initial_interest": _owner_profile_text(profile.get("initial_interest"), 120),
         "personality_summary": _owner_profile_text(big_five.get("summary"), 140),
         **normalized_scores,

@@ -184,24 +184,9 @@ def _calendar_reference_for_command(
     command: Any,
     draft: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """Load one server reference after validating its opaque draft token."""
-    if str(getattr(command, "action", "") or "") not in {"update", "cancel"}:
-        return None
-    if (
-        draft
-        and (draft.get("resolved_target") or {}).get("bound")
-        and str(getattr(command, "draft_mode", "") or "") == "continue"
-        and not getattr(command, "target_reference", None)
-    ):
-        reference = get_reference(user_id, reference_key=DRAFT_TARGET_REFERENCE_KEY)
-        if reference:
-            reference["_force"] = True
-            reference["_draft_bound"] = True
-            return reference
-    reference_key = str(getattr(command, "target_reference", "") or "recent_event")
-    if reference_key.startswith("candidate_") and not candidate_reference_allowed(draft, reference_key):
-        return None
-    return get_reference(user_id, reference_key=reference_key)
+    """Cross-turn Calendar references are disabled on the public chat path."""
+    del user_id, command, draft
+    return None
 
 
 def _invalid_command_result(task_id: str, clarification: Any) -> SubTaskResult:
@@ -715,28 +700,6 @@ def _run_calendar_reads(
             results.append(result)
             continue
 
-        private_data = outcome.private_data or {}
-        reference_payload = (
-            private_data.get("calendar_event_reference")
-            if isinstance(private_data, dict) else None
-        )
-        if isinstance(reference_payload, dict):
-            event = reference_payload.get("event")
-            if isinstance(event, dict):
-                remember_event(
-                    turn_ctx.user_id,
-                    event,
-                    safe_label=str(reference_payload.get("safe_label") or ""),
-                )
-        if result.tool_name in {
-            "calendar.find_my_event",
-            "calendar.list_my_events",
-            "calendar.get_next_my_event",
-        }:
-            if not reference_payload:
-                # A new ambiguous/not-found/list-of-many read must not leave a
-                # previous referent armed for a later terse mutation.
-                clear_reference(turn_ctx.user_id)
         print(f"  [{task.id}#{index}] result=OK")
         results.append(result)
     return results
@@ -854,11 +817,19 @@ def run_task(
                     candidates = [event]
                 if not candidates:
                     continue
-                records = remember_candidates(turn_ctx.user_id, candidates)
                 projections = [
-                    public_projection(record)
-                    for record in records
-                    if public_projection(record)
+                    {
+                        "label": str(
+                            candidate.get("title")
+                            or candidate.get("activity")
+                            or "行程"
+                        )[:180],
+                        "date": str(candidate.get("date") or "")[:20],
+                        "start_time": str(candidate.get("start_time") or "")[:10],
+                        "end_time": str(candidate.get("end_time") or "")[:10],
+                    }
+                    for candidate in candidates[:3]
+                    if isinstance(candidate, dict)
                 ]
                 if projections:
                     suggestions.append({
@@ -915,113 +886,10 @@ def run_task(
 
     if calendar_commands:
         print(f"  [{task.id}] typed calendar commands: {len(calendar_commands)}")
-        place_followup_record = None
-        place_followup_projection = getattr(turn_ctx, "place_followup", None)
-        if any(
-            str(getattr(command, "action", "")) in {"cancel", "cancel_all_upcoming"}
-            for command in calendar_commands
-        ):
-            # An explicit Calendar cancellation also abandons an unfinished
-            # place-to-calendar request in this room.
-            clear_place_followup(turn_ctx.user_id, turn_ctx.room_id)
-            place_followup_projection = None
-        if (
-            len(calendar_commands) == 1
-            and str(getattr(calendar_commands[0], "action", "")) == "create"
-            and place_followup_projection
-        ):
-            if str(getattr(calendar_commands[0], "draft_mode", "none") or "none") == "replace":
-                # An explicit new create must not inherit the previous room's
-                # place or time fields.
-                clear_place_followup(turn_ctx.user_id, turn_ctx.room_id)
-                place_followup_projection = None
-            else:
-                try:
-                    place_followup_record = get_place_followup(
-                        turn_ctx.user_id, turn_ctx.room_id,
-                    )
-                except PlaceFollowupPersistenceError as exc:
-                    # The context projection is already safe to show, but the
-                    # authoritative command fields cannot be merged without the
-                    # room-scoped record. Keep the request bounded and ask the user
-                    # to retry instead of falling back to another room's draft.
-                    print(f"  [{task.id}] place follow-up load failed: {exc}")
-                    place_followup_record = None
-                if place_followup_record:
-                    try:
-                        calendar_commands = [merge_place_followup(
-                            calendar_commands[0], place_followup_record,
-                        )]
-                    except Exception:
-                        place_followup_record = None
-
-        # A room-scoped place follow-up is the authoritative draft for this
-        # branch. Do not merge the legacy user-scoped Calendar draft into it.
-        draft = (
-            get_draft(turn_ctx.user_id)
-            if len(calendar_commands) == 1 and place_followup_record is None
-            else None
-        )
-        if draft is not None:
-            try:
-                replacement = resolved_target_replaced(calendar_commands[0], draft)
-                merged_command = merge_command(calendar_commands[0], draft)
-                if replacement:
-                    clear_draft(turn_ctx.user_id)
-                    clear_place_followup(turn_ctx.user_id, turn_ctx.room_id)
-                    draft = None
-                calendar_commands = [merged_command]
-            except Exception:
-                clear_draft(turn_ctx.user_id)
-
-        place_resolution_context = getattr(turn_ctx, "place_reference_resolution", None)
-        place_message = str(getattr(turn_ctx, "message", "") or "")
-        place_flow_hint = any(
-            str(getattr(command, "action", "")) == "create"
-            and bool(_PLACE_RECHECK_MARKERS.search(place_message))
-            and any(
-                clue and str(clue) in place_message
-                for clue in (
-                    getattr(command, "title", None),
-                    getattr(command, "location", None),
-                )
-            )
-            for command in calendar_commands
-        )
-        place_bound_commands = []
-        for command in calendar_commands:
-            if (
-                place_followup_record
-                and "title" in (place_followup_record.get("missing_fields") or [])
-                and not isinstance(place_followup_record.get("resolved_place"), dict)
-                and str((place_resolution_context or {}).get("status") or "") != "resolved"
-            ):
-                message_text = str(getattr(turn_ctx, "message", "") or "")
-                explicit_clue = any(
-                    clue and str(clue) in message_text
-                    for clue in (
-                        getattr(command, "title", None),
-                        getattr(command, "location", None),
-                    )
-                ) and bool(
-                    _PLACE_RECHECK_MARKERS.search(message_text)
-                    or _PLACE_ACTION_RECHECK_MARKERS.search(message_text)
-                )
-                if not explicit_clue:
-                    try:
-                        command = _clear_unverified_place_fields(command)
-                    except Exception:
-                        continue
-            bound_command, binding_error = _bind_resolved_place_to_create(
-                turn_ctx, command,
-            )
-            if binding_error:
-                results.append(_invalid_command_result(task.id, binding_error))
-                continue
-            place_bound_commands.append(bound_command)
-        calendar_commands = place_bound_commands
-        if not calendar_commands:
-            return results, agent_metrics
+        # Public follow-ups are reconstructed by Planner from the bounded
+        # visible conversation. Do not merge a hidden Calendar/place draft or
+        # overwrite an activity title with a stored place label.
+        draft = None
 
         canonical_commands = []
         for command in calendar_commands:
@@ -1115,58 +983,6 @@ def run_task(
             )
             if preflight.status != "ready":
                 clarification = preflight.clarification
-                place_followup_save_error = None
-                if (
-                    clarification is not None
-                    and clarification.code != "invalid_date"
-                    and len(calendar_commands) == 1
-                ):
-                    if preflight.resolved_target is not None:
-                        remember_resolved_target(
-                            turn_ctx.user_id,
-                            preflight.resolved_target,
-                        )
-                    place_resolution = place_resolution_context
-                    followup_resolution = _place_resolution_for_followup(
-                        turn_ctx,
-                        place_resolution,
-                        place_followup_record,
-                    )
-                    place_flow = bool(
-                        place_followup_record
-                        or place_followup_projection
-                        or isinstance(place_resolution, dict)
-                        or place_flow_hint
-                    )
-                    if place_flow:
-                        try:
-                            raw_ctx = getattr(turn_ctx, "_raw_ctx", None)
-                            save_place_followup(
-                                turn_ctx.user_id,
-                                turn_ctx.room_id,
-                                calendar_commands[0],
-                                missing_fields=clarification.missing_fields,
-                                candidate_options=clarification.candidates,
-                                resolution=followup_resolution,
-                                source_message_id=(
-                                    getattr(raw_ctx, "message_id", None)
-                                    or getattr(turn_ctx, "message_id", None)
-                                ),
-                            )
-                        except PlaceFollowupPersistenceError as exc:
-                            place_followup_save_error = str(exc)
-                            _LOGGER.warning(
-                                "Unable to save room-scoped place follow-up user=%s room=%s reason=%s",
-                                str(turn_ctx.user_id)[:80], str(turn_ctx.room_id)[:80], str(exc),
-                            )
-                    else:
-                        save_draft(
-                            turn_ctx.user_id,
-                            calendar_commands[0],
-                            missing_fields=clarification.missing_fields,
-                            candidates=clarification.candidates,
-                            resolved_target=preflight.resolved_target,
-                        )
                 safe_result: dict[str, Any] = {
                     "calendar_command_result": {
                         "status": preflight.status,
@@ -1176,10 +992,6 @@ def run_task(
                 }
                 if clarification is not None:
                     safe_result["calendar_command_result"]["clarification"] = clarification.model_dump()
-                if place_followup_save_error:
-                    safe_result["place_followup"] = {
-                        "status": "storage_unavailable",
-                    }
                 print(f"  [{task.id}] result=OK (calendar {preflight.status})")
                 results.append(SubTaskResult(
                     task_id=task.id,
@@ -1188,8 +1000,6 @@ def run_task(
                     observation=safe_result,
                 ))
             else:
-                clear_draft(turn_ctx.user_id)
-                clear_place_followup(turn_ctx.user_id, turn_ctx.room_id)
                 payload: dict[str, Any] = {
                     "calendar_plan_version": 1,
                     "plans": [plan.model_dump(exclude_none=True) for plan in preflight.plans],

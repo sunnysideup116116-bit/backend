@@ -21,6 +21,14 @@ from services.ayue_agent.v3.relationship_recommendations import ensure_indexes a
 from services.ayue_agent.v3.place_references import ensure_indexes as ensure_place_reference_indexes
 from services.ayue_agent.v3.place_followups import ensure_indexes as ensure_place_followup_indexes
 from services.proactive_followup_service import ensure_indexes as ensure_proactive_followup_indexes
+from services.post_date_followup_service import (
+    ensure_indexes as ensure_post_date_followup_indexes,
+)
+from services.relationship_memory_service import (
+    ensure_indexes as ensure_relationship_memory_indexes,
+    start_relationship_memory_worker,
+    stop_relationship_memory_worker,
+)
 from services.match_search_job_service import start_match_search_worker, stop_match_search_worker
 from services.conversation_compaction_service import ensure_conversation_compaction_indexes
 from services.memory_outbox_service import (
@@ -47,6 +55,7 @@ from event_worker import (
 )
 from registration_voice import router as registration_voice_router
 from app_voice_assistant import router as app_voice_assistant_router
+from routers.relationship_memories import router as relationship_memories_router
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -83,6 +92,7 @@ app.include_router(calendar.router)
 app.include_router(google_calendar.router)
 app.include_router(registration_voice_router)
 app.include_router(app_voice_assistant_router)
+app.include_router(relationship_memories_router, prefix="/api", tags=["Relationship memories"])
 
 @app.on_event("startup")
 def setup_calendar_indexes():
@@ -97,6 +107,8 @@ def setup_calendar_indexes():
     ensure_place_reference_indexes()
     ensure_place_followup_indexes()
     ensure_proactive_followup_indexes()
+    ensure_post_date_followup_indexes()
+    ensure_relationship_memory_indexes()
     ensure_ayue_agent_indexes()
     ensure_map_cache_indexes()
     ensure_conversation_compaction_indexes()
@@ -113,6 +125,7 @@ def setup_calendar_indexes():
     start_memory_outbox_worker()
     start_profile_retry_worker()
     start_proactive_care_scheduler()
+    start_relationship_memory_worker()
     start_context_graph_worker()
     start_concept_embedding_worker()
     start_event_lifecycle_worker()
@@ -125,6 +138,7 @@ def stop_background_services():
     shutdown_codex_provider()
     stop_event_delivery_worker()
     stop_proactive_care_scheduler()
+    stop_relationship_memory_worker()
     stop_memory_outbox_worker()
     stop_profile_retry_worker()
     stop_match_search_worker()

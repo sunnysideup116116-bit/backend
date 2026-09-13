@@ -68,10 +68,14 @@ def flow(monkeypatch):
         result = scheduler.run_public_agent_turn_v3(ctx)
         if persist:
             message_id = str(messages.insert_one({"room_id": room, "content": result.reply,
-                                "metadata": {"choice_prompt": result.choice_prompt}}).inserted_id)
+                                "metadata": {
+                                    "choice_prompt": result.choice_prompt,
+                                    "interaction_blocks_v1": result.interaction_blocks_v1,
+                                }}).inserted_id)
             if result.choice_prompt:
                 ConfirmationManager(confirmations).mark_presented(user_id="owner", origin_run_id=result.agent_run_id,
-                                                                  message_id=message_id, persisted_content=result.reply)
+                                                                  message_id=message_id, persisted_content=result.reply,
+                                                                  interaction_blocks_v1=result.interaction_blocks_v1)
         return result
     return SimpleNamespace(send=send, matches=matches, profiles=profiles, jobs=searches,
                            choices=confirmations, messages=messages, old_id=old_id, expired_id=expired_id,
@@ -117,7 +121,10 @@ def test_search_request_never_abandons_active_proposal(flow, stage, intent):
         assert "阿月牽線" in result.reply
     else:
         assert result.choice_prompt
-        assert "原本那張邀請會繼續等對方回覆" in result.reply
+        assert "原本那張邀請會繼續等對方回覆" in (
+            result.choice_prompt["display"]["summary"]
+        )
+        assert result.choice_prompt["display"]["summary"] not in result.reply
     assert not flow.jobs.rows
     assert flow.matches.writes == before
     assert flow.matches.find_one({"_id": flow.old_id})["status"] == stage
@@ -170,11 +177,20 @@ def test_injected_downstream_acceptance_is_rejected_for_start(flow, monkeypatch)
     assert not flow.choices.rows
 
 
-def test_unknown_match_intent_is_read_only(flow):
+def test_unknown_match_intent_is_read_only(flow, monkeypatch):
+    monkeypatch.setattr(
+        scheduler.synthesizer,
+        "synthesize",
+        lambda *_args, **_kwargs: (
+            "我還沒整理好這個請求，你可以再說一次。",
+            None,
+            scheduler.SynthesizerMetrics(),
+        ),
+    )
     result = flow.send("我要配對", intent=None)
-    assert result.fallback_reason == "planner_invalid"
+    assert result.fallback_reason is None
     assert not flow.choices.rows and not flow.jobs.rows
-    assert "沒有執行" in result.reply
+    assert "再說一次" in result.reply
 
 
 def test_repeated_search_requests_leave_active_proposal_unchanged(flow):

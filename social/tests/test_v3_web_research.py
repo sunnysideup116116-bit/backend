@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from services.ai_service import ToolCallResult
 from services.ayue_agent.v3 import guarded_execution, planner, scheduler, web_runtime
 from services.ayue_agent.v3.contracts import AgentContextSlice, SubTask, SubTaskResult, SubTaskStatus, ToolProposal, VALID_AGENTS
 from services.ayue_agent.v3.guarded_execution import GuardedReadExecutor
@@ -10,6 +11,7 @@ from services.ayue_agent.v3.sub_agents import places_agent
 from services.ayue_agent.v3.sub_agents.base import SubAgentMetrics
 from services.ayue_agent.v3.sub_agents.web_agent import (
     WebResearchDecision,
+    _bounded_recent_messages,
     _decision_tools,
     _project_dependency_observations,
     decide as decide_web,
@@ -17,6 +19,7 @@ from services.ayue_agent.v3.sub_agents.web_agent import (
 from services.ayue_agent.v3.synthesizer import synthesize
 from services.ayue_agent.v3.web_research import (
     MAX_WEB_PROMPT_SEARCH_RESULTS,
+    WebActivityV1,
     WebEvidenceAssessmentV1,
     anchor_web_search_query,
     anchor_place_search_query,
@@ -56,6 +59,16 @@ def _slice(message="What did the public source say?"):
 
 def _trace():
     return {"guard_results": [], "tool_results": [], "event_sequence": []}
+
+
+def test_web_history_boundary_keeps_latest_four_and_two_thousand_chars():
+    bounded = _bounded_recent_messages([
+        {"role": "user" if index % 2 == 0 else "assistant", "content": str(index) * 600}
+        for index in range(8)
+    ])
+    assert len(bounded) == 4
+    assert sum(len(item["content"]) for item in bounded) == 2000
+    assert bounded[-1]["content"] == "7" * 600
 
 
 def _run_web(task, turn, context_slice, *, seen_keys=None, guard_lock=None,
@@ -445,6 +458,59 @@ class V3WebResearchTests(unittest.TestCase):
         self.assertEqual(metrics.input_payload["place_candidates"][0]["name"], "A Cafe")
         self.assertNotIn("map_url", metrics.input_payload["place_candidates"][0])
         self.assertNotIn("place_id", metrics.input_payload["place_candidates"][0])
+
+    def test_web_agent_receives_structured_history_only_as_context(self):
+        provider_result = SimpleNamespace(
+            input_tokens=1, output_tokens=1, duration_ms=1, content="",
+            tool_calls=[{"name": "web_search_decision", "arguments": {
+                "queries": ["鹽埕週末市集 2026 公告"], "recency": "month",
+            }}],
+        )
+        context_slice = _slice("幫我查剛剛那個活動")
+        context_slice.payload["recent_messages"] = [
+            {"role": "user", "content": "週末想找個活動"},
+            {"role": "assistant", "content": "可以看看鹽埕週末市集。"},
+        ]
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            return_value=provider_result,
+        ) as provider:
+            _decision, metrics = decide_web(
+                context_slice, task_brief="查鹽埕週末市集的最新公告", round_index=1,
+                observations=[], tool_calls_used=0, search_calls_used=0,
+                extract_calls_used=0,
+            )
+        self.assertEqual(
+            metrics.input_payload["context"]["recent_messages"],
+            context_slice.payload["recent_messages"],
+        )
+        self.assertIn("不是外部事實證據", provider.call_args.kwargs["system_prompt"])
+
+    def test_web_agent_receives_server_resolved_time_target(self):
+        provider_result = SimpleNamespace(
+            input_tokens=1, output_tokens=1, duration_ms=1, content="",
+            tool_calls=[{"name": "web_search_decision", "arguments": {
+                "queries": ["高雄 2026-09-19 活動"],
+            }}],
+        )
+        context_slice = _slice("這週六找活動")
+        context_slice.payload["resolved_time_target"] = {
+            "source_text": "這週六", "date": "2026-09-19", "timezone": "Asia/Taipei",
+        }
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            return_value=provider_result,
+        ) as provider:
+            _decision, metrics = decide_web(
+                context_slice, task_brief="找活動", round_index=1,
+                observations=[], tool_calls_used=0, search_calls_used=0,
+                extract_calls_used=0,
+            )
+        self.assertEqual(
+            metrics.input_payload["context"]["resolved_time_target"]["date"],
+            "2026-09-19",
+        )
+        self.assertIn("不得再對原始相對日期", provider.call_args.kwargs["system_prompt"])
 
     def test_web_decision_retries_once_when_provider_omits_function_call(self):
         ref = "place_candidate_0123456789abcdef"
@@ -1340,6 +1406,95 @@ class V3WebResearchTests(unittest.TestCase):
             ["web_activity_name_alias_normalized"],
         )
 
+    def test_required_activity_runtime_repairs_finish_without_researching_again(self):
+        trace = _trace()
+        slc = _slice()
+        slc.payload["_requires_activity_anchor"] = True
+        valid_finish = self._finish(coverage="direct_partial", status="partial").model_copy(
+            update={
+                "activity": WebActivityV1(
+                    title="週六市集", venue="駁二",
+                    source_refs=["web_source_01"],
+                    source_urls=["https://example.com/forum/post"],
+                ),
+            },
+        )
+        decisions = [
+            WebResearchDecision(action="search", queries=["週六公開活動"]),
+            self._finish(coverage="direct_partial", status="partial"),
+            valid_finish,
+        ]
+        with patch.object(web_runtime, "web_enabled", return_value=True), \
+             patch.object(web_runtime.web_agent, "decide", side_effect=[
+                 (decisions[0], SubAgentMetrics(input_tokens=1)),
+                 (decisions[1], SubAgentMetrics(input_tokens=1)),
+                 (decisions[2], SubAgentMetrics(input_tokens=1)),
+             ]) as decide, \
+             patch.object(guarded_execution, "execute_tool", return_value=SimpleNamespace(
+                 ok=True, data=_search_result(),
+             )) as execute:
+            results, _metrics = _run_web(
+                SubTask(
+                    id="w1", agent="web", web_mode="public_lookup",
+                    task_brief="找活動後搜附近晚餐",
+                ),
+                _turn(), slc, trace=trace,
+            )
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(decide.call_count, 3)
+        self.assertTrue(decide.call_args_list[-1].kwargs["finish_only"])
+        self.assertEqual(
+            results[0].observation["primary_activity"]["venue"], "駁二",
+        )
+        diagnostic = trace["web_research"][0]
+        self.assertTrue(diagnostic["activity_required"])
+        self.assertEqual(diagnostic["activity_repair_attempt_count"], 1)
+        self.assertEqual(diagnostic["activity_anchor_status"], "validated")
+
+    def test_required_activity_with_wrong_date_is_not_a_places_anchor(self):
+        trace = _trace()
+        slc = _slice("找 9/26 的活動和附近晚餐")
+        slc.payload["_requires_activity_anchor"] = True
+        slc.payload["resolved_time_target"] = {
+            "source_text": "下週六", "date": "2026-09-26",
+            "timezone": "Asia/Taipei",
+        }
+        finish = self._finish(coverage="direct_sufficient", status="answered").model_copy(
+            update={
+                "activity": WebActivityV1(
+                    title="Legacy Taipei 演出", date="2026-10-08",
+                    venue="Legacy Taipei",
+                    source_refs=["web_source_01"],
+                    source_urls=["https://example.com/forum/post"],
+                ),
+            },
+        )
+        with patch.object(web_runtime, "web_enabled", return_value=True), patch.object(
+            web_runtime.web_agent,
+            "decide",
+            side_effect=[
+                (WebResearchDecision(action="search", queries=["Legacy Taipei 9/26"]), SubAgentMetrics()),
+                (finish, SubAgentMetrics()),
+            ],
+        ), patch.object(
+            guarded_execution,
+            "execute_tool",
+            return_value=SimpleNamespace(ok=True, data=_search_result()),
+        ):
+            results, _metrics = _run_web(
+                SubTask(
+                    id="w1", agent="web", web_mode="public_lookup",
+                    task_brief="查找 2026-09-26 可參加的活動後搜附近晚餐",
+                ),
+                _turn(), slc, trace=trace,
+            )
+
+        observation = results[0].observation
+        self.assertIsNone(observation["primary_activity"])
+        self.assertEqual(observation["status"], "partial")
+        self.assertTrue(any("2026-10-08" in item for item in observation["limitations"]))
+        self.assertEqual(trace["web_research"][0]["activity_anchor_status"], "date_mismatch")
+
     def test_real_activity_alias_shape_keeps_findings_in_one_finish_call(self):
         source_url = "https://example.com/2026-milk-tea-festival"
         provider_result = SimpleNamespace(
@@ -1442,6 +1597,170 @@ class V3WebResearchTests(unittest.TestCase):
                 self.assertEqual(len(decision.findings), 1)
                 self.assertIn(expected_code, decision.normalization_codes)
 
+    def test_singleton_activity_object_list_is_safely_normalized(self):
+        source_url = "https://example.com/activity"
+        provider_result = SimpleNamespace(
+            input_tokens=1, output_tokens=1, duration_ms=1, content="",
+            tool_calls=[{"name": "web_finish_decision", "arguments": {
+                "has_direct_evidence": True,
+                "direct_evidence_complete": False,
+                "findings": [{
+                    "finding": "活動甲有直接公開來源。",
+                    "direct": True,
+                    "source_refs": ["web_source_01"],
+                }],
+                "activity": [{
+                    "name": "活動甲", "location": "駁二",
+                    "source_refs": ["web_source_01"],
+                }],
+            }}],
+        )
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            return_value=provider_result,
+        ):
+            decision, metrics = decide_web(
+                _slice(), task_brief="推薦活動甲", round_index=4,
+                observations=[{"tool": "web.search", "result": _search_result(source_url)}],
+                tool_calls_used=3, search_calls_used=2, extract_calls_used=1,
+                finish_only=True,
+            )
+        self.assertEqual(metrics.llm_call_count, 1)
+        self.assertEqual(decision.activity.title, "活動甲")
+        self.assertEqual(decision.activity.venue, "駁二")
+        self.assertIn(
+            "web_activity_singleton_list_normalized",
+            decision.normalization_codes,
+        )
+
+    def test_invalid_optional_activity_date_and_time_are_omitted_not_discarded(self):
+        provider_result = SimpleNamespace(
+            input_tokens=1, output_tokens=1, duration_ms=1, content="",
+            tool_calls=[{"name": "web_finish_decision", "arguments": {
+                "has_direct_evidence": True,
+                "direct_evidence_complete": False,
+                "findings": [{
+                    "finding": "活動甲有直接公開來源。",
+                    "direct": True,
+                    "source_refs": ["web_source_01"],
+                }],
+                "activity": {
+                    "title": "活動甲", "venue": "駁二",
+                    "date": 20260919, "start_time": 1400,
+                    "source_refs": ["web_source_01"],
+                },
+            }}],
+        )
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            return_value=provider_result,
+        ):
+            decision, _metrics = decide_web(
+                _slice(), task_brief="推薦活動甲", round_index=4,
+                observations=[{"tool": "web.search", "result": _search_result()}],
+                tool_calls_used=3, search_calls_used=2, extract_calls_used=1,
+                finish_only=True,
+            )
+        self.assertIsNotNone(decision.activity)
+        self.assertEqual(decision.activity.date, "")
+        self.assertEqual(decision.activity.start_time, "")
+        self.assertIn("web_activity_date_omitted", decision.normalization_codes)
+        self.assertIn("web_activity_start_time_omitted", decision.normalization_codes)
+
+    def test_required_activity_repairs_once_without_new_web_tool(self):
+        source_url = "https://example.com/activity"
+        slc = _slice()
+        slc.payload["_requires_activity_anchor"] = True
+
+        def finish_result(activity):
+            return SimpleNamespace(
+                input_tokens=1, output_tokens=1, duration_ms=1, content="",
+                tool_calls=[{"name": "web_finish_decision", "arguments": {
+                    "has_direct_evidence": True,
+                    "direct_evidence_complete": False,
+                    "findings": [{
+                        "finding": "活動甲有直接公開來源。",
+                        "direct": True,
+                        "source_refs": ["web_source_01"],
+                    }],
+                    "activity": activity,
+                    "limitations": ["詳細時間待確認。"],
+                }}],
+            )
+
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            side_effect=[
+                finish_result(42),
+                finish_result({
+                    "title": "活動甲", "venue": "駁二",
+                    "source_refs": ["web_source_01"],
+                }),
+            ],
+        ) as provider:
+            decision, metrics = decide_web(
+                slc, task_brief="找活動後搜附近晚餐", round_index=4,
+                observations=[{"tool": "web.search", "result": _search_result(source_url)}],
+                tool_calls_used=1, search_calls_used=1, extract_calls_used=0,
+                finish_only=False,
+            )
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(metrics.llm_call_count, 2)
+        self.assertEqual(decision.activity.venue, "駁二")
+        self.assertIn(
+            "web_activity_anchor_repair_attempted",
+            decision.normalization_codes,
+        )
+        self.assertIn(
+            "web_activity_anchor_repair_required", metrics.rejected_calls,
+        )
+        self.assertEqual(
+            [
+                tool["function"]["name"]
+                for tool in provider.call_args_list[1].args[1]
+            ],
+            ["web_finish_decision"],
+        )
+        self.assertEqual(
+            [tool["function"]["name"] for tool in metrics.tools_raw],
+            ["web_finish_decision"],
+        )
+
+    def test_required_activity_second_failure_keeps_findings_and_marks_unavailable(self):
+        source_url = "https://example.com/activity"
+        slc = _slice()
+        slc.payload["_requires_activity_anchor"] = True
+        invalid_result = SimpleNamespace(
+            input_tokens=1, output_tokens=1, duration_ms=1, content="",
+            tool_calls=[{"name": "web_finish_decision", "arguments": {
+                "has_direct_evidence": True,
+                "direct_evidence_complete": True,
+                "findings": [{
+                    "finding": "活動甲有直接公開來源。",
+                    "direct": True,
+                    "source_refs": ["web_source_01"],
+                }],
+                "activity": "活動甲",
+            }}],
+        )
+        with patch(
+            "services.ayue_agent.v3.sub_agents.web_agent.generate_chat_completion_with_tools",
+            side_effect=[invalid_result, invalid_result],
+        ):
+            decision, metrics = decide_web(
+                slc, task_brief="找活動後搜附近晚餐", round_index=4,
+                observations=[{"tool": "web.search", "result": _search_result(source_url)}],
+                tool_calls_used=1, search_calls_used=1, extract_calls_used=0,
+                finish_only=True,
+            )
+        self.assertIsNone(decision.activity)
+        self.assertEqual(decision.status, "partial")
+        self.assertEqual(len(decision.findings), 1)
+        self.assertIn(
+            "web_activity_anchor_unavailable", decision.normalization_codes,
+        )
+        self.assertEqual(metrics.llm_call_count, 2)
+
     def test_explicit_false_direct_overrides_direct_evidence_class(self):
         source_url = "https://example.com/2025-background"
         provider_result = SimpleNamespace(
@@ -1499,11 +1818,19 @@ class V3WebResearchTests(unittest.TestCase):
         })
         with patch(
             "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=ToolCallResult(
+                content=(
+                    "A related public recap exists (https://example.com/forum/post), "
+                    "but it is not the direct forum evidence you asked for."
+                ),
+                tool_calls=[],
+            ),
         ) as provider:
             reply, _cards, metrics = synthesize(slc)
-        provider.assert_not_called()
+        provider.assert_called_once()
         self.assertIn("A related public recap exists", reply)
-        self.assertEqual(metrics.fallback_reason, "web_research_insufficient")
+        self.assertEqual(metrics.reply_source, "llm")
+        self.assertIsNone(metrics.fallback_reason)
 
     def test_casual_source_only_result_is_not_blocked_by_strict_sentence(self):
         slc = AgentContextSlice(agent="synthesizer", payload={
@@ -1525,11 +1852,22 @@ class V3WebResearchTests(unittest.TestCase):
                 },
             }],
         })
-        with patch("services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools") as provider:
-            reply, _cards, _metrics = synthesize(slc)
-        provider.assert_not_called()
+        with patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=ToolCallResult(
+                content=(
+                    "我先找到這則活動公告，但最後整理還沒完成，"
+                    "現在先不替你補猜內容。"
+                ),
+                tool_calls=[],
+            ),
+        ) as provider:
+            reply, _cards, metrics = synthesize(slc)
+        provider.assert_called_once()
         self.assertIn("活動公告", reply)
         self.assertNotIn("目前查到的公開資訊還不足以確認你問的內容", reply)
+        self.assertEqual(metrics.reply_source, "llm")
+        self.assertIsNone(metrics.fallback_reason)
 
 
 if __name__ == "__main__":

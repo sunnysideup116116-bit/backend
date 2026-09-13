@@ -130,7 +130,8 @@ def test_contact_without_profile_or_text_keeps_safe_defaults(mongo):
     accepted(mongo, "missing")
     mongo.messages.insert_one({"room_id": routes.generate_room_id("owner", "missing"), "timestamp": 1})
     item = routes.get_contacts("owner")["contacts"][1]
-    assert item["name"] == "對方"
+    assert item["name"] == "暱稱暫無法取得"
+    assert item["name_available"] is False
     assert item["latest_message"] == ""
     assert item["context"] == "尚無近期情境"
 

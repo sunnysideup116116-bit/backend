@@ -27,6 +27,7 @@ from .web_research import (
     anchor_place_search_query,
     anchor_web_search_query,
     build_research_result as _build_research_result,
+    observed_source_catalog,
 )
 
 
@@ -88,6 +89,9 @@ def run(
     extract_calls_used = 0
     last_decision = None
     stop_reason = "budget_exhausted"
+    activity_required = bool(
+        context_slice.payload.get("_requires_activity_anchor")
+    )
 
     place_observation_present = any(
         isinstance(item, dict)
@@ -110,6 +114,14 @@ def run(
             "tool_calls_used": tool_calls_used,
             "search_calls_used": search_calls_used,
             "extract_calls_used": extract_calls_used,
+            "activity_required": activity_required,
+            "activity_repair_attempt_count": sum(
+                1 for code in aggregate.rejected_calls
+                if code in {
+                    "web_activity_anchor_repair_required",
+                    "web_activity_anchor_finish_repair_required",
+                }
+            ),
             "normalization_codes": list(
                 getattr(last_decision, "normalization_codes", []) or []
             )[:4],
@@ -122,6 +134,59 @@ def run(
             **kwargs,
             diagnostics=filter_diagnostics,
         )
+        resolved_target = context_slice.payload.get("resolved_time_target")
+        target_date = (
+            str(resolved_target.get("date") or "").strip()
+            if isinstance(resolved_target, dict)
+            else ""
+        )
+        activity_date = (
+            str(result.primary_activity.date or "").strip()
+            if result.primary_activity is not None
+            else ""
+        )
+        if (
+            activity_required
+            and target_date
+            and activity_date
+            and activity_date != target_date
+        ):
+            limitations = list(result.limitations)
+            limitation = (
+                f"查到的活動日期是 {activity_date}，不是指定的 {target_date}；"
+                "未用它搜尋當日附近地點。"
+            )
+            if limitation not in limitations:
+                limitations.append(limitation)
+            result = result.model_copy(update={
+                "primary_activity": None,
+                "status": "partial" if result.findings else "insufficient_evidence",
+                "coverage": "direct_partial" if result.findings else result.coverage,
+                "limitations": limitations[:3],
+                "stop_reason": "partial_coverage" if result.findings else "target_conflict",
+            })
+            filter_diagnostics["activity_anchor_status"] = "date_mismatch"
+        if activity_required and result.primary_activity is None:
+            limitations = list(result.limitations)
+            limitation = "活動場地還無法由已觀察來源可靠定位，附近地點尚未搜尋。"
+            if limitation not in limitations:
+                limitations.append(limitation)
+            has_direct_finding = any(
+                finding.relation == "direct" for finding in result.findings
+            )
+            result = result.model_copy(update={
+                "status": "partial" if has_direct_finding else "insufficient_evidence",
+                "coverage": "direct_partial" if has_direct_finding else result.coverage,
+                "limitations": limitations[:3],
+                "stop_reason": (
+                    "partial_coverage" if has_direct_finding else result.stop_reason
+                ),
+            })
+            filter_diagnostics.setdefault("activity_anchor_status", "unavailable")
+        elif activity_required:
+            filter_diagnostics["activity_anchor_status"] = "validated"
+        else:
+            filter_diagnostics["activity_anchor_status"] = "not_required"
         record_diagnostics(
             execution_status=result.execution_status,
             final_stop_reason=result.stop_reason,
@@ -143,6 +208,27 @@ def run(
         aggregate.llm_requests.extend(metrics.llm_requests or [])
         if metrics.error:
             aggregate.error = metrics.error
+
+    def decision_activity_anchor_ready(decision: Any) -> bool:
+        activity = getattr(decision, "activity", None)
+        if (
+            activity is None
+            or not str(getattr(activity, "title", "") or "").strip()
+            or not str(getattr(activity, "venue", "") or "").strip()
+        ):
+            return False
+        catalog = observed_source_catalog(observations)
+        observed_urls = set(catalog)
+        observed_refs = {
+            str(reference)
+            for item in catalog.values()
+            for reference in (item.get("source_refs") or [])
+            if str(reference).strip()
+        }
+        return bool(
+            set(getattr(activity, "source_urls", []) or []) & observed_urls
+            or set(getattr(activity, "source_refs", []) or []) & observed_refs
+        )
 
     evidence_policy = task.evidence_policy or "casual_discovery"
     if web_mode == "place_hours_fallback" and _places_hours_sufficient(prior_observations):
@@ -369,6 +455,30 @@ def run(
                 aggregate.error = "web_finish_missing_evidence_assessment"
                 # Preserve observations and retry through the finish-only
                 # phase; this failure consumes no Web tool budget.
+                break
+            elif activity_required and not decision_activity_anchor_ready(decision):
+                if "web_activity_anchor_unavailable" in (
+                    getattr(decision, "normalization_codes", []) or []
+                ):
+                    result = build_research_result(
+                        research_question=context_slice.payload.get("message", ""),
+                        answer_target=task.task_brief,
+                        decision=decision,
+                        observations=observations,
+                        execution_status="degraded" if failures else "completed",
+                        stop_reason="partial_coverage",
+                        allowed_subject_refs=(
+                            allowed_subject_refs if place_candidates else None
+                        ),
+                        evidence_policy=evidence_policy,
+                    )
+                    return _completed_result(task, result), aggregate
+                # Preserve the observed findings and give the dedicated
+                # finish-only phase one bounded chance to repair only the
+                # activity projection. No Web tool is executed again.
+                aggregate.rejected_calls.append(
+                    "web_activity_anchor_finish_repair_required"
+                )
                 break
             else:
                 stop_reason = "tool_failure" if failures and not observations else "evidence_sufficient"

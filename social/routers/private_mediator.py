@@ -24,6 +24,7 @@ from services.ayue_agent.product_identity import PRIVATE_RUNTIME_FALLBACK_REPLY
 from services.chat_service import generate_room_id, save_message
 from services.profile_task_service import queue_profile_skills  # compatibility import; Private never invokes it
 from services.relationship_engagement_service import (
+    consume_pending_post_date_feedback,
     consume_pending_probe_answer,
     find_accepted_match,
     generate_mediator_private_room_id,
@@ -78,6 +79,10 @@ def get_mediator_private_messages(other_id: str, user_id: str):
 
         pending_date = {}
 
+    pending_post_date = user_doc.get("pending_post_date_feedback") or {}
+    if pending_post_date.get("other_id") != other_id:
+        pending_post_date = {}
+
     msgs = list(messages_coll.find({"room_id": room_id}, {"_id": 0}).sort("timestamp", 1))
 
     return {
@@ -90,7 +95,9 @@ def get_mediator_private_messages(other_id: str, user_id: str):
 
         "pending_step": pending.get("stage") or (
 
-            "date_" + pending_date.get("stage") if pending_date.get("stage") else None
+            "date_" + pending_date.get("stage") if pending_date.get("stage") else (
+                "post_date_feedback" if pending_post_date else None
+            )
 
         ),
 
@@ -139,6 +146,46 @@ def _run_private_v2_saved_turn(
     external_calendar_authorized: bool = False,
 ) -> dict:
     """Persist exactly one private V2 final after the owner message is saved."""
+    if req.choice_action is None:
+        try:
+            source = messages_coll.find_one(
+                {"room_id": room_id, "sender_id": req.user_id},
+                {"_id": 1},
+                sort=[("timestamp", -1), ("_id", -1)],
+            ) or {}
+        except Exception:
+            source = {}
+        source_message_id = str(source.get("_id") or "")
+        try:
+            user_doc = profiles_coll.find_one({"user_id": req.user_id}) or {}
+        except Exception:
+            user_doc = {}
+        pending_reply = None
+        if external_calendar_authorized:
+            pending_reply = consume_pending_post_date_feedback(
+                match_doc,
+                user_doc,
+                req.user_id,
+                req.other_id,
+                req.message,
+                source_message_id=source_message_id,
+            )
+        if pending_reply is None:
+            pending_reply = consume_pending_probe_answer(
+                match_doc, user_doc, req.user_id, req.other_id, req.message,
+            )
+        from services.relationship_memory_service import enqueue_relationship_memory_extraction
+
+        if external_calendar_authorized:
+            enqueue_relationship_memory_extraction(
+                req.user_id,
+                req.other_id,
+                str(match_doc.get("_id") or ""),
+                source_message_id,
+            )
+        if pending_reply is not None:
+            save_private_mediator_reply(room_id, pending_reply)
+            return {"reply": pending_reply, "pending_step": None}
     result = run_private_agent_turn_v2(
         user_id=req.user_id, other_id=req.other_id, message=req.message,
         match_doc=match_doc, on_progress=on_progress, agent_run_id=agent_run_id,
@@ -213,16 +260,6 @@ def mediator_private_chat(
 
     )
 
-    user_doc = profiles_coll.find_one({"user_id": req.user_id}) or {}
-    probe_reply = (
-        consume_pending_probe_answer(match_doc, user_doc, req.user_id, req.other_id, req.message)
-        if req.choice_action is None
-        else None
-    )
-    if probe_reply is not None:
-        save_private_mediator_reply(room_id, probe_reply)
-        return {"reply": probe_reply, "pending_step": None}
-
     # Current Private V2 owns every accepted-pair turn. It must not fall
     # through into the removed legacy keyword/free-form runtime.
     turn_options = {}
@@ -231,7 +268,12 @@ def mediator_private_chat(
         req.user_id,
     ):
         turn_options["external_calendar_authorized"] = True
-    return _run_private_v2_saved_turn(req, match_doc, room_id, **turn_options)
+    return _run_private_v2_saved_turn(
+        req,
+        match_doc,
+        room_id,
+        **turn_options,
+    )
 
 @router.post("/mediator/private/stream")
 def mediator_private_chat_stream(

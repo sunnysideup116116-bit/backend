@@ -103,10 +103,8 @@ def _display_name(user_id: str | None) -> str:
     profile = profiles_coll.find_one(
         {"user_id": user_id}, {"_id": 0, "display_name": 1, "nickname": 1, "name": 1}
     ) or {}
-    value = str(profile.get("display_name") or profile.get("nickname") or profile.get("name") or "").strip()
-    if not value or value == user_id or value.startswith(("seed_user_", "demo_user", "user_")):
-        return "對方"
-    return value[:30]
+    from services.public_nickname_service import contact_display_name
+    return contact_display_name(user_id, profile) or "對方"
 
 
 def _live_match_query(user_id: str, status: str | None = None) -> dict[str, Any]:

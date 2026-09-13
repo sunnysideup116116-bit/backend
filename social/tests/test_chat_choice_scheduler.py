@@ -23,6 +23,93 @@ def _synth_metrics():
 
 
 class ChatChoiceSchedulerTests(unittest.TestCase):
+    def test_auto_cancelled_card_public_fields_reach_planner(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="不是，是新活動名稱")
+        record = {
+            "_id": "choice-1",
+            "tool_name": "calendar.submit_commands",
+            "interaction_mode": "bubble_buttons_v1",
+            "created_at": 1,
+            "payload": {"plans": [{"form": {
+                "title": "舊標題", "date": "2026-09-26",
+                "start_time": "12:00", "end_time": "18:00",
+                "location": "西園路一段145號B2",
+            }}]},
+        }
+        resolution = {
+            "id": "choice-1", "state": "auto_cancelled", "selected": "cancel",
+            "display": {
+                "title": "確認行事曆變更",
+                "summary": "09/26 12:00–18:00 舊標題",
+                "consequence": "確認後才會寫入行事曆",
+            },
+        }
+        turn = MagicMock(
+            user_id="owner", room_id="room", message=ctx.message,
+            recent_messages=[], history_projection_status="complete",
+            active_proposal=None, active_event_invitation=None,
+            recent_context_draft=None, mentioned_contact_overflow=False,
+        )
+        plan = Plan(tasks=[
+            SubTask(id="s1", agent="synthesizer", task_brief="回覆更正"),
+        ])
+
+        def planner(current_turn):
+            cancelled = current_turn._cancelled_confirmation_context
+            self.assertEqual(cancelled["state"], "auto_cancelled")
+            self.assertEqual(cancelled["calendar_form"]["date"], "2026-09-26")
+            self.assertEqual(cancelled["calendar_form"]["location"], "西園路一段145號B2")
+            self.assertNotIn("choice-1", str(cancelled))
+            return plan, _planner_metrics()
+
+        with patch(
+            "services.ayue_agent.v3.scheduler.ConfirmationManager.list_active",
+            side_effect=[[record], []],
+        ), patch(
+            "services.ayue_agent.v3.scheduler.ConfirmationManager.resolve_for_continuation",
+            return_value=resolution,
+        ), patch(
+            "services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
+            return_value=turn,
+        ), patch(
+            "services.ayue_agent.v3.scheduler.plan_turn", side_effect=planner,
+        ), patch(
+            "services.ayue_agent.v3.scheduler.synthesizer.synthesize",
+            return_value=("我會依新名稱重新整理。", None, _synth_metrics()),
+        ):
+            result = run_public_agent_turn_v3(ctx)
+
+        self.assertEqual(result.choice_resolution["state"], "auto_cancelled")
+
+    def test_auto_cancel_persistence_failure_stops_before_planner(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="改成新標題")
+        record = {
+            "_id": "choice-1", "tool_name": "calendar.submit_commands",
+            "interaction_mode": "bubble_buttons_v1", "created_at": 1,
+        }
+        with patch(
+            "services.ayue_agent.v3.scheduler.ConfirmationManager.list_active",
+            return_value=[record],
+        ), patch(
+            "services.ayue_agent.v3.scheduler.ConfirmationManager.resolve_for_continuation",
+            return_value=None,
+        ), patch(
+            "services.ayue_agent.v3.scheduler.ConfirmationManager.choice_projection",
+            return_value={"id": "choice-1", "state": "pending"},
+        ), patch(
+            "services.ayue_agent.v3.scheduler.build_public_agent_turn_context",
+            return_value=MagicMock(
+                recent_messages=[], history_projection_status="complete",
+            ),
+        ), patch(
+            "services.ayue_agent.v3.scheduler.plan_turn",
+        ) as planner:
+            result = run_public_agent_turn_v3(ctx)
+
+        planner.assert_not_called()
+        self.assertEqual(result.fallback_reason, "confirmation_cancellation_not_persisted")
+        self.assertIn("沒有建立新的確認", result.reply)
+
     def test_conversational_write_returns_button_prompt_without_typing_instruction(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="幫我找人")
         turn = MagicMock(

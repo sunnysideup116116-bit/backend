@@ -61,14 +61,6 @@ from services.message_use_service import (
     mark_message_use,
     mark_message_use_from_turn,
 )
-from services.ayue_agent.v3.place_references import (
-    PlaceReferencePersistenceError,
-    publish_place_presentation,
-)
-from services.ayue_agent.v3.relationship_recommendations import (
-    RecommendationPersistenceError,
-    save_snapshot as save_relationship_recommendation_snapshot,
-)
 from services.relationship_engagement_service import (
     find_accepted_match,
     mark_post_chat_activity,
@@ -368,6 +360,13 @@ def _complete_public_turn(
         metadata["place_cards"] = place_cards
     if presentation_blocks:
         metadata["presentation_blocks"] = presentation_blocks
+    interaction_blocks_v1 = [
+        dict(block)
+        for block in (agent_result.interaction_blocks_v1 or [])[:4]
+        if isinstance(block, dict)
+    ]
+    if interaction_blocks_v1:
+        metadata["interaction_blocks_v1"] = interaction_blocks_v1
     if len(reply_messages) > 1:
         metadata["presentation_messages"] = reply_messages
     if agent_result.choice_prompt:
@@ -376,8 +375,6 @@ def _complete_public_turn(
         saved_reply = save_message(room_id, "ai_assistant", ai_reply, metadata=metadata)
     else:
         saved_reply = save_message(room_id, "ai_assistant", ai_reply)
-    place_presentation_published = False
-    place_presentation_failed = False
     if isinstance(saved_reply, dict):
         try:
             mark_message_use(
@@ -393,76 +390,19 @@ def _complete_public_turn(
             # already-saved reply available even when the auxiliary marker
             # write is temporarily unavailable.
             pass
-        if (
-            agent_result.relationship_recommendation_snapshot
-            and saved_reply.get("message_id")
-            and run_id
-        ):
-            try:
-                save_relationship_recommendation_snapshot(
-                    req.user_id,
-                    room_id,
-                    run_id,
-                    str(saved_reply["message_id"]),
-                    agent_result.relationship_recommendation_snapshot,
-                )
-            except RecommendationPersistenceError as exc:
-                print(f"[relationship_recommendation] snapshot skipped: {type(exc).__name__}")
-        if (
-            run_id
-            and saved_reply.get("message_id")
-            and agent_result.place_presentation_required
-        ):
-            # Place snapshots are created before this assistant write but stay
-            # unpublished until the message has a durable message_id. This
-            # prevents a failed assistant save from arming an unreferenced
-            # candidate list for a later turn.
-            try:
-                published = publish_place_presentation(
-                    req.user_id,
-                    room_id,
-                    run_id,
-                    str(saved_reply["message_id"]),
-                )
-            except PlaceReferencePersistenceError:
-                published = False
-            if not published:
-                place_presentation_failed = True
-                # The assistant row was saved before its source relation could
-                # be committed. Quarantine it so a later turn cannot resolve
-                # an unbound list, and return the same fail-closed copy used by
-                # Scheduler persistence failures.
-                try:
-                    from bson.objectid import ObjectId
-                    messages_coll.update_one(
-                        {"_id": ObjectId(str(saved_reply["message_id"]))},
-                        {"$set": {"is_blocked": True}},
-                    )
-                except Exception:
-                    pass
-                ai_reply = "這次找到地點，但暫時無法保存候選清單；請稍後再試，我還沒有替你建立行程。"
-                reply_messages = [ai_reply]
-            else:
-                place_presentation_published = True
-    if place_presentation_published and on_token is not None:
-        # Scheduler withholds its normal final-reply replay for place turns.
-        # Release exactly the text stored in the assistant row only after the
-        # snapshot is linked to that durable row, so a client never observes a
-        # candidate list that cannot be selected on a later turn.
-        persisted_reply = str(saved_reply.get("content") or ai_reply)
-        for start in range(0, len(persisted_reply), 120):
-            on_token(persisted_reply[start:start + 120])
     if (
         run_id
         and isinstance(saved_reply, dict)
         and saved_reply.get("message_id")
-        and not place_presentation_failed
     ):
         mark_public_confirmation_presented(
             user_id=req.user_id,
             origin_run_id=run_id,
             message_id=str(saved_reply["message_id"]),
             persisted_content=str(saved_reply.get("content") or ""),
+            interaction_blocks_v1=list(
+                (saved_reply.get("metadata") or {}).get("interaction_blocks_v1") or []
+            ),
         )
     # Assessment answers are a separate, owner-scoped workflow. They must not
     # become recent-context or durable-memory evidence. Other saved public
@@ -505,8 +445,9 @@ def _complete_public_turn(
         "sources": sources,
         "place_cards": place_cards,
         "presentation_blocks": presentation_blocks,
+        "interaction_blocks_v1": interaction_blocks_v1,
         "llm_call_metrics": agent_result.llm_call_metrics or [],
-        "choice_prompt": None if place_presentation_failed else agent_result.choice_prompt,
+        "choice_prompt": agent_result.choice_prompt,
         "choice_resolution": agent_result.choice_resolution,
     }
 

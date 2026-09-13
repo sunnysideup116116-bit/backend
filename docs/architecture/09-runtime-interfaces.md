@@ -45,6 +45,7 @@ Final response 使用 `AgentResult`：
 - `reply` 是相容文字投影。
 - `messages` 最多三個顯示氣泡。
 - `sources`、`place_cards`、`presentation_blocks` 都是 bounded typed projection。
+- `interaction_blocks_v1` 是 optional 的文字／confirmation 邏輯順序；舊 client 忽略後仍以 `choice_prompt` 固定放在最後。
 - `agent_run_id` 是不含內容的 opaque correlation ID，只能用來對應 localhost debug run。
 
 ### 2.1 Mobile profile mirror HTTP projection
@@ -100,6 +101,10 @@ population/processed/pending/failed_user_count、created_proposal_count、saved_
 
 ## 3. Context interface
 
+### 公開暱稱來源一致性
+
+本人與已授權聯絡人的名稱共用 Appwrite-first `contact_display_name`，列表使用 bounded batch warmup，Mongo 僅為安全 fallback；不改 owner／accepted-relation gate。`/api/contacts` 增加 optional `name_available`；已接受聯絡人工具增加 `names_complete`。無名字是 unavailable，不是沒有關係；重名仍保留消歧。匿名 proposal／redaction 的「對方」不作全域替換。完整範圍及前端快取規則見 [`../PUBLIC_NICKNAME_CONTRACT.md`](../PUBLIC_NICKNAME_CONTRACT.md)。
+
 2026-09-08：HTTP 層透過 memory service 在組 Public request context 前刷新過期的 owner memory cache；
 Context Builder 維持 read-only，relevant_memories 僅含最多 8 筆帶 like/dislike/avoid/require 方向的安全文字。
 短期 want 不進長期偏好。Public Planner 的 user_preferences 只接受這個封閉帶方向格式，供 direct_chat 尊重偏好；
@@ -129,7 +134,7 @@ Room ownership 同時接受永久 legacy Public room 與 `ai_rooms` 中可由 se
 
 Match slice 可同時包含兩份互不覆蓋的最小狀態：`active_proposal` 對應一般 `relationship_match`，`active_event_invitation` 對應活動牽線。兩份 projection 只提供 stage、公開對象稱呼、是否可決定、活動標題等必要資訊；ID 與 revision 僅留在 server-side turn context / confirmation payload，不由 Planner 提供。
 
-Planner 在取得 `PublicAgentTurnContext` 後另做 bounded prompt projection：最多最近 4 則、合計 2,000 字元，若最新 history item 就是本回合 `message` 則只保留一份；clock 只送 timezone、local date/time、weekday 與實際存在的 temporal references。Optional state 為空時省略；active proposal 只送公開 status、counterparty、user_can_decide，不送 proposal revision。此 projection 不改全域 Context Builder budget，也不改其他 sub-agent slice。
+Planner 在取得 `PublicAgentTurnContext` 後另做 bounded prompt projection：最多最近 8 則、合計 4,000 字元，若最新 history item 就是本回合 `message` 則只保留一份；clock 只送 timezone、local date/time、weekday 與實際存在的 temporal references。Optional state 為空時省略；active proposal 只送公開 status、counterparty、user_can_decide，不送 proposal revision。Web 只把最近 4 則／2,000 字的 structured history 用於指涉與條件解析，不當作外部事實證據。
 
 Places presentation 另由 owner+room 的 durable snapshot 維持候選與 opaque reference。使用者成功選定候選後，Context Builder 以 `selected_reference`／`selected_at` 投影獨立的 `recent_place_reference`（reference、公開名稱、類別、地址摘要）；它不讀取或重用 Calendar draft。裸「它／這間／那間」只有在這個引用唯一且未被更新的推薦清單取代時才解析；明確店名、序號與歷史清單仍依 server resolver 的優先順序處理。
 
@@ -185,7 +190,7 @@ Places task 必須帶 `place_mode=discover|details|reviews`；只有 `discover` 
 
 Planner 只有在下游會消費上游的 typed observation、candidate ref 或其他明確 contract 時才建立 `depends_on`；獨立的 domain request 放在同一層平行執行。這個規則是 DAG 的資料依賴，不是為了排列顯示順序。只需等待、不需傳遞上游資料時使用 `run_if`；Scheduler 只在來源完成後評估它。
 
-具體日期的個人外出建議必須先建立 read-only Calendar availability task，即使使用者說不要新增行程。一般 precheck 使用 `task.finished`，明確的「有事就算了／沒事才繼續」才使用 `calendar.no_scheduled_events`。Calendar Runtime 對成功的單次 `calendar.list_my_events` 產生 `calendar.no_scheduled_events` 或 `calendar.has_scheduled_events`；失敗不偽造 outcome，也不把 `run_if` 控制 metadata 投影給下游 domain prompt。
+具體日期的個人外出建議必須先建立 read-only Calendar availability task。Provider 透過頂層 `availability_policy` 描述語意，Server 才產生 `run_if`：`fit_around_events -> task.finished`，只有附當前句 exact evidence 的 `abort_if_any_event -> calendar.no_scheduled_events`。相對日期由 Server candidate resolver 生成 `stated_period`／`next_occurrence`，Planner 以 `temporal_bindings` 選擇，通過驗證後才注入 provider 不可填寫的 `ResolvedTemporalTarget`。Calendar 與 Web 必須共用該 ISO date。
 
 Provider 輸出的 `mode="tasks"` 必須包含至少一個 domain task，除非同時帶有合法的 `social_opening` opportunity；普通聊天使用 `direct_chat`。具體日期＋既有聯絡人推薦＋新活動＋附近晚餐使用 `calendar`、平行 gated 的 `relationship`／`web`、依賴 Web activity venue 的 `places` 與 terminal `synthesizer`。Planner 遇到 contract mismatch 時最多重試一次，只提示 required `write_intent` 或 `evidence_policy`／`outcome_contract`／`run_if` 的封閉規則，不把錯誤值回送模型；無效 DAG 不轉成 provider-authored synth-only route。
 
@@ -285,6 +290,8 @@ Guard 只驗證 schema、註冊、重複呼叫、步數與 write-confirmation；
 
 所有副作用先建立 `v3_pending_confirmations`，再依呈現 owner 分流：純對話確認使用 room-scoped `bubble_buttons_v1`（精確 `choice_id`），已有媒人卡片的配對／活動決策維持既有卡片與 `legacy_text` 備援。兩種協議不可互相選取或取消，確認後才進 `write_executors.py` 與 canonical domain service。
 
+Public bubble preflight 成功後只將 Server-owned `slot`、operation、display title／summary／consequence 交給 Synthesizer；confirmation ID、revision、executor payload 與資料庫欄位不進 prompt。LLM 只決定 slot 在文字中的語意位置，Server 驗證每個 message index 完整、唯一且有序，pending slot 剛好一次並且前面至少一個 text block，並拒絕 text message 與 `display.summary` 逐字相同。Emergency 只生成中性衔接句，詳細操作摘要仍只在元件出現一次。文字與 layout 一起持久化，canonical digest 兩者都相同後 prepared confirmation 才能轉 pending。
+
 ```text
 ToolProposal(WRITE)
   -> Guard: write_requires_confirmation
@@ -315,7 +322,11 @@ Date-card 模式只暴露這一個 function，最多兩次 provider attempt，�
 
 `SubTaskResult.outcome_codes` 是 server-owned 的 bounded control metadata，目前只允許 `calendar.no_scheduled_events` 與 `calendar.has_scheduled_events`。Calendar Runtime 才能產生它；Scheduler 僅做 exact-match `run_if` 判定，不解析 `observation.events`。`task.finished` 是 Scheduler 對來源 `OK`／`FAILED` 的技術完成判定，不是 domain outcome。條件不符合時下游在 runner 前標記 `SKIPPED/condition_not_met` 或 `SKIPPED/condition_unavailable`，不發出 `tool_started`。
 
+Scheduler 對每個 non-synth task 另投影 `ExecutionOutcome(state=completed|condition_stopped|upstream_unavailable|failed)`。`condition_not_met` 是正常 `condition_stopped`；從未開始的依賴任務是 `upstream_unavailable`，不能宣稱 Web 執行失敗。Trace 另記 `answer_status=complete|partial|condition_stopped|emergency`。
+
 Observation 不是 user-facing prose。Synthesizer 是一般 DAG 的唯一 final wording owner，且只能使用它實際收到的 verified observations。Web URL、place card 與 subject reference 由 server-owned catalog 綁定；模型不能創造新的 reference。
+
+正常中止、部分失敗、證據不足、typed temporal clarification、pending confirmation，以及 Planner 最終無法產生安全 DAG 的 `planner_failure.v1` 都必須進 Synthesizer。後者仍 fail closed 且零 domain tool，但不再由 Scheduler 直接輸出固定錯誤句。Provider error、空內容、schema／grounding／interaction layout 不合法時，使用同一批 verified facts 加修正提示最多重試一次；第一次未驗證內容不對外串流。兩次仍無法安全組合時才使用 observation-safe emergency，唯一 fallback reason 為 `synthesizer_emergency`。
 
 ### Provider model tier and call telemetry
 
@@ -323,7 +334,7 @@ GPT 個人實驗模式由 `start_all.sh gpt` 啟用，僅切換共用 Social `ai
 
 `OLLAMA_FAST_CHAT_MODEL` 是可選的 fast tier；未設定時回退到 `OLLAMA_CHAT_MODEL`。Planner 與 Places／Match／Relationship／Profile proposal runners 要求 fast tier；Calendar、Web、Synthesizer 使用 main tier。ProductInfo retrieval 本身是 bounded typed path；Synthesizer 可用該 projection 搭配使用者的實際問題自然組合回答，固定產品文案只作 provider failure fallback。Runtime model override 優先於這些 tier，且不自動在 fast 失敗後重試 main。
 
-每個 LLM owner 的 metrics 都回報 `llm_call_count` 與 `requested_model_tier`。Planner 對 `missing_tool_call`、`wrong_function_name`、`invalid_arguments` 或 `provider_error` 最多做一次 bounded retry；Provider retry 維持同一 requested tier，不自動切換 main，第二次仍失敗便 fail closed。Planner 的 `retry_count`、`retry_reason`、`failure_code` 與 bounded `attempts` 只投影到 localhost ephemeral debug；durable trace 不保存 prompt 或 raw output。Web 的 bounded retry／finish attempts 會累計真實 provider call 數，Scheduler 的 `trace.llm_call_count` 是 Planner、所有 sub-agent 與 Synthesizer counters 的總和；它不再以 agent 節點數估算呼叫次數。
+每個 LLM owner 的 metrics 都回報 `llm_call_count` 與 `requested_model_tier`。Planner 對 `missing_tool_call`、`wrong_function_name`、`invalid_arguments` 或 `provider_error` 最多做一次 bounded retry；`availability_policy` 與 `temporal_bindings` 有專屬封閉 retry hint。Provider retry 維持同一 requested tier，不自動切換 main，第二次仍失敗便 fail closed。Planner 的 `retry_count`、`retry_reason`、`failure_code` 與 bounded `attempts` 只投影到 localhost ephemeral debug；durable trace 不保存 prompt 或 raw output。Web 的 bounded retry／finish attempts 會累計真實 provider call 數，Scheduler 的 `trace.llm_call_count` 是 Planner、所有 sub-agent 與 Synthesizer counters 的總和；它不再以 agent 節點數估算呼叫次數。
 
 Domain failure 可以在既有 `SubTaskResult` 形狀內帶 bounded `observation` projection，例如 `{"failure": {"code": "location_not_found", "subject": "...", "message": "..."}}`。這只適用於 domain 明確 allowlist 的 user-facing failure；`subject` 必須來自已驗證的 planner/executor arguments，`message` 必須是 server-owned 固定文字。不得放入 raw exception、stack trace、provider detail 或 internal ID。Scheduler 只傳遞這個 projection，不負責解讀 Places 或其他 domain 的 failure semantics。
 
@@ -338,12 +349,11 @@ For ordinary Places/Places+Web recommendations, the active compose contract
 contains `messages: list[str]`, optional `opening` / `closing`, `presentation_class`, `card_intent`,
 `selected_candidate_refs`, `recommended_candidate_refs`, and
 `discussed_candidate_refs`, plus `presented_candidates` and
-`candidate_introductions[{candidate_ref, description}]`. For a multi-place
-discover reply, `messages` is empty; `opening` / `closing` own the free prose while introductions bind each
-grounded explanation to a server-supplied candidate ref. A bounded provider compatibility adapter accepts string introductions only when an equal-length, contiguous `presented_candidates` list supplies the exact refs; otherwise it fails closed. The server applies
-the trusted candidate set/order once, keeps one numbered list without a
-mandatory heading, and falls back to the trusted name/objective detail when an
-introduction is omitted. Legacy list-shaped messages are recognized only for bounded recovery; normalized aliases such as `喫/吃` and `台/臺` are matched, then the provider label is restored. Model-authored `blocks` and `card_mode` are not
+`candidate_introductions[{candidate_ref, description}]`. `messages` is the primary natural-language output;
+`opening` / `closing` and introductions remain compatibility fields. Every visible candidate must have a contiguous
+`presented_candidates` binding whose ordinal matches the candidate name's first non-overlapping public mention.
+The server persists only that visible set in validated mention order and never inserts or reorders visible numbering.
+Normalized aliases such as `喫/吃` and `台/臺` are matched conservatively, then the provider label is restored without changing prose. Model-authored `blocks` and `card_mode` are not
 part of this ordinary schema. The server derives `card_mode` from
 `card_intent` and validated refs, then emits the card-only presentation
 projection from its own candidate catalog. A legacy top-level `blocks` field
@@ -404,7 +414,10 @@ composes the remaining observations, and appends the locked reply afterward.
 Unknown list items remain in the cloned observation; arbitrary observation
 `message` fields never become server-owned replies.
 
-Cards-off place discovery 仍發布一份 server-ordered 編號清單供後續 ordinal 解析，但不強制標題。Candidate rows 保留模型的 grounded 逐店介紹，依可信店名重排後只呈現一次；單一候選不強制編號。
+Cards-off place discovery 以自然 prose 為預設，不強制標題或編號。Server 只將實際出現在公開文字的候選依首次提及順序寫入隱藏 snapshot；後續「第二間」仍可 deterministic 解析，不需要畫面顯示 `1. 2. 3.`。
+當 cards-off provider 回傳通過公開安全檢查的普通文字時，不需因缺少 `compose_public_reply` call 而丟棄。Server 以可信候選名稱做唯一、非重疊比對，成功才建立 hidden binding；沒提店名或同名／重疊時仍保留自然回覆，但不建 snapshot。虛構 URL、internal ref 或未執行寫入宣稱仍 fail closed。
+
+Web findings 與 activity anchor 是兩個不同層級。普通 Web 查詢的 `activity` 是 optional projection；欄位錯誤只移除 activity，不刪除已驗證 findings、sources 與 limitations。當且僅當後續 Places task 依賴這個 Web task 時，Scheduler 以 ephemeral `_requires_activity_anchor` 要求有來源綁定的 `primary_activity.title` 與 `venue`；第一次錯誤只用原 findings/sources 進行一次 finish-only repair，不重新搜尋或 extract。仍無法建立 anchor 時，Web 保留 partial findings，Places 以 `missing_activity_anchor` skip，不得改用 saved location。
 
 `AYUE_V3_WEB_PLACE_BOOTSTRAP_FAST_PATH` is an opt-in latency optimization for
 `casual_discovery` Places -> Web turns. If enabled, Web performs at most two

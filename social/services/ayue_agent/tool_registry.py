@@ -364,6 +364,7 @@ class _AcceptedContactListOutput(BaseModel):
     contacts: list[_MentionedContactOutput] = Field(default_factory=list, max_length=8)
     truncated: bool = False
     total_count: int | None = Field(default=None, ge=0)
+    names_complete: bool = True
 
 
 class _ContactEvidenceOutput(BaseModel):

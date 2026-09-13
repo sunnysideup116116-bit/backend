@@ -175,6 +175,8 @@ class V3WriteExecutorsTests(unittest.TestCase):
         ctx = self._ctx()
         with patch("services.ayue_agent.v3.write_executors.start_assessment_session",
                    return_value={"status": "started", "reply": "我們開始吧"}) as start, \
+             patch("services.ayue_agent.v3.write_executors._assessment_opening_question",
+                   return_value="你遇到空檔時通常怎麼安排？"), \
              patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.find_one_and_update",
                    return_value=None), \
              patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.update_one"):
@@ -184,11 +186,17 @@ class V3WriteExecutorsTests(unittest.TestCase):
             )
         self.assertTrue(ok)
         self.assertEqual(start.call_args.args[1], "big_five")
+        self.assertEqual(
+            start.call_args.kwargs["opening_question"],
+            "你遇到空檔時通常怎麼安排？",
+        )
 
     def test_start_assessment_binds_the_confirmed_room(self):
         ctx = self._ctx()
         with patch("services.ayue_agent.v3.write_executors.start_assessment_session",
                    return_value={"status": "started", "reply": "我們開始吧"}) as start, \
+             patch("services.ayue_agent.v3.write_executors._assessment_opening_question",
+                   return_value="哪種生活選擇會讓你最有感覺？"), \
              patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.find_one_and_update",
                    return_value=None), \
              patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.update_one"):
@@ -200,10 +208,32 @@ class V3WriteExecutorsTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(start.call_args.kwargs["room_id"], "room")
 
+    def test_start_assessment_does_not_open_session_when_question_generation_fails(self):
+        ctx = self._ctx()
+        with patch(
+            "services.ayue_agent.v3.write_executors._assessment_opening_question",
+            return_value="",
+        ), patch(
+            "services.ayue_agent.v3.write_executors.start_assessment_session",
+        ) as start, patch(
+            "services.ayue_agent.v3.write_executors.TOOL_CALLS.find_one_and_update",
+            return_value=None,
+        ), patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.update_one"):
+            ok, _reply, code = execute_write(
+                "profile.start_assessment", {"kind": "basic"}, ctx,
+                MagicMock(), "run1", 0, confirmation_id="c-failed",
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(code, "assessment_opening_generation_failed")
+        start.assert_not_called()
+
     def test_start_assessment_uses_confirmation_id_from_manager_payload(self):
         ctx = self._ctx()
         with patch("services.ayue_agent.v3.write_executors.start_assessment_session",
                    return_value={"status": "started", "reply": "第一題來囉"}) as start, \
+             patch("services.ayue_agent.v3.write_executors._assessment_opening_question",
+                   return_value="你遇到新鮮事時通常會怎麼反應？"), \
              patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.find_one_and_update",
                    return_value=None) as claim, \
              patch("services.ayue_agent.v3.write_executors.TOOL_CALLS.update_one"):

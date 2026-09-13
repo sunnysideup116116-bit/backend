@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from bson.objectid import ObjectId
 
@@ -29,8 +31,8 @@ from .time_context import build_turn_clock
 
 
 INTERNAL_ID_RE = re.compile(r"(?:@?seed_user_[\w-]+|@?demo_user|@?user[_-]?\d+)", re.IGNORECASE)
-MAX_HISTORY_MESSAGES = 32
-MAX_HISTORY_CHARS = 8000
+MAX_HISTORY_MESSAGES = 12
+MAX_HISTORY_CHARS = 6000
 RECENT_CONTEXT_DRAFT_TTL_SECONDS = 30 * 60
 
 
@@ -39,13 +41,66 @@ def _clean_text(value: Any, limit: int = 900) -> str:
     return re.sub(r"\s+", " ", text).strip()[:limit]
 
 
+def _clean_history_content(value: Any) -> str:
+    """Keep visible paragraph/list structure while removing internal IDs."""
+    text = INTERNAL_ID_RE.sub("對方", str(value or "")).replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]+", " ", line).rstrip() for line in text.split("\n")]
+    return "\n".join(lines).strip()
+
+
+def _history_sent_at(value: Any, timezone_name: str) -> str:
+    """Render one persisted message timestamp in the turn's local timezone."""
+    if value in (None, ""):
+        return "unknown"
+    try:
+        if isinstance(value, datetime):
+            instant = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        else:
+            instant = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        return instant.astimezone(ZoneInfo(timezone_name)).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OverflowError, KeyError):
+        return "unknown"
+
+
+def _visible_confirmation_history(item: dict[str, Any]) -> str:
+    """Project only confirmation copy that the user could see in this message."""
+    metadata = item.get("metadata")
+    choice = metadata.get("choice_prompt") if isinstance(metadata, dict) else None
+    if not isinstance(choice, dict):
+        return ""
+    display = choice.get("display")
+    if not isinstance(display, dict):
+        return ""
+    state = str(choice.get("state") or "unknown")[:32]
+    labels = {
+        "pending": "待確認，尚未執行",
+        "confirmed": "已確認",
+        "cancelled": "已取消，尚未執行",
+        "auto_cancelled": "因使用者繼續對話而取消，尚未執行",
+        "expired": "已過期，尚未執行",
+        "superseded": "已被新確認取代，不可再執行",
+        "failed": "執行失敗",
+    }
+    lines = [f"[確認卡｜{labels.get(state, state)}]"]
+    for key, label in (
+        ("title", "操作"),
+        ("summary", "內容"),
+        ("consequence", "確認後"),
+    ):
+        value = _clean_history_content(display.get(key))[:600]
+        if value:
+            lines.append(f"{label}：{value}")
+    return "\n".join(lines)[:900] if len(lines) > 1 else ""
+
+
 def _public_label(user_id: str | None) -> str:
     if not user_id:
         return "對方"
     profile = profiles_coll.find_one(
         {"user_id": user_id}, {"display_name": 1, "nickname": 1, "name": 1}
     ) or {}
-    return _clean_text(profile.get("display_name") or profile.get("nickname") or profile.get("name") or "對方", 30) or "對方"
+    from services.public_nickname_service import contact_display_name
+    return contact_display_name(user_id, profile) or "對方"
 
 
 def _other_id(match: dict[str, Any], user_id: str) -> str | None:
@@ -132,25 +187,68 @@ def _message_is_after_watermark(item: dict[str, Any], watermark: dict[str, Any] 
 
 def _history(
     ctx: AgentTurnContext, *, watermark: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, str]], str]:
-    history: list[dict[str, str]] = []
+    exclude_message_id: str | None = None,
+    current_message: str = "",
+    timezone_name: str = "Asia/Taipei",
+) -> tuple[list[dict[str, Any]], str]:
+    history: list[dict[str, Any]] = []
     previous_assistant = ""
     used = 0
-    for item in reversed((ctx.recent_history or [])[-MAX_HISTORY_MESSAGES:]):
+    # Exclude the separately supplied current message before applying the
+    # twelve-message budget; otherwise a persisted current row would silently
+    # reduce usable history to eleven messages.
+    source = list(ctx.recent_history or [])
+    excluded_id = str(exclude_message_id or "").strip()
+    has_excluded_id = bool(
+        excluded_id
+        and any(
+            str(item.get("_id") or item.get("message_id") or "") == excluded_id
+            for item in source
+            if isinstance(item, dict)
+        )
+    )
+    fallback_current = _clean_history_content(current_message)
+    skipped_fallback_current = False
+    for item in reversed(source):
+        if len(history) >= MAX_HISTORY_MESSAGES:
+            break
         if not _message_is_after_watermark(item, watermark):
             continue
         sender = item.get("sender_id") or item.get("role") or "assistant"
         role = "user" if sender == ctx.user_id or sender == "user" else "assistant"
-        content = _clean_text(item.get("content") or item.get("message"), 900)
+        content = _clean_history_content(item.get("content") or item.get("message"))
+        confirmation = _visible_confirmation_history(item)
+        if confirmation:
+            content = f"{content}\n\n{confirmation}".strip()
         if not content:
+            continue
+        message_id = str(item.get("_id") or item.get("message_id") or "")
+        if has_excluded_id and message_id == excluded_id:
+            continue
+        if (
+            not has_excluded_id
+            and fallback_current
+            and not skipped_fallback_current
+            and role == "user"
+            and content == fallback_current
+        ):
+            skipped_fallback_current = True
             continue
         if role == "assistant" and not previous_assistant:
             previous_assistant = content
+        truncated = False
         if used + len(content) > MAX_HISTORY_CHARS:
-            content = content[: max(0, MAX_HISTORY_CHARS - used)]
+            content = content[: max(0, MAX_HISTORY_CHARS - used)].rstrip()
+            truncated = True
         if not content:
             break
-        history.append({"role": role, "content": content})
+        history.append({
+            "role": role,
+            "content": content,
+            "sent_at": _history_sent_at(item.get("timestamp"), timezone_name),
+            "timezone": timezone_name,
+            "truncated": truncated,
+        })
         used += len(content)
         if used >= MAX_HISTORY_CHARS:
             break
@@ -213,13 +311,15 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     turn_clock = clock or build_turn_clock(ctx.message)
     profile = ctx.user_profile or profiles_coll.find_one({"user_id": ctx.user_id}, {"_id": 0}) or {}
     continuity = load_validated_conversation_continuity(ctx.user_id, ctx.room_id)
-    watermark = None
-    if continuity:
-        watermark = {
-            "covered_through_message_id": continuity["covered_through_message_id"],
-            "covered_through_timestamp": continuity["covered_through_timestamp"],
-        }
-    history, _ = _history(ctx, watermark=watermark)
+    history, _ = _history(
+        ctx,
+        # The recent raw window remains available even when an older
+        # compaction watermark exists; the summary cannot replace corrections.
+        watermark=None,
+        exclude_message_id=ctx.message_id,
+        current_message=ctx.message,
+        timezone_name=turn_clock.timezone,
+    )
     source_char_count = sum(
         len(str(item.get("content") or item.get("message") or ""))
         for item in (ctx.recent_history or [])
@@ -280,71 +380,15 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     # when it semantically recognises a match-status question instead.
     outcome = None
     recent_context_draft = profile.get("recent_context_draft") or None
-    # Calendar follow-up state is a bounded, server-owned projection.  It
-    # contains no event ID/revision and is stored independently of profile data.
-    from .v3.calendar_drafts import get_draft as get_calendar_draft, public_projection as calendar_draft_projection
     from .v3.calendar_references import (
-        get_reference as get_calendar_reference,
         get_recent_mutation,
-        public_projection as calendar_reference_projection,
         recent_mutation_projection,
     )
-    from .v3.relationship_references import (
-        get_reference as get_relationship_reference,
-        public_projection as relationship_reference_projection,
-    )
     from .v3.date_coordination_references import (
-        authority_projection as date_coordination_authority_projection,
         date_coordination_summary,
-        get_reference as get_date_coordination_reference,
-        public_projection as date_coordination_reference_projection,
     )
-    from .v3.relationship_recommendations import (
-        get_snapshot as get_relationship_recommendation,
-        public_projection as relationship_recommendation_projection,
-    )
-    from .v3.place_references import (
-        get_candidate_set as get_place_candidate_set,
-        public_projection as place_candidate_projection,
-        recent_selected_projection as recent_place_reference_projection,
-        place_reference_read_scope,
-    )
-    from .v3.place_followups import (
-        PlaceFollowupPersistenceError,
-        get_followup as get_place_followup,
-        public_projection as place_followup_projection,
-    )
-    calendar_draft = calendar_draft_projection(get_calendar_draft(ctx.user_id))
-    calendar_recent_reference = calendar_reference_projection(get_calendar_reference(ctx.user_id))
     calendar_recent_mutation = recent_mutation_projection(get_recent_mutation(ctx.user_id))
-    recent_contact_reference = relationship_reference_projection(
-        get_relationship_reference(ctx.user_id)
-    )
-    try:
-        recent_action_record = get_date_coordination_reference(ctx.user_id, ctx.room_id)
-    except Exception:
-        # A convenience reference outage must not block ordinary chat or other
-        # read-only domain flows; cancellation fails closed without it.
-        recent_action_record = None
-    recent_action_reference = date_coordination_reference_projection(recent_action_record)
     date_summary, date_summary_authority = date_coordination_summary(ctx.user_id)
-    recent_recommendation = relationship_recommendation_projection(
-        get_relationship_recommendation(ctx.user_id, ctx.room_id)
-    )
-    with place_reference_read_scope():
-        recent_place_candidates = place_candidate_projection(
-            get_place_candidate_set(ctx.user_id, ctx.room_id)
-        )
-        recent_place_reference = recent_place_reference_projection(ctx.user_id, ctx.room_id)
-    try:
-        recent_place_followup = place_followup_projection(
-            get_place_followup(ctx.user_id, ctx.room_id)
-        )
-    except PlaceFollowupPersistenceError:
-        # A missing auxiliary follow-up must not prevent ordinary chat or
-        # Calendar reads from running; the Calendar runtime will fail closed
-        # if it needs the unavailable store for a place continuation.
-        recent_place_followup = None
     now = time.time()
     if recent_context_draft and now - float(recent_context_draft.get("created_at", 0) or 0) > RECENT_CONTEXT_DRAFT_TTL_SECONDS:
         # Context assembly is read-only, including expired auxiliary drafts.
@@ -353,6 +397,15 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
         profile.get("profile_memory_preview"), owner_id=ctx.user_id,
     )]
     mentioned_ids, validation_overflow = validated_mentioned_contact_ids(ctx.user_id, ctx.mentioned_ids)
+    owner_relationship_memories: list[dict[str, Any]] = []
+    if (
+        len(mentioned_ids) == 1
+        and not validation_overflow
+        and bool(getattr(ctx, "external_calendar_authorized", False))
+    ):
+        from services.relationship_memory_service import relationship_memory_context
+
+        owner_relationship_memories = relationship_memory_context(ctx.user_id, mentioned_ids[0])
     focused_match, focused_authority = _focused_match_projection(ctx)
     match_search = {
         **(match_state["search"] or {}),
@@ -385,25 +438,16 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
         focused_match=focused_match,
         match_search=match_search,
         latest_match_outcome=outcome, clock=turn_clock,
-        calendar_draft=calendar_draft, calendar_recent_reference=calendar_recent_reference,
         calendar_recent_mutation=calendar_recent_mutation,
-        recent_place_candidates=recent_place_candidates,
-        recent_place_reference=recent_place_reference,
-        place_followup=recent_place_followup,
         recent_context_draft=recent_context_draft,
-        recent_contact_reference=recent_contact_reference,
-        recent_action_reference=recent_action_reference,
         date_coordination_summary=date_summary,
-        recent_recommendation=recent_recommendation,
         mentioned_contacts=mentioned_contact_refs(ctx.user_id, mentioned_ids),
         mentioned_contact_overflow=bool(ctx.mention_overflow or validation_overflow),
+        owner_relationship_memories=owner_relationship_memories,
         capability_manifest_version=CAPABILITY_MANIFEST_VERSION,
     )
     turn._active_proposal_authority = active_authority  # type: ignore[attr-defined]
     turn._focused_match_authority = focused_authority  # type: ignore[attr-defined]
-    turn._recent_action_reference_authority = date_coordination_authority_projection(  # type: ignore[attr-defined]
-        recent_action_record
-    )
     turn._date_coordination_summary_authority = date_summary_authority  # type: ignore[attr-defined]
     turn._match_state = match_state  # type: ignore[attr-defined]
     return turn

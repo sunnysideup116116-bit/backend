@@ -95,6 +95,42 @@ def resolve_temporal_references(message: str, local_now: datetime) -> dict[str, 
     return present
 
 
+def resolve_temporal_candidates(message: str, local_now: datetime) -> list[dict[str, object]]:
+    """Return bounded, planner-only candidate dates for written relative terms.
+
+    The authoritative legacy resolver above intentionally keeps calendar-week
+    semantics.  This additive projection exposes a future occurrence only when
+    that stated weekday has already passed, leaving the semantic choice to the
+    Planner while keeping every concrete date server-derived.
+    """
+    references = resolve_temporal_references(message, local_now)
+    today = local_now.date()
+    output: list[dict[str, object]] = []
+    for source_text, raw_date in references.items():
+        try:
+            stated = datetime.fromisoformat(raw_date).date()
+        except (TypeError, ValueError):
+            continue
+        relation = "past" if stated < today else "today" if stated == today else "future"
+        candidates: list[dict[str, str]] = [{
+            "id": "stated_period",
+            "date": stated.isoformat(),
+            "relation": relation,
+        }]
+        is_weekday_reference = any(
+            source_text.endswith(suffix) for suffix in _WEEKDAY_SUFFIXES
+        ) and any(token in source_text for token in ("週", "周", "星期", "禮拜"))
+        if is_weekday_reference and stated < today:
+            next_occurrence = stated + timedelta(days=7)
+            candidates.append({
+                "id": "next_occurrence",
+                "date": next_occurrence.isoformat(),
+                "relation": "future",
+            })
+        output.append({"source_text": source_text, "candidates": candidates})
+    return output
+
+
 def build_turn_clock(message: str, now_utc: datetime | None = None) -> TurnClockV1:
     timezone_name = os.getenv("AYUE_DEFAULT_TIMEZONE", "Asia/Taipei").strip() or "Asia/Taipei"
     utc_now = now_utc or datetime.now(timezone.utc)

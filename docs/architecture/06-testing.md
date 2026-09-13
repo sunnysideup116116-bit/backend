@@ -66,7 +66,7 @@ rg --files tests -g "test_*.py" | Sort-Object
 - Web／Places 的來源綁定、卡片 projection、partial evidence 與 itinerary presentation。
 - Synthesizer adaptive Markdown、無固定 Places/Web/itinerary headings、mixed server-owned reply partition，以及 cards disabled 時 zero public cards。
 - Provider model-tier selection、真實 LLM call counters、Planner dependency policy，以及可選 Places -> Web bootstrap 的 off/strict/no-candidate guards。
-- Public Context budget：最近 32 則、合計 ≤8,000 字元；Planner compact-v3 prompt 仍最多 4 則／2,000 字元；最新 current message 不得在 history 重複；active proposal 不得帶 revision。`metadata.message_use` 未標記或屬於 calendar／assessment／no-memory 的來源不得進入 profile、compaction 或 proactive consumer。
+- Public Context budget：最近 32 則、合計 ≤8,000 字元；Planner compact-v3 prompt 最多 8 則／4,000 字元；Web structured history 最多 4 則／2,000 字元；最新 current message 不得在任一 specialist history 重複；active proposal 不得帶 revision。`metadata.message_use` 未標記或屬於 calendar／assessment／no-memory 的來源不得進入 profile、compaction 或 proactive consumer。
 - Calendar busy/free/unknown branch：hard-gated downstream runner/tool_started 次數分別為 0/執行/0；普通 `task.finished` precheck 在 Calendar busy 或技術失敗後仍可繼續，且 control edge 不把 raw events 傳入下游。
 - `RuntimeRegistration` runner signature、`TaskRunnerResult` 互斥結果形狀，以及 compatibility input 只在 boundary 正規化。
 

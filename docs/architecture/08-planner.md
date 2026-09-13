@@ -15,7 +15,7 @@ Planner 透過一次 function calling 輸出 typed arguments，不解析自由�
 
 Provider 每次都必須輸出 `write_intent`。一般請求為 `none`；只有明確要阿月現在建立／送出空白約會邀請才用 `relationship.date_invitation.v1`。「想約某人，幫我找店」的邀約是背景，@ 只是 entity binding。Date write 需一個 root Relationship task 與 terminal Synthesizer，可保留 typed read-only siblings。Canonical `Plan` 保留 `none` default 只供 server-side／舊 fixture 相容。
 
-Planner 的 system prompt 使用 compact-v3 版本：保留 routing ownership、direct-chat 邊界、Places／Web／Calendar／Match／Relationship／Profile／ProductInfo 的歧義規則、DAG invariants，以及具體日期＋既有聯絡人＋新活動＋附近晚餐的五節點範例；不注入完整 public persona、voice few-shots 或 Synthesizer reply contract。Planner 專用 context 只送最近 4 則／2,000 字元歷史、精簡 clock 與非空 server projection；這是 input budget 優化，不是第二個 router。Regression budget 為 system prompt ≤6,000 字元、provider schema ≤3,500 字元、兩者合計 ≤9,500 字元；這些不是 provider context-window 上限。
+Planner 的 system prompt 使用 compact-v3 版本：保留 routing ownership、direct-chat 邊界、Places／Web／Calendar／Match／Relationship／Profile／ProductInfo 的歧義規則、DAG invariants，以及具體日期＋既有聯絡人＋新活動＋附近晚餐的五節點範例；不注入完整 public persona、voice few-shots 或 Synthesizer reply contract。Planner 專用 context 只送最近 8 則／4,000 字元歷史、精簡 clock、server 產生的 temporal candidates 與非空 projection；這是 input budget 優化，不是第二個 router。Regression budget 為 system prompt ≤6,500 字元、provider schema ≤4,000 字元、兩者合計 ≤10,500 字元；這些不是 provider context-window 上限。
 
 `Plan` model 仍接受 `mode="product_info"` 與 `product_info_topics`，但那只是舊 provider payload 的 compatibility input；`normalize_plan_for_execution()` 會立即轉成正常的 `product_info -> synthesizer` DAG。新 prompt、fixture 與文件不得輸出 task-free ProductInfo mode。
 
@@ -42,13 +42,15 @@ Planner 的 system prompt 使用 compact-v3 版本：保留 routing ownership、
 | `web_mode` | Web 新輸出必填：`public_lookup|place_verification|place_hours_fallback`；舊 payload 省略時由 dependency shape 相容推導 |
 | `evidence_policy` | 只有 Web 可用：`casual_discovery|strict_verification` |
 | `outcome_contract` | 只有 Calendar availability task 可用：`calendar.availability.v1` |
-| `run_if` | 控制依賴；`task.finished` 或 allowlisted Calendar outcome，不傳遞上游 observation |
+| `run_if` | Server canonicalizer 產生的控制邊；provider-facing task schema 不暴露此欄位 |
 
 未使用的 optional 欄位要省略；不可用空字串代替 enum，也不可送出不完整的 `{}` `run_if`。Provider boundary 只會把 known agent 的精確空 placeholder 視為省略；空白字串、非空無效值、不完整 condition 與 graph／DAG drift 仍由 canonical validator 拒絕，最多 retry once 後 fail closed。
 
 Planner 永遠不能提供 `user_id`、match/proposal/event ID、revision、expected status 或其他 executor authority fields。
 
-具體日期的個人外出／約會建議，即使使用者說不要新增行程，仍先建立唯讀 Calendar availability task。一般 precheck 使用 `run_if.required_outcome="task.finished"`；只有明確說「有事就算了／沒事才繼續」才使用 `calendar.no_scheduled_events`。Calendar mutation 仍只在使用者明確要求保存、建立、修改或取消時建立。
+具體日期的個人外出／約會建議，即使使用者說不要新增行程，仍先建立唯讀 Calendar availability task。Planner 另以頂層 `availability_policy` 選擇 `fit_around_events` 或 `abort_if_any_event`；前者是預設並 canonicalize 為 `task.finished`，後者只允許明確「有任何行程就停止」的當前句連續 `evidence_span`，並 canonicalize 為 `calendar.no_scheduled_events`。Scheduler 不再從中文重新判斷。
+
+相對日期由 Server 先生成 bounded candidates，Planner 再以頂層 `temporal_bindings` 選擇 `future_planning|stated_period|needs_clarification`。`future_planning` 不得綁到過去候選；source text、candidate ID 與 Calendar／Web task IDs 皆由 Server 驗證。選定後的 `ResolvedTemporalTarget` 是 provider 不可填寫的執行事實，Calendar read window 與 Web prompt 必須使用同一 ISO date；真模糊時產生 typed clarification observation，零 domain tool。Calendar mutation 仍只在使用者明確要求保存、建立、修改或取消時建立。
 
 「具體日期＋從目前認識／accepted contacts 中挑一位＋找新活動＋附近晚餐」固定使用 `calendar`、平行 gated 的 `relationship`／`web`、消費 Web activity venue 的 `places`，以及 terminal `synthesizer`。這是 4 個 domain tasks 加 Synthesizer；不得改成 Match、direct chat 或 provider-authored synth-only plan。
 
@@ -65,10 +67,12 @@ Planner 永遠不能提供 `user_id`、match/proposal/event ID、revision、expe
 - `relationship.date_invitation.v1` 不是精確的 root Relationship → terminal Synthesizer DAG，或混入 precheck／其他 presentation／opportunity。
 - `direct_chat` 混入 task、domain opportunity 或不相容欄位。
 - `itinerary` 沒有 Places task。
+- availability policy 的 task IDs、outcome contract、strict-abort evidence 或產生後的控制邊不合法。
+- temporal binding 的 source／candidate／task IDs 不合法，或 `future_planning` 選到過去日期。
 
-Planner 無 tool call、function name 錯誤、schema 不符或 provider error 時最多重試一次；schema retry 只提供 allowlisted 欄位規則，例如 required `write_intent`、`evidence_policy` 僅限 Web、`outcome_contract` 僅限 Calendar availability，不回送錯誤值。Provider retry 仍使用同一 requested model tier，不自動切換 main。無效或空 DAG 不再靜默改成 Synthesizer-only；兩次仍失敗時 fail closed，不執行任何工具或副作用。舊 ProductInfo envelope 的少量 protocol drift 只能在 planner compatibility boundary 做 bounded repair；不能用自然語言 regex 猜 intent。
+Planner 無 tool call、function name 錯誤、schema 不符或 provider error 時最多重試一次；schema retry 只提供 allowlisted 欄位規則，包含 `availability_policy` 與 `temporal_bindings` 的精確形狀，不回送錯誤值。Provider retry 仍使用同一 requested model tier，不自動切換 main。無效或空 DAG 不再靜默改成可執行的 Synthesizer-only plan；兩次仍失敗時 fail closed，不執行 domain tool 或副作用，但會把 typed no-action fact 交給 Synthesizer 寫最後回覆。舊 ProductInfo envelope 的少量 protocol drift 只能在 planner compatibility boundary 做 bounded repair；不能用自然語言 regex 猜 intent。
 
-Compatibility normalization 先複製 provider arguments，只處理 allowlisted 且不授權的格式漂移：known agent 上錯置的 scoped field、精確空 optional placeholder、date intent relocation、呈現模式降級，以及已由 owner+room snapshot 唯一解析時 Places `details|reviews` task 上錯置的字串／空 `place_reference`。後者只移除模型值，執行器仍使用 Server 已解析的引用；其他 agent、容器型 reference、衝突 intent、`depends_on`／`run_if` drift、unknown agent 與 DAG invariant 不修復。Repair 不消耗 retry，只記 allowlisted code 到 localhost ephemeral debug。
+Compatibility normalization 先複製 provider arguments，只處理 allowlisted 且不授權的格式漂移：known agent 上錯置的 scoped field、精確空 optional placeholder、date intent relocation、呈現模式降級，以及已由 owner+room snapshot 唯一解析時 Places `details|reviews` task 上錯置的字串／空 `place_reference`。Temporal 另允許兩種封閉 repair：將誤放在 `interpretation` 的 `next_occurrence` 還原為 candidate ID，以及從 temporal task IDs 移除明確不屬 Calendar／Web 的 task；兩者都不讀中文、不接受 provider date，也不增加寫入權限。其他 agent、容器型 reference、衝突 intent、`depends_on`／`run_if` drift、unknown agent 與 DAG invariant 不修復。Repair 不消耗 retry，只記 allowlisted code 到 localhost ephemeral debug。
 
 ## 4. Routing ownership
 
@@ -118,7 +122,7 @@ Places 不擁有 Web tools。需要 Places 無法建立的非結構化／目前�
 3. Scheduler 依 `RuntimeRegistration` 呼叫統一 runner；不依 agent 名稱重新設計 domain loop。
 4. Proposal runner 回 `ToolProposal`，再走中央 Guard 與 tool execution；Calendar、Web、ProductInfo 等 specialist runtime 回 completed typed results。Relationship 由自己的 runtime 依 typed write intent 切換 READ／WRITE proposal surface。Scheduler 在啟動 runner 前先評估 `run_if`。
 5. Domain task 只收到自己宣告依賴的 prior observations；Synthesizer 收集所有可用 observation。
-6. 依賴沒有成功 observation 時，下游 task 標記 `SKIPPED/dependency_failed`；條件不符合或來源無 outcome 時標記 `condition_not_met`／`condition_unavailable`。
+6. Scheduler 將每個 non-synth task 投影為 `completed|condition_stopped|upstream_unavailable|failed` 的 `ExecutionOutcome`。條件未成立是正常中止；未啟動的下游不得說成 Web／Places 執行失敗。所有 outcome 與成功 observation 都交給 Synthesizer。
 
 完整 runner/result interface 見 `09-runtime-interfaces.md`。
 

@@ -111,7 +111,7 @@ Places 從 upstream typed `primary_activity.venue` 取 anchor，不從自由文�
 - Ordinary and itinerary composition do not accept model-authored `blocks` or require `card_mode`. `presentation_mode="itinerary"` is only an editorial prompt hint; it uses the ordinary natural-language compose contract without fixed headings or a special rendering schema. The Synthesizer may retain server-owned candidate refs for internal grounding, while optional card-only UI projections remain server-owned.
 - `AYUE_PUBLIC_PLACE_CARDS_ENABLED` is off for the current demo. With the switch off, Places/Web replies are text/Markdown-only and Scheduler emits zero public cards/blocks; candidate projections, refs, provider IDs, map URLs, and Web subject bindings remain available internally.
 - Web-only `web_research.v1` results are LLM-first even when their typed status is partial, insufficient, degraded, or unavailable. The natural reply must preserve the typed limitation; deterministic Web formatting is only a post-composition degradation fallback.
-- `discover` 的多店回覆只呈現一份 server-ordered 編號清單，沒有強制「推薦地點」標題，並保留 model 對每家的 grounded 介紹。`details`／`reviews` 保留單店脈絡，不建立新清單或序號。
+- `discover` 的多店回覆預設使用自然 prose 或輕量 Markdown，不強制標題或編號。Server 驗證每個公開店名與 hidden ref／mention order，只保存實際呈現的候選。`details`／`reviews` 保留單店脈絡，不建立新清單或序號。
 - Places 的常見 user-facing failure 可帶 bounded `failure` observation：`location_not_found`、`location_required`、map timeout/unavailable 等 code 使用 server-owned 固定 message；可公開的 `subject` 只取自已驗證的 executor argument。未知 failure 維持 error code，不傳 raw exception、provider detail 或 internal ID。
 
 ## 6. 測試重點

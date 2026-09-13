@@ -274,6 +274,22 @@ class ProactiveFollowupServiceTests(unittest.TestCase):
         self.assertIsNone(token)
         claim.assert_not_called()
 
+    def test_recent_relationship_prompt_spaces_general_care_for_one_hour(self):
+        profile = {
+            "user_id": "owner",
+            "proactive_care_enabled": True,
+            "last_automatic_relationship_prompt_at": 9_500.0,
+        }
+        with patch(
+            "services.proactive_followup_service.profiles_coll.find_one",
+            return_value=profile,
+        ), patch(
+            "services.proactive_followup_service.profiles_coll.find_one_and_update",
+        ) as claim:
+            token = claim_delivery_slot("owner", "candidate", now=10_000.0)
+        self.assertIsNone(token)
+        claim.assert_not_called()
+
     def test_delivery_recheck_observes_a_pause_during_generation(self):
         with patch(
             "services.proactive_followup_service.PROACTIVE_FOLLOWUPS.find_one",

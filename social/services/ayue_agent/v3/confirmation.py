@@ -69,6 +69,34 @@ def match_choice_labels(record: dict[str, Any]) -> dict[str, str]:
     return {"cancel_label": pair[0], "confirm_label": pair[1]} if pair else {}
 
 
+def confirmation_display(record: dict[str, Any]) -> dict[str, str] | None:
+    """Return bounded, Server-owned facts for a visible confirmation component."""
+    action = str(record.get("tool_name") or "")
+    labels = {
+        "calendar.submit_commands": ("確認行事曆變更", "確認後才會寫入行事曆"),
+        "relationship.start_date_coordination": ("建立約會邀請", "確認後才會送出邀請"),
+        "relationship.cancel_date_coordination": ("取消約會安排", "確認後才會套用變更"),
+        "match.start_search": ("開始搜尋", "確認後才會開始搜尋"),
+        "match.cancel_search": ("停止搜尋", "確認後才會停止搜尋"),
+        "profile.start_assessment": ("重新開始探索", "確認後才會開始"),
+        ASSESSMENT_COMMIT_ACTION: ("套用探索結果", "確認後才會更新個人資料"),
+    }.get(action)
+    summary = str(record.get("preview_text") or "").strip()[:600]
+    for suffix in (
+        " 回覆「確認」才會真的變更。",
+        "回覆「確認」就開始，也可以回覆「取消」。",
+    ):
+        if summary.endswith(suffix):
+            summary = summary[:-len(suffix)].rstrip()
+    if labels is None or not summary:
+        return None
+    return {
+        "title": labels[0],
+        "summary": summary,
+        "consequence": labels[1],
+    }
+
+
 def match_choice_cancel_reply(record: dict[str, Any]) -> str | None:
     action = record.get("tool_name")
     if action == "match.decide_active_proposal":
@@ -112,6 +140,9 @@ def public_choice_projection(record: dict[str, Any]) -> dict[str, Any]:
         "expires_at": float(record.get("expires_at", 0) or 0),
         **match_choice_labels(record),
     }
+    display = confirmation_display(record)
+    if display is not None:
+        projection["display"] = display
     return projection
 
 
@@ -310,14 +341,34 @@ class ConfirmationManager:
                 raise
         return confirmation_id
 
+    @staticmethod
+    def _presentation_digest(
+        content: str,
+        interaction_blocks_v1: list[dict[str, Any]] | None = None,
+    ) -> str:
+        if not interaction_blocks_v1:
+            source = content
+        else:
+            source = json.dumps(
+                {
+                    "content": content,
+                    "interaction_blocks_v1": interaction_blocks_v1,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
     def bind_final_preview(
         self, *, user_id: str, origin_run_id: str, final_content: str,
+        interaction_blocks_v1: list[dict[str, Any]] | None = None,
     ) -> bool:
         """Bind the normalized final reply before it is persisted."""
         content = str(final_content or "")
         if not origin_run_id.strip() or not content.strip():
             return False
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        digest = self._presentation_digest(content, interaction_blocks_v1)
         try:
             result = self._coll.update_one(
                 {
@@ -334,13 +385,14 @@ class ConfirmationManager:
     def mark_presented(
         self, *, user_id: str, origin_run_id: str, message_id: str,
         persisted_content: str,
+        interaction_blocks_v1: list[dict[str, Any]] | None = None,
     ) -> bool:
         """Activate a prepared confirmation only for saved final text."""
         content = str(persisted_content or "")
         message_key = str(message_id or "").strip()
         if not origin_run_id.strip() or not message_key or not content.strip():
             return False
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        digest = self._presentation_digest(content, interaction_blocks_v1)
         now = time.time()
         try:
             result = self._coll.update_one(

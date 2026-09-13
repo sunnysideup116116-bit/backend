@@ -118,6 +118,25 @@ class AssessmentSessionServiceTests(unittest.TestCase):
         self.assertEqual(session["expires_at"], 100 + ASSESSMENT_SESSION_TTL_SECONDS)
         self.assertNotIn("big_five", update.call_args.args[1]["$set"])
 
+    def test_public_opening_question_is_the_exact_saved_last_reply(self):
+        question = "如果週末突然空下來，你會先安排好還是看心情決定？"
+        with patch(
+            "services.assessment_session_service.time.time", return_value=100,
+        ), patch(
+            "services.assessment_session_service.profiles_coll.find_one", return_value={},
+        ), patch(
+            "services.assessment_session_service.profiles_coll.update_one",
+            return_value=SimpleNamespace(modified_count=1),
+        ) as update:
+            outcome = start_assessment_session(
+                "owner", "big_five", idempotency_key="public-confirm",
+                opening_question=question,
+            )
+
+        saved = update.call_args.args[1]["$set"]["agentic_assessment_session"]
+        self.assertEqual(outcome["reply"], saved["last_reply"])
+        self.assertIn("週末突然空下來", saved["last_reply"])
+
     def test_awaiting_commit_blocks_another_start(self):
         profile = {"agentic_assessment_session": {
             **_active_session(), "status": "awaiting_commit", "draft": {"O": 7},

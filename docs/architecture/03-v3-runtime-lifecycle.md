@@ -53,7 +53,7 @@ direct_chat (routers/public_chat.py)
 - synthesizer 必須是終端：不能被任何其他 task 依賴。
 - Planner 另可輸出 `opportunity`（`signal=social_opening` + `evidence_span` + `confidence≥0.8`），Scheduler 會再驗證 evidence_span 是原句連續子字串。這是非動作性的短期溫和提議，不會建立 pending confirmation；明確的開始／重試配對請求必須產生 `match` task，走一般 confirmation path。
 
-Planner 無效（無 tool call、名字錯誤、schema 不符，或 provider error bounded retry 後仍失敗）→ **fail closed**：回「我現在沒辦法判斷這個請求要不要執行」，不執行任何工具。
+Planner 無效（無 tool call、名字錯誤、schema 不符，或 provider error bounded retry 後仍失敗）→ **fail closed**：不執行任何 domain tool，但將 `planner_failure.v1/no_actions_executed` 安全事實交給 Synthesizer 自然回覆；只有 Synthesizer 兩次都無法安全作答才使用 emergency。
 
 產品身份／入口問題建立正常的 `product_info -> synthesizer` DAG。ProductInfoAgent 自己理解 `task_brief`、最多做兩輪 allowlisted knowledge retrieval，回傳 `product_info.v1` observation；Scheduler 不知道 section taxonomy，也不直接組產品答案。`mode="product_info"`／`product_info_topics` 只在 contract boundary 接受舊 provider payload，執行前立即正規化成 DAG，新 Planner 不會產生它。Public 與 Private 是同一位阿月的不同 bounded surface，Private 訊息不自動回流 Public profile/memory。
 
@@ -96,7 +96,7 @@ Guard 通過後各 runtime 再做三道 runtime 檢查：
 
 ### 階段 5：Synthesizer（LLM）
 
-`synthesizer.py:synthesize` 收集所有非 SKIPPED 的 observation，經 `_strip_place_internals`（移除 map_url/place_id/photo_url 等內部欄位）後組成 prompt；server-owned confirmation reply、typed calendar clarification、capability answer 與 assessment domain reply 先 deterministic 直出，不再交給 LLM 改寫；其他結果才由模型產出回覆。只有 `discover` task 的成功 `search_nearby` 結果會建立可供 ordinal follow-up 的 presentation snapshot 與 server-owned ordering；`details`／`reviews` 的 `resolve_place` 維持原選定店家自然 prose，不重新編號或加推薦地點前綴。若沒有任何實際 tool／typed Web observation，Synthesizer 不得聲稱「查過但沒查到」。若候選地點卡存在，模型以 `compose_public_reply` 回傳自然文字與 server-owned `selected_candidate_refs`；Synthesizer 依 `card_intent` 產生 bounded card projection，Scheduler 再套用回 server-side `place_cards`。沒有候選卡片時 `tools=[]`、`tool_calls=[]` 是正常結果。
+`synthesizer.py:synthesize` 收集 verified observations 與每個 non-synth task 的 typed execution outcome，經 `_strip_place_internals`（移除 map_url/place_id/photo_url 等內部欄位）後組成 prompt。正常條件中止、上游不可用、Web／Places 真實失敗、證據不足、typed temporal clarification 與 pending confirmation 都由 LLM 寫最後回覆，不由 Scheduler 提前返回固定 fallback。Provider error、空內容、schema／grounding／confirmation layout 不合法時最多使用同一批 facts 重試一次；兩次仍失敗才轉 `synthesizer_emergency`。只有 `discover` task 的成功 `search_nearby` 結果會建立可供 ordinal follow-up 的 presentation snapshot；隱藏順序必須與候選名稱的公開首次提及順序一致，但 Server 不再強制把文字改寫為編號清單。`details`／`reviews` 的 `resolve_place` 維持原選定店家自然 prose，不重新編號或加推薦地點前綴。若沒有任何實際 tool／typed Web observation，Synthesizer 不得聲稱「查過但沒查到」。若候選地點卡存在，模型以 `compose_public_reply` 回傳自然文字與 server-owned candidate refs；Synthesizer 驗證公開提及順序，Scheduler 只保存實際呈現的候選。
 
 Web-only 的 `web_research.v1` 不論是 `answered`、`partial`、`insufficient_evidence`、`degraded` 或 `unavailable`，都先進入 Synthesizer 取得自然 prose 或輕量 Markdown；typed status、findings、limitations 不再被轉成固定 headings。只有 provider、compose、grounding 或 presentation validation failure 才使用最小化 deterministic Web fallback。Synthesizer 只收到該 typed Web result 作為 Web-only grounding；source URLs 與 `web_source_*` refs 由 server-owned metadata 提供，模型不得新增未觀察到的連結或 reference。
 
@@ -104,7 +104,7 @@ Synthesizer 也會套用 `capabilities.py` 的用詞真相（不得宣稱「隨�
 
 Synthesizer 的格式提示是自適應的：多個候選、比較、步驟或清楚分組時可使用輕量 Markdown；簡單答案維持自然 prose，不要求 Places、Web 或 itinerary 的固定標題。`presentation_mode="itinerary"` 只是 editorial hint，仍使用 ordinary compose contract。
 
-Server-owned mutation verification 與 pending confirmation preview 只有在回合沒有其他 observation 時才直接 bypass Synthesizer。混合回合會把鎖定回覆從 prompt 中分離，讓其他 observation 先正常組合，再附加鎖定回覆；未知 list item 仍保留，避免安全回覆造成其他任務結果遺失。
+Pending Public bubble confirmation 的 ID、revision、executor payload 不進 prompt；Synthesizer 只收到 Server-owned slot 與 bounded display facts，並以 `interaction_blocks_v1` 安排文字與 confirmation component 的邏輯順序。Server 驗證所有 message indices 剛好一次且有序、slot 剛好一次，並拒絕 text message 逐字重複 `display.summary`；emergency 也只用中性衔接句，詳細摘要只在元件出現一次。
 
 ### 階段 6：結果與 Trace
 
@@ -160,7 +160,7 @@ Calendar Agent 提出 `calendar.submit_commands` typed command batch
 
 `PublicAgentTurnContext`（`context.py:build_public_agent_turn_context` 組建）的總體限制：最近 32 則訊息、合計 8,000 字元；近期記憶最多 8 筆；prompt 不含 `seed_user_*`、Mongo document、未公開 ID、對方私人記憶或行事曆內容。原文與 compaction watermark 使用相同排序；超出預算時只提供 bounded recent-only projection。
 
-Planner 另使用 compact prompt projection：最近 4 則、合計 2,000 字元，會移除與 current message 重複的最新 user history；clock 僅保留 timezone、local date/time、weekday 與實際 temporal references。空的 optional state 省略，active proposal 不含 revision；其他 specialist 仍依上表收到自己的 slice。
+Planner 另使用 compact prompt projection：最近 8 則、合計 4,000 字元，會移除與 current message 重複的最新 user history；clock 僅保留 timezone、local date/time、weekday 與實際 temporal references。空的 optional state 省略，active proposal 不含 revision；Web 只把最近 4 則／2,000 字的 structured history 用於指涉與條件解析，不當作外部事實證據。
 
 ## 5. 背景流程（非同步）
 
@@ -175,7 +175,7 @@ Planner 另使用 compact prompt projection：最近 4 則、合計 2,000 字元
 
 | 情境 | 行為 |
 | --- | --- |
-| Planner 無效，或 provider error 重試後仍失敗 | fail closed，直接回覆，不執行工具 |
+| Planner 無效，或 provider error 重試後仍失敗 | fail closed 不執行 domain tool；Synthesizer 依 typed no-action fact 自然回覆 |
 | sub-agent 無 tool call | `sub_agent_no_proposal`（Calendar command 缺欄位、歧義、找不到目標則由 preflight 回 `needs_clarification`，不是此 generic failure） |
 | sub-agent exception | `sub_agent_exception`，其他 task 照跑 |
 | Guard 拒絕 | 該 proposal 標記失敗 code，其他 proposal 不受影響 |
@@ -210,6 +210,8 @@ new Web tool.
 Evidence is graded against the original answer target; adjacent-only or
 conflicting evidence cannot become an answered claim. Missing credentials,
 model failure, and no direct evidence have separate typed outcomes.
+
+若一個 Web task 會成為後續 Places 附近搜尋的來源，Scheduler 只在內部 slice 加上 `requires_activity_anchor`。Web 的 findings/sources/limitations 與 activity projection 分開保留；無效 optional activity 不會把 findings 一起丟棄。Required activity 可對同一批已觀察來源做一次 finish-only repair，仍沒有可信 title、venue 與 source binding 時，Places 以 `missing_activity_anchor` 停止，不呼叫 `places.search_nearby`。Synthesizer 仍回答已找到的活動線索，並明說附近晚餐尚未搜尋。
 
 ### Places -> Web candidate collaboration
 

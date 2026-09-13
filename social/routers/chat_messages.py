@@ -42,7 +42,7 @@ from services.notification_service import (
 from services.relationship_engagement_service import generate_mediator_private_room_id
 from services.match_state_service import verified_accepted_match_query
 from services.match_card_projection import project_match_card_history
-from services.public_nickname_service import proposal_display_name
+from services.public_nickname_service import proposal_display_name, warm_public_nicknames
 from services.risk_block_service import (
     RiskBlockServiceUnavailable,
     risk_block_service,
@@ -361,6 +361,7 @@ def get_contacts(user_id: str, unread_for: str | None = None):
         item["to_user"] if item["from_user"] == user_id else item["from_user"]
         for item in matches
     })
+    warm_public_nicknames(other_ids)
     profile_by_user = {
         profile["user_id"]: profile
         for profile in profiles_coll.find(
@@ -383,9 +384,12 @@ def get_contacts(user_id: str, unread_for: str | None = None):
             int(mediator_unread.get(mediator_room_id, 0)),
             legacy_mediator_unread,
         )
+        label = public_display_name(other_id, profile=other_doc)
+        name_available = bool(label and label != "對方")
         contacts.append({
             "id": other_id,
-            "name": public_display_name(other_id, profile=other_doc),
+            "name": label if name_available else "暱稱暫無法取得",
+            "name_available": name_available,
             "role": "user",
             "context": other_doc.get("current_context", "尚無近期情境") if other_doc else "尚無近期情境",
             "latest_message": latest_by_room.get(room_id, ""),

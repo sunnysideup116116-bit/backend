@@ -18,6 +18,7 @@ from pypinyin import Style, lazy_pinyin
 from services.language_service import normalize_zh_tw
 from services.match_state_service import verified_accepted_match_query
 from services.match_reason_service import reason_for_viewer
+from services.public_nickname_service import contact_display_name, warm_public_nicknames
 
 
 MAX_MENTIONED_CONTACTS = 3
@@ -84,10 +85,7 @@ def display_name(user_id: str | None, *, profile: dict[str, Any] | None = None) 
         profile = profiles_coll.find_one(
             {"user_id": user_id}, {"_id": 0, "display_name": 1, "nickname": 1, "name": 1},
         ) or {}
-    value = str(profile.get("display_name") or profile.get("nickname") or profile.get("name") or "").strip()
-    if not value or value == user_id or value.startswith(("seed_user_", "demo_user", "user_")):
-        return "對方"
-    return public_text(value, 30) or "對方"
+    return contact_display_name(user_id, profile) or "對方"
 
 
 def other_id(match: dict[str, Any], user_id: str) -> str | None:
@@ -185,6 +183,8 @@ def accepted_contact_ids_by_display_name(user_id: str, name_hint: str) -> list[s
             verified_accepted_match_query(user_id),
             {"_id": 0, "from_user": 1, "to_user": 1},
         )
+        matches = list(matches)
+        warm_public_nicknames([other_id(match, user_id) for match in matches])
         for match in matches:
             other_user_id = other_id(match, user_id)
             if not isinstance(other_user_id, str) or other_user_id in resolved:
@@ -293,15 +293,17 @@ def resolve_accepted_contact_name(user_id: str, name_hint: str) -> ContactNameRe
         return ContactNameResolution("unavailable")
     labels: list[tuple[str, str, str, str]] = []
     profile_by_id = {str(item.get("user_id")): item for item in profiles}
+    warm_public_nicknames(ids)
     for candidate in ids:
         profile = profile_by_id.get(candidate) or {}
-        label = public_text(
-            profile.get("display_name") or profile.get("nickname") or profile.get("name"),
-            30,
-        )
+        label = contact_display_name(candidate, profile)
         normalized = _normalized_contact_label(label)
         if label and label != "對方" and normalized:
             labels.append((candidate, label, normalized, _phonetic_contact_label(label)))
+    if len(labels) != len(ids):
+        # Unknown labels are not proof that a named accepted contact is absent;
+        # they also prevent safely ruling out duplicate names.
+        return ContactNameResolution("unavailable")
     exact = [(candidate, label) for candidate, label, normalized, _phonetic in labels if normalized == target]
     if len(exact) == 1:
         return ContactNameResolution("resolved_exact", exact[0][0], exact[0][1], kind="exact")
@@ -388,6 +390,7 @@ def accepted_contact_summaries(
     matches.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
     truncated = len(matches) > safe_limit
     contacts: list[dict[str, Any]] = []
+    warm_public_nicknames([other_id(match, user_id) for match in matches[:safe_limit]])
     for match in matches[:safe_limit]:
         other_user_id = other_id(match, user_id)
         if not other_user_id:

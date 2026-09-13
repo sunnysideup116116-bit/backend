@@ -68,12 +68,8 @@ def _schedule_or_run(scheduler: TaskScheduler | None, task: Callable[[], None]) 
 
 
 def _safe_profile_label(profile: dict, user_id: str) -> str:
-    value = str(
-        profile.get("display_name") or profile.get("nickname") or profile.get("name") or ""
-    ).strip()
-    if not value or value == user_id or value.startswith(("seed_user_", "demo_user", "user_")):
-        return "對方"
-    return value[:30]
+    from services.public_nickname_service import contact_display_name
+    return contact_display_name(user_id, profile) or "對方"
 
 
 def _receiver_intro(profile: dict, user_id: str) -> str:

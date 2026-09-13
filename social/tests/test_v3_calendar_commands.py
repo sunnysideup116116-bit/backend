@@ -356,8 +356,7 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertEqual(merged.draft_mode, "continue")
         self.assertIsNone(merged.target_hint)
         reference = _calendar_reference_for_command("owner", merged, get_draft("owner"))
-        self.assertEqual(reference["event_id"], "dentist-1")
-        self.assertTrue(reference["_force"])
+        self.assertIsNone(reference)
         clear_draft("owner")
 
     def test_resolved_target_continuation_drops_prior_target_selector(self):
@@ -488,7 +487,7 @@ class V3CalendarCommandTests(unittest.TestCase):
         self.assertIsNone(result)
         get_reference.assert_not_called()
 
-    def test_scheduler_loads_advertised_candidate_reference(self):
+    def test_scheduler_ignores_advertised_candidate_reference(self):
         command = CalendarCommand(action="cancel", target_reference="candidate_1")
         draft = {"candidates": [{"reference": "candidate_1", "label": "8/25 雞排約會"}]}
         with patch(
@@ -496,8 +495,8 @@ class V3CalendarCommandTests(unittest.TestCase):
             return_value={"event_id": "event-1", "revision": 4},
         ) as get_reference:
             result = _calendar_reference_for_command("owner", command, draft)
-        self.assertEqual(result["event_id"], "event-1")
-        get_reference.assert_called_once_with("owner", reference_key="candidate_1")
+        self.assertIsNone(result)
+        get_reference.assert_not_called()
 
     def test_draft_continuation_allows_explicit_date_correction(self):
         clear_draft("owner")
@@ -626,7 +625,8 @@ class V3CalendarCommandTests(unittest.TestCase):
         system_prompt = provider.call_args.kwargs["system_prompt"]
         self.assertIn("幫我安排", system_prompt)
         self.assertIn("只是說「我明天五點想去健身」不代表要寫入", system_prompt)
-        self.assertIn("第一個／第二個／最後一個", _SYSTEM)
+        self.assertIn("Planner 在 task_brief 解成具體公開內容", _SYSTEM)
+        self.assertIn("公開聊天不要輸出 target_reference", _SYSTEM)
 
     def test_calendar_agent_reports_invalid_command_instead_of_silent_no_proposal(self):
         context = AgentContextSlice(agent="calendar", payload={"message": "新增去日本"})

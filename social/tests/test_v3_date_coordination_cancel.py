@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext, TurnClockV1
+from services.ayue_agent.public_relationship_projection import ContactNameResolution
 from services.ayue_agent.v3.contracts import (
     DATE_COORDINATION_CANCEL_WRITE_INTENT,
     Plan,
@@ -132,33 +133,26 @@ class DateCoordinationCancelTests(unittest.TestCase):
         )
         self.assertEqual([task.agent for task in plan.tasks], ["relationship", "synthesizer"])
 
-    def test_cancel_preflight_binds_recent_room_reference_and_preview(self):
-        ctx = AgentTurnContext(user_id="owner", room_id="room", message="幫我取消約會卡")
+    def test_cancel_preflight_resolves_public_name_and_preview(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="幫我取消小宇的約會卡")
         turn = MagicMock(
             _mentioned_ids=[],
             mentioned_contact_overflow=False,
             _focused_match_authority=None,
         )
         match = _match()
-        reference = {
-            "match_id": "match-1",
-            "coordination_id": "coord-1",
-            "other_id": "other",
-            "safe_label": "小宇",
-            "status": "pending_partner",
-            "revision": 2,
-            "calendar_event_id": "",
-        }
         with patch(
-            "services.ayue_agent.v3.write_executors.get_date_coordination_reference",
-            return_value=reference,
+            "services.ayue_agent.v3.write_executors.resolve_accepted_contact_name",
+            return_value=ContactNameResolution(
+                "resolved_exact", other_id="other", display_name="小宇", kind="exact",
+            ),
         ), patch(
             "services.ayue_agent.v3.write_executors._date_coordination_candidates",
             return_value=[match],
         ):
             payload, preview = prepare_write_confirmation(
                 "relationship.cancel_date_coordination",
-                {"target_source": "recent_action"},
+                {"target_source": "name", "target_evidence_span": "小宇"},
                 ctx,
                 turn,
             )
@@ -175,14 +169,11 @@ class DateCoordinationCancelTests(unittest.TestCase):
             _focused_match_authority=None,
         )
         with patch(
-            "services.ayue_agent.v3.write_executors.get_date_coordination_reference",
-            return_value={"match_id": "match-1"},
-        ), patch(
             "services.ayue_agent.v3.write_executors._date_coordination_candidates",
         ) as candidates:
             payload, reply = prepare_write_confirmation(
                 "relationship.cancel_date_coordination",
-                {"target_source": "recent_action"},
+                {"target_source": "summary_singleton"},
                 ctx,
                 turn,
             )
@@ -214,8 +205,6 @@ class DateCoordinationCancelTests(unittest.TestCase):
             return_value=None,
         ), patch(
             "services.ayue_agent.v3.write_executors.TOOL_CALLS.update_one",
-        ), patch(
-            "services.ayue_agent.v3.write_executors.clear_date_coordination_reference",
         ):
             ok, reply, code = execute_write(
                 "relationship.cancel_date_coordination",

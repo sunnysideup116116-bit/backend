@@ -70,15 +70,8 @@ def _display_name(user_id: str) -> str:
         ) or {}
     except Exception:
         profile = {}
-    value = str(
-        profile.get("display_name")
-        or profile.get("nickname")
-        or profile.get("name")
-        or ""
-    ).strip()
-    if value and not value.startswith(("seed_user_", "demo_user", "user_")):
-        return value[:30]
-    return "對方"
+    from services.public_nickname_service import contact_display_name
+    return contact_display_name(user_id, profile) or "對方"
 
 
 def _other_participant(room_id: str, participant_id: str) -> str | None:

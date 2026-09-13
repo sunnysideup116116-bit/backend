@@ -31,6 +31,17 @@ PROBE_QUESTIONS = {
     "conversation_hook": "如果要讓對方更好開話題，你希望我透露哪個輕鬆的小線索？",
     "availability": "你近期哪個時間比較方便認識新朋友？",
 }
+_DECLINE_FEEDBACK_RE = re.compile(r"(?:不想聊|不方便說|先跳過|略過|不回答|不要問)")
+_UNRELATED_REQUEST_RE = re.compile(
+    r"(?:天氣|氣溫|下雨|新聞|股票|匯率|導航|查(?:一下)?|搜尋|"
+    r"我想問|請問|可以幫我|幫我(?:安排|設定|查|找)|行事曆|鬧鐘)",
+    re.IGNORECASE,
+)
+_RELATIONSHIP_FEEDBACK_RE = re.compile(
+    r"(?:約會|見面|碰面|相處|聊天|對方|他|她|喜歡|好感|開心|自在|尷尬|緊張|失望|難過|不錯|還好|普通|想再|不想再|感覺)",
+    re.IGNORECASE,
+)
+_SHORT_FEEDBACKS = frozenset({"很好", "不錯", "還好", "普通", "開心", "很開心", "不好", "有點尷尬", "蠻好的"})
 
 
 def generate_mediator_private_room_id(user_id: str, other_id: str) -> str:
@@ -213,13 +224,32 @@ def summarize_relationship(match_id, room_id: str) -> None:
     memory = match_doc.get("relationship_memory", {}) or {}
     if count < 6 or count - int(memory.get("last_summarized_count", 0)) < 4:
         return
+    last_count = max(0, int(memory.get("last_summarized_count", 0) or 0))
     history = list(messages_coll.find(
-        {"room_id": room_id}, {"_id": 0, "sender_id": 1, "content": 1},
-    ).sort("timestamp", -1).limit(20))[::-1]
-    transcript = "\n".join(f"{message['sender_id']}: {message['content']}" for message in history)
+        {"room_id": room_id}, {"_id": 0, "sender_id": 1, "content": 1, "timestamp": 1},
+    ).sort("timestamp", 1).skip(last_count).limit(20))
+    if not history:
+        return
+    labels = {
+        str(match_doc.get("from_user") or ""): "甲方",
+        str(match_doc.get("to_user") or ""): "乙方",
+        "ai_assistant": "阿月",
+    }
+    transcript_lines, transcript_chars = [], 0
+    for message in history:
+        content = re.sub(r"\s+", " ", str(message.get("content") or "")).strip()[:2000]
+        line = f"{labels.get(str(message.get('sender_id') or ''), '參與者')}: {content}"
+        if not content or transcript_chars + len(line) > 12000:
+            continue
+        transcript_lines.append(line)
+        transcript_chars += len(line)
+    if not transcript_lines:
+        return
+    transcript = "\n".join(transcript_lines)
+    previous_summary = str(memory.get("shared_summary") or "")[:2000]
     prompt = f'''
 
-請根據以下兩人的聊天紀錄，整理給媒人使用的關係摘要。
+請只根據共同聊天室的既有摘要與新增訊息，遞迴更新給媒人使用的關係摘要。不得加入任何悄悄話或私人記憶。
 
 只輸出 JSON：
 
@@ -227,14 +257,16 @@ def summarize_relationship(match_id, room_id: str) -> None:
 
 
 
-聊天紀錄：
+既有共同摘要：{previous_summary or "尚無"}
+
+新增共同聊天紀錄：
 
 {transcript}
 
 '''
     try:
         data = json.loads(generate_chat_completion(prompt, temperature=0.2, json_output=True).content)
-        data["last_summarized_count"] = count
+        data["last_summarized_count"] = min(count, last_count + len(history))
         data["updated_at"] = time.time()
         matches_coll.update_one({"_id": match_id}, {"$set": {"relationship_memory": data}})
     except Exception as exc:
@@ -242,10 +274,28 @@ def summarize_relationship(match_id, room_id: str) -> None:
 
 
 def queue_due_feedback(user_id: str) -> None:
+    from services.proactive_followup_service import (
+        followup_mode_for_user,
+        is_proactive_care_enabled,
+    )
+
+    try:
+        profile = profiles_coll.find_one(
+            {"user_id": user_id},
+            {"proactive_care_enabled": 1, "proactive_frequency": 1,
+             "last_automatic_relationship_prompt_at": 1},
+        ) or {}
+    except Exception:
+        return
+    if followup_mode_for_user(user_id) != "on" or not is_proactive_care_enabled(profile):
+        return
     mode, min_messages, idle_seconds, cooldown_seconds = probe_policy(user_id)
     if mode == "manual":
         return
     now = time.time()
+    last_prompt = float(profile.get("last_automatic_relationship_prompt_at", 0) or 0)
+    if last_prompt and now - last_prompt < 3600:
+        return
     # Keep one stable candidate snapshot for this poll.  The loop updates the
     # same collection and must not let those writes change which rows belong
     # to the current delivery pass.
@@ -290,10 +340,18 @@ def queue_due_feedback(user_id: str) -> None:
         )
         if not claimed.modified_count:
             continue
-        queue_mediator_event(
+        queued_event = queue_mediator_event(
             user_id, PROBE_QUESTIONS[kind], "probe_question", match_id=str(match_doc["_id"]),
             other_id=other_id, origin="auto", probe_kind=kind, probe_id=probe_id,
         )
+        if queued_event:
+            profile_query = {"user_id": user_id}
+            if "proactive_care_enabled" in profile:
+                profile_query["proactive_care_enabled"] = True
+            profiles_coll.update_one(
+                profile_query,
+                {"$set": {"last_automatic_relationship_prompt_at": now}},
+            )
         return
 
 
@@ -347,7 +405,9 @@ def consume_pending_probe_answer(
 ) -> str | None:
     """Consume a delivered probe once so it cannot fall through to the chat model."""
     pending = user_doc.get("pending_private_feedback") or {}
-    if pending.get("match_id") != str(match_doc["_id"]) or pending.get("other_id") != other_id:
+    if not pending:
+        return None
+    if pending.get("match_id") != str(match_doc.get("_id") or "") or pending.get("other_id") != other_id:
         return None
     probe_id = pending.get("probe_id")
     state_field = participant_probe_field(match_doc, user_id)
@@ -361,8 +421,17 @@ def consume_pending_probe_answer(
     answer = re.sub(r"\s+", " ", message or "").strip()
     if not answer:
         return "這題我還沒收到內容；你想回答時再跟我說就好。"
-    declined = any(phrase in answer for phrase in ("不想回答", "不方便說", "先跳過", "略過", "不回答"))
+    declined = bool(_DECLINE_FEEDBACK_RE.search(answer))
     kind = state.get("kind") or pending.get("kind") or "sentiment"
+    if not declined and _UNRELATED_REQUEST_RE.search(answer):
+        return None
+    if (
+        not declined
+        and kind == "sentiment"
+        and answer not in _SHORT_FEEDBACKS
+        and not _RELATIONSHIP_FEEDBACK_RE.search(answer)
+    ):
+        return None
     now = time.time()
     completed_state = {
         **state, "status": "declined" if declined else "completed", "answered_at": now,
@@ -400,3 +469,66 @@ def consume_pending_probe_answer(
     if kind == "sentiment":
         return "收到，這是你的私下想法；我先不替你轉述。"
     return "收到，我記下來了，之後會用這個幫你們找話題。"
+
+
+def consume_pending_post_date_feedback(
+    match_doc: dict,
+    user_doc: dict,
+    user_id: str,
+    other_id: str,
+    message: str,
+    *,
+    source_message_id: str,
+) -> str | None:
+    """Consume only a clearly related post-date reply; unrelated turns fall through."""
+    pending = user_doc.get("pending_post_date_feedback") or {}
+    if (
+        pending.get("relationship_id") != str(match_doc.get("_id") or "")
+        or pending.get("other_id") != other_id
+    ):
+        return None
+    answer = re.sub(r"\s+", " ", str(message or "")).strip()
+    now = time.time()
+    if not answer:
+        return None
+    if float(pending.get("expires_at", 0) or 0) <= now:
+        profiles_coll.update_one(
+            {"user_id": user_id, "pending_post_date_feedback.event_id": pending.get("event_id")},
+            {"$unset": {"pending_post_date_feedback": ""}},
+        )
+        return None
+    declined = bool(_DECLINE_FEEDBACK_RE.search(answer))
+    if not declined and _UNRELATED_REQUEST_RE.search(answer):
+        return None
+    if (
+        not declined
+        and answer not in _SHORT_FEEDBACKS
+        and not _RELATIONSHIP_FEEDBACK_RE.search(answer)
+    ):
+        return None
+    profiles_coll.update_one(
+        {"user_id": user_id, "pending_post_date_feedback.event_id": pending.get("event_id")},
+        {"$unset": {"pending_post_date_feedback": ""}},
+    )
+    from services.post_date_followup_service import POST_DATE_FOLLOWUPS
+
+    POST_DATE_FOLLOWUPS.update_one(
+        {"event_id": pending.get("event_id"), "recipient_id": user_id, "status": "delivered"},
+        {"$set": {
+            "response_status": "declined" if declined else "answered",
+            "response_message_id": source_message_id,
+            "responded_at": now,
+        }},
+    )
+    if declined:
+        return "好，這次先不聊，我也不會把它記成你對對方的負面看法。"
+    from services.relationship_memory_service import enqueue_relationship_memory_extraction
+
+    enqueue_relationship_memory_extraction(
+        user_id,
+        other_id,
+        str(match_doc.get("_id") or ""),
+        source_message_id,
+        date_event_id=str(pending.get("event_id") or ""),
+    )
+    return "收到，這是你私下告訴我的感受；我不會自動轉述給對方。"

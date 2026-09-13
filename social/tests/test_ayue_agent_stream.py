@@ -497,7 +497,7 @@ class AyueAgentStreamTests(unittest.TestCase):
         })
         self.assertEqual(len(token["text"]), 600)
 
-    def test_place_tokens_are_released_only_after_assistant_and_snapshot_persist(self):
+    def test_public_place_reply_is_saved_without_snapshot_publication(self):
         req = DirectChatRequest(
             user_id="owner", contact_id="ai_assistant", message="把第二間排進行程",
         )
@@ -512,11 +512,6 @@ class AyueAgentStreamTests(unittest.TestCase):
             order.append("assistant_saved")
             return {"message_id": "assistant-message", "content": content}
 
-        def publish(_user_id, _room_id, _run_id, _message_id):
-            order.append("presentation_published")
-            self.assertEqual(callbacks, [])
-            return True
-
         with patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
              patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
@@ -528,19 +523,67 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.mark_message_use"), \
              patch("routers.public_chat.complete_public_ayue_onboarding"), \
              patch("routers.public_chat.save_message", side_effect=save_reply), \
-             patch("routers.public_chat.publish_place_presentation", side_effect=publish), \
              patch("routers.public_chat.mark_public_confirmation_presented"):
             response = _complete_public_turn(
                 req, "room", [], background_tasks=None, user_message_id="owner-message",
                 on_token=callbacks.append,
             )
 
-        self.assertEqual(order, ["assistant_saved", "presentation_published"])
-        self.assertEqual("".join(callbacks), canonical)
-        self.assertTrue(all(0 < len(fragment) <= 120 for fragment in callbacks))
+        self.assertEqual(order, ["assistant_saved"])
+        self.assertEqual(callbacks, [])
         self.assertEqual(response["reply"], canonical)
 
-    def test_place_tokens_are_not_released_when_snapshot_publication_fails(self):
+    def test_public_confirmation_persists_versioned_interaction_layout_before_activation(self):
+        req = DirectChatRequest(
+            user_id="owner", contact_id="ai_assistant", message="幫我新增晚餐",
+        )
+        history_cursor = MagicMock()
+        history_cursor.sort.return_value.limit.return_value = []
+        blocks = [
+            {"type": "text", "message_index": 0},
+            {"type": "confirmation", "slot": "primary_write_confirmation"},
+        ]
+        saved_metadata = {}
+
+        def save_reply(_room_id, _sender_id, content, metadata=None, **_kwargs):
+            saved_metadata.update(metadata or {})
+            return {
+                "message_id": "assistant-confirmation",
+                "content": content,
+                "metadata": dict(metadata or {}),
+            }
+
+        with patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
+             patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
+             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
+                 handled=True, reply="晚餐時間整理好了，你確認一下。",
+                 messages=["晚餐時間整理好了，你確認一下。"],
+                 presentation_class="transaction", agent_run_id="c" * 32,
+                 interaction_blocks_v1=blocks,
+                 choice_prompt={
+                     "id": "choice-calendar", "state": "pending",
+                     "selected": None, "expires_at": 1e18,
+                     "display": {
+                         "title": "確認行事曆變更", "summary": "9/19 19:00 晚餐",
+                         "consequence": "確認後才會寫入行事曆",
+                     },
+                 },
+             )), \
+             patch("routers.public_chat.mark_message_use_from_turn"), \
+             patch("routers.public_chat.mark_message_use"), \
+             patch("routers.public_chat.complete_public_ayue_onboarding"), \
+             patch("routers.public_chat.save_message", side_effect=save_reply), \
+             patch("routers.public_chat.mark_public_confirmation_presented") as mark:
+            response = _complete_public_turn(
+                req, "room", [], background_tasks=None, user_message_id="owner-message",
+            )
+
+        self.assertEqual(saved_metadata["interaction_blocks_v1"], blocks)
+        self.assertEqual(response["interaction_blocks_v1"], blocks)
+        self.assertEqual(response["choice_prompt"]["display"]["title"], "確認行事曆變更")
+        self.assertEqual(mark.call_args.kwargs["interaction_blocks_v1"], blocks)
+
+    def test_legacy_place_snapshot_flag_cannot_replace_saved_natural_reply(self):
         req = DirectChatRequest(
             user_id="owner", contact_id="ai_assistant", message="把第二間排進行程",
         )
@@ -566,8 +609,8 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.complete_public_ayue_onboarding"), \
              patch("routers.public_chat.save_message", return_value={
                  "message_id": "assistant-message", "content": canonical,
+                 "metadata": {},
              }), \
-             patch("routers.public_chat.publish_place_presentation", return_value=False), \
              patch("routers.public_chat.mark_public_confirmation_presented") as mark_confirmation:
             response = _complete_public_turn(
                 req, "room", [], background_tasks=None, user_message_id="owner-message",
@@ -575,10 +618,9 @@ class AyueAgentStreamTests(unittest.TestCase):
             )
 
         self.assertEqual(callbacks, [])
-        self.assertNotIn("A 店", response["reply"])
-        self.assertIn("暫時無法保存候選清單", response["reply"])
-        self.assertIsNone(response["choice_prompt"])
-        mark_confirmation.assert_not_called()
+        self.assertEqual(response["reply"], canonical)
+        self.assertEqual(response["choice_prompt"]["id"], "choice-1")
+        mark_confirmation.assert_called_once()
 
     def test_public_stream_does_not_publish_tokens_without_opt_in(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="說點什麼")

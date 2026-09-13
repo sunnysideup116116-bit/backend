@@ -92,7 +92,7 @@ class V3CalendarRuntimeBoundaryTests(unittest.TestCase):
             "start_date": "2026-09-19", "end_date": "2026-09-19",
         })
 
-    def test_next_google_event_without_write_reference_clears_an_old_reference(self):
+    def test_next_google_event_does_not_touch_legacy_write_reference(self):
         class Services:
             def execute(self, proposal, **_kwargs):
                 return SimpleNamespace(
@@ -120,7 +120,7 @@ class V3CalendarRuntimeBoundaryTests(unittest.TestCase):
                 max_reads=1,
             )
 
-        clear_reference.assert_called_once_with("owner")
+        clear_reference.assert_not_called()
 
 
 if __name__ == "__main__":

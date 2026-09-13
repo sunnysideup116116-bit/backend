@@ -27,11 +27,27 @@ class V3ContextSlicerTests(unittest.TestCase):
     def test_calendar_slice_excludes_match_and_places(self):
         s = slice_for_agent("calendar", self.turn, prior_observations=[])
         self.assertEqual(s.agent, "calendar")
-        # calendar slice should contain events/time/history but NOT match proposal or places
+        # Planner resolves cross-turn language before Calendar receives this slice.
         self.assertIn("clock", s.payload)
-        self.assertIn("recent_messages", s.payload)
+        self.assertNotIn("recent_messages", s.payload)
         self.assertNotIn("active_proposal", s.payload)
         self.assertNotIn("user_location", s.payload)
+
+    def test_owner_relationship_memory_is_visible_only_to_relationship_agent(self):
+        self.turn.owner_relationship_memories = [{
+            "topic": "聊天感受",
+            "owner_view": "本人覺得和對方聊天很自在",
+            "source": "owner_private_relationship_memory",
+        }]
+        relationship = slice_for_agent("relationship", self.turn, prior_observations=[])
+        match = slice_for_agent("match", self.turn, prior_observations=[])
+        calendar = slice_for_agent("calendar", self.turn, prior_observations=[])
+        self.assertEqual(
+            relationship.payload["owner_private_relationship_memories"][0]["topic"],
+            "聊天感受",
+        )
+        self.assertNotIn("owner_private_relationship_memories", match.payload)
+        self.assertNotIn("owner_private_relationship_memories", calendar.payload)
 
     def test_places_slice_excludes_calendar_and_match(self):
         s = slice_for_agent("places", self.turn, prior_observations=[])
@@ -41,7 +57,7 @@ class V3ContextSlicerTests(unittest.TestCase):
         self.assertNotIn("active_proposal", s.payload)
         self.assertNotIn("recent_context", s.payload)
 
-    def test_places_slice_receives_recent_candidate_projection_for_continuation(self):
+    def test_places_slice_ignores_legacy_candidate_projection(self):
         self.turn.recent_place_candidates = {
             "snapshot_version": "v3-place-presentation-v1",
             "candidates": [{
@@ -55,9 +71,9 @@ class V3ContextSlicerTests(unittest.TestCase):
 
         sliced = slice_for_agent("places", self.turn, prior_observations=[])
 
-        self.assertEqual(sliced.payload["recent_place_candidates"]["candidates"][0]["label"], "旧店")
+        self.assertNotIn("recent_place_candidates", sliced.payload)
 
-    def test_places_slice_gets_only_safe_abandoned_place_referent(self):
+    def test_places_slice_ignores_legacy_place_followup(self):
         self.turn.place_followup = {
             "fields": {"date": "2026-09-12", "start_time": "08:30"},
             "resolved_place": {
@@ -70,13 +86,7 @@ class V3ContextSlicerTests(unittest.TestCase):
 
         sliced = slice_for_agent("places", self.turn, prior_observations=[])
 
-        self.assertEqual(
-            sliced.payload["place_followup"]["resolved_place"]["label"],
-            "JINLIANFA 金聯發",
-        )
-        self.assertTrue(sliced.payload["place_followup"]["abandonment_requested"])
-        self.assertNotIn("fields", sliced.payload["place_followup"])
-        self.assertNotIn("date", str(sliced.payload["place_followup"]))
+        self.assertNotIn("place_followup", sliced.payload)
 
     def test_match_slice_excludes_calendar_details(self):
         s = slice_for_agent("match", self.turn, prior_observations=[])
@@ -121,7 +131,7 @@ class V3ContextSlicerTests(unittest.TestCase):
             "ayue_commitments": [], "recent_decisions": [],
         })
 
-    def test_web_slice_excludes_internal_profile_and_caps_history(self):
+    def test_web_slice_excludes_internal_profile_and_history(self):
         self.turn.recent_messages = [
             {"role": "user", "content": f"msg {i}"} for i in range(8)
         ]
@@ -129,13 +139,32 @@ class V3ContextSlicerTests(unittest.TestCase):
         self.assertEqual(s.agent, "web")
         self.assertNotIn("recent_context", s.payload)
         self.assertNotIn("active_proposal", s.payload)
-        self.assertLessEqual(len(s.payload["recent_messages"]), 4)
+        self.assertNotIn("recent_messages", s.payload)
+
+    def test_all_agent_slices_remove_a_duplicated_current_message(self):
+        self.turn.recent_messages = [
+            {"role": "assistant", "content": "剛剛推薦 A 店和 B 店。"},
+            {"role": "user", "content": self.turn.message},
+        ]
+        history_agents = {"match", "profile", "product_info", "synthesizer"}
+        for agent in ("calendar", "places", "web", "match", "relationship", "profile", "product_info", "synthesizer"):
+            with self.subTest(agent=agent):
+                sliced = slice_for_agent(agent, self.turn, prior_observations=[])
+                if agent not in history_agents:
+                    self.assertNotIn("recent_messages", sliced.payload)
+                    continue
+                self.assertEqual(len(sliced.payload["recent_messages"]), 1)
+                self.assertEqual(sliced.payload["recent_messages"][0]["role"], "assistant")
+                self.assertEqual(
+                    sliced.payload["recent_messages"][0]["content"],
+                    "剛剛推薦 A 店和 B 店。",
+                )
 
     def test_relationship_slice_contains_only_public_relationship_fields(self):
         s = slice_for_agent("relationship", self.turn, prior_observations=[])
         self.assertEqual(s.agent, "relationship")
         self.assertIn("clock", s.payload)
-        self.assertIn("recent_messages", s.payload)
+        self.assertNotIn("recent_messages", s.payload)
         self.assertNotIn("active_proposal", s.payload)
 
     def test_profile_slice_excludes_match_and_calendar(self):

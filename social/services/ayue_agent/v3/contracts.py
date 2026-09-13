@@ -93,6 +93,25 @@ class MatchSearchRequest(BaseModel):
     invitation_evidence: str = Field(default="", max_length=120)
 
 
+class ResolvedTemporalTarget(BaseModel):
+    """Server-resolved date shared by every task bound to one time phrase."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_text: str = Field(min_length=1, max_length=40)
+    date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    timezone: str = Field(default="Asia/Taipei", min_length=1, max_length=64)
+
+
+class TemporalClarification(BaseModel):
+    """Prompt-safe date alternatives that require a natural LLM question."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_text: str = Field(min_length=1, max_length=40)
+    candidates: list[dict[str, str]] = Field(min_length=2, max_length=3)
+
+
 class SubTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -145,6 +164,10 @@ class SubTask(BaseModel):
         default=None,
         description="Optional Calendar control edge; omit unless a downstream task must wait for a Calendar outcome",
     )
+    resolved_time_target: ResolvedTemporalTarget | None = Field(
+        default=None,
+        description="Internal-only server-resolved date; never authored by a provider",
+    )
 
     @model_validator(mode="after")
     def _normalize_evidence_policy(self) -> "SubTask":
@@ -167,6 +190,8 @@ class SubTask(BaseModel):
             raise ValueError("web_mode is only valid for Web tasks")
         if self.outcome_contract is not None and self.agent != "calendar":
             raise ValueError("outcome_contract is only valid for Calendar tasks")
+        if self.resolved_time_target is not None and self.agent not in {"calendar", "web"}:
+            raise ValueError("resolved_time_target is only valid for Calendar or Web tasks")
         return self
 
 
@@ -237,6 +262,10 @@ class Plan(BaseModel):
             "the reference is never authoritative by itself"
         ),
     )
+    temporal_clarification: TemporalClarification | None = Field(
+        default=None,
+        description="Internal-only unresolved date alternatives for Synthesizer composition",
+    )
 
     @field_validator("direct_reply")
     @classmethod
@@ -269,6 +298,8 @@ class Plan(BaseModel):
                 raise ValueError("direct_chat plan cannot contain an opportunity")
             if self.presentation_mode != "default":
                 raise ValueError("direct_chat plan cannot use itinerary presentation")
+            if self.temporal_clarification is not None:
+                raise ValueError("direct_chat cannot carry temporal clarification")
             return self
 
         if self.mode == "product_info":
@@ -282,6 +313,8 @@ class Plan(BaseModel):
                 raise ValueError("product_info plan requires topics")
             if len(set(self.product_info_topics)) != len(self.product_info_topics):
                 raise ValueError("duplicate product_info topic")
+            if self.temporal_clarification is not None:
+                raise ValueError("product_info cannot carry temporal clarification")
             return self
 
         if self.direct_reply is not None or self.direct_messages or self.product_info_topics:
@@ -375,6 +408,12 @@ class Plan(BaseModel):
         synthesizers = [t for t in self.tasks if t.agent == "synthesizer"]
         if len(synthesizers) != 1:
             raise ValueError("plan must contain exactly one synthesizer")
+        if self.temporal_clarification is not None:
+            if self.write_intent != "none":
+                raise ValueError("temporal clarification cannot authorize a write")
+            if len(self.tasks) != 1:
+                raise ValueError("temporal clarification runs only the synthesizer")
+            return self
         synthesizer = synthesizers[0]
         domain_ids = ids - {synthesizer.id}
         referenced_domains = {

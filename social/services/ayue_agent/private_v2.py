@@ -98,6 +98,8 @@ class PrivateAgentTurnContextV2:
     local_time: str
     relationship_semantic_context: dict[str, Any] = field(default_factory=dict)
     external_calendar_authorized: bool = False
+    shared_summary: dict[str, Any] = field(default_factory=dict)
+    owner_relationship_memories: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _compact(value: str) -> str:
@@ -109,18 +111,38 @@ def _confirmation_choice(message: str) -> str:
     return "confirm" if compact in YES else "cancel" if compact in NO else "none"
 
 
-def _bounded_history(room_id: str, *, owner_id: str, other_id: str | None = None) -> list[dict[str, str]]:
-    raw = list(messages_coll.find({"room_id": room_id}, {"_id": 0, "sender_id": 1, "content": 1}).sort("timestamp", -1).limit(12))[::-1]
+def _bounded_history(
+    room_id: str,
+    *,
+    owner_id: str,
+    other_id: str | None = None,
+    limit: int = 20,
+    char_budget: int = 8000,
+) -> list[dict[str, str]]:
+    raw = list(messages_coll.find(
+        {"room_id": room_id},
+        {"sender_id": 1, "content": 1, "timestamp": 1},
+    ).sort("timestamp", -1).limit(limit))
     total, result = 0, []
     for item in raw:
-        content = re.sub(r"\s+", " ", str(item.get("content") or "")).strip()[:500]
-        if not content or total + len(content) > 6000:
+        original = re.sub(r"\s+", " ", str(item.get("content") or "")).strip()
+        remaining = char_budget - total
+        content = original[:min(2000, remaining)]
+        if not content:
             continue
         sender = item.get("sender_id")
         role = "本人" if sender == owner_id else "對方" if other_id and sender == other_id else "阿月"
-        result.append({"role": role, "content": content})
+        result.append({
+            "message_id": str(item.get("_id") or ""),
+            "role": role,
+            "content": content,
+            "timestamp": str(item.get("timestamp") or "")[:40],
+            "truncated": "true" if len(original) > len(content) else "false",
+        })
         total += len(content)
-    return result
+        if total >= char_budget:
+            break
+    return list(reversed(result))
 
 
 def build_private_turn_context_v2(
@@ -136,18 +158,35 @@ def build_private_turn_context_v2(
     shareable["display_name"] = display_name(other_id)
     pair_room = generate_room_id(match_doc["from_user"], match_doc["to_user"])
     private_room = f"mediator_private::{user_id}::{other_id}"
+    from services.relationship_memory_service import relationship_memory_context
+
+    relationship_summary = match_doc.get("relationship_memory") or {}
     return PrivateAgentTurnContextV2(
         user_id=user_id, other_id=other_id, room_id=private_room, message=message,
         pair_revision=int(match_doc.get("proposal_revision", 0) or 0),
         viewer_profile=viewer_context,
         counterparty_shareable=shareable,
         counterparty_advisory=private_counterparty_strategy_context(other_id),
-        shared_history=_bounded_history(pair_room, owner_id=user_id, other_id=other_id),
-        private_history=_bounded_history(private_room, owner_id=user_id),
+        shared_history=_bounded_history(
+            pair_room, owner_id=user_id, other_id=other_id, limit=40, char_budget=16000,
+        ),
+        private_history=_bounded_history(
+            private_room, owner_id=user_id, limit=20, char_budget=8000,
+        ),
         shared_facts=private_pair_shared_facts(match_doc, user_id, other_id),
         local_time=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M"),
         relationship_semantic_context=get_relationship_semantic_context(match_doc, pair_room),
         external_calendar_authorized=external_calendar_authorized,
+        shared_summary={
+            "summary": str(relationship_summary.get("shared_summary") or "")[:2000],
+            "source_message_count": int(relationship_summary.get("last_summarized_count", 0) or 0),
+            "updated_at": str(relationship_summary.get("updated_at") or "")[:40],
+            "source": "shared_pair_chat_only",
+        },
+        owner_relationship_memories=(
+            relationship_memory_context(user_id, other_id)
+            if external_calendar_authorized else []
+        ),
     )
 
 PRIVATE_SCOPE_POLICY = """
@@ -203,6 +242,8 @@ def _legacy_planner_prompt(ctx: PrivateAgentTurnContextV2, observations: list[di
         "counterparty_shareable": ctx.counterparty_shareable,
         "shared_history": ctx.shared_history, "private_history": ctx.private_history,
         "shared_facts": ctx.shared_facts, "local_time": ctx.local_time,
+        "shared_summary": ctx.shared_summary,
+        "owner_private_relationship_memories": ctx.owner_relationship_memories,
         "visible_tools": sorted(PRIVATE_TOOL_REGISTRY), "observations": observations,
         # This section is planner-only. It can influence only the four strategy
         # labels below, never text or factual output.
@@ -312,20 +353,33 @@ def _search_shared_history(ctx: PrivateAgentTurnContextV2, query: str) -> dict[s
             "room_id": generate_room_id(ctx.user_id, ctx.other_id),
             "content": {"$regex": re.escape(term), "$options": "i"},
         },
-        {"_id": 0, "sender_id": 1, "content": 1, "timestamp": 1},
-    ).sort("timestamp", -1).limit(20))[::-1]
-    messages = []
+        {"sender_id": 1, "content": 1, "timestamp": 1},
+    ).sort("timestamp", -1).limit(20))
+    messages, total = [], 0
+    recent_ids = {
+        str(item.get("message_id") or "")
+        for item in ctx.shared_history
+        if str(item.get("message_id") or "")
+    }
     for item in raw:
-        content = re.sub(r"\s+", " ", str(item.get("content") or "")).strip()[:500]
-        if not content:
+        message_id = str(item.get("_id") or "")
+        original = re.sub(r"\s+", " ", str(item.get("content") or "")).strip()
+        remaining = 16000 - total
+        content = original[:min(2000, remaining)]
+        if not content or (message_id and message_id in recent_ids):
             continue
         sender = item.get("sender_id")
         messages.append({
+            "message_id": message_id,
             "role": "本人" if sender == ctx.user_id else "對方",
             "content": content,
             "timestamp": str(item.get("timestamp") or "")[:40],
+            "truncated": len(original) > len(content),
         })
-    return {"query": term, "messages": messages, "needs_query": False}
+        total += len(content)
+        if total >= 16000:
+            break
+    return {"query": term, "messages": list(reversed(messages)), "needs_query": False}
 
 
 def _execute_read(name: str, ctx: PrivateAgentTurnContextV2, arguments: dict[str, str]) -> tuple[bool, dict[str, Any], str | None]:
@@ -421,6 +475,8 @@ def _compose(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]],
         "message": ctx.message, "viewer_profile": ctx.viewer_profile,
         "counterparty_shareable": ctx.counterparty_shareable, "shared_history": ctx.shared_history,
         "shared_facts": ctx.shared_facts, "observations": observations, "strategy": strategy,
+        "shared_summary": ctx.shared_summary,
+        "owner_private_relationship_memories": ctx.owner_relationship_memories,
         "relationship_semantic_context": {
             "current_role": semantic_plan.get("current_role"),
             "macro_summary": context_data.get("macro_summary"),

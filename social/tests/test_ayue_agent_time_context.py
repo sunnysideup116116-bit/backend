@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from services.ayue_agent.time_context import build_turn_clock
+from services.ayue_agent.time_context import build_turn_clock, resolve_temporal_candidates
 
 
 class TurnClockTests(unittest.TestCase):
@@ -46,6 +46,17 @@ class TurnClockTests(unittest.TestCase):
         self.assertEqual(clock.temporal_references["下下周四"], "2026-08-20")
         self.assertNotIn("下週", clock.temporal_references)
         self.assertNotIn("週四", clock.temporal_references)
+
+    def test_sunday_this_saturday_exposes_stated_and_next_candidates(self):
+        local_now = datetime.fromisoformat("2026-09-13T17:00:00+08:00")
+        candidates = resolve_temporal_candidates("這週六找活動", local_now)
+        self.assertEqual(candidates, [{
+            "source_text": "這週六",
+            "candidates": [
+                {"id": "stated_period", "date": "2026-09-12", "relation": "past"},
+                {"id": "next_occurrence", "date": "2026-09-19", "relation": "future"},
+            ],
+        }])
 
 
 if __name__ == "__main__":

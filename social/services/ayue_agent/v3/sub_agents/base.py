@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -15,6 +16,7 @@ from services.ayue_agent.tool_registry import (
     planner_arguments_schema,
 )
 from ..contracts import AgentContextSlice, ToolProposal
+from ..public_reply import validate_public_reply
 
 
 @dataclass
@@ -39,6 +41,10 @@ class SubAgentMetrics:
     # contains codes only; raw arguments remain in the existing loopback-only
     # debug payload and never enter public trace.
     rejected_calls: list[str] = field(default_factory=list)
+    # Public Relationship may return a safe question instead of a write
+    # proposal when the user has not identified a unique target. This text is
+    # presentation-only and never grants tool authority.
+    clarification_text: str = ""
 
 
 def _record_llm_request(metrics: SubAgentMetrics, result: Any, duration_ms: int = 0) -> None:
@@ -222,6 +228,7 @@ def run_required_sub_agent(
     context_slice: AgentContextSlice, task_brief: str,
     retry_hint: str, max_attempts: int = 2,
     model_owner: str | None = None,
+    allow_natural_clarification: bool = False,
 ) -> tuple[list[ToolProposal], SubAgentMetrics]:
     """Run a bounded function-call loop for a typed single-tool capability.
 
@@ -262,6 +269,36 @@ def run_required_sub_agent(
         _record_llm_request(metrics, result)
 
         calls = result.tool_calls or []
+        if not calls and allow_natural_clarification:
+            validation = validate_public_reply(
+                str(result.content or ""),
+                preserve_details=True,
+                reject_internal_identifiers=True,
+                reject_structured_output=True,
+                max_chars=360,
+                max_sentences=5,
+            )
+            clarification = str(validation.reply or "").strip()
+            unsupported_action = re.search(
+                r"(?:已|已經|剛剛).{0,10}(?:建立|送出|取消|撤回|修改|新增|開始)",
+                clarification,
+            )
+            protocol_language = re.search(
+                r"(?:tool|function|schema|工具|函式|呼叫|協定|格式錯誤)",
+                clarification,
+                re.IGNORECASE,
+            )
+            if (
+                clarification
+                and clarification.endswith(("？", "?"))
+                and unsupported_action is None
+                and protocol_language is None
+            ):
+                metrics.clarification_text = clarification
+                metrics.error = ""
+                return [], metrics
+            metrics.rejected_calls.append("unsafe_or_empty_clarification")
+            continue
         if len(calls) != 1:
             metrics.rejected_calls.append("required_tool_call_count")
             continue

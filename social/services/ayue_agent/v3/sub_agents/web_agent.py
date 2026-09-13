@@ -31,12 +31,37 @@ from ..web_research import (
     WebSourceType,
     PLACE_CANDIDATE_REF_PATTERN,
     WEB_SOURCE_REF_PATTERN,
+    observed_source_catalog,
     project_web_observations,
 )
 from .base import SubAgentMetrics
 
 
 MAX_WEB_DECISION_ATTEMPTS = 2
+
+
+def _bounded_recent_messages(value: Any) -> list[dict[str, str]]:
+    """Defensively cap structured conversation context at the Web boundary."""
+    source = list(value or []) if isinstance(value, (list, tuple)) else []
+    selected: list[dict[str, str]] = []
+    used = 0
+    for item in reversed(source):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "")
+        content = str(item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        remaining = 2000 - used
+        if remaining <= 0:
+            break
+        clipped = content[:remaining]
+        selected.append({"role": role, "content": clipped})
+        used += len(clipped)
+        if len(selected) >= 4:
+            break
+    selected.reverse()
+    return selected
 
 
 def _project_dependency_observations(prior_observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -224,6 +249,9 @@ _SYSTEM = """你是 Public Ayue V3 的 Web Research Agent。
 - 若 task 是尋找活動供 itinerary 使用，且來源直接提供活動名稱、場地、日期或時間，額外填 `activity`；activity 的 source_refs/source_urls 必須是實際 observation，缺少的日期或時間留空，不要推測。
 - 找不到指定 direct evidence 時，使用 insufficient_evidence，列出 limitation；不要推測或把 adjacent context 升級成答案。
 - 如果 context 提供 dependency_observations，必須保留其中已驗證的日期、地點與活動條件；不要把它們改成另一個問題，也不要要求上游重新搜尋。
+- context.recent_messages 只用來解析「剛剛那間」、「那個活動」等指涉與保留使用者明確條件；不是外部事實證據，不得單獨用來建立 finding。
+- context.resolved_time_target 是 Server 已選定的權威日期；搜尋與 finish 必須使用其 ISO date，不得再對原始相對日期做第二次解讀。
+- place_candidates 或 dependency_observations 已綁定主體時，它們優先於 recent_messages 與自由文字中的店名、地點或活動推測。
 - 不要輸出任何 user_id、match_id、event_id、revision 或其他 authority field。
 """
 
@@ -347,6 +375,13 @@ def _normalize_finish_arguments(
 
     normalization_codes: list[str] = []
     raw_activity = arguments.get("activity")
+    if (
+        isinstance(raw_activity, list)
+        and len(raw_activity) == 1
+        and isinstance(raw_activity[0], dict)
+    ):
+        raw_activity = raw_activity[0]
+        normalization_codes.append("web_activity_singleton_list_normalized")
     activity: dict[str, Any] | None = None
     if raw_activity is not None and not isinstance(raw_activity, dict):
         normalization_codes.append("web_activity_discarded_invalid_type")
@@ -376,19 +411,20 @@ def _normalize_finish_arguments(
             if not venue and location_alias:
                 venue = location_alias
                 normalization_codes.append("web_activity_location_alias_normalized")
-            optional_fields = {
-                key: activity_text(key, limit)
-                for key, limit in (
-                    ("date", 20),
-                    ("start_time", 10),
-                    ("end_time", 10),
-                    ("district", 80),
-                    ("summary", 300),
-                )
-            }
-            if any(value is None for value in optional_fields.values()):
-                normalization_codes.append("web_activity_discarded_invalid_type")
-            elif not title or not venue:
+            optional_fields: dict[str, str] = {}
+            for key, limit in (
+                ("date", 20),
+                ("start_time", 10),
+                ("end_time", 10),
+                ("district", 80),
+                ("summary", 300),
+            ):
+                value = activity_text(key, limit)
+                if value is None:
+                    value = ""
+                    normalization_codes.append(f"web_activity_{key}_omitted")
+                optional_fields[key] = value
+            if not title or not venue:
                 normalization_codes.append("web_activity_discarded_incomplete")
             else:
                 date = optional_fields["date"] or ""
@@ -596,7 +632,7 @@ def _parse_decision_call(
                     subject_ref=item.subject_ref,
                 ) for item in parsed.findings],
                 limitations=parsed.limitations,
-                normalization_codes=normalization_codes,
+                normalization_codes=normalization_codes[:4],
             ), ""
         return None, "web_decision_wrong_function"
     except Exception:
@@ -651,6 +687,9 @@ def decide(
     metrics = SubAgentMetrics()
     metrics.requested_model_tier = "main"
     projected = project_web_observations(observations)
+    requires_activity_anchor = bool(
+        context_slice.payload.get("_requires_activity_anchor")
+    )
     safe_candidates = [
         {
             "candidate_ref": str(item.get("candidate_ref") or "")[:80],
@@ -681,6 +720,7 @@ def decide(
         "answer_target": task_brief,
         "evidence_policy": evidence_policy,
         "phase": "finish" if finish_only else "research",
+        "requires_activity_anchor": requires_activity_anchor,
         "round": round_index,
         "available_actions": [
             action for action, enabled in (
@@ -699,6 +739,10 @@ def decide(
         "context": {
             "user_location": context_slice.payload.get("user_location", ""),
             "clock": context_slice.payload.get("clock", {}),
+            "resolved_time_target": context_slice.payload.get("resolved_time_target"),
+            "recent_messages": _bounded_recent_messages(
+                context_slice.payload.get("recent_messages"),
+            ),
         },
         "dependency_observations": _project_dependency_observations(
             context_slice.payload.get("prior_observations") or []
@@ -712,6 +756,11 @@ def decide(
         "單一主體與單一問題預設只產生一個 search query；只有兩個不同主體或兩種明確不同 evidence class 才使用兩個 query。\n"
         + "When place_candidates are present, research only those candidate refs. Every search query must carry one subject_ref; never invent a new place. Preserve the unresolved criterion, date, and location.\n"
         + ("Follow the research quality policy: search for sources first, and extract relevant context for nuanced requests.\n" if evidence_policy == "casual_discovery" else "這是嚴格查證；只有直接且足以回答問題的證據才能標成 answered，否則清楚列出尚缺證據。\n")
+        + (
+            "下游附近地點搜尋需要活動錨點；finish 的 activity 必須是 object，"
+            "並含有 title、venue，以及來自本回合 observations 的 source_refs 或 source_urls。\n"
+            if requires_activity_anchor else ""
+        )
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         + "\n\n"
         + _RESEARCH_POLICY
@@ -726,19 +775,56 @@ def decide(
     metrics.tools_raw = tools
     metrics.input_payload = payload
     last_error = "web_decision_missing_function_call"
+    activity_repair_attempted = False
+
+    observed_catalog = observed_source_catalog(observations)
+    observed_activity_urls = set(observed_catalog)
+    observed_activity_refs = {
+        str(reference)
+        for item in observed_catalog.values()
+        for reference in (item.get("source_refs") or [])
+        if str(reference).strip()
+    }
+
+    def activity_anchor_ready(decision: WebResearchDecision) -> bool:
+        activity = decision.activity
+        if activity is None or not activity.title.strip() or not activity.venue.strip():
+            return False
+        return bool(
+            set(activity.source_urls) & observed_activity_urls
+            or set(activity.source_refs) & observed_activity_refs
+        )
+
     for attempt_index in range(MAX_WEB_DECISION_ATTEMPTS):
         attempt_prompt = prompt
+        attempt_tools = tools
         if attempt_index:
-            attempt_prompt += (
-                "\n上一個回應沒有通過 typed decision 驗證。這是唯一一次修正機會："
-                "只呼叫一個本輪允許的 function，不要輸出文字；"
-                "若有 place_candidates，每個 search query 必須有同位置的既有 subject_ref。"
-            )
+            if activity_repair_attempted:
+                attempt_tools = _decision_tools(
+                    has_place_candidates=bool(place_candidates),
+                    can_search=False,
+                    can_extract=False,
+                    can_finish=True,
+                    initial_search=False,
+                )
+                attempt_prompt += (
+                    "\n上一個 finish 的 activity 無法成為可信活動錨點。這是唯一一次 schema repair："
+                    "只呼叫 web_finish_decision，保留同一批 findings、limitations 與來源；"
+                    "activity 必須是單一 object，並有 title、venue 與已觀察 source_refs/source_urls。"
+                    "不要重新搜尋、不要擷取新網頁，也不要輸出文字。"
+                )
+            else:
+                attempt_prompt += (
+                    "\n上一個回應沒有通過 typed decision 驗證。這是唯一一次修正機會："
+                    "只呼叫一個本輪允許的 function，不要輸出文字；"
+                    "若有 place_candidates，每個 search query 必須有同位置的既有 subject_ref。"
+                )
         metrics.prompt_raw = f"SYSTEM:\n{_SYSTEM}\nUSER:\n{attempt_prompt}"
+        metrics.tools_raw = attempt_tools
         metrics.llm_call_count += 1
         try:
             result = generate_chat_completion_with_tools(
-                attempt_prompt, tools, temperature=0, system_prompt=_SYSTEM,
+                attempt_prompt, attempt_tools, temperature=0, system_prompt=_SYSTEM,
                 model_owner="web",
             )
         except Exception as exc:
@@ -767,6 +853,14 @@ def decide(
             pass
         if not result.tool_calls:
             last_error = "web_decision_missing_function_call"
+        elif (
+            activity_repair_attempted
+            and (
+                not isinstance(result.tool_calls[0], dict)
+                or result.tool_calls[0].get("name") != "web_finish_decision"
+            )
+        ):
+            last_error = "web_activity_anchor_repair_wrong_function"
         else:
             decision, last_error = _parse_decision_call(
                 result.tool_calls[0], initial_search=initial_search, place_refs=place_refs,
@@ -778,6 +872,45 @@ def decide(
                 },
             )
             if decision is not None:
+                if (
+                    requires_activity_anchor
+                    and decision.action == "finish"
+                    and not activity_anchor_ready(decision)
+                ):
+                    if attempt_index + 1 < MAX_WEB_DECISION_ATTEMPTS:
+                        last_error = "web_activity_anchor_repair_required"
+                        metrics.rejected_calls.append(last_error)
+                        activity_repair_attempted = True
+                        continue
+                    codes = list(dict.fromkeys([
+                        *decision.normalization_codes,
+                        "web_activity_anchor_repair_attempted",
+                        "web_activity_anchor_unavailable",
+                    ]))[-4:]
+                    limitations = list(decision.limitations)
+                    limitation = "活動場地還無法由已觀察來源可靠定位，因此不能繼續搜尋附近地點。"
+                    if limitation not in limitations:
+                        limitations.append(limitation)
+                    decision = decision.model_copy(update={
+                        "status": (
+                            "partial" if decision.status == "answered"
+                            else decision.status
+                        ),
+                        "activity": None,
+                        "limitations": limitations[:3],
+                        "normalization_codes": codes,
+                    })
+                elif (
+                    requires_activity_anchor
+                    and decision.action == "finish"
+                    and activity_repair_attempted
+                ):
+                    decision = decision.model_copy(update={
+                        "normalization_codes": list(dict.fromkeys([
+                            *decision.normalization_codes,
+                            "web_activity_anchor_repair_attempted",
+                        ]))[-4:],
+                    })
                 metrics.error = ""
                 return decision, metrics
         if attempt_index + 1 < MAX_WEB_DECISION_ATTEMPTS:

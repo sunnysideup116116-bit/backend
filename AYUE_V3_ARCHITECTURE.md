@@ -97,7 +97,7 @@ calendar | places | web | match | relationship | profile | product_info | synthe
 
 Planner 只有在下游會消費上游 typed observation、candidate ref 或其他明確 contract 時才建立 `depends_on`；獨立請求放在同一層平行執行，不為了排列順序製造依賴。需要等待但不傳遞資料時使用 bounded `run_if` control edge。
 
-Planner 使用 compact prompt projection：保留最近 4 則且最多 2,000 字元的歷史，移除已在 `message` 中重複的最新 user message；clock 只投影本地日期／時間、時區、星期與實際出現的相對日期 reference。缺少的 optional state 不送入 prompt，active proposal 不包含 revision。這只縮短 Planner input，不改 PublicAgentTurnContext 的全域 32 則／8,000 字元 budget 或其他 specialist slice。
+Planner 使用 compact prompt projection：保留最近 8 則且最多 4,000 字元的歷史，移除已在 `message` 中重複的最新 user message；clock 只投影本地日期／時間、時區、星期與實際出現的相對日期 reference。缺少的 optional state 不送入 prompt，active proposal 不包含 revision。這只縮短 Planner input，不改 PublicAgentTurnContext 的全域 32 則／8,000 字元 budget 或其他 specialist slice。
 
 目前 compact-v3 prompt 將「具體日期＋從既有聯絡人挑一位＋新活動＋附近晚餐」明定為 `calendar`、平行 gated 的 `relationship`／`web`、依賴 Web activity venue 的 `places`，以及 terminal `synthesizer`。任一子需求需要 domain state 或 external truth 時，整回合不得使用 direct chat 或 provider-authored synth-only plan。Planner schema 失敗最多重試一次，並只附加欄位級 allowlisted 修正提示；無效／空 DAG 不靜默降級成 Synthesizer-only。
 

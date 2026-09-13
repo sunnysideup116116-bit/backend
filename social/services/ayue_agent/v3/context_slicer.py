@@ -9,6 +9,30 @@ from services.ayue_agent.capabilities import product_knowledge_catalog
 from .contracts import AgentContextSlice
 
 
+def _prior_messages(turn_ctx: PublicAgentTurnContext) -> list[dict[str, Any]]:
+    """Return bounded prior messages without duplicating the current request."""
+    messages = [
+        {
+            "role": str(item.get("role") or ""),
+            "content": str(item.get("content") or "").strip(),
+            "sent_at": str(item.get("sent_at") or "unknown")[:40],
+            "timezone": str(item.get("timezone") or turn_ctx.clock.timezone)[:64],
+            "truncated": bool(item.get("truncated")),
+        }
+        for item in (turn_ctx.recent_messages or [])
+        if isinstance(item, dict)
+        and str(item.get("role") or "") in {"user", "assistant"}
+        and str(item.get("content") or "").strip()
+    ]
+    if (
+        messages
+        and messages[-1]["role"] == "user"
+        and messages[-1]["content"] == str(turn_ctx.message or "").strip()
+    ):
+        messages.pop()
+    return messages
+
+
 def slice_for_agent(
     agent_name: str,
     turn_ctx: PublicAgentTurnContext,
@@ -21,67 +45,32 @@ def slice_for_agent(
     only the fields that agent is allowed to see, per the V3 spec §8.
     """
     clock_dump = turn_ctx.clock.model_dump()
+    recent_messages = _prior_messages(turn_ctx)
 
     if agent_name == "calendar":
         return AgentContextSlice(agent="calendar", payload={
             "message": turn_ctx.message,
-            "recent_messages": turn_ctx.recent_messages,
             "clock": clock_dump,
             # calendar agent may need recent_context to understand scheduling context
             "recent_context": turn_ctx.recent_context,
-            "calendar_draft": getattr(turn_ctx, "calendar_draft", None),
-            "calendar_recent_reference": getattr(turn_ctx, "calendar_recent_reference", None),
             "calendar_recent_mutation": getattr(turn_ctx, "calendar_recent_mutation", None),
-            "recent_place_candidates": getattr(turn_ctx, "recent_place_candidates", None),
-            "place_reference_resolution": getattr(turn_ctx, "place_reference_resolution", None),
-            "place_followup": getattr(turn_ctx, "place_followup", None),
+            "cancelled_confirmation": getattr(
+                turn_ctx, "_cancelled_confirmation_context", None,
+            ),
             "prior_observations": prior_observations,
         })
 
     if agent_name == "places":
-        followup = getattr(turn_ctx, "place_followup", None)
-        place_followup = None
-        if isinstance(followup, dict):
-            resolved = followup.get("resolved_place")
-            place_followup = {
-                "resolved_place": {
-                    key: resolved[key]
-                    for key in ("reference", "ordinal", "label", "address_summary")
-                    if isinstance(resolved, dict) and resolved.get(key) not in (None, "")
-                },
-                "abandonment_requested": bool(followup.get("abandonment_requested")),
-            }
         return AgentContextSlice(agent="places", payload={
             "message": turn_ctx.message,
-            "recent_messages": turn_ctx.recent_messages,
             "user_location": turn_ctx.user_location,
             "clock": clock_dump,
             "prior_observations": prior_observations,
-            "recent_place_candidates": getattr(turn_ctx, "recent_place_candidates", None),
-            "recent_place_reference": getattr(turn_ctx, "recent_place_reference", None),
-            "place_reference_resolution": getattr(turn_ctx, "place_reference_resolution", None),
-            "place_followup": place_followup,
         })
 
     if agent_name == "web":
-        recent_messages: list[Any] = []
-        recent_chars = 0
-        for message in reversed(list(turn_ctx.recent_messages or [])):
-            text = str(message or "")
-            if not text:
-                continue
-            remaining = max(0, 2000 - recent_chars)
-            if not remaining:
-                break
-            clipped = text[:remaining]
-            recent_messages.append(clipped)
-            recent_chars += len(clipped)
-            if len(recent_messages) >= 4:
-                break
-        recent_messages.reverse()
         return AgentContextSlice(agent="web", payload={
             "message": turn_ctx.message,
-            "recent_messages": recent_messages,
             # Location is only a coarse saved city/district projection.  The
             # Web Agent may use it for explicitly local public research, but
             # it never receives a precise address or live position.
@@ -95,7 +84,7 @@ def slice_for_agent(
         active_event = turn_ctx.active_event_invitation or {}
         return AgentContextSlice(agent="match", payload={
             "message": turn_ctx.message,
-            "recent_messages": turn_ctx.recent_messages,
+            "recent_messages": recent_messages,
             "conversation_continuity": (
                 turn_ctx.conversation_continuity.model_dump(mode="json")
                 if turn_ctx.conversation_continuity else None
@@ -120,15 +109,14 @@ def slice_for_agent(
     if agent_name == "relationship":
         return AgentContextSlice(agent="relationship", payload={
             "message": turn_ctx.message,
-            "recent_messages": turn_ctx.recent_messages,
             "recent_context": turn_ctx.recent_context,
             "relevant_memories": list(turn_ctx.relevant_memories or []),
             "mentioned_contacts": turn_ctx.mentioned_contacts,
             "mentioned_contact_overflow": turn_ctx.mentioned_contact_overflow,
-            "recent_contact_reference": turn_ctx.recent_contact_reference,
-            "recent_action_reference": getattr(turn_ctx, "recent_action_reference", None),
+            "owner_private_relationship_memories": list(
+                getattr(turn_ctx, "owner_relationship_memories", []) or []
+            ),
             "date_coordination_summary": getattr(turn_ctx, "date_coordination_summary", None),
-            "recent_recommendation": getattr(turn_ctx, "recent_recommendation", None),
             "clock": clock_dump,
             "prior_observations": prior_observations,
         })
@@ -136,7 +124,7 @@ def slice_for_agent(
     if agent_name == "profile":
         return AgentContextSlice(agent="profile", payload={
             "message": turn_ctx.message,
-            "recent_messages": turn_ctx.recent_messages,
+            "recent_messages": recent_messages,
             "recent_context": turn_ctx.recent_context,
             "relevant_memories": turn_ctx.relevant_memories,
             "clock": clock_dump,
@@ -149,14 +137,14 @@ def slice_for_agent(
         # calendar contents, relationship-private context, or raw documents.
         return AgentContextSlice(agent="product_info", payload={
             "message": str(turn_ctx.message or "")[:1200],
-            "recent_messages": list(turn_ctx.recent_messages or [])[-4:],
+            "recent_messages": recent_messages[-4:],
             "product_knowledge_catalog": product_knowledge_catalog(),
         })
 
     if agent_name == "synthesizer":
         return AgentContextSlice(agent="synthesizer", payload={
             "message": turn_ctx.message,
-            "recent_messages": turn_ctx.recent_messages,
+            "recent_messages": recent_messages,
             "conversation_continuity": (
                 turn_ctx.conversation_continuity.model_dump(mode="json")
                 if turn_ctx.conversation_continuity else None
@@ -166,10 +154,6 @@ def slice_for_agent(
             "user_location": turn_ctx.user_location,
             "clock": clock_dump,
             "observations": prior_observations,
-            "recent_place_reference": getattr(turn_ctx, "recent_place_reference", None),
-            "place_reference_resolution": getattr(turn_ctx, "place_reference_resolution", None),
-            "place_followup": getattr(turn_ctx, "place_followup", None),
-            "recent_action_reference": getattr(turn_ctx, "recent_action_reference", None),
             "date_coordination_summary": getattr(turn_ctx, "date_coordination_summary", None),
         })
 

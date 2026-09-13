@@ -6,6 +6,20 @@ from services import proactive_delivery_service as delivery
 
 
 class ProactiveDeliveryServiceTests(unittest.TestCase):
+    def test_persisted_post_date_notice_refreshes_the_private_surface(self):
+        marker = {"post_date_followup_delivery": {
+            "event_id": "date-1", "other_id": "other",
+            "message": "今天原本安排的約會，後來情況怎麼樣？",
+        }}
+        with patch.object(delivery.profiles_coll, "find_one", return_value={"user_id": "owner"}), \
+             patch.object(delivery.profiles_coll, "find_one_and_update", return_value=marker), \
+             patch.object(delivery, "queue_due_feedback") as queue:
+            response = delivery.proactive_check("owner")
+        self.assertEqual(response["surface"], "relationship_private")
+        self.assertEqual(response["type"], "post_date_followup")
+        self.assertEqual(response["other_id"], "other")
+        queue.assert_not_called()
+
     def test_match_gif_is_saved_as_typed_message_in_private_mediator_room(self):
         event = {
             "event_id": "gif-1", "type": "match_connected_gif", "match_id": "match-1",

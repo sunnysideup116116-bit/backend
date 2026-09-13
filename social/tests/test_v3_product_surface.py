@@ -80,8 +80,8 @@ class ProductSurfaceContractTests(unittest.TestCase):
         self.assertTrue(access["use_private_for_contextual_chat_advice"])
         self.assertIn("近期聊天紀錄", projection["facts"]["where_to_ask"]["private"])
 
-    def test_presentation_limits_reject_transaction_split(self):
-        self.assertIsNone(build_presentation(["第一則", "第二則"], "transaction"))
+    def test_presentation_limits_allow_natural_transaction_split(self):
+        self.assertIsNotNone(build_presentation(["第一則", "第二則"], "transaction"))
         self.assertIsNotNone(build_presentation(["第一則", "第二則"], "product_info"))
 
     def test_onboarding_has_three_fixed_bubbles_only_for_empty_public_room(self):

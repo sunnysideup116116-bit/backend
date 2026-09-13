@@ -28,6 +28,8 @@
 - [雙人開場／Profiling 修正](docs/PAIR_CHAT_PROFILING_FIX_2026-09-12.md)：移除首句代回、共同開場冪等保存、測驗錯誤分類與同 ID 重試；含本次驗證及歷史日誌限制。
 - [客製化開場與暱稱](docs/PAIR_OPENING_PERSONALIZATION_2026-09-13.md)：Appwrite-first 名稱、接受後背景模型生成、單一具體問題及失敗降級。
 
+公開暱稱、已接受聯絡人辨識與前端快取的統一規則見 [公開暱稱契約](docs/PUBLIC_NICKNAME_CONTRACT.md)。
+
 ## Port 總覽
 
 | Port | 服務 | 入口 | 說明 |

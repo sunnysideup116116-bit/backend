@@ -62,7 +62,7 @@ class V3PlaceFollowupFlowTests(unittest.TestCase):
                 "Tu酥館台式炸雞鹽埕店",
                 "原大禮街香雞排",
                 "駁二大禮市場雞排",
-                "香雞排",
+                "鹽埕炸物攤",
                 "阿亮香雞排 鹽埕店",
             ), start=1)
         ]
@@ -87,7 +87,7 @@ class V3PlaceFollowupFlowTests(unittest.TestCase):
                 "tasks": [
                     {
                         "id": "p1", "agent": "places", "place_mode": "details",
-                        "depends_on": [], "task_brief": "查第二間店家的地址與結構化資料",
+                        "depends_on": [], "task_brief": "查原大禮街香雞排（高雄市鹽埕區）的地址與結構化資料",
                     },
                     {
                         "id": "s1", "agent": "synthesizer", "depends_on": ["p1"],
@@ -101,7 +101,7 @@ class V3PlaceFollowupFlowTests(unittest.TestCase):
                 "tasks": [
                     {
                         "id": "p1", "agent": "places", "place_mode": "reviews",
-                        "depends_on": [], "task_brief": "查選定店家的好不好吃與口味評論",
+                        "depends_on": [], "task_brief": "查原大禮街香雞排（高雄市鹽埕區）的好不好吃與口味評論",
                     },
                     {
                         "id": "w1", "agent": "web", "depends_on": ["p1"],
@@ -120,7 +120,7 @@ class V3PlaceFollowupFlowTests(unittest.TestCase):
                 "tasks": [
                     {
                         "id": "p1", "agent": "places", "place_mode": "details",
-                        "depends_on": [], "task_brief": "延續已選店家查營業資訊",
+                        "depends_on": [], "task_brief": "查原大禮街香雞排（高雄市鹽埕區）的營業資訊",
                     },
                     {
                         "id": "s1", "agent": "synthesizer", "depends_on": ["p1"],
@@ -134,7 +134,7 @@ class V3PlaceFollowupFlowTests(unittest.TestCase):
                 "tasks": [
                     {
                         "id": "p1", "agent": "places", "place_mode": "details",
-                        "depends_on": [], "task_brief": "再次延續已選店家查詳細資訊",
+                        "depends_on": [], "task_brief": "再次查原大禮街香雞排（高雄市鹽埕區）的詳細資訊",
                     },
                     {
                         "id": "w1", "agent": "web", "web_mode": "place_hours_fallback",
@@ -173,24 +173,28 @@ class V3PlaceFollowupFlowTests(unittest.TestCase):
             }]),
             ToolCallResult(content="", tool_calls=[{
                 "name": "places.resolve_place",
-                # The server must replace this with the bound name + address.
-                "arguments": {"query": "十九甲雞排－新北樹林店"},
+                "arguments": {"query": "原大禮街香雞排"},
             }]),
             ToolCallResult(content="", tool_calls=[{
                 "name": "places.resolve_place",
-                "arguments": {"query": "十九甲雞排－新北樹林店"},
+                "arguments": {"query": "原大禮街香雞排"},
             }]),
             ToolCallResult(content="", tool_calls=[{
                 "name": "places.resolve_place",
-                "arguments": {"query": "十九甲雞排－新北樹林店"},
+                "arguments": {"query": "原大禮街香雞排"},
             }]),
             ToolCallResult(content="", tool_calls=[{
                 "name": "places.resolve_place",
-                "arguments": {"query": "十九甲雞排－新北樹林店"},
+                "arguments": {"query": "原大禮街香雞排"},
             }]),
         ]
         synth_results = [
-            ToolCallResult(content="附近先找到幾間雞排店，可以依距離挑選。", tool_calls=[]),
+            # Cards-off ordinary prose is accepted and the hidden order is
+            # derived from the first unique public mention of each trusted name.
+            ToolCallResult(content=(
+                "可以依序看 Tu酥館台式炸雞鹽埕店、原大禮街香雞排、"
+                "駁二大禮市場雞排、鹽埕炸物攤和阿亮香雞排 鹽埕店。"
+            ), tool_calls=[]),
             ToolCallResult(content="原大禮街香雞排位於高雄市鹽埕區大禮街。", tool_calls=[]),
             ToolCallResult(content="查到的一篇食記提到外皮酥脆，但也覺得偏油；目前只有一篇來源。", tool_calls=[]),
             ToolCallResult(content="已延續原大禮街香雞排並補查公開資訊。", tool_calls=[]),
@@ -256,9 +260,7 @@ class V3PlaceFollowupFlowTests(unittest.TestCase):
             return synth_results.pop(0)
 
         def context_builder(ctx, *, clock=None):
-            turn = _public_turn(ctx.message)
-            selected = recent_selected_projection(ctx.user_id, ctx.room_id)
-            return turn.model_copy(update={"recent_place_reference": selected})
+            return _public_turn(ctx.message)
 
         contexts = [
             AgentTurnContext(
@@ -319,18 +321,14 @@ class V3PlaceFollowupFlowTests(unittest.TestCase):
             sixth = run_public_agent_turn_v3(contexts[5])
             sixth_snapshot = get_candidate_set("integration-owner", "integration-room")
 
-        self.assertIn("2. 原大禮街香雞排", first.reply)
-        self.assertEqual(first_snapshot["origin_run_id"], second_snapshot["origin_run_id"])
-        self.assertEqual(second_snapshot["origin_run_id"], third_snapshot["origin_run_id"])
-        self.assertEqual(third_snapshot["origin_run_id"], fourth_snapshot["origin_run_id"])
-        self.assertEqual(fourth_snapshot["origin_run_id"], fifth_snapshot["origin_run_id"])
-        self.assertEqual(fifth_snapshot["origin_run_id"], sixth_snapshot["origin_run_id"])
-        self.assertEqual(second_snapshot["selected_at"], third_snapshot["selected_at"])
-        self.assertEqual(third_snapshot["selected_at"], fourth_snapshot["selected_at"])
-        self.assertEqual(fourth_snapshot["selected_at"], fifth_snapshot["selected_at"])
-        self.assertEqual(fifth_snapshot["selected_at"], sixth_snapshot["selected_at"])
+        self.assertIn("原大禮街香雞排", first.reply)
+        self.assertNotIn("2. 原大禮街香雞排", first.reply)
+        self.assertTrue(all(snapshot is None for snapshot in (
+            first_snapshot, second_snapshot, third_snapshot,
+            fourth_snapshot, fifth_snapshot, sixth_snapshot,
+        )))
         self.assertIn("原大禮街香雞排", second.reply)
-        self.assertEqual(selected_after_details["label"], "原大禮街香雞排")
+        self.assertIsNone(selected_after_details)
         self.assertNotIn("推薦地點", second.reply)
         self.assertIn("外皮酥脆", third.reply)
         self.assertIn("偏油", third.reply)
@@ -383,7 +381,7 @@ class V3PlaceFollowupFlowTests(unittest.TestCase):
             "tasks": [
                 {
                     "id": "p1", "agent": "places", "place_mode": "details",
-                    "depends_on": [], "task_brief": "查第二間店家",
+                    "depends_on": [], "task_brief": "查豪食G炸雞（高雄市鹽埕區富野路140號）",
                 },
                 {
                     "id": "s1", "agent": "synthesizer", "depends_on": ["p1"],
@@ -408,23 +406,35 @@ class V3PlaceFollowupFlowTests(unittest.TestCase):
         ), patch(
             "services.ayue_agent.v3.scheduler.commit_resolved_selection",
             return_value={"status": "storage_unavailable"},
-        ), patch(
+        ) as commit_selection, patch(
             "services.ayue_agent.v3.scheduler._persist_trace",
         ) as persist_trace, patch(
             "services.ayue_agent.v3.sub_agents.base.generate_chat_completion_with_tools",
+            return_value=ToolCallResult(content="", tool_calls=[{
+                "name": "places.resolve_place",
+                "arguments": {"query": "豪食G炸雞"},
+            }]),
         ) as places_provider, patch(
             "services.ayue_agent.v3.scheduler.execute_tool",
-        ) as execute:
+            return_value=ToolResult(ok=True, data={
+                "found": True,
+                "place": {
+                    "name": "豪食G炸雞",
+                    "address_summary": "高雄市鹽埕區富野路140號",
+                    "provider": "google",
+                    "place_id": "ChIJfried",
+                },
+            }),
+        ) as execute, patch(
+            "services.ayue_agent.v3.synthesizer.generate_chat_completion_with_tools",
+            return_value=ToolCallResult(content="豪食G炸雞的資料已重新核對。", tool_calls=[]),
+        ):
             result = run_public_agent_turn_v3(ctx)
-        places_provider.assert_not_called()
-        execute.assert_not_called()
-        self.assertEqual(result.fallback_reason, "place_selection_persistence_failed")
-        self.assertIn("沒有繼續查詢", result.reply)
-        persisted_trace = persist_trace.call_args.args[2]
-        self.assertEqual(
-            persisted_trace["place_diagnostics"]["selection_commit"]["status"],
-            "storage_unavailable",
-        )
+        places_provider.assert_called_once()
+        execute.assert_called_once()
+        commit_selection.assert_not_called()
+        self.assertIsNone(result.fallback_reason)
+        self.assertIn("豪食G炸雞", result.reply)
 
     def test_details_rejects_a_different_provider_branch(self):
         cards = [
@@ -453,7 +463,7 @@ class V3PlaceFollowupFlowTests(unittest.TestCase):
         turn._mentioned_ids = []
         task = SubTask(
             id="p1", agent="places", place_mode="details", depends_on=[],
-            task_brief="查選定店家的詳細資料",
+            task_brief="查原大禮街香雞排（高雄市鹽埕區）的詳細資料",
         )
         wrong_branch = {
             **cards[0],
@@ -486,9 +496,8 @@ class V3PlaceFollowupFlowTests(unittest.TestCase):
                 trace=trace,
             )
 
-        self.assertEqual(results[0].error_code, "place_provider_identity_mismatch")
-        self.assertEqual(execute_tool.call_args.args[0].arguments["query"], "原大禮街香雞排 高雄市鹽埕區")
-        self.assertEqual(trace["tool_results"][-1]["code"], "place_provider_identity_mismatch")
+        self.assertEqual(results[0].error_code, "sub_agent_invalid_proposal")
+        execute_tool.assert_not_called()
 
 
 if __name__ == "__main__":

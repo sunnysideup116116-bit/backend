@@ -180,6 +180,53 @@ def _run_recommendation(
     list_seen = False
     evidence_seen = False
 
+    if (task.relationship_intent or "recommend") == "recommend":
+        proposal = ToolProposal(
+            tool_name="relationship.list_accepted_contacts",
+            arguments={},
+        )
+        outcome = services.execute(
+            proposal,
+            allowed_tools=frozenset({"relationship.list_accepted_contacts"}),
+            step_count=0,
+            max_reads=1,
+            prior_observations=prior,
+            call_index=0,
+        )
+        if outcome.attempted:
+            read_count = 1
+        result = outcome.result
+        if result.status is SubTaskStatus.OK and result.observation:
+            observations.append(_observation_dict(result))
+        elif result.error_code:
+            aggregate.rejected_calls.append(str(result.error_code))
+        decision = None
+        if observations:
+            decision, metrics = relationship_agent.finish_recommendation(
+                context_slice,
+                task_brief=task.task_brief,
+                observations=[*prior, *observations],
+            )
+            _accumulate_metrics(aggregate, metrics)
+        envelope = _recommendation_observation(
+            task=task,
+            observations=observations,
+            stop_reason=(
+                "candidate_pool_loaded"
+                if decision is not None
+                else "finish_protocol_failed"
+                if observations
+                else "relationship_read_failed"
+            ),
+            decision=decision,
+        )
+        return TaskRunnerResult.from_completed([SubTaskResult(
+            task_id=task.id,
+            status=SubTaskStatus.OK if observations else SubTaskStatus.FAILED,
+            observation=envelope,
+            error_code=None if observations else "relationship_evidence_unavailable",
+        )]), aggregate
+
     for round_index in range(MAX_RELATIONSHIP_LLM_CALLS):
         if read_count >= MAX_RELATIONSHIP_READS:
             stop_reason = "read_budget_exhausted"
@@ -282,16 +329,8 @@ def _run_recommendation(
 DATE_INVITATION_PROTOCOL_FAILURE_CODE = (
     "relationship_date_invitation_provider_protocol_failed"
 )
-DATE_INVITATION_PROTOCOL_FAILURE_REPLY = (
-    "我知道你要建立邀請卡，但我剛才沒能安全確認邀請對象。"
-    "請直接說名字或 @ 對方再試一次。"
-)
 DATE_COORDINATION_CANCEL_PROTOCOL_FAILURE_CODE = (
     "relationship_date_coordination_cancel_provider_protocol_failed"
-)
-DATE_COORDINATION_CANCEL_PROTOCOL_FAILURE_REPLY = (
-    "我知道你要取消約會卡，但我剛才沒能安全確認是哪一張。"
-    "請說對方名字或從約會卡上指定後再試一次。"
 )
 
 
@@ -318,4 +357,18 @@ def run(
         proposals, metrics = relationship_agent.run(
             context_slice, task_brief=task.task_brief,
         )
+    clarification = str(getattr(metrics, "clarification_text", "") or "").strip()
+    if not proposals and clarification:
+        return TaskRunnerResult.from_completed([SubTaskResult(
+            task_id=task.id,
+            status=SubTaskStatus.SKIPPED,
+            skip_reason="needs_clarification",
+            observation={
+                "clarification": {
+                    "kind": "relationship_target",
+                    "message": clarification,
+                    "operation_prepared": False,
+                },
+            },
+        )]), metrics
     return TaskRunnerResult.from_proposals(proposals), metrics

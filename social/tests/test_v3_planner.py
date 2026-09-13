@@ -10,7 +10,7 @@ from services.ayue_agent.v3.contracts import Plan, SubTask
 from services.ayue_agent.v3.planner import (
     _PLANNER_PROMPT_VERSION, _PLANNER_SYSTEM, _decompose_tool_schema, _planner_prompt,
     _planner_validation_retry_hint, _normalize_provider_plan_arguments,
-    _canonicalize_write_intent_briefs, _explicit_match_request_intent, plan_turn,
+    _explicit_match_request_intent, plan_turn,
 )
 from services.ai_service import ToolCallResult
 
@@ -23,7 +23,10 @@ def _clock():
     )
 
 
-def _fc_result(content="", tool_calls=None, *, inject_write_intent=True, inject_match_intent=True):
+def _fc_result(
+    content="", tool_calls=None, *, inject_write_intent=True,
+    inject_match_intent=True, inject_relationship_intent=True,
+):
     calls = deepcopy(tool_calls or [])
     if inject_match_intent:
         for call in calls:
@@ -32,6 +35,13 @@ def _fc_result(content="", tool_calls=None, *, inject_write_intent=True, inject_
                 for task in arguments.get("tasks") or []:
                     if isinstance(task, dict) and task.get("agent") == "match":
                         task.setdefault("match_intent", "status")
+    if inject_relationship_intent:
+        for call in calls:
+            arguments = call.get("arguments") or {}
+            if call.get("name") == "decompose_tasks" and isinstance(arguments, dict):
+                for task in arguments.get("tasks") or []:
+                    if isinstance(task, dict) and task.get("agent") == "relationship":
+                        task.setdefault("relationship_intent", "lookup")
     if inject_write_intent:
         for call in calls:
             if call.get("name") != "decompose_tasks":
@@ -54,9 +64,14 @@ def _steak_dag_arguments():
 
 
 def _known_contact_activity_dinner_arguments(*, hard_gate=False):
-    outcome = "calendar.no_scheduled_events" if hard_gate else "task.finished"
     return {
         "mode": "tasks",
+        "availability_policy": {
+            "calendar_task_id": "c1",
+            "controlled_task_ids": ["r1", "w1"],
+            "mode": "abort_if_any_event" if hard_gate else "fit_around_events",
+            "evidence_span": "有事就算了" if hard_gate else "",
+        },
         "tasks": [
             {
                 "id": "c1", "agent": "calendar", "depends_on": [],
@@ -65,14 +80,13 @@ def _known_contact_activity_dinner_arguments(*, hard_gate=False):
             },
             {
                 "id": "r1", "agent": "relationship", "depends_on": [],
+                "relationship_intent": "recommend",
                 "task_brief": "列出 accepted contacts，供最終回覆比較適合人選",
-                "run_if": {"source_task_id": "c1", "required_outcome": outcome},
             },
             {
                 "id": "w1", "agent": "web", "depends_on": [],
                 "task_brief": "找高雄中山大學附近這週六可參加的新活動",
                 "evidence_policy": "casual_discovery",
-                "run_if": {"source_task_id": "c1", "required_outcome": outcome},
             },
             {
                 "id": "p1", "agent": "places", "place_mode": "discover", "depends_on": ["w1"],
@@ -88,6 +102,56 @@ def _known_contact_activity_dinner_arguments(*, hard_gate=False):
 
 
 class V3PlannerTests(unittest.TestCase):
+    def test_relationship_intent_is_explicit_and_repaired_once(self):
+        turn = self._turn("我想約人去你剛講的活動，有誰適合？")
+        missing = _fc_result(
+            tool_calls=[{
+                "name": "decompose_tasks",
+                "arguments": {
+                    "mode": "tasks",
+                    "tasks": [
+                        {
+                            "id": "r1", "agent": "relationship",
+                            "task_brief": "比較現在可邀約的人",
+                        },
+                        {
+                            "id": "s1", "agent": "synthesizer",
+                            "depends_on": ["r1"], "task_brief": "回覆建議",
+                        },
+                    ],
+                },
+            }],
+            inject_relationship_intent=False,
+        )
+        repaired = _fc_result(tool_calls=[{
+            "name": "decompose_tasks",
+            "arguments": {
+                "mode": "tasks", "write_intent": "none",
+                "tasks": [
+                    {
+                        "id": "r1", "agent": "relationship",
+                        "relationship_intent": "recommend",
+                        "task_brief": "比較現在可邀約的人",
+                    },
+                    {
+                        "id": "s1", "agent": "synthesizer",
+                        "depends_on": ["r1"], "task_brief": "回覆建議",
+                    },
+                ],
+            },
+        }])
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            side_effect=[missing, repaired],
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(plan.write_intent, "none")
+        self.assertEqual(plan.tasks[0].relationship_intent, "recommend")
+        self.assertEqual(plan.tasks[0].task_brief, "比較現在可邀約的人")
+        self.assertEqual(metrics.retry_count, 1)
+
     def test_match_diagnostic_helper_does_not_classify_discussion_or_negation(self):
         for message in (
             "配對那邊我不懂",
@@ -259,6 +323,75 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(plan.tasks[2].run_if.required_outcome, "task.finished")
         self.assertEqual(plan.tasks[3].depends_on, ["w1"])
         self.assertEqual(metrics.direct_chat_fallback_reason, "")
+
+    def test_sunday_future_plan_binds_this_saturday_to_next_occurrence(self):
+        message = "這週六如果有空，找個活動，再排附近晚餐"
+        turn = self._turn(message).model_copy(update={
+            "clock": TurnClockV1(
+                timezone="Asia/Taipei",
+                utc_iso="2026-09-13T09:00:00+00:00",
+                local_iso="2026-09-13T17:00:00+08:00",
+                local_date="2026-09-13",
+                local_time="17:00",
+                weekday_zh_tw="星期日",
+                temporal_references={"這週六": "2026-09-12"},
+            ),
+        })
+        arguments = _known_contact_activity_dinner_arguments()
+        arguments["temporal_bindings"] = [{
+            "source_text": "這週六",
+            "task_ids": ["c1", "w1"],
+            "interpretation": "future_planning",
+            "candidate_id": "next_occurrence",
+        }]
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "decompose_tasks", "arguments": arguments,
+            }]),
+        ):
+            plan, metrics = plan_turn(turn)
+        self.assertIsNotNone(plan, metrics.error)
+        targets = {
+            task.agent: task.resolved_time_target.date
+            for task in plan.tasks
+            if task.resolved_time_target is not None
+        }
+        self.assertEqual(targets, {"calendar": "2026-09-19", "web": "2026-09-19"})
+        self.assertEqual(plan.tasks[2].run_if.required_outcome, "task.finished")
+
+    def test_ambiguous_temporal_binding_routes_to_llm_clarification_plan(self):
+        message = "這週六幫我看看有什麼安排"
+        turn = self._turn(message).model_copy(update={
+            "clock": TurnClockV1(
+                timezone="Asia/Taipei",
+                utc_iso="2026-09-13T09:00:00+00:00",
+                local_iso="2026-09-13T17:00:00+08:00",
+                local_date="2026-09-13", local_time="17:00", weekday_zh_tw="星期日",
+                temporal_references={"這週六": "2026-09-12"},
+            ),
+        })
+        arguments = {
+            "mode": "tasks", "write_intent": "none",
+            "tasks": [
+                {"id": "c1", "agent": "calendar", "task_brief": "查這週六行程"},
+                {"id": "s1", "agent": "synthesizer", "depends_on": ["c1"], "task_brief": "回答"},
+            ],
+            "temporal_bindings": [{
+                "source_text": "這週六", "task_ids": [],
+                "interpretation": "needs_clarification",
+            }],
+        }
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "decompose_tasks", "arguments": arguments,
+            }]),
+        ):
+            plan, metrics = plan_turn(turn)
+        self.assertIsNotNone(plan, metrics.error)
+        self.assertEqual([task.agent for task in plan.tasks], ["synthesizer"])
+        self.assertEqual(plan.temporal_clarification.source_text, "這週六")
 
     def test_provider_scoped_evidence_policy_is_repaired_without_mutating_raw_arguments(self):
         turn = self._turn("找附近適合約會的地方")
@@ -596,7 +729,7 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(arguments["tasks"][0]["run_if"], {})
         self.assertEqual(arguments["tasks"][1]["evidence_policy"], "")
 
-    def test_misplaced_date_invitation_intent_is_recovered_to_top_level(self):
+    def test_misplaced_date_invitation_intent_does_not_elevate_authority(self):
         turn = self._turn("幫我約小涵")
         arguments = {
             "write_intent": "none",
@@ -620,16 +753,21 @@ class V3PlannerTests(unittest.TestCase):
             plan, metrics = plan_turn(turn)
         self.assertIsNotNone(plan)
         self.assertEqual(provider.call_count, 1)
-        self.assertEqual(plan.write_intent, "relationship.date_invitation.v1")
+        self.assertEqual(plan.write_intent, "none")
         self.assertEqual([task.agent for task in plan.tasks], ["relationship", "synthesizer"])
         self.assertIsNone(plan.tasks[0].outcome_contract)
         self.assertEqual(metrics.retry_count, 0)
         self.assertEqual(metrics.failure_code, "")
         self.assertEqual(metrics.attempts[0]["status"], "repaired")
-        self.assertEqual(
-            metrics.attempts[0]["repair_codes"],
-            ["misplaced_date_invitation_intent_recovered"],
-        )
+        normalized, repair_codes = _normalize_provider_plan_arguments({
+            **original,
+            "tasks": [
+                {**original["tasks"][0], "relationship_intent": "lookup"},
+                original["tasks"][1],
+            ],
+        })
+        self.assertEqual(normalized["write_intent"], "none")
+        self.assertIn("misplaced_date_invitation_intent_removed", repair_codes)
         self.assertEqual(arguments, original)
 
     def test_canonical_subtask_still_rejects_empty_optional_values(self):
@@ -693,6 +831,112 @@ class V3PlannerTests(unittest.TestCase):
         hint = _planner_validation_retry_hint(caught.exception)
         self.assertIn("run_if is only a control edge", hint)
         self.assertNotIn("missing", hint)
+
+    def test_availability_and_temporal_schema_errors_get_exact_retry_contract(self):
+        from pydantic import ValidationError
+        from services.ayue_agent.v3.planner import _DecomposeTasksArguments
+
+        arguments = _known_contact_activity_dinner_arguments()
+        arguments["availability_policy"] = {"type": "fit_around_events"}
+        arguments["temporal_bindings"] = [{
+            "source_text": "這週六", "date": "2026-09-19", "relation": "future",
+        }]
+        with self.assertRaises(ValidationError) as caught:
+            _DecomposeTasksArguments.model_validate(arguments)
+        hint = _planner_validation_retry_hint(caught.exception)
+        self.assertIn("calendar_task_id, controlled_task_ids, mode", hint)
+        self.assertIn("Omit the whole field for Calendar mutations", hint)
+        self.assertIn("source_text, task_ids, interpretation", hint)
+        self.assertIn("never copy date or relation", hint)
+
+    def test_invalid_live_temporal_shape_retries_with_contract_and_recovers(self):
+        message = "這週六如果有空，找個活動，再排附近晚餐"
+        turn = self._turn(message).model_copy(update={
+            "clock": TurnClockV1(
+                timezone="Asia/Taipei",
+                utc_iso="2026-09-13T09:00:00+00:00",
+                local_iso="2026-09-13T17:00:00+08:00",
+                local_date="2026-09-13",
+                local_time="17:00",
+                weekday_zh_tw="星期日",
+                temporal_references={"這週六": "2026-09-12"},
+            ),
+        })
+        invalid = _known_contact_activity_dinner_arguments()
+        invalid["availability_policy"] = {"policy": "fit_around_events"}
+        invalid["temporal_bindings"] = [{
+            "source_text": "這週六", "date": "2026-09-19", "relation": "future",
+        }]
+        valid = _known_contact_activity_dinner_arguments()
+        valid["temporal_bindings"] = [{
+            "source_text": "這週六",
+            "task_ids": ["c1", "w1"],
+            "interpretation": "future_planning",
+            "candidate_id": "next_occurrence",
+        }]
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            side_effect=[
+                _fc_result(tool_calls=[{"name": "decompose_tasks", "arguments": invalid}]),
+                _fc_result(tool_calls=[{"name": "decompose_tasks", "arguments": valid}]),
+            ],
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+
+        self.assertIsNotNone(plan, metrics.error)
+        self.assertEqual(provider.call_count, 2)
+        retry_prompt = provider.call_args_list[1].args[0]
+        self.assertIn("availability_policy is only for a Calendar availability read", retry_prompt)
+        self.assertIn("temporal_bindings is an array", retry_prompt)
+        self.assertEqual(plan.tasks[2].resolved_time_target.date, "2026-09-19")
+
+    def test_known_candidate_enum_swap_and_non_temporal_target_are_repaired(self):
+        message = "這週六如果有空，找個活動，再排附近晚餐"
+        turn = self._turn(message).model_copy(update={
+            "clock": TurnClockV1(
+                timezone="Asia/Taipei",
+                utc_iso="2026-09-13T09:00:00+00:00",
+                local_iso="2026-09-13T17:00:00+08:00",
+                local_date="2026-09-13",
+                local_time="17:00",
+                weekday_zh_tw="星期日",
+                temporal_references={"這週六": "2026-09-12"},
+            ),
+        })
+        arguments = _known_contact_activity_dinner_arguments()
+        arguments["temporal_bindings"] = [{
+            "source_text": "這週六",
+            "task_ids": ["c1", "w1", "p1"],
+            "interpretation": "next_occurrence",
+            "candidate_id": "next_occurrence",
+        }]
+        malformed = deepcopy(arguments)
+        malformed["temporal_bindings"][0]["task_ids"].extend(["missing", 7])
+        normalized, _codes = _normalize_provider_plan_arguments(malformed)
+        self.assertEqual(
+            normalized["temporal_bindings"][0]["task_ids"],
+            ["c1", "w1", "missing", 7],
+        )
+        with patch(
+            "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
+            return_value=_fc_result(tool_calls=[{
+                "name": "decompose_tasks", "arguments": arguments,
+            }]),
+        ) as provider:
+            plan, metrics = plan_turn(turn)
+
+        self.assertIsNotNone(plan, metrics.error)
+        provider.assert_called_once()
+        self.assertEqual(metrics.attempts[0]["repair_codes"], [
+            "temporal_candidate_used_as_interpretation",
+            "non_temporal_task_ids_removed",
+        ])
+        targets = {
+            task.agent: task.resolved_time_target.date
+            for task in plan.tasks
+            if task.resolved_time_target is not None
+        }
+        self.assertEqual(targets, {"calendar": "2026-09-19", "web": "2026-09-19"})
 
     def test_explicit_stop_when_busy_uses_calendar_free_gate_for_both_parallel_reads(self):
         turn = self._turn(
@@ -835,23 +1079,34 @@ class V3PlannerTests(unittest.TestCase):
             set(schema["properties"]),
             {
                 "mode", "write_intent", "presentation_mode", "tasks", "direct_reply",
-                "direct_messages", "opportunity", "place_selection",
+                "direct_messages", "opportunity",
+                "availability_policy", "temporal_bindings",
             },
         )
         self.assertIn("write_intent", schema["required"])
+        availability_schema = schema["properties"]["availability_policy"]
+        self.assertEqual(availability_schema["type"], "object")
+        self.assertNotIn("anyOf", availability_schema)
+        candidate_schema = (
+            schema["properties"]["temporal_bindings"]["items"]
+            ["properties"]["candidate_id"]
+        )
+        self.assertEqual(candidate_schema["type"], "string")
+        self.assertNotIn("anyOf", candidate_schema)
         task_schema = schema["properties"]["tasks"]["items"]
         self.assertEqual(
             set(task_schema["properties"]),
             {
                 "id", "agent", "depends_on", "task_brief", "place_mode", "evidence_policy",
-                "web_mode", "outcome_contract", "run_if", "match_intent", "match_search_request",
+                "web_mode", "outcome_contract", "relationship_intent", "match_intent",
+                "match_search_request",
             },
         )
         self.assertEqual(
             set(task_schema["required"]),
             {"id", "agent", "task_brief"},
         )
-        for field_name in ("evidence_policy", "web_mode", "outcome_contract", "run_if"):
+        for field_name in ("evidence_policy", "web_mode", "outcome_contract"):
             with self.subTest(field_name=field_name):
                 self.assertNotIn("default", task_schema["properties"][field_name])
                 self.assertNotIn("anyOf", task_schema["properties"][field_name])
@@ -889,7 +1144,7 @@ class V3PlannerTests(unittest.TestCase):
         ])
         self.assertIsNone(plan.tasks[0].web_mode)
 
-    def test_explicit_place_selection_in_mixed_request_requires_places_task(self):
+    def test_mixed_place_and_relationship_request_uses_resolved_task_briefs(self):
         turn = self._turn(
             "第五間詳細資訊也給我，你覺得有人適合跟我一起去嗎？",
         ).model_copy(update={
@@ -900,15 +1155,6 @@ class V3PlannerTests(unittest.TestCase):
                 "label": "一等一咖啡茶飲",
             },
         })
-        relationship_only = _fc_result(tool_calls=[{
-            "name": "decompose_tasks", "arguments": {
-                "write_intent": "none", "place_selection": "第五間",
-                "tasks": [
-                    {"id": "r1", "agent": "relationship", "depends_on": [], "task_brief": "找適合同行的人"},
-                    {"id": "s1", "agent": "synthesizer", "depends_on": ["r1"], "task_brief": "整理"},
-                ],
-            },
-        }])
         corrected = _fc_result(tool_calls=[{
             "name": "decompose_tasks", "arguments": {
                 "write_intent": "none", "place_selection": "第五間",
@@ -921,12 +1167,14 @@ class V3PlannerTests(unittest.TestCase):
         }])
         with patch(
             "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
-            side_effect=[relationship_only, corrected],
+            return_value=corrected,
         ) as provider:
             plan, metrics = plan_turn(turn)
-        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(provider.call_count, 1)
         self.assertEqual([task.agent for task in plan.tasks], ["places", "relationship", "synthesizer"])
-        self.assertEqual(metrics.retry_reason, "invalid_arguments")
+        self.assertIsNone(plan.place_selection)
+        self.assertIn("一等一咖啡茶飲", plan.tasks[0].task_brief)
+        self.assertEqual(metrics.retry_count, 0)
 
     def test_planner_system_policy_has_routing_catalog_and_task_contract(self):
         for agent in ("calendar", "places", "web", "match", "relationship", "profile", "product_info", "synthesizer"):
@@ -939,8 +1187,9 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIn("mode=direct_chat", _PLANNER_SYSTEM)
         self.assertIn("direct_reply", _PLANNER_SYSTEM)
         self.assertIn("c1=calendar(outcome_contract=calendar.availability.v1)", _PLANNER_SYSTEM)
-        self.assertIn("r1=relationship(run_if c1:task.finished)", _PLANNER_SYSTEM)
-        self.assertIn("w1=web(run_if c1:task.finished)", _PLANNER_SYSTEM)
+        self.assertIn("availability_policy=fit_around_events controls r1/w1", _PLANNER_SYSTEM)
+        self.assertIn("r1=relationship", _PLANNER_SYSTEM)
+        self.assertIn("w1=web(web_mode=public_lookup)", _PLANNER_SYSTEM)
         self.assertIn("p1=places(depends_on=[w1])", _PLANNER_SYSTEM)
         self.assertIn("不需要 App、domain、private、external truth", _PLANNER_SYSTEM)
         self.assertIn("product_info -> synthesizer", _PLANNER_SYSTEM)
@@ -948,7 +1197,7 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIn("簡短肯定語接唯讀地點重試提議", _PLANNER_SYSTEM)
 
     def test_planner_dependency_policy_is_typed_and_not_sequential_by_default(self):
-        self.assertIn("typed observation、candidate ref", _PLANNER_SYSTEM)
+        self.assertIn("typed observation 或其他明確 contract", _PLANNER_SYSTEM)
         self.assertIn("獨立查詢", _PLANNER_SYSTEM)
 
     def test_calendar_persistence_semantics_take_precedence_over_availability(self):
@@ -959,7 +1208,7 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIn("explicit Calendar create/update/cancel", _PLANNER_SYSTEM)
         self.assertIn("takes precedence", _PLANNER_SYSTEM)
         self.assertIn("calendar -> synthesizer mutation flow", _PLANNER_SYSTEM)
-        self.assertIn("不重新搜尋 Places", _PLANNER_SYSTEM)
+        self.assertIn("不重新搜尋一批候選", _PLANNER_SYSTEM)
 
     def test_planner_keeps_structured_place_facts_in_places(self):
         self.assertIn("結構化 hours、price、rating、walking", _PLANNER_SYSTEM)
@@ -972,7 +1221,7 @@ class V3PlannerTests(unittest.TestCase):
         ):
             self.assertIn(claim, _PLANNER_SYSTEM)
         self.assertIn("使用 places -> web -> synthesizer", _PLANNER_SYSTEM)
-        self.assertIn("server-issued candidate refs", _PLANNER_SYSTEM)
+        self.assertIn("本輪 provider identity", _PLANNER_SYSTEM)
         self.assertIn("不使用關鍵字或 regex router", _PLANNER_SYSTEM)
 
     def test_planner_policy_distinguishes_contact_aggregate_from_match_singleton(self):
@@ -1020,33 +1269,14 @@ class V3PlannerTests(unittest.TestCase):
             ["relationship", "synthesizer"],
         )
         self.assertEqual(plan.write_intent, "relationship.date_invitation.v1")
-        self.assertIn("relationship.start_date_coordination", plan.tasks[0].task_brief)
+        self.assertEqual(
+            plan.tasks[0].task_brief,
+            "為小葵建立空白約會邀請卡；不要詢問或填寫日期、時間、地點、活動。",
+        )
         self.assertNotIn("calendar", [task.agent for task in plan.tasks])
         self.assertNotIn("places", [task.agent for task in plan.tasks])
         self.assertNotIn("web", [task.agent for task in plan.tasks])
         self.assertEqual(provider.call_count, 1)
-
-    def test_mixed_date_invite_preserves_places_brief(self):
-        plan = Plan(
-            write_intent="relationship.date_invitation.v1",
-            tasks=[
-                SubTask(id="r1", agent="relationship", depends_on=[], task_brief="send invite"),
-                SubTask(
-                    id="p1", agent="places", place_mode="discover", depends_on=[],
-                    task_brief="find nearby ice shops",
-                ),
-                SubTask(
-                    id="s1", agent="synthesizer", depends_on=["r1", "p1"],
-                    task_brief="combine",
-                ),
-            ],
-        )
-
-        normalized = _canonicalize_write_intent_briefs(plan)
-
-        self.assertIn("relationship.start_date_coordination", normalized.tasks[0].task_brief)
-        self.assertEqual(normalized.tasks[1].task_brief, "find nearby ice shops")
-        self.assertIn("verified read-only observation", normalized.tasks[2].task_brief)
 
     def test_invite_boundary_prompt_treats_companion_as_context(self):
         self.assertIn("想約小凱吃冰，幫我找店", _PLANNER_SYSTEM)
@@ -1135,7 +1365,7 @@ class V3PlannerTests(unittest.TestCase):
                 self.assertEqual(unchanged, candidate)
                 self.assertEqual(codes, [])
 
-    def test_resolved_place_followup_repairs_task_reference_without_retry(self):
+    def test_public_planner_rejects_model_authored_place_reference(self):
         turn = self._turn("第二間你覺得怎樣").model_copy(update={
             "place_reference_resolution": {
                 "status": "resolved", "reference": "place_ref_server_owned",
@@ -1165,13 +1395,10 @@ class V3PlannerTests(unittest.TestCase):
         ) as provider:
             plan, metrics = plan_turn(turn)
 
-        self.assertIsNotNone(plan)
-        self.assertEqual(provider.call_count, 1)
-        self.assertEqual(metrics.retry_count, 0)
-        self.assertEqual(
-            metrics.attempts[0]["repair_codes"],
-            ["resolved_place_task_reference_removed"],
-        )
+        self.assertIsNone(plan)
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(metrics.retry_count, 1)
+        self.assertEqual(metrics.retry_reason, "invalid_arguments")
 
     def test_place_reference_schema_error_gets_exact_retry_hint(self):
         from pydantic import ValidationError
@@ -1187,7 +1414,7 @@ class V3PlannerTests(unittest.TestCase):
             })
         hint = _planner_validation_retry_hint(caught.exception)
         self.assertIn("place_reference never belongs inside a task", hint)
-        self.assertIn("top-level place_selection", hint)
+        self.assertIn("concrete public place name", hint)
 
     def test_date_invitation_intent_rejects_match_precheck_and_retries(self):
         turn = self._turn("幫我約小哲出來")
@@ -1234,7 +1461,7 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(metrics.failure_code, "")
         retry_prompt = provider.call_args_list[1].args[0]
         self.assertIn("Match is never a precheck", retry_prompt)
-        self.assertIn("relationship.start_date_coordination", plan.tasks[0].task_brief)
+        self.assertEqual(plan.tasks[0].task_brief, "建立空白邀請卡")
 
     def test_date_invitation_match_precheck_twice_fails_closed(self):
         turn = self._turn("你幫我建立邀請卡")
@@ -1324,10 +1551,10 @@ class V3PlannerTests(unittest.TestCase):
         self.assertIn("0.8", _PLANNER_SYSTEM)
         self.assertIn('signal="none"', _PLANNER_SYSTEM)
 
-    def test_planner_system_policy_routes_calendar_draft_continuations(self):
-        self.assertIn("calendar_draft", _PLANNER_SYSTEM)
-        self.assertIn("missing_fields", _PLANNER_SYSTEM)
-        self.assertIn("candidates", _PLANNER_SYSTEM)
+    def test_planner_system_policy_rebuilds_calendar_continuations_from_chat(self):
+        self.assertNotIn("calendar_draft", _PLANNER_SYSTEM)
+        self.assertIn("recent_messages", _PLANNER_SYSTEM)
+        self.assertIn("cancelled_confirmation", _PLANNER_SYSTEM)
         self.assertIn("只交 calendar 做唯讀驗證", _PLANNER_SYSTEM)
 
     def test_planner_exposes_recent_mutation_only_as_bounded_verification_context(self):
@@ -1343,9 +1570,9 @@ class V3PlannerTests(unittest.TestCase):
 
     def test_compact_planner_prompt_and_context_projection_budget(self):
         schema_chars = len(json.dumps(_decompose_tool_schema(), ensure_ascii=False, separators=(",", ":")))
-        self.assertLessEqual(len(_PLANNER_SYSTEM), 6000)
-        self.assertLessEqual(schema_chars, 3500)
-        self.assertLessEqual(len(_PLANNER_SYSTEM) + schema_chars, 9500)
+        self.assertLessEqual(len(_PLANNER_SYSTEM), 7000)
+        self.assertLessEqual(schema_chars, 4000)
+        self.assertLessEqual(len(_PLANNER_SYSTEM) + schema_chars, 11000)
         message = "找附近的咖啡廳"
         turn = self._turn(message).model_copy(update={
             "recent_messages": [
@@ -1365,15 +1592,39 @@ class V3PlannerTests(unittest.TestCase):
         prompt = _planner_prompt(turn)
         payload = json.loads(prompt)
         self.assertEqual(prompt.count(message), 1)
-        self.assertLessEqual(len(payload["recent_messages"]), 4)
+        self.assertLessEqual(len(payload["recent_messages"]), 12)
         self.assertLessEqual(
-            sum(len(item["content"]) for item in payload["recent_messages"]), 2000,
+            sum(len(item["content"]) for item in payload["recent_messages"]), 6000,
         )
+        self.assertNotIn("calendar_draft", payload)
         self.assertNotIn("proposal_revision", payload["active_proposal"])
         self.assertNotIn("utc_iso", payload["clock"])
         self.assertNotIn("local_iso", payload["clock"])
         self.assertNotIn("version", payload["clock"])
         self.assertNotIn("\": ", prompt)
+
+    def test_planner_recent_history_keeps_twelve_messages_with_six_thousand_char_cap(self):
+        turn = self._turn("繼續剛剛的安排").model_copy(update={
+            "recent_messages": [
+                {"role": "user" if index % 2 == 0 else "assistant", "content": f"m{index}"}
+                for index in range(14)
+            ],
+        })
+        payload = json.loads(_planner_prompt(turn))
+        self.assertEqual(
+            [item["content"] for item in payload["recent_messages"]],
+            [f"m{index}" for index in range(2, 14)],
+        )
+
+        turn.recent_messages = [
+            {"role": "user" if index % 2 == 0 else "assistant", "content": str(index) * 1200}
+            for index in range(12)
+        ]
+        payload = json.loads(_planner_prompt(turn))
+        self.assertEqual(
+            sum(len(item["content"]) for item in payload["recent_messages"]),
+            6000,
+        )
 
     def test_planner_uses_system_role_and_minimal_routing_context(self):
         turn = self._turn("最近有什麼行程？")
@@ -1668,7 +1919,7 @@ class V3PlannerTests(unittest.TestCase):
         self.assertEqual(metrics.retry_reason, "")
         self.assertEqual(metrics.failure_code, "provider_timeout")
 
-    def test_abandoned_place_followup_rejects_match_plan_and_retries_places(self):
+    def test_legacy_place_followup_does_not_override_public_planner_result(self):
         turn = self._turn("算了不用，但給我他的詳細資料").model_copy(update={
             "active_proposal": {
                 "status": "pending",
@@ -1716,15 +1967,13 @@ class V3PlannerTests(unittest.TestCase):
         }])
         with patch(
             "services.ayue_agent.v3.planner.generate_chat_completion_with_tools",
-            side_effect=[wrong_match, corrected_places],
+            return_value=wrong_match,
         ) as provider:
             plan, metrics = plan_turn(turn)
 
-        self.assertEqual(provider.call_count, 2)
-        self.assertEqual([task.agent for task in plan.tasks], ["places", "synthesizer"])
-        self.assertEqual(metrics.retry_count, 1)
-        self.assertEqual(metrics.retry_reason, "invalid_arguments")
-        self.assertEqual(metrics.attempts[0]["validation_fields"], ["place_followup"])
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual([task.agent for task in plan.tasks], ["match", "synthesizer"])
+        self.assertEqual(metrics.retry_count, 0)
 
     def test_explicit_match_reference_is_not_blocked_by_place_followup(self):
         turn = self._turn("告訴我目前配對對方的詳細資料").model_copy(update={
@@ -1763,8 +2012,7 @@ class V3PlannerTests(unittest.TestCase):
 
 
 class V3PlannerOpportunityTests(unittest.TestCase):
-    def test_plan_turn_keeps_place_selection_as_an_internal_hint(self):
-        from services.ayue_agent.v3.contracts import PlaceSelection
+    def test_plan_turn_discards_legacy_place_selection_hint(self):
         turn = PublicAgentTurnContext(
             user_id="owner", room_id="room", message="把第二個加到明天行程",
             clock=_clock(),
@@ -1783,8 +2031,7 @@ class V3PlannerOpportunityTests(unittest.TestCase):
             }]),
         ):
             plan, _metrics = plan_turn(turn)
-        self.assertIsInstance(plan.place_selection, PlaceSelection)
-        self.assertEqual(plan.place_selection.selection_text, "第二個")
+        self.assertIsNone(plan.place_selection)
 
     def test_plan_parses_opportunity_signal(self):
         from services.ayue_agent.v3.contracts import OpportunitySignal

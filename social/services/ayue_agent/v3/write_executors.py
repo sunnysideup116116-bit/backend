@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from database import db
+from services.ai_service import generate_chat_completion
 from services.match_action_service import (
     decide_active_event_invitation, decide_active_proposal, start_match_search,
 )
@@ -21,6 +22,7 @@ from services.match_search_job_service import (
 )
 from services.proposal_namespace import RELATIONSHIP_MATCH_NAMESPACE
 from services.assessment_session_service import start_assessment_session
+from services.ayue_agent.v3.public_reply import validate_public_reply
 from services.ayue_agent.match_opportunity import (
     assess_match_opportunity, missing_basis_question,
 )
@@ -28,16 +30,8 @@ from services.ayue_agent.public_relationship_projection import (
     display_name as relationship_display_name,
     resolve_accepted_contact_name,
 )
-from .relationship_references import (
-    clear_reference as clear_relationship_reference,
-    get_reference as get_relationship_reference,
-    remember_contact,
-)
 from .date_coordination_references import (
     CANCELLABLE_STATUSES as DATE_COORDINATION_CANCELLABLE_STATUSES,
-    clear_reference as clear_date_coordination_reference,
-    get_reference as get_date_coordination_reference,
-    remember_date_coordination,
 )
 from services.match_search_context import safe_search_context, search_context_for_turn
 TOOL_CALLS = db["agent_tool_calls"]
@@ -231,25 +225,88 @@ def _decide_active_event_invitation(
         return False, "我現在不能安全地更新這張活動邀請。", type(exc).__name__
 
 
+def _assessment_opening_question(ctx: Any, kind: str) -> str:
+    """Generate one validated public opening; never mutate assessment state."""
+    profile = ctx.user_profile if isinstance(ctx.user_profile, dict) else {}
+    interests: list[str] = []
+    for key in ("interests", "hobbies"):
+        value = profile.get(key)
+        if isinstance(value, list):
+            for item in value:
+                text = re.sub(r"\s+", " ", str(item or "")).strip()[:40]
+                if text and text not in interests:
+                    interests.append(text)
+                if len(interests) == 3:
+                    break
+        if len(interests) == 3:
+            break
+    dimension = (
+        "日常做決定、安排事情、與人互動時的自然習慣"
+        if kind == "big_five"
+        else "價值觀、人生選擇、關係需要或壓力下的真實感受"
+    )
+    interest_context = "、".join(interests) if interests else "沒有額外興趣資料"
+    result = generate_chat_completion(
+        (
+            f"探索類型：{kind}\n可用興趣：{interest_context}\n"
+            "只輸出一個自然、具體、容易回答的繁體中文問題。"
+        ),
+        temperature=0.75,
+        max_tokens=180,
+        model_owner="profile",
+        system_prompt=(
+            "你是公開 Candy 的個人探索開場提問者。"
+            f"問題要自然觸及{dimension}，不要解釋、不要自我介紹、不要列選項。"
+        ),
+    )
+    validation = validate_public_reply(
+        getattr(result, "content", ""),
+        preserve_details=True,
+        reject_internal_identifiers=True,
+        reject_structured_output=True,
+        max_chars=360,
+        max_sentences=3,
+    )
+    question = str(validation.reply or "").strip()
+    if not question or not question.endswith(("？", "?")):
+        return ""
+    return question
+
+
 def _start_assessment(ctx: Any, arguments: dict[str, Any], *, confirmation_id: str | None) -> tuple[bool, str, str | None]:
     kind = {"basic": "big_five", "deep": "deep_profile"}.get(str(arguments.get("kind") or ""))
     if kind is None:
         return False, "我沒有找到要開始的探索類型，你可以告訴我想做基本性格還是深層探索。", "assessment_unknown_kind"
     key = _idempotency_key(confirmation_id, "assessment", 0, suffix=kind)
     if not _claim_once(key):
-        return True, "這個探索確認正在處理，我不會重複開始。", None
+        prior = TOOL_CALLS.find_one({"idempotency_key": key}) or {}
+        saved = prior.get("result") if isinstance(prior.get("result"), dict) else {}
+        reply = str(saved.get("reply") or "").strip()
+        if saved.get("status") in {"started", "already_started"} and reply:
+            return True, reply, None
+        return False, "這次開始尚未完成，也沒有重複開新的探索。", "assessment_start_incomplete"
     try:
+        opening_question = _assessment_opening_question(ctx, kind)
+        if not opening_question:
+            _finish(key, "failed", {"status": "opening_generation_failed"})
+            return False, "這次還沒有成功開始探索。", "assessment_opening_generation_failed"
         outcome = start_assessment_session(
             ctx.user_id,
             kind,
             idempotency_key=key,
             room_id=str(ctx.room_id or "").strip() or None,
+            opening_question=opening_question,
         )
     except Exception as exc:
+        _finish(key, "failed", {"status": "assessment_start_failed"})
         return False, "剛剛沒有成功開始，我沒有改動原本的資料。你想再試一次時跟我說。", type(exc).__name__
     ok = outcome.get("status") in {"started", "already_started"}
-    _finish(key, "done", {"status": outcome.get("status")})
-    return ok, str(outcome.get("reply") or "我們可以從一個輕鬆的問題開始。"), None if ok else str(outcome.get("status") or "assessment_start_failed")
+    reply = str(outcome.get("reply") or "").strip()
+    _finish(key, "done" if ok else "failed", {
+        "status": outcome.get("status"),
+        "reply": reply if ok else "",
+    })
+    return ok, reply, None if ok else str(outcome.get("status") or "assessment_start_failed")
 
 
 def _contact_resolution_failure(status: str, *, name_hint: str = "") -> str:
@@ -266,6 +323,20 @@ def _contact_resolution_failure(status: str, *, name_hint: str = "") -> str:
     return "我還不確定你要邀請哪一位，可以說名字或指定一位聯絡人嗎？"
 
 
+def _name_is_grounded_in_public_chat(name: str, ctx: Any, turn: Any) -> bool:
+    """Allow a resolved public name from the current bounded conversation."""
+    target = re.sub(r"\s+", "", str(name or "")).casefold()
+    if len(target) < 2:
+        return False
+    texts = [str(getattr(ctx, "message", "") or "")]
+    texts.extend(
+        str(item.get("content") or "")
+        for item in (getattr(turn, "recent_messages", None) or [])
+        if isinstance(item, dict)
+    )
+    return any(target in re.sub(r"\s+", "", text).casefold() for text in texts)
+
+
 def _prepare_date_coordination(
     arguments: dict[str, Any], ctx: Any, turn: Any,
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -273,7 +344,6 @@ def _prepare_date_coordination(
 
     mention_ids = list(getattr(turn, "_mentioned_ids", []) or [])
     if bool(getattr(turn, "mentioned_contact_overflow", False)) or len(mention_ids) > 1:
-        clear_relationship_reference(ctx.user_id)
         return None, _contact_resolution_failure("ambiguous")
 
     target_id = ""
@@ -286,12 +356,12 @@ def _prepare_date_coordination(
         safe_label = relationship_display_name(target_id)
         resolution_kind = "mention"
     elif target_source == "name":
-        if not evidence_span or evidence_span not in str(ctx.message or ""):
-            clear_relationship_reference(ctx.user_id)
+        if not evidence_span or not _name_is_grounded_in_public_chat(
+            evidence_span, ctx, turn,
+        ):
             return None, _contact_resolution_failure("not_found", name_hint=evidence_span)
         resolved = resolve_accepted_contact_name(ctx.user_id, evidence_span)
         if resolved.status not in {"resolved_exact", "resolved_phonetic", "resolved_fuzzy"} or not resolved.other_id:
-            clear_relationship_reference(ctx.user_id)
             if resolved.status == "ambiguous":
                 names = "、".join(resolved.candidates[:3])
                 return None, f"我找到不只一位可能的對象：{names or '請指定一位'}。你想邀請哪一位？"
@@ -299,14 +369,6 @@ def _prepare_date_coordination(
         target_id = resolved.other_id
         safe_label = resolved.display_name
         resolution_kind = resolved.kind or "exact"
-    elif target_source == "recent_contact":
-        reference = get_relationship_reference(ctx.user_id)
-        if not reference:
-            clear_relationship_reference(ctx.user_id)
-            return None, _contact_resolution_failure("missing_recent")
-        target_id = str(reference.get("other_id") or "")
-        safe_label = str(reference.get("safe_label") or "對方")
-        resolution_kind = "recent"
     else:
         return None, _contact_resolution_failure("not_found")
 
@@ -324,7 +386,6 @@ def _prepare_date_coordination(
             return None, f"你和「{safe_label}」已經有一張等待回覆的約會邀請卡，我不會重複建立。"
         return None, f"你和「{safe_label}」已有進行中的約會安排，我不會再建立新的卡片。"
     revision = int(match.get("proposal_revision", 0) or 0)
-    remember_contact(ctx.user_id, target_id, safe_label)
     return {
         "action": "relationship.start_date_coordination",
         "arguments": {},
@@ -391,22 +452,7 @@ def _start_date_coordination(
         _finish(key, "failed", {"error_code": "stale_relationship"})
         return False, "你和這位對象的聯絡狀態已變更，因此我沒有建立邀請卡。", "stale_relationship"
     _finish(key, "done", {"status": "created"})
-    remember_contact(ctx.user_id, other_id, safe_label)
-    # Keep a room-scoped, short-lived referent for follow-ups such as
-    # 「可以取消嗎」. Persistence is advisory; the canonical match and
-    # coordination CAS remain the authority at confirmation time.
-    try:
-        remember_date_coordination(
-            ctx.user_id,
-            str(ctx.room_id or ""),
-            match,
-            coordination,
-            other_id=other_id,
-            safe_label=safe_label,
-        )
-    except Exception:
-        pass
-    return True, f"完成啦！邀請卡已經放進聊天室了～接下來就等他回覆，之後你們再一起喬時間和細節。祝你們約會順利、玩得開心～", None
+    return True, f"你和「{safe_label}」的空白約會邀請卡已建立，目前等待對方接受。", None
 
 
 def _date_coordination_candidates(user_id: str, other_id: str | None = None) -> list[dict[str, Any]]:
@@ -471,34 +517,9 @@ def _resolve_date_coordination_for_cancel(
     # reference, even if the provider selected recent_action in its proposal.
     if len(mention_ids) == 1 and target_source in {"recent_action", "summary_singleton", "singleton"}:
         target_source = "mention"
-    # The most recent room-scoped date action wins over an unfocused Hub card.
-    # A provider-selected focused_card is still allowed when no recent action
-    # is available; the canonical match is checked again below.
-    if target_source == "focused_card" and not mention_ids:
-        try:
-            if get_date_coordination_reference(ctx.user_id, ctx.room_id):
-                target_source = "recent_action"
-        except Exception:
-            pass
     match: dict[str, Any] | None = None
     label = "對方"
-    if target_source == "recent_action":
-        reference = get_date_coordination_reference(ctx.user_id, ctx.room_id)
-        if not reference:
-            return None, None, "", "我還不確定你要取消哪一張約會卡，可以說對方名字或指定卡片嗎？"
-        reference_match_id = str(reference.get("match_id") or "")
-        recent_matches = _date_coordination_candidates(
-            ctx.user_id, str(reference.get("other_id") or "")
-        )
-        match = next(
-            (
-                row for row in recent_matches
-                if str(row.get("_id") or "") == reference_match_id
-            ),
-            None,
-        )
-        label = str(reference.get("safe_label") or "對方")[:30]
-    elif target_source == "focused_card":
+    if target_source == "focused_card":
         authority = getattr(turn, "_focused_match_authority", None) or {}
         match = _match_by_authority(ctx.user_id, str(authority.get("match_id") or ""))
     elif target_source == "mention":
@@ -509,7 +530,9 @@ def _resolve_date_coordination_for_cancel(
         match = match_rows[0] if len(match_rows) == 1 else None
         label = relationship_display_name(other_id)[:30] or "對方"
     elif target_source == "name":
-        if not evidence_span or evidence_span not in str(ctx.message or ""):
+        if not evidence_span or not _name_is_grounded_in_public_chat(
+            evidence_span, ctx, turn,
+        ):
             return None, None, "", "我還不確定你指的是哪一位，可以說名字或指定一張約會卡嗎？"
         resolved = resolve_accepted_contact_name(ctx.user_id, evidence_span)
         if resolved.status == "ambiguous":
@@ -548,7 +571,7 @@ def _resolve_date_coordination_for_cancel(
         if not candidates:
             return None, None, "", "目前沒有可以取消的約會卡。"
         # Do not silently fall back from an explicit target to another card.
-        if target_source in {"mention", "name", "focused_card", "recent_action"}:
+        if target_source in {"mention", "name", "focused_card"}:
             return None, None, "", "這張約會卡已不存在或狀態已更新，請重新查看後再試一次。"
         match = candidates[0]
     coordination = match.get("date_coordination") or {}
@@ -683,7 +706,6 @@ def _cancel_date_coordination(
         _finish(key, "failed", {"error_code": "date_coordination_cancel_failed"})
         return False, "我現在無法取消這張約會卡，請稍後再試。", type(exc).__name__
     _finish(key, "done", {"status": "cancelled"})
-    clear_date_coordination_reference(ctx.user_id, ctx.room_id)
     if expected_status == "pending_partner":
         reply = "好，這張約會邀請已替你撤回。"
     elif event_revision is not None or data.get("calendar_event_id"):

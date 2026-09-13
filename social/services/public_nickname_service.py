@@ -1,4 +1,4 @@
-"""Read public Appwrite nicknames for proposal UI, never for model context.
+"""Canonical public names; callers retain owner/accepted-relation boundaries.
 
 Appwrite owns registered profile names; Mongo display names remain a fallback
 for synchronized, seed, and legacy projections. This adapter does not
@@ -108,13 +108,89 @@ def _read_appwrite_nickname(user_id: str) -> str | None:
 
 
 def proposal_display_name(user_id: str, *, fallback_lookup: Callable[[str], str]) -> str:
-    """Resolve one UI-only name without failing the proposal on lookup errors."""
+    """Resolve a bounded public name; the caller owns authorization/scope."""
     if not isinstance(user_id, str) or not user_id:
         return ""
     try:
         value = _read_appwrite_nickname(user_id)
         if value is None:
             value = fallback_lookup(user_id)
-        return safe_proposal_nickname(value, user_id)
+        label = safe_proposal_nickname(value, user_id)
+        return "" if label in {"(對方)", "（對方）"} else label
     except Exception:
         return ""
+
+
+def contact_display_name(user_id: str | None, profile: dict | None = None) -> str:
+    """Appwrite first, safe Mongo fallback; empty means unavailable, not a name."""
+    if not isinstance(user_id, str) or not user_id:
+        return ""
+
+    def fallback(_user_id: str) -> str:
+        source = profile
+        if source is None:
+            from database import profiles_coll
+            source = profiles_coll.find_one(
+                {"user_id": user_id}, {"_id": 0, "display_name": 1, "nickname": 1, "name": 1},
+            ) or {}
+        for field in ("name", "display_name", "nickname"):
+            label = safe_proposal_nickname(source.get(field), user_id)
+            if label and label not in {"(對方)", "（對方）"}:
+                return label
+        return ""
+
+    return proposal_display_name(user_id, fallback_lookup=fallback)
+
+
+def warm_public_nicknames(user_ids) -> None:
+    """Batch only already-authorized IDs; name-only reads, ≤50 per request.
+
+    Negative cache entries also prevent an outage from becoming one request
+    per contact. Canonical empty names must never revive an old Mongo alias.
+    """
+    if not _PROJECT_ID or not _API_KEY:
+        return
+    base_url = _nickname_endpoint()
+    endpoint = urlparse(base_url)
+    if (
+        not endpoint.hostname or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment
+        or not (endpoint.scheme == "https" or (endpoint.scheme == "http" and endpoint.hostname in {"localhost", "127.0.0.1", "::1"}))
+    ):
+        return
+    ids = list(dict.fromkeys(uid for uid in user_ids if isinstance(uid, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,35}", uid)))
+    now = time.monotonic()
+    with _cache_lock:
+        missing = [uid for uid in ids if uid not in _cache or _cache[uid][0] <= now]
+    for start in range(0, len(missing), 50):
+        batch = missing[start:start + 50]
+        found = {uid: None for uid in batch}
+        try:
+            response = requests.get(
+                f"{base_url}/databases/dating_db/collections/user_profiles/documents",
+                headers={"X-Appwrite-Project": _PROJECT_ID, "X-Appwrite-Key": _API_KEY},
+                params={"queries[]": [json.dumps(q) for q in (
+                    {"method": "equal", "attribute": "$id", "values": batch},
+                    {"method": "select", "values": ["$id", "name"]},
+                    {"method": "limit", "values": [len(batch)]},
+                )]}, timeout=(1.0, 2.0), allow_redirects=False,
+            )
+            payload = response.json() if response.status_code == 200 else {}
+            rows = payload.get("documents", []) if isinstance(payload, dict) else []
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict) or row.get("$id") not in found:
+                    continue
+                uid, raw = row["$id"], row.get("name")
+                if not (uid.startswith("seed_user_") and isinstance(raw, str) and raw.strip() == uid):
+                    found[uid] = safe_proposal_nickname(raw, uid)
+        except (requests.RequestException, ValueError):
+            pass
+        with _cache_lock:
+            for uid, value in found.items():
+                # Do not overwrite a newer single-name read completed while
+                # this batch was in flight.
+                if uid in _cache and _cache[uid][0] > now:
+                    continue
+                _cache[uid] = (time.monotonic() + _CACHE_TTL_SECONDS, value)
+                _cache.move_to_end(uid)
+            while len(_cache) > _CACHE_LIMIT:
+                _cache.popitem(last=False)

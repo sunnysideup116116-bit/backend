@@ -165,7 +165,7 @@ class RelationshipRecommendationTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.error_code, "accepted_contact_list_unavailable")
 
-    def test_recommendation_runtime_reads_then_follows_up_with_grounded_refs(self):
+    def test_recommendation_runtime_reads_once_then_finishes_once(self):
         context = AgentContextSlice(
             agent="relationship",
             payload={
@@ -210,16 +210,16 @@ class RelationshipRecommendationTests(unittest.TestCase):
             result, metrics = relationship_runtime.run(context, task=task, services=services)
         observation = result.completed_results[0].observation
         self.assertEqual(observation["schema_version"], "relationship_recommendation.v1")
-        self.assertEqual([name for name, _args in services.calls], [
-            "relationship.list_accepted_contacts",
-            "relationship.get_contact_evidence",
-        ])
+        self.assertEqual(
+            [name for name, _args in services.calls],
+            ["relationship.list_accepted_contacts"],
+        )
         self.assertEqual(observation["candidate_pool"][0]["display_name"], "小宇")
-        self.assertEqual(observation["evidence"][0]["contact_ref"], "relref_one")
+        self.assertEqual(observation["evidence"], [])
         self.assertEqual(observation["recommendations"][0]["classification"], "exploratory")
         self.assertEqual(observation["recommended_candidate_refs"], ["relref_one"])
         self.assertIn("不知道他是否喜歡獵人", observation["unknowns"])
-        self.assertEqual(metrics.llm_call_count, 3)
+        self.assertEqual(metrics.llm_call_count, 1)
 
     def test_snapshot_is_room_scoped_and_expires(self):
         snapshot = {

@@ -12,6 +12,7 @@ import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from services.ayue_agent.contracts import AgentResult, AgentTurnContext, PresentationBlock
 from services.ayue_agent.context import build_public_agent_turn_context
@@ -64,6 +65,8 @@ from .confirmation import (
     INTERACTION_LEGACY,
     SURFACE_PUBLIC,
     ConfirmationManager,
+    confirmation_display,
+    interaction_mode_for_action,
     match_choice_cancel_reply,
     sync_choice_message_projection,
 )
@@ -162,21 +165,9 @@ def _direct_chat_block_reason(
         return "active_match_guidance"
     if getattr(turn, "mentioned_contact_overflow", False):
         return "mentioned_contact_overflow"
-    if (
-        getattr(turn, "place_reference_resolution", None)
-        and getattr(plan, "place_selection", None) is not None
-    ):
-        return "place_reference_resolution"
-    if getattr(turn, "place_followup", None):
-        return "place_followup"
     if plan.opportunity is not None and plan.opportunity.signal != "none":
         return "opportunity"
     return None
-
-
-def _planner_failure_reply(turn: Any) -> str:
-    """Return neutral copy when the Planner protocol truly fails."""
-    return "這次規劃沒有完成，所以我沒有執行任何操作。請稍後再試一次。"
 
 
 def _abandon_place_followup_for_turn(turn: Any) -> Any:
@@ -382,6 +373,31 @@ def _place_distance_requested(context_slice: AgentContextSlice) -> bool:
     return bool(_PLACE_DISTANCE_REQUEST_RE.search(text))
 
 
+def _public_place_text_key(value: Any) -> str:
+    return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", str(value or "").casefold())
+
+
+def _place_query_grounded_in_task_brief(query: Any, task_brief: Any) -> bool:
+    """Require the public name/address query to come from Planner's brief."""
+    query_key = _public_place_text_key(query)
+    brief_key = _public_place_text_key(task_brief)
+    return bool(len(query_key) >= 2 and query_key in brief_key)
+
+
+def _resolved_place_grounded_in_task_brief(
+    result: Any, task_brief: Any,
+) -> bool:
+    """Reject a provider branch whose returned public name was never selected."""
+    if not isinstance(result, dict) or not result.get("found"):
+        return True
+    place = result.get("place")
+    if not isinstance(place, dict):
+        return False
+    name_key = _public_place_text_key(place.get("name"))
+    brief_key = _public_place_text_key(task_brief)
+    return bool(name_key and name_key in brief_key)
+
+
 def _run_registered_places(
     context_slice: AgentContextSlice,
     *,
@@ -408,6 +424,14 @@ def _run_registered_places(
     )
     accepted = []
     for proposal in list(proposals or []):
+        if (
+            proposal.tool_name == "places.resolve_place"
+            and not _place_query_grounded_in_task_brief(
+                proposal.arguments.get("query"), task.task_brief,
+            )
+        ):
+            metrics.rejected_calls.append("place_resolve_query_not_grounded")
+            continue
         if (
             proposal.tool_name in allowed_tools
             and (
@@ -454,6 +478,7 @@ def has_active_public_confirmation(user_id: str) -> bool:
 
 def mark_public_confirmation_presented(
     *, user_id: str, origin_run_id: str, message_id: str, persisted_content: str,
+    interaction_blocks_v1: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Activate a prepared confirmation only after Public Chat persisted it."""
     return ConfirmationManager(_CONFIRMATIONS).mark_presented(
@@ -461,7 +486,70 @@ def mark_public_confirmation_presented(
         origin_run_id=origin_run_id,
         message_id=message_id,
         persisted_content=persisted_content,
+        interaction_blocks_v1=interaction_blocks_v1,
     )
+
+
+def _cancelled_confirmation_context(
+    record: dict[str, Any] | None,
+    resolution: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Expose the cancelled card's visible facts without reviving authority."""
+    if not isinstance(record, dict) or not isinstance(resolution, dict):
+        return None
+    display = resolution.get("display")
+    if not isinstance(display, dict):
+        display = confirmation_display(record)
+    if not isinstance(display, dict):
+        return None
+    context: dict[str, Any] = {
+        "state": "auto_cancelled",
+        "reason": "conversation_continued",
+        "operation": str(record.get("tool_name") or "")[:80],
+        "display": {
+            key: str(display.get(key) or "")[:600]
+            for key in ("title", "summary", "consequence")
+            if str(display.get(key) or "").strip()
+        },
+    }
+    if context["operation"] == "calendar.submit_commands":
+        payload = record.get("payload")
+        plans = payload.get("plans") if isinstance(payload, dict) else None
+        plan = plans[0] if isinstance(plans, list) and len(plans) == 1 else None
+        form = plan.get("form") if isinstance(plan, dict) else None
+        if isinstance(form, dict):
+            context["calendar_form"] = {
+                key: form[key]
+                for key in (
+                    "title", "date", "end_date", "start_time", "end_time",
+                    "timezone", "activity", "location", "budget", "notes", "all_day",
+                )
+                if form.get(key) not in (None, "")
+            }
+    return context
+
+
+def _apply_choice_projection_to_history(
+    history: list[dict[str, Any]], projection: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Keep the in-memory history aligned with the just-persisted cancellation."""
+    choice_id = str(projection.get("id") or "")
+    if not choice_id:
+        return list(history or [])
+    output: list[dict[str, Any]] = []
+    for item in history or []:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata")
+        choice = metadata.get("choice_prompt") if isinstance(metadata, dict) else None
+        if isinstance(choice, dict) and str(choice.get("id") or "") == choice_id:
+            output.append({
+                **item,
+                "metadata": {**metadata, "choice_prompt": dict(projection)},
+            })
+        else:
+            output.append(item)
+    return output
 
 
 def _topological_layers(plan: Plan) -> list[list[SubTask]]:
@@ -602,32 +690,6 @@ def _server_owned_date_coordination_reply(
     return None
 
 
-def _server_owned_date_coordination_failure_reply(
-    task_results: dict[str, list[SubTaskResult]],
-    *,
-    write_intent: str,
-) -> str | None:
-    """Return the fixed, bounded failure copy for the typed write runtime."""
-    if write_intent not in {
-        DATE_INVITATION_WRITE_INTENT,
-        DATE_COORDINATION_CANCEL_WRITE_INTENT,
-    }:
-        return None
-    for results in task_results.values():
-        for result in results:
-            failure = result.observation.get("failure") if isinstance(result.observation, dict) else None
-            failure_codes = {
-                relationship_runtime.DATE_INVITATION_PROTOCOL_FAILURE_CODE:
-                    relationship_runtime.DATE_INVITATION_PROTOCOL_FAILURE_REPLY,
-                relationship_runtime.DATE_COORDINATION_CANCEL_PROTOCOL_FAILURE_CODE:
-                    relationship_runtime.DATE_COORDINATION_CANCEL_PROTOCOL_FAILURE_REPLY,
-            }
-            reply = failure_codes.get(str(result.error_code or ""))
-            if reply and isinstance(failure, dict) and failure.get("code") == str(result.error_code):
-                return reply
-    return None
-
-
 def _server_owned_confirmed_date_reply(results: list[dict[str, Any]]) -> str | None:
     """Keep the canonical write result from being rewritten into a claim."""
     for result in results:
@@ -727,10 +789,54 @@ def _dependency_completed(results: list["SubTaskResult"]) -> bool:
         result.status is SubTaskStatus.OK
         or (
             result.status is SubTaskStatus.SKIPPED
-            and result.skip_reason == "places_hours_sufficient"
+            and result.skip_reason in {
+                "places_hours_sufficient", "needs_clarification",
+            }
         )
         for result in results
     )
+
+
+def _web_activity_anchor_available(
+    task: "SubTask",
+    task_results: dict[str, list["SubTaskResult"]],
+    task_by_id: dict[str, "SubTask"],
+) -> bool | None:
+    """Validate the typed Web anchor before a dependent Places search.
+
+    ``None`` means the Places task has no Web dependency. A Web dependency is
+    usable only when its server-owned result contains a non-empty activity
+    title and venue; findings alone remain displayable but cannot authorize a
+    nearby search or a saved-location fallback.
+    """
+    if task.agent != "places":
+        return None
+    web_dependencies = [
+        dependency
+        for dependency in task.depends_on
+        if dependency in task_by_id and task_by_id[dependency].agent == "web"
+    ]
+    if not web_dependencies:
+        return None
+    for dependency in web_dependencies:
+        for result in task_results.get(dependency, []):
+            observation = result.observation
+            if (
+                result.status is not SubTaskStatus.OK
+                or not isinstance(observation, dict)
+                or observation.get("schema_version") != "web_research.v1"
+            ):
+                continue
+            activity = observation.get("primary_activity")
+            if (
+                isinstance(activity, dict)
+                and str(activity.get("title") or "").strip()
+                and str(activity.get("venue") or "").strip()
+                and isinstance(activity.get("source_urls"), list)
+                and any(str(url or "").strip() for url in activity["source_urls"])
+            ):
+                return True
+    return False
 
 
 def _public_sources(task_results: Any) -> list[dict[str, str]]:
@@ -743,6 +849,47 @@ def _public_sources(task_results: Any) -> list[dict[str, str]]:
     """
     sources: list[dict[str, str]] = []
     seen: set[str] = set()
+
+    def canonical_url(value: Any) -> str:
+        url = str(value or "").strip()
+        if not is_safe_public_url(url):
+            return ""
+        parsed = urlsplit(url)
+        path = parsed.path.rstrip("/") or "/"
+        query = urlencode([
+            (key, value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if not key.lower().startswith("utm_")
+            and key.lower() not in {"fbclid", "gclid"}
+        ])
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}?{query}".rstrip("?")
+
+    def append_candidates(candidates: list[Any], preferred_urls: list[str] | None = None) -> bool:
+        by_url: dict[str, Any] = {}
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            key = canonical_url(item.get("url"))
+            if key and key not in by_url:
+                by_url[key] = item
+        ordered: list[Any] = []
+        for url in preferred_urls or []:
+            item = by_url.get(canonical_url(url))
+            if item is not None and item not in ordered:
+                ordered.append(item)
+        ordered.extend(item for item in candidates if item not in ordered)
+        for item in ordered:
+            url = str((item or {}).get("url") or "").strip()
+            key = canonical_url(url)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            title = re.sub(r"\s+", " ", str((item or {}).get("title") or "")).strip()[:140]
+            sources.append({"title": title or url, "url": url})
+            if len(sources) == 5:
+                return True
+        return False
+
     if isinstance(task_results, dict):
         result_groups = task_results.values()
     elif isinstance(task_results, list):
@@ -765,21 +912,23 @@ def _public_sources(task_results: Any) -> list[dict[str, str]]:
                 continue
             if data.get("schema_version") == "web_research.v1":
                 candidates = data.get("sources") or []
+                preferred_urls: list[str] = []
+                for finding in data.get("findings") or []:
+                    if isinstance(finding, dict):
+                        preferred_urls.extend(finding.get("source_urls") or [])
+                activity = data.get("primary_activity")
+                if isinstance(activity, dict):
+                    preferred_urls.extend(activity.get("source_urls") or [])
             elif tool_name == "web.search":
                 candidates = data.get("results") or []
+                preferred_urls = []
             elif tool_name == "web.extract":
                 candidates = data.get("pages") or []
+                preferred_urls = []
             else:
                 continue
-            for item in candidates:
-                url = str((item or {}).get("url") or "")
-                if not is_safe_public_url(url) or url in seen:
-                    continue
-                seen.add(url)
-                title = re.sub(r"\s+", " ", str((item or {}).get("title") or "")).strip()[:140]
-                sources.append({"title": title or url, "url": url})
-                if len(sources) == 5:
-                    return sources
+            if append_candidates(candidates, preferred_urls):
+                return sources
     return sources
 
 
@@ -882,34 +1031,25 @@ def _resolve_presentation_blocks(
 def _server_ordered_place_messages(
     messages: list[str], snapshot: dict[str, Any],
 ) -> list[str]:
-    """Make the visible plain-text order come from the saved snapshot.
+    """Preserve visible prose and restore only trusted provider labels."""
+    return [
+        _restore_snapshot_candidate_labels(str(item), snapshot).strip()[:2400]
+        for item in messages
+        if str(item).strip()
+    ][:3]
 
-    The model may explain candidates in any prose order.  The list users act
-    on is server-authored from the same snapshot that ordinal resolution reads,
-    so a displayed second item can never drift from the stored second item.
-    """
-    candidates = [
-        item for item in (snapshot.get("candidates") or [])
-        if isinstance(item, dict) and str(item.get("label") or "").strip()
+
+def _presentation_style(messages: list[str]) -> str:
+    """Classify formatting for privacy-safe diagnostics only."""
+    lines = [
+        line for message in messages for line in str(message or "").splitlines()
+        if line.strip()
     ]
-    candidates.sort(key=lambda item: int(item.get("ordinal", 0) or 0))
-    if not candidates:
-        return [str(item).strip() for item in messages if str(item).strip()][:3]
-    candidate_summaries = []
-    for item in candidates[:8]:
-        label = str(item.get("label") or "地點").strip()[:80]
-        candidate_summaries.append({
-            "candidate_ref": str(item.get("reference") or ""),
-            "name": label,
-        })
-
-    # The shared renderer is idempotent: it recognizes existing trusted rows,
-    # preserves their descriptions, and reapplies snapshot order. Pre-stripping
-    # would make the saved reply lose candidate-bound prose.
-    rendered, _refs, _bindings = synthesizer._server_ordered_place_messages(
-        messages, candidate_summaries,
-    )
-    return [str(item).strip()[:2400] for item in rendered if str(item).strip()][:3]
+    if any(re.match(r"^\s*(?:\d{1,3}|[一二三四五六七八九十]+)[.)、：:]\s*", line) for line in lines):
+        return "numbered"
+    if any(re.match(r"^\s*[-*+•‣▪◦]\s+", line) for line in lines):
+        return "bulleted"
+    return "prose"
 
 
 def _restore_snapshot_candidate_labels(
@@ -1047,6 +1187,7 @@ def _run_sub_task(
     guard_lock: threading.Lock,
     on_progress: ProgressCallback | None, run_id: str, trace: dict[str, Any],
     debug_enabled: bool = False,
+    requires_activity_anchor: bool = False,
 ) -> tuple[list[SubTaskResult], SubAgentMetrics | None]:
     """Run a single sub-task: slice context, call sub-agent, guard, execute.
 
@@ -1059,6 +1200,18 @@ def _run_sub_task(
     if read_budget_state is None:
         read_budget_state = {"count": 0}
     context_slice = slice_for_agent(task.agent, turn_ctx, prior_observations=prior_observations)
+    if task.resolved_time_target is not None:
+        context_slice.payload = {
+            **context_slice.payload,
+            "resolved_time_target": task.resolved_time_target.model_dump(mode="json"),
+        }
+    if task.agent == "web" and requires_activity_anchor:
+        # Ephemeral scheduler-to-runtime control only. It is not part of the
+        # public request or persisted Web result schema.
+        context_slice.payload = {
+            **context_slice.payload,
+            "_requires_activity_anchor": True,
+        }
     if (
         task.agent == "calendar"
         and getattr(turn_ctx, "_place_selection_requires_calendar_create", False)
@@ -1198,7 +1351,7 @@ def _run_sub_task(
                 observation={
                     "failure": {
                         "code": failure_code,
-                        "message": relationship_runtime.DATE_INVITATION_PROTOCOL_FAILURE_REPLY,
+                        "operation_prepared": False,
                     },
                 },
             )], agent_metrics
@@ -1214,7 +1367,7 @@ def _run_sub_task(
                 observation={
                     "failure": {
                         "code": failure_code,
-                        "message": relationship_runtime.DATE_COORDINATION_CANCEL_PROTOCOL_FAILURE_REPLY,
+                        "operation_prepared": False,
                     },
                 },
             )], agent_metrics
@@ -1230,16 +1383,6 @@ def _run_sub_task(
             error_code=error_code,
         )], agent_metrics
 
-    bound_place = (
-        _place_binding_for_turn(turn_ctx)
-        if task.agent == "places" and task.place_mode in {"details", "reviews"}
-        else None
-    )
-    bound_place_query = (
-        _bound_place_query(turn_ctx)
-        if task.agent == "places" and task.place_mode in {"details", "reviews"}
-        else ""
-    )
     results: list[SubTaskResult] = []
     for index, proposal in enumerate(proposals):
         if task.agent == "match" and not match_runtime.proposal_allowed(task.match_intent, proposal, allow_event=bool(turn_ctx.active_event_invitation)):
@@ -1385,39 +1528,6 @@ def _run_sub_task(
                                           tool_name=proposal.tool_name,
                                           error_code="executor_args_invalid"))
             continue
-        if (
-            task.agent == "places"
-            and task.place_mode in {"details", "reviews"}
-            and proposal.tool_name == "places.resolve_place"
-        ):
-            if bound_place is None or not bound_place_query:
-                print(f"  [{task.id}#{index}] result=FAILED  error_code=place_reference_unbound")
-                results.append(SubTaskResult(
-                    task_id=task.id,
-                    status=SubTaskStatus.FAILED,
-                    tool_name=proposal.tool_name,
-                    error_code="place_reference_unbound",
-                ))
-                continue
-            # Ignore any model-authored branch/name and query the provider with
-            # the server-owned public name plus address summary. Identity is
-            # checked again against the opaque snapshot after execution.
-            safe_args = {**safe_args, "query": bound_place_query}
-        elif (
-            task.agent == "places"
-            and task.place_mode == "details"
-            and proposal.tool_name == "places.measure_distance"
-        ):
-            if bound_place is None or not bound_place_query:
-                print(f"  [{task.id}#{index}] result=FAILED  error_code=place_reference_unbound")
-                results.append(SubTaskResult(
-                    task_id=task.id,
-                    status=SubTaskStatus.FAILED,
-                    tool_name=proposal.tool_name,
-                    error_code="place_reference_unbound",
-                ))
-                continue
-            safe_args = {**safe_args, "destination": bound_place_query}
         with guard_lock:
             key = tool_call_key(spec, safe_args)
             if key in seen_keys:
@@ -1494,48 +1604,28 @@ def _run_sub_task(
                                           observation=_failure_observation_from_tool_result(tool_result)))
             continue
         if (
-            task.agent == "places"
-            and task.place_mode in {"details", "reviews"}
-            and proposal.tool_name == "places.resolve_place"
-            and not _place_provider_identity_matches(
-                bound_place,
-                (tool_result.data or {}).get("place") if isinstance(tool_result.data, dict) else None,
+            proposal.tool_name == "places.resolve_place"
+            and not _resolved_place_grounded_in_task_brief(
+                tool_result.data, task.task_brief,
             )
         ):
-            _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
-                            step_id=step_id, outcome="error", tool_name=proposal.tool_name,
-                            duration_ms=tool_duration_ms)
+            _emit_progress(
+                on_progress, "tool_finished", trace=trace,
+                agent_run_id=run_id, step_id=step_id, outcome="error",
+                tool_name=proposal.tool_name, duration_ms=tool_duration_ms,
+            )
             trace["tool_results"].append({
                 "tool": proposal.tool_name,
                 "ok": False,
-                "code": "place_provider_identity_mismatch",
+                "code": "place_identity_not_grounded",
             })
-            if debug_enabled:
-                append_debug_event(
-                    run_id, "tool_finished", task_id=task.id, step_id=step_id,
-                    function=proposal.tool_name, outcome="error",
-                    duration_ms=tool_duration_ms,
-                    error_code="place_provider_identity_mismatch",
-                )
-            print(f"  [{task.id}#{index}] result=FAILED  error_code=place_provider_identity_mismatch")
             results.append(SubTaskResult(
                 task_id=task.id,
                 status=SubTaskStatus.FAILED,
                 tool_name=proposal.tool_name,
-                error_code="place_provider_identity_mismatch",
+                error_code="place_identity_not_grounded",
             ))
             continue
-        private_data = tool_result.private_data or {}
-        relationship_reference = (
-            private_data.get("relationship_contact_reference")
-            if isinstance(private_data, dict) else None
-        )
-        if isinstance(relationship_reference, dict):
-            other_id = str(relationship_reference.get("other_id") or "")
-            safe_label = str(relationship_reference.get("safe_label") or "")
-            if other_id and safe_label:
-                from .relationship_references import remember_contact
-                remember_contact(turn_ctx.user_id, other_id, safe_label)
         _emit_progress(on_progress, "tool_finished", trace=trace, agent_run_id=run_id,
                         step_id=step_id, outcome="ok", tool_name=proposal.tool_name,
                         duration_ms=tool_duration_ms)
@@ -1572,18 +1662,60 @@ def run_public_agent_turn_v3(
     })
     mgr = ConfirmationManager(_CONFIRMATIONS)
     continuation_resolution: dict[str, Any] | None = None
+    continuation_record: dict[str, Any] | None = None
+    continuation_cancel_failed = False
     if ctx.choice_action is None and ctx.assessment_action is None:
-        continuation_resolution = mgr.resolve_for_continuation(
+        active_before = mgr.list_active(
             user_id=ctx.user_id,
             room_id=ctx.room_id,
             surface=SURFACE_PUBLIC,
+            interaction_mode=INTERACTION_BUBBLE,
         )
+        active_before = [
+            record for record in active_before
+            if str(
+                record.get("interaction_mode")
+                or interaction_mode_for_action(str(record.get("tool_name") or ""))
+            ) == INTERACTION_BUBBLE
+        ]
+        if active_before:
+            active_before.sort(
+                key=lambda record: float(record.get("created_at", 0) or 0),
+                reverse=True,
+            )
+            continuation_record = active_before[0]
+        try:
+            continuation_resolution = mgr.resolve_for_continuation(
+                user_id=ctx.user_id,
+                room_id=ctx.room_id,
+                surface=SURFACE_PUBLIC,
+            )
+        except Exception:
+            continuation_cancel_failed = continuation_record is not None
+        if continuation_record is not None and continuation_resolution is None:
+            latest_projection = mgr.choice_projection(
+                user_id=ctx.user_id,
+                room_id=ctx.room_id,
+                surface=SURFACE_PUBLIC,
+                choice_id=str(continuation_record.get("_id") or ""),
+            )
+            latest_state = str((latest_projection or {}).get("state") or "")
+            if latest_state in {"confirmed", "cancelled", "auto_cancelled", "expired", "superseded", "failed"}:
+                continuation_resolution = latest_projection
+                continuation_cancel_failed = False
+            else:
+                continuation_cancel_failed = True
         if continuation_resolution:
             sync_choice_message_projection(
                 messages_coll,
                 room_id=ctx.room_id,
                 projection=continuation_resolution,
             )
+            ctx = ctx.model_copy(update={
+                "recent_history": _apply_choice_projection_to_history(
+                    list(ctx.recent_history or []), continuation_resolution,
+                ),
+            })
         # An awaiting assessment draft is itself a bubble choice. Continuing
         # the same room cancels the draft and then lets the new text reach the
         # ordinary planner. Pre-rollout sessions without a choice record fail
@@ -1601,6 +1733,11 @@ def run_public_agent_turn_v3(
     run_id = uuid.uuid4().hex
     clock = build_turn_clock(ctx.message)
     turn = build_public_agent_turn_context(ctx, clock=clock)
+    turn._cancelled_confirmation_context = (  # type: ignore[attr-defined]
+        _cancelled_confirmation_context(continuation_record, continuation_resolution)
+        if str((continuation_resolution or {}).get("state") or "") == "auto_cancelled"
+        else None
+    )
     turn._raw_ctx = ctx  # type: ignore[attr-defined]
     turn._mentioned_ids = mentioned_ids  # type: ignore[attr-defined]
     turn._place_resolution_origin_run_id = None  # type: ignore[attr-defined]
@@ -1613,6 +1750,15 @@ def run_public_agent_turn_v3(
         "total_input_tokens": 0, "total_output_tokens": 0,
         "direct_chat_fallback_reason": None,
         "web_research": [],
+        "context_diagnostics": {
+            "history_message_count": len(turn.recent_messages),
+            "history_char_count": sum(
+                len(str(item.get("content") or ""))
+                for item in turn.recent_messages
+                if isinstance(item, dict)
+            ),
+            "history_projection_status": turn.history_projection_status,
+        },
         "place_diagnostics": {
             "resolution": {
                 "status": "not_evaluated",
@@ -1621,6 +1767,9 @@ def run_public_agent_turn_v3(
                 "origin_run_id": None,
             },
             "candidate_count": 0,
+            "presented_candidate_count": 0,
+            "binding_validation": "not_evaluated",
+            "presentation_style": "not_evaluated",
             "presentation_persistence": "not_attempted",
             "source_message_linked": False,
             "calendar_flow": False,
@@ -1628,6 +1777,18 @@ def run_public_agent_turn_v3(
         },
         "result": {"handled": True, "conversation_intent": "", "fallback_reason": None},
     }
+    if continuation_cancel_failed:
+        reply = "前一個確認的狀態暫時無法安全更新，所以我先沒有建立新的確認。請先重新整理查看原卡狀態，再把這次更正傳一次。"
+        return AgentResult(
+            handled=True,
+            reply=reply,
+            messages=[reply],
+            presentation_class="fallback",
+            conversation_intent="confirmation_state_conflict",
+            agent_run_id=run_id,
+            agent_mode="v3_confirmation_guard",
+            fallback_reason="confirmation_cancellation_not_persisted",
+        )
     if debug_enabled:
         begin_debug_run(run_id, ctx.user_id)
         append_debug_event(
@@ -1717,20 +1878,7 @@ def run_public_agent_turn_v3(
         if presentation is None and normalized_reply:
             presentation = build_presentation([normalized_reply], "fallback")
         if presentation is not None:
-            place_labels = tuple(
-                str(projection.get("label") or "").strip()
-                for projection in (
-                    getattr(turn, "place_reference_resolution", None),
-                    getattr(turn, "recent_place_reference", None),
-                )
-                if isinstance(projection, dict) and str(projection.get("label") or "").strip()
-            )
-            messages = [
-                _restore_snapshot_candidate_labels(
-                    message, place_snapshot, extra_labels=place_labels,
-                )
-                for message in presentation.messages
-            ]
+            messages = list(presentation.messages)
             normalized_reply = "\n\n".join(messages)
         result = result.model_copy(update={"reply": normalized_reply, "messages": messages})
         # Confirmation preview hashes must bind the exact text that the HTTP
@@ -1739,6 +1887,7 @@ def run_public_agent_turn_v3(
             user_id=ctx.user_id,
             origin_run_id=confirmation_run_id,
             final_content=normalized_reply,
+            interaction_blocks_v1=result.interaction_blocks_v1,
         )
         choice_prompt = mgr.choice_for_run(
             user_id=ctx.user_id,
@@ -1790,6 +1939,53 @@ def run_public_agent_turn_v3(
             assessment_kind=str(outcome.get("kind") or session.get("kind") or "") or None,
             assessment_revision=outcome.get("revision", int(session.get("revision", 0) or 0)),
         )
+
+    def _compose_pending_confirmation(
+        *,
+        task_id: str,
+        tool_name: str,
+        preview: str,
+        conversation_intent: str,
+    ) -> tuple[AgentResult, SynthesizerMetrics]:
+        """Let Synthesizer place one Server-owned confirmation slot naturally."""
+        synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{
+            "task_id": task_id,
+            "status": "ok",
+            "tool": tool_name,
+            "result": {
+                "pending_confirmation": True,
+                "tool_name": tool_name,
+                "preview": preview,
+            },
+            "error_code": None,
+            "skip_reason": None,
+        }])
+        composed_reply, _card_decision, metrics = synthesizer.synthesize(
+            synth_slice,
+            on_token=emit_token_fragment,
+        )
+        _print_llm_metrics("synthesizer", metrics)
+        call_count = _metric_call_count(metrics)
+        return AgentResult(
+            handled=True,
+            reply=composed_reply,
+            messages=metrics.presentation_messages or [composed_reply],
+            presentation_class=metrics.presentation_class,
+            interaction_blocks_v1=metrics.interaction_blocks_v1,
+            conversation_intent=conversation_intent,
+            agent_run_id=run_id,
+            agent_mode="v3",
+            fallback_reason=metrics.fallback_reason,
+            llm_call_metrics=[{
+                "agent": "synthesizer",
+                "input_tokens": metrics.input_tokens,
+                "output_tokens": metrics.output_tokens,
+                "duration_ms": metrics.duration_ms,
+                "call_count": call_count,
+                "requested_model_tier": metrics.requested_model_tier,
+                "model_name": _metric_model_name(metrics),
+            }] if call_count else [],
+        ), metrics
 
     if ctx.choice_action is not None:
         choice_id = str(ctx.choice_id or "")
@@ -2001,7 +2197,7 @@ def run_public_agent_turn_v3(
             synth_slice, on_token=None if date_confirmation else emit_token_fragment,
         )
         server_reply = _server_owned_confirmed_date_reply(results)
-        if server_reply:
+        if server_reply and synth_metrics.fallback_reason:
             reply = server_reply
             synth_metrics.presentation_messages = [server_reply]
             synth_metrics.presentation_class = "transaction"
@@ -2124,77 +2320,29 @@ def run_public_agent_turn_v3(
                 surface=SURFACE_PUBLIC,
                 interaction_mode=INTERACTION_BUBBLE,
             )
+            composed, _metrics = _compose_pending_confirmation(
+                task_id="assessment_commit",
+                tool_name=ASSESSMENT_COMMIT_ACTION,
+                preview=button_reply,
+                conversation_intent="assessment",
+            )
+            result = result.model_copy(update={
+                "reply": composed.reply,
+                "messages": composed.messages,
+                "presentation_class": composed.presentation_class,
+                "interaction_blocks_v1": composed.interaction_blocks_v1,
+                "fallback_reason": composed.fallback_reason,
+                "llm_call_metrics": composed.llm_call_metrics,
+            })
         _print_separator("V3 RUN END")
         return _finalize_debug(result)
 
-    # Resolve a server-owned place referent before the Planner only as context.
-    # This is not an intent gate: unresolved/ambiguous place language continues
-    # through Planner/Calendar so typed date and time fields can be retained in
-    # a draft while the user clarifies the place. Calendar draft candidates
-    # retain precedence for their own same-domain ordinal follow-up.
-    calendar_draft_candidates = (
-        list((turn.calendar_draft or {}).get("candidates") or [])
-        if isinstance(turn.calendar_draft, dict)
-        else []
-    )
-    if not calendar_draft_candidates:
-        place_resolution = resolve_message_reference(
-            ctx.user_id, ctx.room_id, turn.message, commit_selection=False,
-        )
-        resolution_status = str(place_resolution.get("status") or "none")
-        trace["place_diagnostics"]["resolution"] = {
-            "status": resolution_status,
-            "method": str(place_resolution.get("resolution_method") or "") or None,
-            "candidate_count": int(place_resolution.get("candidate_count", 0) or 0),
-            "origin_run_id": str(place_resolution.get("origin_run_id") or "") or None,
-        }
-        if resolution_status == "resolved":
-            turn = turn.model_copy(update={
-                "recent_place_candidates": place_candidate_projection(
-                    get_place_candidate_set(ctx.user_id, ctx.room_id)
-                ),
-                "place_reference_resolution": public_place_resolution(place_resolution),
-            })
-            turn._place_resolution_origin_run_id = str(  # type: ignore[attr-defined]
-                place_resolution.get("origin_run_id") or ""
-            ).strip() or None
-            turn._place_resolution_method = str(  # type: ignore[attr-defined]
-                place_resolution.get("resolution_method") or ""
-            ).strip() or None
-            turn._raw_ctx = ctx  # type: ignore[attr-defined]
-            turn._mentioned_ids = mentioned_ids  # type: ignore[attr-defined]
-        elif resolution_status != "none":
-            # Keep only safe, non-authoritative resolution state in the Planner
-            # context. The Calendar runtime must not turn it into a provider
-            # identity; it may use the status to preserve a date/time draft.
-            issue_projection: dict[str, Any] = {
-                "status": resolution_status,
-                "candidate_count": int(place_resolution.get("candidate_count", 0) or 0),
-            }
-            options = place_resolution.get("candidate_options")
-            if isinstance(options, list):
-                issue_projection["candidate_options"] = [
-                    {
-                        "label": str(item.get("label") or "")[:80],
-                        "address_summary": str(item.get("address_summary") or "")[:100],
-                    }
-                    for item in options[:3]
-                    if isinstance(item, dict) and str(item.get("label") or "").strip()
-                ]
-            turn = turn.model_copy(update={"place_reference_resolution": issue_projection})
-            turn._place_resolution_origin_run_id = None  # type: ignore[attr-defined]
-            turn._place_resolution_method = None  # type: ignore[attr-defined]
-            turn._raw_ctx = ctx  # type: ignore[attr-defined]
-            turn._mentioned_ids = mentioned_ids  # type: ignore[attr-defined]
-    elif trace["place_diagnostics"]["resolution"]["status"] == "not_evaluated":
-        trace["place_diagnostics"]["resolution"] = {
-            "status": "skipped_calendar_draft",
-            "method": None,
-            "candidate_count": len(calendar_draft_candidates),
-            "origin_run_id": None,
-        }
-
-    turn = _abandon_place_followup_for_turn(turn)
+    trace["place_diagnostics"]["resolution"] = {
+        "status": "chat_context",
+        "method": "planner_task_brief",
+        "candidate_count": 0,
+        "origin_run_id": None,
+    }
 
     choice = "none" if continuation_resolution else confirmation_choice(ctx.message)
     pending_records = mgr.list_active(
@@ -2263,30 +2411,15 @@ def run_public_agent_turn_v3(
                 room_id=ctx.room_id,
                 surface=SURFACE_PUBLIC,
             )
-            synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{
-                "task_id": "match_guidance",
-                "status": "ok",
-                "tool": None,
-                "result": [{
-                    "pending_confirmation": True,
-                    "tool_name": "match.start_search",
-                    "preview": preview or "",
-                }],
-                "error_code": None,
-                "skip_reason": None,
-            }])
-            reply, _card_decision, synth_metrics = synthesizer.synthesize(synth_slice, on_token=emit_token_fragment)
-            _print_llm_metrics("synthesizer", synth_metrics)
-            return _finalize_debug(AgentResult(
-                handled=True,
-                reply=reply,
-                messages=synth_metrics.presentation_messages or [reply],
-                presentation_class=synth_metrics.presentation_class,
+            composed, _synth_metrics = _compose_pending_confirmation(
+                task_id="match_guidance",
+                tool_name="match.start_search",
+                preview=preview or "",
                 conversation_intent="match_confirmation",
-                agent_run_id=run_id,
-                agent_mode="v3",
-                match_readiness_state="ready",
-            ))
+            )
+            return _finalize_debug(composed.model_copy(update={
+                "match_readiness_state": "ready",
+            }))
     if choice in {"confirm", "cancel"} and not pending_records:
         if choice == "cancel":
             _print_separator("V3 RUN END")
@@ -2332,7 +2465,7 @@ def run_public_agent_turn_v3(
         synth_slice = slice_for_agent("synthesizer", turn, prior_observations=[{"task_id":"confirm","status":"ok","tool":None,"result":results,"error_code":None,"skip_reason":None}])
         reply, _card_decision, synth_metrics = synthesizer.synthesize(synth_slice, on_token=emit_token_fragment)
         server_reply = _server_owned_confirmed_date_reply(results)
-        if server_reply:
+        if server_reply and synth_metrics.fallback_reason:
             reply = server_reply
             synth_metrics.reply_source = "verified_observation"
             synth_metrics.presentation_messages = [server_reply]
@@ -2444,34 +2577,109 @@ def run_public_agent_turn_v3(
         )
 
     if plan is None:
-        trace["llm_call_count"] = _metric_call_count(planner_metrics)
-        trace["total_input_tokens"] = total_input_tokens
-        trace["total_output_tokens"] = total_output_tokens
-        trace["latency_ms"] = round((time.perf_counter() - run_total_started) * 1000)
-        print("\n  [planner] result=FAILED → fail closed")
-        _print_separator("V3 RUN END")
-        print(f"  total_tokens={total_input_tokens + total_output_tokens} (in={total_input_tokens} out={total_output_tokens})")
-        print(f"  [llm] total_calls={_metric_call_count(planner_metrics)}")
+        print("\n  [planner] result=FAILED → synthesize safe no-action response")
         trace["planner_failure"] = {
-            "stage": "fallback",
+            "stage": "synthesis",
             "failure_code": planner_metrics.failure_code,
             "retry_count": planner_metrics.retry_count,
             "retry_reason": planner_metrics.retry_reason,
             "attempts": _privacy_safe_planner_attempts(planner_metrics),
         }
+        failure_observation = {
+            "task_id": "planner",
+            "status": "failed",
+            "tool": None,
+            "result": {
+                "schema_version": "planner_failure.v1",
+                "safe_state": "no_actions_executed",
+                "retryable": True,
+            },
+            "error_code": "request_not_safely_planned",
+            "skip_reason": None,
+        }
+        synth_slice = slice_for_agent(
+            "synthesizer",
+            turn,
+            prior_observations=[failure_observation],
+        )
+        _emit_progress(
+            on_progress,
+            "subagent_started",
+            trace=trace,
+            agent_run_id=run_id,
+            task_id="planner_response",
+            agent="synthesizer",
+        )
+        reply, _card_decision, synth_metrics = synthesizer.synthesize(
+            synth_slice,
+            on_token=emit_token_fragment,
+        )
+        _print_llm_metrics("synthesizer", synth_metrics)
+        total_input_tokens += synth_metrics.input_tokens
+        total_output_tokens += synth_metrics.output_tokens
+        synth_call_count = _metric_call_count(synth_metrics)
+        _emit_progress(
+            on_progress,
+            "subagent_finished",
+            trace=trace,
+            agent_run_id=run_id,
+            task_id="planner_response",
+            agent="synthesizer",
+            status="degraded" if synth_metrics.fallback_reason else "ok",
+            error=synth_metrics.error_code or "",
+            input_tokens=synth_metrics.input_tokens,
+            output_tokens=synth_metrics.output_tokens,
+            duration_ms=synth_metrics.duration_ms,
+            tool_name=None,
+        )
+        planner_call_count = _metric_call_count(planner_metrics)
+        trace["llm_call_count"] = planner_call_count + synth_call_count
+        trace["total_input_tokens"] = total_input_tokens
+        trace["total_output_tokens"] = total_output_tokens
+        trace["latency_ms"] = round((time.perf_counter() - run_total_started) * 1000)
         trace["result"] = {
             "handled": True,
             "conversation_intent": "clarification",
-            "fallback_reason": "planner_invalid",
+            "fallback_reason": synth_metrics.fallback_reason,
         }
+        trace["answer_status"] = (
+            "emergency"
+            if synth_metrics.fallback_reason == "synthesizer_emergency"
+            else "partial"
+        )
+        trace["event_sequence"].append("final")
         _persist_trace(run_id, ctx, trace)
-        reply = _planner_failure_reply(turn)
+        _print_separator("V3 RUN END")
+        print(f"  total_tokens={total_input_tokens + total_output_tokens} (in={total_input_tokens} out={total_output_tokens})")
+        print(f"  [llm] total_calls={planner_call_count + synth_call_count}")
         return _finalize_debug(AgentResult(
-            handled=True, reply=reply,
+            handled=True,
+            reply=reply,
+            messages=synth_metrics.presentation_messages or [reply],
+            presentation_class=synth_metrics.presentation_class,
             agent_run_id=run_id,
             agent_mode="v3",
-            fallback_reason="planner_invalid",
+            fallback_reason=synth_metrics.fallback_reason,
             profile_write_reason="unknown",
+            conversation_intent="clarification",
+            llm_call_metrics=[{
+                "agent": "planner",
+                "input_tokens": planner_metrics.input_tokens,
+                "output_tokens": planner_metrics.output_tokens,
+                "duration_ms": planner_metrics.duration_ms,
+                "call_count": planner_call_count,
+                "requested_model_tier": planner_metrics.requested_model_tier,
+                "model_name": _metric_model_name(planner_metrics),
+                "mode": "failed",
+            }, {
+                "agent": "synthesizer",
+                "input_tokens": synth_metrics.input_tokens,
+                "output_tokens": synth_metrics.output_tokens,
+                "duration_ms": synth_metrics.duration_ms,
+                "call_count": synth_call_count,
+                "requested_model_tier": synth_metrics.requested_model_tier,
+                "model_name": _metric_model_name(synth_metrics),
+            }],
         ))
 
     plan = normalize_plan_for_execution(plan, turn.message)
@@ -2482,151 +2690,10 @@ def run_public_agent_turn_v3(
         for task in plan.tasks
         if task.agent == "places"
     }
-    place_selection = getattr(plan, "place_selection", None)
-    resolution_status = str(
-        (getattr(turn, "place_reference_resolution", None) or {}).get("status") or "none"
-    )
-    if place_selection is not None:
-        selection_text = str(getattr(place_selection, "selection_text", "") or "").strip()
-        if not selection_text:
-            place_resolution = {
-                "status": "invalid_selection",
-                "candidate_count": 0,
-            }
-        else:
-            # Planner's selection text is an intent hint and may be normalized
-            # (for example, 「第二個」 versus the user's 「第二間」). The
-            # server resolver owns the actual place identity, so always give it
-            # the complete original message instead of requiring a literal
-            # substring match against model output.
-            place_resolution = resolve_message_reference(
-                ctx.user_id, ctx.room_id, turn.message, commit_selection=False,
-            )
-            if place_resolution.get("status") == "none":
-                # A Planner place hint without a matching durable snapshot is
-                # still a place continuation, but it is not permission to use
-                # the model's guessed title as a provider identity.
-                place_resolution = {
-                    "status": "unavailable",
-                    "candidate_count": 0,
-                }
-        resolution_status = str(place_resolution.get("status") or "none")
-        trace["place_diagnostics"]["resolution"] = {
-            "status": resolution_status,
-            "method": str(place_resolution.get("resolution_method") or "") or None,
-            "candidate_count": int(place_resolution.get("candidate_count", 0) or 0),
-            "origin_run_id": str(place_resolution.get("origin_run_id") or "") or None,
-        }
-        if resolution_status == "resolved":
-            turn = turn.model_copy(update={
-                "place_reference_resolution": public_place_resolution(place_resolution),
-            })
-            turn._place_resolution_origin_run_id = str(  # type: ignore[attr-defined]
-                place_resolution.get("origin_run_id") or ""
-            ).strip() or None
-            turn._place_resolution_method = str(  # type: ignore[attr-defined]
-                place_resolution.get("resolution_method") or ""
-            ).strip() or None
-        else:
-            issue_projection: dict[str, Any] = {
-                "status": resolution_status,
-                "candidate_count": int(place_resolution.get("candidate_count", 0) or 0),
-            }
-            options = place_resolution.get("candidate_options")
-            if isinstance(options, list):
-                issue_projection["candidate_options"] = [
-                    {
-                        "label": str(item.get("label") or "")[:80],
-                        "address_summary": str(item.get("address_summary") or "")[:100],
-                    }
-                    for item in options[:3]
-                    if isinstance(item, dict) and str(item.get("label") or "").strip()
-                ]
-            turn = turn.model_copy(update={
-                "place_reference_resolution": issue_projection,
-            })
-            turn._place_resolution_origin_run_id = None  # type: ignore[attr-defined]
-            turn._place_resolution_method = None  # type: ignore[attr-defined]
-        turn._raw_ctx = ctx  # type: ignore[attr-defined]
-        turn._mentioned_ids = mentioned_ids  # type: ignore[attr-defined]
-
-    resolved_selection = getattr(turn, "place_reference_resolution", None)
-    selection_method = str(getattr(turn, "_place_resolution_method", "") or "")
-    has_place_selection_read = any(
-        task.agent == "places" and task.place_mode in {"details", "reviews"}
-        for task in plan.tasks
-    )
-    has_calendar_selection = bool(
-        place_selection is not None
-        and any(
-            task.agent == "calendar" and task.outcome_contract is None
-            for task in plan.tasks
-        )
-    )
-    explicit_new_selection = bool(
-        selection_method
-        and selection_method not in {"selected_pronoun", "selected_deictic"}
-    )
-    should_commit_selection = bool(
-        isinstance(resolved_selection, dict)
-        and resolved_selection.get("status") == "resolved"
-        and (
-            has_calendar_selection
-            or (has_place_selection_read and explicit_new_selection)
-        )
-    )
-    if should_commit_selection:
-        commit_input = {
-            **resolved_selection,
-            "origin_run_id": getattr(turn, "_place_resolution_origin_run_id", None),
-        }
-        selection_commit = commit_resolved_selection(
-            ctx.user_id,
-            ctx.room_id,
-            commit_input,
-        )
-        commit_status = str(selection_commit.get("status") or "storage_unavailable")
-        trace["place_diagnostics"]["selection_commit"] = {
-            "status": commit_status,
-            "method": selection_method or None,
-        }
-        if commit_status == "committed":
-            selected_projection = selection_commit.get("selection")
-            if isinstance(selected_projection, dict):
-                turn = turn.model_copy(update={
-                    "recent_place_reference": selected_projection,
-                })
-                turn._raw_ctx = ctx  # type: ignore[attr-defined]
-                turn._mentioned_ids = mentioned_ids  # type: ignore[attr-defined]
-        else:
-            trace["llm_call_count"] = _metric_call_count(planner_metrics)
-            trace["total_input_tokens"] = total_input_tokens
-            trace["total_output_tokens"] = total_output_tokens
-            trace["latency_ms"] = round((time.perf_counter() - run_total_started) * 1000)
-            trace["result"] = {
-                "handled": True,
-                "conversation_intent": "clarification",
-                "fallback_reason": "place_selection_persistence_failed",
-            }
-            _persist_trace(run_id, ctx, trace)
-            reply = "這次有辨認到你選的店家，但暫時無法保存選擇，所以沒有繼續查詢。請重新選一次。"
-            return _finalize_debug(AgentResult(
-                handled=True,
-                reply=reply,
-                conversation_intent="clarification",
-                agent_run_id=run_id,
-                agent_mode="v3",
-                fallback_reason="place_selection_persistence_failed",
-                profile_write_reason="unknown",
-            ))
-    turn._place_selection_requires_calendar_create = bool(  # type: ignore[attr-defined]
-        place_selection is not None
-        and resolution_status == "resolved"
-        and any(
-            task.agent == "calendar" and task.outcome_contract is None
-            for task in plan.tasks
-        )
-    )
+    trace["place_diagnostics"]["selection_commit"] = {
+        "status": "disabled_chat_context",
+        "method": "planner_task_brief",
+    }
     trace["place_diagnostics"]["calendar_flow"] = any(
         task.agent == "calendar" for task in plan.tasks
     )
@@ -2740,6 +2807,18 @@ def run_public_agent_turn_v3(
             ))
 
     guidance_observations: list[dict[str, Any]] = []
+    if plan.temporal_clarification is not None:
+        guidance_observations.append({
+            "task_id": "temporal_clarification",
+            "status": "ok",
+            "tool": None,
+            "result": {
+                "schema_version": "temporal_clarification.v1",
+                **plan.temporal_clarification.model_dump(mode="json"),
+            },
+            "error_code": None,
+            "skip_reason": None,
+        })
     match_guidance_shown = False
     opportunity = getattr(plan, "opportunity", None)
     if opportunity is not None and opportunity.signal == "social_opening":
@@ -2780,6 +2859,7 @@ def run_public_agent_turn_v3(
         **({"web_mode": t.web_mode} if t.agent == "web" and t.web_mode else {}),
         **({"outcome_contract": t.outcome_contract} if t.outcome_contract else {}),
         **({"run_if": t.run_if.model_dump()} if t.run_if else {}),
+        **({"resolved_time_target": t.resolved_time_target.model_dump(mode="json")} if t.resolved_time_target else {}),
     } for t in plan.tasks]
     trace["plan"] = [
         {
@@ -2791,6 +2871,7 @@ def run_public_agent_turn_v3(
             **({"match_intent": t.match_intent} if t.match_intent else {}),
             **({"outcome_contract": t.outcome_contract} if t.outcome_contract else {}),
             **({"run_if": t.run_if.model_dump()} if t.run_if else {}),
+            **({"resolved_time_target": t.resolved_time_target.model_dump(mode="json")} if t.resolved_time_target else {}),
         }
         for t in plan.tasks
     ]
@@ -2840,6 +2921,13 @@ def run_public_agent_turn_v3(
     seen_keys: set[tuple[str, str]] = set()
     task_results: dict[str, list[SubTaskResult]] = {}
     task_by_id = {task.id: task for task in plan.tasks}
+    web_activity_anchor_task_ids = {
+        dependency
+        for task in plan.tasks
+        if task.agent == "places"
+        for dependency in task.depends_on
+        if dependency in task_by_id and task_by_id[dependency].agent == "web"
+    }
 
     _print_separator("SUB-AGENT EXECUTION")
     for layer in _topological_layers(plan):
@@ -2863,6 +2951,28 @@ def run_public_agent_turn_v3(
                                 input_tokens=0, output_tokens=0, duration_ms=0,
                                 tool_name=None)
                 return task, result, None
+            activity_anchor_available = _web_activity_anchor_available(
+                task, task_results, task_by_id,
+            )
+            if activity_anchor_available is False:
+                result = [SubTaskResult(
+                    task_id=task.id,
+                    status=SubTaskStatus.SKIPPED,
+                    skip_reason="missing_activity_anchor",
+                )]
+                with guard_lock:
+                    trace.setdefault("place_diagnostics", {})[
+                        "places_skip_reason"
+                    ] = "missing_activity_anchor"
+                print(f"\n  [{task.id}] SKIPPED (missing_activity_anchor)")
+                _emit_progress(
+                    on_progress, "subagent_finished", trace=trace,
+                    agent_run_id=run_id, task_id=task.id, agent=task.agent,
+                    status="skipped", error="missing_activity_anchor",
+                    input_tokens=0, output_tokens=0, duration_ms=0,
+                    tool_name=None,
+                )
+                return task, result, None
             condition_skip = _condition_skip_reason(task, task_results)
             if condition_skip is not None:
                 result = [SubTaskResult(task_id=task.id, status=SubTaskStatus.SKIPPED,
@@ -2881,7 +2991,10 @@ def run_public_agent_turn_v3(
                                         planner_write_intent=plan.write_intent,
                                         guard_lock=guard_lock,
                                         on_progress=on_progress, run_id=run_id, trace=trace,
-                                        debug_enabled=debug_enabled)
+                                        debug_enabled=debug_enabled,
+                                        requires_activity_anchor=(
+                                            task.id in web_activity_anchor_task_ids
+                                        ))
             except Exception as exc:
                 # A sub-task must never crash the whole run: convert any
                 # unexpected exception into a FAILED result so the synthesizer
@@ -2975,8 +3088,56 @@ def run_public_agent_turn_v3(
                 "coverage": str(observation.get("coverage") or "")[:32],
                 "finding_count": len(observation.get("findings") or []),
                 "source_count": len(observation.get("sources") or []),
+                "activity_required": result.task_id in web_activity_anchor_task_ids,
+                "activity_anchor_status": (
+                    "validated" if isinstance(observation.get("primary_activity"), dict)
+                    and str((observation.get("primary_activity") or {}).get("title") or "").strip()
+                    and str((observation.get("primary_activity") or {}).get("venue") or "").strip()
+                    and isinstance((observation.get("primary_activity") or {}).get("source_urls"), list)
+                    and any(
+                        str(url or "").strip()
+                        for url in (observation.get("primary_activity") or {}).get("source_urls", [])
+                    )
+                    else "unavailable" if result.task_id in web_activity_anchor_task_ids
+                    else "not_required"
+                ),
             })
     trace["place_diagnostics"]["web"] = web_diagnostics
+
+    execution_outcomes: list[dict[str, Any]] = []
+    for task in plan.tasks:
+        if task.agent == "synthesizer":
+            continue
+        results = task_results.get(task.id, [])
+        if not results:
+            continue
+        failed = next((item for item in results if item.status is SubTaskStatus.FAILED), None)
+        skipped = next((item for item in results if item.status is SubTaskStatus.SKIPPED), None)
+        if failed is not None:
+            state = "failed"
+            reason_code = failed.error_code or (
+                failed.guard_code.value if failed.guard_code is not None else "task_failed"
+            )
+        elif skipped is not None:
+            state = (
+                "condition_stopped"
+                if skipped.skip_reason == "condition_not_met"
+                else "needs_clarification"
+                if skipped.skip_reason == "needs_clarification"
+                else "upstream_unavailable"
+            )
+            reason_code = skipped.skip_reason or "task_skipped"
+        else:
+            state = "completed"
+            reason_code = None
+        execution_outcomes.append({
+            "task_id": task.id,
+            "agent": task.agent,
+            "state": state,
+            "reason_code": reason_code,
+            "source_task_id": task.run_if.source_task_id if task.run_if is not None else None,
+        })
+    trace["execution_outcomes"] = execution_outcomes
 
     _print_separator("SYNTHESIZER")
     prior: list[dict[str, Any]] = []
@@ -2985,7 +3146,24 @@ def run_public_agent_turn_v3(
         for r in task_results[task_id]:
             if r.status is not SubTaskStatus.SKIPPED:
                 prior.append(_observation_dict(task_id, r))
+            elif r.skip_reason == "needs_clarification":
+                prior.append(_observation_dict(task_id, r))
+            elif r.skip_reason == "missing_activity_anchor":
+                prior.append({
+                    "task_id": task_id,
+                    "status": "skipped",
+                    "tool": None,
+                    "result": {
+                        "activity_anchor_unavailable": {
+                            "code": "missing_activity_anchor",
+                            "places_search_performed": False,
+                        },
+                    },
+                    "error_code": None,
+                    "skip_reason": "missing_activity_anchor",
+                })
     synth_slice = slice_for_agent("synthesizer", turn, prior_observations=prior)
+    synth_slice.payload["execution_outcomes"] = execution_outcomes
     synth_slice.payload["web_execution_failures"] = [
         {
             "task_id": task.id,
@@ -2994,8 +3172,7 @@ def run_public_agent_turn_v3(
         for task in plan.tasks
         if task.agent == "web"
         for result in task_results.get(task.id, [])
-        if result.status in {SubTaskStatus.FAILED, SubTaskStatus.SKIPPED}
-        and result.skip_reason != "places_hours_sufficient"
+        if result.status is SubTaskStatus.FAILED
     ][:4]
     synth_slice.payload["presentation_mode"] = getattr(plan, "presentation_mode", "default")
     place_modes = {
@@ -3046,7 +3223,7 @@ def run_public_agent_turn_v3(
             or (isinstance(item.get("result"), dict) and item["result"].get("schema_version") == "web_research.v1")
         )
         for item in prior
-    )
+    ) or bool(execution_outcomes) or plan.temporal_clarification is not None
     date_write_workflow = plan.write_intent in {
         DATE_INVITATION_WRITE_INTENT,
         DATE_COORDINATION_CANCEL_WRITE_INTENT,
@@ -3061,31 +3238,23 @@ def run_public_agent_turn_v3(
         on_token=synth_token_callback,
     )
     server_reply = _server_owned_date_coordination_reply(task_results)
-    server_failure_reply = _server_owned_date_coordination_failure_reply(
-        task_results, write_intent=plan.write_intent,
-    )
     domain_tasks = [task for task in plan.tasks if task.agent != "synthesizer"]
     exclusive_date_transaction = bool(
         date_write_workflow
         and len(domain_tasks) == 1
         and domain_tasks[0].agent == "relationship"
     )
-    if server_reply and exclusive_date_transaction:
+    if (
+        server_reply
+        and exclusive_date_transaction
+        and not synth_metrics.interaction_blocks_v1
+        and synth_metrics.fallback_reason
+    ):
         reply = server_reply
         synth_metrics.reply_source = "verified_observation"
         synth_metrics.presentation_messages = [server_reply]
         synth_metrics.presentation_blocks = None
         synth_metrics.presentation_class = "transaction"
-    elif server_failure_reply:
-        if exclusive_date_transaction:
-            reply = server_failure_reply
-            synth_metrics.reply_source = "verified_observation"
-            synth_metrics.presentation_messages = [server_failure_reply]
-            synth_metrics.presentation_blocks = None
-            synth_metrics.presentation_class = "fallback"
-        elif server_failure_reply not in reply:
-            reply = "\n\n".join(part for part in (reply, server_failure_reply) if part)
-            synth_metrics.presentation_messages = [reply]
     reply = normalize_public_reply(reply)
     _print_llm_metrics("synthesizer", synth_metrics)
     total_input_tokens += synth_metrics.input_tokens
@@ -3126,105 +3295,28 @@ def run_public_agent_turn_v3(
             results=[{"reply": reply, "card_decision": card_decision}],
         )
 
+    presentation_messages = synth_metrics.presentation_messages or [reply]
     selected_place_cards = (
         _apply_card_decision(candidate_cards, card_decision)
         if public_cards_enabled else []
     )
-    has_new_place_result = bool(discovery_results)
     place_snapshot = None
     place_persistence_failed = False
-    if has_new_place_result:
-        cards_by_ref = {
-            str(card.get("candidate_ref") or ""): card
-            for card in candidate_cards
-            if str(card.get("candidate_ref") or "")
-        }
-        presented_refs = {
-            str(reference)
-            for reference in (synth_metrics.presented_candidate_refs or [])
-            if str(reference) in cards_by_ref
-        }
-        # Candidate order is owned by the verified Places projection. Model
-        # authored refs/ordinals may narrow the displayed set, but cannot
-        # reorder it. Persist exactly the candidates visible in this reply.
-        ordered_cards = [
-            card for card in candidate_cards[:8]
-            if str(card.get("candidate_ref") or "") in cards_by_ref
-            and (
-                not presented_refs
-                or str(card.get("candidate_ref") or "") in presented_refs
-            )
-        ]
-        ordered_ordinals = {
-            str(card["candidate_ref"]): index
-            for index, card in enumerate(ordered_cards, start=1)
-        }
-        try:
-            place_snapshot = replace_presented_candidates(
-                ctx.user_id,
-                ctx.room_id,
-                ordered_cards,
-                presented_ordinals=ordered_ordinals,
-                origin_run_id=run_id,
-                source_message_id=ctx.message_id,
-                # The HTTP boundary publishes this after saving the assistant
-                # message. Direct unit/runtime callers without a source message
-                # retain the historical synchronous seam.
-                published=not bool(ctx.message_id),
-            )
-        except PlaceReferencePersistenceError as exc:
-            place_persistence_failed = True
-            _LOGGER.error(
-                "V3 place presentation persistence failed run_id=%s reason=%s",
-                run_id, str(exc),
-            )
-        if ordered_cards and place_snapshot is None and not place_persistence_failed:
-            place_persistence_failed = True
-        trace["place_diagnostics"].update({
-            "candidate_count": len(ordered_cards),
-            "presentation_persistence": (
-                "failed" if place_persistence_failed
-                else "saved_published" if place_snapshot and not ctx.message_id
-                else "saved_pending_source_link" if place_snapshot
-                else "failed"
-            ),
-            "source_message_linked": bool(place_snapshot and not ctx.message_id),
-        })
-
-    presentation_messages = synth_metrics.presentation_messages or [reply]
-    if place_persistence_failed:
-        reply = "這次找到地點，但暫時無法保存候選清單；請稍後再試，我還沒有替你建立行程。"
-        presentation_messages = [reply]
-        synth_metrics.presentation_messages = presentation_messages
-        synth_metrics.presentation_class = "fallback"
-        synth_metrics.fallback_reason = "place_presentation_persistence_failed"
-        synth_metrics.presentation_blocks = None
-    elif place_snapshot:
-        # The visible candidate order must stay tied to the same immutable
-        # snapshot whether optional place cards are enabled or not.  Cards can
-        # be added by the UI, but they never change the text ordinal contract.
-        presentation_messages = _server_ordered_place_messages(
-            presentation_messages, place_snapshot,
-        )
-        reply = "\n\n".join(presentation_messages)
-        synth_metrics.presentation_messages = presentation_messages
-        if not public_cards_enabled:
-            synth_metrics.presentation_blocks = []
-        synth_metrics.presented_candidate_refs = [
-            str(item.get("reference") or "")
-            for item in (place_snapshot.get("candidates") or [])
-            if isinstance(item, dict) and item.get("reference")
-        ]
-        synth_metrics.presented_candidate_bindings = [
-            {"candidate_ref": str(item["reference"]), "presented_ordinal": int(item["ordinal"])}
-            for item in (place_snapshot.get("candidates") or [])
-            if isinstance(item, dict) and item.get("reference")
-        ]
-    else:
-        synth_metrics.presentation_messages = presentation_messages
+    trace["place_diagnostics"].update({
+        "candidate_count": len(candidate_cards) if discovery_results else 0,
+        "presented_candidate_count": 0,
+        "binding_validation": "disabled_chat_context",
+        "plain_content_binding": "disabled_chat_context",
+        "presentation_persistence": "disabled_chat_context",
+        "source_message_linked": False,
+    })
+    synth_metrics.presentation_messages = presentation_messages
     presentation_blocks = _resolve_presentation_blocks(
         synth_metrics.presentation_blocks,
         selected_place_cards,
+        presentation_messages,
+    )
+    trace["place_diagnostics"]["presentation_style"] = _presentation_style(
         presentation_messages,
     )
     place_cards = selected_place_cards
@@ -3252,22 +3344,12 @@ def run_public_agent_turn_v3(
         if synth_metrics.presentation_class == "product_info"
         else "casual_chat"
     )
-    relationship_recommendation_snapshot = next(
-        (
-            dict(result.observation)
-            for results in task_results.values()
-            for result in results
-            if result.status is SubTaskStatus.OK
-            and isinstance(result.observation, dict)
-            and result.observation.get("schema_version") == "relationship_recommendation.v1"
-        ),
-        None,
-    )
     result = AgentResult(
         handled=True,
         reply=reply,
         messages=presentation_messages,
         presentation_class=synth_metrics.presentation_class,
+        interaction_blocks_v1=synth_metrics.interaction_blocks_v1,
         conversation_intent=conversation_intent,
         agent_run_id=run_id,
         agent_mode="v3",
@@ -3281,7 +3363,7 @@ def run_public_agent_turn_v3(
             if any(task.agent == "calendar" for task in plan.tasks)
             else "casual"
         ),
-        relationship_recommendation_snapshot=relationship_recommendation_snapshot,
+        relationship_recommendation_snapshot=None,
     )
     if place_cards:
         result.place_cards = place_cards
@@ -3333,6 +3415,15 @@ def run_public_agent_turn_v3(
         "conversation_intent": result.conversation_intent,
         "fallback_reason": result.fallback_reason,
     }
+    trace["answer_status"] = (
+        "emergency"
+        if result.fallback_reason == "synthesizer_emergency"
+        else "condition_stopped"
+        if any(item["state"] == "condition_stopped" for item in execution_outcomes)
+        else "partial"
+        if any(item["state"] in {"upstream_unavailable", "failed"} for item in execution_outcomes)
+        else "complete"
+    )
     trace["event_sequence"].append("final")
     _persist_trace(run_id, ctx, trace)
     return _finalize_debug(result)
