@@ -202,7 +202,7 @@ class _CalendarEventOutput(BaseModel):
     status: str
     location: str = ""
     notes: str = ""
-    event_kind: Literal["personal", "shared_date", ""] = ""
+    event_kind: Literal["personal", "shared_date", "google_read_only", ""] = ""
 
 
 class _CalendarOutput(BaseModel):
@@ -227,7 +227,7 @@ class _CalendarEventCandidateOutput(BaseModel):
     end_time: str
     location: str = ""
     notes: str = ""
-    event_kind: Literal["personal", "shared_date", ""] = ""
+    event_kind: Literal["personal", "shared_date", "google_read_only", ""] = ""
 
 
 class _CalendarFindOutput(BaseModel):
@@ -244,7 +244,7 @@ class _CalendarFindOutput(BaseModel):
     end_time: str = ""
     location: str = ""
     notes: str = ""
-    event_kind: Literal["personal", "shared_date", ""] = ""
+    event_kind: Literal["personal", "shared_date", "google_read_only", ""] = ""
     companion_known: bool = False
     companion_display_name: str = "對方"
     companion_safe_summary: str = ""
@@ -545,7 +545,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "calendar.list_my_events": ToolSpec(
         "calendar.list_my_events", ToolRisk.READ, "calendar_events",
-        "讀取本人的行事曆與忙碌時段，不讀取對方行事曆。建議用 start_date 與 end_date（YYYY-MM-DD）指定查詢區間，可包含今天之前與之後；不指定時預設未來 90 天。",
+        "讀取本人的行事曆與忙碌時段，包含已連接且授權阿月的 Google 唯讀行程；不讀取對方行事曆內容。建議用 start_date 與 end_date（YYYY-MM-DD）指定查詢區間，可包含今天之前與之後；不指定時預設未來 90 天。",
         "我看一下你的行事曆…",
         planner_arguments_model=_CalendarListArguments,
         executor_arguments_model=_CalendarListArguments,

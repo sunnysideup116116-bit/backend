@@ -69,6 +69,12 @@ class AgentTurnContext(BaseModel):
 class PublicAgentRequestContext(AgentTurnContext):
     """Public-turn-only private inputs that must never reach prompt state."""
 
+    external_calendar_authorized: bool = Field(
+        default=False,
+        exclude=True,
+        repr=False,
+    )
+
     focused_match_id: str | None = Field(
         default=None, exclude=True, repr=False,
     )

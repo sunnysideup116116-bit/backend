@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import socket
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -30,6 +31,15 @@ MATCHMAKER_REQUIRED = (
     "NEO4J_USERNAME",
     "NEO4J_PASSWORD",
     "NEO4J_DATABASE",
+)
+GOOGLE_CALENDAR_REQUIRED = (
+    "GOOGLE_CALENDAR_CLIENT_ID",
+    "GOOGLE_CALENDAR_CLIENT_SECRET",
+    "GOOGLE_CALENDAR_TOKEN_KEY",
+    "GOOGLE_CALENDAR_REDIRECT_URI",
+)
+GOOGLE_CALENDAR_REDIRECT_URI = (
+    "https://service.misproject.us.ci/api/integrations/google-calendar/callback"
 )
 
 
@@ -96,10 +106,33 @@ def validate_environment(social_path: Path, matchmaker_path: Path) -> Validation
     remote_ollama = not _is_local_url(social.get("OLLAMA_HOST", ""))
     if remote_ollama and not social.get("OLLAMA_API_KEY", "").strip():
         missing_social += ("OLLAMA_API_KEY",)
+    google_calendar_enabled = social.get(
+        "AYUE_GOOGLE_CALENDAR_ENABLED", "off"
+    ).strip().lower() in {"1", "true", "on", "yes"}
+    if google_calendar_enabled:
+        for key in GOOGLE_CALENDAR_REQUIRED:
+            if not social.get(key, "").strip() and key not in missing_social:
+                missing_social += (key,)
+        if (
+            social.get("GOOGLE_CALENDAR_REDIRECT_URI", "").strip()
+            and social["GOOGLE_CALENDAR_REDIRECT_URI"].strip()
+            != GOOGLE_CALENDAR_REDIRECT_URI
+        ):
+            missing_social += ("GOOGLE_CALENDAR_REDIRECT_URI",)
+        token_key = social.get("GOOGLE_CALENDAR_TOKEN_KEY", "").strip()
+        if token_key and not _valid_fernet_key(token_key):
+            missing_social += ("GOOGLE_CALENDAR_TOKEN_KEY",)
     missing_matchmaker = tuple(
         key for key in MATCHMAKER_REQUIRED if not matchmaker.get(key, "").strip()
     )
     return ValidationResult(missing_social, missing_matchmaker)
+
+
+def _valid_fernet_key(value: str) -> bool:
+    try:
+        return len(base64.urlsafe_b64decode(value.encode("ascii"))) == 32
+    except (ValueError, UnicodeError):
+        return False
 
 
 def _is_local_url(value: str) -> bool:

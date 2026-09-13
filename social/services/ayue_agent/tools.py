@@ -19,6 +19,11 @@ from services.calendar_service import (
     get_next_event,
     get_timezone,
 )
+from services.agent_calendar_bridge import (
+    AgentCalendarUnavailable,
+    find_google_events,
+    merge_google_events,
+)
 from services.match_state_service import (
     get_counterparty_match_source,
     get_match_status_snapshot,
@@ -60,7 +65,13 @@ from .v3.place_references import (
 )
 
 
-def _calendar_events(user_id: str, clock: TurnClockV1 | None = None, arguments: dict | None = None) -> ToolResult:
+def _calendar_events(
+    user_id: str,
+    clock: TurnClockV1 | None = None,
+    arguments: dict | None = None,
+    *,
+    include_google: bool = False,
+) -> ToolResult:
     if not calendar_access_enabled(user_id):
         return ToolResult(ok=False, error_code="calendar_access_denied", user_message="你目前沒有授權我讀取行事曆。")
     zone = get_timezone(clock.timezone) if clock else timezone(timedelta(hours=8), name="Asia/Taipei")
@@ -142,28 +153,38 @@ def _calendar_events(user_id: str, clock: TurnClockV1 | None = None, arguments: 
         end_utc = now_utc + timedelta(days=90)
         range_label = "next_90_days"
     events = get_calendar_context(user_id, None, now_utc, end_utc).get("viewer_events", [])
+    try:
+        events = merge_google_events(
+            user_id,
+            events,
+            now_utc,
+            end_utc,
+            authorized=include_google,
+        )
+    except AgentCalendarUnavailable:
+        return ToolResult(
+            ok=False,
+            error_code="calendar_external_unavailable",
+            user_message="Google 日曆目前無法讀取，請稍後再試。",
+        )
     safe_events = []
     active_events = []
     for event in events:
         if event.get("status") == "cancelled":
             continue
         active_events.append(event)
-        zone = get_timezone(event.get("timezone") or "Asia/Taipei")
-        start = datetime.fromisoformat(str(event["start_at"]).replace("Z", "+00:00")).astimezone(zone)
-        end = datetime.fromisoformat(str(event["end_at"]).replace("Z", "+00:00")).astimezone(zone)
-        all_day = bool(event.get("all_day", False))
-        end_date = end.date() - timedelta(days=1) if all_day else end.date()
-        safe_events.append({
-            "date": start.date().isoformat(),
-            "end_date": end_date.isoformat(),
-            "all_day": all_day,
-            "start_time": "" if all_day else start.strftime("%H:%M"),
-            "end_time": "" if all_day else end.strftime("%H:%M"),
-            "activity": event.get("activity") or event.get("title") or "行程",
-            "status": event.get("status", "confirmed"),
-        })
+        safe_event = _calendar_event_fields(event)
+        # Bulk listing stays concise; detailed notes remain available only
+        # through the existing single-event lookup tool.
+        safe_event.pop("notes", None)
+        safe_event["status"] = event.get("status", "confirmed")
+        safe_events.append(safe_event)
     private_data: dict[str, Any] = {}
-    if len(safe_events) == 1 and len(active_events) == 1:
+    if (
+        len(safe_events) == 1
+        and len(active_events) == 1
+        and active_events[0].get("source_type") != "google"
+    ):
         only_event = safe_events[0]
         interval_label = (
             "全天"
@@ -180,11 +201,32 @@ def _calendar_events(user_id: str, clock: TurnClockV1 | None = None, arguments: 
     return ToolResult(ok=True, data={"events": safe_events, "range": range_label}, private_data=private_data)
 
 
-def _calendar_next_event(user_id: str, clock: TurnClockV1 | None = None) -> ToolResult:
+def _calendar_next_event(
+    user_id: str,
+    clock: TurnClockV1 | None = None,
+    *,
+    include_google: bool = False,
+) -> ToolResult:
     if not calendar_access_enabled(user_id):
         return ToolResult(ok=False, error_code="calendar_access_denied", user_message="你目前沒有授權我讀取行事曆。")
     now_utc = clock_utc(clock) if clock else datetime.now(timezone.utc)
-    event = get_next_event(user_id, now_utc, now_utc + timedelta(days=90))
+    end_utc = now_utc + timedelta(days=90)
+    event = get_next_event(user_id, now_utc, end_utc)
+    try:
+        merged = merge_google_events(
+            user_id,
+            [event] if event else [],
+            now_utc,
+            end_utc,
+            authorized=include_google,
+        )
+    except AgentCalendarUnavailable:
+        return ToolResult(
+            ok=False,
+            error_code="calendar_external_unavailable",
+            user_message="Google 日曆目前無法讀取，請稍後再試。",
+        )
+    event = merged[0] if merged else None
     if not event:
         return ToolResult(ok=True, data={"status": "not_found", "event": None})
     safe_event = _calendar_event_fields(event)
@@ -192,7 +234,11 @@ def _calendar_next_event(user_id: str, clock: TurnClockV1 | None = None) -> Tool
     return ToolResult(
         ok=True,
         data={"status": "found", "event": safe_event},
-        private_data={"calendar_event_reference": {"event": event}},
+        private_data=(
+            {"calendar_event_reference": {"event": event}}
+            if event.get("source_type") != "google"
+            else {}
+        ),
     )
 
 
@@ -217,7 +263,13 @@ def _calendar_event_fields(event: dict) -> dict[str, object]:
         "end_time": "" if all_day else end.strftime("%H:%M"),
         "location": str(event.get("location") or "")[:160],
         "notes": str(event.get("notes") or "")[:200],
-        "event_kind": "shared_date" if event.get("source_type") == "date" else "personal",
+        "event_kind": (
+            "google_read_only"
+            if event.get("source_type") == "google"
+            else "shared_date"
+            if event.get("source_type") == "date"
+            else "personal"
+        ),
     }
 
 
@@ -227,6 +279,11 @@ def _calendar_event_companion(event: dict, user_id: str) -> dict[str, object]:
     Calendar storage contains participant IDs for synchronization.  They are
     intentionally kept executor-side and are never included in the tool result.
     """
+    if event.get("source_type") == "google":
+        return {
+            "event_kind": "google_read_only", "companion_known": False,
+            "companion_display_name": "對方", "companion_safe_summary": "",
+        }
     if event.get("source_type") != "date":
         return {
             "event_kind": "personal", "companion_known": False,
@@ -287,6 +344,26 @@ def _calendar_find_event(ctx: AgentTurnContext, arguments: dict[str, Any]) -> To
         ):
             if event not in events:
                 events.append(event)
+    if not companion_hint and bool(getattr(ctx, "external_calendar_authorized", False)):
+        try:
+            for event in find_google_events(
+                ctx.user_id,
+                event_hint,
+                date_hint=date_hint,
+                authorized=True,
+                limit=limit,
+            ):
+                if not any(
+                    existing.get("event_id") == event.get("event_id")
+                    for existing in events
+                ):
+                    events.append(event)
+        except AgentCalendarUnavailable:
+            return ToolResult(
+                ok=False,
+                error_code="calendar_external_unavailable",
+                user_message="Google 日曆目前無法讀取，請稍後再試。",
+            )
     if not events:
         reason = "companion_ambiguous" if len(companion_ids) > 1 else "event_not_found"
         return _empty_calendar_find(
@@ -304,7 +381,11 @@ def _calendar_find_event(ctx: AgentTurnContext, arguments: dict[str, Any]) -> To
     return ToolResult(ok=True, data={
         "status": "found", "reason_code": "", **_calendar_event_fields(event),
         **_calendar_event_companion(event, ctx.user_id), "candidates": [],
-    }, private_data={"calendar_event_reference": {"event": event}})
+    }, private_data=(
+        {"calendar_event_reference": {"event": event}}
+        if event.get("source_type") != "google"
+        else {}
+    ))
 
 
 def _calendar_verify_recent_mutation(ctx: AgentTurnContext) -> ToolResult:
@@ -959,9 +1040,14 @@ def execute_tool(
     arguments = validate_executor_arguments(spec, call.arguments)
     if arguments is None:
         return ToolResult(ok=False, error_code="invalid_tool_arguments", user_message="這個請求的資訊格式不正確，我沒有執行它。")
+    include_google = bool(getattr(ctx, "external_calendar_authorized", False))
     executors = {
-        "calendar_events": lambda: _calendar_events(ctx.user_id, clock, arguments),
-        "calendar_next_event": lambda: _calendar_next_event(ctx.user_id, clock),
+        "calendar_events": lambda: _calendar_events(
+            ctx.user_id, clock, arguments, include_google=include_google,
+        ),
+        "calendar_next_event": lambda: _calendar_next_event(
+            ctx.user_id, clock, include_google=include_google,
+        ),
         "calendar_event_find": lambda: _calendar_find_event(ctx, arguments),
         "calendar_mutation_verification": lambda: _calendar_verify_recent_mutation(ctx),
         "current_time": lambda: _current_time(clock),

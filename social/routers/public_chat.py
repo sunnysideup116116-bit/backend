@@ -22,6 +22,7 @@ from fastapi.responses import StreamingResponse
 from database import matches_coll, messages_coll, profiles_coll
 from models import DirectChatRequest
 from services.ai_service import generate_chat_completion
+from services.appwrite_identity_service import authenticated_owner_matches
 from services.ayue_agent import (
     mark_public_confirmation_presented,
     run_public_agent_turn_v3,
@@ -281,6 +282,7 @@ def _complete_public_turn(
     background_tasks: BackgroundTasks | None = None,
     user_message_id: str | None = None,
     debug_enabled: bool = False,
+    external_calendar_authorized: bool = False,
 ) -> dict:
     """Run and persist one V3 turn after the owner message has been saved."""
     fetched_history = list(
@@ -319,6 +321,7 @@ def _complete_public_turn(
             req.device_location.model_dump(mode="json")
             if req.device_location is not None else None
         ),
+        external_calendar_authorized=external_calendar_authorized,
     )
     agent_result = run_public_agent_turn_v3(
         agent_ctx, on_progress=on_progress, on_token=on_token,
@@ -511,6 +514,7 @@ def _complete_public_turn(
 def _run_public_stream_turn(
     req: DirectChatRequest, background_tasks: BackgroundTasks, on_progress,
     *, on_token=None, debug_enabled: bool = False,
+    external_calendar_authorized: bool = False,
 ) -> dict:
     """Public-only stream path; mirrors the V3 branch of direct_chat exactly once."""
     room_id = _resolve_ai_room_id(req)
@@ -554,6 +558,7 @@ def _run_public_stream_turn(
         on_token=on_token, background_tasks=background_tasks,
         user_message_id=(user_message or {}).get("message_id"),
         debug_enabled=debug_enabled,
+        external_calendar_authorized=external_calendar_authorized,
     )
 
 
@@ -635,6 +640,10 @@ def direct_chat_stream(
     state = {"agent_run_id": fallback_run_id}
     worker_done = threading.Event()
     debug_enabled = _is_loopback_debug_request(request)
+    external_calendar_authorized = authenticated_owner_matches(
+        request.headers.get("Authorization") if request else None,
+        req.user_id,
+    )
     token_stream_enabled = bool(
         request
         and request.headers.get("x-ayue-stream-tokens", "").strip().lower() == "v1"
@@ -660,16 +669,19 @@ def direct_chat_stream(
             if req.contact_id == "ai_assistant":
                 def emit_token(fragment: str) -> None:
                     emit({"type": "token", "agent_run_id": state["agent_run_id"], "text": fragment})
+                turn_options = {
+                    "on_token": emit_token if token_stream_enabled else None,
+                }
+                if external_calendar_authorized:
+                    turn_options["external_calendar_authorized"] = True
                 if debug_enabled:
+                    turn_options["debug_enabled"] = True
                     response = _run_public_stream_turn(
-                        req, worker_background_tasks, emit,
-                        on_token=emit_token if token_stream_enabled else None,
-                        debug_enabled=True,
+                        req, worker_background_tasks, emit, **turn_options,
                     )
                 else:
                     response = _run_public_stream_turn(
-                        req, worker_background_tasks, emit,
-                        on_token=emit_token if token_stream_enabled else None,
+                        req, worker_background_tasks, emit, **turn_options,
                     )
             else:
                 # Stream is intentionally optional for legacy/private contacts;
@@ -717,7 +729,11 @@ def direct_chat_stream(
 
 
 @router.post("/direct_chat")
-def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
+def direct_chat(
+    req: DirectChatRequest,
+    background_tasks: BackgroundTasks,
+    request: Request = None,
+):
     """Handle Public Ayue with V3, or preserve the existing pair-chat adapter."""
     requested_mentions, mention_overflow = _validated_requested_mentions(req)
     request_message = _public_request_message(req)
@@ -758,6 +774,10 @@ def direct_chat(req: DirectChatRequest, background_tasks: BackgroundTasks):
             req, room_id, requested_mentions, mention_overflow,
             background_tasks=background_tasks,
             user_message_id=(user_message or {}).get("message_id"),
+            external_calendar_authorized=authenticated_owner_matches(
+                request.headers.get("Authorization") if request else None,
+                req.user_id,
+            ),
         )
 
     room_id = generate_room_id(req.user_id, req.contact_id)

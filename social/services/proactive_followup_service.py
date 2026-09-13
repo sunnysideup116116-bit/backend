@@ -20,6 +20,7 @@ from bson.objectid import ObjectId
 from pymongo.errors import DuplicateKeyError
 
 from database import calendar_events_coll, db, messages_coll, profiles_coll
+from services.agent_calendar_bridge import google_busy_until
 from services.ayue_agent.time_context import resolve_temporal_references
 from services.calendar_service import ACTIVE_EVENT_STATUSES
 from services.message_use_service import is_reusable_for_care, is_reusable_for_profile
@@ -1192,17 +1193,26 @@ def owner_busy_until(user_id: str, *, now: float) -> tuple[float | None, bool]:
         )
     except Exception:
         return None, False
-    if not event:
-        return None, True
-    end_at = event.get("end_at")
-    if isinstance(end_at, datetime):
-        if end_at.tzinfo is None:
-            end_at = end_at.replace(tzinfo=timezone.utc)
-        return end_at.timestamp(), True
+    internal_until: float | None = None
+    if event:
+        end_at = event.get("end_at")
+        if isinstance(end_at, datetime):
+            if end_at.tzinfo is None:
+                end_at = end_at.replace(tzinfo=timezone.utc)
+            internal_until = end_at.timestamp()
+        else:
+            try:
+                internal_until = float(end_at)
+            except (TypeError, ValueError):
+                return None, False
     try:
-        return float(end_at), True
-    except (TypeError, ValueError):
+        external_until, external_ok = google_busy_until(user_id, now=now)
+    except Exception:
         return None, False
+    if not external_ok:
+        return None, False
+    candidates = [value for value in (internal_until, external_until) if value]
+    return (max(candidates) if candidates else None), True
 
 
 def defer_followup_candidate(candidate: dict[str, Any], *, until: float, now: float) -> None:

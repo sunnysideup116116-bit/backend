@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timedelta, timezone
 
+from services.agent_calendar_bridge import AgentCalendarUnavailable, google_events_for_agent
 from services.calendar_service import calendar_access_enabled, get_calendar_context, get_timezone
 
 
@@ -68,13 +69,32 @@ def calendar_range_for_message(message: str, now: datetime | None = None) -> tup
     return start, end, truncated
 
 
-def partner_busy(user_id: str, other_id: str, start: datetime, end: datetime) -> tuple[bool, list[dict[str, str]]]:
+def partner_busy(
+    user_id: str,
+    other_id: str,
+    start: datetime,
+    end: datetime,
+    *,
+    include_google: bool = False,
+) -> tuple[bool, list[dict[str, str]]]:
     """Return only busy intervals; no IDs or event metadata leave this facade."""
     if not calendar_access_enabled(other_id):
         return False, []
     events = get_calendar_context(user_id, other_id, start, end)
+    partner_events = list(events.get("partner_busy", []))
+    try:
+        partner_events.extend(
+            google_events_for_agent(
+                other_id,
+                start,
+                end,
+                authorized=include_google,
+            )
+        )
+    except AgentCalendarUnavailable:
+        return False, []
     busy = []
-    for event in events.get("partner_busy", []):
+    for event in partner_events:
         start_at, end_at = event.get("start_at"), event.get("end_at")
         if start_at and end_at:
             busy.append({"start_at": str(start_at), "end_at": str(end_at), "busy": "true"})

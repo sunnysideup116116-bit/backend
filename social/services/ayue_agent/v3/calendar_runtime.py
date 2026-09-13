@@ -686,6 +686,17 @@ def _run_calendar_reads(
     results: list[SubTaskResult] = []
     read_step_count = 0
     for index, proposal in enumerate(proposals):
+        if (
+            task.resolved_time_target is not None
+            and proposal.tool_name == "calendar.list_my_events"
+        ):
+            target_date = task.resolved_time_target.date
+            proposal = proposal.model_copy(update={
+                "arguments": {
+                    "start_date": target_date,
+                    "end_date": target_date,
+                },
+            })
         print(f"  [{task.id}#{index}] proposal: tool={proposal.tool_name}")
         outcome = services.execute(
             proposal,
@@ -717,7 +728,11 @@ def _run_calendar_reads(
                     event,
                     safe_label=str(reference_payload.get("safe_label") or ""),
                 )
-        if result.tool_name in {"calendar.find_my_event", "calendar.list_my_events"}:
+        if result.tool_name in {
+            "calendar.find_my_event",
+            "calendar.list_my_events",
+            "calendar.get_next_my_event",
+        }:
             if not reference_payload:
                 # A new ambiguous/not-found/list-of-many read must not leave a
                 # previous referent armed for a later terse mutation.

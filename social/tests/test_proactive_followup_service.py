@@ -98,6 +98,23 @@ class ProactiveFollowupServiceTests(unittest.TestCase):
         self.assertEqual(find.call_args.args[1], {"end_at": 1, "_id": 0})
         self.assertNotIn("title", find.call_args.args[1])
 
+    def test_calendar_busy_gate_includes_connected_google_calendar(self):
+        google_end = datetime(2026, 9, 6, 14, 0, tzinfo=timezone.utc)
+        with patch(
+            "services.proactive_followup_service.calendar_events_coll.find_one",
+            return_value=None,
+        ), patch(
+            "services.proactive_followup_service.google_busy_until",
+            return_value=(google_end.timestamp(), True),
+        ):
+            busy_until, available = owner_busy_until(
+                "owner",
+                now=google_end.timestamp() - 1800,
+            )
+
+        self.assertTrue(available)
+        self.assertEqual(busy_until, google_end.timestamp())
+
     def test_numeric_date_uses_next_day_window_without_exposing_calendar_details(self):
         source_time = datetime(2026, 9, 6, 3, 0, tzinfo=timezone.utc).timestamp()
         available, expires = _schedule_window(

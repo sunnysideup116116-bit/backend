@@ -9,11 +9,12 @@ import threading
 import time
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from database import matches_coll, messages_coll, profiles_coll
 from models import MediatorPrivateRequest
+from services.appwrite_identity_service import authenticated_owner_matches
 from services.ayue_agent.private_contracts import PrivateClientAction
 from services.ayue_agent.private_v2 import (
     mark_private_confirmation_presented,
@@ -128,13 +129,22 @@ def save_private_mediator_reply(
     )
 
 
-def _run_private_v2_saved_turn(req: MediatorPrivateRequest, match_doc: dict, room_id: str, on_progress=None, agent_run_id: str | None = None, on_token=None) -> dict:
+def _run_private_v2_saved_turn(
+    req: MediatorPrivateRequest,
+    match_doc: dict,
+    room_id: str,
+    on_progress=None,
+    agent_run_id: str | None = None,
+    on_token=None,
+    external_calendar_authorized: bool = False,
+) -> dict:
     """Persist exactly one private V2 final after the owner message is saved."""
     result = run_private_agent_turn_v2(
         user_id=req.user_id, other_id=req.other_id, message=req.message,
         match_doc=match_doc, on_progress=on_progress, agent_run_id=agent_run_id,
         on_token=on_token,
         choice_id=req.choice_id, choice_action=req.choice_action,
+        external_calendar_authorized=external_calendar_authorized,
     )
     reply = result.reply or PRIVATE_RUNTIME_FALLBACK_REPLY
     handoff = result.handoff.model_dump() if getattr(result, "handoff", None) else None
@@ -174,7 +184,11 @@ def _run_private_v2_saved_turn(req: MediatorPrivateRequest, match_doc: dict, roo
 
 @router.post("/mediator/private")
 
-def mediator_private_chat(req: MediatorPrivateRequest, background_tasks: BackgroundTasks):
+def mediator_private_chat(
+    req: MediatorPrivateRequest,
+    background_tasks: BackgroundTasks,
+    request: Request = None,
+):
 
     match_doc = find_accepted_match(req.user_id, req.other_id)
 
@@ -211,10 +225,20 @@ def mediator_private_chat(req: MediatorPrivateRequest, background_tasks: Backgro
 
     # Current Private V2 owns every accepted-pair turn. It must not fall
     # through into the removed legacy keyword/free-form runtime.
-    return _run_private_v2_saved_turn(req, match_doc, room_id)
+    turn_options = {}
+    if authenticated_owner_matches(
+        request.headers.get("Authorization") if request else None,
+        req.user_id,
+    ):
+        turn_options["external_calendar_authorized"] = True
+    return _run_private_v2_saved_turn(req, match_doc, room_id, **turn_options)
 
 @router.post("/mediator/private/stream")
-def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: BackgroundTasks):
+def mediator_private_chat_stream(
+    req: MediatorPrivateRequest,
+    background_tasks: BackgroundTasks,
+    request: Request = None,
+):
     """NDJSON stream for the current Private V2 runtime."""
     match_doc = find_accepted_match(req.user_id, req.other_id)
     if not match_doc:
@@ -222,6 +246,10 @@ def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: 
     event_queue: queue.Queue[dict | None] = queue.Queue()
     fallback_run_id = uuid.uuid4().hex
     worker_done = threading.Event()
+    external_calendar_authorized = authenticated_owner_matches(
+        request.headers.get("Authorization") if request else None,
+        req.user_id,
+    )
 
     def emit(event: dict) -> None:
         if event.get("type") not in {"run_started", "tool_started", "tool_finished", "token"}:
@@ -240,7 +268,17 @@ def mediator_private_chat_stream(req: MediatorPrivateRequest, background_tasks: 
             if req.choice_action is None:
                 save_message(room_id, req.user_id, req.message)
             emit({"type": "run_started", "agent_run_id": fallback_run_id})
-            response = _run_private_v2_saved_turn(req, match_doc, room_id, emit, fallback_run_id, on_token=emit_token)
+            turn_options = {"on_token": emit_token}
+            if external_calendar_authorized:
+                turn_options["external_calendar_authorized"] = True
+            response = _run_private_v2_saved_turn(
+                req,
+                match_doc,
+                room_id,
+                emit,
+                fallback_run_id,
+                **turn_options,
+            )
             event_queue.put({"type": "final", "response": response})
         except Exception:
             event_queue.put({"type": "error", "agent_run_id": fallback_run_id, "reply": PRIVATE_RUNTIME_FALLBACK_REPLY})

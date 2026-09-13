@@ -3,10 +3,11 @@ import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from services.codex_chat_provider import shutdown as shutdown_codex_provider
-from routers import calendar, chat, match, places, system, frontend
+from routers import calendar, chat, match, places, system, frontend, google_calendar
 from routers.match import ensure_match_indexes
 from routers.chat_messages import ensure_chat_read_indexes
 from services.calendar_service import ensure_calendar_indexes
+from services.google_calendar_service import ensure_google_calendar_indexes
 from services.ayue_agent.v3.scheduler import ensure_indexes as ensure_ayue_agent_indexes
 from services.ayue_agent.maps_client import ensure_map_cache_indexes
 from services.profile_skills import ensure_profile_skill_indexes
@@ -79,6 +80,7 @@ app.include_router(match.router)
 app.include_router(places.router)
 app.include_router(system.router)
 app.include_router(calendar.router)
+app.include_router(google_calendar.router)
 app.include_router(registration_voice_router)
 app.include_router(app_voice_assistant_router)
 
@@ -86,6 +88,7 @@ app.include_router(app_voice_assistant_router)
 def setup_calendar_indexes():
     ensure_chat_read_indexes()
     ensure_calendar_indexes()
+    ensure_google_calendar_indexes()
     ensure_calendar_draft_indexes()
     ensure_calendar_reference_indexes()
     ensure_relationship_reference_indexes()

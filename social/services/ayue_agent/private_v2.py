@@ -97,6 +97,7 @@ class PrivateAgentTurnContextV2:
     shared_facts: list[dict[str, str]]
     local_time: str
     relationship_semantic_context: dict[str, Any] = field(default_factory=dict)
+    external_calendar_authorized: bool = False
 
 
 def _compact(value: str) -> str:
@@ -122,7 +123,14 @@ def _bounded_history(room_id: str, *, owner_id: str, other_id: str | None = None
     return result
 
 
-def build_private_turn_context_v2(user_id: str, other_id: str, message: str, match_doc: dict[str, Any]) -> PrivateAgentTurnContextV2:
+def build_private_turn_context_v2(
+    user_id: str,
+    other_id: str,
+    message: str,
+    match_doc: dict[str, Any],
+    *,
+    external_calendar_authorized: bool = False,
+) -> PrivateAgentTurnContextV2:
     viewer_context = private_viewer_profile_context(user_id)
     shareable = safe_public_profile(other_id)
     shareable["display_name"] = display_name(other_id)
@@ -139,6 +147,7 @@ def build_private_turn_context_v2(user_id: str, other_id: str, message: str, mat
         shared_facts=private_pair_shared_facts(match_doc, user_id, other_id),
         local_time=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M"),
         relationship_semantic_context=get_relationship_semantic_context(match_doc, pair_room),
+        external_calendar_authorized=external_calendar_authorized,
     )
 
 PRIVATE_SCOPE_POLICY = """
@@ -257,20 +266,37 @@ def _safe_pair_summary(ctx: PrivateAgentTurnContextV2) -> dict[str, Any]:
 
 def _availability(ctx: PrivateAgentTurnContextV2, scope: str) -> dict[str, Any]:
     start, end, truncated = calendar_range_for_message(scope or ctx.message)
-    access, busy = partner_busy(ctx.user_id, ctx.other_id, start, end)
+    access, busy = partner_busy(
+        ctx.user_id,
+        ctx.other_id,
+        start,
+        end,
+        include_google=ctx.external_calendar_authorized,
+    )
     return {"access": access, "busy": busy, "truncated": truncated}
 
 
 def _viewer_availability(ctx: PrivateAgentTurnContextV2, scope: str) -> dict[str, Any]:
     """Return only the viewer's busy intervals for a relationship planning read."""
+    from services.agent_calendar_bridge import AgentCalendarUnavailable, merge_google_events
     from services.calendar_service import calendar_access_enabled, get_calendar_context
 
     start, end, truncated = calendar_range_for_message(scope or ctx.message)
     if not calendar_access_enabled(ctx.user_id):
         return {"access": False, "busy": [], "truncated": truncated}
     context = get_calendar_context(ctx.user_id, None, start, end)
+    try:
+        viewer_events = merge_google_events(
+            ctx.user_id,
+            context.get("viewer_events", []),
+            start,
+            end,
+            authorized=ctx.external_calendar_authorized,
+        )
+    except AgentCalendarUnavailable:
+        return {"access": False, "busy": [], "truncated": truncated}
     busy = []
-    for event in context.get("viewer_events", [])[:16]:
+    for event in viewer_events[:16]:
         start_at, end_at = event.get("start_at"), event.get("end_at")
         if start_at and end_at:
             busy.append({"start_at": str(start_at), "end_at": str(end_at), "busy": "true"})
@@ -438,6 +464,7 @@ def run_private_agent_turn_v2(
     *, user_id: str, other_id: str, message: str, match_doc: dict[str, Any], on_progress: Callable[[dict[str, str]], None] | None = None,
     agent_run_id: str | None = None, on_token: Callable[[str], None] | None = None,
     choice_id: str | None = None, choice_action: str | None = None,
+    external_calendar_authorized: bool = False,
 ) -> AgentResult:
     started = time.perf_counter()
     run_id, observations, trace = agent_run_id or uuid.uuid4().hex, [], {"visible_tools": sorted(PRIVATE_TOOL_REGISTRY), "decisions": [], "guard": [], "tools": [], "context_ms": 0, "model_ms": [], "tool_ms": []}
@@ -456,7 +483,13 @@ def run_private_agent_turn_v2(
         on_token(fragment)
     try:
         context_started = time.perf_counter()
-        ctx = build_private_turn_context_v2(user_id, other_id, message, match_doc)
+        ctx = build_private_turn_context_v2(
+            user_id,
+            other_id,
+            message,
+            match_doc,
+            external_calendar_authorized=external_calendar_authorized,
+        )
         trace["context_ms"] = round((time.perf_counter() - context_started) * 1000)
         def compose_reply(strategy: str) -> str:
             return _compose(
