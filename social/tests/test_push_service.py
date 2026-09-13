@@ -106,6 +106,62 @@ class PushDispatchTests(unittest.TestCase):
             requests.get.return_value = self._target_response(targets)
             self.assertEqual(push_service._valid_push_target_ids("other"), [])
 
+    def test_internal_endpoint_and_loopback_tls_policy_are_scoped(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "APPWRITE_INTERNAL_ENDPOINT": "https://127.0.0.1/v1",
+                "APPWRITE_ENDPOINT": "https://appwrite.misproject.us.ci/v1",
+            },
+        ):
+            self.assertEqual(
+                push_service._configured_endpoint(),
+                "https://127.0.0.1/v1",
+            )
+
+        self.assertFalse(
+            push_service._should_verify_tls("https://127.0.0.1/v1")
+        )
+        self.assertFalse(
+            push_service._should_verify_tls("https://localhost/v1")
+        )
+        self.assertTrue(
+            push_service._should_verify_tls(
+                "https://appwrite.misproject.us.ci/v1"
+            )
+        )
+
+    def test_tls_policy_is_forwarded_to_lookup_and_dispatch(self):
+        target = {
+            "$id": "target-1",
+            "providerType": "push",
+            "providerId": push_service._FCM_PROVIDER_ID,
+            "expired": False,
+        }
+        with (
+            patch.object(push_service, "_VERIFY_TLS", False),
+            patch.object(push_service.requests, "get") as get,
+        ):
+            get.return_value = self._target_response([target])
+            self.assertEqual(
+                push_service._valid_push_target_ids("other"),
+                ["target-1"],
+            )
+        self.assertIs(get.call_args.kwargs["verify"], False)
+
+        with (
+            patch.object(push_service, "_VERIFY_TLS", False),
+            patch.object(
+                push_service,
+                "_valid_push_target_ids",
+                return_value=["target-1"],
+            ),
+            patch.object(push_service.requests, "post") as post,
+        ):
+            post.return_value = MagicMock(status_code=201, text="")
+            push_service._send_prepared_event(_event())
+        self.assertIs(post.call_args.kwargs["verify"], False)
+
     def test_queue_records_before_spawning_daemon_dispatch(self):
         events = [_event()]
         with patch.object(

@@ -13,6 +13,7 @@ from fastapi import WebSocket
 from .language import display_transcript
 from .capabilities import CATALOG, ACTIONS, available_actions
 from .contextual import bind_target, safe_result
+from .weather import resolve_weather_location
 
 from .contracts import (
     VoiceProposal,
@@ -110,7 +111,11 @@ def _proposal_from_function(call: Any, *, revision: int) -> VoiceProposal | None
         arguments["count"] = raw.get("count")
     elif name == "read_calendar":
         intent = "calendar.query"
-        arguments["range"] = raw.get("range")
+        arguments = {
+            key: raw.get(key)
+            for key in ("range", "start_date", "end_date")
+            if key in raw
+        }
     elif name == "create_calendar_event":
         intent = "calendar.create"
         arguments = {
@@ -202,12 +207,18 @@ async def run_duplex_session(
     initial_context: dict[str, Any],
     max_session_seconds: int,
     send_event: SendEvent,
+    conversation_memory: str = "",
+    memory_turns: list[dict[str, str]] | None = None,
+    weather_service: Any | None = None,
+    weather_location_provider: Any | None = None,
+    weather_user_id: str = "",
 ) -> None:
     """Bridge one app WebSocket to one persistent, full-duplex Gemini session."""
 
     context = safe_context(initial_context)
     live = provider.create_duplex_session(
         voice_config=context.get("voice_config"),
+        conversation_memory=conversation_memory,
     )
     await live.connect()
     pending: DuplexConfirmation | None = None
@@ -234,6 +245,24 @@ async def run_duplex_session(
     last_delegated_proposal: VoiceProposal | None = None
     last_delegated_expires_at = 0.0
     started = time.monotonic()
+    remembered_turns = memory_turns if memory_turns is not None else []
+    last_remembered_user = ""
+
+    def remember(role: str, value: Any) -> None:
+        nonlocal last_remembered_user
+        text = display_transcript(str(value or "")).strip()[:2000]
+        if role not in {"user", "assistant"} or not text:
+            return
+        if role == "user" and text == last_remembered_user:
+            return
+        item = {"role": role, "content": text}
+        if remembered_turns and remembered_turns[-1] == item:
+            return
+        remembered_turns.append(item)
+        if role == "user":
+            last_remembered_user = text
+        if len(remembered_turns) > 100:
+            del remembered_turns[0]
 
     await send_event({
         "type": "state",
@@ -294,6 +323,47 @@ async def run_duplex_session(
             return
         if call_id:
             seen_tool_calls.add(call_id)
+        if name == "read_weather":
+            if pending is not None:
+                await tool_response(call, {
+                    "status": "awaiting_confirmation",
+                    "phrase": pending.phrase,
+                    "spoken_prompt": localized_prompt("confirm"),
+                    "message": "請先完成或取消目前待確認的操作。",
+                })
+                return
+            if weather_service is None:
+                await tool_response(call, {
+                    "status": "failed",
+                    "error_code": "weather_service_disabled",
+                    "message": "目前天氣與空氣品質服務尚未啟用。",
+                })
+                return
+            try:
+                location = await resolve_weather_location(
+                    (call.args or {}).get("location"),
+                    weather_user_id,
+                    weather_location_provider,
+                )
+                result = await asyncio.to_thread(
+                    weather_service.query,
+                    location,
+                )
+            except Exception:
+                result = {
+                    "status": "failed",
+                    "error_code": "weather_service_unavailable",
+                    "message": "目前暫時查不到天氣與空氣品質，請稍後再試。",
+                }
+            next_reply_code = (
+                "weather"
+                if result.get("status") == "ok"
+                else "weather_partial"
+                if result.get("status") == "partial"
+                else "weather_unavailable"
+            )
+            await tool_response(call, result)
+            return
         visible_action = visible_choice_action(last_user_transcript)
         visible_status = dict(context.get("feature_status") or {})
         if (
@@ -742,6 +812,8 @@ async def run_duplex_session(
                     "text": display_transcript(last_user_transcript),
                     "final": incoming.finished is True,
                 })
+                if incoming.finished is True:
+                    remember("user", last_user_transcript)
             if content.interrupted:
                 await reset_output(interrupted=True)
             outgoing = content.output_transcription
@@ -797,6 +869,10 @@ async def run_duplex_session(
                         })
                         current_sequence += 1
             if content.turn_complete:
+                if not suppress_current_turn and last_user_transcript:
+                    remember("user", last_user_transcript)
+                if not suppress_current_turn and current_transcript:
+                    remember("assistant", current_transcript)
                 response_id = current_response_id
                 if response_id:
                     await send_event({
@@ -967,6 +1043,7 @@ async def run_duplex_session(
             elif kind == "stop":
                 break
     finally:
+        remember("user", last_user_transcript)
         stopped = True
         receiver.cancel()
         await asyncio.gather(receiver, return_exceptions=True)

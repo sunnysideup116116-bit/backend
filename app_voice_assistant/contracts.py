@@ -74,6 +74,10 @@ _PASSWORD_RE = re.compile(
     r"((?:密碼|密码|password)\s*(?:是|為|为|=|:|：)?\s*)[^\s，,。；;]{1,128}",
     re.IGNORECASE,
 )
+_CALENDAR_EXPLICIT_DATE_RE = re.compile(
+    r"(?<!\d)(\d{4})\s*(?:年|[-/.])\s*(\d{1,2})\s*"
+    r"(?:月|[-/.])\s*(\d{1,2})\s*日?",
+)
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,77 @@ class VoiceProposal:
 def normalized_phrase(value: Any) -> str:
     text = unicodedata.normalize("NFKC", str(value or "")).strip().lower()
     return re.sub(r"[\s，,。.!！?？、]+", "", text)
+
+
+def _weather_location(value: str) -> str | None:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lower = text.lower()
+    weather_terms = (
+        "天氣", "天气", "氣象", "气象", "氣溫", "气温", "溫度", "温度",
+        "會下雨", "会下雨", "空氣品質", "空气质量", "aqi",
+        "weather", "air quality",
+    )
+    if not any(term in lower for term in weather_terms):
+        return None
+    compact = normalized_phrase(text)
+    lookup_suffixes = (
+        "天氣", "天气", "氣象", "气象", "氣溫", "气温", "溫度", "温度",
+        "空氣品質", "空气质量", "aqi", "weather", "airquality",
+    )
+    query_markers = (
+        "如何", "怎麼樣", "怎么样", "多少", "查", "看", "想知道",
+        "告訴", "告诉", "會不會", "会不会", "嗎", "吗", "?", "？",
+    )
+    if (
+        not any(marker in lower for marker in query_markers)
+        and not any(compact.endswith(suffix) for suffix in lookup_suffixes)
+        and not lower.startswith(("weather", "air quality"))
+    ):
+        return None
+    if (
+        any(term in text for term in ("貼文", "发文", "發文", "寫一篇", "写一篇"))
+        or any(term in lower for term in ("喜歡這種天氣", "喜欢这种天气"))
+    ):
+        return None
+    location = re.sub(
+        r"(?:幫我|帮我|請|请|可以|能不能|想知道|告訴我|告诉我|"
+        r"查詢|查询|查一下|看一下|查|看)",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    location = re.sub(
+        r"(?:今天|今日|現在|现在|目前|此刻|當地|当地|即時|实时|的)",
+        " ",
+        location,
+        flags=re.IGNORECASE,
+    )
+    location = re.sub(
+        r"(?:天氣|天气|氣象|气象|氣溫|气温|溫度|温度|空氣品質|空气质量|"
+        r"aqi|weather|air\s*quality|會不會下雨|会不会下雨|會下雨|会下雨|"
+        r"怎麼樣|怎么样|如何|多少|好不好|很好|好嗎|好吗|嗎|吗|\bin\b)",
+        " ",
+        location,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"\s+", " ", location).strip(" ，,。.!！?？、")[:120]
+
+
+def _explicit_calendar_range(value: str) -> tuple[str, str] | None:
+    matches = _CALENDAR_EXPLICIT_DATE_RE.findall(str(value or ""))
+    parsed: list[date] = []
+    for year, month, day_value in matches[:2]:
+        try:
+            parsed.append(date(int(year), int(month), int(day_value)))
+        except ValueError:
+            return None
+    if not parsed:
+        return None
+    if len(parsed) == 1:
+        parsed.append(parsed[0])
+    if parsed[1] < parsed[0]:
+        return None
+    return parsed[0].isoformat(), parsed[1].isoformat()
 
 
 def visible_choice_action(value: Any) -> str | None:
@@ -369,6 +444,16 @@ def requires_confirmation(proposal: VoiceProposal) -> bool:
 
 
 def confirmation_phrase(proposal: VoiceProposal) -> str:
+    if proposal.intent == "date.confirm":
+        return "確認安排"
+    if proposal.intent == "date.update":
+        return "確認修改共同約會"
+    if proposal.intent == "date.respond":
+        return (
+            "確認接受約會邀請"
+            if proposal.arguments.get("accepted") is True
+            else "確認拒絕約會邀請"
+        )
     if proposal.intent.startswith("date."):
         return "確認共同約會操作"
     if proposal.intent == "calendar.create":
@@ -428,6 +513,19 @@ def confirmation_matches(text: str, proposal: VoiceProposal) -> bool:
             "ai.proactive_care": {f"{verb}AI主動關心", f"{verb}主動關心"},
         }.get(key, set())
         return action in aliases
+    if proposal.intent == "date.confirm":
+        return action in {"安排", "約會安排", "共同約會", "共同約會安排"}
+    if proposal.intent == "date.update":
+        return action in {
+            "安排", "修改安排", "更新安排", "修改共同約會", "更新共同約會",
+        }
+    if proposal.intent == "date.respond":
+        aliases = (
+            {"接受邀請", "接受約會邀請"}
+            if proposal.arguments.get("accepted") is True
+            else {"拒絕邀請", "拒絕約會邀請"}
+        )
+        return action in aliases
     return False
 
 
@@ -472,16 +570,38 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
                 if key in clean and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", clean[key]):
                     return None
             args["changes"] = clean
+    elif intent == "weather.query":
+        location = re.sub(
+            r"\s+", " ", str(raw_args.get("location") or ""),
+        ).strip()[:120]
+        args = {"location": location}
     elif intent == "app.navigate":
         destination = str(raw_args.get("destination") or "").strip()
         if destination not in NAVIGATION_DESTINATIONS:
             return None
         args["destination"] = destination
     elif intent == "calendar.query":
-        requested_range = str(raw_args.get("range") or "upcoming").strip()
-        if requested_range not in CALENDAR_QUERY_RANGES:
+        start_date = str(raw_args.get("start_date") or "").strip()
+        end_date = str(raw_args.get("end_date") or "").strip()
+        if bool(start_date) != bool(end_date):
             return None
-        args["range"] = requested_range
+        if start_date and end_date:
+            try:
+                parsed_start = date.fromisoformat(start_date)
+                parsed_end = date.fromisoformat(end_date)
+            except ValueError:
+                return None
+            if parsed_end < parsed_start:
+                return None
+            args = {
+                "start_date": parsed_start.isoformat(),
+                "end_date": parsed_end.isoformat(),
+            }
+        else:
+            requested_range = str(raw_args.get("range") or "upcoming").strip()
+            if requested_range not in CALENDAR_QUERY_RANGES:
+                return None
+            args["range"] = requested_range
     elif intent == "calendar.create":
         title = re.sub(r"\s+", " ", str(raw_args.get("title") or "")).strip()[:80]
         event_date = str(raw_args.get("date") or "").strip()
@@ -691,6 +811,46 @@ def deterministic_proposal(
             {"action": visible_action},
             "我會按下畫面上目前的按鈕。", revision,
         )
+    named_date_confirmation = re.search(
+        r"(?:幫我|請)?(?:確認|確定)(?:一下)?(?:和|跟)\s*"
+        r"([^，,。！？!?]{1,40}?)\s*(?:的)?(?:共同約會|約會)?安排$",
+        raw,
+    ) or re.search(
+        r"(?:幫我|請)?(?:確認|確定)(?:一下)?\s*"
+        r"([^，,。！？!?]{1,40}?)\s*的(?:共同約會|約會)?安排$",
+        raw,
+    )
+    date_confirmation_phrases = {
+        "確認安排", "確定安排", "確認這個安排", "確定這個安排",
+        "確認約會安排", "確定約會安排", "確認共同約會", "確定共同約會",
+        "確認共同約會安排", "確定共同約會安排",
+        "confirmshareddate", "confirmthearrangement",
+    }
+    if named_date_confirmation is not None or compact in date_confirmation_phrases:
+        target = (
+            named_date_confirmation.group(1).strip()
+            if named_date_confirmation is not None
+            else "目前對象"
+        )
+        if normalized_phrase(target) in {
+            "這個", "目前", "目前這個", "共同約會", "約會",
+            "這個共同約會", "目前共同約會",
+        }:
+            target = "目前對象"
+        return VoiceProposal(
+            "date.confirm",
+            {"contact_name": target},
+            "我先核對這份共同約會，再確認你這一方。",
+            revision,
+        )
+    weather_location = _weather_location(raw)
+    if weather_location is not None:
+        return VoiceProposal(
+            "weather.query",
+            {"location": weather_location},
+            "我同時查看目前天氣與空氣品質。",
+            revision,
+        )
     if compact in {
         "你是誰", "你是誰啊", "請問你是誰", "你叫什麼", "你的名字是什麼",
         "你是谁", "你是谁啊", "请问你是谁", "你叫什么", "你的名字是什么",
@@ -888,6 +1048,19 @@ def deterministic_proposal(
         )):
             return _deterministic_calendar_create(raw, revision)
         else:
+            explicit_range = _explicit_calendar_range(raw)
+            if _CALENDAR_EXPLICIT_DATE_RE.search(raw) and explicit_range is None:
+                return None
+            if explicit_range is not None:
+                return VoiceProposal(
+                    "calendar.query",
+                    {
+                        "start_date": explicit_range[0],
+                        "end_date": explicit_range[1],
+                    },
+                    working_reply,
+                    revision,
+                )
             calendar_range = "upcoming"
             if "明天" in raw:
                 calendar_range = "tomorrow"

@@ -17,6 +17,10 @@ from services.notification_service import (
 SERVER_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(dotenv_path=SERVER_ROOT / ".env", override=False)
 
+_DEFAULT_ENDPOINT = "https://appwrite.misproject.us.ci/v1"
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
 def _validated_endpoint(value: str) -> str:
     endpoint = value.strip().rstrip("/")
     parsed = urlparse(endpoint)
@@ -27,14 +31,26 @@ def _validated_endpoint(value: str) -> str:
     raise ValueError("APPWRITE_ENDPOINT must use HTTPS outside loopback development")
 
 
+def _configured_endpoint() -> str:
+    return _validated_endpoint(
+        os.getenv("APPWRITE_INTERNAL_ENDPOINT")
+        or os.getenv("APPWRITE_ENDPOINT")
+        or _DEFAULT_ENDPOINT
+    )
+
+
+def _should_verify_tls(endpoint: str) -> bool:
+    """Trust the system CA store except for the host-local Appwrite proxy."""
+    return urlparse(endpoint).hostname not in _LOOPBACK_HOSTS
+
+
 _CONFIG_ERROR = ""
 try:
-    _ENDPOINT = _validated_endpoint(
-        os.getenv("APPWRITE_ENDPOINT") or "https://appwrite.misproject.us.ci/v1"
-    )
+    _ENDPOINT = _configured_endpoint()
 except ValueError as exc:
     _ENDPOINT = ""
     _CONFIG_ERROR = str(exc)
+_VERIFY_TLS = _should_verify_tls(_ENDPOINT) if _ENDPOINT else True
 _PROJECT_ID = os.getenv("APPWRITE_PROJECT_ID") or ""
 _API_KEY = os.getenv("APPWRITE_API_KEY") or ""
 _FCM_PROVIDER_ID = os.getenv("APPWRITE_FCM_PROVIDER_ID") or "6a81bf000036a6eaf5e0"
@@ -48,11 +64,15 @@ _HEADERS = {
     "Content-Type": "application/json",
 }
 
+
 def _valid_push_target_ids(user_id: str) -> list[str]:
     """Resolve non-expired FCM targets without exposing their identifiers."""
     try:
         response = requests.get(
-            f"{_ENDPOINT}/users/{user_id}", headers=_HEADERS, timeout=10,
+            f"{_ENDPOINT}/users/{user_id}",
+            headers=_HEADERS,
+            timeout=10,
+            verify=_VERIFY_TLS,
         )
     except Exception as exc:
         print(f"[push_service] target lookup failed: {type(exc).__name__}: {exc}")
@@ -106,6 +126,7 @@ def _send_prepared_event(event: NotificationEvent) -> None:
             headers=_HEADERS,
             json=payload,
             timeout=10,
+            verify=_VERIFY_TLS,
         )
         if response.status_code >= 300:
             print(

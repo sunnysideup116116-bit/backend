@@ -22,6 +22,7 @@ def _enabled(value: str | None, default: bool) -> bool:
 class AppVoiceSettings:
     enabled: bool
     demo_only: bool
+    memory_enabled: bool
     gemini_fallback_enabled: bool
     text_model: str
     live_model: str
@@ -60,9 +61,16 @@ class AppVoiceSettings:
             for value in env.get("VOICE_APP_TEST_USER_IDS", "").split(",")
             if value.strip()
         )
+        memory_enabled = _enabled(env.get("VOICE_MEMORY_ENABLED"), False)
+        default_consent_version = (
+            "demo-free-gemini-live-ollama-memory-v1"
+            if memory_enabled
+            else "demo-free-gemini-live-v2"
+        )
         return cls(
             enabled=_enabled(env.get("VOICE_APP_ENABLED"), True),
             demo_only=_enabled(env.get("VOICE_APP_DEMO_ONLY"), True),
+            memory_enabled=memory_enabled,
             gemini_fallback_enabled=_enabled(
                 env.get("VOICE_APP_GEMINI_FALLBACK_ENABLED"), True,
             ),
@@ -82,8 +90,8 @@ class AppVoiceSettings:
             ),
             tts_voice=(env.get("VOICE_APP_TTS_VOICE", "Achird").strip() or "Achird"),
             consent_version=(
-                env.get("VOICE_APP_CONSENT_VERSION", "demo-free-gemini-live-v2").strip()
-                or "demo-free-gemini-live-v2"
+                env.get("VOICE_APP_CONSENT_VERSION", default_consent_version).strip()
+                or default_consent_version
             ),
             max_session_seconds=bounded("VOICE_APP_MAX_SESSION_SECONDS", 600, 20, 600),
             ticket_ttl_seconds=bounded("VOICE_APP_TICKET_TTL_SECONDS", 60, 15, 300),

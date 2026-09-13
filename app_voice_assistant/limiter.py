@@ -17,6 +17,10 @@ class AppVoiceTicket:
     user_id: str
     ip_fingerprint: str
     expires_at: float
+    username: str = ""
+    session_id: str = ""
+    memory_older_summary: str = ""
+    memory_recent_summary: str = ""
 
 
 class AppVoiceTicketStore:
@@ -25,7 +29,17 @@ class AppVoiceTicketStore:
         self._tickets: dict[str, AppVoiceTicket] = {}
         self._lock = threading.Lock()
 
-    def issue(self, identity: str, user_id: str, ip_fingerprint: str) -> tuple[str, int]:
+    def issue(
+        self,
+        identity: str,
+        user_id: str,
+        ip_fingerprint: str,
+        *,
+        username: str = "",
+        session_id: str = "",
+        memory_older_summary: str = "",
+        memory_recent_summary: str = "",
+    ) -> tuple[str, int]:
         token = secrets.token_urlsafe(32)
         now = time.monotonic()
         with self._lock:
@@ -35,6 +49,10 @@ class AppVoiceTicketStore:
                 user_id=user_id,
                 ip_fingerprint=ip_fingerprint,
                 expires_at=now + self._ttl,
+                username=username,
+                session_id=session_id,
+                memory_older_summary=memory_older_summary,
+                memory_recent_summary=memory_recent_summary,
             )
         return token, self._ttl
 

@@ -286,6 +286,43 @@ def test_calendar_read_does_not_require_public_ayue_permission():
     assert context_allows_proposal(context, calendar) is True
 
 
+def test_calendar_query_accepts_any_valid_past_or_future_date_interval():
+    past = validate_proposal({
+        "intent": "calendar.query",
+        "arguments": {
+            "start_date": "2021-01-03",
+            "end_date": "2021-04-27",
+        },
+    }, base_revision=4)
+    future = deterministic_proposal(
+        "查一下 2032 年 8 月 2 日到 2033 年 1 月 19 日的行事曆",
+        context={"revision": 5},
+    )
+
+    assert past is not None
+    assert past.arguments == {
+        "start_date": "2021-01-03",
+        "end_date": "2021-04-27",
+    }
+    assert future is not None
+    assert future.intent == "calendar.query"
+    assert future.arguments == {
+        "start_date": "2032-08-02",
+        "end_date": "2033-01-19",
+    }
+    assert validate_proposal({
+        "intent": "calendar.query",
+        "arguments": {"start_date": "2026-09-01"},
+    }, base_revision=0) is None
+    assert validate_proposal({
+        "intent": "calendar.query",
+        "arguments": {
+            "start_date": "2026-09-30",
+            "end_date": "2026-09-01",
+        },
+    }, base_revision=0) is None
+
+
 def test_direct_calendar_writes_are_structured_and_never_accept_event_ids():
     create = validate_proposal({
         "intent": "calendar.create",

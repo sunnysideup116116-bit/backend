@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import re
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -28,9 +29,45 @@ from .contracts import (
 from .duplex_runtime import run_duplex_session
 from .contextual import bind_target
 from .capabilities import CATALOG
-from .limiter import AppVoiceLimiter, AppVoiceTicketStore, fingerprint, new_process_secret
+from .limiter import (
+    AppVoiceLimiter,
+    AppVoiceTicket,
+    AppVoiceTicketStore,
+    fingerprint,
+    new_process_secret,
+)
+from .memory import (
+    AppwriteVoiceMemoryService,
+    VoiceMemoryError,
+    VoiceMemoryRecord,
+    VoiceOwner,
+)
 from .provider import AppVoiceProvider
 from .settings import AppVoiceSettings
+from .weather import GoogleVoiceWeatherService, resolve_weather_location
+
+
+def _saved_weather_location(user_id: str) -> str:
+    """Read the coarse manual profile location from the in-process Social DB."""
+    database = sys.modules.get("database")
+    profiles = getattr(database, "profiles_coll", None) if database else None
+    if profiles is None:
+        return ""
+    try:
+        profile = profiles.find_one(
+            {"user_id": user_id}, {"_id": 0, "profile_location": 1},
+        ) or {}
+    except Exception:
+        return ""
+    raw = profile.get("profile_location")
+    if not isinstance(raw, dict):
+        return ""
+    city = re.sub(r"\s+", "", str(raw.get("city") or "")).strip("，,。")[:20]
+    district = re.sub(
+        r"\s+", "", str(raw.get("district") or ""),
+    ).strip("，,。")[:20]
+    location = f"{city}{district}".strip()
+    return location[:80] if len(location) >= 2 else ""
 
 
 class AppVoiceSessionRequest(BaseModel):
@@ -59,6 +96,9 @@ class AppVoiceRuntime:
         settings: AppVoiceSettings | None = None,
         keys: list[str] | None = None,
         provider: AppVoiceProvider | None = None,
+        memory_service: Any | None = None,
+        weather_service: Any | None = None,
+        weather_location_provider: Any | None = None,
     ):
         self.settings = settings or AppVoiceSettings.from_env()
         resolved_keys = collect_google_api_keys() if keys is None else keys
@@ -66,6 +106,59 @@ class AppVoiceRuntime:
         self.tickets = AppVoiceTicketStore(self.settings.ticket_ttl_seconds)
         self.limiter = AppVoiceLimiter(self.settings)
         self.secret = new_process_secret()
+        self.memory = (
+            memory_service
+            if memory_service is not None
+            else AppwriteVoiceMemoryService.from_env()
+            if self.settings.memory_enabled
+            else None
+        )
+        self._memory_tasks: set[asyncio.Task[Any]] = set()
+        self.weather = (
+            weather_service
+            if weather_service is not None
+            else GoogleVoiceWeatherService.from_env_or_none()
+        )
+        self.weather_location_provider = weather_location_provider
+
+    def queue_memory_finalize(
+        self, ticket: AppVoiceTicket, turns: list[dict[str, str]],
+    ) -> None:
+        if self.memory is None or not ticket.session_id or not ticket.username:
+            return
+        owner = VoiceOwner(ticket.user_id, ticket.username)
+        turn_count = len(turns)
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self.memory.finalize_session,
+                owner,
+                ticket.session_id,
+                list(turns),
+            )
+        )
+        self._memory_tasks.add(task)
+
+        def finished(done: asyncio.Task[Any]) -> None:
+            self._memory_tasks.discard(done)
+            if done.cancelled():
+                return
+            try:
+                result = done.result()
+                saved = result.last_session_id == ticket.session_id
+                print(
+                    "[APP_VOICE_MEMORY] "
+                    f"{'saved' if saved else 'skipped'} "
+                    f"revision={result.revision} turns={turn_count}"
+                )
+            except Exception as error:
+                code = getattr(error, "code", type(error).__name__)
+                print(f"[APP_VOICE_MEMORY] finalize failed: {code}")
+
+        task.add_done_callback(finished)
+
+    async def wait_memory_tasks(self) -> None:
+        if self._memory_tasks:
+            await asyncio.gather(*tuple(self._memory_tasks), return_exceptions=True)
 
     def client_ip(self, connection: Request | WebSocket) -> str:
         forwarded = connection.headers.get("x-forwarded-for", "")
@@ -104,7 +197,25 @@ def _setting_reply(proposal: VoiceProposal) -> str:
     return f"{label}將{'開啟' if enabled else '關閉'}。"
 
 
+def _bearer_token(request: Request) -> str:
+    value = str(request.headers.get("authorization") or "").strip()
+    scheme, separator, token = value.partition(" ")
+    if separator and scheme.lower() == "bearer" and token.strip():
+        return token.strip()
+    return ""
+
+
 def _confirmation_preview(proposal: VoiceProposal, context: dict[str, Any]) -> str:
+    if proposal.intent == "date.confirm":
+        contact = str(proposal.arguments.get("contact_name") or "目前對象")[:40]
+        return f"要確認你和{contact}的共同約會安排，請說「確認安排」。"
+    if proposal.intent == "date.update":
+        contact = str(proposal.arguments.get("contact_name") or "目前對象")[:40]
+        return f"要套用你和{contact}的共同約會修改，請說「確認修改共同約會」。"
+    if proposal.intent == "date.respond":
+        contact = str(proposal.arguments.get("contact_name") or "目前對象")[:40]
+        decision = "接受" if proposal.arguments.get("accepted") is True else "拒絕"
+        return f"要{decision}{contact}的約會邀請，請說「{confirmation_phrase(proposal)}」。"
     if proposal.intent == "calendar.create":
         title = str(proposal.arguments.get("title") or "行程")[:80]
         event_date = str(proposal.arguments.get("date") or "")
@@ -146,6 +257,16 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
             "screen_context_version": 1,
             "structured_action_results": True,
             "demo_only": runtime.settings.demo_only,
+            "session_memory": runtime.memory is not None,
+            "session_memory_storage": "appwrite_internal" if runtime.memory else "disabled",
+            "session_memory_max_chars": 200 if runtime.memory else 0,
+            "session_memory_recent_chars": 120 if runtime.memory else 0,
+            "voice_weather": runtime.weather is not None,
+            "voice_weather_sources": (
+                ["google_weather", "google_air_quality"]
+                if runtime.weather is not None
+                else []
+            ),
             "android_on_device_stt": True,
             "gemini_fallback_available": runtime.provider.gemini_available,
             "gemini_live_audio": runtime.provider.gemini_available,
@@ -188,6 +309,8 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                 "direct_self_profile", "direct_memory_read",
                 "direct_memory_add",
                 "direct_shared_dates", "date_invitation_response", "shared_date_form_update",
+                "shared_date_form_confirm",
+                "current_weather_and_air_quality",
             ],
         }
 
@@ -197,14 +320,46 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
             raise HTTPException(status_code=503, detail="app_voice_unavailable")
         if req.consent_version != runtime.settings.consent_version:
             raise HTTPException(status_code=409, detail="app_voice_consent_mismatch")
-        if not runtime.settings.allows_user(req.user_id):
+        user_id = req.user_id
+        username = ""
+        memory = VoiceMemoryRecord()
+        if runtime.memory is not None:
+            try:
+                owner, memory = await asyncio.to_thread(
+                    runtime.memory.authenticate_and_load,
+                    _bearer_token(request),
+                    req.user_id,
+                )
+            except VoiceMemoryError as error:
+                status = 401 if error.code in {
+                    "voice_memory_jwt_required",
+                    "voice_memory_authentication_failed",
+                    "voice_memory_user_mismatch",
+                } else 503
+                raise HTTPException(status_code=status, detail=error.code) from error
+            user_id = owner.user_id
+            username = owner.username
+            print(
+                "[APP_VOICE_MEMORY] loaded "
+                f"revision={memory.revision} "
+                f"chars={len(memory.older_summary) + len(memory.recent_summary)}"
+            )
+        if not runtime.settings.allows_user(user_id):
             raise HTTPException(status_code=403, detail="app_voice_demo_account_required")
         ip = runtime.client_ip(request)
-        identity = fingerprint(runtime.secret, req.user_id, req.installation_id, ip)
+        identity = fingerprint(runtime.secret, user_id, req.installation_id, ip)
         if not runtime.limiter.allow_session(identity):
             raise HTTPException(status_code=429, detail="app_voice_rate_limit")
         ip_hash = fingerprint(runtime.secret, "app-voice-ip", ip)
-        ticket, ttl = runtime.tickets.issue(identity, req.user_id, ip_hash)
+        ticket, ttl = runtime.tickets.issue(
+            identity,
+            user_id,
+            ip_hash,
+            username=username,
+            session_id=uuid.uuid4().hex,
+            memory_older_summary=memory.older_summary,
+            memory_recent_summary=memory.recent_summary,
+        )
         return {
             "ticket": ticket,
             "expires_in_seconds": ttl,
@@ -221,6 +376,8 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
         await websocket.accept()
         acquired = False
         live_audio_task: asyncio.Task[None] | None = None
+        ticket: AppVoiceTicket | None = None
+        memory_turns: list[dict[str, str]] = []
         try:
             try:
                 hello = json.loads(await asyncio.wait_for(websocket.receive_text(), timeout=5))
@@ -245,7 +402,34 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
             acquired = True
             output_mode = str(hello.get("output_mode") or "gemini_tts")
             input_mode = str(hello.get("input_mode") or "on_device_text")
-            context = safe_context(hello.get("context"))
+            memory_record = VoiceMemoryRecord(
+                older_summary=ticket.memory_older_summary,
+                recent_summary=ticket.memory_recent_summary,
+            )
+            memory_prompt = memory_record.prompt_text()
+
+            def session_context(value: Any) -> dict[str, Any]:
+                result = safe_context(value)
+                voice_config = dict(result.get("voice_config") or {})
+                if ticket and ticket.username:
+                    voice_config["self_name"] = ticket.username
+                result["voice_config"] = voice_config
+                if memory_prompt:
+                    result["conversation_memory"] = memory_prompt
+                return result
+
+            def remember(role: str, value: Any) -> None:
+                text = str(value or "").strip()[:2000]
+                if role not in {"user", "assistant"} or not text:
+                    return
+                item = {"role": role, "content": text}
+                if memory_turns and memory_turns[-1] == item:
+                    return
+                memory_turns.append(item)
+                if len(memory_turns) > 100:
+                    del memory_turns[0]
+
+            context = session_context(hello.get("context"))
             pending: PendingConfirmation | None = None
             delegated_actions: dict[str, VoiceProposal] = {}
             last_delegated_proposal: VoiceProposal | None = None
@@ -286,6 +470,11 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                         initial_context=context,
                         max_session_seconds=runtime.settings.max_session_seconds,
                         send_event=send_event,
+                        conversation_memory=memory_prompt,
+                        memory_turns=memory_turns,
+                        weather_service=runtime.weather,
+                        weather_location_provider=runtime.weather_location_provider,
+                        weather_user_id=ticket.user_id,
                     )
                     await send_event({"type": "closed", "reconnect": True})
                     await websocket.close(code=1000)
@@ -350,6 +539,7 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
             async def reply(text: str, *, code: str = "ok") -> None:
                 nonlocal live_audio_task, live_response_id
                 await cancel_live_audio(notify=True)
+                remember("assistant", text)
                 response_id = uuid.uuid4().hex
                 await send_event({
                     "type": "assistant_reply", "text": text[:160], "code": code,
@@ -395,6 +585,36 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                     await reply(
                         "這項功能沒有被你授權，可以在「阿月語音助理」設定裡調整。",
                         code="permission_denied",
+                    )
+                    return
+                if proposal.intent == "weather.query":
+                    if runtime.weather is None:
+                        await reply(
+                            "目前天氣與空氣品質服務尚未啟用。",
+                            code="weather_unavailable",
+                        )
+                        return
+                    location = await resolve_weather_location(
+                        proposal.arguments.get("location"),
+                        ticket.user_id,
+                        runtime.weather_location_provider,
+                    )
+                    result = await asyncio.to_thread(
+                        runtime.weather.query,
+                        location,
+                    )
+                    status = str(result.get("status") or "failed")
+                    await reply(
+                        str(result.get("message") or "目前暫時查不到氣象資料。")[:900],
+                        code=(
+                            "weather"
+                            if status == "ok"
+                            else "weather_partial"
+                            if status == "partial"
+                            else "clarification"
+                            if status == "needs_input"
+                            else "weather_unavailable"
+                        ),
                     )
                     return
                 if proposal.intent == "assistant.close":
@@ -510,7 +730,7 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                     continue
                 kind = control.get("type")
                 if kind == "context_changed":
-                    next_context = safe_context(control.get("context"))
+                    next_context = session_context(control.get("context"))
                     if pending and (
                         next_context["scope"] != pending.scope
                         or next_context["revision"] != pending.revision
@@ -532,6 +752,7 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                 elif kind == "utterance":
                     await cancel_live_audio(notify=True)
                     text = str(control.get("text") or "")[:2000]
+                    remember("user", text)
                     if pending:
                         await confirm_pending(
                             confirmation_id=pending.confirmation_id,
@@ -592,9 +813,11 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                 await asyncio.gather(live_audio_task, return_exceptions=True)
             if acquired:
                 runtime.limiter.release()
+            if ticket is not None and acquired:
+                runtime.queue_memory_finalize(ticket, memory_turns)
 
     return app_router
 
 
-_runtime = AppVoiceRuntime()
+_runtime = AppVoiceRuntime(weather_location_provider=_saved_weather_location)
 router = create_router(_runtime)

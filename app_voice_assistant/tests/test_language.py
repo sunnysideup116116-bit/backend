@@ -25,3 +25,12 @@ def test_display_conversion_preserves_english_spacing_and_translates_script_only
     assert display_transcript("我喜欢和 candy 打篮球。") == "我喜歡和 candy 打籃球。"
     assert display_transcript("Hello candy, nice to meet you.") == "Hello candy, nice to meet you."
     assert display_transcript("我喜欢篮球", traditional=False) == "我喜欢篮球"
+
+
+def test_display_conversion_removes_only_streamed_cjk_token_spaces():
+    assert display_transcript("你 可 以 幫 我 什 麼 忙 啊？") == "你可以幫我什麼忙啊？"
+    assert (
+        display_transcript("嗨 Candy， 我 是 阿 月， 今 天 想 請 我 幫 什 麼？")
+        == "嗨 Candy，我是阿月，今天想請我幫什麼？"
+    )
+    assert display_transcript("下午 4 點和 Candy 見面") == "下午 4 點和 Candy 見面"

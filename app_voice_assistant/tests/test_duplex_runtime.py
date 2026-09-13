@@ -837,6 +837,51 @@ def test_calendar_read_is_direct_and_does_not_delegate_to_public_ayue():
     asyncio.run(scenario())
 
 
+def test_calendar_read_forwards_an_unbounded_explicit_date_interval():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket,
+            provider=FakeProvider(live),
+            limiter=FakeLimiter(),
+            identity="test",
+            initial_context={
+                "scope": "global",
+                "revision": 0,
+                "permissions": {"calendar_read": True},
+            },
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="calendar-history",
+            name="read_calendar",
+            args={
+                "start_date": "2020-01-01",
+                "end_date": "2035-12-31",
+            },
+        )]))
+        await wait_until(lambda: any(
+            item.get("intent") == "calendar.query" for item in events
+        ))
+        action = next(
+            item for item in events if item.get("intent") == "calendar.query"
+        )
+        assert action["arguments"] == {
+            "start_date": "2020-01-01",
+            "end_date": "2035-12-31",
+        }
+        await socket.incoming.put({
+            "type": "websocket.receive",
+            "text": json.dumps({"type": "stop"}),
+        })
+        await task
+
+    asyncio.run(scenario())
+
+
 def test_calendar_create_is_direct_and_executes_after_one_spoken_confirmation():
     async def scenario():
         live = FakeLive()

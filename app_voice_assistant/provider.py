@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import json
+import re
 import wave
 from collections import OrderedDict
 from datetime import datetime
@@ -15,6 +16,27 @@ from registration_voice.key_pool import GoogleApiKeyPool
 from .contracts import VoiceProposal, deterministic_proposal, safe_context, validate_proposal
 from .duplex_session import AppVoiceDuplexSession
 from .settings import AppVoiceSettings
+
+
+def _calendar_range_needs_model(
+    text: str,
+    proposal: VoiceProposal | None,
+) -> bool:
+    if (
+        proposal is None
+        or proposal.intent != "calendar.query"
+        or proposal.arguments != {"range": "upcoming"}
+    ):
+        return False
+    value = str(text or "")
+    return bool(re.search(
+        r"(?:\d{4}\s*年|\d{1,2}\s*月|去年|前年|今年|明年|後年|后年|"
+        r"上個月|上个月|這個月|这个月|下個月|下个月|季度|季|半年|年度|"
+        r"從.+(?:到|至)|从.+(?:到|至)|"
+        r"(?:過去|过去|未來|未来)\s*[一二三四五六七八九十兩两半\d]+"
+        r"\s*(?:天|週|周|月|季|年))",
+        value,
+    ))
 
 
 class AppVoiceProvider:
@@ -32,19 +54,33 @@ class AppVoiceProvider:
         self,
         *,
         voice_config: dict[str, str] | None = None,
+        conversation_memory: str = "",
     ) -> AppVoiceDuplexSession:
         return AppVoiceDuplexSession(
             self.settings,
             self.keys,
             voice_config=voice_config,
+            conversation_memory=conversation_memory,
         )
+
+    def _safe_context_with_memory(self, context: dict[str, Any]) -> dict[str, Any]:
+        safe = safe_context(context)
+        memory = str(context.get("conversation_memory") or "").strip()[:600]
+        if memory:
+            safe["conversation_memory"] = memory
+        return safe
 
     async def interpret_text(
         self, text: str, *, context: dict[str, Any],
     ) -> VoiceProposal | None:
-        safe = safe_context(context)
+        safe = self._safe_context_with_memory(context)
         local = deterministic_proposal(text, context=safe)
-        if local is not None and local.intent != "post.open_draft":
+        needs_calendar_model = _calendar_range_needs_model(text, local)
+        if (
+            local is not None
+            and local.intent != "post.open_draft"
+            and not needs_calendar_model
+        ):
             return local
         if self.gemini_available:
             generated = await self._gemini_turn(text, context=safe)
@@ -57,7 +93,9 @@ class AppVoiceProvider:
     ) -> VoiceProposal | None:
         if not self.gemini_available or not audio:
             return None
-        return await self._gemini_turn("", context=safe_context(context), audio=audio)
+        return await self._gemini_turn(
+            "", context=self._safe_context_with_memory(context), audio=audio,
+        )
 
     async def synthesize(self, text: str) -> dict[str, str] | None:
         spoken = text.strip()[:160]
@@ -189,10 +227,12 @@ settings.set、post.open_draft、post.replace_caption、post.append_caption、
 post.request_publish、calendar.query、calendar.create、calendar.update、calendar.cancel、
 personality.explore、ayue.public_query、ayue.private_query、contacts.query、self.query、
 memory.query、memory.add、ui.choice.activate、ui.target.select、chat.open、chat.request_send、
-assistant.reply、assistant.cancel、assistant.close。
+weather.query、assistant.reply、assistant.cancel、assistant.close。
 app.navigate destination 只能是 chat、matching、profile、settings、profile_edit、
 voice_settings、calendar、matching_ayue、match_hub、memory、create_post。
-calendar.query range 只能是 today、tomorrow、week、weekend、next_week、upcoming。
+calendar.query 查指定期間時 arguments 只能有 start_date 與 end_date，格式皆為 YYYY-MM-DD，
+而且包含起訖日；不限制過去或未來跨度。今天、明天、本週等簡單查詢也可只用 range，
+值只能是 today、tomorrow、week、weekend、next_week、upcoming。
 calendar.create arguments 只能有 title、date（YYYY-MM-DD）、start_time（HH:mm）、
 可選 end_time、location、notes。calendar.update 以自然語言 target 指定既有行程，
 只能修改 date、start_time、end_time、location、notes；calendar.cancel 只能有 target。
@@ -219,6 +259,9 @@ arguments 只能有 label 與 stance，並等待確認。
 填寫或調整已讀取的共同約會用 date.update（contact_name、changes），changes 只允許
 date、start_time、end_time、activity、location、notes、budget；日期 YYYY-MM-DD，時間 HH:mm。
 確認本人這一方的安排用 date.confirm（contact_name），所有寫入等待口頭確認；不能代表對方同意。
+查詢目前天氣、溫度、降雨或空氣品質使用 weather.query，location 只放使用者說出的城市或區域；
+未提供地點時保留空字串，讓 Server 使用設定中的預設所在地。不可猜測其他位置，
+也不可改用公開阿月或 Web 搜尋。
 目前安全狀態若 feature_status.visible_choice_pending=true，使用者說確認、確定、同意、好、
 取消、不要或不同意時必須使用 ui.choice.activate，arguments 只能是
 {{"action":"confirm"}} 或 {{"action":"cancel"}}；不可把這些確認詞送成 chat.request_send、

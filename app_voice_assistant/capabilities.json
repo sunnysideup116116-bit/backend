@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 3,
   "target_permissions": {
     "contact": "chat_list",
     "calendar_event": "calendar_read",
@@ -100,7 +100,9 @@
       "permission": "calendar_read",
       "confirmation": false,
       "parameters": [
-        "range"
+        "range",
+        "start_date",
+        "end_date"
       ],
       "target_kinds": []
     },
@@ -358,6 +360,15 @@
         "enabled"
       ],
       "target_kinds": []
+    },
+    "weather.query": {
+      "permission": null,
+      "confirmation": false,
+      "parameters": [
+        "location"
+      ],
+      "target_kinds": [],
+      "tool": "read_weather"
     },
     "ui.choice.activate": {
       "permission": null,

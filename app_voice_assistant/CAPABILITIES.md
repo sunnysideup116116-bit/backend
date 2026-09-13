@@ -1,5 +1,40 @@
 # Voice Assistant 能力與限制
 
+## 2026-09-13：短期記憶、Google 即時氣象與任意行事曆區間
+
+- 記憶收尾日誌曾出現 `voice_memory_summary_failed`；現在 DeepSeek 仍優先嘗試兩次，也會接受被 Markdown 包住或帶額外欄位的有效 JSON。兩次都失敗時改用同樣受遮蔽、本人姓名移除與 200 字限制保護的本機滾動摘要，仍遞增 Appwrite revision，不再遺失整段 session。
+- 「結束／關閉語音模式」等控制句與阿月的「好，語音模式已關閉／我先休息」會在摘要前移除。只有關閉控制句的 session 不呼叫 DeepSeek、不更新 revision；前面有實質對話時仍保存對話內容，但不保存關閉套話。
+- 語音啟動在 capability、同意、暱稱、WebSocket 與麥克風各個非同步邊界都核對同一個 session generation。啟動中再次點吉祥物會立刻收合並取消；晚完成的連線會再次關閉，不會在背景自行啟動麥克風。
+- Appwrite 實際文件已確認為 `revision=2`，較早摘要 39 字、近期摘要 67 字；合成 Gemini Live 測試在不呼叫工具的情況下，直接依注入摘要回答「星期日下午四點」，因此 Appwrite→ticket→Live system instruction 路徑有效。
+- 「上一段語音／剛才說到哪／上次語音約幾點」會直接使用短期摘要；「阿月記住的事／長期偏好」仍讀 canonical `read_memories`，回答時可補充近期語音脈絡並清楚區分兩種來源，不會因長期清單為空而忽略短期摘要。
+- 新增 `read_weather`／`weather.query`，只查目前狀況。使用者說出城市或區域時優先使用該地點；未說地點時，才讀取設定頁「所在地（僅用於附近資訊查詢）」保存的 Agent 專用 `profile_location`。不讀 Appwrite 個人資料的 `region`，Agent 地區不存在時才追問。這個讀取只在缺少氣象地點時執行，不增加其他語音功能的連線或回覆時間。地名先由 Google Places Text Search 解析為座標，API key 全部留在 Server。
+- 每個有效氣象查詢都會並行且各呼叫一次 Google Weather `currentConditions:lookup` 與 Air Quality `currentConditions:lookup`，不使用快取替代任何一個來源。回傳目前天氣、溫度、體感、降雨機率、濕度、風速、UV、台灣 AQI、主要污染物與一般族群健康建議；單一來源失敗時會回傳另一來源並明示資料不完整。
+- `GOOGLE_WEATHER_API_KEY`、`GOOGLE_AIR_QUALITY_API_KEY` 與地名解析 key 可獨立設定；留空時沿用既有受限的 `GOOGLE_PLACES_SERVER_API_KEY`。目前 Server key 已實測 Weather 與 Air Quality 均回 200。
+- `read_calendar`／`calendar.query` 除原本今天、明天、本週等預設值外，新增包含起訖日的 `start_date`、`end_date`。可查任意過去、現在或未來區間，不設固定回溯、展望或跨度上限；回覆仍只口述前五筆，避免超長語音。
+- action catalog 已升為 v3；正式 capability 會回報 `voice_weather=true`、`voice_weather_sources=[google_weather, google_air_quality]` 與 `current_weather_and_air_quality`。
+- 本次驗證：App Voice Server 121 項通過；Flutter 五組語音與 action 契約 83 項通過；相關 Dart 靜態分析與 capability 產物同步檢查通過。內網 Appwrite storage smoke 驗證 DeepSeek 強制失敗仍寫入 revision 1、關閉-only session 不增加 revision、結束套話未保存，測試文件隨後以 204 刪除；既有摘要與 DeepSeek 輸出中的舊結束套話也有清理回歸。真實 Gemini 文字備援把「去年三月一日到五月三十一日」解析為 `2025-03-01` 至 `2025-05-31`；Gemini Live 對「今天天氣如何」選出 `read_weather(args={})`，確認未說地點時會交由 Server 套用 Agent 地區。先前含明確地點的 Live smoke 與 Google Weather／Air Quality 雙來源也均成功。
+- 官方介面：[Weather current conditions](https://developers.google.com/maps/documentation/weather/current-conditions)、[Air Quality current conditions](https://developers.google.com/maps/documentation/air-quality/current-conditions)。
+
+## 2026-09-12：語音顯示與共同約會確認補強
+
+- Gemini Live 逐段轉錄若在中文字之間插入單一空白，Server 顯示邊界會只移除相鄰漢字／中文標點間的空白；`嗨 Candy`、英文單字與 `下午 4 點` 等有意義的空格保留。
+- 全螢幕在尚無對話時顯示的「正在準備語音助理／正在開啟麥克風」等狀態文字，改放在 94% 不透明的 theme surface、圓角與輕微陰影上，半透明背景不再降低可讀性。
+- 「確認安排／確認共同約會／確認和某人的安排」明確對應 `date.confirm`。Live 會先 `read_shared_dates` 讀取最新對象與表單，再建立只屬於登入者這一方的口頭確認；`確認安排` 也可核准前一步待確認的共同約會修改，但裸「安排」不會執行寫入。
+- `confirmation_phrase` 依 `date.confirm`、`date.update`、接受邀請與拒絕邀請分開，不再共用模糊的「確認共同約會操作」。其他設定、傳訊、發布與配對確認口令未放寬。
+- 本次回歸：App Voice Server 104 項通過；Flutter 語音介面、共同約會、畫面 context 與 action executor 五組共 80 項通過；相關 Dart 靜態分析無問題。合成內容的真實 Gemini Live smoke 依序選出 `read_shared_dates(contact_name=小安)` 與 `confirm_shared_date(contact_name=小安)`，沒有執行 App 寫入。
+
+## 2026-09-12：兩層短期對話記憶
+
+- 每次建立語音 session 時，Flutter 會取得短效 Appwrite JWT；Server 以內網 `/account` 驗證 JWT 內的 `$id` 必須等於 Client 宣告的 `userId`，再以該 ID 讀取個人資料。Client 傳入的姓名不作為可信來源。
+- 每個帳號在獨立 Appwrite database `voice_memory`、collection `voice_session_memories` 只有一份文件；文件 ID 與 `user_id` 都使用已驗證的 Appwrite userId。`username` 若與同一 userId 的 profile `name` 不同，建立下一次 session 時會同步更新，但只作身分同步與本人姓名移除依據，不作為摘要內容。
+- Server 只透過 `APPWRITE_INTERNAL_ENDPOINT` 連線 Appwrite。設定必須是 loopback、私有 IP 或單段內網服務名稱且以 `/v1` 結尾；公開網域與 HTTP redirect 都會被拒絕。目前 schema 已透過 `https://127.0.0.1/v1` 建立及驗證。
+- 對話結束、Client 正常關閉或 WebSocket 中斷後，Server 在背景把上一份摘要與本次文字轉錄交給 Ollama DeepSeek，更新成 `older_summary` 最多 70 字及 `recent_summary` 最多 120 字，兩者合計最多 200 字。問候或沒有實質內容的 session 不呼叫模型。
+- Gemini Live 的 `input_transcription.finished` 不保證成為 `True`；Server 會在 finished、model turn complete 與 WebSocket 關閉三個邊界保存最後使用者逐字稿並去重，避免畫面看得到對話但收尾誤判成空 session。日誌只記錄 `saved/skipped`、revision 與回合數，不包含姓名或逐字稿。
+- 下一次語音會把這份摘要加入 Gemini Live 與文字備援的輸入背景。摘要明確標為可能過期且不可信，不能授權操作，也不能取代行事曆、配對、權限或其他工具與 API 的即時結果。
+- 摘要中的登入者姓名會在讀取舊摘要、username 改名同步、送入 DeepSeek 前及模型輸出後四個邊界改成「使用者」；其他對話人物姓名仍可保留，因此改名不會留下兩個像是不同人物的本人名稱。
+- 原始錄音與完整逐字稿不寫入 Appwrite；Email、台灣手機、口述密碼／驗證碼及憑證形式字串會先遮蔽。Ollama 或 Appwrite 寫回失敗時保留上一版記憶，不影響已完成的語音回覆。
+- 本次驗證已併入上方 104 項 App Voice Server 回歸；真實 DeepSeek 合成 smoke 會把 `Candy` 改成「使用者」並保留另一人物「小安」。完整 storage smoke 已把隨機測試文件寫成 revision 1、驗證摘要與 session ID 後立即刪除。Appwrite 的獨立 database、collection、六個欄位與唯一索引已由內網遷移程式實際建立並驗證。
+
 ## 2026-09-12：畫面上下文與結構化動作結果
 
 第二批基礎版新增真人聊天室、行事曆、牽線頁的項目參照與選取狀態，支援「他／這個／第二個」接到本頁實際資料；新增相容的結構化結果與共用能力清單。原本的確認和業務 API 流程保留。參照範圍、權限、同步產生指令與驗證方式見 [CONTEXT_CONTRACT.md](CONTEXT_CONTRACT.md)。
@@ -19,7 +54,7 @@
 
 最新決定：全域語音阿月只限原生 Android App。Windows、Linux、Web（包含 Android 瀏覽器）均隱藏水獺與設定入口，coordinator 也阻止啟動、重連與喊醒流程；直接進入語音設定頁只顯示 Android 限定提示。註冊頁的獨立語音功能不在本次修改範圍。
 
-全螢幕只保留聊天室標題列的小頭像，隱藏原本可拖曳的浮動水獺；使用縮小按鈕返回簡易模式。訊息泡泡使用完全不透明底色，文字明確使用主題前景色與中等字重。準備中／連線中等中央提示為 13sp 中性色小字，無紅色除錯樣式或底線。全域浮層有自己的 Overlay 與 Material，確保位於 Navigator 上方時文字與按鈕提示正常。
+全螢幕只保留聊天室標題列的小頭像，隱藏原本可拖曳的浮動水獺；使用縮小按鈕返回簡易模式。訊息泡泡使用完全不透明底色，文字明確使用主題前景色與中等字重。準備中／連線中等中央提示為 13sp 中性色小字，並有自己的圓角 surface 背景與輕微陰影。全域浮層有自己的 Overlay 與 Material，確保位於 Navigator 上方時文字與按鈕提示正常。
 
 本次平台與全螢幕修正：41 項語音測試通過（包含瀏覽器／桌面停用、實際 MaterialApp.builder 結構下的中性色小字及模式切換）；相關 Dart 靜態分析無問題。
 
@@ -36,9 +71,9 @@
 - Live 工具回覆原本只保留 200 字，現調整為最多 12,000 字，保留邀請分類與記憶資料供模型回答。逐段 transcription 保留英文單字間空白；完整回覆顯示上限為 2,000 字。
 - **簡易模式**：可拖曳水獺與回覆泡泡，僅顯示阿月回覆，講完後保留內容，可捲動閱讀、展開或關閉。
 - **全螢幕模式**：半透明漸層覆蓋原 App，顯示使用者與阿月的本次對話，自動跟隨最新內容（手動往上閱讀時暫停跟隨），可縮回簡易模式。原 Navigator 保持掛載，語音導航與資料更新仍正常執行。
-- 對話最多保留本次 100 則於記憶體，結束語音／登出即清除，不新增持久化錄音或聊天紀錄。這不是跨語音 session 的長期對話記憶；長期偏好仍使用「阿月記住的事」。
+- 對話最多保留本次 100 則於記憶體；結束語音／登出後完整逐字內容會清除，只留下上述最多 200 字的跨 session 短期摘要。長期偏好仍使用「阿月記住的事」。
 
-本次驗證：Flutter 全套 602 項通過；最後的共同約會／API 追加回歸 27 項通過。App Voice Server 62 項通過，Social 約會領域與改期 HTTP 14 項通過。`dart analyze lib test` 無錯誤，僅兩個既有 style info。Android debug APK 建置成功；透過 `start_all.sh` 啟動的完整 Server 健康，正式 capability 已回報 `direct_shared_dates`、`date_invitation_response` 與 `shared_date_form_update`。本次沒有連接 Android 裝置，未宣稱實際麥克風或雙真人帳號端到端驗證。
+本次驗證：Flutter 全套 602 項通過；最後的共同約會／API 追加回歸 27 項通過。App Voice Server 62 項通過，Social 約會領域與改期 HTTP 14 項通過。`dart analyze lib test` 無錯誤，僅兩個既有 style info。Android debug APK 建置成功；正式 capability 會回報 `direct_shared_dates`、`date_invitation_response`、`shared_date_form_update` 與 `shared_date_form_confirm`。本次沒有連接 Android 裝置，未宣稱實際麥克風或雙真人帳號端到端驗證。
 
 GitNexus 檢查目前整個未提交工作區（含本次之前已有的聊天、配對、個資同步修改）：DatingApp 49 個 symbols／16 條流程、Server 67 個 symbols／17 條流程，均為 CRITICAL。這是累積跨頁／契約影響，不代表每項修改皆為 CRITICAL；新建的約會 controller 與測試檔另由上述回歸覆蓋。
 
@@ -83,7 +118,7 @@ GitNexus 檢查目前整個未提交工作區（含本次之前已有的聊天�
 - 裝置沒有可用的離線中文辨識時，可改用 Gemini PCM16 音訊回退。
 - Gemini 回退使用本機 PCM16 語音活動偵測；偵測到說話後約 0.9 秒持續靜音即自動送出，最長仍有 15 秒保護期限。
 - Gemini 回退每次最多收取 30 秒 PCM16、16 kHz、單聲道音訊。
-- 全雙工改為持續前景收音，因此同意版本升為 `demo-free-gemini-live-v2`，舊同意不會被沿用。
+- 加入 Ollama 與 Appwrite 短期摘要後，同意版本升為 `demo-free-gemini-live-ollama-memory-v1`，舊同意不會被沿用。
 
 ### AI 語音輸出
 
@@ -233,7 +268,7 @@ AI 指示不得自行虛構同行者、精確地點或沒有被使用者說出�
 
 ### 公開阿月、行事曆、Web 與地點
 
-- `calendar.query` 由 App Voice 直接讀取本人行事曆，支援今天、明天、未來七天、週末、下週與未來一個月；只需 `calendar_read`，不需 `public_ayue`、`match_ayue` 或切換到配對頁。
+- `calendar.query` 由 App Voice 直接讀取本人行事曆，支援今天、明天、未來七天、週末、下週與未來一個月等預設值，也支援包含起訖日的任意過去、現在或未來日期區間；只需 `calendar_read`，不需 `public_ayue`、`match_ayue` 或切換到配對頁。
 - 行事曆寫入改為 `calendar.create`、`calendar.update`、`calendar.cancel` 三個 App Voice 直接 function；`ask_public_ayue` schema 已移除 calendar domain，Server 會拒絕舊的公開阿月行事曆委派。
 - 新增行程只接受 title、YYYY-MM-DD、HH:mm 與可選地點／備註；未說結束時間時預設一小時。修改／取消只讓模型提供自然名稱 `target`，Flutter 讀取本人行事曆後解析唯一事件，模型不能提供 event ID。
 - 三種寫入都需要 `calendar_write` 與 30 秒 Server confirmation；修改／取消因需要先解析事件，另需 `calendar_read`。個人行程使用 canonical PATCH／cancel API；雙人約會改期沿用既有 reschedule API，不繞過對方確認狀態。
@@ -296,7 +331,7 @@ AI 指示不得自行虛構同行者、精確地點或沒有被使用者說出�
 
 ### `POST /api/app-voice/session`
 
-使用安裝 ID、測試帳號 ID、同意版本、輸入模式與輸出模式申請一次性 ticket。
+使用安裝 ID、Appwrite userId、同意版本、輸入模式與輸出模式申請一次性 ticket。短期記憶啟用時必須帶 `Authorization: Bearer <Appwrite JWT>`；Server 會以內網 Appwrite 驗證 JWT 與 userId 相同後才讀取該帳號的摘要。
 
 ### `WSS /api/app-voice`
 
@@ -342,14 +377,14 @@ Server 可回傳：
 
 - 只接受固定 intent、個資欄位與設定 key；模型不能指定任意 API、route、函式、user ID 或檔案路徑。
 - ticket 一次使用、綁定帳號匿名指紋與來源 IP 指紋，且有短效期限。
-- 原始音訊、個人資料、caption 與 transcript 不寫入 Server 日誌。
+- 原始音訊、個人資料、caption 與 transcript 不寫入 Server 日誌。完整 transcript 只在記憶體中暫存並交給摘要模型，Appwrite 只保存最多 200 字的摘要。
 - Android 麥克風只在 App 前景且浮動氣泡開啟時持續串流；背景化、登出、隱藏功能或明確關閉會停止 AudioRecord。
 - Server 只回傳操作提案，不持有 Flutter 的檔案路徑或圖片內容。
 - 預設每帳號 10 分鐘最多 6 個 session、每天 30 個 session、全站同時 4 個 session；單次前景 session 最長 600 秒，屆時 Client 會自動申請新 ticket 重連。
 - 所有回覆改用 Gemini 後，Gemini TTS 限制調整為每帳號每天最多 60 次；達上限時保留文字回覆但不播放語音。
 - 多把 Google API Key 不會增加同一 Google project 的總額度。
 - `VOICE_APP_DEMO_ONLY=on` 時，只允許設定於 `VOICE_APP_TEST_USER_IDS` 的帳號；名單為空時會拒絕所有 session。
-- `VOICE_APP_DEMO_ONLY=off` 時，測試帳號 allowlist 不生效，任何帶有非空登入帳號 ID 的 Client 都能申請 session；每帳號與全站額度限制仍然有效。
+- `VOICE_APP_DEMO_ONLY=off` 時，測試帳號 allowlist 不生效；短期記憶啟用時仍須以有效 Appwrite JWT 證明 userId，且每帳號與全站額度限制仍然有效。
 - 目前本機 `Server/.env` 設為 `VOICE_APP_DEMO_ONLY=off`，因此暫時不限制測試帳號。
 
 ## 畢業專題測試帳號
@@ -426,15 +461,24 @@ Server 可回傳：
 1. 實際設定位置是 `Server/.env`；可參考 `Server/app_voice_assistant/.env.example`。
 2. 暫時關閉測試帳號限制：設定 `VOICE_APP_DEMO_ONLY=off`。
 3. 要恢復限制：設定 `VOICE_APP_DEMO_ONLY=on`，並在 `VOICE_APP_TEST_USER_IDS` 填入以逗號分隔的實際 Appwrite `userId`。
-4. 確認 Google API Key 變數已由既有 key pool 讀取。
-5. 設定修改後必須透過 `Server/start_all.sh` 重新啟動完整 Server 才會生效。
-6. Flutter 必須連線固定正式網址 `https://service.misproject.us.ci/`。
+4. 設定 `VOICE_MEMORY_ENABLED=on`、`APPWRITE_INTERNAL_ENDPOINT`、Appwrite project/key、profile 與 voice memory database／collection ID；內網端點不能使用公開網域。
+5. 確認既有 `OLLAMA_HOST`、`OLLAMA_API_KEY` 與 `VOICE_MEMORY_OLLAMA_MODEL` 指向要使用的 DeepSeek 模型。
+6. 首次部署以 `Server/venv/bin/python Server/app_voice_assistant/setup_memory_appwrite.py --apply` 建立可重複套用的獨立 schema。
+7. 確認 Google API Key 變數已由既有 key pool 讀取。
+8. 設定修改後必須透過 `Server/start_all.sh` 重新啟動完整 Server 才會生效。
+9. Flutter 必須連線固定正式網址 `https://service.misproject.us.ci/`。
 
 若未完成 Server 部署／重啟，執行中的 Server 仍會沿用舊設定。若重新開啟 demo-only 卻沒有設定 allowlist，Android App 雖會顯示吉祥物，但建立語音 session 時會被 Server 拒絕。
 
-關閉 allowlist 不會關閉 Gemini 免費層的用量限制，也不會把免費服務變成適合真實敏感個資的生產環境。因為 session API 目前只接收 Client 傳來的 `userId`、沒有獨立驗證 Appwrite JWT，公開環境關閉 allowlist 也會提高額度遭濫用的風險；完成展示後應重新開啟。
+關閉 allowlist 不會關閉 Gemini 免費層的用量限制，也不會把免費服務變成適合真實敏感個資的生產環境。短期記憶啟用後 session API 會驗證 Appwrite JWT，但公開展示仍應保留合理額度與測試帳號限制。
 
 ## 驗證紀錄
+
+- 2026-09-13 短期記憶收尾、啟動取消、即時氣象與任意行事曆區間：App Voice Server 121 項、Flutter 五組相關回歸 83 項通過；相關 Dart 靜態分析、capability 同步、內網 Appwrite fallback storage、真實 Gemini memory injection、自然日期區間解析、無地點與明確地點兩種 `read_weather` smoke，以及 Google Weather／Air Quality 雙來源呼叫均成功。
+
+- 2026-09-12 顯示、共同約會確認、本人姓名排除與 Live 記憶收尾：App Voice Server 104 項通過；Flutter 五組語音／約會回歸 80 項通過；Dart 相關檔案靜態分析無問題；真實 Gemini Live、DeepSeek 與 Appwrite storage smoke 均通過。Appwrite schema 仍使用已透過 `https://127.0.0.1/v1` 建立及驗證的獨立 database。
+
+- 2026-09-12 短期對話記憶：Appwrite schema 已透過 `https://127.0.0.1/v1` 實際建立及驗證；完整 Server 曾通過四個固定服務與正式 capability readiness。
 
 - 2026-09-12 語音配對補修：Flutter 全量 504 項通過；App Voice Server 全量 56 項通過；Social 離線回歸 1852 項通過、4 項跳過、133 組 subtests 通過。另以真實 `MainPageController`／`MatchHubPage` fixture 驗證 direct `match.query`、牽線卡內容、導航完成與失敗不假稱成功；瀏覽器自動化當下沒有可用 Chrome／IAB session，因此未將裝置麥克風或真人資料頁冒稱 E2E 成功。
 
