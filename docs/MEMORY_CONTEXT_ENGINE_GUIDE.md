@@ -137,6 +137,10 @@ Saved owner message
 
 ### 2.3 對話壓縮與延續性（Compaction 機制）
 
+#### 2026-09-14 指定帳號正式注入驗收
+
+已於當時部署的 Public V3 DAG，以指定 demo 帳號完成真實摘要生成／評估、模型輸入核對、無摘要對照組，以及正式公開聊天 API 驗收。`COMPACTION_MODE=shadow` 是現有生成模式；摘要消費另由 `CONTEXT_MODE=on` 與明確 owner allowlist 控制。明確 canary 可使用逐份通過驗證的摘要，`*` 仍受全域 readiness gate 限制。此結果不代表全部帳號或後續 Pi runtime 已驗證。完整方法、部署設定與簡報用語見 [驗收紀錄](SUMMARY_INJECTION_ACCEPTANCE_2026-09-14.md)。正式 `.env` 不納入版本庫。
+
 - **觸發條件**：單一聊天室累積訊息超過 **30 句**時觸發。
 - **壓縮策略**：壓縮最舊 **10~11 句**為結構化摘要，保留最新 **20 句**未壓縮訊息。
 - **儲存位置**：MongoDB `conversation_compactions`，並帶 `covered_through_message_id` watermark。
