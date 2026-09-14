@@ -1,0 +1,457 @@
+"""Message history and contact-list HTTP adapters for the chat surface."""
+
+import base64
+import logging
+import math
+
+from bson import ObjectId, json_util
+from bson.errors import InvalidId
+from pymongo.errors import PyMongoError
+from fastapi import APIRouter, HTTPException, Response
+from pydantic import BaseModel, Field
+from typing import Literal
+
+from database import db, matches_coll, messages_coll, profiles_coll, notification_threads_coll
+from services.ayue_agent.shared.confirmation import project_match_choice_history
+from services.ayue_agent.shared.contact_selections import project_contact_selection_history
+from models import ClearRequest
+from services.ai_room_service import (
+    create_room as create_ai_room,
+    delete_room as delete_ai_room,
+    get_room as get_ai_room,
+    list_rooms as list_ai_rooms,
+    mark_room_read,
+    maybe_backfill_title,
+    rename_room as rename_ai_room,
+    ensure_match_hub,
+    MATCH_HUB_ROOM_KIND,
+)
+from services.ayue_agent.onboarding import (
+    complete_public_ayue_onboarding, ensure_public_ayue_onboarding,
+    public_ayue_onboarding_state,
+)
+from services.assessment_session_service import assessment_public_state_for_room
+from services.ayue_agent.public_relationship_projection import (
+    display_name as public_display_name,
+)
+from services.chat_service import generate_room_id
+from services.notification_service import (
+    PAIR,
+    MEDIATOR_PRIVATE,
+    notification_unread_map,
+)
+from services.relationship_engagement_service import generate_mediator_private_room_id
+from services.match_state_service import verified_accepted_match_query
+from services.match_card_projection import project_match_card_history
+from services.public_nickname_service import proposal_display_name, warm_public_nicknames
+from services.risk_block_service import (
+    RiskBlockServiceUnavailable,
+    risk_block_service,
+)
+
+
+router = APIRouter()
+
+
+def ensure_chat_read_indexes() -> None:
+    """Support bounded room history and latest-per-room contact previews."""
+    keys = [("room_id", 1), ("timestamp", -1), ("_id", -1)]
+    try:
+        if any(list(index.get("key", [])) == keys for index in messages_coll.index_information().values()):
+            return
+        messages_coll.create_index(keys, name="chat_room_history_cursor")
+    except PyMongoError:
+        logging.getLogger(__name__).warning("Chat read index is unavailable", exc_info=True)
+
+
+def _encode_message_cursor(message: dict) -> str | None:
+    identifier = message.get("_id")
+    if not isinstance(identifier, (ObjectId, str)):
+        return None
+    return base64.urlsafe_b64encode(json_util.dumps(identifier).encode()).decode().rstrip("=")
+
+
+def _decode_message_cursor(value: str):
+    try:
+        if not value or len(value) > 1024:
+            raise ValueError("invalid cursor")
+        identifier = json_util.loads(base64.b64decode(
+            value + "=" * (-len(value) % 4), altchars=b"-_", validate=True,
+        ).decode())
+        if not isinstance(identifier, (ObjectId, str)):
+            raise ValueError("invalid cursor type")
+        return identifier
+    except (ValueError, TypeError, UnicodeError, InvalidId) as exc:
+        raise HTTPException(status_code=400, detail="無效的訊息分頁游標") from exc
+
+
+def _message_boundary(timestamp: float, identifier: str | None, *, older: bool) -> dict:
+    if not math.isfinite(timestamp):
+        raise HTTPException(status_code=400, detail="無效的訊息時間")
+    if identifier is None:
+        return {"timestamp": {"$lt" if older else "$gte": timestamp}}
+    decoded = _decode_message_cursor(identifier)
+    id_filter = {"_id": {"$lt" if older else "$gte": decoded}}
+    # Legacy rows use ObjectId; idempotent pair writes use string ids. Mongo
+    # comparisons are type-bracketed even though sorting orders both types.
+    # Include the other type when crossing that boundary at the same timestamp.
+    if older and isinstance(decoded, ObjectId):
+        id_filter = {"$or": [id_filter, {"_id": {"$type": "string"}}]}
+    elif not older and isinstance(decoded, str):
+        id_filter = {"$or": [id_filter, {"_id": {"$type": "objectId"}}]}
+    return {"$or": [
+        {"timestamp": {"$lt" if older else "$gt": timestamp}},
+        {"timestamp": timestamp, **id_filter},
+    ]}
+
+
+def _find_accepted_match(user_id: str, other_id: str):
+    return matches_coll.find_one(verified_accepted_match_query(user_id, other_id))
+
+
+def _strip_internal_message_use(messages: list[dict]) -> list[dict]:
+    """Keep server-owned reuse policy out of the public history contract."""
+    projected: list[dict] = []
+    for message in messages:
+        item = dict(message or {})
+        metadata = item.get("metadata")
+        if isinstance(metadata, dict) and "message_use" in metadata:
+            metadata = dict(metadata)
+            metadata.pop("message_use", None)
+            if metadata:
+                item["metadata"] = metadata
+            else:
+                item.pop("metadata", None)
+        projected.append(item)
+    return projected
+
+
+def _project_public_message_ids(messages: list[dict]) -> list[dict]:
+    """Expose one stable public id without migrating legacy message rows.
+
+    Newer writers persist ``message_id`` while older rows may only have
+    Mongo's ``_id``.  The client needs the same identity for history and live
+    events, so derive the public value at read time and always remove the
+    database-only field before returning the payload.
+    """
+    projected: list[dict] = []
+    for message in messages:
+        item = dict(message or {})
+        message_id = item.get("message_id")
+        if message_id is None or not str(message_id).strip():
+            message_id = item.get("_id")
+        if message_id is not None and str(message_id).strip():
+            item["message_id"] = str(message_id)
+        item.pop("_id", None)
+        projected.append(item)
+    return projected
+
+
+@router.get("/messages/{contact_id}")
+def get_messages(
+    contact_id: str,
+    user_id: str,
+    ai_room_id: str | None = None,
+    limit: int | None = None,
+    before: float | None = None,
+    response: Response = None,
+    before_id: str | None = None,
+    through: float | None = None,
+    through_id: str | None = None,
+):
+    if ((before_id is not None and before is None)
+            or (through_id is not None and through is None)
+            or (through is not None and (before is not None or limit is not None))):
+        raise HTTPException(status_code=400, detail="無效的訊息分頁參數")
+    if response is not None:
+        # Message history is a live polling resource. Intermediary/CDN caching
+        # previously returned old risk metadata and made handled prompts appear
+        # again after users reopened a room.
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    # Multi-room AI surface: an explicit AI room id overrides the derived
+    # legacy room. Ownership is enforced; only AI rooms take this path.
+    if ai_room_id:
+        room = get_ai_room(ai_room_id, user_id)
+        if not room:
+            raise HTTPException(status_code=403, detail="無權存取此聊天室")
+        room_id = ai_room_id
+        # Retry pending title generation when the user reopens the room.
+        maybe_backfill_title(room_id, user_id)
+        # Opening the room clears its NEW flag so the badge disappears.
+        mark_room_read(room_id, user_id)
+    else:
+        room_id = generate_room_id(user_id, contact_id)
+
+    is_ai_contact = contact_id == "ai_assistant"
+    base_query: dict = {"room_id": room_id, "is_blocked": {"$ne": True}}
+    query = dict(base_query)
+    if before is not None:
+        query.update(_message_boundary(before, before_id, older=True))
+    elif through is not None:
+        query.update(_message_boundary(through, through_id, older=False))
+    # Keep _id available long enough to derive a stable public identity for
+    # legacy rows.  _project_public_message_ids removes it before serialization.
+    cursor = messages_coll.find(query).sort([("timestamp", -1), ("_id", -1)])
+    if limit is not None and limit > 0:
+        # Fetch one extra message to detect whether older history exists.
+        fetched = list(cursor.limit(limit + 1))
+        has_more = len(fetched) > limit
+        # Sort is descending (newest first); re-reverse so the client always
+        # receives messages in chronological (oldest → newest) order.
+        messages = list(reversed(fetched[:limit]))
+    else:
+        # Legacy clients expect ascending order without a limit.
+        messages = list(cursor)[::-1]
+        has_more = False
+    next_before = None
+    next_before_id = None
+    if messages:
+        oldest = messages[0]
+        timestamp = oldest.get("timestamp")
+        if isinstance(timestamp, (int, float)) and math.isfinite(timestamp):
+            next_before = timestamp
+            next_before_id = _encode_message_cursor(oldest)
+    if through is not None:
+        # Synchronize every loaded row, including metadata updates/deletions,
+        # while allowing newly arrived messages to extend the window.
+        older_query = dict(base_query)
+        older_query.update(_message_boundary(
+            next_before if next_before is not None else through,
+            next_before_id if next_before is not None else through_id,
+            older=True,
+        ))
+        has_more = messages_coll.find_one(older_query, {"_id": 1}) is not None
+    messages = _project_public_message_ids(messages)
+    messages = _strip_internal_message_use(messages)
+    if is_ai_contact:
+        messages = project_match_card_history(
+            messages, user_id,
+            nickname_lookup=lambda uid: proposal_display_name(uid, fallback_lookup=public_display_name),
+        )
+        messages = project_match_choice_history(
+            messages, user_id=user_id, room_id=room_id, collection=db["v3_pending_confirmations"],
+        )
+        messages = project_contact_selection_history(
+            messages, user_id=user_id, room_id=room_id,
+            collection=db["v3_contact_selections"],
+        )
+    user_doc = profiles_coll.find_one({"user_id": user_id})
+    active_proposal_id = (user_doc or {}).get("active_match_proposal_id")
+    date_coordination = None
+    established_dates = []
+    if not is_ai_contact:
+        match_doc = _find_accepted_match(user_id, contact_id)
+        if match_doc:
+            date_coordination = match_doc.get("date_coordination")
+            established_dates = match_doc.get("established_dates", [])
+    payload = {
+        "messages": messages,
+        "has_more": has_more,
+        "next_before": next_before,
+        "next_before_id": next_before_id,
+        "public_ayue_onboarding": (
+            public_ayue_onboarding_state(user_id)
+            if is_ai_contact and not ai_room_id  # onboarding only in legacy room
+            else None
+        ),
+        "active_match_proposal_id": active_proposal_id,
+        "date_coordination": date_coordination,
+        "established_dates": established_dates,
+    }
+    if is_ai_contact:
+        payload.update(assessment_public_state_for_room(
+            user_doc or {}, room_id, include_unscoped=not bool(ai_room_id),
+        ))
+    if ai_room_id:
+        room = get_ai_room(room_id, user_id) or {}
+        payload["ai_room"] = room
+    return payload
+
+
+@router.post("/public-ayue/onboarding/complete")
+def complete_public_ayue_onboarding_route(req: ClearRequest):
+    complete_public_ayue_onboarding(req.user_id)
+    return {"status": "ok", "version": 1}
+
+
+class PublicAyueOnboardingEnsureRequest(BaseModel):
+    """Optional room hint used to keep onboarding scoped to the general room."""
+
+    user_id: str
+    ai_room_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+@router.post("/public-ayue/onboarding/ensure")
+def ensure_public_ayue_onboarding_route(req: PublicAyueOnboardingEnsureRequest):
+    """Persist the one-time Public Ayue self-introduction, if applicable."""
+    return ensure_public_ayue_onboarding(req.user_id, room_id=req.ai_room_id)
+
+
+@router.get("/contacts")
+def get_contacts(user_id: str, unread_for: str | None = None):
+    try:
+        excluded_user_ids = risk_block_service.excluded_user_ids(user_id)
+    except RiskBlockServiceUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="安全關係狀態暫時無法確認",
+        ) from exc
+    if unread_for is not None:
+        # The pair page only needs one private-unread badge. Keep the existing
+        # contact envelope so older servers/clients remain compatible.
+        if unread_for in excluded_user_ids:
+            return {"contacts": []}
+        match_doc = _find_accepted_match(user_id, unread_for)
+        if not match_doc:
+            return {"contacts": []}
+        role = "from" if match_doc.get("from_user") == user_id else "to"
+        count = int((match_doc.get("private_unread") or {}).get(role, 0) or 0)
+        try:
+            thread = notification_threads_coll.find_one({
+                "user_id": user_id, "surface": MEDIATOR_PRIVATE,
+                "conversation_id": generate_mediator_private_room_id(user_id, unread_for),
+            }, {"_id": 0, "unread_count": 1}) or {}
+            count = max(count, int(thread.get("unread_count") or 0))
+        except Exception:
+            # Match notification_unread_map's established legacy fallback.
+            pass
+        return {"contacts": [{"id": unread_for, "mediator_unread_count": max(0, count)}]}
+    user_doc = profiles_coll.find_one({"user_id": user_id})
+    ai_locked = user_doc.get("ai_chat_locked", False) if user_doc else False
+    matches = [
+        match_doc
+        for match_doc in matches_coll.find(verified_accepted_match_query(user_id))
+        if (
+            match_doc["to_user"]
+            if match_doc["from_user"] == user_id
+            else match_doc["from_user"]
+        ) not in excluded_user_ids
+    ]
+    contacts = [{
+        "id": "ai_assistant",
+        "name": "阿月",
+        "role": "system",
+        "context": "先懂你，再在合適時機陪你牽線的媒人朋友。",
+        "is_locked": ai_locked,
+    }]
+    pair_unread = notification_unread_map(user_id, PAIR)
+    mediator_unread = notification_unread_map(user_id, MEDIATOR_PRIVATE)
+    room_ids = [
+        generate_room_id(
+            user_id,
+            match_doc["to_user"] if match_doc["from_user"] == user_id else match_doc["from_user"],
+        )
+        for match_doc in matches
+    ]
+    latest_by_room = {}
+    if room_ids:
+        latest_by_room = {
+            row["_id"]: (
+                "傳送了一張圖片"
+                if str(row.get("message_type") or "text") == "image"
+                else str(row.get("content") or "")
+            )
+            for row in messages_coll.aggregate([
+                {"$match": {"room_id": {"$in": room_ids}, "is_blocked": {"$ne": True}}},
+                {"$sort": {"room_id": 1, "timestamp": -1, "_id": -1}},
+                {"$group": {
+                    "_id": "$room_id",
+                    "content": {"$first": {"$ifNull": ["$content", ""]}},
+                    "message_type": {"$first": {"$ifNull": ["$message_type", "text"]}},
+                }},
+            ])
+        }
+    other_ids = list({
+        item["to_user"] if item["from_user"] == user_id else item["from_user"]
+        for item in matches
+    })
+    warm_public_nicknames(other_ids)
+    profile_by_user = {
+        profile["user_id"]: profile
+        for profile in profiles_coll.find(
+            {"user_id": {"$in": other_ids}},
+            {"_id": 0, "user_id": 1, "current_context": 1,
+             "display_name": 1, "nickname": 1, "name": 1},
+        )
+    } if other_ids else {}
+    for match_doc in matches:
+        other_id = match_doc["to_user"] if match_doc["from_user"] == user_id else match_doc["from_user"]
+        other_doc = profile_by_user.get(other_id, {})
+        room_id = generate_room_id(user_id, other_id)
+        mediator_room_id = generate_mediator_private_room_id(user_id, other_id)
+        role = "from" if match_doc.get("from_user") == user_id else "to"
+        legacy_mediator_unread = int(
+            (match_doc.get("private_unread", {}) or {}).get(role, 0) or 0
+        )
+        pair_unread_count = int(pair_unread.get(room_id, 0))
+        mediator_unread_count = max(
+            int(mediator_unread.get(mediator_room_id, 0)),
+            legacy_mediator_unread,
+        )
+        label = public_display_name(other_id, profile=other_doc)
+        name_available = bool(label and label != "對方")
+        contacts.append({
+            "id": other_id,
+            "name": label if name_available else "暱稱暫無法取得",
+            "name_available": name_available,
+            "role": "user",
+            "context": other_doc.get("current_context", "尚無近期情境") if other_doc else "尚無近期情境",
+            "latest_message": latest_by_room.get(room_id, ""),
+            "unread": pair_unread_count > 0,
+            "unread_count": pair_unread_count,
+            "mediator_unread_count": mediator_unread_count,
+        })
+    return {"contacts": contacts}
+
+
+# --- AI multi-room surface ---
+
+class CreateAiRoomRequest(BaseModel):
+    user_id: str
+    room_kind: Literal["conversation", "match_hub"] = "conversation"
+
+
+class RenameAiRoomRequest(BaseModel):
+    user_id: str
+    title: str = Field(min_length=1, max_length=60)
+
+
+class DeleteAiRoomRequest(BaseModel):
+    user_id: str
+
+
+@router.get("/ai_rooms")
+def list_ai_rooms_route(user_id: str):
+    profile = profiles_coll.find_one(
+        {"user_id": user_id}, {"_id": 0, "agentic_assessment_session": 1},
+    ) or {}
+    return {"rooms": list_ai_rooms(user_id, assessment_profile=profile)}
+
+
+@router.post("/ai_rooms")
+def create_ai_room_route(req: CreateAiRoomRequest):
+    room = (
+        ensure_match_hub(req.user_id)
+        if req.room_kind == MATCH_HUB_ROOM_KIND
+        else create_ai_room(req.user_id)
+    )
+    if not room:
+        raise HTTPException(status_code=503, detail="阿月牽線目前暫時無法使用")
+    return {"room": room}
+
+
+@router.patch("/ai_rooms/{room_id}")
+def rename_ai_room_route(room_id: str, req: RenameAiRoomRequest):
+    room = rename_ai_room(room_id, req.user_id, req.title)
+    if not room:
+        raise HTTPException(status_code=403, detail="無法重新命名此聊天室")
+    return {"room": room}
+
+
+@router.delete("/ai_rooms/{room_id}")
+def delete_ai_room_route(room_id: str, user_id: str):
+    ok = delete_ai_room(room_id, user_id)
+    if not ok:
+        raise HTTPException(status_code=403, detail="無法刪除此聊天室")
+    return {"status": "ok"}

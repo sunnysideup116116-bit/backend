@@ -12,7 +12,7 @@ from pymongo import MongoClient
 
 
 ROOT = Path(__file__).resolve().parents[1]
-load_dotenv(ROOT / "social_demotest" / ".env", override=False)
+load_dotenv(ROOT / "social" / ".env", override=False)
 
 
 def present_count(items: list[dict], field: str) -> int:

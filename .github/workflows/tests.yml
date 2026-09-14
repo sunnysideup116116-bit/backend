@@ -1,0 +1,40 @@
+name: Backend regression tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: social
+            requirements: social/requirements.txt
+          - suite: risk
+            requirements: risk_backend/requirements.txt
+          - suite: matchmaker
+            requirements: matchmaker_agent/requirements.txt
+          - suite: contracts
+            requirements: social/requirements.txt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            ${{ matrix.requirements }}
+            requirements-test.txt
+      - name: Install service and test dependencies
+        run: python -m pip install -r '${{ matrix.requirements }}' -r requirements-test.txt
+      - name: Check canonical startup syntax
+        run: bash -n start_all.sh
+      - name: Run isolated regression tests
+        run: python scripts/run_offline_tests.py '${{ matrix.suite }}'

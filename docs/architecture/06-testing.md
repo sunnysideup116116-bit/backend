@@ -1,17 +1,19 @@
-# 06. 測試策略
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# 06. 測試策略
 
-> 所有行為修改都必須有 deterministic test；自動測試不得連線或修改正式 MongoDB Atlas、Neo4j、Tavily 或 Google APIs。測試檔清單以 `social_demotest/tests/test_*.py` 為準，不在文件固定容易過期的檔案數量。
+> 所有行為修改都必須有 deterministic test；自動測試不得連線或修改正式 MongoDB Atlas、Neo4j、Tavily 或 Google APIs。測試檔清單以 `social/tests/test_*.py` 為準，不在文件固定容易過期的檔案數量。
 
 ## 1. 基本指令
 
-在 `social_demotest/` 下執行：
+在 Server 根目錄使用已安裝 requirements-test 的 Python：
 
-```powershell
-$env:AYUE_SKIP_DOTENV = "1"
-$env:MONGO_URI = "mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=50&connectTimeoutMS=50"
-..\.project-venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
-..\.project-venv\Scripts\python.exe -m compileall -q .
+```bash
+venv/bin/python scripts/run_offline_tests.py social
+venv/bin/python scripts/run_offline_tests.py matchmaker
+venv/bin/python scripts/run_offline_tests.py contracts
+bash -n start_all.sh
 ```
+
+Windows 可將 Python 路徑換成 `.project-venv\\Scripts\\python.exe`。runner 使用 pytest，停用 dotenv 並封鎖外部 network/DNS；只用 unittest discover 會漏掉 pytest function/fixture 測試，不可當完整驗證。
 
 列出目前測試：
 
@@ -41,12 +43,12 @@ rg --files tests -g "test_*.py" | Sort-Object
 
 ## 3. Domain 與 API
 
-- 配對：`test_match_*`、`test_accepted_match_integrity.py`，覆蓋 qualification、job、directional reason、CAS／stale／終態。
+- 配對／Event：`test_match_*`、`test_event_*`、`test_inline_match_proposals.py`、`test_proposal_nickname.py`、`test_accepted_match_integrity.py`，覆蓋 qualification、job、一般／Event 名額分離與 Hub 多卡片、同頁 progress、viewer hydration、directional reason、暱稱、婉拒選項、CAS／stale／終態、既有聊天重用與單一 Event 開場卡。
 - 行事曆／共同約會：`test_calendar_*`、`test_date_coordination_service.py`、`test_private_calendar.py`。
-- Profile／Memory：`test_profile_*`、`test_memory_service.py`、`test_assessment_session_service.py`，特別驗證 owner evidence span 與 message-id idempotency。
+- Profile／Memory：`test_profile_*`、`test_memory_service.py`、`test_memory_outbox_service.py`、`test_conversation_compaction_service.py`、`test_assessment_session_service.py`，特別驗證 owner evidence span、message-id idempotency、bounded retry、relation-preserving restore，以及 legacy／新版 owner room 的 watermark 與 continuity gate。
 - Private Ayue：`test_private_v2.py`、`test_private_context_projection.py`、`test_private_mediator_extraction.py`、`test_private_redirect.py`、`test_semantic_plan_service_fixes.py`；覆蓋 relationship semantic projection、600 字元單位更新門檻與 raw Graph 欄位隔離，且不得和 Public V3 混用 context 或 runtime。
-- 主動關心：`test_proactive_*`；驗證 atomic claim、grounding 與不重複投遞。
-- HTTP／相容性：`test_chat_leaf_routers.py`、`test_chat_router_characterization.py`、`test_start_ayue_launcher.py`；保護 JSON contract、NDJSON final 與 health identity。
+- 主動關心：`test_proactive_*`；驗證 source／room scope、typed candidate create/update/close、cap／expiry、48 小時與週上限、quiet／Calendar busy gate、shadow 不送出、grounding 與不重複投遞。
+- HTTP／相容性：`test_chat_leaf_routers.py`、`test_chat_router_characterization.py`（launcher 測試已隨 start_ayue 移除）；保護 JSON contract、NDJSON final 與 health identity。
 - 外部工具：`test_ayue_agent_web_tools.py`、`test_ayue_agent_maps_tools.py`、`test_google_places_client.py`；一律 stub provider，驗證 timeout、URL／位置安全與 bounded output。
 
 ## 4. 必覆蓋的不變量
@@ -54,6 +56,9 @@ rg --files tests -g "test_*.py" | Sort-Object
 - Planner sequence、DAG 與 fail-closed 行為。
 - Guard result code、tool schema／output、重複呼叫與額度。
 - Confirmation、ownership、CAS、idempotency、stale 與 concurrency。
+- 一般與 Event proposal namespace 不互相佔名額；terminal state 不被較舊 polling/cache 復活；Event accepted opener 以 match-scoped key 最多保存一次。
+- Match search 與 recent-context 的競態必須覆蓋：第一次 revision mismatch 原子重排同一 job 並維持公開 queued 狀態、第二次不再重排且投遞一次可見失敗、cancel／lease handoff 不得被誤判為可重試。
+- 只有使用者 opt-in 勾選的婉拒原因能形成 `AVOIDS`；空選擇、取消或 stale decision 不寫記憶。
 - Context／trace／stream／mention 的隱私邊界。
 - Profile evidence 只來自已保存 owner 原句。
 - Public V3 與 Private V2 的 runtime／context 隔離。
@@ -61,13 +66,20 @@ rg --files tests -g "test_*.py" | Sort-Object
 - Web／Places 的來源綁定、卡片 projection、partial evidence 與 itinerary presentation。
 - Synthesizer adaptive Markdown、無固定 Places/Web/itinerary headings、mixed server-owned reply partition，以及 cards disabled 時 zero public cards。
 - Provider model-tier selection、真實 LLM call counters、Planner dependency policy，以及可選 Places -> Web bootstrap 的 off/strict/no-candidate guards。
-- Planner compact-v3 prompt budget：system prompt ≤6,000 chars、provider schema ≤3,500 chars、合計 ≤9,500 chars；Planner history 最多 4 則／2,000 字元；最新 current message 不得在 history 重複；active proposal 不得帶 revision。
+- Public Context budget：最近 32 則、合計 ≤8,000 字元；Planner compact-v3 prompt 最多 8 則／4,000 字元；Web structured history 最多 4 則／2,000 字元；最新 current message 不得在任一 specialist history 重複；active proposal 不得帶 revision。`metadata.message_use` 未標記或屬於 calendar／assessment／no-memory 的來源不得進入 profile、compaction 或 proactive consumer。
 - Calendar busy/free/unknown branch：hard-gated downstream runner/tool_started 次數分別為 0/執行/0；普通 `task.finished` precheck 在 Calendar busy 或技術失敗後仍可繼續，且 control edge 不把 raw events 傳入下游。
 - `RuntimeRegistration` runner signature、`TaskRunnerResult` 互斥結果形狀，以及 compatibility input 只在 boundary 正規化。
 
 新增 fallback、result code 或 trace 欄位時，必須同步更新 allowlist 與 privacy test。修真實失敗案例時，先把案例匿名化加入 trajectory fixture，再修 contract、projection 或 prompt；不要新增自然語言 keyword router。
 
-## 5. 交付檢查
+## 5. 最近驗證快照（2026-09-08，非永久保證）
+
+- 完整 Social：1773 passed、4 skipped、133 subtests；後續本輪只改 Markdown。
+- Flutter Hub／拒絕原因：63 passed；另外卡片暱稱／即時狀態組曾 65 passed，兩組有重疊，不可相加當成獨立測試總數。
+- Matchmaker：23 點後全套 75 passed、1 failed；期限測試 fixture 的一小時區間跨日卻只有第一天 evidence，先被 date_evidence_mismatch 擋下。固定白天時間重跑該項通過；未改生產程式或隱藏此失敗。
+- 使用者已確認最後配對／拒絕畫面正常；未涵蓋的故障注入及未來排程不可自動視為人工驗收完成。詳見修正紀錄與 freeze 計畫。
+
+## 6. 交付檢查
 
 - 相關 deterministic tests 通過，並記錄完整 suite 是否有既有環境型失敗。
 - Python compile 通過。

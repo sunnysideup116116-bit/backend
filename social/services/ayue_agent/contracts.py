@@ -1,0 +1,249 @@
+"""Typed contracts for the bounded public-Ayue agent runtime."""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from services.conversation_compaction_contracts import ConversationSummaryV1
+
+
+class DecisionKind(str, Enum):
+    TOOL_CALL = "tool_call"
+    FINAL = "final"
+    CONFIRMATION = "confirmation"
+
+
+class AgentIntent(str, Enum):
+    CHAT = "chat"
+    MATCH_STATUS = "match_status"
+    MATCH_ACTION = "match_action"
+    CALENDAR = "calendar"
+    CALENDAR_ACTION = "calendar_action"
+    RELATIONSHIP = "relationship"
+    PROFILE = "profile"
+    ASSESSMENT = "assessment"
+    MEMORY = "memory"
+    TIME = "time"
+    WEB = "web"
+    PLACES = "places"
+    UNCLEAR = "unclear"
+
+
+class ToolCall(BaseModel):
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolResult(BaseModel):
+    ok: bool
+    data: dict[str, Any] = Field(default_factory=dict)
+    error_code: str | None = None
+    user_message: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    # Executor-only metadata.  Scheduler may consume this for a server-owned
+    # reference, but it must never be copied into an observation/prompt.
+    private_data: dict[str, Any] = Field(default_factory=dict, repr=False, exclude=True)
+
+
+class AgentTurnContext(BaseModel):
+    user_id: str
+    room_id: str
+    message: str
+    # Server-owned control-plane input. Public Pi handles this before the
+    # planner; it is never copied into prompt-safe context or trace payloads.
+    assessment_action: Literal["cancel"] | None = None
+    choice_id: str | None = None
+    choice_action: Literal["confirm", "cancel", "more"] | None = None
+    message_id: str | None = None
+    mentioned_ids: list[str] = Field(default_factory=list)
+    mention_overflow: bool = False
+    user_profile: dict[str, Any] = Field(default_factory=dict)
+    recent_history: list[dict[str, Any]] = Field(default_factory=list)
+    # The HTTP adapter may fetch one sentinel row beyond the public history
+    # budget so Context Builder can report a bounded recent-only projection.
+    history_truncated: bool = False
+
+
+class PublicAgentRequestContext(AgentTurnContext):
+    """Public-turn-only private inputs that must never reach prompt state."""
+
+    external_calendar_authorized: bool = Field(
+        default=False,
+        exclude=True,
+        repr=False,
+    )
+
+    focused_match_id: str | None = Field(
+        default=None, exclude=True, repr=False,
+    )
+    focused_match_namespace: str | None = Field(
+        default=None, exclude=True, repr=False,
+    )
+    focused_match_revision: int | None = Field(
+        default=None, exclude=True, repr=False,
+    )
+
+    device_location: dict[str, Any] | None = Field(
+        default=None, exclude=True, repr=False,
+    )
+
+
+class TurnClockV1(BaseModel):
+    """Authoritative local clock, created once for a public-agent turn."""
+    version: str = "v1"
+    timezone: str
+    utc_iso: str
+    local_iso: str
+    local_date: str
+    local_time: str
+    weekday_zh_tw: str
+    temporal_references: dict[str, str] = Field(default_factory=dict)
+
+
+class PublicAgentTurnContext(BaseModel):
+    """Prompt-safe public Pi state, assembled once for each turn."""
+    version: str = "public-v1"
+    user_id: str
+    room_id: str
+    message: str
+    recent_messages: list[dict[str, Any]] = Field(default_factory=list)
+    history_projection_status: Literal["complete", "recent_only_budget_limited"] = "complete"
+    conversation_continuity: ConversationSummaryV1 | None = None
+    recent_context: str = ""
+    user_location: str = ""
+    relevant_memories: list[str] = Field(default_factory=list)
+    active_proposal: dict[str, Any] | None = None
+    active_event_invitation: dict[str, Any] | None = None
+    # Server-validated, prompt-safe target for a Hub "詢問這張" follow-up.
+    # The match id and revision remain on the private request/authority path.
+    focused_match: dict[str, Any] | None = None
+    match_search: dict[str, Any] | None = None
+    latest_match_outcome: dict[str, Any] | None = None
+    calendar_draft: dict[str, Any] | None = None
+    calendar_recent_reference: dict[str, Any] | None = None
+    calendar_recent_mutation: dict[str, Any] | None = None
+    # Only opaque refs and bounded public labels are projected here. Provider
+    # identity remains in the server-owned place reference store.
+    recent_place_candidates: dict[str, Any] | None = None
+    # The latest uniquely selected place is independent from Calendar draft
+    # state, so a later details/reviews question can safely resolve "它".
+    recent_place_reference: dict[str, Any] | None = None
+    place_reference_resolution: dict[str, Any] | None = None
+    # Room-scoped, prompt-safe state for an incomplete place-to-calendar
+    # continuation. Provider identity and persistence details remain server-side.
+    place_followup: dict[str, Any] | None = None
+    recent_context_draft: dict[str, Any] | None = None
+    # Public references only. Their executor-side IDs remain on AgentTurnContext.
+    mentioned_contacts: list[dict[str, str]] = Field(default_factory=list)
+    mentioned_contact_overflow: bool = False
+    # Owner-only and person-scoped. Populated only for one explicitly resolved
+    # contact and exposed solely to the relationship sub-agent.
+    owner_relationship_memories: list[dict[str, Any]] = Field(default_factory=list)
+    # Short-lived, prompt-safe relationship referent. The executor-side ID is
+    # kept in v3.relationship_references and is never part of this model.
+    recent_contact_reference: dict[str, Any] | None = None
+    # Short-lived, server-owned recommendation context for a reason/revision
+    # follow-up. Candidate identity remains opaque and room scoped.
+    recent_recommendation: dict[str, Any] | None = None
+    # Short-lived, room-scoped projection of the latest date coordination card.
+    # Coordination/match IDs and CAS values stay on the executor-only authority
+    # attached by Context Builder.
+    recent_action_reference: dict[str, Any] | None = None
+    # Bounded summary of the user's valid date cards. Public copy contains
+    # labels/status/actions only; per-card IDs and CAS values stay on the
+    # executor-only authority attached by Context Builder.
+    date_coordination_summary: dict[str, Any] | None = None
+    capability_manifest_version: str = "v2"
+    match_opportunity_state: str = "not_ready"
+    guidance_directive: str = "none"
+    clock: TurnClockV1 = Field(default_factory=lambda: TurnClockV1(
+        timezone="Asia/Taipei", utc_iso="1970-01-01T00:00:00+00:00",
+        local_iso="1970-01-01T08:00:00+08:00", local_date="1970-01-01",
+        local_time="08:00", weekday_zh_tw="星期四",
+    ))
+
+
+class AgentDecision(BaseModel):
+    """Provider-neutral planner contract. IDs and revisions are never model inputs."""
+    model_config = ConfigDict(extra="forbid")
+
+    kind: DecisionKind
+    intent: AgentIntent = AgentIntent.CHAT
+    tool_name: str | None = None
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    confidence: float = 0.0
+    evidence_span: str | None = None
+    reply: str | None = None
+    opportunity_signal: Literal["none", "social_opening"] = "none"
+    opportunity_confidence: float = 0.0
+    opportunity_evidence_span: str | None = None
+    clarification_goal: str | None = None
+    missing_fields: list[str] = Field(default_factory=list)
+    recent_context_followup: Literal["none", "ask_activity"] = "none"
+    place_search_followup: Literal["none", "recommend"] = "none"
+
+
+class PresentationBlock(BaseModel):
+    """Bounded server/UI projection for Markdown fragments and place cards."""
+    model_config = ConfigDict(extra="forbid")
+
+    message_index: int = Field(ge=0, le=2)
+    # Empty markdown is allowed only when a card is bound.
+    markdown: str = Field(default="", max_length=1400)
+    place_card_indices: list[int] = Field(default_factory=list, max_length=1)
+
+    @model_validator(mode="after")
+    def validate_projection(self):
+        if not self.markdown and not self.place_card_indices:
+            raise ValueError("presentation block needs markdown or a place card")
+        return self
+
+
+class AgentResult(BaseModel):
+    handled: bool
+    reply: str | None = None
+    messages: list[str] = Field(default_factory=list, max_length=3)
+    presentation_class: Literal[
+        "conversation", "social_opportunity", "product_info", "transaction",
+        "capability", "fallback", "onboarding", "grounded_recommendation",
+    ] = "conversation"
+    # True only when a confirmed Calendar write committed in this turn.  The
+    # public UI uses this as a cache-invalidation hint; it is not domain state.
+    calendar_state_changed: bool = False
+    conversation_intent: str = "casual_chat"
+    mentioned_other_ids: list[str] = Field(default_factory=list)
+    context_changed: bool = False
+    context_confirmation_needed: bool = False
+    agent_run_id: str | None = None
+    agent_mode: str = "unknown"
+    fallback_reason: str | None = None
+    match_state_changed: bool = False
+    match_readiness_state: str | None = None
+    match_guidance_shown: bool = False
+    # Compatibility metadata. The Public HTTP layer excludes assessment turns
+    # through profile_write_reason; ordinary saved owner messages still reach
+    # the isolated extractor.
+    profile_write_allowed: bool = True
+    assessment_state: str | None = None
+    assessment_kind: str | None = None
+    assessment_revision: int | None = None
+    profile_write_reason: str = "casual"
+    sources: list[dict[str, str]] = Field(default_factory=list)
+    place_cards: list[dict[str, str]] = Field(default_factory=list)
+    presentation_blocks: list[PresentationBlock] = Field(default_factory=list, max_length=12)
+    interaction_blocks_v1: list[dict[str, Any]] = Field(default_factory=list, max_length=4)
+    llm_call_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    # Safe, UI-only projections. Authority-bearing arguments remain solely in
+    # the confirmation store and never enter prompts or debug traces.
+    choice_prompt: dict[str, Any] | None = None
+    choice_resolution: dict[str, Any] | None = None
+    # Internal publication handshake for a newly persisted Places snapshot.
+    # Excluded from all public response/model projections.
+    place_presentation_required: bool = Field(default=False, exclude=True, repr=False)
+    # Internal handoff to the HTTP adapter; published only after the assistant
+    # reply has a durable message id.
+    relationship_recommendation_snapshot: dict[str, Any] | None = Field(
+        default=None, exclude=True, repr=False,
+    )

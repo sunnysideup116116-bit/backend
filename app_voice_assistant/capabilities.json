@@ -1,0 +1,395 @@
+{
+  "version": 3,
+  "target_permissions": {
+    "contact": "chat_list",
+    "calendar_event": "calendar_read",
+    "match_invitation": "match_read"
+  },
+  "actions": {
+    "app.navigate": {
+      "permission": "navigation",
+      "confirmation": false,
+      "parameters": [
+        "destination"
+      ],
+      "target_kinds": []
+    },
+    "assistant.cancel": {
+      "permission": null,
+      "confirmation": false,
+      "parameters": [],
+      "target_kinds": []
+    },
+    "assistant.close": {
+      "permission": null,
+      "confirmation": false,
+      "parameters": [],
+      "target_kinds": []
+    },
+    "assistant.reply": {
+      "permission": null,
+      "confirmation": false,
+      "parameters": [],
+      "target_kinds": []
+    },
+    "ayue.private_query": {
+      "permission": "private_ayue",
+      "confirmation": false,
+      "parameters": [
+        "contact_name",
+        "question",
+        "target_ref"
+      ],
+      "target_kinds": [
+        "contact"
+      ],
+      "tool": "ask_private_ayue",
+      "target_permissions": [
+        "chat_list",
+        "private_ayue",
+        "chat_content"
+      ]
+    },
+    "ayue.public_query": {
+      "permission": "public_ayue",
+      "confirmation": false,
+      "parameters": [
+        "domain",
+        "question",
+        "target_ref"
+      ],
+      "target_kinds": [
+        "match_invitation"
+      ],
+      "tool": "ask_public_ayue",
+      "target_permissions": [
+        "match_read",
+        "match_actions"
+      ]
+    },
+    "calendar.cancel": {
+      "permission": "calendar_write",
+      "confirmation": true,
+      "parameters": [
+        "target",
+        "target_ref"
+      ],
+      "target_kinds": [
+        "calendar_event"
+      ],
+      "tool": "cancel_calendar_event",
+      "target_permissions": [
+        "calendar_read",
+        "calendar_write"
+      ]
+    },
+    "calendar.create": {
+      "permission": "calendar_write",
+      "confirmation": true,
+      "parameters": [
+        "title",
+        "date",
+        "start_time",
+        "end_time",
+        "location",
+        "notes"
+      ],
+      "target_kinds": []
+    },
+    "calendar.query": {
+      "permission": "calendar_read",
+      "confirmation": false,
+      "parameters": [
+        "range",
+        "start_date",
+        "end_date"
+      ],
+      "target_kinds": []
+    },
+    "calendar.update": {
+      "permission": "calendar_write",
+      "confirmation": true,
+      "parameters": [
+        "target",
+        "target_ref",
+        "date",
+        "start_time",
+        "end_time",
+        "location",
+        "notes"
+      ],
+      "target_kinds": [
+        "calendar_event"
+      ],
+      "tool": "update_calendar_event",
+      "target_permissions": [
+        "calendar_read",
+        "calendar_write"
+      ]
+    },
+    "chat.open": {
+      "permission": "chat_list",
+      "confirmation": false,
+      "parameters": [
+        "contact_name",
+        "target_ref"
+      ],
+      "target_kinds": [
+        "contact"
+      ],
+      "tool": "open_chat"
+    },
+    "chat.request_send": {
+      "permission": "chat_send",
+      "confirmation": true,
+      "parameters": [
+        "contact_name",
+        "message",
+        "target_ref"
+      ],
+      "target_kinds": [
+        "contact"
+      ],
+      "tool": "send_chat_message",
+      "target_permissions": [
+        "chat_list",
+        "chat_send"
+      ]
+    },
+    "contacts.query": {
+      "permission": "chat_list",
+      "confirmation": false,
+      "parameters": [],
+      "target_kinds": []
+    },
+    "date.confirm": {
+      "permission": "calendar_write",
+      "confirmation": true,
+      "parameters": [
+        "contact_name",
+        "target_ref"
+      ],
+      "target_kinds": [
+        "contact"
+      ],
+      "tool": "confirm_shared_date",
+      "target_permissions": [
+        "chat_list",
+        "calendar_read",
+        "calendar_write"
+      ]
+    },
+    "date.query": {
+      "permission": "calendar_read",
+      "confirmation": false,
+      "parameters": [
+        "contact_name",
+        "target_ref"
+      ],
+      "target_kinds": [
+        "contact"
+      ],
+      "tool": "read_shared_dates",
+      "target_permissions": [
+        "chat_list",
+        "calendar_read"
+      ]
+    },
+    "date.respond": {
+      "permission": "calendar_write",
+      "confirmation": true,
+      "parameters": [
+        "contact_name",
+        "target_ref",
+        "accepted"
+      ],
+      "target_kinds": [
+        "contact"
+      ],
+      "tool": "respond_date_invitation",
+      "target_permissions": [
+        "chat_list",
+        "calendar_read",
+        "calendar_write"
+      ]
+    },
+    "date.update": {
+      "permission": "calendar_write",
+      "confirmation": true,
+      "parameters": [
+        "contact_name",
+        "target_ref",
+        "changes"
+      ],
+      "target_kinds": [
+        "contact"
+      ],
+      "tool": "update_shared_date",
+      "target_permissions": [
+        "chat_list",
+        "calendar_read",
+        "calendar_write"
+      ]
+    },
+    "match.ayue_query": {
+      "permission": "match_ayue",
+      "confirmation": false,
+      "parameters": [
+        "question",
+        "target_ref"
+      ],
+      "target_kinds": [
+        "match_invitation"
+      ],
+      "tool": "ask_matching_ayue",
+      "target_permissions": [
+        "match_read",
+        "match_actions"
+      ]
+    },
+    "match.query": {
+      "permission": "match_read",
+      "confirmation": false,
+      "parameters": [
+        "view"
+      ],
+      "target_kinds": []
+    },
+    "memory.add": {
+      "permission": "memory_write",
+      "confirmation": true,
+      "parameters": [
+        "label",
+        "stance"
+      ],
+      "target_kinds": []
+    },
+    "memory.query": {
+      "permission": "memory_read",
+      "confirmation": false,
+      "parameters": [
+        "query"
+      ],
+      "target_kinds": []
+    },
+    "personality.explore": {
+      "permission": "public_ayue",
+      "confirmation": false,
+      "parameters": [
+        "message"
+      ],
+      "target_kinds": []
+    },
+    "post.append_caption": {
+      "permission": "post_draft",
+      "confirmation": false,
+      "parameters": [
+        "caption"
+      ],
+      "target_kinds": []
+    },
+    "post.open_draft": {
+      "permission": "post_draft",
+      "confirmation": false,
+      "parameters": [
+        "caption"
+      ],
+      "target_kinds": []
+    },
+    "post.replace_caption": {
+      "permission": "post_draft",
+      "confirmation": false,
+      "parameters": [
+        "caption"
+      ],
+      "target_kinds": []
+    },
+    "post.request_publish": {
+      "permission": "post_publish",
+      "confirmation": true,
+      "parameters": [],
+      "target_kinds": []
+    },
+    "post.select_recent_photos": {
+      "permission": "gallery",
+      "confirmation": false,
+      "parameters": [
+        "count"
+      ],
+      "target_kinds": []
+    },
+    "profile.open": {
+      "permission": "profile",
+      "confirmation": false,
+      "parameters": [],
+      "target_kinds": []
+    },
+    "profile.patch": {
+      "permission": "profile",
+      "confirmation": false,
+      "parameters": [
+        "changes"
+      ],
+      "target_kinds": []
+    },
+    "profile.request_commit": {
+      "permission": "profile",
+      "confirmation": true,
+      "parameters": [],
+      "target_kinds": []
+    },
+    "self.query": {
+      "permission": "memory_read",
+      "confirmation": false,
+      "parameters": [
+        "detail"
+      ],
+      "target_kinds": []
+    },
+    "settings.open": {
+      "permission": "settings",
+      "confirmation": false,
+      "parameters": [],
+      "target_kinds": []
+    },
+    "settings.set": {
+      "permission": "settings",
+      "confirmation": false,
+      "parameters": [
+        "key",
+        "enabled"
+      ],
+      "target_kinds": []
+    },
+    "weather.query": {
+      "permission": null,
+      "confirmation": false,
+      "parameters": [
+        "location"
+      ],
+      "target_kinds": [],
+      "tool": "read_weather"
+    },
+    "ui.choice.activate": {
+      "permission": null,
+      "confirmation": false,
+      "parameters": [
+        "action"
+      ],
+      "target_kinds": []
+    },
+    "ui.target.select": {
+      "permission": "screen_read",
+      "confirmation": false,
+      "parameters": [
+        "target_ref"
+      ],
+      "target_kinds": [
+        "contact",
+        "calendar_event",
+        "match_invitation"
+      ],
+      "tool": "select_screen_target"
+    }
+  }
+}

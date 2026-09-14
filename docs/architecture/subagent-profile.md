@@ -1,4 +1,4 @@
-# Sub-agent：profile（個人檔案子代理）
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Sub-agent：profile（個人檔案子代理）
 
 > 本文說明使用者與阿月談「你是誰／你了解我多少／我的記憶」以及基本性格、深層探索時，背後怎麼運作：profile sub-agent 能做什麼、呼叫哪些 function、assessment session 如何運作。
 
@@ -38,9 +38,11 @@
 
 回傳（`_RecentContextOutput`）：`current_context`、`revision`、`exists`。資料來自已保存的 `current_context`（`safe_recent_context`），不會重新分析。
 
-### 2.3 `memory.search_my_profile`（READ，無參數）
+### 2.3 `memory.search_my_profile`（READ，可選 query）
 
-回傳（`_MemoryOutput`）：`summary`（profile_memory_summary）、`current_context`、`preferences`（`profile_memory_preview` ≤8，typed 渲染：喜歡/不喜歡/需要/避免 前綴）。
+參數 `query` 最多 120 字，預設空；不接受 user_id，由 server 綁定本人。工具經 memory service 查 9001 的 durable relations，先匹配 query 再限 8 筆，因此可查常駐 preview 以外的記憶。這是中文字詞／bigram 與英文詞匹配，可由模型補同義詞，不是新的 embedding 檢索。
+
+回傳 `summary`、`current_context`、`preferences`（帶喜歡／不喜歡／需要／避免方向）、`status=available|unavailable`、`source=graph|cache`、`truncated`。不可用時沿用 bounded cache，不宣稱沒有記憶；空 query 或 truncated 不代表所有偏好。查詢不覆寫一般 preview。
 
 ### 2.4 `profile.start_assessment`（WRITE，需確認）
 
@@ -55,8 +57,8 @@ Planner 參數（`_AssessmentStartArguments`）：
 ```text
 proposal → Guard(write_requires_confirmation) → prepare_write_confirmation
   → kind 驗證 → preview:「要重新開始{基本性格|深層探索}嗎？新的結果完成前，原本的資料會保留。
-     回覆『確認』就開始，也可以回覆『取消』。」
-確認後 execute_write → _start_assessment
+     請選擇是否開始。」＋ AI 泡泡內「取消／確認」
+按鈕確認後 execute_write → _start_assessment
   → assessment_session_service.start_assessment_session(user_id, kind, idempotency_key=confirmation:{id}:{kind})
 ```
 
@@ -67,10 +69,10 @@ proposal → Guard(write_requires_confirmation) → prepare_write_confirmation
 | 狀態 | 行為 |
 | --- | --- |
 | `active`（探索進行中） | 每則訊息作為 session 答案：`advance_assessment_session`；回覆「取消」可中斷 |
-| `awaiting_commit`（探索完成） | 只接受封閉協議：「確認」→ `commit_assessment_session`（CAS revision）覆寫正式資料；「取消」→ 保留原本資料；其他 → 提示 |
+| `awaiting_commit`（探索完成） | 完成訊息泡泡提供 `choice_id` 按鈕：「確認」→ `commit_assessment_session`（CAS revision）覆寫正式資料；「取消」或繼續同房對話 → 保留原本資料 |
 | session 過期 | `expire_assessment_session` |
 
-Assessment 相關回合回傳 `assessment_state/kind/revision`；**assessment 答案不會進入 profile extraction pipeline**（`public_chat.py` 以 `profile_write_reason == "assessment"` 排除），也不會成為近期情境或 durable memory evidence。
+Assessment 相關回合回傳 `assessment_state/kind/revision`；**assessment 答案不會進入 profile extraction pipeline**。Public turn 會在原始 owner message 寫入 `metadata.message_use=assessment`，後續 coverage、抽取、compaction 與 proactive consumer 都會再次排除，不依賴單一 `profile_write_reason` 字串。
 
 ## 4. Profile 資料怎麼來（與聊天 Agent 分離）
 
@@ -79,7 +81,8 @@ profile sub-agent 只**讀**；寫入由獨立的 owner-only pipeline 負責：
 ```text
 使用者訊息 → 保存（唯一一次）→ public_chat 背景排程
   → profile_task_service → profile_skills.py
-      - message_id 冪等（每則訊息最多處理一次）
+      - `metadata.message_use=ordinary` 才可進入；calendar operation、assessment、no-memory 與未標記 legacy source fail closed
+      - message_id 冪等；provider 暫時失敗最多三次，依 30／120 秒退避重試
       - 只用「已保存的 owner 原始訊息」；禁用 assistant reply/history/tool result/match state/對方資料
       - LLM 提出 typed ProfileExtractionDecision + 原句 evidence_span
       - evidence 必須是 owner message 連續原文子字串，否則拒絕

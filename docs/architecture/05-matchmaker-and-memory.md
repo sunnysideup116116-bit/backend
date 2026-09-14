@@ -1,6 +1,6 @@
 # 05. 媒婆服務、圖記憶與 Context Engine
 
-> 本篇說明 port 9001 媒婆服務（candidate 排序＋Neo4j 記憶）與主服務的記憶／profile pipeline。完整資料邊界請見根目錄 `MEMORY_CONTEXT_ENGINE_GUIDE.md`。
+> 本篇說明 port 9001 媒婆服務（candidate 排序＋Neo4j 記憶）與主服務的記憶／profile pipeline。完整資料邊界請見 [Memory 指南](../MEMORY_CONTEXT_ENGINE_GUIDE.md)。
 
 ## 1. 媒婆服務（matchmaker_agent, port 9001）
 
@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | `/health` | GET | Process-level readiness（不讀 profile／Neo4j） |
 | `/api/match` | POST | 候選排序：`{target_user, candidates, target_deep_profile}` → `{outcome: selected\|no_suitable_candidate, matches: [1 筆]}` |
-| `/api/feedback` | POST | 婉拒／接受後的反思：LLM 產生 graph reflection → 寫入 `HAS_PREFERENCE` relationships |
+| `/api/feedback` | POST | 只正規化使用者本次明確勾選的 `explicit_reasons`；空清單回 `skipped`。目前提案 UI 僅在 opt-in 婉拒時呼叫，並共用 memory writer 轉成 `AVOIDS` Concept relationships |
 | `/api/global_reflection` | POST | 從一對（from_big_five→to_big_five）歸納全域法則 `GlobalRule`（相似度合併，weight 遞增） |
 | `/api/memory/apply` | POST | 寫入已驗證的 memory proposals（不重新萃取），message_id 冪等 |
 | `/api/memory/{user_id}` | GET | 讀某使用者 active 偏好（owner-scoped） |
@@ -24,34 +24,38 @@
 
 ### 排序決策（`matchmaker.py:MatchmakerAgent`）
 
-權重：近期情境 context 30% + 雙方 graph memory 25% + deep_profile/價值觀 20% + Big Five 15% + 立即可聊話題 10%。硬性規則：任一方 `DISLIKES_TRAIT` 命中對方特質原則上不推薦；沒有值得誠實推薦的人時回 `no_suitable_candidate`，不得硬選。
+權重：近期情境 context 30% + 雙方 graph memory 25% + deep_profile/價值觀 20% + Big Five 15% + 立即可聊話題 10%。硬性規則：任一方的 `AVOIDS` Concept 明確命中對方公開特質時，原則上不得推薦；沒有值得誠實推薦的人時回 `no_suitable_candidate`，不得硬選。
 
 `/api/match` 的處理流程（`agent_api.py:match_endpoint`）：
 
-1. 平行讀取發起者 graph memory、候選人 graph memories、全域法則（Neo4j 讀取失敗時回傳占位文字，不中斷）。
+1. 平行讀取發起者 graph memory、候選人 graph memories、全域法則（strict Graph read；逾時／不可用回傳明確失敗，不以占位資料繼續配對）。
 2. 每個 candidate 附加自己的 `graph_memory` 欄位（**candidate 的記憶只代表 candidate**）。
-3. `agent.match(...)` 呼叫 LLM；解析 JSON 失敗或格式不符 → HTTP 502 `Invalid matchmaker response`（呼叫端不能把 provider 失敗當成「沒有合適人選」）。
+3. `agent.match_async(...)` 呼叫 LLM；解析 JSON 失敗或格式不符 → HTTP 502 `Invalid matchmaker response`（呼叫端不能把 provider 失敗當成「沒有合適人選」）。
 4. `matches` 最多保留 1 筆，`matched_user_id` 必須存在。
 
 ## 2. Neo4j 圖記憶模型
 
 ```
-(:User {id}) -[HAS_PREFERENCE {stance, type, confidence, active, evidence_count, source}]-> (:Trait {key, name, category})
+(:User {id}) -[:PREFERS]-> (:Concept {key, label, kind})
+(:User {id}) -[:AVOIDS]-> (:Concept {key, label, kind})
+(:User {id}) -[:CURRENTLY_WANTS {expires_at}]-> (:Concept {key, label, kind})
 (:Agent {name:"System"}) -[LEARNED_RULE {weight}]-> (:GlobalRule {content, category})
 (:MemoryObservation {message_id})   ← message_id 冪等（每則 owner 訊息最多套用一次）
 (:ChatEntity {key}) -[IS_A|HAS|LIKES|...]-> (:ChatEntity {key})   ← 雙人聊天 triples
 ```
 
 - 偏好必須 **owner-scoped**：`MemoryObservation.message_id` 唯一約束保證同一訊息不會重複套用。
-- `stance` ∈ {like, dislike, require, avoid}；`type` 由 stance 推導（LIKES_TRAIT/DISLIKES_TRAIT）。
+- `stance=like|require` 投影為 `PREFERS`；`stance=dislike|avoid` 投影為 `AVOIDS`；短期活動意圖另由 recent-context projection 產生 `CURRENTLY_WANTS`。
+- `LIKES_TRAIT`／`DISLIKES_TRAIT` 目前只是 Matchmaker LLM／文字投影的 compatibility label；寫入 Neo4j 前必須分別轉成 `PREFERS`／`AVOIDS`，不得建立同名 Graph relationship。
 - 敏感內容（種族、宗教、性傾向、疾病等）在寫入前被正則擋掉（`agent_api.py` 的 `protected`）。
-- **系統產生的長期建議是 recommendation，不是使用者事實**：禁止寫成 `HAS_PREFERENCE`（需獨立 versioned contract + TTL + dismissed state，見 `MEMORY_CONTEXT_ENGINE_GUIDE.md`）。
+- **系統產生的長期建議是 recommendation，不是使用者事實**：禁止寫成 `PREFERS`、`AVOIDS` 或 `CURRENTLY_WANTS`（需獨立 versioned contract + TTL + dismissed state，見 `MEMORY_CONTEXT_ENGINE_GUIDE.md`）。
 
 ## 3. 主服務的記憶 pipeline
 
 ### 3.1 Profile extraction（`profile_skills.py`）
 
-- 只接受**已保存的 owner 原始訊息**（`public_chat.py` 在保存後背景排程）；同一 `message_id` 最多處理一次（`_claim_profile_message` 的 `$setOnInsert` upsert）。
+- 只接受**已保存的 owner 原始訊息**（`public_chat.py` 在保存後先寫入 `metadata.message_use`，再背景排程）；只有 `message-use-v1` 的 `ordinary` source 可處理，calendar operation、assessment、no-memory 與未標記 source fail closed。
+- 同一 `message_id` 最多成功處理一次；provider 暫時失敗保留 processing lease，最多三次依 30／120 秒退避，由 `profile-retry-worker` 重試；政策排除與 source 不可用不重試。
 - 禁止使用 assistant reply、conversation history、tool result、match state 或對方資料作為寫入來源。
 - LLM 只提出 typed `ProfileExtractionDecision`（`profile_contracts.py`）＋原句 `evidence_span`；evidence 必須是 owner message 的連續原文子字串（`_valid_evidence_span`），否則拒絕該欄位。
 - 近期情境只保存本人現實活動；找人、配對、提案、等待回覆不得成為近期情境。長期記憶只保存明確且可持續的本人偏好（confidence ≥0.90，`subject=owner`）。
@@ -61,22 +65,26 @@
 ### 3.2 Durable memory facade（`memory_service.py`）
 
 - `apply_profile_memory_proposals`：validated durable-memory write facade，只走媒婆 `/api/memory/apply`。主服務不直接連 Neo4j；9001 不可用、endpoint 缺失或回應無效時，寫入 bounded `profile_memory_outbox` 待重試並明確回 `MemoryWriteError`。
-- `get_user_graph_memories`：讀回 active 偏好並投影成 `profile_memory_preview`（Mongo read projection，**不是第二個 source of truth**）。
+- `refresh_owner_memory_profile`：聊天／init 的共用 lazy refresh，300 秒 TTL、Graph 失敗保留 cache 並於聊天路徑退避 30 秒，設定頁可 force refresh。以 `profile_memory_revision` CAS 避免晚到讀取復活已停用記憶。
+- `get_graph_memory_snapshot` 讀 durable-only 偏好；`profile_memory_preview` 最多 12 筆，是 Mongo read projection，**不是第二個 source of truth**。
 - `apply_memory_action`：透過 `/api/memory/action` 執行 disable／restore／correct，再同步 read projection。
 - `_sync_memory_projection`：把圖記憶壓縮成 ≤12 筆的 Mongo 投影與摘要。
+- `memory_outbox_service.py`：以 Mongo lease、bounded exponential backoff 與最多八次嘗試重送已驗證 proposals；不重新讀 raw chat。9001 以單一 transaction 寫入 observation marker 與全部 edges，讓 duplicate delivery 可安全結案。
+- 記憶管理以 owner-scoped `MEMORY_DISABLED` 暫存原 relation；restore 不得把 `AVOIDS` 變成 `PREFERS`，correct 不得改寫其他 owner 共用的 Concept edge。設定頁用 status-aware Graph read 刷新 projection，只有 Graph unavailable 才沿用 cache。
 
 已移除的 `/api/memory/observe` 與自由文字 memory extractor 不得恢復。唯一 extraction owner 是 `profile_skills.py`；媒婆只接受已通過 subject、confidence 與原句 evidence 驗證的 typed proposals。
 
 ### 3.3 Context Engine 邊界（現況）
 
-`context.py:build_public_agent_turn_context` 每回合組 bounded context（`relevant_memories` ≤8 筆等）。新 Context Engine 若建置，只能輸出 bounded、versioned typed bundle；Public／Private runtime 各自套用 privacy adapter。Retrieval 必須先做 owner／room／accepted-relation 硬隔離，再做相關度排序、budget、dedup；失敗時回 bounded empty projection 與 error code，不得改抓 raw data。
+`context.py:build_public_agent_turn_context` 每回合組 bounded context（原文最多 32 則／8,000 字元、帶方向 `relevant_memories` ≤8 筆）。`memory.search_my_profile(query)` 可向 Graph 補查 preview 以外的本人 durable 偏好；先 query 匹配再限 8 筆，回傳 unavailable/truncated，未命中不代表從未提過。新 Context Engine 若建置，只能輸出 bounded、versioned typed bundle；Public／Private runtime 各自套用 privacy adapter。Retrieval 必須先做 owner／room／accepted-relation 硬隔離，再做相關度排序、budget、dedup；失敗時回 bounded empty projection 與 error code，不得改抓 raw data。
 
 ## 4. 配對狀態真相（canonical lifecycle）
 
-- Lifecycle：`draft → pending → accepted`；`declined` 為終態。
+- Lifecycle：`draft → pending → accepted`；`declined`／`expired` 為終態。
 - `match_decision_service.py:apply_match_decision` 是唯一 CAS 轉移：`status + proposal_revision` 條件更新（`find_one_and_update`），stale 回報最新狀態且不覆寫；`idempotency_key` 存於 `last_decision`，重放回 `idempotent: true`。
-- 只有 live `draft/pending` 阻擋新的 active proposal；`accepted` 是已建立的聯絡關係。
-- 效果（通知、開聊天室、GIF、feedback）只在 transition 成功後執行（`match_action_service.apply_transition_effects`）；effect 失敗不讓已提交 transition 被重送。
+- 一般與 Event 的 namespace／名額政策分開；Hub 可同時有多張卡。本人發起的未決 draft 或 queued/running 搜尋阻擋新搜尋，等待對方及收到邀請不一律阻擋。`accepted` 是已建立聯絡關係，不是 live proposal。
+- Durable search job 會綁定建立時的 `current_context_revision`。若 concurrent recent-context extraction 在搜尋中提交新 revision，worker 會以 Mongo CAS 將同一 job 最多重排一次並從最新 snapshot 重跑；queued/running 狀態持續可見。第二次仍變動才終止為 stale，並投遞 idempotent `match_search_failed` 說明，不得無聲消失或無限重跑。
+- 效果（通知、開聊天室、Event 開場卡、GIF、opt-in feedback）只在 transition 成功後執行（`match_action_service.apply_transition_effects`）；effect 失敗不讓已提交 transition 被重送。Event invitation 對既有 accepted pair 沿用 canonical chat，並以 match-scoped key 冪等保存一次公開活動介紹，不建立第二個 relationship anchor。
 
 ## 5. 雙人關係 context（不可誤用）
 

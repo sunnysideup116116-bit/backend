@@ -1,4 +1,4 @@
-# Sub-agent：relationship（關係子代理）
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Sub-agent：relationship（關係子代理）
 
 > 本文說明使用者與阿月談「已建立聯絡的人／@ 對象」或要求建立空白約會邀請卡時，背後怎麼運作：Relationship Runtime 能做什麼、呼叫哪些 function、target 如何驗證。
 
@@ -109,7 +109,7 @@ relationship task → LLM 提 relationship.list_accepted_contacts
 4. 回覆以公開摘要比較（近期情境、initial_interest、verified_common_ground 等 typed 欄位）；若其中一位非 accepted → 該位不顯示，阿月說明「小美目前不是已接受配對，我不能讀取她的資料」。
 ## 6. 公開阿月建立空白約會邀請卡
 
-使用者明確要求邀請一位已接受聯絡人時，Planner 必須宣告 `write_intent="relationship.date_invitation.v1"`；canonical validation 只接受 `relationship -> synthesizer`，驗證後以 bounded server-owned brief 取代 provider task brief。Match 不是 contact-validation precheck，也不先追問日期、時間或地點。Relationship Agent 必須只提出一次 `relationship.start_date_coordination`。
+使用者明確要阿月現在建立／送出空白邀請時，Planner 宣告 `write_intent="relationship.date_invitation.v1"`。「想約對方吃冰，幫我找店」的邀約是背景，不授權建卡；@ 也只綁定對象。Canonical validation 需一個 root Relationship write task 和 terminal Synthesizer，可保留明確的 typed read-only siblings。Match 不是 contact-validation precheck，Relationship Agent 仍只提一次 `relationship.start_date_coordination`。
 
 Proposal 只可帶 `target_source`（`mention`、`name`、`recent_contact`）；name 模式另帶本回合原句的連續 `target_evidence_span`。Server 只在 accepted relationships 內解析 target，可接受唯一且 bounded 的文字／拼音名稱修正；模糊、未知、過期、非 accepted 或資料不可用都 fail closed。需要修正名稱時，身份與建立卡片合併在同一筆 preview-bound confirmation。
 
@@ -124,3 +124,5 @@ Proposal 只可帶 `target_source`（`mention`、`name`、`recent_contact`）；
 ```
 
 或 `{"target_source":"mention"}`／`{"target_source":"recent_contact"}`。缺少、錯誤、重複、自由文字或無效 function call 只給一次固定 protocol correction；provider timeout 不重試。兩次失敗後回固定 clarification「我知道你要建立邀請卡，但我剛才沒能安全確認邀請對象。請直接說名字或 @ 對方再試一次。」不讀聯絡人、不建立 confirmation，也不執行 write。Intent、normalized payload 與 target authority 都不進 durable trace 或 public events。
+
+純邀請回合直接呈現 server-owned preview；混合回合抽離 preview 時仍保留 `relationship_transaction_state.v1` 的 action、pending status 與公開對象名稱給 Synthesizer，讓它只組其他 verified observations，最後再原樣附上 preview。與 pending 狀態相反的「不能建立／到阿月牽線／已送出」文字會被拒絕並改用可信 fallback。建立預覽使用「要幫你和某人建立約會邀請卡嗎？確認後才會送出」，不預告已執行，也不假設對方性別。

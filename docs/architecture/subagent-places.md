@@ -1,8 +1,16 @@
-# Sub-agent：places（地點子代理）
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Sub-agent：places（地點子代理）
 
 > 現行 owner：`services/ayue_agent/v3/sub_agents/places_agent.py`。Places 負責結構化地點候選、營業／目前開放、價位、評分、步行距離／時間、距離與地圖卡；只有 Places 無法建立的非結構化／目前公開條件才由獨立 Web task 處理。
 
 ## 1. 責任邊界
+
+每個 Places `SubTask` 都必須帶 server-validated `place_mode`：
+
+- `discover`：附近搜尋，建立新的候選池、序號與 presentation snapshot。
+- `details`：沿用單一已選地點，查結構化資料；不提出 `places.search_nearby`。
+- `reviews`：沿用單一已選地點，先由 Places resolve，再交給 `places -> web -> synthesizer` 查口碑；不提出 nearby 或距離查詢。
+
+`recent_place_reference` 是 Context Builder 從 durable presentation 的 selected reference 投影出的安全上下文，獨立於 Calendar 草稿。名稱與地址只用來組 server-owned resolve query；provider identity 仍留在 server，resolve 結果必須和原 provider identity 完全一致。
 
 Places 可以：
 
@@ -26,7 +34,7 @@ Places 不可以：
 | `places.measure_distance` | 測量明確兩地，或保存地區到目的地的距離 |
 | `places.resolve_place` | 將明確店名／景點解析成安全 place card |
 
-### 2.1 `places.search_nearby`
+### 2.1 `places.search_nearby`（僅 `discover`）
 
 Planner arguments：
 
@@ -36,21 +44,24 @@ Planner arguments：
 | `categories` | `restaurant|cafe|bar|attraction|park`，1–3 類 |
 | `cuisine` | 具體料理／飲品提示，最多 30 字 |
 | `radius_m` | 300–5000；是 server-side hard bound |
-| `limit` | 1–10；agent 一般最多要求 8 |
+| `limit` | 1–8；換批時 executor 可為排除舊店將 provider pool 擴到 10 |
 | `use_saved_location` | 只使用本人手動保存的粗粒度城市／行政區 |
 | `ordering` | `distance|balanced`；跨類別 itinerary 才使用 balanced |
+| `exclude_previously_presented` | 只在使用者要其他家／換批時使用；provider identity 由 server 從同 room 已發布 snapshot 解析 |
 
 回傳 `_PlacesNearbyOutput`：anchor、origin kind、distance basis、attribution 與 bounded `places[]`。Provider ID、map URL、photo URL 保留在 server-side card projection，不直接進 Synthesizer prompt。
 
-### 2.2 `places.measure_distance`
+### 2.2 `places.measure_distance`（只有使用者明確問距離／交通時）
 
 Arguments：`origin`、`destination`、`use_saved_origin`。Google Routes 可用時可回 driving distance/time；否則回 straight-line distance，必須依 `distance_basis` 如實描述。
 
 此工具標記 `reuse_success_within_turn=True`；相同端點的成功 observation 在同一 turn 內重用，不重跑 provider。
 
-### 2.3 `places.resolve_place`
+### 2.3 `places.resolve_place`（`details`／`reviews`）
 
-Arguments：`query`。Query 必須是使用者明確提到或已驗證 observation 中的名稱；找不到時回 `found=false`，不能發明地點或 map URL。
+Arguments：`query`。在單店追問中 Scheduler 會用 server-owned 名稱＋地址覆蓋 model query；resolve 回傳的 provider 與 place identity 必須和原 snapshot 相同，不能只因店名相似而接受不同分店或城市。找不到或 identity 不一致時回報無法確認，不能發明地點或 map URL。
+
+`resolve_place` 是單一地點的詳情查詢，不建立新的推薦清單或 ordinal snapshot。Places 從 room-scoped `place_followup` 只會收到 safe `resolved_place` 與 abandonment marker，不會收到日期／時間；本回合的「他／它／這間」指向該地點。若 marker 表示已放棄，代表 Calendar 草稿已清除，不影響本回合查店家資料。
 
 ## 3. Provider 與 radius enforcement
 
@@ -77,7 +88,7 @@ places -> web -> synthesizer
 1. 若條件可由 Places structured fields 建立，Places 直接回傳 typed enrichment，不建立 Web task。
 2. 若條件是 Places 無法建立的非結構化／目前公開主張，Places 只建立符合地點／類別／radius 的候選池，不聲稱已符合該 criterion。
 3. Scheduler 把最多五個 privacy-safe candidate summaries 投影成 `place_candidate_*` refs。
-4. Web 只能查證這些 refs；findings 必須保留 subject binding，不能靠名稱相似度換成別家店。
+4. Web 只能查證這些 refs；搜尋、擷取與 findings 都保留單一 `subject_ref`，不能靠名稱相似度換成別家店。食記對口味的 direct finding 是有來源歸屬的主觀證據，不因主觀就整批捨棄；來源不足時使用 partial。
 5. Synthesizer 只對 direct-supported candidate 作 verified recommendation；證據不足時明確標示 unconfirmed candidates。
 
 「找一個新活動並排整天」使用：
@@ -92,6 +103,7 @@ Places 從 upstream typed `primary_activity.venue` 取 anchor，不從自由文�
 
 - Retrieval 與 display 分開：可取最多八個候選；一般 grounded recommendation 顯示 2–3 張卡，除非使用者明確要求更多，否則最多 4 張。
 - `_strip_place_internals` 在 observation 進 Synthesizer 前移除 map/provider/photo internals。
+- Places slice 可看最近候選的公開投影，用來判斷是否提出換批 flag；它不會取得 provider ID。Executor 先排除同 room 已發布的同類 provider identities，再套用 `limit`。
 - `selected_candidate_refs` 只綁定 server 已有 candidates；模型不能製造卡片、URL 或 map link。
 - `presentation_blocks` 是 Synthesizer 驗證 refs 後產生的 server-owned UI projection，不是模型 authored fragment。
 - Normal Places/Places+Web grounded success uses Synthesizer `compose_public_reply`; `requested_limit` describes the comparison pool, while `selected_candidate_refs` controls visible cards. Explicit final counts use `card_intent=explicit_set`; non-selected candidates remain internal unless the user asks to see all.
@@ -99,6 +111,7 @@ Places 從 upstream typed `primary_activity.venue` 取 anchor，不從自由文�
 - Ordinary and itinerary composition do not accept model-authored `blocks` or require `card_mode`. `presentation_mode="itinerary"` is only an editorial prompt hint; it uses the ordinary natural-language compose contract without fixed headings or a special rendering schema. The Synthesizer may retain server-owned candidate refs for internal grounding, while optional card-only UI projections remain server-owned.
 - `AYUE_PUBLIC_PLACE_CARDS_ENABLED` is off for the current demo. With the switch off, Places/Web replies are text/Markdown-only and Scheduler emits zero public cards/blocks; candidate projections, refs, provider IDs, map URLs, and Web subject bindings remain available internally.
 - Web-only `web_research.v1` results are LLM-first even when their typed status is partial, insufficient, degraded, or unavailable. The natural reply must preserve the typed limitation; deterministic Web formatting is only a post-composition degradation fallback.
+- `discover` 的多店回覆預設使用自然 prose 或輕量 Markdown，不強制標題或編號。Server 驗證每個公開店名與 hidden ref／mention order，只保存實際呈現的候選。`details`／`reviews` 保留單店脈絡，不建立新清單或序號。
 - Places 的常見 user-facing failure 可帶 bounded `failure` observation：`location_not_found`、`location_required`、map timeout/unavailable 等 code 使用 server-owned 固定 message；可公開的 `subject` 只取自已驗證的 executor argument。未知 failure 維持 error code，不傳 raw exception、provider detail 或 internal ID。
 
 ## 6. 測試重點

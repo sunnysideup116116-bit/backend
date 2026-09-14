@@ -13,13 +13,14 @@ os.environ.setdefault("NEO4J_PASSWORD", "stub")
 os.environ.setdefault("OLLAMA_HOST", "http://127.0.0.1:9")
 os.environ.setdefault("OLLAMA_API_KEY", "stub")
 
-from matchmaker import MatchmakerAgent
+from matchmaker import EVENT_HOOK_LLM_TIMEOUT_SECONDS, MatchmakerAgent
 
 
 class EventPipelineTests(unittest.TestCase):
     def _agent_with_failed_llm(self):
         agent = MatchmakerAgent.__new__(MatchmakerAgent)
         agent.client = MagicMock()
+        agent.client.with_options.return_value = agent.client
         agent.client.chat.completions.create.side_effect = RuntimeError("offline")
         agent.model = "stub"
         return agent
@@ -55,6 +56,7 @@ class EventPipelineTests(unittest.TestCase):
             "candidate_links": ["戶外", "音樂"],
         })
         self.assertEqual(result["first"], "target")
+        agent.client.with_options.assert_not_called()
 
     def test_invitation_order_fallback_can_ask_candidate_first(self):
         agent = self._agent_with_failed_llm()
@@ -325,6 +327,36 @@ class EventPipelineTests(unittest.TestCase):
 
         self.assertEqual(result["ingested_count"], 0)
 
+    def test_late_model_result_is_discarded_before_graph_write(self):
+        agent = MatchmakerAgent.__new__(MatchmakerAgent)
+        agent.client = MagicMock()
+        agent.model = "stub"
+        agent.event_model = "stub"
+        now = int(time.time())
+        start = now + 86400
+        taipei = timezone(timedelta(hours=8))
+        date_text = datetime.fromtimestamp(start, taipei).strftime("%Y-%m-%d")
+        message = MagicMock()
+        message.content = json.dumps([{
+            "title": "期限測試活動", "summary": "摘要", "venue": "高雄港",
+            "starts_at": start, "ends_at": start + 3600,
+            "time_precision": "datetime", "date_evidence": date_text,
+            "source_url": "https://example.com/deadline", "region": "高雄",
+            "tags": ["戶外"], "vibes": ["輕鬆"],
+        }], ensure_ascii=False)
+        agent.client.chat.completions.create.return_value.choices = [MagicMock(message=message)]
+
+        with patch("matchmaker.GraphDatabase.driver") as graph:
+            result = agent.extract_and_ingest_search_results([{
+                "title": "期限測試活動", "snippet": f"活動日期 {date_text}",
+                "source_url": "https://example.com/deadline",
+                "discovery_category": "運動",
+            }], region="高雄", window_days=30, write_deadline=time.time() - 1)
+
+        self.assertEqual(result["ingested_count"], 0)
+        self.assertEqual(result["validation_counts"]["write_deadline_expired"], 1)
+        graph.assert_not_called()
+
     def test_event_dates_must_match_an_exact_source_evidence_quote(self):
         agent = MatchmakerAgent.__new__(MatchmakerAgent)
         now = int(time.time())
@@ -577,6 +609,7 @@ class EventPipelineTests(unittest.TestCase):
     def test_event_hook_adds_event_name_when_model_omits_it(self):
         agent = MatchmakerAgent.__new__(MatchmakerAgent)
         agent.client = MagicMock()
+        agent.client.with_options.return_value = agent.client
         agent.model = "stub"
         message = MagicMock()
         message.content = "我想到一個也喜歡生活選物的人，要不要我幫你牽線？"
@@ -588,6 +621,9 @@ class EventPipelineTests(unittest.TestCase):
             "target_links": ["可愛風格"],
             "candidate_links": ["生活選物"],
         })
+        agent.client.with_options.assert_called_once_with(
+            timeout=EVENT_HOOK_LLM_TIMEOUT_SECONDS, max_retries=0,
+        )
         self.assertIn("下一站，少女心市", hook)
         self.assertIn("生活選物", hook)
 
@@ -669,6 +705,7 @@ class EventPipelineTests(unittest.TestCase):
     def test_event_hook_adds_event_name_when_model_omits_it(self):
         agent = MatchmakerAgent.__new__(MatchmakerAgent)
         agent.client = MagicMock()
+        agent.client.with_options.return_value = agent.client
         agent.model = "stub"
         message = MagicMock()
         message.content = "我想到一個也喜歡生活選物的人，要不要我幫你牽線？"

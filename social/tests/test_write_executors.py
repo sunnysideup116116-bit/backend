@@ -1,0 +1,407 @@
+"""Shared confirmed-write executor regression tests."""
+import unittest
+from unittest.mock import MagicMock, patch
+
+from services.ayue_agent.contracts import AgentTurnContext
+from services.ayue_agent.shared.write_executors import execute_write, prepare_write_confirmation
+
+
+class WriteExecutorsTests(unittest.TestCase):
+    def _ctx(self):
+        return AgentTurnContext(user_id="owner", room_id="room", message="確認")
+
+    def test_start_search_queues_job(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        with patch("services.ayue_agent.shared.write_executors.start_match_search",
+                   return_value={"status": "queued"}) as start, \
+             patch("services.ayue_agent.shared.write_executors.TOOL_CALLS.find_one_and_update",
+                   return_value=None), \
+             patch("services.ayue_agent.shared.write_executors.TOOL_CALLS.update_one"):
+            ok, reply, code = execute_write(
+                "match.start_search", {}, ctx, turn, "run1", 0,
+                confirmation_id="conf1",
+            )
+        self.assertTrue(ok)
+        self.assertIn("1–3 分鐘", reply)
+        start.assert_called_once()
+        self.assertEqual(start.call_args.kwargs["idempotency_key"], "confirmation:conf1")
+        self.assertEqual(start.call_args.kwargs["origin_room_id"], "room")
+
+    def test_operation_item_id_is_stable_calendar_idempotency_key(self):
+        ctx = self._ctx()
+        with patch(
+            "services.ayue_agent.shared.write_executors._calendar_execute",
+            return_value=(True, "完成", None),
+        ) as execute_calendar:
+            result = execute_write(
+                "calendar.submit_commands", {}, ctx, MagicMock(), "run1", 0,
+                confirmation_id="confirmation-new",
+                payload={
+                    "_confirmation_id": "confirmation-old",
+                    "_operation_item_id": "operation-item-1",
+                    "calendar_plan_version": 1,
+                    "plans": [{}],
+                },
+            )
+
+        self.assertEqual(result, (True, "完成", None))
+        self.assertEqual(
+            execute_calendar.call_args.kwargs["confirmation_id"],
+            "operation-item-1",
+        )
+
+    def test_start_search_idempotent_replay(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        with patch("services.ayue_agent.shared.write_executors.start_match_search") as start, \
+             patch("services.ayue_agent.shared.write_executors.TOOL_CALLS.find_one_and_update",
+                   return_value={"result": {"reply": "我已經處理過這次搜尋。"}}):
+            ok, reply, code = execute_write(
+                "match.start_search", {}, ctx, turn, "run1", 0,
+                confirmation_id="conf1",
+            )
+        self.assertTrue(ok)
+        self.assertEqual(reply, "我已經處理過這次搜尋。")
+        start.assert_not_called()
+
+    def test_decide_active_proposal_uses_revision_cas(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        turn.active_proposal = {
+            "user_can_decide": True,
+            "allowed_actions": ["interested", "declined"],
+            "proposal_revision": 2,
+        }
+        with patch("services.ayue_agent.shared.write_executors.decide_active_proposal",
+                   return_value={"status": "success"}) as decide:
+            ok, reply, code = execute_write(
+                "match.decide_active_proposal", {"decision": "interested"},
+                ctx, turn, "run1", 0,
+                payload={
+                    "match_id": "match-1", "expected_status": "draft",
+                    "proposal_revision": 2, "proposal_namespace": "relationship_match",
+                },
+            )
+        self.assertTrue(ok)
+        self.assertEqual(decide.call_args.kwargs["expected_revision"], 2)
+
+    def test_decide_active_proposal_not_actionable(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        turn.active_proposal = {"user_can_decide": False}
+        ok, reply, code = execute_write(
+            "match.decide_active_proposal", {"decision": "interested"},
+            ctx, turn, "run1", 0,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(code, "decision_not_actionable")
+
+    def test_decide_active_proposal_stale_reports_latest(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        turn.active_proposal = {
+            "user_can_decide": True,
+            "allowed_actions": ["interested", "declined"],
+            "proposal_revision": 1,
+        }
+        with patch("services.ayue_agent.shared.write_executors.decide_active_proposal",
+                   return_value={"stale": True, "current_status": "accepted"}):
+            ok, reply, code = execute_write(
+                "match.decide_active_proposal", {"decision": "interested"},
+                ctx, turn, "run1", 0,
+                payload={
+                    "match_id": "match-1", "expected_status": "draft",
+                    "proposal_revision": 1, "proposal_namespace": "relationship_match",
+                },
+            )
+        self.assertTrue(ok)
+        self.assertIn("互相接受", reply)
+        self.assertEqual(code, "stale_revision")
+
+    def test_cancel_waiting_other_proposal_uses_bound_authority(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        turn.active_proposal = {
+            "user_can_decide": True,
+            "allowed_actions": ["cancelled"],
+            "proposal_revision": 3,
+        }
+        with patch("services.ayue_agent.shared.write_executors.decide_active_proposal",
+                   return_value={"status": "success"}) as decide:
+            ok, reply, code = execute_write(
+                "match.decide_active_proposal", {"decision": "cancelled"},
+                ctx, turn, "run1", 0,
+                payload={
+                    "match_id": "match-3", "expected_status": "pending",
+                    "proposal_revision": 3, "proposal_namespace": "relationship_match",
+                },
+            )
+        self.assertTrue(ok)
+        self.assertIn("撤回", reply)
+        self.assertEqual(decide.call_args.kwargs["expected_match_id"], "match-3")
+
+    def test_cancel_search_uses_confirmation_bound_job(self):
+        ctx = self._ctx()
+        with patch("services.ayue_agent.shared.write_executors.cancel_match_search",
+                   return_value={"status": "cancelled"}) as cancel, \
+             patch("services.ayue_agent.shared.write_executors.TOOL_CALLS.find_one_and_update",
+                   return_value=None), \
+             patch("services.ayue_agent.shared.write_executors.TOOL_CALLS.update_one"):
+            ok, reply, code = execute_write(
+                "match.cancel_search", {}, ctx, MagicMock(), "run1", 0,
+                confirmation_id="cancel-1", payload={"match_search_job_id": "job-1"},
+            )
+        self.assertTrue(ok)
+        self.assertIn("已取消", reply)
+        self.assertEqual(cancel.call_args.kwargs["expected_job_id"], "job-1")
+
+    def test_decide_active_event_invitation_uses_server_bound_revision(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        turn.active_event_invitation = {
+            "user_can_decide": True, "proposal_revision": 7, "event_title": "港邊市集",
+        }
+        with patch("services.ayue_agent.shared.write_executors.decide_active_event_invitation",
+                   return_value={"status": "success"}) as decide:
+            ok, reply, code = execute_write(
+                "match.decide_active_event_invitation", {"decision": "interested"},
+                ctx, turn, "run1", 0, payload={"proposal_revision": 7},
+            )
+        self.assertTrue(ok)
+        self.assertIsNone(code)
+        self.assertEqual(decide.call_args.kwargs["user_id"], "owner")
+        self.assertEqual(decide.call_args.kwargs["expected_revision"], 7)
+
+    def test_decide_active_event_invitation_rejects_stale_payload_before_write(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        turn.active_event_invitation = {"user_can_decide": True, "proposal_revision": 8}
+        with patch("services.ayue_agent.shared.write_executors.decide_active_event_invitation") as decide:
+            ok, reply, code = execute_write(
+                "match.decide_active_event_invitation", {"decision": "declined"},
+                ctx, turn, "run1", 0, payload={"proposal_revision": 7},
+            )
+        self.assertFalse(ok)
+        self.assertEqual(code, "event_decision_not_actionable")
+        decide.assert_not_called()
+
+    def test_start_assessment_unknown_kind(self):
+        ctx = self._ctx()
+        ok, reply, code = execute_write(
+            "profile.start_assessment", {"kind": "weird"}, ctx, MagicMock(), "run1", 0,
+            confirmation_id="c1",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(code, "assessment_unknown_kind")
+
+    def test_start_assessment_ok(self):
+        ctx = self._ctx()
+        with patch("services.ayue_agent.shared.write_executors.start_assessment_session",
+                   return_value={"status": "started", "reply": "我們開始吧"}) as start, \
+             patch("services.ayue_agent.shared.write_executors._assessment_opening_question",
+                   return_value="你遇到空檔時通常怎麼安排？"), \
+             patch("services.ayue_agent.shared.write_executors.TOOL_CALLS.find_one_and_update",
+                   return_value=None), \
+             patch("services.ayue_agent.shared.write_executors.TOOL_CALLS.update_one"):
+            ok, reply, code = execute_write(
+                "profile.start_assessment", {"kind": "basic"}, ctx, MagicMock(), "run1", 0,
+                confirmation_id="c1",
+            )
+        self.assertTrue(ok)
+        self.assertEqual(start.call_args.args[1], "big_five")
+        self.assertEqual(
+            start.call_args.kwargs["opening_question"],
+            "你遇到空檔時通常怎麼安排？",
+        )
+
+    def test_start_assessment_binds_the_confirmed_room(self):
+        ctx = self._ctx()
+        with patch("services.ayue_agent.shared.write_executors.start_assessment_session",
+                   return_value={"status": "started", "reply": "我們開始吧"}) as start, \
+             patch("services.ayue_agent.shared.write_executors._assessment_opening_question",
+                   return_value="哪種生活選擇會讓你最有感覺？"), \
+             patch("services.ayue_agent.shared.write_executors.TOOL_CALLS.find_one_and_update",
+                   return_value=None), \
+             patch("services.ayue_agent.shared.write_executors.TOOL_CALLS.update_one"):
+            ok, _reply, _code = execute_write(
+                "profile.start_assessment", {"kind": "deep"}, ctx, MagicMock(), "run1", 0,
+                confirmation_id="c-room",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(start.call_args.kwargs["room_id"], "room")
+
+    def test_start_assessment_does_not_open_session_when_question_generation_fails(self):
+        ctx = self._ctx()
+        with patch(
+            "services.ayue_agent.shared.write_executors._assessment_opening_question",
+            return_value="",
+        ), patch(
+            "services.ayue_agent.shared.write_executors.start_assessment_session",
+        ) as start, patch(
+            "services.ayue_agent.shared.write_executors.TOOL_CALLS.find_one_and_update",
+            return_value=None,
+        ), patch("services.ayue_agent.shared.write_executors.TOOL_CALLS.update_one"):
+            ok, _reply, code = execute_write(
+                "profile.start_assessment", {"kind": "basic"}, ctx,
+                MagicMock(), "run1", 0, confirmation_id="c-failed",
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(code, "assessment_opening_generation_failed")
+        start.assert_not_called()
+
+    def test_start_assessment_uses_confirmation_id_from_manager_payload(self):
+        ctx = self._ctx()
+        with patch("services.ayue_agent.shared.write_executors.start_assessment_session",
+                   return_value={"status": "started", "reply": "第一題來囉"}) as start, \
+             patch("services.ayue_agent.shared.write_executors._assessment_opening_question",
+                   return_value="你遇到新鮮事時通常會怎麼反應？"), \
+             patch("services.ayue_agent.shared.write_executors.TOOL_CALLS.find_one_and_update",
+                   return_value=None) as claim, \
+             patch("services.ayue_agent.shared.write_executors.TOOL_CALLS.update_one"):
+            ok, reply, code = execute_write(
+                "profile.start_assessment", {"kind": "basic"}, ctx, MagicMock(), "confirm-run", 0,
+                payload={"_confirmation_id": "assessment-confirmation-42"},
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(reply, "第一題來囉")
+        expected_key = "confirmation:assessment-confirmation-42:big_five"
+        self.assertEqual(claim.call_args.args[0]["idempotency_key"], expected_key)
+        self.assertEqual(start.call_args.kwargs["idempotency_key"], expected_key)
+
+    def test_calendar_legacy_tool_fails_closed_without_domain_write(self):
+        ctx = self._ctx()
+        with patch("services.calendar_service.create_personal_event") as create, \
+             patch("services.calendar_service.update_personal_event") as update, \
+             patch("services.calendar_service.cancel_event") as cancel:
+            ok, reply, code = execute_write(
+                "calendar.cancel_my_event", {"event_hint": "出國"}, ctx, MagicMock(), "run1", 0,
+                confirmation_id="legacy-c1",
+                payload={"batch": [{"tool": "calendar.cancel_my_event", "data": {}}]},
+            )
+        self.assertFalse(ok)
+        self.assertEqual(code, "calendar_legacy_tool_disabled")
+        create.assert_not_called()
+        update.assert_not_called()
+        cancel.assert_not_called()
+
+    def test_unknown_write_tool_fails(self):
+        ctx = self._ctx()
+        ok, reply, code = execute_write("nope.tool", {}, ctx, MagicMock(), "run1", 0)
+        self.assertFalse(ok)
+        self.assertEqual(code, "write_executor_not_registered")
+
+
+class WritePreflightTests(unittest.TestCase):
+    def _ctx(self):
+        return AgentTurnContext(user_id="owner", room_id="room", message="確認")
+
+    def test_start_search_not_ready_returns_error_reply(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        with patch("services.ayue_agent.shared.write_executors.assess_match_opportunity") as assess:
+            assess.return_value = MagicMock(state="not_ready", reason_codes=("profile_basis_insufficient",),
+                                            missing_basis=("preferences",))
+            payload, reply = prepare_write_confirmation("match.start_search", {}, ctx, turn)
+        self.assertIsNone(payload)
+        self.assertIn("多了解你的方向", reply)
+
+    def test_start_search_ready_returns_payload(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        with patch("services.ayue_agent.shared.write_executors.assess_match_opportunity") as assess:
+            assess.return_value = MagicMock(state="ready", reason_codes=())
+            payload, reply = prepare_write_confirmation("match.start_search", {}, ctx, turn)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["action"], "match.start_search")
+        self.assertIn("開始", reply)
+
+    def test_topic_search_preview_sets_honest_skill_expectation(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="幫我找一個也會衝浪的人")
+        turn = MagicMock()
+        with patch("services.ayue_agent.shared.write_executors.assess_match_opportunity") as assess:
+            assess.return_value = MagicMock(state="ready", reason_codes=())
+            payload, reply = prepare_write_confirmation("match.start_search", {}, ctx, turn)
+        self.assertEqual(payload["data"]["search_context"]["invitation_topic"], "衝浪")
+        self.assertNotIn("delivery_mode", payload["data"])
+        self.assertIn("先給你看人選與推薦說明", reply)
+        self.assertIn("不會先假設對方也喜歡", reply)
+        self.assertNotIn("可能對衝浪有興趣", reply)
+        self.assertIn("不一定已經會衝浪", reply)
+        self.assertIn("現在只開始搜尋", reply)
+
+    def test_activity_search_does_not_add_a_skill_warning(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="幫我找人一起滑雪")
+        turn = MagicMock()
+        with patch("services.ayue_agent.shared.write_executors.assess_match_opportunity") as assess:
+            assess.return_value = MagicMock(state="ready", reason_codes=())
+            payload, reply = prepare_write_confirmation("match.start_search", {}, ctx, turn)
+        self.assertEqual(payload["data"]["search_context"]["invitation_topic"], "滑雪")
+        self.assertNotIn("delivery_mode", payload["data"])
+        self.assertIn("你看完再決定是否送出邀請", reply)
+        self.assertNotIn("不一定已經會", reply)
+
+    def test_match_decision_preview_binds_proposal_revision(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        turn.active_proposal = {
+            "user_can_decide": True,
+            "allowed_actions": ["interested", "declined"],
+            "proposal_revision": 4,
+            "counterparty": "小安",
+        }
+        turn._active_proposal_authority = {
+            "match_id": "match-4",
+            "expected_status": "draft",
+            "proposal_revision": 4,
+            "proposal_namespace": "relationship_match",
+        }
+        payload, reply = prepare_write_confirmation(
+            "match.decide_active_proposal",
+            {"decision": "interested"},
+            ctx,
+            turn,
+        )
+        self.assertEqual(payload["data"]["proposal_revision"], 4)
+        self.assertEqual(payload["data"]["match_id"], "match-4")
+        self.assertIn("小安", reply)
+
+    def test_cancel_search_preview_binds_active_job(self):
+        ctx = self._ctx()
+        with patch("services.ayue_agent.shared.write_executors.active_match_search_job",
+                   return_value={"job_id": "job-7", "status": "running"}):
+            payload, reply = prepare_write_confirmation(
+                "match.cancel_search", {}, ctx, MagicMock(),
+            )
+        self.assertEqual(payload["data"]["match_search_job_id"], "job-7")
+        self.assertIn("取消", reply)
+
+    def test_event_decision_preview_binds_title_and_revision(self):
+        ctx = self._ctx()
+        turn = MagicMock()
+        turn.active_event_invitation = {
+            "user_can_decide": True,
+            "proposal_revision": 5,
+            "event_title": "港邊市集",
+        }
+        payload, reply = prepare_write_confirmation(
+            "match.decide_active_event_invitation",
+            {"decision": "interested"}, ctx, turn,
+        )
+        self.assertEqual(payload["data"]["proposal_revision"], 5)
+        self.assertIn("港邊市集", reply)
+
+    def test_assessment_unknown_kind_returns_error(self):
+        ctx = self._ctx()
+        payload, reply = prepare_write_confirmation(
+            "profile.start_assessment", {"kind": "weird"}, ctx, MagicMock(),
+        )
+        self.assertIsNone(payload)
+        self.assertIn("探索類型", reply)
+
+
+if __name__ == "__main__":
+    unittest.main()

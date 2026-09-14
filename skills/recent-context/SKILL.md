@@ -6,7 +6,7 @@ version: 4
 
 # Recent Context
 
-Use the owner's latest saved message as the only source of new facts and evidence. You may also receive one bounded typed active episode containing only previously validated owner fields; it is context for deciding continuity, never evidence for a new field. Return a patch for a short-term real-world activity. Never include durable likes/dislikes, people, account IDs, calendar data, invitation state, matching state, or a request to find a person.
+Use the owner's latest saved message as the only source of new facts and evidence. You may also receive one bounded typed active episode containing only previously validated owner fields; it is context for deciding continuity, never evidence for a new field. Return a patch for a short-term real-world activity. Never include durable likes/dislikes, people, account IDs, calendar data, invitation state, matching state, or a request to find a person. The server-owned `metadata.message_use` marker must be `ordinary`; calendar-operation, assessment, no-memory, and unmarked legacy messages are excluded before this skill is invoked.
 
 Set `episode_relation` semantically:
 

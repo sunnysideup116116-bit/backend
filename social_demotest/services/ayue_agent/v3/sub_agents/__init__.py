@@ -1,1 +1,0 @@
-"""Sub-agent modules: each is a thin LLM + function-calling wrapper over its tool set."""

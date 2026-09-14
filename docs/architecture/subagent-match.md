@@ -1,131 +1,61 @@
-# Sub-agent：match（配對子代理）
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Sub-agent：match（配對搜尋與牽線收件匣）
 
-> 本文說明使用者與阿月談「配對／牽線／對象」時，背後怎麼運作：match sub-agent 能做什麼、呼叫哪些 function、寫入如何確認與執行、媒婆如何介入。
+> 對照後端 e06f9a1、前端 7b86365。現行 owner 是 `v3/match_runtime.py`，由 Scheduler 的 RuntimeRegistration dispatch；不是每次重新呼叫一個 LLM 來決定提案狀態。
 
-## 1. 角色與能做什麼
+## 1. 能力與邊界
 
-**系統角色**（`v3/sub_agents/match_agent.py` 的 `_SYSTEM`）：
+- Match 查本人搜尋、牽線收件匣狀態與受限的單一對象摘要；收件匣可同時有一般、指定主題及 Event 卡。
+- accepted contacts 的清單、數量、比較、活動同行推薦由 Relationship 擁有，不以「配對」關鍵字決定路由。
+- 開始／取消搜尋先確認；接受、婉拒、撤回提案在「阿月牽線」卡片操作。聊天中的此類要求只引導到 Hub，不新建決策 confirmation。
+- 本人發起且仍待本人決定的 draft，以及 queued/running 搜尋會阻擋新搜尋；等待對方或收到別人的邀請不會一律阻擋。
+- 每個 job 最多產生一個人選，不等於帳號最多只有一張提案。一般和 Event 的名額政策分開；既有關係不因 Event 邀請重建。
 
-> 你是公開阿月的配對子代理：負責查詢配對狀態、對方摘要與發起搜尋。
+## 2. 工具與語意契約
 
-能力：
-
-- **查詢**本人的唯一單一 proposal／配對狀態（成功、接受、回覆、進度）。
-- **讀取**目前有效或已接受配對的**單一公開**對象摘要（非 accepted 時自動匿名化：身份、共同點、摘要都不公開）。
-- **發起搜尋**（`match.start_search`，需確認）。
-- **對唯一可操作提案**表達有興趣或婉拒（`match.decide_active_proposal`，revision CAS）。
-
-**不負責**：不讀對方私人資料；不用聊天紀錄猜配對結果（一律讀 canonical observation）；不列出或計算 accepted contacts aggregate，不把「等待回覆」寫成近期情境。「我目前配對到哪些人／現在有配到誰／總共幾位」是 accepted-contact aggregate，必須交給 Relationship，不得因句子含「目前」或「配對」而交給 Match。
-
-## 2. 可呼叫的工具（4 個）
-
-| 工具 | risk | 用途 |
+| 工具 | 風險 | 現行用途 |
 | --- | --- | --- |
-| `match.get_status` | READ | 讀唯一正式配對狀態 snapshot |
-| `match.get_counterparty_summary` | READ | 讀目前有效／已接受配對的單一公開對象摘要；不回答 accepted contacts aggregate |
-| `match.start_search` | WRITE | 開始找新對象（先建立 confirmation） |
-| `match.decide_active_proposal` | WRITE | 對唯一可操作提案表達有興趣／婉拒（runtime 注入 revision） |
+| `match.get_status` | READ | canonical 多卡片／搜尋 snapshot；不是 accepted contacts aggregate |
+| `match.get_counterparty_summary` | READ | 受限公開摘要；不從聊天猜身份，不列整份聯絡人 |
+| `match.start_search` | WRITE | 只準備搜尋確認，確認後建立 durable job |
+| `match.cancel_search` | WRITE | 只取消本人 queued/running job，先確認，不撤回既有邀請 |
 
-### 2.1 `match.get_status`（READ，無參數）
+Registry 中的 `match.decide_active_proposal`／`match.decide_active_event_invitation` 是保留的相容 executor 定義，不是目前 Match 的聊天可見工具。不能據此恢復聊天決策路徑。
 
-回傳（`_MatchStatusOutput`）：`state`、`scope`、`is_terminal`、`chat_opened`、`counterparty`（公開名稱）、`revision`、`updated_at`、`reason_code`。
+Planner 在 Match task 帶 `match_intent`。搜尋另帶 `match_search_request`：
 
-資料來自 `match_state_service.get_match_status_snapshot`（canonical read model），不是聊天紀錄。
+| 欄位 | 意義 |
+| --- | --- |
+| `kind` | `general` 或 `activity`；「適合認識／合得來」是一般找人條件，不是活動 |
+| `topic` | 本句具體活動原文；runtime 驗證，不從舊房間借用 |
+| `invitation_evidence` | 只有本句明確要求找到就代送邀請才填原文，否則空 |
 
-範例（「他回覆了沒？」）：
+這不是 model 可提供的 IDs／revision 或直接寫入權限。一般與活動搜尋預設先看提案；只有活動搜尋的有效代送意圖才在可見確認中明示「開始找並送出邀請」。topic 存在不等於授權。語意未提供時 runtime 降為一般搜尋，activity 未通過原文驗證時先澄清。
 
-```json
-{"tool_name": "match.get_status", "arguments": {}}
-```
+## 3. 搜尋與呈現
 
-### 2.2 `match.get_counterparty_summary`（READ，無參數）
+1. Planner → Match runtime → Guard → `prepare_write_confirmation`；readiness 不足先追問。
+2. 保存 room-scoped preview 與 choice，使用者確認後才呼叫 `_start_search`。
+3. `match_search_jobs` 以 job id／lease／context revision 執行；狀態和入口回到原 room，Hub 是提案操作頁。
+4. 向量檢索先取 100 筆（numCandidates=500），套用封鎖、群組、pair history 等排除後，最多 20 人進資格檢查，再有界分批交 9001 排序。這是較寬檢索窗，不放寬硬門檻，也不保證一定有結果。
+5. 預設產生 draft 給發起者先看。明確授權的 invite_on_match 才由既有 job 經 canonical accept CAS 轉 pending，通知對方。
+6. UI 顯示 viewer-bound 推薦理由與公開暱稱。Topic 文案保留公開性格說明或明示缺少共同活動依據，不把本人願望寫成對方共同興趣。
+7. 技術失敗使用具體 failure code；真正無候選可回 no_candidates。Google 額度／Graph／模型失敗不可冒充成功配對。
 
-回傳（`_CounterpartySummaryOutput`）：`found`、`match_state`、`display_name`、`safe_summary`、`recent_context`、`initial_interest`、`personality_summary`、`distinctive_tags`(≤4)、`verified_common_ground`、`recommendation_tier`、`chat_opened`。
+## 4. 卡片決策與婉拒
 
-隱私規則（`tools.py:_counterparty_summary`）：只有 `accepted` 才揭露 `display_name` 與完整摘要；`draft/pending` 期間用 `anonymize_counterparty_payload` 匿名化。配對機會未 ready 時 `missing_basis_question` 引導使用者先補資料。
+Hub 發送 `POST /api/match/decision`，綁定 match ID、namespace、畫面上的 status/revision；9001 或模型不能自行選擇新 authority。
 
-### 2.3 `match.start_search`（WRITE）
+- lifecycle：draft → pending → accepted；declined／expired 為終態。
+- 第一方接受是等待對方；雙方接受後才可使用授權聊天室。
+- 「先不用」開啟原因視窗：先不拒絕不送 request；只婉拒傳空 reasons；記錄原因並婉拒只傳勾選的原始 options。
+- 只有 opt-in 的 explicit_reasons 交既有 feedback／memory facade 形成本人 AVOIDS。沒有可用選項時仍可不記錄，不能捏造原因。
+- stale 只同步狀態、不覆寫終態；effects 使用既有防重複機制。
+- 歷史 choice projection 讀取 delivery_mode，避免「搜尋並邀請」重新進房後變成「開始搜尋」。
 
-Planner 參數：無。**不能由第一次 Planner decision 直接執行**：
+## 5. Opportunity 與 Event
 
-```text
-proposal → Guard(write_requires_confirmation) → prepare_write_confirmation
-  → assess_match_opportunity(profile, user_id, explicit_search=True)
-      - not_ready → 追問 profile basis（「我想先多了解你的方向…」）
-      - active_match_blocked → 「你目前還有一段配對正在進行」
-      - ready → 建立 pending confirmation（TTL 900s）
-  → Synthesizer:「我會依你的近況、偏好和個性挑選，不會隨機配對。要我現在開始找就回覆『確認』…」
-確認後 execute_write → _start_search → match_action_service.start_match_search
-  → enqueue_match_search（job 佇列, idempotency_key=confirmation:{id}）
-```
+`opportunity.social_opening` 是經原文 evidence／confidence 驗證的柔性提議，不自行開始搜尋或送出邀請。明確找新人的要求走 Match task。每週 Event discovery／掃描／離線投遞是獨立 background domain，詳見 [Event 指南](../EVENT_DRIVEN_MATCHMAKER_GUIDE.md)。
 
-搜尋是**非同步 job**：`match_search_worker` claim job → 資格檢查與向量篩選 → 呼叫媒婆 `POST http://127.0.0.1:9001/api/match` → 產生**唯一 draft proposal** → mediator event「我翻到一位可以介紹給你的人…」。約 1–3 分鐘，使用者可繼續聊天。
+## 6. 驗證
 
-### 2.4 `match.decide_active_proposal`（WRITE）
-
-Planner 參數（`_ProposalDecisionArguments`）：
-
-| 欄位 | 型別 | 說明 |
-| --- | --- | --- |
-| `decision` | `"interested"` \| `"declined"` | 有興趣／婉拒 |
-
-**模型不填 match_id 或 revision**；executor 從 `turn.active_proposal` 注入（`_decide_active_proposal`）：
-
-```text
-proposal → Guard(write_requires_confirmation) → prepare_write_confirmation
-  → preflight 只驗證 user_can_decide + decision 合法 → 建立 pending confirmation
-確認後 execute_write → _decide_active_proposal
-  → decide_active_proposal(user_id, decision, expected_revision=proposal_revision, idempotency_key)
-  → match_action_service → apply_match_decision（CAS: status + proposal_revision）
-      - stale → 回報最新狀態（accepted/declined/pending/draft 各對應文案），不覆寫
-      - 成功 → apply_transition_effects（通知、開聊天室、GIF 慶祝、婉拒 feedback→媒婆）
-```
-
-## 3. 呼叫流程（背後怎麼運作）
-
-```text
-使用者: 「他回覆了沒？」
-  │
-  ▼ Planner → match task（depends_on: []）
-  ▼ slice_for_agent("match"): message + recent_messages + active_proposal + latest_match_outcome + clock
-  ▼ match_agent.run → LLM function calling
-  ▼ Guard → READ 工具通過
-  ▼ execute_tool → _match_status → get_match_status_snapshot
-  ▼ Synthesizer: 「有，對方已經接受了，聊天室也開啟了。」
-```
-
-使用者主動想找人（「可以幫我找對象嗎？」）則走：
-
-```text
-Planner → match task → LLM 提 match.start_search（WRITE）
-  → Guard: write_requires_confirmation → preflight（opportunity 檢查）
-  → confirmation + preview → 使用者「確認」
-  → job 佇列 → worker → 媒婆 9001 /api/match → draft proposal → mediator event
-  → 阿月之後再以 status 工具讀回並回報
-```
-
-## 4. 主動牽線（opportunity）路徑
-
-不經 match sub-agent 的另一條路：Planner 在 `decompose_tasks` 輸出 `opportunity: {signal: "social_opening", evidence_span, confidence}`。Scheduler 驗證（evidence_span 是原句連續子字串且 confidence ≥0.8）後：
-
-- `assess_match_opportunity` 為 `ready` → 直接建立 `match.start_search` confirmation（`source=opportunity_guidance`），Synthesizer 以「你提到『…』。感覺這件事有人一起也不錯…」邀請。
-- `not_ready` → 引導補 profile basis。
-
-## 5. 狀態真相與隱私
-
-- Canonical lifecycle：`draft → pending → accepted`；`declined` 為終態。`accepted` 是已建立的聯絡關係，不是進行中的提案；只有 live `draft/pending` 阻擋新 active proposal。
-- 「對方是誰」等問題一律從 canonical tool observation 讀，禁止從聊天紀錄猜。
-- 使用者面向文字用「對象／人選／對方／旅伴」，禁止稱人為「物件」。
-- 配對結果、是否接受等問題由 `match.get_status`／`get_counterparty_summary` 的 typed projection 回答，不暴露內部 ID。
-
-## 6. 端到端範例
-
-**使用者**：「有人可以介紹給我嗎？」
-
-1. Planner：match task + synthesizer。
-2. match agent 提 `match.start_search` → Guard 攔截 → preflight：profile 已 ready → confirmation。
-3. 阿月：「我會依你的近況、偏好和個性挑選，不會隨機配對。要我現在開始找就回覆『確認』；也可以先補充條件。」
-4. 使用者：「確認」→ `_start_search` → job 入佇列 → 阿月：「好，我開始幫你找，通常約需要 1–3 分鐘。」
-5. Worker：候選資格篩選 → 媒婆選出 1 位 → draft proposal → mediator event 通知使用者。
-6. 使用者：「他是誰？」→ match agent 提 `match.get_counterparty_summary` → 回覆公開摘要（draft 期間匿名化）。
-7. 使用者：「我有興趣」→ `match.decide_active_proposal(decision=interested)` → confirmation → CAS 轉 pending → 對方收到通知。
+`test_match_search_consent.py`、`test_match_vector_retrieval_window.py`、`test_match_invite_on_match.py`、`test_match_restart_flow.py`、`test_onboarding_decline_feedback.py`；Flutter `match_hub_decline_test.dart`、`match_hub_inbox_test.dart`。最新人工驗收和已知限制見 [修正紀錄](../MATCH_SEARCH_CONSENT_FIX_2026-09-08.md)。

@@ -1,4 +1,4 @@
-# 01. 專案總覽
+> **Pi 正式化註記**：本文中的 URL、資料型別與 domain API 仍可適用；凡提到公開 V3 Planner、Scheduler、subagent 或 DAG 的段落均已退役，現行 runtime 見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# 01. 專案總覽
 
 > 本篇為工程師 onboarding 的第一站：說明這個 repo 是什麼、有哪兩個服務、各自負責什麼，以及公開阿月與阿月悄悄話的關係。詳細的 Python 模組拆解、runtime 生命週期與 sub-agent 流程請見本目錄其他文件。
 
@@ -30,7 +30,7 @@ Context Builder
 
 | 服務 | 目錄 | 執行 | 責任 |
 | --- | --- | --- | --- |
-| 主服務（social_demotest） | `social_demotest/` | FastAPI，port 8000 | 產品後端：使用者、聊天、配對狀態、行事曆、地點、記憶、公開阿月 V3 runtime、Web Demo |
+| 主服務（social） | `social/` | FastAPI，port 8000 | 產品後端：使用者、聊天、配對狀態、行事曆、地點、記憶、公開阿月 V3 runtime、Web Demo |
 | 媒婆服務（matchmaker_agent） | `matchmaker_agent/` | FastAPI，port 9001 | 候選人排序（LLM 評估）、Neo4j 圖記憶讀寫、feedback 反思、全域法則歸納 |
 
 兩者透過 HTTP 互動：
@@ -45,17 +45,16 @@ Neo4j 只在需要完整媒婆記憶功能時設定；沒有 Neo4j 時媒婆仍�
 
 | 路徑 | 責任 |
 | --- | --- |
-| `social_demotest/main.py` | FastAPI app、routers 註冊、startup 時啟動 background workers |
-| `social_demotest/frontend.html` | 現行 Web UI（單檔 HTML + JS），消費 NDJSON stream 與卡片 API |
-| `social_demotest/routers/` | HTTP adapters：`chat.py` 是 `/api` aggregate，leaf routers 各管一類端點 |
-| `social_demotest/services/` | Domain services：配對、行事曆、記憶、profile、媒人、悄悄話等 |
-| `social_demotest/services/ayue_agent/v3/` | 公開阿月 V3 runtime：scheduler、planner、runtime registry、domain runtimes、guard、sub-agents、synthesizer、confirmation、write executors |
-| `social_demotest/services/ayue_agent/` | V3 之外的公開阿月元件：context builder、tool registry、tools facade、web/maps clients、proactive care、private runtimes |
-| `social_demotest/tests/` | 離線 deterministic contract／trajectory／state／privacy tests |
+| `social/main.py` | FastAPI app、routers 註冊、startup 時啟動 background workers |
+| `social/frontend.html` | 現行 Web UI（單檔 HTML + JS），消費 NDJSON stream 與卡片 API |
+| `social/routers/` | HTTP adapters：`chat.py` 是 `/api` aggregate，leaf routers 各管一類端點 |
+| `social/services/` | Domain services：配對、行事曆、記憶、profile、媒人、悄悄話等 |
+| `social/services/ayue_agent/v3/` | 公開阿月 V3 runtime：scheduler、planner、runtime registry、domain runtimes、guard、sub-agents、synthesizer、confirmation、write executors |
+| `social/services/ayue_agent/` | V3 之外的公開阿月元件：context builder、tool registry、tools facade、web/maps clients、proactive care、private runtimes |
+| `social/tests/` | 離線 deterministic contract／trajectory／state／privacy tests |
 | `matchmaker_agent/` | 媒婆服務：`agent_api.py`（FastAPI adapters）、`matchmaker.py`（LLM 評估 agent） |
 | `docs/` | 設計與變更文件；本目錄 `docs/architecture/` 是架構導覽 |
 | `skills/` | 近期情境、記憶、性格探索的 versioned prompt policy |
-| `start_ayue.ps1` / `start_ayue.cmd` | Windows 啟動與 health check |
 
 ## 4. 公開阿月 vs 阿月悄悄話
 
@@ -77,7 +76,7 @@ Neo4j 只在需要完整媒婆記憶功能時設定；沒有 Neo4j 時媒婆仍�
 2. `routers/public_chat.py` 保存使用者訊息、組 `AgentTurnContext`，呼叫 `run_public_agent_turn_v3`。
 3. Scheduler 依序處理：assessment session → confirmation → Planner（拆 DAG）→ 依 `RuntimeRegistration` 拓撲分層執行 sub-agents → proposal 經 Guard/工具執行，specialist runtime 回 completed typed result → Synthesizer 產出最終回覆。
 4. 回覆保存為唯一一筆 assistant message；assessment 回答不會進 profile 記憶 pipeline。
-5. 背景：`profile_skills.py` 以保存的 owner 原始訊息做近期情境／記憶 extraction；`proactive_scheduler.py` 依使用者的「AI 關心頻率」定期產生主動關心。
+5. 背景：`profile_skills.py` 以保存的 owner 原始訊息做近期情境／記憶 extraction，並可提出最多三筆 `proactive_followups`；`proactive_scheduler.py` 依 server-owned cadence、quiet/busy 與 consent gate 產生原聊天室的自然追問。
 
 完整流程與每層職責見 `03-v3-runtime-lifecycle.md`。
 

@@ -1,0 +1,8 @@
+{
+  "name": "ayue-pi-experiment",
+  "private": true,
+  "type": "module",
+  "scripts": { "check": "node bridge.mjs --check", "test": "node bridge.test.mjs" },
+  "dependencies": { "@earendil-works/pi-agent-core": "0.85.1", "@earendil-works/pi-ai": "0.85.1" },
+  "engines": { "node": ">=22.19.0" }
+}

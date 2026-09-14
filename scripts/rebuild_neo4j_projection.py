@@ -120,7 +120,7 @@ def main() -> None:
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
-    load_dotenv(ROOT / "social_demotest" / ".env", override=False)
+    load_dotenv(ROOT / "social" / ".env", override=False)
     mongo = MongoClient(os.environ["MONGO_URI"], serverSelectionTimeoutMS=8_000)
     mongo.admin.command("ping")
     db = mongo["profiling_db"]

@@ -23,7 +23,7 @@ def normalized_timestamp(value: object, fallback: float) -> float:
 
 
 def main() -> None:
-    load_dotenv(ROOT / "social_demotest" / ".env", override=False)
+    load_dotenv(ROOT / "social" / ".env", override=False)
     client = MongoClient(os.environ["MONGO_URI"], serverSelectionTimeoutMS=8_000)
     client.admin.command("ping")
     db = client["profiling_db"]

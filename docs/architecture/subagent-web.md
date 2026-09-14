@@ -1,4 +1,4 @@
-# Web Sub-agent
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Web Sub-agent
 
 > 現行 owner：`services/ayue_agent/v3/sub_agents/web_agent.py` 保存 Web decision contract；`v3/web_runtime.py` 保存 bounded research loop；`v3/guarded_execution.py` 提供最小 Guard→URL binding→executor arguments→`execute_tool` adapter。`web_tools.py` 只負責 Tavily adapter，不負責研究策略。
 
@@ -21,6 +21,10 @@ Web task 的 `task_brief` 必須保留使用者真正要找的 proposition、地
 | `strict_verification` | 明確要求官方／確認，或醫療、法律、金融、安全風險問題 | 必須有直接證據；不足時明確回 partial／insufficient |
 
 省略 policy 時 typed contract 預設為 `casual_discovery`。這是 Planner 的語意判斷，不是 keyword router。
+
+Web task 可帶 `web_mode`：`public_lookup` 不接受 Places 資料依賴；`place_verification` 只查已綁定候選；`place_hours_fallback` 在 Places 沒有完整星期營業資訊時補查同一候選。舊 task 未帶 mode 時，runtime 只依是否存在 Places dependency 推導 `public_lookup` 或 `place_verification`。
+
+Tavily adapter 會保留可診斷的失敗類別：未設定、認證、限流、timeout、network、4xx request、5xx provider 與 invalid response 不再全部折疊成 `web_unavailable`。Public fallback 仍只顯示一段安全的 unavailable 說明，不把內部錯誤碼或重複 limitation 洩漏給使用者。
 
 ## 3. Bounded observation loop
 
@@ -66,6 +70,8 @@ Action legality only follows runtime-owned state：
 
 每次 search query 都由 server 綁回 Planner 的 `answer_target`。若 task 正在驗證 Places 候選，還會綁定 server-owned `place_candidate_*` reference；模型不能靠名稱猜測候選身分。
 
+一般活動探索只要直接來源提供活動名稱與場地即可保留 `partial`；缺少日期／時間時逐項標示待確認，且不為了達到要求數量而補出無來源活動。年份不明、已過期或只有背景介紹的資料不得描述成目前正在舉辦。
+
 `project_web_observations()` 對 search rows、per-page extract 與總 research context 分別設限。達到 `MAX_WEB_PROMPT_SEARCH_RESULTS` 只停止加入更多 search rows，不會停止掃描後續 observations；因此 `search -> refined search -> extract -> finish` 的 late extract 仍會進 finalizer。不得以提高 search cap 取代此行為。
 
 ## 4. 輸出契約
@@ -81,6 +87,8 @@ Web task 最終只輸出 `web_research.v1`：
 
 搜尋結果會先轉成 `web_source_01` 形式的本回合 reference；finish 時由 server 還原成已觀察 URL。未觀察、危險或不符合 subject binding 的 URL 會被丟棄。相鄰背景資料不能被升級成直接回答。
 
+`primary_activity` 是可選投影，不能使有效 findings 整批失敗。Finish normalization 只相容 `name → title`、`location → venue`；標準欄位與別名衝突、必要欄位缺漏或 activity 型別錯誤時捨棄 activity，繼續驗證 findings。日期區間不轉成單日日期。Finding 明確的 `direct=false` 優先；缺少 direct 時才相容 `evidence_class=direct|adjacent`，避免往年背景被全域 direct 訊號升級。
+
 ## 5. 與 Places／行程的 DAG
 
 - 單純查近期資訊：`web → synthesizer`
@@ -95,6 +103,7 @@ Web task 最終只輸出 `web_research.v1`：
 - timeout、rate limit、provider failure 與 evidence 不足使用不同 typed code。
 - 已有安全 observation 但後續模型失敗時保留來源與已驗證 finding，不改寫成空白成功。
 - Raw HTML、第三方 instruction、完整 provider payload、query arguments 與 tool result 不進 trace 或 public stream。
+- Durable trace 只保存 mode、execution/stop 狀態、工具計數、觀察來源數、finding 過濾前後數、丟棄原因與 activity normalization codes；raw model output 仍只允許進 localhost ephemeral debug trace。
 - Web 只使用本人手動保存的粗略地點或當回合明確地點，不推測即時位置或地址。
 
 ## 7. 測試

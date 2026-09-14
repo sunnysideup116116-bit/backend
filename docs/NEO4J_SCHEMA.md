@@ -4,7 +4,7 @@ Event-driven 主動媒人的完整資料流、API、排程、demo 與除錯請�
 [`EVENT_DRIVEN_MATCHMAKER_GUIDE.md`](./EVENT_DRIVEN_MATCHMAKER_GUIDE.md)。
 
 Neo4j is a compact relationship projection. MongoDB remains the source of
-truth for profiles, recent context, workflow state, and preference evidence.
+truth for profiles, recent context, workflow state, and preference evidence. Active durable relations are read from Neo4j for memory/context; Mongo preview is a cache, not a second active-relation authority.
 
 ## Core Nodes
 
@@ -13,6 +13,8 @@ truth for profiles, recent context, workflow state, and preference evidence.
 | `User` | `id` | Stable identity used to connect graph relations. |
 | `Concept` | `key`, `label`, `kind`, `embedding`, `embedded_at` | Reusable semantic concept. The 768-dimensional vector is computed once and reused. |
 | `Event` | `id`, `dedupe_key`, `schema_version`, `status`, `title`, `summary`, `category`, `region`, `venue`, `starts_at`, `ends_at`, `time_precision`, `session_starts`, `session_ends`, `session_precisions`, `session_count`, `expires_at`, `source_url`, `source_name`, `source_tier`, `first_seen_at`, `last_seen_at` | Time-limited, verified public activity. Multi-session times use parallel primitive arrays rather than extra nodes. |
+
+`MemoryObservation {message_id, owner_user_id, created_at}` is the transactional idempotency marker for memory writes; it is committed together with Concept relations. `Concept.kind` classifies activity/interest/partner_trait etc.; PREFERS/AVOIDS encode direction. The App displays prefer/avoid, not kind.
 
 `Agent` and `GlobalRule` are retained as technical learning nodes. They are
 not user profile storage.
@@ -24,7 +26,8 @@ not user profile storage.
 | `(User)-[:PREFERS]->(Concept)` | none | Durable positive preference. |
 | `(User)-[:AVOIDS]->(Concept)` | none | Durable dealbreaker or negative preference. |
 | `(User)-[:HAS_TRAIT]->(Concept)` | none | Public trait projection, when available. |
-| `(User)-[:CURRENTLY_WANTS]->(Concept)` | `expires_at` | Optional short-lived intent projection. |
+| `(User)-[:CURRENTLY_WANTS]->(Concept)` | `expires_at` | Optional short-lived intent projection; not durable preference. |
+| `(User)-[:MEMORY_DISABLED]->(Concept)` | `original_relation`, `original_expires_at`, `disabled_at` | Owner-scoped restore marker; excluded from active reads. |
 | `(Event)-[:HAS_TAG]->(Concept)` | none | Event topic or activity. |
 | `(Event)-[:HAS_VIBE]->(Concept)` | none | Event atmosphere. |
 | `(User)-[:EVENT_RELEVANCE]->(Event)` | bounded semantic evidence, embedding model, update time | Rebuildable candidate-retrieval cache; not a declared user preference. |
@@ -44,10 +47,8 @@ not user profile storage.
 
 ## Rules
 
-1. Neo4j relationships do not duplicate confidence, reason, source, match ID,
-   counters, display labels, or lifecycle flags.
-2. Disabling a preference deletes its graph relationship and marks the Mongo
-   fact inactive. Restoring it recreates the relationship.
+1. Active PREFERS/AVOIDS edges do not duplicate preference evidence metadata. MEMORY_DISABLED stores only the restore metadata listed above; CURRENTLY_WANTS and Event cache edges retain their documented bounded properties.
+2. Disabling removes the active edge, records an owner-scoped MEMORY_DISABLED marker and updates Mongo lifecycle metadata. Restore recreates the original relation (CURRENTLY_WANTS only if unexpired); correction moves only this owner's edge, never edits another owner's shared Concept.
 3. Raw conversation text and the full recent-context document never enter
    Neo4j. A `CURRENTLY_WANTS` edge contains only `expires_at`.
 4. Event signals reuse `Concept`; separate `Tag`, `Vibe`, and `Category` node
@@ -56,25 +57,20 @@ not user profile storage.
 6. Demo reseeding may delete `User` and user-owned memory projections, but it
    must preserve `Event`, `GlobalRule`, `Agent`, and Concepts still linked to
    preserved nodes. A blanket `MATCH (n) DETACH DELETE n` is forbidden.
+7. A match decline creates `AVOIDS` only when the owner explicitly selects
+   `decline_reason_options` and confirms that the reasons may be recorded. The
+   successful match CAS happens first; the bounded `/api/feedback` normalizer
+   then reuses `/api/memory/apply`. Decline without recording, cancellation,
+   empty reasons, stale decisions, and inferred counterparty traits never write
+   preference edges.
 
 ## Event Ingestion V1
 
 - The pilot region is Kaohsiung and the accepted time window is the next 30 days.
 - Port 8000 is the only web-search owner and uses the bounded Tavily adapter.
-- Discovery performs separate bounded searches for exhibitions, markets,
-  music, sports, festivals, and food activities. Every category owns a
-  versioned validation skill plus an official-source query and a broader
-  fallback query. Each query contributes at most two candidates and each
-  category contributes at most four, so an earlier category cannot consume the
-  whole budget. The Kaohsiung twmarket category page remains a pinned market
-  source.
-- Validation is sent to the matchmaker one category at a time. Kimi may take
-  longer on a category without blocking or competing with the next category;
-  a weak response cannot erase valid events from another category.
-- Discovery may extract at most twelve source pages, with a fair maximum of two
-  pages per category. Each extraction request asks for that category's dates,
-  venue, and defining evidence. Content is truncated before validation and is
-  never persisted.
+- Current pilot discovery schedules markets, music, sports, festivals and food; exhibition validation remains available but is not in the default pilot schedule. Each category has its own validation policy and bounded sources: up to 5 metadata candidates per query, 10 per category, with a target/hard inventory cap of 6 per category. See the Event guide for configured supplemental budgets.
+- Validation uses the configured Event model and bounded category batches. Do not assume a fixed provider/model name; a weak response cannot erase valid events from another category.
+- Initial discovery may extract at most 30 pages total and 10 per category, 2 URLs per extraction request; supplemental recovery is separately bounded. Requests ask for category dates, venue and evidence. Raw content is bounded before validation and is not persisted.
 - Extraction queries include the exact active date window. Event category is
   inherited from the server-owned discovery batch and cannot be relabeled by
   model output.
@@ -191,6 +187,10 @@ Apply after reviewing counts:
 
 The apply order is Mongo backup, graph conversion, old relationship removal,
 then verification.
+
+## Owner memory reads
+
+Social refreshes a 12-item Mongo preview lazily (300 seconds), retaining cache on unavailable Graph reads and using revision CAS. Public Context renders at most 8 directional items. `/api/memory/{user_id}` accepts `durable_only` and `query`; query filtering occurs before the limit, with an extra row to compute `truncated`. It is lexical lookup, not new embedding retrieval. Owner-scoped reads do not return disabled or expired intent edges; failure is not proof of absent memory.
 
 ## Recent Intent Projection
 

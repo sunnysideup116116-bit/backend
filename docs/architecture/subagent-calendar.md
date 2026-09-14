@@ -1,4 +1,4 @@
-# Sub-agent：calendar（行事曆子代理）
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Sub-agent：calendar（行事曆子代理）
 
 > 本文說明使用者與阿月談「行程」時，背後怎麼運作：calendar sub-agent 能做什麼、呼叫哪些 function、參數長什麼樣、寫入如何確認、以及端到端範例。
 

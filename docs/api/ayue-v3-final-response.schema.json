@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://service.misproject.us.ci/contracts/ayue-v3-final-response.schema.json",
+  "title": "Ayue V3 Public Final Response",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["reply"],
+  "properties": {
+    "reply": {"type": "string"},
+    "messages": {"type": "array", "maxItems": 3, "items": {"type": "string"}},
+    "is_locked": {"type": "boolean"},
+    "conversation_intent": {"type": ["string", "null"]},
+    "calendar_state_changed": {"type": "boolean"},
+    "mentioned_other_ids": {"type": "array", "items": {"type": "string"}},
+    "context_changed": {"type": "boolean"},
+    "context_confirmation_needed": {"type": "boolean"},
+    "profile_update_pending": {"type": "boolean"},
+    "profile_process_run_key": {"type": ["string", "null"]},
+    "agent_run_id": {"type": ["string", "null"]},
+    "agent_mode": {"type": ["string", "null"]},
+    "agent_version": {"const": "v3"},
+    "match_readiness_state": {"type": ["string", "null"]},
+    "match_guidance_shown": {"type": "boolean"},
+    "assessment_state": {"type": ["string", "null"]},
+    "assessment_kind": {"type": ["string", "null"]},
+    "assessment_revision": {"type": ["integer", "null"], "minimum": 0},
+    "sources": {"type": "array", "maxItems": 5, "items": {"type": "object"}},
+    "place_cards": {"type": "array", "maxItems": 8, "items": {"type": "object"}},
+    "presentation_blocks": {"type": "array", "maxItems": 12, "items": {"type": "object"}},
+    "llm_call_metrics": {"type": "array", "items": {"type": "object"}},
+    "risk": {"type": ["object", "null"]}
+  }
+}

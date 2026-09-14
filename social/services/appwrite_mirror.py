@@ -1,0 +1,139 @@
+"""Fire-and-forget mirror of MongoDB chat messages into Appwrite Realtime.
+
+The social server keeps MongoDB as the source of truth. Every saved message
+is mirrored into the ``dating_db.chat_messages`` collection so the Flutter
+app's Appwrite Realtime subscription can push new messages instead of
+polling.
+
+Mirroring is best-effort: failures are logged and never block the request
+path. The app keeps its polling fallback, so a failed mirror only degrades
+delivery latency, never availability.
+"""
+
+import hashlib
+import json
+import os
+import threading
+import time
+from pathlib import Path
+from urllib.parse import urlparse
+
+import requests
+from dotenv import load_dotenv
+
+SERVER_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(dotenv_path=SERVER_ROOT / ".env", override=False)
+
+def _validated_endpoint(value: str) -> str:
+    endpoint = value.strip().rstrip("/")
+    parsed = urlparse(endpoint)
+    if parsed.scheme == "https":
+        return endpoint
+    if parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        return endpoint
+    raise ValueError("APPWRITE_ENDPOINT must use HTTPS outside loopback development")
+
+
+try:
+    _ENDPOINT = _validated_endpoint(
+        os.getenv("APPWRITE_ENDPOINT") or "https://appwrite.misproject.us.ci/v1"
+    )
+except ValueError:
+    _ENDPOINT = ""
+_PROJECT_ID = os.getenv("APPWRITE_PROJECT_ID") or ""
+_API_KEY = os.getenv("APPWRITE_API_KEY") or ""
+_DB_ID = "dating_db"
+_COLLECTION_ID = "chat_messages"
+
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_VERIFY_TLS = urlparse(_ENDPOINT).hostname not in _LOOPBACK_HOSTS
+
+_ENABLED = bool(_ENDPOINT and _PROJECT_ID and _API_KEY)
+
+_HEADERS = {
+    "X-Appwrite-Project": _PROJECT_ID,
+    "X-Appwrite-Key": _API_KEY,
+    "Content-Type": "application/json",
+}
+
+_METADATA_MAX = 1000
+
+
+def _other_participant(room_id: str, sender_id: str) -> str | None:
+    """Recover the other participant from a sorted ``a_b`` room id."""
+    if not room_id or not sender_id:
+        return None
+    prefix = sender_id + "_"
+    if room_id.startswith(prefix):
+        return room_id[len(prefix):]
+    suffix = "_" + sender_id
+    if room_id.endswith(suffix):
+        return room_id[: -len(suffix)]
+    return None
+
+
+def mirror_message_to_appwrite(msg: dict) -> None:
+    """Best-effort mirror of one saved message into Appwrite Realtime."""
+    if not _ENABLED:
+        return
+    room_id = str(msg.get("room_id") or "")
+    sender_id = str(msg.get("sender_id") or "")
+    message_id = str(msg.get("message_id") or "")
+    if not room_id or not sender_id or not message_id:
+        return
+    document_id = hashlib.sha256(
+        f"mongo-message:{message_id}".encode("utf-8")
+    ).hexdigest()[:32]
+    receiver_id = _other_participant(room_id, sender_id)
+    data = {
+        "room_id": room_id,
+        "sender_id": sender_id,
+        "receiver_id": receiver_id or "",
+        "content": str(msg.get("content") or ""),
+        "message_type": str(msg.get("message_type") or "text"),
+        "timestamp": int(msg.get("timestamp") or time.time()),
+        "is_blocked": bool(msg.get("is_blocked", False)),
+        "delivery_status": str(msg.get("delivery_status") or "delivered"),
+        "risk_level": str(msg.get("risk_level") or "safe"),
+    }
+    metadata = msg.get("metadata")
+    if metadata:
+        public_metadata = dict(metadata) if isinstance(metadata, dict) else metadata
+        if isinstance(public_metadata, dict):
+            public_metadata.pop("message_use", None)
+        if public_metadata:
+            data["metadata"] = json.dumps(public_metadata, ensure_ascii=False)[:_METADATA_MAX]
+    permissions = [f'read("user:{sender_id}")']
+    if receiver_id:
+        permissions.append(f'read("user:{receiver_id}")')
+    try:
+        response = requests.post(
+            f"{_ENDPOINT}/databases/{_DB_ID}/collections/{_COLLECTION_ID}/documents",
+            headers=_HEADERS,
+            json={
+                "documentId": document_id,
+                "data": data,
+                "permissions": permissions,
+            },
+            timeout=5,
+            verify=_VERIFY_TLS,
+        )
+        # Replaying the same canonical Mongo message is idempotent. Appwrite
+        # reports the already-created deterministic document as 409; every
+        # other non-success response should remain visible in diagnostics.
+        if response.status_code != 409:
+            response.raise_for_status()
+    except Exception as exc:
+        print(f"[appwrite_mirror] mirror failed: {type(exc).__name__}: {exc}")
+
+
+def mirror_message_to_appwrite_async(msg: dict) -> None:
+    """Queue a mirror on a daemon thread; never blocks the caller."""
+    if not _ENABLED:
+        return
+    threading.Thread(
+        target=mirror_message_to_appwrite,
+        args=(msg,),
+        name="appwrite-mirror",
+        daemon=True,
+    ).start()
