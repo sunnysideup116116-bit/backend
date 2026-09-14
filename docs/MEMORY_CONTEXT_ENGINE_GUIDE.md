@@ -137,12 +137,19 @@ Saved owner message
 
 ### 2.3 對話壓縮與延續性（Compaction 機制）
 
+目前新增operator批准的受控全域試行、owner-only進度API與持久重建worker。獨立合成benchmark可用作明確的operator批准依据，但不灌入線上評估數據；未批准仍沿用原readiness門檻。批准後低使用量僅反映健康資料不足／過期，足夠線上樣本顯示品質退化才自動暫停。政策、模型或程式指紋改變須重新批准，逐份摘要驗證不變。詳見 [操作指南](SUMMARY_ROLLOUT_OPERATIONS.md)。
+
+#### 2026-09-14 指定帳號正式注入驗收
+
+已於當時部署的 Public V3 DAG，以指定 demo 帳號完成真實摘要生成／評估、模型輸入核對、無摘要對照組，以及正式公開聊天 API 驗收。`COMPACTION_MODE=shadow` 是現有生成模式；摘要消費另由 `CONTEXT_MODE=on` 與明確 owner allowlist 控制。明確 canary 可使用逐份通過驗證的摘要，`*` 仍受全域 readiness gate 限制。此結果不代表全部帳號或後續 Pi runtime 已驗證。完整方法、部署設定與簡報用語見 [驗收紀錄](SUMMARY_INJECTION_ACCEPTANCE_2026-09-14.md)。正式 `.env` 不納入版本庫。
+
 - **觸發條件**：單一聊天室累積訊息超過 **30 句**時觸發。
-- **壓縮策略**：壓縮最舊 **10~11 句**為結構化摘要，保留最新 **20 句**未壓縮訊息。
+- **壓縮策略**：從最舊最多 **11 則**訊息選取符合 9,000 字元來源預算的完整連續前綴，保留至少最新 **20 則**未壓縮訊息。不再逐則截前900字；生成與評估使用同一份完整來源。單則超過來源預算時回 `source_over_budget` 並延後，不略過該則，也不推進其 watermark。
 - **儲存位置**：MongoDB `conversation_compactions`，並帶 `covered_through_message_id` watermark。
 - **聊天室範圍**：永久 legacy room 與 `ai_rooms` 中經 server 驗證屬於 owner 的新版聊天室各自壓縮；刪除、偽造或他人 room fail closed。壓縮前的 profile coverage 使用同一 owner-room validator。
 - **用途隔離**：只有 `message-use-v1` 的 `ordinary` message 送入摘要模型；被排除的訊息仍計入批次 watermark，但不送入 generation/evaluation。整批皆被排除時保留既有合格摘要並直接推進 watermark，不呼叫模型。舊版或未標記來源不作為遞迴摘要基底。
-- **政策版本**：目前 compaction policy 為 `conversation_compaction_policy_v4`；摘要來源用途變更時，舊版摘要不再注入 context。
+- **政策版本**：目前 compaction policy 為 `conversation_compaction_policy_v5`；舊版摘要不再注入或作為遞迴基底，既有原文保留，後續維護回合由原文重新選批。
+- **空摘要檢查**：來源有可重用文字卻得到全空摘要時，以 `empty_summary` 進行一次有界修復；仍為空則不呼叫 evaluator、不更新合格摘要或 watermark。純閒聊也可能因此保守延後；不為填滿摘要而捏造內容。生成／評估失敗保留上一份現行政策的合格摘要。
 - **模型契約**：generation／evaluation 讀取 `generate_chat_completion()` 的 `ChatResult.content`；測試不得再用不符合正式 contract 的純字串掩蓋介面漂移。
 - **啟用閘門**：個別 canary user 可由明確 allowlist 讀取通過評估的摘要；`*` 全域 token 另要求 rollout readiness（至少 50 筆、pass ≥95%、review ≤5%、unavailable ≤2%、指標未過期），結果快取 60 秒。未達標時只保留 shadow generation，不注入 context。
 

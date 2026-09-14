@@ -50,14 +50,23 @@ test('a prepared confirmation stops remaining calls in the same batch', async ()
   assert.equal(result.stopped, true);
 });
 
-test('invalid tool schema cannot reach the Python executor; repeated failure is bounded', async () => {
-  const result = await runExperiment(initial, async type => {
+test('repeated invalid tool schema falls back to one bounded prose-only recovery', async () => {
+  let models = 0;
+  const result = await runExperiment(initial, async (type, payload) => {
     assert.equal(type, 'model');
+    models += 1;
+    if (models === 3) {
+      assert.deepEqual(payload.toolNames, []);
+      assert.match(JSON.stringify(payload.messages), /明確指出未完成的需求/);
+      return { content: '部分查詢完成，但排程尚未建立。', tool_calls: [] };
+    }
     return { tool_calls: [{ name: 'prepare', arguments: { user_id: 'forged' } }] };
   });
   assert.equal(result.calls, 0);
-  assert.equal(result.rounds, 2);
-  assert.equal(result.error, 'pi_tool_schema_invalid');
+  assert.equal(result.rounds, 3);
+  assert.equal(result.error, null);
+  assert.equal(result.finalText, '部分查詢完成，但排程尚未建立。');
+  assert.equal(result.schema_recovery_attempted, true);
   assert.deepEqual(result.toolFailures.map(item => item.attempt), [1, 2]);
   assert.deepEqual(result.toolFailures[0].argumentFields, ['<unknown>']);
   assert.equal(result.budget_exhausted, false);

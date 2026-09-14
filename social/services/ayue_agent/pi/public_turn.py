@@ -65,9 +65,18 @@ def _persist_trace(run_id: str, ctx: Any, trace: dict[str, Any], collection: Any
         pass
 
 
-def _replay_tokens(on_token: Callable[[str], None] | None, text: str) -> None:
+def _replay_tokens(
+    on_token: Callable[[str], None] | None,
+    text: str,
+    *,
+    already_streamed: str = "",
+) -> None:
     if on_token is None:
         return
+    if already_streamed:
+        if not text.startswith(already_streamed):
+            return
+        text = text[len(already_streamed):]
     for start in range(0, len(text), 120):
         on_token(text[start:start + 120])
 
@@ -338,7 +347,8 @@ def _continue_batch_after_choice(
     result: AgentResult, *, ctx: Any, turn: Any, run_id: str,
     trace: dict[str, Any], batches: OperationBatchManager,
     confirmation_store: Any, selection_store: Any, batch_store: Any,
-    on_progress: Callable | None, debug_enabled: bool,
+    on_progress: Callable | None, on_token: Callable[[str], None] | None,
+    debug_enabled: bool,
 ) -> AgentResult:
     """Continue the newly active item in the same HTTP run after a receipt."""
     if not result.choice_resolution:
@@ -383,6 +393,7 @@ def _continue_batch_after_choice(
     object.__setattr__(next_turn, "_operation_item_id", str(current.get("item_id") or ""))
     next_result = run_pi_turn(
         next_turn, run_id=run_id, trace=trace, on_progress=on_progress,
+        on_token=on_token,
         debug_enabled=debug_enabled, confirmation_collection=confirmation_store,
         contact_selection_collection=selection_store, operation_batch_collection=batch_store,
     )
@@ -450,13 +461,23 @@ def run_pi_public_turn(
         object.__setattr__(turn, "_operation_item_id", str(current.get("item_id") or ""))
 
     trace: dict[str, Any] = {"event_sequence": []}
+    streamed_parts: list[str] = []
+
+    def emit_validated_token(fragment: str) -> None:
+        if not fragment or on_token is None:
+            return
+        streamed_parts.append(fragment)
+        on_token(fragment)
+
+    runtime_on_token = emit_validated_token if on_token is not None else None
     choice_result = _handle_choice(ctx, turn, run_id, confirmations, selections, batches)
     if choice_result is not None:
         choice_result = _continue_batch_after_choice(
             choice_result, ctx=ctx, turn=turn, run_id=run_id, trace=trace,
             batches=batches, confirmation_store=confirmation_store,
             selection_store=selection_store, batch_store=batch_store,
-            on_progress=on_progress, debug_enabled=debug_enabled,
+            on_progress=on_progress, on_token=runtime_on_token,
+            debug_enabled=debug_enabled,
         )
         result = _bind_interactions(choice_result, ctx=ctx, run_id=run_id,
                                     confirmations=confirmations, selections=selections, batches=batches)
@@ -475,6 +496,7 @@ def run_pi_public_turn(
                     sync_choice_message_projection(messages_coll, room_id=ctx.room_id, projection=resolution)
             result = run_pi_turn(
                 turn, run_id=run_id, trace=trace, on_progress=on_progress,
+                on_token=runtime_on_token,
                 debug_enabled=debug_enabled,
                 confirmation_collection=confirmation_store,
                 contact_selection_collection=selection_store,
@@ -487,5 +509,9 @@ def run_pi_public_turn(
         "fallback_reason": result.fallback_reason,
     }
     _persist_trace(run_id, ctx, trace, runs_collection)
-    _replay_tokens(on_token, result.reply or "")
+    _replay_tokens(
+        on_token,
+        result.reply or "",
+        already_streamed="".join(streamed_parts),
+    )
     return result

@@ -12,6 +12,7 @@ from services.language_service import normalize_public_reply
 
 _WRITE_RECEIPT = re.compile(
     r"(?:已經|已经|已).{0,12}(?:新增|寫入|写入|送出|寄出|取消|刪除|删除|修改|排好|安排好|建立(?:約會|邀請|行程))"
+    r"|(?:幫|替)你.{0,12}(?:排|安排|加到行事曆)(?:好|了)"
     r"|\bI(?:'ve| have)?\s+(?:created|sent|deleted|updated|scheduled)\b", re.I,
 )
 _CARD_MARKER = re.compile(r"\[\[\s*(?:confirmation|selection)\s*\]\]", re.I)
@@ -175,14 +176,15 @@ def verified_observation_fallback(observations: list[dict]) -> str | None:
     ]
     if not successful:
         return None
+    if any(str(item.get("tool") or "").startswith("web.") for item in successful):
+        return (
+            "公開資料已有部分查詢結果，但這次後續處理失敗，無法可靠完成整個需求；"
+            "也沒有建立或執行任何需要確認的變更。請直接重試原需求。"
+        )
     latest = successful[-1]
     tool = str(latest.get("tool") or "")
     result = latest.get("result") or {}
     values = _text_values(result, limit=6)
-    if tool.startswith("web."):
-        if not values:
-            return "公開資料查詢已完成，但這次無法安全整理內容；你可以縮小活動、人物或地區範圍再查一次。"
-        return "我查到的重點包括：\n" + "\n".join(f"- {value}" for value in values[:5])
     if tool.startswith("places."):
         if values:
             return "附近場所查詢已完成，可以先看看：\n" + "\n".join(f"- {value}" for value in values[:5])

@@ -5,6 +5,8 @@ import requests
 
 from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext, ToolCall
 from services.ayue_agent.pi.runtime import _public_sources
+from services.ayue_agent.pi.places_tools import _normalize_nearby
+from services.ayue_agent.pi.reply import failed_reply
 from services.ayue_agent.shared.web_guard import web_extract_urls_allowed
 from services.ayue_agent.tools import execute_tool
 from services.ayue_agent.web_tools import extract_web, is_safe_public_url, search_web
@@ -127,6 +129,29 @@ class AyueWebToolsTests(unittest.TestCase):
             }]},
         }])
         self.assertEqual(sources, [])
+
+    def test_beverage_alias_becomes_cafe_with_specific_search_hint(self):
+        normalized = _normalize_nearby({
+            "category": "飲料店", "use_saved_location": True, "limit": 5,
+        })
+        self.assertEqual(normalized["categories"], ["cafe"])
+        self.assertEqual(normalized["cuisine"], "飲料店")
+        self.assertNotIn("category", normalized)
+
+    def test_web_failure_never_publishes_an_unrelated_latest_snippet(self):
+        reply = failed_reply("pi_tool_schema_invalid", observations=[
+            {"status": "ok", "tool": "web.search", "result": {"results": [{
+                "title": "綠島空氣品質", "url": "https://example.com/green-island",
+                "snippet": "AQI 良好",
+            }]}},
+            {"status": "ok", "tool": "web.search", "result": {"results": [{
+                "title": "不相關飲料文章", "url": "https://example.com/drink",
+                "snippet": "一大段不相關內容",
+            }]}},
+        ])
+        self.assertIn("部分查詢結果", reply)
+        self.assertIn("沒有建立或執行", reply)
+        self.assertNotIn("不相關飲料文章", reply)
 
     def test_profile_location_is_coarse_and_safe(self):
         location = normalize_profile_location("高雄市", "鹽埕區")
