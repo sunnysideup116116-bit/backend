@@ -36,7 +36,7 @@ from services.ayue_agent.product_identity import (
 )
 from .public_relationship_projection import display_name, safe_public_profile
 from services.semantic_plan_service import get_relationship_semantic_context
-from .v3.confirmation import (
+from .shared.confirmation import (
     INTERACTION_BUBBLE,
     SURFACE_PRIVATE,
     ConfirmationManager,
@@ -46,7 +46,7 @@ from .v3.confirmation import (
 
 PRIVATE_RUNS = db["private_agent_runs"]
 if os.getenv("AYUE_TEST_MODE", "").strip().lower() in {"1", "true", "on"}:
-    from .v3.test_store import MemoryCollection
+    from .shared.test_store import MemoryCollection
 
     PRIVATE_CONFIRMATIONS = MemoryCollection()
 else:

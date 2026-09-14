@@ -1,4 +1,4 @@
-# Sub-agent：places（地點子代理）
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Sub-agent：places（地點子代理）
 
 > 現行 owner：`services/ayue_agent/v3/sub_agents/places_agent.py`。Places 負責結構化地點候選、營業／目前開放、價位、評分、步行距離／時間、距離與地圖卡；只有 Places 無法建立的非結構化／目前公開條件才由獨立 Web task 處理。
 

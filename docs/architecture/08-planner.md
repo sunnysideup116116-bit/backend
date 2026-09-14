@@ -1,4 +1,4 @@
-# 08. Planner：任務拆解器
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# 08. Planner：任務拆解器
 
 > 程式碼真相：`social/services/ayue_agent/v3/planner.py` 與 `v3/contracts.py`。Planner 只做語意 routing 與靜態 DAG 拆解，不執行工具、不審核、不保存 domain state，也不直接回答需要產品或 domain 真相的問題。
 

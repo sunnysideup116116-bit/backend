@@ -1,4 +1,4 @@
-# 02. Python 模組地圖
+> **Pi 正式化註記**：本文中的 URL、資料型別與 domain API 仍可適用；凡提到公開 V3 Planner、Scheduler、subagent 或 DAG 的段落均已退役，現行 runtime 見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# 02. Python 模組地圖
 
 > 本篇逐一說明 `social/` 的 Python 檔案在做什麼，方便新工程師在改動前先定位 owner。所有路徑以 `social/` 為根（有特別註明者除外）。程式碼是最終真相；若本文與程式碼不符，以程式碼為準並更新本文。
 

@@ -153,7 +153,7 @@ def claim_guidance_offer(user_id: str, fingerprint: str) -> bool:
 
     This is guidance state only; it never authorizes or queues a match search.
     The atomic predicate prevents two browser tabs from showing the same offer
-    and records the cooldown state that V3 previously forgot to persist.
+    and records the cooldown state that an older runtime forgot to persist.
     """
     now = time.time()
     try:
@@ -163,7 +163,7 @@ def claim_guidance_offer(user_id: str, fingerprint: str) -> bool:
         ) or {}
     except Exception:
         # Guidance is optional UX state.  A profile-store outage must not
-        # turn an ordinary chat turn into a V3 runtime failure.
+        # turn an ordinary chat turn into a public-agent runtime failure.
         return False
     guidance = current.get("match_guidance") or {}
     try:

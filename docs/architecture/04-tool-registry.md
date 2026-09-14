@@ -1,4 +1,4 @@
-# 04. Tool Registry：能力與安全契約
+> **Pi 正式化註記**：本文中的 URL、資料型別與 domain API 仍可適用；凡提到公開 V3 Planner、Scheduler、subagent 或 DAG 的段落均已退役，現行 runtime 見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# 04. Tool Registry：能力與安全契約
 
 > 本篇說明公開阿月的全部工具契約。**`social/services/ayue_agent/tool_registry.py` 是能力的唯一入口**：新增任何能力都必須先在此註冊，並同步更新 `tools.py`（唯讀 facade）或 `write_executors.py`（寫入執行）與 Planner prompt。
 

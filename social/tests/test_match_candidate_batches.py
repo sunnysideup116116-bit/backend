@@ -11,7 +11,7 @@ from routers import match as router
 from services import match_search_job_service as jobs
 from services import match_state_service as state
 from services.match_search_context import context_embedding_source_hash
-from tests.test_match_restart_flow import flow
+from tests.match_flow_fixture import flow
 
 
 def reply(selected=None):

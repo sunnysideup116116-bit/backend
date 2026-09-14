@@ -35,6 +35,26 @@ case "$AYUE_LLM_PROVIDER" in
 esac
 
 LOG_DIR="${AYUE_LOG_DIR:-$SERVER_ROOT/.runtime-logs}"
+# Public Ayue requires the pinned local Pi bridge. Validate it before touching
+# logs or service ports so a broken installation cannot start a partial stack.
+if ! command -v node >/dev/null 2>&1; then
+    echo "Public Ayue requires Node.js >= 22.19.0." >&2
+    exit 1
+fi
+if ! node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=19)?0:1)'; then
+    echo "Public Ayue requires Node.js >= 22.19.0; found $(node --version)." >&2
+    exit 1
+fi
+if [[ ! -f "$SERVER_ROOT/pi_agent/bridge.mjs" ]] || \
+   [[ ! -f "$SERVER_ROOT/pi_agent/node_modules/@earendil-works/pi-agent-core/package.json" ]]; then
+    echo "Pi dependencies are missing. Run: cd '$SERVER_ROOT/pi_agent' && npm ci --ignore-scripts" >&2
+    exit 1
+fi
+if ! node "$SERVER_ROOT/pi_agent/bridge.mjs" --check >/dev/null 2>&1; then
+    echo "Pi bridge self-check failed. Run: cd '$SERVER_ROOT/pi_agent' && npm ci --ignore-scripts" >&2
+    exit 1
+fi
+export AYUE_PI_RUNTIME_AVAILABLE=1
 mkdir -p "$LOG_DIR"
 SERVICE_PIDS=()
 SHUTDOWN_TIMEOUT_SECONDS="${AYUE_SHUTDOWN_TIMEOUT_SECONDS:-10}"
@@ -49,7 +69,7 @@ LOCAL_WEB_CORS_ORIGINS="http://127.0.0.1:4173,http://localhost:4173"
 export CORS_ORIGINS="${CORS_ORIGINS:+${CORS_ORIGINS},}${LOCAL_WEB_CORS_ORIGINS}"
 
 echo -e "${CYAN}================================================================${NC}"
-echo -e "${CYAN}🚀  Dating App Backend Full Stack Startup (Ayue V3 Architecture)${NC}"
+echo -e "${CYAN}🚀  Dating App Backend Full Stack Startup (Ayue Pi Architecture)${NC}"
 echo -e "${CYAN}📁  Server Root: $SERVER_ROOT${NC}"
 echo -e "${CYAN}📁  Log Directory: $LOG_DIR${NC}"
 echo -e "${CYAN}🌐  Local Web Origin: http://127.0.0.1:4173${NC}"

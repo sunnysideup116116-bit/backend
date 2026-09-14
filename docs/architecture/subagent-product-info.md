@@ -1,4 +1,4 @@
-# Sub-agent：product_info（產品資訊子代理）
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Sub-agent：product_info（產品資訊子代理）
 
 > 現行 owner：`services/ayue_agent/v3/sub_agents/product_info_agent.py`。ProductInfo 是 Public V3 DAG 的 first-class read-only specialist；它不是 Planner 的 topic mode，也不是直接回覆使用者的 FAQ router。
 

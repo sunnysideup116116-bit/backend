@@ -125,7 +125,7 @@ class DirectChatRequest(BaseModel):
     # They are mutually exclusive with a conversational message so a button
     # tap can never be reinterpreted as model-authored natural language.
     choice_id: str | None = Field(default=None, min_length=1, max_length=128)
-    choice_action: Literal["confirm", "cancel"] | None = None
+    choice_action: Literal["confirm", "cancel", "more"] | None = None
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
     # Appwrite storage file id for image messages. When present, the message
     # is treated as an image and the text risk gate is skipped.

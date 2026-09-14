@@ -1,4 +1,4 @@
-# Sub-agent：match（配對搜尋與牽線收件匣）
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Sub-agent：match（配對搜尋與牽線收件匣）
 
 > 對照後端 e06f9a1、前端 7b86365。現行 owner 是 `v3/match_runtime.py`，由 Scheduler 的 RuntimeRegistration dispatch；不是每次重新呼叫一個 LLM 來決定提案狀態。
 

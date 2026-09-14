@@ -59,7 +59,7 @@ Server/
 │   │   ├── chat.py            #     /api/* 聚合 router（leaf routers 組合成一個 Chat tag）
 │   │   ├── chat_onboarding.py #     個性測驗（big_five / deep_profile）
 │   │   ├── chat_messages.py   #     訊息讀取
-│   │   ├── public_chat.py     #     公開阿月 V3（direct_chat / NDJSON stream）+ 風險閘道
+│   │   ├── public_chat.py     #     公開阿月 Pi（direct_chat / NDJSON stream）+ 風險閘道
 │   │   ├── private_mediator.py#     私聊媒人 Private V2
 │   │   ├── match.py           #     配對搜尋/提案/接受/婉拒（CAS revision）
 │   │   ├── calendar.py        #     本人行事曆 CRUD
@@ -70,9 +70,10 @@ Server/
 │   │   ├── system.py          #     健康檢查/init/seed/設定/通知
 │   │   └── frontend.py        #     前端頁面路由
 │   ├── services/              #   領域邏輯
-│   │   ├── ayue_agent/        #     阿月 V3 sub-agent runtime
-│   │   │   ├── v3/            #       scheduler / planner / sub_agents / synthesizer / guard…
-│   │   │   ├── router.py      #       runtime 註冊
+│   │   ├── ayue_agent/        #     公開 Pi、Private V2 與共用安全邊界
+│   │   │   ├── pi/            #       公開 Pi loop、tool schemas 與 bridge adapter
+│   │   │   ├── shared/        #       confirmation / guard / writes / runtime state
+│   │   │   ├── router.py      #       共用文字與確認協定 helper
 │   │   │   ├── tools.py / tool_registry.py
 │   │   │   ├── maps_client.py / google_places_client.py / web_tools.py
 │   │   │   ├── private_v2.py  #       Private V2 協調
@@ -154,6 +155,8 @@ cd Server
 ./start_all.sh          # 依序啟動：guardrail → risk → matchmaker → social（前景，Ctrl+C 停止）
 ```
 
+公開阿月需要 Node.js 22.19+ 與 `pi_agent` 的鎖定依賴。`start_all.sh` 會在接觸 ports 或 logs 前執行 bridge self-check；缺少依賴時依錯誤訊息執行 `cd pi_agent && npm ci --ignore-scripts`。
+
 `start_all.sh` 不會另外啟動 Event process。`social/main.py` 在 FastAPI startup 時會自動建立
 Event discovery daemon thread，shutdown 時呼叫對應 stop hook。一般開發與整合測試不得再另開
 `python event_worker.py`，否則會在同一 Mongo singleton queue 上產生多餘的第二個 consumer。
@@ -204,16 +207,16 @@ Event、Memory／Compaction、Neo4j Concept 的完整契約分別見 `docs/EVENT
 | 媒婆 | `MATCH_AGENT_CANDIDATE_LIMIT`、`MATCH_VECTOR_QUALIFICATION_MIN` |
 | Event | `EVENT_WEEKLY_CYCLE_ENABLED`、`EVENT_DISCOVERY_WEEKDAY`、`EVENT_DISCOVERY_HOUR`、`EVENT_WORKER_RECONCILE_SECONDS`、`EVENT_PAIR_DECLINE_COOLDOWN_DAYS` |
 | Memory／Compaction | `AYUE_MEMORY_OUTBOX_WORKER_ENABLED`、`AYUE_MEMORY_OUTBOX_POLL_SECONDS`、`AYUE_CONVERSATION_COMPACTION_MODE`、`AYUE_CONVERSATION_CONTEXT_MODE` |
-| 行為開關 | `AYUE_V3_SIMPLE_CHAT_FAST_PATH`、`AYUE_MAPS_ENABLED`、`AYUE_GOOGLE_PLACE_CARDS_ENABLED`、`AYUE_PROFILE_SKILLS_MODE`、`AYUE_PROACTIVE_FOLLOWUP_MODE` … |
+| 行為開關 | `AYUE_MAPS_ENABLED`、`AYUE_GOOGLE_PLACE_CARDS_ENABLED`、`AYUE_PROFILE_SKILLS_MODE`、`AYUE_PROACTIVE_FOLLOWUP_MODE` … |
 
 ## 測試
 
 | 套件 | 位置 | 執行 |
 |------|------|------|
-| 跨服務契約 | `Server/tests/` | `venv/bin/python -m unittest discover -s tests -p 'test_*.py'` |
-| social | `social/tests/` | `cd social && ../venv/bin/python -m unittest discover -s tests -p 'test_*.py'` |
-| matchmaker | `matchmaker_agent/test_*.py` | `cd matchmaker_agent && ../venv/bin/python -m unittest discover -s . -p 'test_*.py'` |
-| risk_backend | `risk_backend/tests/` | `venv/bin/python -m pytest risk_backend/tests/` |
+| 跨服務契約 | `Server/tests/` | `.local-venv/social/bin/python scripts/run_offline_tests.py contracts` |
+| social | `social/tests/` | `.local-venv/social/bin/python scripts/run_offline_tests.py social` |
+| matchmaker | `matchmaker_agent/test_*.py` | `.local-venv/social/bin/python scripts/run_offline_tests.py matchmaker` |
+| risk_backend | `risk_backend/tests/` | `.local-venv/social/bin/python scripts/run_offline_tests.py risk` |
 
 2026-09-04 Event／Memory content-only 整合驗收快照：Flutter 212 項通過、Matchmaker 76 項通過；
 Social 為 1,158 項、3 個已在未套入整合內容的 target baseline 重現的 errors、7 skipped；跨服務契約為

@@ -1,4 +1,4 @@
-# Sub-agent：profile（個人檔案子代理）
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Sub-agent：profile（個人檔案子代理）
 
 > 本文說明使用者與阿月談「你是誰／你了解我多少／我的記憶」以及基本性格、深層探索時，背後怎麼運作：profile sub-agent 能做什麼、呼叫哪些 function、assessment session 如何運作。
 

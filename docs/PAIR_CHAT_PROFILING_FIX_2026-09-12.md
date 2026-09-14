@@ -1,4 +1,4 @@
-# 雙人聊天室開場與 Profiling 錯誤回覆修正
+> **架構更新註記**：本文保留其 domain／歷史內容；其中公開 V3 Planner、Scheduler、subagent 或 DAG 的描述已被 Pi 正式架構取代。\n\n# 雙人聊天室開場與 Profiling 錯誤回覆修正
 
 > 本篇是 09-12 的修正紀錄。共同開場已於 09-13 改為 Appwrite-first 暱稱及模型客製化，現況見 [後續修正](PAIR_OPENING_PERSONALIZATION_2026-09-13.md)；profiling 不變。
 

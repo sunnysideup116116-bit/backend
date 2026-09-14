@@ -1,7 +1,7 @@
 import pytest
 
-from services.ayue_agent.v3.confirmation import match_choice_cancel_reply, public_choice_projection
-from tests.test_match_restart_flow import flow
+from services.ayue_agent.shared.confirmation import match_choice_cancel_reply, public_choice_projection
+from tests.match_flow_fixture import flow
 
 
 @pytest.mark.parametrize("tool,args,cancel,confirm", [

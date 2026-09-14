@@ -59,7 +59,7 @@ from .google_places_client import (
     measure_distance_matrix, resolve_place as resolve_google_place,
     search_nearby_places,
 )
-from .v3.place_references import (
+from .shared.place_history import (
     PlaceReferencePersistenceError,
     private_presented_place_identities,
 )
@@ -390,7 +390,7 @@ def _calendar_find_event(ctx: AgentTurnContext, arguments: dict[str, Any]) -> To
 
 def _calendar_verify_recent_mutation(ctx: AgentTurnContext) -> ToolResult:
     """Verify the latest short-lived Calendar write against canonical state."""
-    from services.ayue_agent.v3.calendar_references import verify_recent_mutation
+    from services.ayue_agent.shared.calendar_state import verify_recent_mutation
 
     return ToolResult(ok=True, data={
         "calendar_mutation_verification": verify_recent_mutation(ctx.user_id),

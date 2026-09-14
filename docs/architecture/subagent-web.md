@@ -1,4 +1,4 @@
-# Web Sub-agent
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Web Sub-agent
 
 > 現行 owner：`services/ayue_agent/v3/sub_agents/web_agent.py` 保存 Web decision contract；`v3/web_runtime.py` 保存 bounded research loop；`v3/guarded_execution.py` 提供最小 Guard→URL binding→executor arguments→`execute_tool` adapter。`web_tools.py` 只負責 Tavily adapter，不負責研究策略。
 

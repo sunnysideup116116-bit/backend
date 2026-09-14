@@ -64,7 +64,7 @@ def _entry_key(entry: dict[str, Any]) -> str:
 
 
 def invalidate_choices(confirmations: Any, messages: Any, match_id: str) -> int:
-    from services.ayue_agent.v3.confirmation import public_choice_projection
+    from services.ayue_agent.shared.confirmation import public_choice_projection
     count = 0
     for record in confirmations.find({
         "payload.match_id": match_id, "payload.proposal_namespace": RELATIONSHIP_MATCH_NAMESPACE,

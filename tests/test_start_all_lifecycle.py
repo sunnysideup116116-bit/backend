@@ -22,6 +22,10 @@ class StartAllLifecycleTests(unittest.TestCase):
         (self.root / "start_all.sh").write_bytes((ROOT / "start_all.sh").read_bytes())
         (self.root / "bin").mkdir()
         (self.root / "scripts").mkdir()
+        pi_package = self.root / "pi_agent/node_modules/@earendil-works/pi-agent-core/package.json"
+        pi_package.parent.mkdir(parents=True)
+        pi_package.write_text('{}')
+        (self.root / "pi_agent/bridge.mjs").write_text('process.exit(0);')
         self._executable(self.root / "bin/lsof", "#!/bin/sh\nexit 0\n")
         self._executable(self.root / "bin/sleep", f"#!{sys.executable}\nimport sys,time\ntime.sleep(min(float(sys.argv[1]), 0.02))\n")
         self._executable(self.root / "bin/curl", f"#!{sys.executable}\n" + """

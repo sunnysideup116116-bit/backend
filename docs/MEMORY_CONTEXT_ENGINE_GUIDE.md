@@ -1,4 +1,4 @@
-# Memory、Graph 與 Context Engine 擴充指南
+> **架構更新註記**：本文保留其 domain／歷史內容；其中公開 V3 Planner、Scheduler、subagent 或 DAG 的描述已被 Pi 正式架構取代。\n\n# Memory、Graph 與 Context Engine 擴充指南
 
 本文件給負責「長期建議、Graph Memory、Context Engine」的開發者。開始修改前也必須閱讀 [`AGENTS.md`](./AGENTS.md) 與 [`AYUE_V3_ARCHITECTURE.md`](./AYUE_V3_ARCHITECTURE.md)。
 

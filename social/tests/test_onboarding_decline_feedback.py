@@ -1,15 +1,16 @@
 """Offline cross-service contracts for interests and opt-in proposal feedback."""
 
 from copy import deepcopy
+import inspect
+import json
 from unittest.mock import MagicMock
 
 import pytest
 import requests
 from bson import ObjectId
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from fastapi import BackgroundTasks, HTTPException
 
-from models import ChatRequest
+from models import ChatRequest, MatchDecisionRequest
 from routers import chat_onboarding, match as routes
 from services import assessment_session_service as assessment
 from services import match_action_service as actions
@@ -18,6 +19,37 @@ from tests.match_flow_store import Collection
 
 
 MATCH_ID = "64f000000000000000000001"
+
+
+class _Response:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = json.dumps(payload, ensure_ascii=False)
+
+    def json(self):
+        return self._payload
+
+
+class _DirectMatchClient:
+    def post(self, path, json):
+        assert path == "/api/match/decision"
+        try:
+            tasks = BackgroundTasks()
+            payload = routes.decide_match(MatchDecisionRequest.model_validate(json), tasks)
+            for task in tasks.tasks:
+                outcome = task.func(*task.args, **task.kwargs)
+                assert not inspect.isawaitable(outcome)
+            return _Response(200, payload)
+        except HTTPException as exc:
+            return _Response(exc.status_code, exc.detail)
+
+    def get(self, path, params):
+        assert path == "/api/match/state"
+        try:
+            return _Response(200, routes.get_single_match_state(**params))
+        except HTTPException as exc:
+            return _Response(exc.status_code, exc.detail)
 
 
 def proposal(status="draft", namespace="relationship_match"):
@@ -50,10 +82,7 @@ def http_flow(monkeypatch):
     monkeypatch.setattr(actions.requests, "post", post)
     save = MagicMock()
     monkeypatch.setattr(actions, "upsert_preference_facts", save)
-    app = FastAPI()
-    app.include_router(routes.router)
-    with TestClient(app) as client:
-        yield client, matches, post, save, queue
+    yield _DirectMatchClient(), matches, post, save, queue
 
 
 def decision_body(*, reasons=(), status="draft", action="decline", namespace="relationship_match"):

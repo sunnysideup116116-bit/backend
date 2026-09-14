@@ -15,8 +15,7 @@ from services.ayue_agent.product_identity import (
     PUBLIC_VOICE_FEW_SHOTS,
 )
 from services.ayue_agent.private_v2 import PrivateAgentTurnContextV2, _compose
-from services.ayue_agent.v3.planner import _PLANNER_SYSTEM
-from services.ayue_agent.v3.synthesizer import _synthesizer_system_prompt
+from services.ayue_agent.pi.prompts import POLICY
 from services.mediator_context_service import MEDIATOR_PERSONA
 from unittest.mock import patch
 
@@ -33,16 +32,12 @@ class AyueProductIdentityTests(unittest.TestCase):
         self.assertIn("聊天建議", PRIVATE_AYUE_PERSONA)
         self.assertEqual(MEDIATOR_PERSONA, LEGACY_AYUE_PERSONA)
 
-    def test_public_planner_and_synthesizer_receive_canonical_identity(self):
-        self.assertIn(AYUE_CORE_IDENTITY, _PLANNER_SYSTEM)
-        self.assertIn(AYUE_MISSION_SHORT, _PLANNER_SYSTEM)
-        self.assertIn(AYUE_VOICE_SHORT, _PLANNER_SYSTEM)
-        self.assertNotIn(PUBLIC_AYUE_PERSONA, _PLANNER_SYSTEM)
+    def test_public_pi_receives_canonical_identity(self):
+        self.assertIn("公開阿月", POLICY)
+        self.assertIn("繁體中文", POLICY)
         for question, reply in PUBLIC_VOICE_FEW_SHOTS:
-            self.assertNotIn(question, _PLANNER_SYSTEM)
-            self.assertNotIn(reply, _PLANNER_SYSTEM)
-        self.assertIn(PUBLIC_AYUE_PERSONA, _synthesizer_system_prompt("general_conversation", False))
-        self.assertIn(PUBLIC_AYUE_PERSONA, _synthesizer_system_prompt("grounded_result", False))
+            self.assertNotIn(question, POLICY)
+            self.assertNotIn(reply, POLICY)
 
     def test_private_composer_receives_private_surface_identity(self):
         context = PrivateAgentTurnContextV2(

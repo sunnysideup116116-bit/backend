@@ -30,8 +30,24 @@ def test_selection_and_successful_preflight_before_startup(tmp_path, args, env_p
     fake_python.parent.mkdir(parents=True)
     fake_python.write_text('#!/bin/sh\nprintf "preflight=%s\\n" "$AYUE_LLM_PROVIDER"\nexit 0\n')
     fake_python.chmod(0o755)
+    pi_package = tmp_path / "pi_agent/node_modules/@earendil-works/pi-agent-core/package.json"
+    pi_package.parent.mkdir(parents=True)
+    pi_package.write_text('{}')
+    (tmp_path / "pi_agent/bridge.mjs").write_text('process.exit(0);')
     result = subprocess.run(["bash", str(script), *args], capture_output=True, text=True,
                             env={"PATH": os.environ["PATH"], "AYUE_LLM_PROVIDER": env_provider}, timeout=3)
     assert result.returncode == 0
     assert f"selected={expected}" in result.stdout
     assert ("preflight=gpt" in result.stdout) == (expected == "gpt")
+
+
+def test_missing_pi_dependencies_fail_before_logs_or_ports(tmp_path):
+    script = tmp_path / "start_all.sh"
+    script.write_bytes((ROOT / "start_all.sh").read_bytes())
+    result = subprocess.run(
+        ["bash", str(script), "ollama"], capture_output=True, text=True,
+        env={"PATH": os.environ["PATH"]}, timeout=3,
+    )
+    assert result.returncode == 1
+    assert "Pi dependencies are missing" in result.stderr
+    assert not (tmp_path / ".runtime-logs").exists()

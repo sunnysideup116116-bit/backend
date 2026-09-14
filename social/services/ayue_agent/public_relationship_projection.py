@@ -208,12 +208,35 @@ class ContactNameResolution:
     kind: str = ""
 
 
+@dataclass(frozen=True)
+class ContactCandidate:
+    other_id: str
+    display_name: str
+    kind: str
+    score: float
+
+
+@dataclass(frozen=True)
+class ContactCandidateSearch:
+    status: str
+    candidates: tuple[ContactCandidate, ...] = ()
+
+
 def _normalized_contact_label(value: Any) -> str:
     text = unicodedata.normalize("NFKC", normalize_zh_tw(str(value or ""))).casefold()
     return "".join(
         char for char in text
         if not unicodedata.category(char).startswith(("P", "Z"))
     ).lstrip("@")[:30]
+
+
+def _contact_words(value: Any) -> list[str]:
+    """Split public names at spaces and Latin/CJK script boundaries."""
+    text = unicodedata.normalize("NFKC", normalize_zh_tw(str(value or ""))).casefold()
+    return [
+        token for token in re.findall(r"[a-z0-9]+|[\u3400-\u9fff]+", text)
+        if token
+    ][:12]
 
 
 def _phonetic_contact_label(value: Any) -> str:
@@ -249,6 +272,37 @@ def _levenshtein(left: str, right: str) -> int:
     return previous[-1]
 
 
+def _damerau_levenshtein(left: str, right: str) -> int:
+    """Bounded optimal-string-alignment distance, including adjacent swaps."""
+    if not left:
+        return len(right)
+    if not right:
+        return len(left)
+    rows = [[0] * (len(right) + 1) for _ in range(len(left) + 1)]
+    for index in range(len(left) + 1):
+        rows[index][0] = index
+    for index in range(len(right) + 1):
+        rows[0][index] = index
+    for left_index in range(1, len(left) + 1):
+        for right_index in range(1, len(right) + 1):
+            cost = left[left_index - 1] != right[right_index - 1]
+            rows[left_index][right_index] = min(
+                rows[left_index - 1][right_index] + 1,
+                rows[left_index][right_index - 1] + 1,
+                rows[left_index - 1][right_index - 1] + cost,
+            )
+            if (
+                left_index > 1 and right_index > 1
+                and left[left_index - 1] == right[right_index - 2]
+                and left[left_index - 2] == right[right_index - 1]
+            ):
+                rows[left_index][right_index] = min(
+                    rows[left_index][right_index],
+                    rows[left_index - 2][right_index - 2] + 1,
+                )
+    return rows[-1][-1]
+
+
 def _fuzzy_limit(length: int) -> tuple[int, float]:
     if length <= 1:
         return 0, 1.0
@@ -259,11 +313,17 @@ def _fuzzy_limit(length: int) -> tuple[int, float]:
     return max(1, int(length * 0.20)), 0.0
 
 
-def resolve_accepted_contact_name(user_id: str, name_hint: str) -> ContactNameResolution:
-    """Resolve a bounded public label only among the owner's accepted contacts."""
+def search_accepted_contact_candidates(
+    user_id: str, name_hint: str, *, limit: int = 12,
+) -> ContactCandidateSearch:
+    """Rank public names inside the owner's accepted contacts only.
+
+    Candidate scores are discovery hints. They never authorize a write or
+    replace the canonical accepted-match check performed after selection.
+    """
     target = _normalized_contact_label(name_hint)
     if not target:
-        return ContactNameResolution("not_found")
+        return ContactCandidateSearch("not_found")
     try:
         cursor = matches_coll.find(
             verified_accepted_match_query(user_id),
@@ -273,9 +333,9 @@ def resolve_accepted_contact_name(user_id: str, name_hint: str) -> ContactNameRe
             cursor = cursor.limit(MAX_CONTACT_RESOLUTION_CANDIDATES + 1)
         matches = list(cursor)[:MAX_CONTACT_RESOLUTION_CANDIDATES + 1]
     except Exception:
-        return ContactNameResolution("unavailable")
+        return ContactCandidateSearch("unavailable")
     if len(matches) > MAX_CONTACT_RESOLUTION_CANDIDATES:
-        return ContactNameResolution("too_many")
+        return ContactCandidateSearch("too_many")
 
     ids: list[str] = []
     for match in matches:
@@ -283,14 +343,14 @@ def resolve_accepted_contact_name(user_id: str, name_hint: str) -> ContactNameRe
         if isinstance(candidate, str) and candidate and candidate not in ids:
             ids.append(candidate)
     if not ids:
-        return ContactNameResolution("not_found")
+        return ContactCandidateSearch("not_found")
     try:
         profiles = list(profiles_coll.find(
             {"user_id": {"$in": ids}},
             {"_id": 0, "user_id": 1, "display_name": 1, "nickname": 1, "name": 1},
         ))
     except Exception:
-        return ContactNameResolution("unavailable")
+        return ContactCandidateSearch("unavailable")
     labels: list[tuple[str, str, str, str]] = []
     profile_by_id = {str(item.get("user_id")): item for item in profiles}
     warm_public_nicknames(ids)
@@ -303,50 +363,90 @@ def resolve_accepted_contact_name(user_id: str, name_hint: str) -> ContactNameRe
     if len(labels) != len(ids):
         # Unknown labels are not proof that a named accepted contact is absent;
         # they also prevent safely ruling out duplicate names.
-        return ContactNameResolution("unavailable")
-    exact = [(candidate, label) for candidate, label, normalized, _phonetic in labels if normalized == target]
+        return ContactCandidateSearch("unavailable")
+    hint_words = _contact_words(name_hint)
+    phonetic_target = _phonetic_contact_label(target) or (
+        target if target.isascii() and target.isalnum() else ""
+    )
+    ranked: list[ContactCandidate] = []
+    for candidate, label, normalized, phonetic in labels:
+        kind = ""
+        score = 0.0
+        if normalized == target:
+            kind, score = "exact", 1.0
+        else:
+            words = _contact_words(label)
+            if len(target) >= 3 and hint_words and len(words) > len(hint_words) and any(
+                words[start:start + len(hint_words)] == hint_words
+                for start in range(len(words) - len(hint_words) + 1)
+            ):
+                kind, score = "word", 0.94
+            elif phonetic_target and (
+                (phonetic and phonetic == phonetic_target)
+                or any(_phonetic_contact_label(word) == phonetic_target for word in words)
+            ):
+                kind, score = "phonetic", 0.92
+            else:
+                comparison_keys = [normalized]
+                comparison_keys.extend(
+                    _normalized_contact_label(word) for word in words
+                    if len(_normalized_contact_label(word)) >= 2
+                )
+                best_similarity = 0.0
+                best_distance = 10_000
+                for key in dict.fromkeys(comparison_keys):
+                    length = max(len(target), len(key))
+                    distance = _damerau_levenshtein(target, key)
+                    similarity = 1.0 - (distance / length if length else 1.0)
+                    if (distance, -similarity) < (best_distance, -best_similarity):
+                        best_distance, best_similarity = distance, similarity
+                maximum_distance, minimum_similarity = _fuzzy_limit(max(len(target), 1))
+                candidate_limit, candidate_minimum = _fuzzy_limit(
+                    max(len(target), min((len(key) for key in comparison_keys), default=len(normalized)))
+                )
+                if (
+                    len(target) >= 2
+                    and best_distance <= min(maximum_distance, candidate_limit)
+                    and best_similarity >= max(minimum_similarity, candidate_minimum)
+                ):
+                    kind, score = "fuzzy", round(best_similarity, 4)
+        if kind:
+            ranked.append(ContactCandidate(candidate, label, kind, score))
+    ranked.sort(key=lambda item: -item.score)
+    if ranked:
+        best_score = ranked[0].score
+        # A strong exact word or phonetic hit should not be diluted by weak
+        # short-name edit-distance neighbours.
+        margin = 0.03 if best_score >= 0.9 else 0.20
+        ranked = [item for item in ranked if best_score - item.score <= margin]
+    return ContactCandidateSearch(
+        "found" if ranked else "not_found",
+        tuple(ranked[:max(1, min(int(limit), 20))]),
+    )
+
+
+def resolve_accepted_contact_name(user_id: str, name_hint: str) -> ContactNameResolution:
+    """Compatibility resolver; invitation creation separately confirms similarities."""
+    search = search_accepted_contact_candidates(user_id, name_hint)
+    if search.status != "found":
+        return ContactNameResolution(search.status)
+    exact = [item for item in search.candidates if item.kind == "exact"]
     if len(exact) == 1:
-        return ContactNameResolution("resolved_exact", exact[0][0], exact[0][1], kind="exact")
+        item = exact[0]
+        return ContactNameResolution("resolved_exact", item.other_id, item.display_name, kind="exact")
     if len(exact) > 1:
-        return ContactNameResolution("ambiguous", candidates=tuple(label for _, label in exact[:3]))
-
-    phonetic_target = _phonetic_contact_label(target)
-    if phonetic_target:
-        phonetic_matches = [
-            (candidate, label)
-            for candidate, label, _normalized, phonetic in labels
-            if phonetic and phonetic == phonetic_target
-        ]
-        if len(phonetic_matches) == 1:
-            return ContactNameResolution(
-                "resolved_phonetic",
-                phonetic_matches[0][0],
-                phonetic_matches[0][1],
-                kind="phonetic",
-            )
-        if len(phonetic_matches) > 1:
-            return ContactNameResolution(
-                "ambiguous",
-                candidates=tuple(label for _, label in phonetic_matches[:3]),
-            )
-
-    maximum_distance, minimum_similarity = _fuzzy_limit(max(len(target), 1))
-    scored: list[tuple[int, float, str, str]] = []
-    for candidate, label, normalized, _phonetic in labels:
-        length = max(len(target), len(normalized))
-        distance = _levenshtein(target, normalized)
-        similarity = 1.0 - (distance / length if length else 1.0)
-        candidate_limit, candidate_minimum_similarity = _fuzzy_limit(length)
-        if distance <= min(maximum_distance, candidate_limit) and similarity >= max(minimum_similarity, candidate_minimum_similarity):
-            scored.append((distance, similarity, candidate, label))
-    if not scored:
-        return ContactNameResolution("not_found")
-    scored.sort(key=lambda item: (item[0], -item[1], item[3], item[2]))
-    best = scored[0]
-    tied = [item for item in scored if item[0] == best[0] and item[1] == best[1]]
-    if len(tied) > 1 or (len(scored) > 1 and best[1] - scored[1][1] < 0.20):
-        return ContactNameResolution("ambiguous", candidates=tuple(item[3] for item in scored[:3]))
-    return ContactNameResolution("resolved_fuzzy", best[2], best[3], kind="fuzzy")
+        return ContactNameResolution("ambiguous", candidates=tuple(item.display_name for item in exact[:3]))
+    if len(search.candidates) == 1:
+        item = search.candidates[0]
+        return ContactNameResolution(
+            "resolved_phonetic" if item.kind == "phonetic" else "resolved_fuzzy",
+            item.other_id,
+            item.display_name,
+            kind="phonetic" if item.kind == "phonetic" else "fuzzy",
+        )
+    return ContactNameResolution(
+        "ambiguous", candidates=tuple(item.display_name for item in search.candidates[:3]),
+    )
 
 
 def mentioned_contact_summary(user_id: str, other_user_ids: list[str]) -> list[dict[str, Any]]:

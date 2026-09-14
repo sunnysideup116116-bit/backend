@@ -1,4 +1,4 @@
-# 06. 測試策略
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# 06. 測試策略
 
 > 所有行為修改都必須有 deterministic test；自動測試不得連線或修改正式 MongoDB Atlas、Neo4j、Tavily 或 Google APIs。測試檔清單以 `social/tests/test_*.py` 為準，不在文件固定容易過期的檔案數量。
 

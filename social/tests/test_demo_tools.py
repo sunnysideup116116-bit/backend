@@ -20,7 +20,7 @@ class DemoToolsTests(unittest.TestCase):
 
         result = get_demo_status("owner")
 
-        self.assertEqual(result["agent_version"], "v3")
+        self.assertEqual(result["agent_version"], "pi")
         self.assertTrue(result["web_search_ready"])
         self.assertEqual(result["location"]["display_name"], "高雄市鹽埕區")
         self.assertEqual(result["recent_context"], "最近想去駁二看展")
@@ -40,7 +40,7 @@ class DemoToolsTests(unittest.TestCase):
         result = get_demo_status("owner")
 
         self.assertFalse(result["profile_exists"])
-        self.assertEqual(result["agent_version"], "v3")
+        self.assertEqual(result["agent_version"], "pi")
         self.assertFalse(result["web_search_ready"])
         self.assertEqual(result["location"], {})
         self.assertEqual(result["recent_context"], "尚無近期情境")

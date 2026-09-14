@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from services.ayue_agent.v3.calendar_commands import CalendarCommandBatch
+from services.ayue_agent.shared.calendar_commands import CalendarCommandBatch
 
 
 class ToolRisk(str, Enum):

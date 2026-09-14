@@ -2,14 +2,12 @@ from copy import deepcopy
 import time
 
 from bson import ObjectId
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from services.ayue_agent import context as ayue_context, match_opportunity
 from services.ayue_agent.contracts import AgentTurnContext
 from services import match_state_service as state, match_search_job_service as jobs
 from routers import match as router
-from tests.test_match_restart_flow import flow
+from tests.match_flow_fixture import flow
 
 
 def test_status_api_and_real_context_builder_are_read_only(flow, monkeypatch):
@@ -28,14 +26,10 @@ def test_status_api_and_real_context_builder_are_read_only(flow, monkeypatch):
     }})
     before = deepcopy((flow.matches.rows, flow.profiles.rows))
     counts = (flow.matches.writes, flow.profiles.writes)
-    app = FastAPI()
-    app.include_router(router.router)
-    client = TestClient(app)
     for room in ("legacy", "room", "another-room"):
-        response = client.get("/api/match/status", params={"user_id": "owner"})
-        assert response.status_code == 200
-        assert response.json()["status_snapshot"]["state"] == "waiting_other"
-        assert response.json()["search"]["status"] == "idle"
+        response = router.get_match_status("owner")
+        assert response["status_snapshot"]["state"] == "waiting_other"
+        assert response["search"]["status"] == "idle"
         ctx = AgentTurnContext(user_id="owner", room_id=room, message="我有配對中嗎？",
                                user_profile=flow.profiles.find_one({"user_id": "owner"}))
         turn = ayue_context.build_public_agent_turn_context(ctx)

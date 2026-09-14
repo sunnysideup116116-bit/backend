@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 from typing import Literal
 
 from database import db, matches_coll, messages_coll, profiles_coll, notification_threads_coll
-from services.ayue_agent.v3.confirmation import project_match_choice_history
+from services.ayue_agent.shared.confirmation import project_match_choice_history
+from services.ayue_agent.shared.contact_selections import project_contact_selection_history
 from models import ClearRequest
 from services.ai_room_service import (
     create_room as create_ai_room,
@@ -230,6 +231,10 @@ def get_messages(
         )
         messages = project_match_choice_history(
             messages, user_id=user_id, room_id=room_id, collection=db["v3_pending_confirmations"],
+        )
+        messages = project_contact_selection_history(
+            messages, user_id=user_id, room_id=room_id,
+            collection=db["v3_contact_selections"],
         )
     user_doc = profiles_coll.find_one({"user_id": user_id})
     active_proposal_id = (user_doc or {}).get("active_match_proposal_id")

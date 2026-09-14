@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 
-def run_public_agent_turn_v3(*args, **kwargs):
-    """Lazy import for the V3 sub-agent runtime."""
-    from .v3.scheduler import run_public_agent_turn_v3 as _run_v3
-    return _run_v3(*args, **kwargs)
+def run_public_agent_turn(*args, **kwargs):
+    """Pi public entrypoint for HTTP and shared voice callers."""
+    from .public_runtime import run_public_agent_turn as _run_public
+    return _run_public(*args, **kwargs)
 
 
-def mark_public_confirmation_presented(**kwargs):
-    """Lazy facade for the persisted-public-preview confirmation boundary."""
-    from .v3.scheduler import mark_public_confirmation_presented as _mark_presented
-    return _mark_presented(**kwargs)
+def mark_public_interaction_presented(**kwargs):
+    """Activate any prepared public interaction after durable publication."""
+    from .public_runtime import mark_public_interaction_presented as _mark_interaction
+    return _mark_interaction(**kwargs)
 
 
-__all__ = ["run_public_agent_turn_v3", "mark_public_confirmation_presented"]
+__all__ = [
+    "run_public_agent_turn", "mark_public_interaction_presented",
+]

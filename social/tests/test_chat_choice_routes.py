@@ -16,6 +16,7 @@ class ChatChoiceRouteTests(unittest.TestCase):
         )
         expected = {"reply": "已完成"}
         with patch.object(public_chat, "_resolve_ai_room_id", return_value="room"), \
+             patch.object(public_chat, "_require_public_pi"), \
              patch.object(public_chat, "save_message") as save_message, \
              patch.object(public_chat, "_complete_public_turn", return_value=expected) as complete, \
              patch.object(public_chat.profiles_coll, "update_one"):
@@ -33,6 +34,7 @@ class ChatChoiceRouteTests(unittest.TestCase):
             choice_id="choice-1", choice_action="cancel",
         )
         with patch.object(public_chat, "_resolve_ai_room_id", return_value="room"), \
+             patch.object(public_chat, "_require_public_pi"), \
              patch.object(public_chat, "save_message") as save_message, \
              patch.object(public_chat, "record_proactive_activity"), \
              patch.object(public_chat, "_complete_public_turn", return_value={"reply": "已取消"}):

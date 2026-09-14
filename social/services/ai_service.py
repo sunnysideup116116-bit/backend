@@ -421,6 +421,7 @@ def generate_chat_completion_with_tools(
     on_token: Callable[[str], None] | None = None,
     deadline_monotonic: float | None = None,
     model_owner: str | None = None,
+    conversation_messages: list[dict] | None = None,
 ) -> ToolCallResult:
     """Native function calling; zero timing metrics mean not observable.
 
@@ -429,12 +430,25 @@ def generate_chat_completion_with_tools(
     duration and otherwise uses an observed streaming interval; a non-stream
     response without decoding timing cannot supply a meaningful TPS.
     """
+    if conversation_messages is not None:
+        if not conversation_messages or any(
+            not isinstance(item, dict) or item.get("role") not in {"user", "assistant", "tool"}
+            for item in conversation_messages
+        ):
+            raise ValueError("invalid_conversation_messages")
     if codex_chat_provider.selected_provider() == "gpt":
         effective_model = _resolve_chat_model(
             prefer_fast_model=prefer_fast_model, model_owner=model_owner,
         )
+        # The existing Codex app-server proposal adapter accepts text input.
+        # Preserve the role-labelled transcript explicitly on that adapter;
+        # Ollama below receives native assistant/tool messages.
+        provider_prompt = (
+            json.dumps(conversation_messages, ensure_ascii=False)
+            if conversation_messages is not None else prompt
+        )
         result = codex_chat_provider.generate(
-            prompt, model=effective_model, system_prompt=system_prompt, tools=tools,
+            provider_prompt, model=effective_model, system_prompt=system_prompt, tools=tools,
             deadline_monotonic=deadline_monotonic, on_token=on_token,
         )
         return ToolCallResult(**result, prompt=prompt, model_name=effective_model)
@@ -452,11 +466,16 @@ def generate_chat_completion_with_tools(
 
     started = time.perf_counter()
     first_token_at: float | None = None
+    provider_messages = (
+        ([{"role": "system", "content": system_prompt}] if system_prompt else [])
+        + conversation_messages
+        if conversation_messages is not None else _chat_messages(prompt, system_prompt)
+    )
     if on_token is None:
         response = _chat_with_deadline(
             deadline_monotonic=deadline_monotonic,
             model=effective_model,
-            messages=_chat_messages(prompt, system_prompt),
+            messages=provider_messages,
             tools=tools,
             options=options,
         )
@@ -464,7 +483,7 @@ def generate_chat_completion_with_tools(
         response = _chat_with_deadline(
             deadline_monotonic=deadline_monotonic,
             model=effective_model,
-            messages=_chat_messages(prompt, system_prompt),
+            messages=provider_messages,
             tools=tools,
             options=options,
             stream=True,

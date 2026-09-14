@@ -36,6 +36,14 @@ def _request(path: str, *, token_stream: bool = False) -> Request:
 
 
 class StreamDeliveryGuaranteesTests(unittest.TestCase):
+    def setUp(self):
+        self._owner_auth = patch("routers.public_chat.authenticated_owner_matches", return_value=True)
+        self._pi_available = patch("services.ayue_agent.pi.settings.pi_available", return_value=True)
+        self._owner_auth.start()
+        self._pi_available.start()
+        self.addCleanup(self._owner_auth.stop)
+        self.addCleanup(self._pi_available.stop)
+
     def test_private_runtime_forwards_live_provider_tokens_before_final(self):
         context = private_context()
         decision = PrivateAgentDecision(
@@ -77,8 +85,7 @@ class StreamDeliveryGuaranteesTests(unittest.TestCase):
     def test_public_first_token_is_observable_before_final(self):
         release = threading.Event()
 
-        def fake_turn(_req, _tasks, emit, on_token=None):
-            emit({"type": "run_started", "agent_run_id": "run-live"})
+        def fake_turn(_req, _tasks, emit, on_token=None, **_kwargs):
             on_token("第")
             release.wait(1)
             on_token("一字")
@@ -105,9 +112,9 @@ class StreamDeliveryGuaranteesTests(unittest.TestCase):
             started, token, remaining = asyncio.run(scenario(response))
 
         self.assertEqual(started["type"], "run_started")
-        self.assertEqual(token, {
-            "type": "token", "agent_run_id": "run-live", "text": "第",
-        })
+        self.assertEqual(token["type"], "token")
+        self.assertEqual(token["text"], "第")
+        self.assertEqual(token["agent_run_id"], started["agent_run_id"])
         self.assertEqual(remaining[-1]["type"], "final")
         self.assertEqual(response.headers["cache-control"], "no-cache, no-transform")
         self.assertEqual(response.headers["x-accel-buffering"], "no")
@@ -115,7 +122,7 @@ class StreamDeliveryGuaranteesTests(unittest.TestCase):
     def test_public_queue_keeps_every_token_in_order(self):
         fragments = [str(index) for index in range(100)]
 
-        def fake_turn(_req, _tasks, _emit, on_token=None):
+        def fake_turn(_req, _tasks, _emit, on_token=None, **_kwargs):
             for fragment in fragments:
                 on_token(fragment)
             return {"reply": "".join(fragments), "agent_run_id": "run-all"}
@@ -140,7 +147,7 @@ class StreamDeliveryGuaranteesTests(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "final")
 
     def test_private_stream_delivers_tokens_and_no_buffer_headers(self):
-        def fake_turn(_req, _match, _room, _emit, _run_id, on_token=None):
+        def fake_turn(_req, _match, _room, _emit, _run_id, on_token=None, **_kwargs):
             on_token("悄")
             on_token("悄話")
             return {"reply": "悄悄話", "agent_run_id": "private-run"}

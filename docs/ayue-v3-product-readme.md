@@ -1,4 +1,4 @@
-# 阿月交友 Demo
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# 阿月交友 Demo
 
 這個 repository 是目前 Demo 使用的阿月 V3。公開阿月採用 sub-agent 架構：Planner 拆解任務 DAG、Sub-agents 以 function calling 執行工具、Synthesizer 彙整回覆；程式端負責權限、確認、狀態轉移、隱私與冪等性。
 

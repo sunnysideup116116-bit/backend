@@ -1,4 +1,4 @@
-# Flutter 從 V1 Demo 遷移到 Public V3：Agent 指南
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Flutter 從 V1 Demo 遷移到 Public V3：Agent 指南
 
 > 對象：曾依照 [`chenjia0510/socialdemo_`](https://github.com/chenjia0510/socialdemo_) 搬過 V1 邏輯，現在要把 Flutter App 接到本 repository 現行 V3 的 coding agent。舊參考倉庫目前 `main` 指向 commit `5aaa20881b9c659d4ba4bfb5566f5628a92ac5ca`（2026-07-02）；它是舊 FastAPI／Web Demo 快照，不是現行 backend contract。
 

@@ -59,7 +59,7 @@ def use_from_turn(
 ) -> MessageUse:
     """Resolve a server-owned turn result into a reusable message use.
 
-    Calendar and assessment reasons are produced by V3 server branches.  A
+    Calendar and assessment reasons are produced by public-agent server branches. A
     short no-memory phrase is a closed protocol and is checked here as a
     defense-in-depth gate.  Any unrecognised control reason fails closed.
     """

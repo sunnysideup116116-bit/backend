@@ -560,7 +560,7 @@ def _event_matches_explicit_temporal(event: dict, hint: str, temporal_references
 
 
 def _target_selector_value(selector: object, field_name: str) -> str:
-    """Read a typed selector without importing the V3 command model."""
+    """Read a typed selector without importing the shared command model."""
     if selector is None:
         return ""
     if isinstance(selector, dict):

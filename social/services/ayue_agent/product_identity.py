@@ -52,7 +52,7 @@ AYUE_MISSION_SHORT = (
 )
 AYUE_VOICE_SHORT = "回覆短、自然、有一點熟朋友的立場，不要像客服或功能說明。"
 
-# Public V3 user-facing copy guidance.  Keep this separate from the shared
+# Public Pi user-facing copy guidance. Keep this separate from the shared
 # persona so Private Ayue and non-reply classifiers do not inherit a Public
 # reply-length contract.
 PUBLIC_REPLY_TONE = (

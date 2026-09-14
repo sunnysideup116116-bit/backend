@@ -70,7 +70,7 @@ def _normalize_public_reply_line(value: str) -> str:
 def normalize_public_reply(value: str | None, *, max_length: int | None = None) -> str:
     """Normalize human-facing model text without rewriting opaque payloads.
 
-    Public V3 replies are prose, but they may contain a URL or a code/JSON
+    Public Pi replies are prose, but they may contain a URL or a code/JSON
     fragment that must remain byte-for-byte stable.  OpenCC owns the language
     conversion; this boundary only protects those opaque fragments and never
     touches tool arguments, IDs, revisions, or stored JSON.

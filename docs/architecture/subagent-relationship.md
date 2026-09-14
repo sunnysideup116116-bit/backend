@@ -1,4 +1,4 @@
-# Sub-agent：relationship（關係子代理）
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Sub-agent：relationship（關係子代理）
 
 > 本文說明使用者與阿月談「已建立聯絡的人／@ 對象」或要求建立空白約會邀請卡時，背後怎麼運作：Relationship Runtime 能做什麼、呼叫哪些 function、target 如何驗證。
 

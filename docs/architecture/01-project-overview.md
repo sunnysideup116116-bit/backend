@@ -1,4 +1,4 @@
-# 01. 專案總覽
+> **Pi 正式化註記**：本文中的 URL、資料型別與 domain API 仍可適用；凡提到公開 V3 Planner、Scheduler、subagent 或 DAG 的段落均已退役，現行 runtime 見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# 01. 專案總覽
 
 > 本篇為工程師 onboarding 的第一站：說明這個 repo 是什麼、有哪兩個服務、各自負責什麼，以及公開阿月與阿月悄悄話的關係。詳細的 Python 模組拆解、runtime 生命週期與 sub-agent 流程請見本目錄其他文件。
 

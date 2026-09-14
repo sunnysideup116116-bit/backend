@@ -1,4 +1,4 @@
-# 03. 公開阿月 V3 Runtime 生命週期
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# 03. 公開阿月 V3 Runtime 生命週期
 
 > 本篇說明「使用者送出一句話到阿月回覆」之間發生的一切：每個階段的 owner、產物與失敗行為。程式碼真相在 `social/services/ayue_agent/v3/`。
 

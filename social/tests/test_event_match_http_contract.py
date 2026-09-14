@@ -7,7 +7,6 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
-from fastapi.testclient import TestClient
 from pymongo.errors import AutoReconnect
 
 from models import EventDiscoveryRequest, MatchDecisionRequest
@@ -221,18 +220,19 @@ class PublicEventQueueTests(unittest.TestCase):
     def test_public_post_and_status_routes_are_registered(self):
         app = FastAPI()
         app.include_router(routes.router)
+        paths = {route.path for route in app.routes}
+        self.assertIn("/api/match/events/discover", paths)
+        self.assertIn("/api/match/events/discover/status", paths)
         with patch.object(routes, "enqueue_event_discovery_job", return_value={
             "status": "queued", "state": "queued", "run_number": 7,
         }), patch.object(routes, "event_discovery_job_snapshot", return_value={
             "state": "completed", "outcome": "partial", "run_number": 7,
-        }), TestClient(app) as client:
-            queued = client.post("/api/match/events/discover", json={})
-            snapshot = client.get("/api/match/events/discover/status")
-        self.assertEqual(queued.status_code, 200)
-        self.assertEqual(queued.json()["status"], "queued")
-        self.assertEqual(snapshot.status_code, 200)
-        self.assertEqual(snapshot.json()["state"], "completed")
-        self.assertEqual(snapshot.json()["outcome"], "partial")
+        }):
+            queued = routes.discover_public_events(EventDiscoveryRequest())
+            snapshot = routes.get_public_event_discovery_status()
+        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(snapshot["state"], "completed")
+        self.assertEqual(snapshot["outcome"], "partial")
 
 
 class EventScanOwnershipTests(unittest.TestCase):

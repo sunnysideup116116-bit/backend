@@ -1065,7 +1065,7 @@ def _role_bound_reason_entries(target: dict, candidate: dict, tier: str, *, refi
 
     The older v2 prompt returned both directions in one JSON object. A model
     could swap those sibling fields and the old validator had no way to detect
-    it. V3 constructs each direction from one viewer and one counterparty,
+    it. The public match flow constructs each direction from one viewer and one counterparty,
     then persists those bindings with the text.
     """
     entries: list[dict] = []

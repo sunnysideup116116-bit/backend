@@ -1,4 +1,4 @@
-# Ayue V3 Website-to-Flutter UI Contract
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Ayue V3 Website-to-Flutter UI Contract
 
 `Server/social/frontend.html` is the executable visual reference. Flutter may adapt spacing and platform controls, but must preserve the same states, actions, concurrency rules, privacy boundaries, and fallback behavior.
 

@@ -1,4 +1,4 @@
-# 0726-new 阿月前後端整合紀錄
+> **架構更新註記**：本文保留其 domain／歷史內容；其中公開 V3 Planner、Scheduler、subagent 或 DAG 的描述已被 Pi 正式架構取代。\n\n# 0726-new 阿月前後端整合紀錄
 
 > [!NOTE]
 > **歷史紀錄說明 (Historical Archive Notice)**

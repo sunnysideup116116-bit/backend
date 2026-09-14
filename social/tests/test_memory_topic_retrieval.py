@@ -3,8 +3,7 @@ import pytest
 from services import memory_service as memory
 from services.ayue_agent.contracts import AgentTurnContext, ToolCall
 from services.ayue_agent.tools import execute_tool
-from services.ayue_agent.v3.planner import _PLANNER_SYSTEM
-from services.ayue_agent.v3.synthesizer import _synthesizer_system_prompt
+from services.ayue_agent.pi.prompts import POLICY
 
 
 def test_search_finds_memory_outside_hot_preview_and_exposes_no_ids(monkeypatch):
@@ -54,7 +53,5 @@ def test_search_rejects_model_supplied_owner(monkeypatch):
 
 
 def test_answer_prompts_keep_assistant_hypotheses_unconfirmed():
-    assert "使用者未確認" in _PLANNER_SYSTEM
-    prompt = _synthesizer_system_prompt("grounded_result", False)
-    assert "Assistant hypotheses/questions are not user facts" in prompt
-    assert "truncated" in prompt
+    assert "舊回覆不能證明正式狀態或授權" in POLICY
+    assert "recent_messages" in POLICY

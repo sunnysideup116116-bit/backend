@@ -1,0 +1,332 @@
+"""Shared confirmation lifecycle regression tests."""
+import unittest
+import time
+from unittest.mock import MagicMock, patch
+
+from services.ayue_agent.shared.confirmation import (
+    INTERACTION_BUBBLE,
+    SURFACE_PUBLIC,
+    ConfirmationManager,
+)
+from services.ayue_agent.shared.test_store import MemoryCollection
+
+
+class AgentConfirmationTests(unittest.TestCase):
+    def test_public_dag_confirmation_is_expired_before_executor(self):
+        store = MemoryCollection()
+        store.insert_one({
+            "_id": "old", "user_id": "owner", "room_id": "room",
+            "surface": "public_ayue", "source_engine": "dag",
+            "interaction_mode": INTERACTION_BUBBLE, "status": "pending",
+            "created_at": time.time(), "expires_at": time.time() + 900,
+            "tool_name": "match.start_search", "arguments": {}, "payload": {},
+            "preview_fingerprint": "bound", "presented_message_id": "message",
+            "presented_at": time.time(),
+        })
+        executor = MagicMock()
+        result = ConfirmationManager(store).execute_confirmed(
+            user_id="owner", room_id="room", surface="public_ayue",
+            choice_id="old", interaction_mode=INTERACTION_BUBBLE, executor=executor,
+        )
+        self.assertEqual(result[0]["error_code"], "dag_retired")
+        self.assertEqual(store.find({"_id": "old"})[0]["status"], "expired")
+        executor.assert_not_called()
+
+    def setUp(self):
+        self.coll = MagicMock()
+        self.mgr = ConfirmationManager(self.coll)
+
+    def _record(self, *, confirmation_id="c1", created_at=1.0, tool_name="calendar.submit_commands"):
+        arguments = {}
+        payload = {"calendar_plan_version": 1, "plans": []}
+        origin_run_id = "run-preview"
+        return {
+            "_id": confirmation_id,
+            "user_id": "owner",
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "payload": payload,
+            "status": "pending",
+            "agent_name": "calendar",
+            "created_at": created_at,
+            "expires_at": 1e18,
+            "origin_run_id": origin_run_id,
+            "request_fingerprint": self.mgr._request_fingerprint(
+                tool_name=tool_name,
+                arguments=arguments,
+                payload=payload,
+                origin_run_id=origin_run_id,
+            ),
+            "preview_fingerprint": "preview-digest",
+            "presented_message_id": "message-1",
+            "presented_at": created_at + 0.5,
+            "room_id": "room",
+            "surface": SURFACE_PUBLIC,
+            "interaction_mode": INTERACTION_BUBBLE,
+        }
+
+    @patch("services.ayue_agent.shared.confirmation.time.time", return_value=100.0)
+    def test_create_confirmation_supersedes_old_pending_and_binds_preview(self, _now):
+        self.mgr.create_confirmation(
+            user_id="owner",
+            agent_name="calendar",
+            tool_name="calendar.submit_commands",
+            arguments={},
+            payload={"calendar_plan_version": 1, "plans": []},
+            ttl_seconds=900,
+            origin_run_id="run-preview",
+            preview="Cancel tomorrow's event?",
+            room_id="room",
+        )
+        self.coll.update_many.assert_called_once_with(
+            {
+                "user_id": "owner",
+                "status": {"$in": ["prepared", "pending"]},
+                "interaction_mode": INTERACTION_BUBBLE,
+                "surface": SURFACE_PUBLIC,
+                "room_id": "room",
+            },
+            {"$set": {
+                "status": "superseded",
+                "superseded_at": 100.0,
+                "resolution_reason": "replacement",
+            }},
+        )
+        doc = self.coll.insert_one.call_args[0][0]
+        self.assertEqual(doc["status"], "prepared")
+        self.assertEqual(doc["origin_run_id"], "run-preview")
+        self.assertTrue(doc["request_fingerprint"])
+        self.assertFalse(doc["preview_fingerprint"])
+        self.assertTrue(doc["preview_source_fingerprint"])
+        self.assertNotIn("preview", doc)
+
+    @patch("services.ayue_agent.shared.confirmation.time.time", return_value=100.0)
+    def test_planner_projection_contains_no_ids_arguments_or_payload(self, _now):
+        self.coll.find.return_value = [self._record()]
+        projection = self.mgr.planner_projection(user_id="owner")
+        self.assertEqual(projection[0]["domain"], "calendar")
+        self.assertLessEqual(projection[0]["expires_in_seconds"], 900)
+        text = repr(projection)
+        for forbidden in ("confirmation_id", "event_revision", "arguments", "payload", "run-preview"):
+            self.assertNotIn(forbidden, text)
+
+    def test_execute_confirmed_runs_newest_bound_confirmation_only(self):
+        older = self._record(confirmation_id="old", created_at=1.0)
+        newer = self._record(
+            confirmation_id="new",
+            created_at=2.0,
+            tool_name="calendar.submit_commands",
+        )
+        self.coll.find.return_value = [older, newer]
+        self.coll.update_one.side_effect = [
+            MagicMock(modified_count=1),
+            MagicMock(modified_count=1),
+        ]
+        executed = []
+
+        def executor(tool_name, arguments, user_id, payload=None):
+            executed.append((tool_name, payload["_confirmation_id"]))
+            return (True, "done", None)
+
+        results = self.mgr.execute_confirmed(user_id="owner", executor=executor)
+        self.assertEqual(executed, [("calendar.submit_commands", "new")])
+        self.assertTrue(results[0]["ok"])
+        self.assertEqual(results[0]["confirmation_id"], "new")
+
+    def test_unbound_legacy_confirmation_is_rejected_without_execution(self):
+        record = self._record()
+        record.pop("origin_run_id")
+        record.pop("request_fingerprint")
+        self.coll.find.return_value = [record]
+        executor = MagicMock()
+
+        results = self.mgr.execute_confirmed(user_id="owner", executor=executor)
+
+        executor.assert_not_called()
+        self.assertEqual(results[0]["error_code"], "confirmation_unbound")
+
+    def test_tampered_confirmation_is_rejected_without_execution(self):
+        record = self._record()
+        record["payload"]["event_revision"] = 99
+        self.coll.find.return_value = [record]
+        executor = MagicMock()
+
+        results = self.mgr.execute_confirmed(user_id="owner", executor=executor)
+
+        executor.assert_not_called()
+        self.assertEqual(results[0]["error_code"], "confirmation_unbound")
+
+    def test_execute_confirmed_returns_empty_when_claim_lost(self):
+        self.coll.find.return_value = [self._record()]
+        self.coll.update_one.return_value = MagicMock(modified_count=0)
+        executor = MagicMock()
+
+        results = self.mgr.execute_confirmed(user_id="owner", executor=executor)
+
+        self.assertEqual(results, [])
+        executor.assert_not_called()
+
+    @patch("services.ayue_agent.shared.confirmation.time.time", return_value=100.0)
+    def test_calendar_confirmation_stays_prepared_until_persisted_preview_is_marked(self, _now):
+        self.coll.update_one.return_value = MagicMock(modified_count=1)
+        self.mgr.create_confirmation(
+            user_id="owner", agent_name="calendar", tool_name="calendar.submit_commands",
+            arguments={}, payload={"plans": []}, origin_run_id="run-preview",
+            preview="要新增行程嗎？",
+            room_id="room",
+        )
+        self.coll.find.return_value = []
+        self.assertEqual(self.mgr.list_active(user_id="owner"), [])
+        executed = []
+        self.assertEqual(
+            self.mgr.execute_confirmed(
+                user_id="owner",
+                executor=lambda *args: executed.append(args) or (True, "done", None),
+            ),
+            [],
+        )
+        self.assertEqual(executed, [])
+        self.assertTrue(self.mgr.bind_final_preview(
+            user_id="owner", origin_run_id="run-preview", final_content="要新增行程嗎？",
+        ))
+        self.assertTrue(self.mgr.mark_presented(
+            user_id="owner", origin_run_id="run-preview", message_id="message-1",
+            persisted_content="要新增行程嗎？",
+        ))
+
+    def test_non_calendar_confirmation_keeps_existing_pending_lifecycle(self):
+        from services.ayue_agent.shared.test_store import MemoryCollection
+
+        manager = ConfirmationManager(MemoryCollection())
+        manager.create_confirmation(
+            user_id="owner", agent_name="relationship",
+            tool_name="relationship.start_date_coordination",
+            arguments={}, payload={}, origin_run_id="run-relationship",
+            preview="要建立約會邀請嗎？",
+            room_id="room",
+        )
+        self.assertEqual(manager.list_active(user_id="owner"), [])
+        manager.bind_final_preview(
+            user_id="owner", origin_run_id="run-relationship",
+            final_content="要建立約會邀請嗎？",
+        )
+        manager.mark_presented(
+            user_id="owner", origin_run_id="run-relationship",
+            message_id="message-relationship",
+            persisted_content="要建立約會邀請嗎？",
+        )
+        active = manager.list_active(user_id="owner", room_id="room")
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["status"], "pending")
+
+    def test_preview_fingerprint_is_bound_to_exact_persisted_content(self):
+        from services.ayue_agent.shared.test_store import MemoryCollection
+
+        manager = ConfirmationManager(MemoryCollection())
+        manager.create_confirmation(
+            user_id="owner", agent_name="calendar", tool_name="calendar.submit_commands",
+            arguments={}, payload={"plans": []}, origin_run_id="run-preview",
+            preview="原始預覽",
+            room_id="room",
+        )
+        self.assertTrue(manager.bind_final_preview(
+            user_id="owner", origin_run_id="run-preview", final_content="最終預覽",
+        ))
+        self.assertFalse(manager.mark_presented(
+            user_id="owner", origin_run_id="run-preview", message_id="message-1",
+            persisted_content="原始預覽",
+        ))
+        self.assertTrue(manager.mark_presented(
+            user_id="owner", origin_run_id="run-preview", message_id="message-1",
+            persisted_content="最終預覽",
+        ))
+
+    def test_interaction_layout_is_part_of_presentation_fingerprint(self):
+        from services.ayue_agent.shared.test_store import MemoryCollection
+
+        manager = ConfirmationManager(MemoryCollection())
+        manager.create_confirmation(
+            user_id="owner", agent_name="calendar", tool_name="calendar.submit_commands",
+            arguments={}, payload={"plans": []}, origin_run_id="run-layout",
+            preview="要新增行程嗎？", room_id="room",
+        )
+        expected = [
+            {"type": "text", "message_index": 0},
+            {"type": "confirmation", "slot": "primary_write_confirmation"},
+        ]
+        self.assertTrue(manager.bind_final_preview(
+            user_id="owner", origin_run_id="run-layout", final_content="你確認一下。",
+            interaction_blocks_v1=expected,
+        ))
+        self.assertFalse(manager.mark_presented(
+            user_id="owner", origin_run_id="run-layout", message_id="message-layout",
+            persisted_content="你確認一下。", interaction_blocks_v1=[],
+        ))
+        self.assertTrue(manager.mark_presented(
+            user_id="owner", origin_run_id="run-layout", message_id="message-layout",
+            persisted_content="你確認一下。", interaction_blocks_v1=expected,
+        ))
+
+    def test_public_choice_projection_contains_server_owned_display(self):
+        from services.ayue_agent.shared.confirmation import public_choice_projection
+
+        projection = public_choice_projection({
+            "_id": "choice", "status": "pending", "expires_at": 100,
+            "tool_name": "calendar.submit_commands",
+            "preview_text": "要新增 9/19 19:00「晚餐」嗎？",
+        })
+        self.assertEqual(projection["display"]["title"], "確認行事曆變更")
+        self.assertIn("晚餐", projection["display"]["summary"])
+
+        assessment = public_choice_projection({
+            "_id": "assessment-choice", "status": "pending", "expires_at": 100,
+            "tool_name": "profile.commit_assessment",
+            "preview_text": "這是新的探索草稿，請選擇是否套用。",
+        })
+        self.assertEqual(assessment["display"]["title"], "套用探索結果")
+        self.assertIn("更新個人資料", assessment["display"]["consequence"])
+
+    def test_supersede_and_confirm_race_never_cancels_executing_mutation(self):
+        from services.ayue_agent.shared.test_store import MemoryCollection
+
+        manager = ConfirmationManager(MemoryCollection())
+        manager.create_confirmation(
+            user_id="owner", agent_name="calendar", tool_name="calendar.submit_commands",
+            arguments={}, payload={"plans": []}, origin_run_id="run-preview",
+            preview="預覽",
+            room_id="room",
+        )
+        manager.bind_final_preview(
+            user_id="owner", origin_run_id="run-preview", final_content="預覽",
+        )
+        manager.mark_presented(
+            user_id="owner", origin_run_id="run-preview", message_id="message-1",
+            persisted_content="預覽",
+        )
+        record = manager.list_active(user_id="owner")[0]
+        manager._coll.update_one(
+            {"_id": record["_id"], "status": "pending"},
+            {"$set": {"status": "executing"}},
+        )
+        result = manager.supersede_active(user_id="owner", tool_name="calendar.submit_commands")
+        self.assertEqual(result["status"], "already_executing")
+        self.assertEqual(manager._coll.find({"_id": record["_id"]})[0]["status"], "executing")
+
+    def test_tuple_failure_preserves_stale_revision_code(self):
+        self.coll.find.return_value = [self._record()]
+        self.coll.update_one.side_effect = [
+            MagicMock(modified_count=1),
+            MagicMock(modified_count=0),
+        ]
+
+        results = self.mgr.execute_confirmed(
+            user_id="owner",
+            executor=lambda *_args, **_kwargs: (False, "stale", "stale_revision"),
+        )
+
+        self.assertFalse(results[0]["ok"])
+        self.assertEqual(results[0]["error_code"], "stale_revision")
+
+
+if __name__ == "__main__":
+    unittest.main()

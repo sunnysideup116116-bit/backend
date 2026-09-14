@@ -150,7 +150,7 @@ def _deliver_pending_slot(profile: dict, *, now: float) -> str:
 def run_due_proactive_care_once(*, now: float | None = None, limit: int = 40) -> dict[str, int]:
     """Claim, generate and persist one safe candidate per scheduler pass.
 
-    The worker is intentionally independent from Planner/V3. Profile extraction
+    The worker is intentionally independent from public Pi. Profile extraction
     creates candidates; this function only evaluates timing/consent gates and
     writes a grounded assistant message to the candidate's original room.
     """

@@ -6,7 +6,7 @@ from dotenv import dotenv_values
 
 
 LLM_OWNER_NAMES = frozenset({
-    "planner", "calendar", "places", "match",
+    "pi", "planner", "calendar", "places", "match",
     "relationship", "profile", "web", "synthesizer",
 })
 FAST_MODEL_OWNERS = frozenset({

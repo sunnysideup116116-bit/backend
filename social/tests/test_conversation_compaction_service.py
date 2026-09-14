@@ -13,7 +13,7 @@ from services.ai_service import ChatResult
 from services.conversation_compaction_contracts import ConversationSummaryV1
 from services.ayue_agent import context as ayue_context
 from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext
-from services.ayue_agent.v3.planner import _planner_prompt
+from services.ayue_agent.pi.runtime import pi_context
 from services.message_use_service import metadata_for_use
 
 
@@ -889,7 +889,7 @@ class ConversationCompactionServiceTests(unittest.TestCase):
             "recent_only_budget_limited",
         )
 
-    def test_planner_receives_summary_without_watermark_or_revision(self):
+    def test_pi_receives_summary_without_watermark_or_revision(self):
         ctx = PublicAgentTurnContext(
             user_id="owner", room_id="ai_assistant_owner", message="那繼續聊旅行",
             recent_messages=[{"role": "user", "content": "我想去京都"}],
@@ -897,11 +897,12 @@ class ConversationCompactionServiceTests(unittest.TestCase):
                 active_topics=["週末旅行"], unresolved_questions=["想去哪個城市"],
             ),
         )
-        prompt = _planner_prompt(ctx)
-        self.assertIn("週末旅行", prompt)
-        self.assertIn("conversation_continuity", prompt)
-        self.assertNotIn("covered_through_message_id", prompt)
-        self.assertNotIn('"revision"', prompt)
+        payload = pi_context(ctx)
+        encoded = json.dumps(payload, ensure_ascii=False)
+        self.assertIn("週末旅行", encoded)
+        self.assertIn("conversation_continuity", payload)
+        self.assertNotIn("covered_through_message_id", encoded)
+        self.assertNotIn('"revision"', encoded)
 
     def test_exact_batch_rejects_wrong_sender_without_returning_content(self):
         message = _message(1, "other", "對方私人內容")

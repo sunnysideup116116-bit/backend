@@ -4,14 +4,14 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from models import DirectChatRequest, MediatorPrivateRequest
-from services.ayue_agent.v3.confirmation import (
+from services.ayue_agent.shared.confirmation import (
     INTERACTION_BUBBLE,
     INTERACTION_LEGACY,
     SURFACE_PUBLIC,
     ConfirmationManager,
     interaction_mode_for_action,
 )
-from services.ayue_agent.v3.test_store import MemoryCollection
+from services.ayue_agent.shared.test_store import MemoryCollection
 from services.ayue_agent.private_v2 import (
     PRIVATE_CONFIRMATIONS,
     PrivateAgentTurnContextV2,

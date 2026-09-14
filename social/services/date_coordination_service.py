@@ -506,7 +506,7 @@ def cancel_coordination_or_event(
     ):
         raise HTTPException(status_code=409, detail="約會剛剛已變更，請重新確認")
     # Existing Calendar callers pass expected_revision for the event CAS. The
-    # V3 date-card path additionally passes the coordination revision so a
+    # The public date-card path additionally passes the coordination revision so a
     # confirmation cannot cancel a form that changed while it was pending.
 
     event = None

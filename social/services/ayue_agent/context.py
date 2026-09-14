@@ -28,6 +28,8 @@ from .contracts import AgentTurnContext, PublicAgentTurnContext, TurnClockV1
 from .capabilities import CAPABILITY_MANIFEST_VERSION
 from .public_relationship_projection import mentioned_contact_refs, validated_mentioned_contact_ids
 from .time_context import build_turn_clock
+from .shared.interaction_history import historical_interaction_projection
+from .web_tools import is_safe_public_url
 
 
 INTERNAL_ID_RE = re.compile(r"(?:@?seed_user_[\w-]+|@?demo_user|@?user[_-]?\d+)", re.IGNORECASE)
@@ -91,6 +93,30 @@ def _visible_confirmation_history(item: dict[str, Any]) -> str:
         if value:
             lines.append(f"{label}：{value}")
     return "\n".join(lines)[:900] if len(lines) > 1 else ""
+
+
+def _visible_source_history(item: dict[str, Any]) -> list[dict[str, str]]:
+    """Project sources saved with this exact visible assistant message."""
+    metadata = item.get("metadata")
+    raw_sources = metadata.get("sources") if isinstance(metadata, dict) else None
+    if not isinstance(raw_sources, list):
+        return []
+    output: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for source in raw_sources:
+        if not isinstance(source, dict):
+            continue
+        url = str(source.get("url") or "").strip()
+        if not is_safe_public_url(url) or url in seen:
+            continue
+        seen.add(url)
+        output.append({
+            "title": _clean_text(source.get("title") or "公開來源", 160),
+            "url": url[:1000],
+        })
+        if len(output) >= 5:
+            break
+    return output
 
 
 def _public_label(user_id: str | None) -> str:
@@ -242,13 +268,21 @@ def _history(
             truncated = True
         if not content:
             break
-        history.append({
+        history_item = {
             "role": role,
             "content": content,
             "sent_at": _history_sent_at(item.get("timestamp"), timezone_name),
             "timezone": timezone_name,
             "truncated": truncated,
-        })
+        }
+        historical_interaction = historical_interaction_projection(item)
+        if historical_interaction is not None:
+            history_item["historical_interaction"] = historical_interaction
+        if role == "assistant":
+            sources = _visible_source_history(item)
+            if sources:
+                history_item["sources"] = sources
+        history.append(history_item)
         used += len(content)
         if used >= MAX_HISTORY_CHARS:
             break
@@ -303,7 +337,7 @@ def build_public_context(ctx: AgentTurnContext) -> dict[str, Any]:
 
 
 def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1 | None = None) -> PublicAgentTurnContext:
-    """Assemble the only bounded state the Public V3 runtime may see.
+    """Assemble the only bounded state the public Pi runtime may see.
 
     Database identifiers, raw profile documents, other users' calendars and old
     unrelated matches deliberately remain outside this object.
@@ -380,11 +414,11 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     # when it semantically recognises a match-status question instead.
     outcome = None
     recent_context_draft = profile.get("recent_context_draft") or None
-    from .v3.calendar_references import (
+    from .shared.calendar_state import (
         get_recent_mutation,
         recent_mutation_projection,
     )
-    from .v3.date_coordination_references import (
+    from .shared.date_coordination_state import (
         date_coordination_summary,
     )
     calendar_recent_mutation = recent_mutation_projection(get_recent_mutation(ctx.user_id))

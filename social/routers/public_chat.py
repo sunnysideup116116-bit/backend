@@ -1,8 +1,7 @@
-"""Public direct-chat HTTP adapters and V3 orchestration.
+"""Public direct-chat HTTP adapters and engine-neutral orchestration.
 
 This module owns only /api/direct_chat and /api/direct_chat/stream. Public
-Ayue delegates to services.ayue_agent.v3.scheduler; there is no legacy
-public runtime anymore.
+Public Ayue delegates to the production Pi runtime.
 """
 
 import asyncio
@@ -24,8 +23,8 @@ from models import DirectChatRequest
 from services.ai_service import generate_chat_completion
 from services.appwrite_identity_service import authenticated_owner_matches
 from services.ayue_agent import (
-    mark_public_confirmation_presented,
-    run_public_agent_turn_v3,
+    mark_public_interaction_presented,
+    run_public_agent_turn,
 )
 from services.ayue_agent.contracts import PublicAgentRequestContext
 from services.assessment_session_service import (
@@ -36,7 +35,7 @@ from services.ayue_agent.proactive_care import record_proactive_activity
 from services.proactive_followup_service import record_owner_activity
 from services.ayue_agent.onboarding import complete_public_ayue_onboarding
 from services.ayue_agent.product_identity import PUBLIC_RETRY_REPLY, PUBLIC_RUNTIME_ERROR_REPLY
-from services.ayue_agent.v3.debug_trace import (
+from services.ayue_agent.shared.debug_trace import (
     finish_run as finish_debug_run,
     local_debug_enabled,
 )
@@ -98,6 +97,14 @@ router = APIRouter()
 MATCH_READINESS_THRESHOLD = 75
 
 
+def _require_public_pi(request: Request | None, authenticated: bool) -> None:
+    if request is None or not authenticated:
+        raise HTTPException(401, "public_agent_authentication_required")
+    from services.ayue_agent.pi.settings import PiRuntimeUnavailable, pi_available
+    if not pi_available():
+        raise HTTPException(503, str(PiRuntimeUnavailable()))
+
+
 def _validate_focused_match(req: DirectChatRequest) -> dict | None:
     """Resolve one Hub card against canonical participant/namespace state."""
     match_id = str(req.focused_match_id or "").strip()
@@ -155,18 +162,6 @@ def _resolve_ai_room_id(req: DirectChatRequest) -> str:
         return req.ai_room_id
     return generate_room_id(req.user_id, req.contact_id)
 
-_PUBLIC_PROGRESS_STAGE_BY_AGENT = {
-    "calendar": ("checking_calendar", "阿月正在確認你的行事曆…"),
-    "places": ("finding_places", "阿月正在整理地點資訊…"),
-    "web": ("checking_web", "阿月正在查證公開資訊…"),
-    "match": ("checking_match", "阿月正在確認配對狀態…"),
-    "relationship": ("checking_relationship", "阿月正在確認關係資訊…"),
-    "profile": ("checking_profile", "阿月正在整理你的資料…"),
-    "product_info": ("checking_product", "阿月正在確認產品資訊…"),
-    "synthesizer": ("composing", "阿月正在整理回覆…"),
-}
-
-
 def queue_profile_skills(
     background_tasks, user_id: str, message: str, message_id: str | None,
     surface: str, match_id: str | None = None, *, progress_token: str | None = None,
@@ -193,7 +188,7 @@ def check_and_trigger_date_activation(room_id: str, user_id: str, contact_id: st
         coordination = create_invite(match_doc, user_id, contact_id)
         if coordination:
             try:
-                from services.ayue_agent.v3.date_coordination_references import remember_date_coordination
+                from services.ayue_agent.shared.date_coordination_state import remember_date_coordination
                 remember_date_coordination(
                     user_id,
                     room_id,
@@ -276,7 +271,7 @@ def _complete_public_turn(
     debug_enabled: bool = False,
     external_calendar_authorized: bool = False,
 ) -> dict:
-    """Run and persist one V3 turn after the owner message has been saved."""
+    """Run and persist one Pi turn after the owner message has been saved."""
     fetched_history = list(
         messages_coll.find({"room_id": room_id})
         .sort([("timestamp", -1), ("_id", -1)])
@@ -315,7 +310,7 @@ def _complete_public_turn(
         ),
         external_calendar_authorized=external_calendar_authorized,
     )
-    agent_result = run_public_agent_turn_v3(
+    agent_result = run_public_agent_turn(
         agent_ctx, on_progress=on_progress, on_token=on_token,
         debug_enabled=debug_enabled,
     )
@@ -390,12 +385,26 @@ def _complete_public_turn(
             # already-saved reply available even when the auxiliary marker
             # write is temporarily unavailable.
             pass
+    interaction_activated = False
     if (
         run_id
         and isinstance(saved_reply, dict)
         and saved_reply.get("message_id")
     ):
-        mark_public_confirmation_presented(
+        if agent_result.place_presentation_required:
+            try:
+                from services.ayue_agent.shared.place_history import publish_place_presentation
+                publish_place_presentation(
+                    req.user_id,
+                    room_id,
+                    run_id,
+                    str(saved_reply["message_id"]),
+                )
+            except Exception:
+                # The reply remains valid public text. An unpublished snapshot
+                # is intentionally unusable for later ordinal references.
+                pass
+        interaction_activated = mark_public_interaction_presented(
             user_id=req.user_id,
             origin_run_id=run_id,
             message_id=str(saved_reply["message_id"]),
@@ -404,6 +413,35 @@ def _complete_public_turn(
                 (saved_reply.get("metadata") or {}).get("interaction_blocks_v1") or []
             ),
         )
+    interaction_expected = bool(
+        agent_result.choice_prompt
+        or any(
+            isinstance(block, dict)
+            and block.get("type") in {"confirmation", "contact_selection"}
+            for block in interaction_blocks_v1
+        )
+    )
+    published_choice_prompt = agent_result.choice_prompt
+    if interaction_expected and not interaction_activated:
+        # A prepared record is not executable authority. If durable save or
+        # activation failed, do not publish a live-looking control in this
+        # response; a later refresh may only recover from the same record.
+        interaction_blocks_v1 = [
+            block for block in interaction_blocks_v1
+            if block.get("type") not in {"confirmation", "contact_selection"}
+        ]
+        published_choice_prompt = None
+        if isinstance(saved_reply, dict) and saved_reply.get("_id") is not None:
+            try:
+                messages_coll.update_one(
+                    {"_id": saved_reply["_id"], "room_id": room_id},
+                    {"$unset": {
+                        "metadata.choice_prompt": "",
+                        "metadata.interaction_blocks_v1": "",
+                    }},
+                )
+            except Exception:
+                pass
     # Assessment answers are a separate, owner-scoped workflow. They must not
     # become recent-context or durable-memory evidence. Other saved public
     # messages still reach the isolated extractor.
@@ -433,7 +471,7 @@ def _complete_public_turn(
         "profile_process_run_key": profile_process_run_key,
         "agent_run_id": agent_result.agent_run_id,
         "agent_mode": agent_result.agent_mode,
-        "agent_version": "v3",
+        "agent_version": "pi",
         "match_readiness_state": agent_result.match_readiness_state,
         "match_guidance_shown": agent_result.match_guidance_shown,
         "assessment_state": agent_result.assessment_state
@@ -447,7 +485,7 @@ def _complete_public_turn(
         "presentation_blocks": presentation_blocks,
         "interaction_blocks_v1": interaction_blocks_v1,
         "llm_call_metrics": agent_result.llm_call_metrics or [],
-        "choice_prompt": agent_result.choice_prompt,
+        "choice_prompt": published_choice_prompt,
         "choice_resolution": agent_result.choice_resolution,
     }
 
@@ -457,7 +495,7 @@ def _run_public_stream_turn(
     *, on_token=None, debug_enabled: bool = False,
     external_calendar_authorized: bool = False,
 ) -> dict:
-    """Public-only stream path; mirrors the V3 branch of direct_chat exactly once."""
+    """Public-only stream path; runs one authenticated Pi turn exactly once."""
     room_id = _resolve_ai_room_id(req)
     requested_mentions, mention_overflow = _validated_requested_mentions(req)
     request_message = _public_request_message(req)
@@ -526,17 +564,6 @@ def _sanitize_public_stream_event(event: dict) -> dict | None:
     run_id = str(event.get("agent_run_id") or "")[:128]
     if event_type == "run_started" and run_id:
         return {"type": "run_started", "agent_run_id": run_id}
-    if event_type == "subagent_started" and run_id:
-        stage = _PUBLIC_PROGRESS_STAGE_BY_AGENT.get(str(event.get("agent") or ""))
-        if stage is None:
-            return None
-        stage_name, text = stage
-        return {
-            "type": "stage",
-            "agent_run_id": run_id,
-            "stage": stage_name,
-            "text": text,
-        }
     if event_type == "tool_started" and run_id:
         return {
             "type": "tool_started",
@@ -585,6 +612,8 @@ def direct_chat_stream(
         request.headers.get("Authorization") if request else None,
         req.user_id,
     )
+    if req.contact_id == "ai_assistant":
+        _require_public_pi(request, external_calendar_authorized)
     token_stream_enabled = bool(
         request
         and request.headers.get("x-ayue-stream-tokens", "").strip().lower() == "v1"
@@ -646,17 +675,28 @@ def direct_chat_stream(
                 pass
 
     async def event_stream():
+        if req.contact_id == "ai_assistant":
+            # Flush headers and one non-content event before waiting for Pi.
+            # Proxies must not turn model latency into the client's connect timeout.
+            yield json.dumps({"type": "run_started", "agent_run_id": state["agent_run_id"]}) + "\n"
+        last_delivery = time.monotonic()
         while True:
             try:
                 event = event_queue.get_nowait()
             except queue.Empty:
                 if worker_done.is_set():
                     break
+                if req.contact_id == "ai_assistant" and time.monotonic() - last_delivery >= 10.0:
+                    # Empty NDJSON lines are transport keepalives, understood
+                    # by existing desktop clients without a protocol upgrade.
+                    yield "\n"
+                    last_delivery = time.monotonic()
                 await asyncio.sleep(0.01)
                 continue
             if event is None:
                 break
             yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+            last_delivery = time.monotonic()
 
     threading.Thread(target=worker, name="ayue-direct-chat-stream", daemon=True).start()
     return StreamingResponse(
@@ -675,7 +715,13 @@ def direct_chat(
     background_tasks: BackgroundTasks,
     request: Request = None,
 ):
-    """Handle Public Ayue with V3, or preserve the existing pair-chat adapter."""
+    """Handle public Ayue with Pi, or preserve the existing pair-chat adapter."""
+    external_calendar_authorized = False
+    if req.contact_id == "ai_assistant":
+        external_calendar_authorized = authenticated_owner_matches(
+            request.headers.get("Authorization") if request else None, req.user_id,
+        )
+        _require_public_pi(request, external_calendar_authorized)
     requested_mentions, mention_overflow = _validated_requested_mentions(req)
     request_message = _public_request_message(req)
     display_message = request_message
@@ -715,10 +761,7 @@ def direct_chat(
             req, room_id, requested_mentions, mention_overflow,
             background_tasks=background_tasks,
             user_message_id=(user_message or {}).get("message_id"),
-            external_calendar_authorized=authenticated_owner_matches(
-                request.headers.get("Authorization") if request else None,
-                req.user_id,
-            ),
+            external_calendar_authorized=external_calendar_authorized,
         )
 
     room_id = generate_room_id(req.user_id, req.contact_id)

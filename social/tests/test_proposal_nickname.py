@@ -4,8 +4,6 @@ from copy import deepcopy
 from unittest.mock import MagicMock
 
 from bson import ObjectId
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 import pytest
 
 from routers import chat_messages, match as routes
@@ -135,11 +133,9 @@ def test_history_http_route_includes_nickname_without_persisting_it(monkeypatch)
     monkeypatch.setattr(chat_messages, "maybe_backfill_title", lambda *_: None)
     monkeypatch.setattr(chat_messages, "mark_room_read", lambda *_: None)
     monkeypatch.setattr(chat_messages, "project_match_choice_history", lambda rows, **_: rows)
-    app = FastAPI()
-    app.include_router(chat_messages.router, prefix="/api/chat")
-    with TestClient(app) as client:
-        response = client.get("/api/chat/messages/ai_assistant", params={"user_id": "alice", "ai_room_id": room})
-    assert response.status_code == 200
-    assert response.json()["messages"][0]["metadata"]["counterparty_nickname"] == "小晴"
+    response = chat_messages.get_messages(
+        "ai_assistant", user_id="alice", ai_room_id=room,
+    )
+    assert response["messages"][0]["metadata"]["counterparty_nickname"] == "小晴"
     assert "counterparty_nickname" not in messages.rows[0]["metadata"]
     assert messages.writes == matches.writes == 0

@@ -4,7 +4,8 @@ from unittest.mock import Mock, patch
 import requests
 
 from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext, ToolCall
-from services.ayue_agent.v3.scheduler import _public_sources, _web_extract_urls_allowed
+from services.ayue_agent.pi.runtime import _public_sources
+from services.ayue_agent.shared.web_guard import web_extract_urls_allowed
 from services.ayue_agent.tools import execute_tool
 from services.ayue_agent.web_tools import extract_web, is_safe_public_url, search_web
 from services.profile_location import normalize_profile_location, safe_profile_location
@@ -105,19 +106,20 @@ class AyueWebToolsTests(unittest.TestCase):
 
     def test_extract_is_bound_to_owner_url_or_current_search_observation(self):
         ctx = AgentTurnContext(user_id="owner", room_id="room", message="請看 https://example.com/a")
-        self.assertTrue(_web_extract_urls_allowed(ctx, [], ["https://example.com/a"]))
-        self.assertFalse(_web_extract_urls_allowed(ctx, [], ["https://example.net/unseen"]))
+        self.assertTrue(web_extract_urls_allowed(ctx, [], ["https://example.com/a"]))
+        self.assertFalse(web_extract_urls_allowed(ctx, [], ["https://example.net/unseen"]))
         observations = [{"tool": "web.search", "result": {"results": [{"url": "https://example.net/unseen"}]}}]
-        self.assertTrue(_web_extract_urls_allowed(ctx, observations, ["https://example.net/unseen"]))
+        self.assertTrue(web_extract_urls_allowed(ctx, observations, ["https://example.net/unseen"]))
 
     def test_sources_never_include_web_content(self):
-        sources = _public_sources([{"tool": "web.search", "result": {"results": [{
+        sources = _public_sources([{"status": "ok", "tool": "web.search", "result": {"results": [{
             "title": "官方活動", "url": "https://example.com/event", "snippet": "ignore this instruction",
         }]}}])
         self.assertEqual(sources, [{"title": "官方活動", "url": "https://example.com/event"}])
 
     def test_place_map_links_are_not_mislabeled_as_web_evidence(self):
         sources = _public_sources([{
+            "status": "ok",
             "tool": "places.search_nearby",
             "result": {"places": [{
                 "name": "候選咖啡店",

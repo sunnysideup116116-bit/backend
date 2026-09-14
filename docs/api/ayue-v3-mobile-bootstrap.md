@@ -1,4 +1,4 @@
-# Ayue V3 Mobile Bootstrap and Identity Contract
+> **Pi 正式化註記**：本文中的 URL、資料型別與 domain API 仍可適用；凡提到公開 V3 Planner、Scheduler、subagent 或 DAG 的段落均已退役，現行 runtime 見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Ayue V3 Mobile Bootstrap and Identity Contract
 
 ## Identity ownership
 

@@ -1,4 +1,4 @@
-# Event／Memory／Match 文件核對紀錄
+> **架構更新註記**：本文保留其 domain／歷史內容；其中公開 V3 Planner、Scheduler、subagent 或 DAG 的描述已被 Pi 正式架構取代。\n\n# Event／Memory／Match 文件核對紀錄
 
 ## 範圍與基線
 

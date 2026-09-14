@@ -1,4 +1,4 @@
-# Ayue V3 Backend Change Record
+> **歷史文件（2026-09-14 以前）**：本文記錄已退役的公開 DAG 架構，不可作為現行操作指引。公開阿月目前固定使用 Pi；現行規格見 Server/AYUE_V3_ARCHITECTURE.md。\n\n# Ayue V3 Backend Change Record
 
 This file records only integration changes to the canonical Ayue V3 backend import: the reason for each change and the behavior before and after it.
 

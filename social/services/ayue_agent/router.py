@@ -1,9 +1,4 @@
-"""Shared deterministic helpers for the public-Ayue V3 runtime.
-
-The V3 sub-agent runtime keeps only the small closed protocols and reply
-sanitizers that both the Scheduler and the Synthesizer rely on.  All
-planner/guard/composer logic lives in the V3 package.
-"""
+"""Shared deterministic helpers for public Ayue reply validation."""
 
 from __future__ import annotations
 

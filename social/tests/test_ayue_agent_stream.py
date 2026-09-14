@@ -43,6 +43,14 @@ def _request(host: str = "testclient", *, token_stream: bool = False) -> Request
 
 
 class AyueAgentStreamTests(unittest.TestCase):
+    def setUp(self):
+        self._owner_auth = patch("routers.public_chat.authenticated_owner_matches", return_value=True)
+        self._pi_available = patch("services.ayue_agent.pi.settings.pi_available", return_value=True)
+        self._owner_auth.start()
+        self._pi_available.start()
+        self.addCleanup(self._owner_auth.stop)
+        self.addCleanup(self._pi_available.stop)
+
     def test_assessment_from_another_room_is_removed_before_scheduler(self):
         req = DirectChatRequest(
             user_id="owner", contact_id="ai_assistant", message="普通聊天",
@@ -57,8 +65,8 @@ class AyueAgentStreamTests(unittest.TestCase):
         }}
         with patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
              patch("routers.public_chat.profiles_coll.find_one", return_value=profile), \
-             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
-                 handled=True, reply="我們聊別的。", agent_mode="v3",
+             patch("routers.public_chat.run_public_agent_turn", return_value=AgentResult(
+                 handled=True, reply="我們聊別的。", agent_mode="pi",
                  match_state_changed=True,
              )) as run, \
              patch("routers.public_chat.complete_public_ayue_onboarding"), \
@@ -74,7 +82,7 @@ class AyueAgentStreamTests(unittest.TestCase):
         self.assertIsNone(response["assessment_kind"])
         self.assertTrue(response["match_state_changed"])
 
-    def test_json_direct_chat_v3_does_not_load_removed_public_runtime(self):
+    def test_json_direct_chat_routes_authenticated_owner_to_public_pi(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="你好")
         real_import = builtins.__import__
         imported_requests = []
@@ -92,14 +100,16 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.matches_coll.find", return_value=[]), \
              patch("routers.public_chat.profiles_coll.update_one"), \
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
+             patch("routers.public_chat.authenticated_owner_matches", return_value=True), \
+             patch("services.ayue_agent.pi.settings.pi_available", return_value=True), \
              patch("routers.public_chat._complete_public_turn", return_value={
-                 "reply": "嗨。", "agent_version": "v3", "agent_run_id": "run-v3",
-             }) as complete_v3, \
+                 "reply": "嗨。", "agent_version": "pi", "agent_run_id": "run-pi",
+             }) as complete_pi, \
              patch("builtins.__import__", side_effect=record_import):
-            response = direct_chat(req, BackgroundTasks())
+            response = direct_chat(req, BackgroundTasks(), _request())
 
-        self.assertEqual(response["agent_version"], "v3")
-        complete_v3.assert_called_once()
+        self.assertEqual(response["agent_version"], "pi")
+        complete_pi.assert_called_once()
         self.assertFalse(any(
             name == "services.ayue_agent.runtime"
             or (name == "services.ayue_agent" and "runtime" in fromlist)
@@ -190,7 +200,7 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.profiles_coll.update_one"), \
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
              patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
-             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
+             patch("routers.public_chat.run_public_agent_turn", return_value=AgentResult(
                  handled=True, reply="嗨。", agent_run_id="a" * 32, agent_mode="v2",
                  profile_write_allowed=False,
              )):
@@ -224,7 +234,7 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
              patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
              patch("routers.public_chat.queue_profile_skills") as queue_profile, \
-             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
+             patch("routers.public_chat.run_public_agent_turn", return_value=AgentResult(
                  handled=True, reply="遇到臨時變動時呢？", agent_run_id="assessment-run", agent_mode="v2",
                  profile_write_allowed=False, profile_write_reason="assessment",
                  assessment_state="active", assessment_kind="big_five", assessment_revision=2,
@@ -253,8 +263,8 @@ class AyueAgentStreamTests(unittest.TestCase):
              }), \
              patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
              patch("routers.public_chat.queue_profile_skills") as queue_profile, \
-             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
-                 handled=True, reply="這段探索已取消。", agent_run_id="assessment-cancel-run", agent_mode="v3",
+             patch("routers.public_chat.run_public_agent_turn", return_value=AgentResult(
+                 handled=True, reply="這段探索已取消。", agent_run_id="assessment-cancel-run", agent_mode="pi",
                  profile_write_allowed=False, profile_write_reason="assessment",
                  assessment_state="cancelled", assessment_kind="deep_profile", assessment_revision=4,
              )) as run:
@@ -300,15 +310,13 @@ class AyueAgentStreamTests(unittest.TestCase):
         self.assertEqual(source.count("setTimeout(refreshMatchStatus, 100)"), 1)
         self.assertNotIn("match-progress-card", source)
 
-    def test_debug_trace_shows_direct_chat_fast_path_or_fallback(self):
+    def test_debug_trace_uses_pi_runtime_events(self):
         source = (
             Path(__file__).resolve().parents[1] / "frontend.html"
         ).read_text(encoding="utf-8")
-        self.assertIn('event.mode === "direct_chat"', source)
-        self.assertIn("direct_chat · Fast Path", source)
-        self.assertIn("Direct Chat Fast Path", source)
-        self.assertIn("Direct Chat 未採用", source)
-        self.assertIn("direct_chat_fallback_reason", source)
+        self.assertIn("Pi Agent 執行紀錄", source)
+        self.assertIn('event.outcome || event.status || ""', source)
+        self.assertNotIn("Direct Chat Fast Path", source)
 
     def test_giphy_message_is_rendered_from_typed_safe_media(self):
         source = (
@@ -360,20 +368,18 @@ class AyueAgentStreamTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "frontend.html"
         ).read_text(encoding="utf-8")
         self.assertIn("function escapeDebugHtml(value)", source)
-        self.assertIn('escapeDebugHtml((r.reply || "").substring(0, 200))', source)
-        self.assertIn("escapeDebugHtml(finalReply.substring(0, 300))", source)
+        self.assertIn('escapeDebugHtml(event.type || "event")', source)
 
-    def test_local_debug_panel_has_bounded_stream_and_structured_v3_details(self):
+    def test_local_debug_panel_has_bounded_stream_and_structured_pi_details(self):
         source = (
             Path(__file__).resolve().parents[1] / "frontend.html"
         ).read_text(encoding="utf-8")
         self.assertIn("new AbortController()", source)
         self.assertIn("controller.abort(), 120000", source)
         self.assertIn("/api/debug/ayue-runs/", source)
-        self.assertIn("任務 DAG／層級關係", source)
-        self.assertIn("餵入資料", source)
-        self.assertIn("可用 Functions", source)
-        self.assertIn("Executor args", source)
+        self.assertIn("Pi Agent 執行紀錄", source)
+        self.assertNotIn("subagent_started", source)
+        self.assertNotIn("planner_completed", source)
 
         ai_source = (
             Path(__file__).resolve().parents[1] / "services" / "ai_service.py"
@@ -421,8 +427,7 @@ class AyueAgentStreamTests(unittest.TestCase):
     def test_public_stream_emits_only_safe_progress_and_compatible_final_response(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="今天幾月幾號")
 
-        def fake_turn(_req, _tasks, emit, on_token=None):
-            emit({"type": "run_started", "agent_run_id": "run-1"})
+        def fake_turn(_req, _tasks, emit, on_token=None, **_kwargs):
             emit({
                 "type": "plan_created", "agent_run_id": "run-1",
                 "prompt_raw": "seed_user_08 private prompt",
@@ -459,12 +464,8 @@ class AyueAgentStreamTests(unittest.TestCase):
         events = [json.loads(chunk) for chunk in chunks]
         self.assertEqual(
             [event["type"] for event in events],
-            ["run_started", "stage", "stage", "tool_started", "tool_finished", "final"],
+            ["run_started", "tool_started", "tool_finished", "final"],
         )
-        self.assertEqual(events[1]["stage"], "checking_calendar")
-        self.assertEqual(events[1]["text"], "阿月正在確認你的行事曆…")
-        self.assertEqual(events[2]["stage"], "composing")
-        self.assertEqual(events[2]["text"], "阿月正在整理回覆…")
         self.assertEqual(events[-1]["response"]["reply"], "今天是 2026-07-30。")
         public_text = json.dumps(events, ensure_ascii=False)
         for forbidden in (
@@ -479,10 +480,10 @@ class AyueAgentStreamTests(unittest.TestCase):
         callback_seen = threading.Event()
         callbacks = []
 
-        def fake_turn(_req, _tasks, emit, on_token=None):
+        def fake_turn(_req, _tasks, emit, on_token=None, **_kwargs):
             callbacks.append(on_token)
             callback_seen.set()
-            return {"reply": "你好，很高興認識你。", "agent_version": "v3", "agent_run_id": "run-tok"}
+            return {"reply": "你好，很高興認識你。", "agent_version": "pi", "agent_run_id": "run-tok"}
 
         with             patch("routers.public_chat._run_public_stream_turn", side_effect=fake_turn):
             direct_chat_stream(
@@ -514,7 +515,7 @@ class AyueAgentStreamTests(unittest.TestCase):
 
         with patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
-             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
+             patch("routers.public_chat.run_public_agent_turn", return_value=AgentResult(
                  handled=True, reply=canonical, messages=[canonical],
                  presentation_class="grounded_recommendation",
                  agent_run_id="a" * 32, place_presentation_required=True,
@@ -523,7 +524,7 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.mark_message_use"), \
              patch("routers.public_chat.complete_public_ayue_onboarding"), \
              patch("routers.public_chat.save_message", side_effect=save_reply), \
-             patch("routers.public_chat.mark_public_confirmation_presented"):
+             patch("routers.public_chat.mark_public_interaction_presented"):
             response = _complete_public_turn(
                 req, "room", [], background_tasks=None, user_message_id="owner-message",
                 on_token=callbacks.append,
@@ -555,7 +556,7 @@ class AyueAgentStreamTests(unittest.TestCase):
 
         with patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
-             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
+             patch("routers.public_chat.run_public_agent_turn", return_value=AgentResult(
                  handled=True, reply="晚餐時間整理好了，你確認一下。",
                  messages=["晚餐時間整理好了，你確認一下。"],
                  presentation_class="transaction", agent_run_id="c" * 32,
@@ -573,7 +574,7 @@ class AyueAgentStreamTests(unittest.TestCase):
              patch("routers.public_chat.mark_message_use"), \
              patch("routers.public_chat.complete_public_ayue_onboarding"), \
              patch("routers.public_chat.save_message", side_effect=save_reply), \
-             patch("routers.public_chat.mark_public_confirmation_presented") as mark:
+             patch("routers.public_chat.mark_public_interaction_presented") as mark:
             response = _complete_public_turn(
                 req, "room", [], background_tasks=None, user_message_id="owner-message",
             )
@@ -582,6 +583,41 @@ class AyueAgentStreamTests(unittest.TestCase):
         self.assertEqual(response["interaction_blocks_v1"], blocks)
         self.assertEqual(response["choice_prompt"]["display"]["title"], "確認行事曆變更")
         self.assertEqual(mark.call_args.kwargs["interaction_blocks_v1"], blocks)
+
+    def test_failed_interaction_activation_is_not_returned_as_live_card(self):
+        req = DirectChatRequest(
+            user_id="owner", contact_id="ai_assistant", message="幫我新增晚餐",
+        )
+        history_cursor = MagicMock()
+        history_cursor.sort.return_value.limit.return_value = []
+        blocks = [
+            {"type": "text", "message_index": 0},
+            {"type": "confirmation", "slot": "primary_write_confirmation"},
+        ]
+        saved = {
+            "_id": "saved-row", "message_id": "saved-row", "content": "請確認晚餐行程。",
+            "metadata": {"interaction_blocks_v1": blocks},
+        }
+        with patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
+             patch("routers.public_chat.messages_coll.update_one") as update, \
+             patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
+             patch("routers.public_chat.run_public_agent_turn", return_value=AgentResult(
+                 handled=True, reply="請確認晚餐行程。", messages=["請確認晚餐行程。"],
+                 presentation_class="transaction", agent_run_id="d" * 32,
+                 interaction_blocks_v1=blocks,
+                 choice_prompt={"id": "choice-calendar", "state": "pending", "expires_at": 1e18},
+             )), \
+             patch("routers.public_chat.mark_message_use_from_turn"), \
+             patch("routers.public_chat.mark_message_use"), \
+             patch("routers.public_chat.complete_public_ayue_onboarding"), \
+             patch("routers.public_chat.save_message", return_value=saved), \
+             patch("routers.public_chat.mark_public_interaction_presented", return_value=False):
+            response = _complete_public_turn(
+                req, "room", [], background_tasks=None, user_message_id="owner-message",
+            )
+        self.assertIsNone(response["choice_prompt"])
+        self.assertFalse(any(block.get("type") == "confirmation" for block in response["interaction_blocks_v1"]))
+        update.assert_called_once()
 
     def test_legacy_place_snapshot_flag_cannot_replace_saved_natural_reply(self):
         req = DirectChatRequest(
@@ -595,7 +631,7 @@ class AyueAgentStreamTests(unittest.TestCase):
         with patch("routers.public_chat.messages_coll.find", return_value=history_cursor), \
              patch("routers.public_chat.messages_coll.update_one"), \
              patch("routers.public_chat.profiles_coll.find_one", return_value={"user_id": "owner"}), \
-             patch("routers.public_chat.run_public_agent_turn_v3", return_value=AgentResult(
+             patch("routers.public_chat.run_public_agent_turn", return_value=AgentResult(
                  handled=True, reply=canonical, messages=[canonical],
                  presentation_class="grounded_recommendation",
                  agent_run_id="b" * 32, place_presentation_required=True,
@@ -611,7 +647,7 @@ class AyueAgentStreamTests(unittest.TestCase):
                  "message_id": "assistant-message", "content": canonical,
                  "metadata": {},
              }), \
-             patch("routers.public_chat.mark_public_confirmation_presented") as mark_confirmation:
+             patch("routers.public_chat.mark_public_interaction_presented") as mark_confirmation:
             response = _complete_public_turn(
                 req, "room", [], background_tasks=None, user_message_id="owner-message",
                 on_token=callbacks.append,
@@ -627,11 +663,11 @@ class AyueAgentStreamTests(unittest.TestCase):
         callback_seen = threading.Event()
         callbacks = []
 
-        def fake_turn(_req, _tasks, emit, on_token=None):
+        def fake_turn(_req, _tasks, emit, on_token=None, **_kwargs):
             callbacks.append(on_token)
             callback_seen.set()
             return {
-                "reply": "你好。", "agent_version": "v3",
+                "reply": "你好。", "agent_version": "pi",
                 "agent_run_id": "run-default",
             }
 
@@ -646,7 +682,7 @@ class AyueAgentStreamTests(unittest.TestCase):
         with             patch("routers.public_chat._run_public_stream_turn", side_effect=RuntimeError("seed_user_08 raw database error")):
             response = direct_chat_stream(req, BackgroundTasks(), _request())
             chunks = asyncio.run(_collect(response))
-        event = json.loads(chunks[0])
+        event = json.loads(chunks[-1])
         self.assertEqual(event["type"], "error")
         self.assertIn("這件事還沒處理", event["reply"])
         self.assertNotIn("seed_user_08", event["reply"])
@@ -656,7 +692,7 @@ class AyueAgentStreamTests(unittest.TestCase):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="記得我想旅行")
         background_finished = threading.Event()
 
-        def fake_turn(_req, tasks, emit, on_token=None):
+        def fake_turn(_req, tasks, emit, on_token=None, **_kwargs):
             tasks.add_task(background_finished.set)
             emit({"type": "run_started", "agent_run_id": "run-background"})
             return {"reply": "我記得。", "agent_version": "v2", "agent_run_id": "run-background"}
@@ -670,7 +706,7 @@ class AyueAgentStreamTests(unittest.TestCase):
     def test_unknown_progress_event_is_not_published(self):
         req = DirectChatRequest(user_id="owner", contact_id="ai_assistant", message="聊天")
 
-        def fake_turn(_req, _tasks, emit, on_token=None):
+        def fake_turn(_req, _tasks, emit, on_token=None, **_kwargs):
             emit({"type": "debug", "prompt": "seed_user_08", "result": {"private": True}})
             return {"reply": "好呀。", "agent_version": "v2", "agent_run_id": "run-safe"}
 
@@ -678,7 +714,7 @@ class AyueAgentStreamTests(unittest.TestCase):
             response = direct_chat_stream(req, BackgroundTasks(), _request())
             chunks = asyncio.run(_collect(response))
         events = [json.loads(chunk) for chunk in chunks]
-        self.assertEqual([event["type"] for event in events], ["final"])
+        self.assertEqual([event["type"] for event in events], ["run_started", "final"])
         self.assertNotIn("seed_user_08", json.dumps(events, ensure_ascii=False))
 
     def test_private_redirect_prefills_public_without_auto_submit(self):

@@ -10,7 +10,7 @@ from services import proactive_delivery_service as delivery, chat_service, ai_ro
 from services import match_action_service as actions
 from services.match_card_projection import project_match_card_history
 from tests.match_flow_store import Collection
-from tests.test_match_restart_flow import flow
+from tests.match_flow_fixture import flow
 
 
 @pytest.fixture

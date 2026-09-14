@@ -9,14 +9,12 @@ from pydantic import ValidationError
 
 from models import CalendarEventCreateRequest, CalendarEventUpdateRequest
 from services.ayue_agent.contracts import AgentTurnContext
-from services.ayue_agent.v3.calendar_commands import (
+from services.ayue_agent.shared.calendar_commands import (
     CalendarCommand,
     normalize_calendar_batch_payload,
     preflight_calendar_commands,
 )
-from services.ayue_agent.v3.calendar_drafts import merge_command
-from services.ayue_agent.v3.write_executors import execute_write
-from services.ayue_agent.v3.sub_agents.calendar_agent import _tools_schema
+from services.ayue_agent.shared.write_executors import execute_write
 from services.ayue_agent.tools import _calendar_events
 from services.calendar_service import (
     _parse_local_interval,
@@ -192,10 +190,10 @@ class CalendarAllDayCommandTests(unittest.TestCase):
 
     def _preflight(self, command):
         with patch(
-            "services.ayue_agent.v3.calendar_commands.calendar_access_enabled",
+            "services.ayue_agent.shared.calendar_commands.calendar_access_enabled",
             return_value=True,
         ), patch(
-            "services.ayue_agent.v3.calendar_commands.conflicts_for_viewer",
+            "services.ayue_agent.shared.calendar_commands.conflicts_for_viewer",
             return_value=[],
         ):
             return preflight_calendar_commands(self._ctx(), [command])
@@ -210,16 +208,6 @@ class CalendarAllDayCommandTests(unittest.TestCase):
         self.assertTrue(result.plans[0].form["all_day"])
         self.assertIn("9/04 全天", result.preview)
         self.assertIn("回覆「確認」", result.preview)
-
-    def test_calendar_agent_schema_exposes_all_day_and_end_date(self):
-        command_tool = next(
-            item for item in _tools_schema()
-            if item["function"]["name"] == "calendar.submit_commands"
-        )
-        schema_text = json.dumps(command_tool["function"]["parameters"])
-
-        self.assertIn("all_day", schema_text)
-        self.assertIn("end_date", schema_text)
 
     def test_provider_fields_wrapper_preserves_all_day_range(self):
         payload = normalize_calendar_batch_payload({
@@ -263,25 +251,6 @@ class CalendarAllDayCommandTests(unittest.TestCase):
         self.assertEqual(result.status, "ready")
         self.assertIn("09/04 22:00–09/05 02:00", result.preview)
 
-    def test_all_day_continuation_satisfies_missing_clock_fields(self):
-        prior = CalendarCommand(
-            action="create", title="去非洲", date="2026-09-04",
-        )
-        record = {
-            "command": prior.model_dump(exclude_none=True),
-            "missing_fields": ["start_time", "end_time"],
-        }
-        merged = merge_command(
-            CalendarCommand(action="create", all_day=True, draft_mode="continue"),
-            record,
-        )
-        result = self._preflight(merged)
-
-        self.assertEqual(merged.title, "去非洲")
-        self.assertEqual(merged.date, "2026-09-04")
-        self.assertTrue(merged.all_day)
-        self.assertEqual(result.status, "ready")
-
     def test_timed_personal_event_can_be_updated_to_all_day(self):
         event = {
             "event_id": "event-1",
@@ -298,13 +267,13 @@ class CalendarAllDayCommandTests(unittest.TestCase):
             action="update", target_hint="去非洲", all_day=True,
         )
         with patch(
-            "services.ayue_agent.v3.calendar_commands.calendar_access_enabled",
+            "services.ayue_agent.shared.calendar_commands.calendar_access_enabled",
             return_value=True,
         ), patch(
-            "services.ayue_agent.v3.calendar_commands.resolve_owned_event",
+            "services.ayue_agent.shared.calendar_commands.resolve_owned_event",
             return_value=(event, None),
         ), patch(
-            "services.ayue_agent.v3.calendar_commands.conflicts_for_viewer",
+            "services.ayue_agent.shared.calendar_commands.conflicts_for_viewer",
             return_value=[],
         ):
             result = preflight_calendar_commands(self._ctx(), [command])
@@ -337,7 +306,7 @@ class CalendarAllDayCommandTests(unittest.TestCase):
             "services.calendar_service.create_personal_event",
             return_value=returned_event,
         ) as create, patch(
-            "services.ayue_agent.v3.write_executors.remember_recent_mutation",
+            "services.ayue_agent.shared.write_executors.remember_recent_mutation",
             create=True,
         ):
             ok, reply, code = execute_write(

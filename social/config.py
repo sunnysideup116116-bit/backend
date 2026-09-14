@@ -77,9 +77,6 @@ AYUE_GOOGLE_PLACE_ENRICHMENTS_ENABLED = os.getenv("AYUE_GOOGLE_PLACE_ENRICHMENTS
 # candidate projection, refs, IDs, and map URLs remain available internally.
 AYUE_PUBLIC_PLACE_CARDS_ENABLED = os.getenv("AYUE_PUBLIC_PLACE_CARDS_ENABLED", "off").strip().lower() == "on"
 # Opt-in bounded bootstrap for casual Places -> Web research.
-AYUE_V3_WEB_PLACE_BOOTSTRAP_FAST_PATH = os.getenv(
-    "AYUE_V3_WEB_PLACE_BOOTSTRAP_FAST_PATH", "off"
-).strip().lower() in {"1", "true", "on"}
 # Place Details Photos SKU bills the media bytes only (free 1,000/month).
 # The photos field itself rides along in Text Search Pro at no extra cost.
 AYUE_GOOGLE_PLACE_PHOTOS_ENABLED = os.getenv("AYUE_GOOGLE_PLACE_PHOTOS_ENABLED", "off").strip().lower() == "on"

@@ -28,8 +28,8 @@ from services.proactive_followup_service import (
     cancel_pending_followups,
     is_proactive_care_enabled,
 )
-from services.ayue_agent.v3.scheduler import has_active_public_confirmation
-from services.ayue_agent.v3.debug_trace import get_run as get_debug_run, local_debug_enabled
+from services.ayue_agent.shared.runtime_state import has_active_public_confirmation
+from services.ayue_agent.shared.debug_trace import get_run as get_debug_run, local_debug_enabled
 from services.ayue_agent.web_tools import web_enabled
 from services.profile_location import normalize_profile_location, safe_profile_location
 from services.ayue_agent.public_relationship_projection import anonymize_counterparty_payload
@@ -103,7 +103,7 @@ def _is_loopback_debug_request(request: Request) -> bool:
 
 @router.get("/debug/ayue-runs/{run_id}")
 def local_ayue_debug_run(run_id: str, user_id: str, request: Request):
-    """Return one ephemeral raw V3 diagnostic only to a true loopback client."""
+    """Return one ephemeral raw Pi diagnostic only to a true loopback client."""
     if not _is_loopback_debug_request(request) or not re.fullmatch(r"[a-f0-9]{32}", run_id):
         raise HTTPException(status_code=404, detail="Debug trace unavailable")
     run = get_debug_run(run_id, user_id)
@@ -291,7 +291,7 @@ def get_demo_status(user_id: str):
     search_status = str(search.get("status") or "idle")[:40]
     return {
         "profile_exists": bool(profile),
-        "agent_version": "v3",
+        "agent_version": "pi",
         "web_search_ready": web_enabled(),
         "location": safe_profile_location(profile),
         "recent_context": safe_recent_context(profile.get("current_context", ""), "尚無近期情境"),

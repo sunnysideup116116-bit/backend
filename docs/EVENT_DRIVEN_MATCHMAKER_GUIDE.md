@@ -1,4 +1,4 @@
-# Event-Driven Proactive Matchmaker Guide
+> **架構更新註記**：本文保留其 domain／歷史內容；其中公開 V3 Planner、Scheduler、subagent 或 DAG 的描述已被 Pi 正式架構取代。\n\n# Event-Driven Proactive Matchmaker Guide
 
 本文件是「事件驅動主動媒人」功能的完整技術與操作指南。閱讀者不需要先理解
 `matchmaker_new`；正式實作已整合在 `social` 與

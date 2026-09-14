@@ -51,11 +51,11 @@ class AgentTurnContext(BaseModel):
     user_id: str
     room_id: str
     message: str
-    # Server-owned control plane input.  Public V3 handles this before the
+    # Server-owned control-plane input. Public Pi handles this before the
     # planner; it is never copied into prompt-safe context or trace payloads.
     assessment_action: Literal["cancel"] | None = None
     choice_id: str | None = None
-    choice_action: Literal["confirm", "cancel"] | None = None
+    choice_action: Literal["confirm", "cancel", "more"] | None = None
     message_id: str | None = None
     mentioned_ids: list[str] = Field(default_factory=list)
     mention_overflow: bool = False
@@ -103,7 +103,7 @@ class TurnClockV1(BaseModel):
 
 
 class PublicAgentTurnContext(BaseModel):
-    """Prompt-safe Public V3 state, assembled once for each turn."""
+    """Prompt-safe public Pi state, assembled once for each turn."""
     version: str = "public-v1"
     user_id: str
     room_id: str
