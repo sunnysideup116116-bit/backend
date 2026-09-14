@@ -65,3 +65,7 @@ python scripts/retire_public_dag_state.py --verify
 正式啟動入口只有 `start_all.sh`。它在清 ports 與建立 logs 前檢查 Node 版本、Pi dependency 與 bridge self-check，再啟動固定的 Social `8000`、Risk `8001`、Matchmaker `9001`、Guardrail `8081`。
 
 主要驗證包括 Social 離線 suite、shared confirmation/write/Calendar 測試、Pi bridge 測試、registration/app voice、啟動 lifecycle、Flutter analyze/widget tests，以及 `scripts/build_web.sh`。提交前必須執行 GitNexus `detect-changes --scope all`。
+
+## Compaction v5 整合
+
+摘要來源改為9,000字元預算內的完整訊息連續前綴，不截斷單則尾段；超額訊息延後且不推進watermark。有可用來源卻產生全空摘要時最多修復一次，失敗保留上一份現行政策合格摘要。舊policy摘要需重新生成；owner/room隔離與全域readiness門檻不變。此domain修正沿用Pi既有conversation_continuity接線，不恢復DAG。
