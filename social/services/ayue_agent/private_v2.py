@@ -67,18 +67,18 @@ class PrivateToolSpec(BaseModel):
 
 
 PRIVATE_TOOL_REGISTRY = {
-    "private.relationship.get_pair_summary": PrivateToolSpec(name="private.relationship.get_pair_summary", risk="read", description="讀取這段已接受關係中可公開、共同或已同意分享的摘要。", progress_text="我整理一下你們已確認的共同資訊…"),
-    "private.relationship.get_shared_history": PrivateToolSpec(name="private.relationship.get_shared_history", risk="read", description="讀取這一對在共同聊天室的近期對話脈絡。", progress_text="我回看一下你們最近聊到哪裡…"),
-    "private.relationship.search_shared_history": PrivateToolSpec(name="private.relationship.search_shared_history", risk="read", description="依使用者提供的主題關鍵字搜尋這一對共同聊天室的本人可見歷史，最多回傳二十則。", progress_text="我找一下你們以前聊到這個主題的內容…"),
-    "private.calendar.get_counterparty_availability": PrivateToolSpec(name="private.calendar.get_counterparty_availability", risk="read", description="確認對方在指定期間的 busy/free 時段；不可讀取行程內容。", progress_text="我確認一下對方那段時間是否已有安排…"),
-    "private.date.start_coordination": PrivateToolSpec(name="private.date.start_coordination", risk="write", description="發起雙方同意的約會協調；會通知對方，必須先確認。", progress_text="我準備先問對方是否願意一起協調約會…", requires_confirmation=True),
+    "private.relationship.get_pair_summary": PrivateToolSpec(name="private.relationship.get_pair_summary", risk="read", description="讀取這段已接受關係中可公開、共同或已同意分享的摘要。", progress_text="我翻翻你們確認過的共同資訊～"),
+    "private.relationship.get_shared_history": PrivateToolSpec(name="private.relationship.get_shared_history", risk="read", description="讀取這一對在共同聊天室的近期對話脈絡。", progress_text="翻翻你們最近聊過的，把話接起來。"),
+    "private.relationship.search_shared_history": PrivateToolSpec(name="private.relationship.search_shared_history", risk="read", description="依使用者提供的主題關鍵字搜尋這一對共同聊天室的本人可見歷史，最多回傳二十則。", progress_text="我潛進聊天紀錄裡撈撈看～"),
+    "private.calendar.get_counterparty_availability": PrivateToolSpec(name="private.calendar.get_counterparty_availability", risk="read", description="確認對方在指定期間的 busy/free 時段；不可讀取行程內容。", progress_text="我幫你看看對方那段時間方不方便～"),
+    "private.date.start_coordination": PrivateToolSpec(name="private.date.start_coordination", risk="write", description="發起雙方同意的約會協調；會通知對方，必須先確認。", progress_text="我先把約會協調準備好，等你點頭～", requires_confirmation=True),
 }
 
 PRIVATE_TOOL_REGISTRY["private.calendar.get_viewer_availability"] = PrivateToolSpec(
     name="private.calendar.get_viewer_availability",
     risk="read",
     description="只有明確的關係或約會規劃問題才可查看使用者本人指定期間的 busy/free，不回傳行程內容。",
-    progress_text="我先看看你那段時間是否已有安排。",
+    progress_text="翻翻你的行事曆，看看那段時間怎麼排。",
 )
 
 

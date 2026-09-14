@@ -541,13 +541,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "system.get_current_time": ToolSpec(
         "system.get_current_time", ToolRisk.READ, "current_time",
         "讀取本回合的目前台北時間與訊息中相對日期的實際日期。",
-        "我確認一下現在的時間…",
+        "我先對一下時間，等等別讓日期跑掉～",
         output_model=_ClockOutput,
     ),
     "calendar.list_my_events": ToolSpec(
         "calendar.list_my_events", ToolRisk.READ, "calendar_events",
         "讀取本人的行事曆與忙碌時段，包含已連接且授權阿月的 Google 唯讀行程；不讀取對方行事曆內容。建議用 start_date 與 end_date（YYYY-MM-DD）指定查詢區間，可包含今天之前與之後；不指定時預設未來 90 天。",
-        "我看一下你的行事曆…",
+        "翻翻你的行事曆，看看時間怎麼排。",
         planner_arguments_model=_CalendarListArguments,
         executor_arguments_model=_CalendarListArguments,
         output_model=_CalendarOutput,
@@ -556,19 +556,19 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "calendar.get_next_my_event": ToolSpec(
         "calendar.get_next_my_event", ToolRisk.READ, "calendar_next_event",
         "讀取本人接下來 90 天內最近的一筆有效行程；適用於『最近一筆』『下一個行程』『最近有什麼行程』，會回傳唯一可供後續這筆／它／他／她指涉的行程。",
-        "我看一下你最近的一筆行程…",
+        "看看你下一個行程是什麼～",
         output_model=_CalendarNextOutput,
     ),
     "calendar.verify_recent_mutation": ToolSpec(
         "calendar.verify_recent_mutation", ToolRisk.READ, "calendar_mutation_verification",
         "確認最近一次行事曆變更是否已套用；只適用於使用者追問剛才的新增、修改或取消結果，不會再次執行寫入。",
-        "驗證最近一次行事曆變更是否成功。",
+        "我再確認一次，看看剛才的變更有沒有成功。",
         output_model=_CalendarMutationVerificationOutput,
     ),
     "calendar.find_my_event": ToolSpec(
         "calendar.find_my_event", ToolRisk.READ, "calendar_event_find",
         "查詢本人一筆指定行程及其是否為已確認共同約會；適用於問某個行程的日期、內容或跟誰去。可用已接受聯絡人的公開名稱縮小共同約會，但只會從該筆行程回答，不能用目前配對對象猜測。",
-        "我確認一下這筆行程…",
+        "我找找你說的那筆行程～",
         planner_arguments_model=_CalendarFindArguments,
         executor_arguments_model=_CalendarFindArguments,
         output_model=_CalendarFindOutput,
@@ -577,31 +577,31 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "match.get_status": ToolSpec(
         "match.get_status", ToolRisk.READ, "match_status",
         "讀取本人目前的配對搜尋與牽線卡數量；可回答有幾張待回覆、幾張等待對方與搜尋進度，不提供未授權的對方資料。",
-        "我看一下目前的配對進度…",
+        "去牽線小站看看，有沒有新消息～",
         output_model=_MatchStatusOutput,
     ),
     "match.get_counterparty_summary": ToolSpec(
         "match.get_counterparty_summary", ToolRisk.READ, "counterparty_summary",
         "讀取使用者明確指向的單一公開對象摘要；若有多張牽線卡，不可自行猜測使用者指的是哪一張。",
-        "我確認一下這位對象的公開資訊…",
+        "看看這位朋友有哪些亮點。",
         output_model=_CounterpartySummaryOutput,
     ),
     "profile.get_recent_context": ToolSpec(
         "profile.get_recent_context", ToolRisk.READ, "recent_context",
         "讀取本人已儲存的近期情境；適用於問我是否記得近期計畫，不會寫入或重新分析資料。",
-        "我確認一下你最近提過的計畫…",
+        "翻翻我們最近聊過的，把話接起來。",
         output_model=_RecentContextOutput,
     ),
     "profile.get_self_summary": ToolSpec(
         "profile.get_self_summary", ToolRisk.READ, "self_profile",
         "讀取本人的已完成基礎資料、深度資料、偏好、近期情境與粗略地區；適用於問『我是誰』、『你了解我多少』或自己的個性與興趣。只讀取本人資料，不會寫入。",
-        "我整理一下我目前認識的你…",
+        "把我認識的你，整理一下。",
         output_model=_SelfProfileOutput,
     ),
     "relationship.get_verified_evidence": ToolSpec(
         "relationship.get_verified_evidence", ToolRisk.READ, "relationship_evidence",
         "讀取已接受配對的可驗證互動摘要。",
-        "我確認一下這段互動的資訊…",
+        "翻翻你們的互動，找找有用的線索。",
         executor_arguments_model=_RelationshipEvidenceArguments,
         output_model=_RelationshipOutput,
         argument_source=ToolArgumentSource.MENTIONED_RELATIONSHIP,
@@ -609,7 +609,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "relationship.get_contact_evidence": ToolSpec(
         "relationship.get_contact_evidence", ToolRisk.READ, "contact_evidence",
         "讀取目前 accepted-contact 清單中最多三位候選人的較完整公開摘要；只能使用本回合清單回傳的 contact_ref，不接受 user ID。",
-        "我再核對一下這幾位對象的公開資訊…",
+        "我把這幾位朋友再仔細看看～",
         executor_arguments_model=_RelationshipContactEvidenceArguments,
         output_model=_ContactEvidenceListOutput,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,
@@ -617,7 +617,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "relationship.get_mentioned_contact_summary": ToolSpec(
         "relationship.get_mentioned_contact_summary", ToolRisk.READ, "mentioned_contact_summary",
         "讀取本回合 @ 的已接受聯絡人公開摘要；適用於詢問對方近況、特質或比較對象。",
-        "我看一下這位對象的公開資訊…",
+        "看看這位朋友有哪些亮點。",
         executor_arguments_model=_MentionedContactSummaryArguments,
         output_model=_MentionedContactSummaryOutput,
         argument_source=ToolArgumentSource.MENTIONED_CONTACTS,
@@ -625,13 +625,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "relationship.list_accepted_contacts": ToolSpec(
         "relationship.list_accepted_contacts", ToolRisk.READ, "accepted_contact_list",
         "讀取本人已接受／已建立聯絡人的 bounded 最小公開摘要與總數；適用於詢問已經配到誰、配到幾個人、現有聯絡人中誰適合某個活動或地點，不能用來推測對方行程，也不包含尚未接受的 proposal。truncated=true 時只能在返回清單中比較，不能宣稱涵蓋全部聯絡人。",
-        "我整理一下目前已建立聯絡的對象…",
+        "翻翻聯絡簿，看看你已經認識了誰。",
         output_model=_AcceptedContactListOutput,
     ),
     "relationship.start_date_coordination": ToolSpec(
         "relationship.start_date_coordination", ToolRisk.WRITE, "date_coordination_start",
         "使用者明確要求和一位已建立聯絡的對象建立空白約會邀請卡。只提出一次確認；日期、地點與表單內容由雙方在聊天室自行填寫。",
-        "建立空白約會邀請卡前確認",
+        "我先把約會邀請準備好，等你點頭～",
         requires_confirmation=True,
         planner_arguments_model=_DateCoordinationStartArguments,
         executor_arguments_model=_NoArguments,
@@ -640,7 +640,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "relationship.cancel_date_coordination": ToolSpec(
         "relationship.cancel_date_coordination", ToolRisk.WRITE, "date_coordination_cancel",
         "取消一張由 server context 指定的約會卡；只提出確認，不接受模型提供的 coordination ID、對象 ID、狀態或 revision。",
-        "我先確認要不要取消這張約會卡…",
+        "我先確認一下，真的要取消這張約會卡嗎？",
         requires_confirmation=True,
         planner_arguments_model=_DateCoordinationCancelArguments,
         executor_arguments_model=_NoArguments,
@@ -649,7 +649,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "memory.search_my_profile": ToolSpec(
         "memory.search_my_profile", ToolRisk.READ, "memory_profile",
         "按主題搜尋本人長期偏好；query 可含相關主題與同義詞，空字串查一般偏好。查無結果不代表從未說過；truncated 表示只回部分。",
-        "我確認一下我替你記住的事情…",
+        "翻一下小筆記，看看我替你記住了什麼。",
         output_model=_MemoryOutput,
         planner_arguments_model=_MemorySearchArguments,
         executor_arguments_model=_MemorySearchArguments,
@@ -658,7 +658,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "web.search": ToolSpec(
         "web.search", ToolRisk.READ, "web_search",
         "查詢最新公開資訊；適用於活動、店家、景點、新聞或使用者明確要求上網查詢。",
-        "我查一下最近的公開資訊…",
+        "潛下去撈一下最新資料～",
         planner_arguments_model=_WebSearchArguments,
         executor_arguments_model=_WebSearchArguments,
         output_model=_WebSearchOutput,
@@ -667,7 +667,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "web.extract": ToolSpec(
         "web.extract", ToolRisk.READ, "web_extract",
         "讀取本回合公開搜尋結果或使用者提供網址的重點內容，以確認細節。",
-        "我打開來源確認一下細節…",
+        "我點進去瞧瞧，把細節看清楚。",
         planner_arguments_model=_WebExtractArguments,
         executor_arguments_model=_WebExtractArguments,
         output_model=_WebExtractOutput,
@@ -676,7 +676,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "places.search_nearby": ToolSpec(
         "places.search_nearby", ToolRisk.READ, "places_nearby",
         "查詢指定地點或本人儲存地區附近的餐廳、咖啡廳、小酌地點、景點或公園；距離為直線距離。",
-        "我找一下附近的地點…",
+        "附近有什麼好地方？我來翻翻地圖。",
         planner_arguments_model=_PlacesNearbyArguments,
         executor_arguments_model=_PlacesNearbyArguments,
         output_model=_PlacesNearbyOutput,
@@ -685,7 +685,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "places.measure_distance": ToolSpec(
         "places.measure_distance", ToolRisk.READ, "places_distance",
         "查詢兩個指定地點，或本人儲存地區到指定地點的距離；Google Routes 可用時回傳駕車距離與時間，否則回傳直線距離。不提供即時路況或步行時間。",
-        "我估一下兩地的距離…",
+        "攤開小地圖，看看兩邊有多遠。",
         planner_arguments_model=_PlacesDistanceArguments,
         executor_arguments_model=_PlacesDistanceArguments,
         output_model=_PlacesDistanceOutput,
@@ -695,7 +695,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "places.resolve_place": ToolSpec(
         "places.resolve_place", ToolRisk.READ, "places_resolve",
         "將使用者明確提到、或本回合已確認名稱的店家或景點解析成公開地點卡；不能自行捏造店名。",
-        "我確認一下這家店的公開地點資訊…",
+        "我看看這家店在地圖上的公開資訊～",
         planner_arguments_model=_PlacesResolveArguments,
         executor_arguments_model=_PlacesResolveArguments,
         output_model=_PlacesResolveOutput,
@@ -704,19 +704,19 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "match.start_search": ToolSpec(
         "match.start_search", ToolRisk.WRITE, "start_search",
         "開始找新對象；只能先建立 confirmation，確認後由 Runtime 執行。",
-        "好，我開始幫你找合適的人…",
+        "好～阿月出發幫你找合適的人！",
         requires_confirmation=True,
     ),
     "match.cancel_search": ToolSpec(
         "match.cancel_search", ToolRisk.WRITE, "cancel_search",
         "取消本人目前仍在 queued／running 的配對搜尋；只能先建立 confirmation，確認後由 Runtime 執行。",
-        "我先確認是否要停止這次搜尋…",
+        "我先確認一下，要不要讓這次牽線停在這裡。",
         requires_confirmation=True,
     ),
     "match.decide_active_proposal": ToolSpec(
         "match.decide_active_proposal", ToolRisk.WRITE, "decide_active_proposal",
         "對唯一可操作提案表達有興趣、婉拒，或在等待對方時撤回；Runtime 注入 proposal authority。",
-        "我正在更新這張牽線提案…",
+        "我正在幫你更新這張牽線卡～",
         requires_confirmation=True,
         planner_arguments_model=_ProposalDecisionArguments,
         executor_arguments_model=_ProposalDecisionArguments,
@@ -726,7 +726,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         "match.decide_active_event_invitation", ToolRisk.WRITE,
         "decide_active_event_invitation",
         "對唯一可操作的活動牽線邀請表達有興趣或婉拒；Runtime 注入 Event proposal revision。",
-        "我正在更新這張活動牽線邀請…",
+        "我正在幫你更新這張活動邀請～",
         requires_confirmation=True,
         planner_arguments_model=_EventProposalDecisionArguments,
         executor_arguments_model=_EventProposalDecisionArguments,
@@ -735,7 +735,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "profile.start_assessment": ToolSpec(
         "profile.start_assessment", ToolRisk.WRITE, "assessment_start",
         "開始或重新開始本人的基本／深層探索；kind=basic 或 deep，必須先取得確認，完成後仍需再次確認才會覆寫對應正式資料。",
-        "我準備開始這段探索…",
+        "暖身一下，準備陪你開始這段探索～",
         requires_confirmation=True,
         planner_arguments_model=_AssessmentStartArguments,
         executor_arguments_model=_AssessmentStartArguments,
@@ -746,7 +746,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         "提交一個或多個行事曆 mutation command；欄位必須使用 canonical action、target_reference 或 target_hint，"
         "不要使用 type 或 target；target_reference 只能是 server context 提供的 recent_event/candidate_1..candidate_3，"
         "target_hint 只放自然語言行程 identity clue，不含操作詞；不含 event_id、revision 或其他 authority fields。",
-        "我整理一下要變更的行程…",
+        "我把要改的行程整理好，等你確認。",
         requires_confirmation=True,
         planner_arguments_model=CalendarCommandBatch,
         executor_arguments_model=CalendarCommandBatch,
