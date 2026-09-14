@@ -63,10 +63,11 @@ export async function runExperiment(initial, request, onAgent = undefined) {
   const allowedArgumentFields = new Map(
     initial.tools.map(tool => [tool.name, schemaFieldPaths(tool.parameters)]),
   );
-  let repeatedToolFailure = false;
+  let schemaRecoveryAttempted = false;
   let repairAttempted = false;
   let proseRepairMode = false;
   let pendingToolRefresh = false;
+  let pendingSchemaRecoveryMessage = null;
   let maxRounds = Math.max(1, Math.min(initial.maxRounds ?? 6, 10));
   let maxToolCalls = Math.max(1, Math.min(initial.maxToolCalls ?? 8, 16));
   const model = {
@@ -174,12 +175,16 @@ export async function runExperiment(initial, request, onAgent = undefined) {
       return [...messages.slice(0, 8), ...messages.slice(-32)];
     },
     prepareNextTurnWithContext: ({ context }) => {
-      if (!pendingToolRefresh) return undefined;
+      if (!pendingToolRefresh && !pendingSchemaRecoveryMessage) return undefined;
+      const messages = pendingSchemaRecoveryMessage
+        ? [...context.messages, pendingSchemaRecoveryMessage]
+        : context.messages;
+      pendingSchemaRecoveryMessage = null;
       pendingToolRefresh = false;
-      return { context: { ...context, tools: activeTools() } };
+      return { context: { ...context, messages, tools: activeTools() } };
     },
     shouldStopAfterTurn: async ({ message }) => {
-      if (stopped || repeatedToolFailure) return true;
+      if (stopped) return true;
       if (message.role !== 'assistant' || message.stopReason !== 'stop'
         || message.content.some(item => item.type === 'toolCall')) return rounds >= maxRounds;
       const candidate = message.content.filter(item => item.type === 'text')
@@ -229,7 +234,18 @@ export async function runExperiment(initial, request, onAgent = undefined) {
       toolFailureCounts.set(tool, attempt);
       toolFailures.push({ tool, code: 'tool_schema_invalid', attempt,
         argumentFields: toolArgumentFields.get(event.toolCallId) ?? [] });
-      if (attempt >= 2) repeatedToolFailure = true;
+      if (attempt >= 2 && !schemaRecoveryAttempted) {
+        schemaRecoveryAttempted = true;
+        proseRepairMode = true;
+        enabledToolNames.clear();
+        pendingToolRefresh = true;
+        pendingSchemaRecoveryMessage = {
+          role: 'user',
+          content: [{ type: 'text', text:
+            '工具參數連續無法通過驗證。請停止呼叫工具，僅使用目前已成功且已驗證的工具結果完成回答；明確指出未完成的需求，不得宣稱已執行任何尚未確認或驗證的變更。' }],
+          timestamp: Date.now(),
+        };
+      }
     }
   });
   if (onAgent) onAgent(agent);
@@ -239,9 +255,8 @@ export async function runExperiment(initial, request, onAgent = undefined) {
   } finally {
     if (onAgent) onAgent(null);
   }
-  if (repeatedToolFailure && !error) error = 'pi_tool_schema_invalid';
   return { rounds, calls, stopped, error, finalText, toolFailures: toolFailures.slice(0, 4),
-    repair_attempted: repairAttempted,
+    repair_attempted: repairAttempted, schema_recovery_attempted: schemaRecoveryAttempted,
     budget_exhausted: !stopped && !finalText && rounds >= maxRounds };
 }
 

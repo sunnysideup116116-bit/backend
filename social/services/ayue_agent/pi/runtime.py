@@ -45,6 +45,71 @@ class PiMetrics:
     input_tokens: int = 0
     output_tokens: int = 0
 
+
+class _ValidatedReplyStream:
+    """Publish only complete provider sentences that pass the public boundary.
+
+    Tool-call arguments and incomplete prose remain buffered. The authoritative
+    final event can still correct a previously safe prefix when final validation
+    repairs a later sentence.
+    """
+
+    def __init__(
+        self,
+        on_token: Callable[[str], None],
+        observations: list[dict],
+    ) -> None:
+        self._on_token = on_token
+        self._observations = observations
+        self._raw = ""
+        self._published = ""
+        self._blocked = False
+
+    @property
+    def published(self) -> str:
+        return self._published
+
+    def push(self, fragment: str) -> None:
+        if self._blocked or not fragment:
+            return
+        self._raw += str(fragment)
+        boundaries = list(re.finditer(r"[\u3002\uff01\uff1f!?]|\n", self._raw))
+        if not boundaries:
+            return
+        self._publish(self._raw[:boundaries[-1].end()])
+
+    def accept(self, text: str) -> bool:
+        """Flush the validated remainder when it still extends the live prefix."""
+        if self._blocked:
+            return False
+        canonical = str(text or "")
+        if self._published and not canonical.startswith(self._published):
+            self._blocked = True
+            return False
+        delta = canonical[len(self._published):]
+        if delta:
+            self._on_token(delta)
+            self._published = canonical
+        return True
+
+    def reject(self) -> None:
+        self._blocked = True
+
+    def _publish(self, raw_prefix: str) -> None:
+        validation = validate_pi_reply_result(raw_prefix, self._observations)
+        canonical = validation.reply
+        if not canonical:
+            self._blocked = True
+            return
+        if self._published and not canonical.startswith(self._published):
+            self._blocked = True
+            return
+        delta = canonical[len(self._published):]
+        if delta:
+            self._on_token(delta)
+            self._published = canonical
+
+
 def pi_context(turn: Any) -> dict:
     historical_interactions: list[dict[str, Any]] = []
     recent_messages = [
@@ -305,6 +370,7 @@ def run_pi_turn(
     contact_selection_collection: Any,
     operation_batch_collection: Any,
     on_progress=None,
+    on_token: Callable[[str], None] | None = None,
     debug_enabled=False,
 ) -> AgentResult:
     del debug_enabled
@@ -346,8 +412,11 @@ def run_pi_turn(
     trace["pi_budget_class"] = budget_class
     trace["pi_model_budget"] = model_limit
     trace["pi_tool_budget"] = tool_limit
+    active_reply_stream: _ValidatedReplyStream | None = None
+    live_stream_abandoned = False
 
     def model_call(messages, deadline, active_tool_names=None):
+        nonlocal active_reply_stream, live_stream_abandoned
         metrics.llm_call_count += 1
         if metrics.llm_call_count > model_limit - 1 or time.monotonic() >= turn_deadline:
             return {"error": "pi_model_budget_exhausted"}
@@ -356,21 +425,35 @@ def run_pi_turn(
         started = time.perf_counter()
         diagnostic = {"stage": "decision", "call": metrics.llm_call_count, "tool_count": len(active_schemas)}
         trace.setdefault("pi_model_diagnostics", []).append(diagnostic)
+        reply_stream = (
+            _ValidatedReplyStream(on_token, observations)
+            if on_token is not None and not live_stream_abandoned
+            else None
+        )
+        active_reply_stream = reply_stream
         try:
             completion = generate_chat_completion_with_tools(
                 "", [{"type": "function", "function": schema} for schema in active_schemas],
                 system_prompt=POLICY, temperature=0, max_tokens=4096,
                 deadline_monotonic=min(deadline, turn_deadline), model_owner="pi",
-                # Consume provider chunks internally; publish only validated
-                # final text. Read inactivity timeout no longer caps the entire
-                # non-stream response while the provider is still generating.
-                on_token=lambda _fragment: None,
+                # Keep the provider in streaming mode for observable TTFT and
+                # publish only sentence prefixes accepted by the public reply
+                # boundary. Incomplete or unsafe text never crosses this seam.
+                on_token=(reply_stream.push if reply_stream else lambda _fragment: None),
                 conversation_messages=provider_messages(messages),
             )
         except Exception as exc:
             code = "pi_provider_timeout" if "timeout" in type(exc).__name__.lower() or isinstance(exc, TimeoutError) else "pi_provider_error"
             diagnostic.update(code=code, error_type=type(exc).__name__, duration_ms=round((time.perf_counter() - started) * 1000))
+            if reply_stream and reply_stream.published:
+                live_stream_abandoned = True
             return {"error": code}
+        if completion.tool_calls:
+            if reply_stream:
+                if reply_stream.published:
+                    live_stream_abandoned = True
+                reply_stream.reject()
+            active_reply_stream = None
         diagnostic.update(code=None, duration_ms=round((time.perf_counter() - started) * 1000))
         metrics.input_tokens += completion.input_tokens
         metrics.output_tokens += completion.output_tokens
@@ -465,9 +548,17 @@ def run_pi_turn(
         return response
 
     def final_validate(text: str, repair_attempted: bool) -> dict[str, Any]:
+        nonlocal active_reply_stream, live_stream_abandoned
         validation = validate_pi_reply_result(text, observations)
         if validation.reply:
+            if active_reply_stream is not None and not live_stream_abandoned:
+                if not active_reply_stream.accept(validation.reply):
+                    live_stream_abandoned = True
             return {"accept": True, "text": validation.reply}
+        if active_reply_stream is not None:
+            if active_reply_stream.published:
+                live_stream_abandoned = True
+            active_reply_stream.reject()
         code = validation.code or "pi_reply_invalid"
         trace.setdefault("pi_reply_validation", []).append({
             "code": code,
@@ -622,7 +713,10 @@ def run_pi_turn(
             else "confirmation" if tool_runtime.write_prepared
             else "casual"
         ),
-        sources=_public_sources(observations),
+        # A fallback is not claim-bound to a specific web observation. Do not
+        # publish a potentially unrelated source card beside generic recovery
+        # prose; successful model replies retain their verified web sources.
+        sources=[] if failure else _public_sources(observations),
         place_presentation_required=False,
         llm_call_metrics=llm_metrics,
     )

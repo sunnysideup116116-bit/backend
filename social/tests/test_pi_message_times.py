@@ -47,3 +47,12 @@ def test_pending_and_confirmed_receipts_hide_internal_annotations():
 
 def test_timestamp_removal_does_not_bypass_unverified_write_check():
     assert validate_pi_reply(STAMP + "\n我已新增行程。", []) is None
+
+
+def test_informal_unverified_schedule_claim_is_rejected():
+    assert validate_pi_reply("綠島空氣很好，所以幫你排了明天下午一點。", []) is None
+
+
+def test_future_schedule_offer_remains_publishable():
+    reply = "我可以幫你安排；建立確認卡並由你確認後才會新增。"
+    assert validate_pi_reply(reply, []) == reply

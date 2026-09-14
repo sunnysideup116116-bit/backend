@@ -21,6 +21,7 @@ Places 用於餐廳、咖啡店、景點、營業資訊、距離與具體店家�
 _CATEGORY_VALUES = [
     "restaurant", "cafe", "bar", "attraction", "park",
     "coffee", "coffee_shop", "餐廳", "咖啡", "咖啡店", "酒吧", "景點", "公園",
+    "beverage", "bubble_tea", "飲料", "飲料店", "手搖飲", "手搖飲店", "茶飲店",
 ]
 SCHEMAS = ({
     "name": "places.search_nearby",
@@ -54,6 +55,13 @@ SCHEMAS = ({
 _CATEGORY_ALIASES = {
     "coffee": "cafe", "coffee_shop": "cafe", "咖啡": "cafe", "咖啡店": "cafe",
     "餐廳": "restaurant", "酒吧": "bar", "景點": "attraction", "公園": "park",
+    "beverage": "cafe", "bubble_tea": "cafe", "飲料": "cafe", "飲料店": "cafe",
+    "手搖飲": "cafe", "手搖飲店": "cafe", "茶飲店": "cafe",
+}
+
+_BEVERAGE_HINTS = {
+    "beverage": "飲料店", "bubble_tea": "手搖飲", "飲料": "飲料店", "飲料店": "飲料店",
+    "手搖飲": "手搖飲", "手搖飲店": "手搖飲", "茶飲店": "茶飲店",
 }
 
 
@@ -65,9 +73,17 @@ def _normalize_nearby(arguments: dict[str, Any]) -> dict[str, Any]:
         categories = [category]
     if not isinstance(categories, list) or not categories:
         raise ValueError("categories_required")
-    canonical = [_CATEGORY_ALIASES.get(str(item), str(item)) for item in categories]
+    raw_categories = [str(item) for item in categories]
+    canonical = [_CATEGORY_ALIASES.get(item, item) for item in raw_categories]
     if any(item not in {"restaurant", "cafe", "bar", "attraction", "park"} for item in canonical):
         raise ValueError("category_invalid")
+    if not str(values.get("cuisine") or "").strip():
+        beverage_hint = next(
+            (_BEVERAGE_HINTS[item] for item in raw_categories if item in _BEVERAGE_HINTS),
+            "",
+        )
+        if beverage_hint:
+            values["cuisine"] = beverage_hint
     anchor = values.pop("anchor", None)
     location = values.pop("location", None)
     if anchor and location and str(anchor).strip() != str(location).strip():

@@ -170,13 +170,13 @@ def test_confirmed_surfing_search_reaches_executor_once(monkeypatch):
     assert "delivery_mode" not in submitted[0]
 
 
-def test_provider_stream_is_consumed_internally_before_public_tokens(monkeypatch):
+def test_unsafe_provider_stream_is_held_before_public_tokens(monkeypatch):
     store = mongomock.MongoClient().test
     request, turn = make_turn("哈囉")
     monkeypatch.setattr(public_turn, "build_public_agent_turn_context", lambda *_a, **_k: turn)
     monkeypatch.setattr(public_turn, "validated_mentioned_contact_ids", lambda *_a: ([], False))
     def provider(*_a, **kwargs):
-        kwargs["on_token"]("RAW_UNVALIDATED [[confirmation]]")
+        kwargs["on_token"]("我已準備 RAW_UNVALIDATED [[confirmation]]。")
         return ToolCallResult(content="你好，我是阿月。", tool_calls=[])
     monkeypatch.setattr(pi_runtime, "generate_chat_completion_with_tools", provider)
     tokens = []
@@ -187,3 +187,48 @@ def test_provider_stream_is_consumed_internally_before_public_tokens(monkeypatch
     assert "".join(tokens) == result.reply
     assert "RAW_UNVALIDATED" not in str(tokens)
     assert store.r.find_one({})["pi_model_diagnostics"][0]["code"] is None
+
+
+def test_safe_provider_sentence_is_published_before_completion(monkeypatch):
+    store = mongomock.MongoClient().test
+    request, turn = make_turn("哈囉")
+    monkeypatch.setattr(public_turn, "build_public_agent_turn_context", lambda *_a, **_k: turn)
+    monkeypatch.setattr(public_turn, "validated_mentioned_contact_ids", lambda *_a: ([], False))
+    release = threading.Event()
+    published = threading.Event()
+    tokens: list[str] = []
+    result: dict[str, AgentResult] = {}
+
+    def provider(*_a, **kwargs):
+        kwargs["on_token"]("你好，我先看懂你的問題。")
+        assert release.wait(2)
+        kwargs["on_token"]("答案馬上來。")
+        return ToolCallResult(content="你好，我先看懂你的問題。答案馬上來。", tool_calls=[])
+
+    def collect(fragment: str) -> None:
+        tokens.append(fragment)
+        published.set()
+
+    def run() -> None:
+        result["value"] = public_turn.run_pi_public_turn(
+            request,
+            on_token=collect,
+            confirmation_collection=store.c,
+            contact_selection_collection=store.s,
+            operation_batch_collection=store.b,
+            runs_collection=store.r,
+        )
+
+    monkeypatch.setattr(pi_runtime, "generate_chat_completion_with_tools", provider)
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert published.wait(5)
+        assert "".join(tokens) == "你好，我先看懂你的問題。"
+    finally:
+        release.set()
+        worker.join(5)
+
+    assert not worker.is_alive()
+    assert result["value"].reply == "你好，我先看懂你的問題。答案馬上來。"
+    assert "".join(tokens) == result["value"].reply
