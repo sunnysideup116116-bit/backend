@@ -271,6 +271,8 @@ draft/pending -> expired
 
 ## 10. Profile、Memory 與 Context Engine
 
+Compaction policy v5 使用9,000字元預算內的完整訊息連續前綴；生成與評估不截斷單則尾段。過大訊息明確延後且不推進watermark；有可用來源卻產生全空摘要時最多修復一次，失敗保留上一份現行政策合格摘要。舊policy摘要不作遞迴基底或注入，原文保留供重新壓縮。詳見 Memory 指南。
+
 `memory.search_my_profile` 現支援 bounded query，透過 9001 在本人 Graph 偏好中先匹配再限量，
 可查回常駐 8 筆之外的記憶；結果明示 unavailable／truncated，不把未命中當成從未說過。
 Profile agent 可提出主題同義詞。Planner／Synthesizer 不得將使用者未確認的 assistant 推測當作已知性格。

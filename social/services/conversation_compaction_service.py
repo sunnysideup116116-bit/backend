@@ -35,12 +35,11 @@ from services.message_use_service import (
 
 CONVERSATION_COMPACTIONS = db["conversation_compactions"]
 CONVERSATION_COMPACTION_RUNS = db["conversation_compaction_shadow_runs"]
-COMPACTION_POLICY_VERSION = "conversation_compaction_policy_v4"
+COMPACTION_POLICY_VERSION = "conversation_compaction_policy_v5"
 COMPACTION_SOFT_MESSAGE_LIMIT = 30
 COMPACTION_KEEP_RECENT_MESSAGES = 20
 COMPACTION_QUERY_LIMIT = COMPACTION_SOFT_MESSAGE_LIMIT + 1
 COMPACTION_BATCH_MESSAGE_LIMIT = COMPACTION_QUERY_LIMIT - COMPACTION_KEEP_RECENT_MESSAGES
-COMPACTION_MESSAGE_CHAR_LIMIT = 900
 COMPACTION_TOTAL_INPUT_CHAR_LIMIT = 9000
 ROLLOUT_MIN_SHADOW_RUNS = 50
 ROLLOUT_MIN_PASS_RATE = 0.95
@@ -50,6 +49,10 @@ ROLLOUT_MAX_METRICS_AGE_SECONDS = 24 * 60 * 60
 ROLLOUT_READINESS_CACHE_SECONDS = 60
 _rollout_readiness_lock = threading.Lock()
 _rollout_readiness_cache: tuple[float, bool] = (0.0, False)
+
+
+class EmptyCompactionSummaryError(ValueError):
+    """Reusable source must not silently become an approved empty summary."""
 
 
 def conversation_compaction_mode() -> str:
@@ -194,6 +197,8 @@ def _select_compaction_batch(user_id: str, room_id: str) -> dict[str, Any]:
                 "sender_id": 1,
                 "timestamp": 1,
                 "metadata.message_use": 1,
+                "content": 1,
+                "metadata.owner_raw_content": 1,
             },
         ).sort([("timestamp", 1), ("_id", 1)]).limit(COMPACTION_QUERY_LIMIT)
         pending = list(cursor)[:COMPACTION_QUERY_LIMIT]
@@ -202,7 +207,9 @@ def _select_compaction_batch(user_id: str, room_id: str) -> dict[str, Any]:
     if len(pending) <= COMPACTION_SOFT_MESSAGE_LIMIT:
         return {"status": "below_threshold"}
     compact_count = len(pending) - COMPACTION_KEEP_RECENT_MESSAGES
-    batch = pending[:compact_count]
+    batch = _complete_message_prefix(user_id, pending[:compact_count])
+    if not batch:
+        return {"status": "source_over_budget"}
     return {
         "status": "ready",
         "message_ids": [str(message["_id"]) for message in batch],
@@ -262,21 +269,38 @@ def _load_exact_batch(user_id: str, room_id: str, message_ids: list[str]) -> lis
     return ordered
 
 
+def _reusable_message_text(user_id: str, message: dict[str, Any]) -> str:
+    if not is_reusable_for_compaction(message):
+        return ""
+    content = message.get("content")
+    if message.get("sender_id") == user_id:
+        owner_raw = (message.get("metadata") or {}).get("owner_raw_content")
+        content = owner_raw if isinstance(owner_raw, str) else content
+    return " ".join(str(content or "").split())
+
+
+def _complete_message_prefix(user_id: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select a contiguous prefix; never skip an unprocessed message's tail."""
+    selected = []
+    used = 0
+    for message in messages:
+        size = len(_reusable_message_text(user_id, message))
+        if used + size > COMPACTION_TOTAL_INPUT_CHAR_LIMIT:
+            break
+        selected.append(message)
+        used += size
+    return selected
+
+
 def _prompt_messages(user_id: str, messages: list[dict[str, Any]]) -> list[dict[str, str]]:
     projected: list[dict[str, str]] = []
     total = 0
     for message in messages:
-        if not is_reusable_for_compaction(message):
+        text = _reusable_message_text(user_id, message)
+        if not text:
             continue
-        content = message.get("content")
-        if message.get("sender_id") == user_id:
-            owner_raw = ((message.get("metadata") or {}).get("owner_raw_content"))
-            content = owner_raw if isinstance(owner_raw, str) else content
-        text = " ".join(str(content or "").split())[:COMPACTION_MESSAGE_CHAR_LIMIT]
-        remaining = COMPACTION_TOTAL_INPUT_CHAR_LIMIT - total
-        if not text or remaining <= 0:
-            continue
-        text = text[:remaining]
+        if total + len(text) > COMPACTION_TOTAL_INPUT_CHAR_LIMIT:
+            raise ValueError("compaction_source_over_budget")
         projected.append({
             "role": "owner" if message.get("sender_id") == user_id else "ayue",
             "content": text,
@@ -340,10 +364,13 @@ Continuity retention rules:
 """
     if contract_repair:
         prompt += """
-The previous attempt did not satisfy the JSON contract. Repair only the output shape: return valid JSON, all six keys, array values only, no markdown, no explanation, and no extra keys.
+The previous attempt did not satisfy the summary contract. Return valid JSON, all six array keys, no markdown or extra keys. Preserve source-supported facts, explicit corrections and unresolved questions. Do not return six empty arrays for meaningful source content, and never invent facts to fill them.
 """
     raw = generate_chat_completion(prompt, temperature=0, json_output=True)
-    return ConversationSummaryV1.model_validate(json.loads(_model_content(raw)))
+    summary = ConversationSummaryV1.model_validate(json.loads(_model_content(raw)))
+    if not any(summary.model_dump().values()) and _prompt_messages(user_id, messages):
+        raise EmptyCompactionSummaryError("empty_summary_for_reusable_source")
+    return summary
 
 
 def _evaluate_summary(
@@ -370,6 +397,7 @@ Candidate typed summary：
     prompt += """
 
 Retention scoring rules:
+0. Check explicit corrections against the latest source wording, and retain established facts and unresolved questions. An empty candidate cannot pass when the source contains any such information. Never assume a correction or resolution that is absent from the source.
 1. A retention field is true when every still-relevant item from the prior summary and material raw messages is represented in the candidate, even if wording is safely condensed.
 2. A retention field is also true when the prior summary and raw messages contain no applicable information for that field.
 3. Do not mark omission when the candidate removes only resolved, explicitly contradicted, obsolete, or duplicate information.
@@ -437,6 +465,8 @@ def _excluded_only_evaluation() -> ConversationCompactionEvaluationV1:
 
 
 def _typed_step_failure_code(exc: Exception) -> str:
+    if isinstance(exc, EmptyCompactionSummaryError):
+        return "empty_summary"
     if isinstance(exc, json.JSONDecodeError):
         return "invalid_json"
     if isinstance(exc, ValidationError):
@@ -712,6 +742,10 @@ def run_conversation_compaction_shadow(
         return {"status": "source_unavailable"}
     if not messages:
         return {"status": "source_changed"}
+    # Recheck the actual loaded text, including edits since queue selection.
+    messages = _complete_message_prefix(user_id, messages)
+    if not messages:
+        return {"status": "source_over_budget"}
     baseline = _validated_recursive_baseline(current, user_id, room_id)
     prior_summary = baseline.summary.model_dump() if baseline else None
     baseline_source_hash = baseline.source_hash if baseline else None
