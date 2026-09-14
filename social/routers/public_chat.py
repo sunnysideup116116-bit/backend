@@ -50,9 +50,6 @@ from services.ai_room_service import (
     get_room as get_ai_room,
     mark_first_message_for_title,
 )
-from services.conversation_compaction_service import (
-    queue_conversation_compaction_shadow as _queue_conversation_compaction_shadow,
-)
 from services.profile_skills import profile_skills_mode_for_user
 from services.profile_task_service import queue_profile_skills as _queue_profile_skills
 from services.message_use_service import (
@@ -177,8 +174,12 @@ def queue_profile_skills(
 def queue_conversation_compaction_shadow(
     background_tasks, user_id: str, room_id: str,
 ) -> dict:
-    """Queue continuity maintenance without changing the originating turn."""
-    return _queue_conversation_compaction_shadow(background_tasks, user_id, room_id)
+    """Persist maintenance so long rooms can catch up beyond the current turn."""
+    from services.conversation_summary_operations import enqueue_rebuild
+    try:
+        return enqueue_rebuild(user_id, room_id)
+    except Exception:
+        return {"status": "storage_unavailable", "queued": False}
 
 def check_and_trigger_date_activation(room_id: str, user_id: str, contact_id: str, message: str, match_doc: dict):
     """A proposal creates one invitation; it never opens a form without the partner."""

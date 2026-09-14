@@ -42,6 +42,8 @@ Public HTTP / App voice delegation
 
 ## Context、工具與串流
 
+Summary v5 的全域試行批准、線上健康監測與逐份摘要驗證分開。經本機operator審核的獨立50例報告可批准受控試行；`*`仍需有效批准或原readiness，逐份owner/room/policy/evaluation檢查不變。正常聊天將摘要維護排入持久job，Social啟停有lease與有界重試的重建worker。狀態查詢為唯讀且需owner JWT；詳見 [Summary rollout](docs/SUMMARY_ROLLOUT_OPERATIONS.md)。
+
 Public Context Builder 保留最近訊息、通過驗證的 conversation continuity、owner 記憶、正式 Match/Calendar/Relationship 投影與裝置位置權限。Pi prompt 只取得 bounded、安全投影；其他房間、未發布結果與 authority fields 不可進入模型。
 
 Pi 的工具 allowlist 由 `pi/registry.py` 明確列出。讀取工具回傳 bounded observation；寫入工具只能建立 pending confirmation。多項操作以自然語言 request 保存於 operation batch，不保存模型推測的資料 identity。

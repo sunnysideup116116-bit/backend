@@ -88,7 +88,10 @@ def _global_context_rollout_ready() -> bool:
         if now < expires_at:
             return ready
         try:
-            ready = conversation_compaction_rollout_readiness().get("status") == "ready"
+            from services.conversation_summary_operations import rollout_decision
+            approved = rollout_decision()
+            ready = (approved if approved is not None else
+                     conversation_compaction_rollout_readiness().get("status") == "ready")
         except Exception:
             ready = False
         _rollout_readiness_cache = (now + ROLLOUT_READINESS_CACHE_SECONDS, ready)

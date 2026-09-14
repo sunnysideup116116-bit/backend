@@ -137,6 +137,8 @@ Saved owner message
 
 ### 2.3 對話壓縮與延續性（Compaction 機制）
 
+目前新增operator批准的受控全域試行、owner-only進度API與持久重建worker。獨立合成benchmark可用作明確的operator批准依据，但不灌入線上評估數據；未批准仍沿用原readiness門檻。批准後低使用量僅反映健康資料不足／過期，足夠線上樣本顯示品質退化才自動暫停。政策、模型或程式指紋改變須重新批准，逐份摘要驗證不變。詳見 [操作指南](SUMMARY_ROLLOUT_OPERATIONS.md)。
+
 #### 2026-09-14 指定帳號正式注入驗收
 
 已於當時部署的 Public V3 DAG，以指定 demo 帳號完成真實摘要生成／評估、模型輸入核對、無摘要對照組，以及正式公開聊天 API 驗收。`COMPACTION_MODE=shadow` 是現有生成模式；摘要消費另由 `CONTEXT_MODE=on` 與明確 owner allowlist 控制。明確 canary 可使用逐份通過驗證的摘要，`*` 仍受全域 readiness gate 限制。此結果不代表全部帳號或後續 Pi runtime 已驗證。完整方法、部署設定與簡報用語見 [驗收紀錄](SUMMARY_INJECTION_ACCEPTANCE_2026-09-14.md)。正式 `.env` 不納入版本庫。

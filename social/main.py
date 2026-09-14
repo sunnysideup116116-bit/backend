@@ -52,6 +52,8 @@ from event_worker import (
 from registration_voice import router as registration_voice_router
 from app_voice_assistant import router as app_voice_assistant_router
 from routers.relationship_memories import router as relationship_memories_router
+from routers.conversation_summaries import router as conversation_summaries_router
+from services.conversation_summary_operations import start_summary_worker, stop_summary_worker
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -89,6 +91,7 @@ app.include_router(google_calendar.router)
 app.include_router(registration_voice_router)
 app.include_router(app_voice_assistant_router)
 app.include_router(relationship_memories_router, prefix="/api", tags=["Relationship memories"])
+app.include_router(conversation_summaries_router, prefix="/api", tags=["Conversation summaries"])
 
 @app.on_event("startup")
 def setup_calendar_indexes():
@@ -123,10 +126,12 @@ def setup_calendar_indexes():
     start_event_lifecycle_worker()
     start_event_discovery_worker()
     start_event_delivery_worker()
+    start_summary_worker()
 
 
 @app.on_event("shutdown")
 def stop_background_services():
+    stop_summary_worker()
     shutdown_codex_provider()
     stop_event_delivery_worker()
     stop_proactive_care_scheduler()
