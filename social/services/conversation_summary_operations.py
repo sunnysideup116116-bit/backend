@@ -35,7 +35,9 @@ def algorithm_fingerprint():
     functions = [c._reusable_message_text, c._complete_message_prefix, c._prompt_messages,
                  c._generate_summary, c._evaluate_summary, c._evaluation_projection, c.ConversationSummaryV1,
                  decode_message_id, message_id_order_key, c._load_exact_batch,
-                 c._message_query_after, c._validated_recursive_baseline]
+                 c._message_query_after, c._validated_recursive_baseline,
+                 c._validate_generated_summary, c._generate_with_contract_retry, c.run_conversation_compaction_shadow,
+                 c.ConversationCompactionObservabilityV1]
     return hashlib.sha256('\n'.join(inspect.getsource(f) for f in functions).encode()).hexdigest()
 
 
@@ -88,7 +90,7 @@ def approve_benchmark(report, digest, *, apply=True):
         raise ValueError('benchmark_identity_or_coverage_invalid')
     passes = sum(r.get('passed') is True and r.get('content_pass') is True
                  and (r.get('evaluation') or {}).get('status') == 'pass' for r in rows)
-    unavailable = sum(not r.get('evaluation') for r in rows)
+    unavailable = sum(not r.get('evaluation') or r['evaluation'].get('status') == 'unavailable' for r in rows)
     reviews = sum((r.get('evaluation') or {}).get('status') == 'review' for r in rows)
     critical = any(r.get('leaked') or ((r.get('evaluation') or {}).get('status') == 'pass'
                                       and r.get('content_pass') is not True) for r in rows)
