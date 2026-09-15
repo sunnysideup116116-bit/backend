@@ -37,6 +37,49 @@ def test_context_redacts_ids_and_respects_each_data_permission():
     assert screen_context(screen_read=False)['screen'] == {}
 
 
+def test_screen_content_is_bounded_and_requires_its_own_permission():
+    raw = {
+        'scope': 'chat',
+        'permissions': {
+            'screen_read': True,
+            'chat_list': True,
+            'chat_content': True,
+        },
+        'screen': {
+            'surface_id': 'surface-1',
+            'ready': True,
+            'items': [],
+            'available_actions': [],
+            'content': {
+                'kind': 'chat_messages',
+                'content_permission': 'chat_content',
+                'title': '小安',
+                'item_count': 1,
+                'items': [{
+                    'role': 'contact',
+                    'text': '這是可以讀取的內容',
+                    'message_id': 'secret-message-id',
+                    'metadata': {'prompt': 'do not leak'},
+                }],
+            },
+        },
+    }
+    allowed = safe_context(raw)
+    content = allowed['screen']['content']
+    assert content['items'] == [{'role': 'contact', 'text': '這是可以讀取的內容'}]
+    assert 'secret-message-id' not in json.dumps(allowed)
+    assert 'do not leak' not in json.dumps(allowed)
+
+    raw['permissions']['chat_content'] = False
+    redacted = safe_context(raw)['screen']['content']
+    assert redacted == {
+        'kind': 'chat_messages',
+        'content_permission': 'chat_content',
+        'redacted': True,
+        'item_count': 1,
+    }
+
+
 def test_ref_freezes_selected_contact_even_when_names_are_identical():
     args, error = bind_target('chat.request_send', {'contact_name': '他', 'message': '我可以'}, screen_context())
     assert error is None

@@ -61,7 +61,8 @@ def test_only_unresolved_natural_calendar_ranges_use_the_model():
     assert natural.arguments == {
         "start_date": "2025-03-01",
         "end_date": "2025-05-31",
+        "source": "all",
     }
     assert preset is not None
-    assert preset.arguments == {"range": "today"}
+    assert preset.arguments == {"source": "all", "range": "today"}
     assert calls == ["查去年三月到五月的行事曆"]

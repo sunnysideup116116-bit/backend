@@ -72,6 +72,27 @@ test('repeated invalid tool schema falls back to one bounded prose-only recovery
   assert.equal(result.budget_exhausted, false);
 });
 
+test('a tool-requested recovery disables tools before the next model turn', async () => {
+  let models = 0;
+  const result = await runExperiment(initial, async (type, payload) => {
+    if (type === 'tool') return {
+      observations: [{ status: 'failed', error_code: 'location_not_found' }],
+      disableTools: true,
+      recoveryPrompt: '請根據成功結果回答，並說明後續地點搜尋未完成。',
+    };
+    models += 1;
+    if (models === 1) {
+      return { tool_calls: [{ name: 'read', arguments: { value: 'place' } }] };
+    }
+    assert.deepEqual(payload.toolNames, []);
+    assert.match(JSON.stringify(payload.messages), /後續地點搜尋未完成/);
+    return { content: '已找到餐廳，但附近飲料店尚未找到。', tool_calls: [] };
+  });
+  assert.equal(result.finalText, '已找到餐廳，但附近飲料店尚未找到。');
+  assert.equal(result.error, null);
+  assert.equal(result.rounds, 2);
+});
+
 test('model-only timestamps survive tool rounds without changing history', async () => {
   const history = [{
     role: 'user', content: [{ type: 'text', text: '下週四去駁二' }], timestamp: 0,

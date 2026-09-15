@@ -186,8 +186,10 @@ def verified_observation_fallback(observations: list[dict]) -> str | None:
     result = latest.get("result") or {}
     values = _text_values(result, limit=6)
     if tool.startswith("places."):
-        if values:
-            return "附近場所查詢已完成，可以先看看：\n" + "\n".join(f"- {value}" for value in values[:5])
+        return (
+            "已取得部分地點資料，但這次後續搜尋未能可靠完成；"
+            "沒有執行任何變更。請直接重試原需求。"
+        )
     if tool == "product.get_info":
         facts = result.get("facts") if isinstance(result, dict) else None
         if facts:

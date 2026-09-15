@@ -130,6 +130,14 @@ class GooglePlacesCuisineTests(unittest.TestCase):
         self.assertIn("restaurant", body["textQuery"])
         self.assertEqual(len(places), 1)
         self.assertEqual(places[0]["name"], "示範火鍋店")
+        self.assertNotIn("_latitude", places[0])
+        with self._enabled():
+            private_places = search_nearby_places(
+                "高雄市鹽埕區", 22.62, 120.28, ["restaurant"], limit=3,
+                cuisine="火鍋", include_private_coordinates=True,
+            )
+        self.assertEqual(private_places[0]["_latitude"], 22.62)
+        self.assertEqual(private_places[0]["_longitude"], 120.28)
 
     def test_seo_suffix_is_removed_but_provider_name_is_retained_internally(self):
         provider_name = "不二 TEA&NO.1｜高雄飲料推薦｜官方菜單與外送"

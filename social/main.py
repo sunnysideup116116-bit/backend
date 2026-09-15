@@ -50,7 +50,11 @@ from event_worker import (
     start_event_discovery_worker, stop_event_discovery_worker,
 )
 from registration_voice import router as registration_voice_router
-from app_voice_assistant import router as app_voice_assistant_router
+from app_voice_assistant import (
+    router as app_voice_assistant_router,
+    start_app_voice_task_services,
+    stop_app_voice_task_services,
+)
 from routers.relationship_memories import router as relationship_memories_router
 from routers.conversation_summaries import router as conversation_summaries_router
 from services.conversation_summary_operations import start_summary_worker, stop_summary_worker
@@ -127,10 +131,12 @@ def setup_calendar_indexes():
     start_event_discovery_worker()
     start_event_delivery_worker()
     start_summary_worker()
+    start_app_voice_task_services()
 
 
 @app.on_event("shutdown")
 def stop_background_services():
+    stop_app_voice_task_services()
     stop_summary_worker()
     shutdown_codex_provider()
     stop_event_delivery_worker()

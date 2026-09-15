@@ -13,6 +13,79 @@ def _text(value, limit=120):
     return re.sub(r'(?<!\d)09\d{8}(?!\d)', '[電話已隱藏]', text)
 
 
+def _safe_content(value, permissions):
+    if not isinstance(value, dict):
+        return {}
+    kind = _text(value.get('kind'), 80)
+    content_permission = str(
+        value.get('content_permission') or value.get('permission') or ''
+    ).strip()[:80]
+    raw_items = value.get('items')
+    raw_count = value.get('item_count')
+    try:
+        item_count = max(
+            0,
+            min(
+                10000,
+                int(raw_count) if raw_count is not None else (
+                    len(raw_items) if isinstance(raw_items, list) else 0
+                ),
+            ),
+        )
+    except (TypeError, ValueError):
+        item_count = len(raw_items) if isinstance(raw_items, list) else 0
+    if content_permission and permissions.get(content_permission) is not True:
+        return {
+            **({'kind': kind} if kind else {}),
+            'content_permission': content_permission,
+            'redacted': True,
+            'item_count': item_count,
+        }
+
+    allowed = {
+        'role', 'speaker', 'text', 'title', 'summary', 'date', 'start_time',
+        'end_time', 'location', 'source_type', 'status', 'stage',
+        'progress_percent', 'timestamp',
+    }
+    long_text = {'text', 'summary'}
+    items = []
+    for raw in (raw_items[:20] if isinstance(raw_items, list) else []):
+        if not isinstance(raw, dict):
+            continue
+        item = {}
+        for key in allowed:
+            if key not in raw:
+                continue
+            if key == 'progress_percent':
+                try:
+                    item[key] = max(0, min(100, int(raw[key])))
+                except (TypeError, ValueError):
+                    continue
+            else:
+                limit = 500 if key in long_text else 160
+                text = _text(raw.get(key), limit)
+                if text:
+                    item[key] = text
+        if item:
+            items.append(item)
+    title = _text(value.get('title'), 160)
+    content = {
+        **({'kind': kind} if kind else {}),
+        **({'content_permission': content_permission} if content_permission else {}),
+        **({'title': title} if title else {}),
+        'item_count': item_count,
+        'truncated': value.get('truncated') is True or (
+            isinstance(raw_items, list) and len(raw_items) > len(items)
+        ),
+        'items': items,
+    }
+    # Keep a malicious or accidentally oversized page projection bounded even
+    # after field-level truncation.
+    while len(str(content)) > 8000 and items:
+        items.pop()
+    return content
+
+
 def safe_screen(value, permissions):
     if not isinstance(value, dict) or permissions.get('screen_read') is not True:
         return {}
@@ -31,15 +104,19 @@ def safe_screen(value, permissions):
         actions = raw.get('actions') if isinstance(raw.get('actions'), list) else []
         items.append({'ref': ref, 'kind': kind, 'label': _text(raw.get('label')),
                       'permission': permission,
-                      'attributes': {key: _text(attrs[key]) for key in ('date', 'start_time', 'end_time', 'status') if key in attrs},
+                      'attributes': {key: _text(attrs[key]) for key in ('date', 'start_time', 'end_time', 'status', 'source_type') if key in attrs},
                       'actions': available_actions(actions, permissions, targets=True)})
     requested = value.get('available_actions')
     selected = value.get('selected_ref')
-    return {'surface_id': _text(value.get('surface_id'), 80),
+    safe = {'surface_id': _text(value.get('surface_id'), 80),
             'ready': value.get('ready') is True, 'items': items,
             'selected_ref': selected if isinstance(selected, str) and selected in seen else '',
             'available_actions': available_actions(requested if isinstance(requested, list) else [], permissions, targets=True),
             'truncated': value.get('truncated') is True}
+    content = _safe_content(value.get('content'), permissions)
+    if content:
+        safe['content'] = content
+    return safe
 
 
 def _ordinal(text):
@@ -114,7 +191,7 @@ def safe_result(value):
     def item(raw):
         if not isinstance(raw, dict):
             return {}
-        result = {key: _text(raw[key], 500) for key in ('ref', 'kind', 'label', 'title', 'name', 'date', 'start_time', 'end_time', 'status')
+        result = {key: _text(raw[key], 500) for key in ('ref', 'kind', 'label', 'title', 'name', 'date', 'start_time', 'end_time', 'status', 'source_type')
                   if isinstance(raw.get(key), str)}
         attrs = raw.get('attributes')
         if isinstance(attrs, dict):

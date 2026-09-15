@@ -193,6 +193,18 @@ def test_weather_intent_is_narrow_and_never_requires_confirmation():
     assert proposal.arguments == {"location": "台北"}
     assert not requires_confirmation(proposal)
 
+    combined = deterministic_proposal(
+        "幫我查台北現在的天氣與空氣品質", context={},
+    )
+    assert combined.intent == "weather.query"
+    assert combined.arguments == {"location": "台北"}
+
+    place_with_joiner = deterministic_proposal(
+        "幫我查新北市中和區的天氣與空氣品質", context={},
+    )
+    assert place_with_joiner.intent == "weather.query"
+    assert place_with_joiner.arguments == {"location": "新北市中和區"}
+
     current = deterministic_proposal("今天天氣如何", context={})
     assert current.intent == "weather.query"
     assert current.arguments == {"location": ""}

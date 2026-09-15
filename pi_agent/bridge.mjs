@@ -67,7 +67,7 @@ export async function runExperiment(initial, request, onAgent = undefined) {
   let repairAttempted = false;
   let proseRepairMode = false;
   let pendingToolRefresh = false;
-  let pendingSchemaRecoveryMessage = null;
+  let pendingProseRecoveryMessage = null;
   let maxRounds = Math.max(1, Math.min(initial.maxRounds ?? 6, 10));
   let maxToolCalls = Math.max(1, Math.min(initial.maxToolCalls ?? 8, 16));
   const model = {
@@ -135,6 +135,16 @@ export async function runExperiment(initial, request, onAgent = undefined) {
         if (allTools.some(candidate => candidate.name === name)) enabledToolNames.add(name);
       }
       if (Array.isArray(result.enableTools) && result.enableTools.length) pendingToolRefresh = true;
+      if (result.disableTools === true && typeof result.recoveryPrompt === 'string'
+        && result.recoveryPrompt) {
+        proseRepairMode = true;
+        enabledToolNames.clear();
+        pendingToolRefresh = true;
+        pendingProseRecoveryMessage = {
+          role: 'user', content: [{ type: 'text', text: result.recoveryPrompt }],
+          timestamp: Date.now(),
+        };
+      }
       return { content: [{ type: 'text', text: JSON.stringify(result.observations ?? []) }],
         details: {}, addedToolNames: result.enableTools ?? [], terminate: stopped };
     },
@@ -175,11 +185,11 @@ export async function runExperiment(initial, request, onAgent = undefined) {
       return [...messages.slice(0, 8), ...messages.slice(-32)];
     },
     prepareNextTurnWithContext: ({ context }) => {
-      if (!pendingToolRefresh && !pendingSchemaRecoveryMessage) return undefined;
-      const messages = pendingSchemaRecoveryMessage
-        ? [...context.messages, pendingSchemaRecoveryMessage]
+      if (!pendingToolRefresh && !pendingProseRecoveryMessage) return undefined;
+      const messages = pendingProseRecoveryMessage
+        ? [...context.messages, pendingProseRecoveryMessage]
         : context.messages;
-      pendingSchemaRecoveryMessage = null;
+      pendingProseRecoveryMessage = null;
       pendingToolRefresh = false;
       return { context: { ...context, messages, tools: activeTools() } };
     },
@@ -239,7 +249,7 @@ export async function runExperiment(initial, request, onAgent = undefined) {
         proseRepairMode = true;
         enabledToolNames.clear();
         pendingToolRefresh = true;
-        pendingSchemaRecoveryMessage = {
+        pendingProseRecoveryMessage = {
           role: 'user',
           content: [{ type: 'text', text:
             '工具參數連續無法通過驗證。請停止呼叫工具，僅使用目前已成功且已驗證的工具結果完成回答；明確指出未完成的需求，不得宣稱已執行任何尚未確認或驗證的變更。' }],

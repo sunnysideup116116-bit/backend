@@ -27,7 +27,29 @@ Public routes:
 
 - `GET /api/app-voice/capability`
 - `POST /api/app-voice/session`
+- `GET /api/app-voice/tasks`
+- `POST /api/app-voice/tasks/{task_ref}/cancel`
+- `POST /api/app-voice/tasks/{task_ref}/retry`
+- `POST /api/app-voice/tasks/{task_ref}/input`
+- `POST /api/app-voice/tasks/{task_ref}/dismiss`
+- `POST /api/app-voice/tasks/{task_ref}/undo`
 - `WSS /api/app-voice`
+
+Protocol v4 supports three server-side routing modes: `legacy` keeps the
+original direct Gemini declarations, `proxy` uses the seven-tool capability
+catalog, and `template` uses the official Gemini Live-style direct session with
+a small domain-level tool surface. Template mode keeps simple reads and
+navigation on one tool round-trip while complex writes still use the existing
+confirmation and task boundaries. Protocol-v4 sessions always verify a fresh
+Appwrite JWT; task state is stored in the existing Social Mongo database and
+never contains raw audio or full transcripts.
+
+Catalog v5 keeps the same seven model-visible tools while adding guided App
+coaching, permission repair, an authorized-data search, a unified digest, four
+fixed workflows, structured waiting-input cards, retry/edit/dismiss/undo task
+controls, and up to eight device-local personal routines. Routines only store a
+name, an allowlisted template, and bounded template arguments; they never store
+user IDs, database IDs, or capability refs.
 
 Copy the values from `.env.example` into `Server/.env` and start the complete
 stack only through `Server/start_all.sh`. Free Gemini fallback is intended for

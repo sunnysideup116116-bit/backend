@@ -12,6 +12,7 @@ from app_voice_assistant.contracts import (
 )
 from app_voice_assistant.limiter import AppVoiceLimiter, AppVoiceTicketStore
 from app_voice_assistant.settings import AppVoiceSettings
+from app_voice_assistant.telemetry import record_voice_metric
 
 
 def test_all_official_live_voice_names_are_allowlisted():
@@ -19,6 +20,21 @@ def test_all_official_live_voice_names_are_allowlisted():
     for name in ("Zephyr", "Charon", "Leda", "Achird", "Sulafat"):
         context = safe_context({"voice_config": {"voice_name": name}})
         assert context["voice_config"]["voice_name"] == name
+
+
+def test_voice_telemetry_drops_queries_arguments_and_owner_data(caplog):
+    with caplog.at_level("INFO", logger="app_voice.telemetry"):
+        record_voice_metric(
+            "capability_search", routing_mode="proxy",
+            capability_id="calendar.query", search_ranking="calendar.query",
+            latency_ms=12, result_code="ok",
+            query="private words", arguments={"secret": "value"}, user_id="owner",
+        )
+    rendered = caplog.text
+    assert "calendar.query" in rendered
+    assert "private words" not in rendered
+    assert "secret" not in rendered
+    assert "owner" not in rendered
 
 
 def test_profile_patch_is_allowlisted_and_validated():
@@ -166,6 +182,21 @@ def test_safe_context_keeps_a_non_email_display_name_only():
     assert "self_name" not in email["voice_config"]
 
 
+def test_safe_context_projects_only_allowlisted_routine_summaries():
+    context = safe_context({
+        "voice_config": {
+            "routines": [
+                {"name": "早安小幫手", "template_id": "daily_briefing", "arguments": {"secret": "drop"}},
+                {"name": "a@example.com", "template_id": "daily_briefing"},
+                {"name": "危險", "template_id": "send_message"},
+            ],
+        },
+    })
+    assert context["voice_config"]["routines"] == [{
+        "name": "早安小幫手", "template_id": "daily_briefing",
+    }]
+
+
 def test_recent_photo_selection_is_count_only_and_has_separate_permission():
     context = safe_context({
         "scope": "post",
@@ -257,7 +288,7 @@ def test_calendar_questions_are_direct_and_manual_location_is_structured():
 
     assert calendar is not None
     assert calendar.intent == "calendar.query"
-    assert calendar.arguments == {"range": "weekend"}
+    assert calendar.arguments == {"source": "all", "range": "weekend"}
     assert calendar_write is not None
     assert calendar_write.intent == "calendar.create"
     assert calendar_write.arguments["title"] == "籃球"
@@ -307,6 +338,7 @@ def test_calendar_query_accepts_any_valid_past_or_future_date_interval():
     assert future is not None
     assert future.intent == "calendar.query"
     assert future.arguments == {
+        "source": "all",
         "start_date": "2032-08-02",
         "end_date": "2033-01-19",
     }
@@ -367,6 +399,67 @@ def test_direct_calendar_writes_are_structured_and_never_accept_event_ids():
     assert context_allows_proposal(write_only, create) is True
     assert context_allows_proposal(write_only, update) is False
     assert context_allows_proposal(write_only, cancel) is False
+
+
+def test_calendar_cancel_is_deterministic_and_uses_the_current_personal_target():
+    screen_context = safe_context({
+        "scope": "calendar",
+        "revision": 8,
+        "permissions": {
+            "calendar_read": True,
+            "calendar_write": True,
+            "screen_read": True,
+        },
+        "screen": {
+            "ready": True,
+            "selected_ref": "surface-8-1-1",
+            "items": [{
+                "ref": "surface-8-1-1",
+                "kind": "calendar_event",
+                "label": "籃球練習",
+                "actions": ["calendar.update", "calendar.cancel"],
+                "attributes": {"source_type": "personal"},
+            }],
+        },
+    })
+
+    named = deterministic_proposal(
+        "刪除行事曆中的「籃球練習」這個行程", context=safe_context({}),
+    )
+    selected = deterministic_proposal("刪除這個", context=screen_context)
+
+    assert named is not None
+    assert named.intent == "calendar.cancel"
+    assert named.arguments == {"target": "籃球練習"}
+    assert selected is not None
+    assert selected.intent == "calendar.cancel"
+    assert selected.arguments == {
+        "target": "籃球練習", "target_ref": "surface-8-1-1",
+    }
+    assert requires_confirmation(selected) is True
+
+
+def test_calendar_cancel_keeps_an_explicit_date_as_a_disambiguation_hint():
+    proposal = deterministic_proposal(
+        "刪除 2026年9月30日的晚餐行程", context=safe_context({}),
+    )
+    month_day = deterministic_proposal(
+        "取消 9月30日的晚餐", context=safe_context({}),
+    )
+
+    assert proposal is not None
+    assert proposal.intent == "calendar.cancel"
+    assert proposal.arguments == {"target": "晚餐", "date": "2026-09-30"}
+    assert month_day is not None
+    assert month_day.arguments == {"target": "晚餐", "date": "2026-09-30"}
+    assert validate_proposal({
+        "intent": "calendar.cancel",
+        "arguments": {"target": "晚餐", "date": "2026-09-30"},
+    }, base_revision=0) is not None
+    assert validate_proposal({
+        "intent": "calendar.cancel",
+        "arguments": {"target": "晚餐", "date": "2026-9-30"},
+    }, base_revision=0) is None
 
 
 def test_match_progress_and_hub_actions_stay_in_the_matching_domain():
@@ -525,6 +618,153 @@ def test_named_date_request_routes_to_the_existing_private_ayue_room():
     }
 
 
+def test_explicit_private_ayue_phrase_uses_the_current_chat_contact():
+    proposal = deterministic_proposal(
+        "幫我用阿月悄悄話看看我們最近聊了什麼",
+        context=safe_context({
+            "scope": "ayue_private",
+            "feature_status": {"contact_name": "小美"},
+        }),
+    )
+
+    assert proposal is not None
+    assert proposal.intent == "ayue.private_query"
+    assert proposal.arguments == {
+        "contact_name": "小美",
+        "question": "幫我用阿月悄悄話看看我們最近聊了什麼",
+    }
+
+
+def test_chat_places_matching_and_calendar_sources_are_deterministic():
+    permissions = {
+        "navigation": True,
+        "screen_read": True,
+        "chat_list": True,
+        "chat_content": True,
+        "private_ayue": True,
+        "places": True,
+        "public_ayue": True,
+        "match_read": True,
+        "match_actions": True,
+        "match_ayue": True,
+        "calendar_read": True,
+    }
+    global_context = safe_context({"permissions": permissions})
+    chat_context = safe_context({
+        "scope": "chat",
+        "revision": 4,
+        "permissions": permissions,
+        "screen": {
+            "surface_id": "surface-1",
+            "ready": True,
+            "selected_ref": "surface-1-4-1",
+            "available_actions": ["chat.open", "ayue.private_query"],
+            "items": [{
+                "ref": "surface-1-4-1",
+                "kind": "contact",
+                "label": "小美",
+                "actions": ["chat.open", "ayue.private_query"],
+            }],
+        },
+    })
+
+    cases = (
+        ("開啟聊天室", global_context, "app.navigate", {"destination": "chat"}),
+        ("幫我開聊天室", global_context, "app.navigate", {"destination": "chat"}),
+        ("開啟和小美的聊天室", global_context, "chat.open", {"contact_name": "小美"}),
+        ("和小美的聊天室", global_context, "chat.open", {"contact_name": "小美"}),
+        (
+            "讀取裡面的內容",
+            chat_context,
+            "ayue.private_query",
+            {
+                "contact_name": "小美",
+                "question": "讀取裡面的內容",
+                "target_ref": "surface-1-4-1",
+            },
+        ),
+        (
+            "讀取「小美」的聊天內容",
+            global_context,
+            "ayue.private_query",
+            {
+                "contact_name": "小美",
+                "question": "讀取「小美」的聊天內容",
+            },
+        ),
+        (
+            "高雄哪裡有好玩的",
+            global_context,
+            "ayue.public_query",
+            {"domain": "places", "question": "高雄哪裡有好玩的"},
+        ),
+        (
+            "幫我找配對",
+            global_context,
+            "match.ayue_query",
+            {"question": "幫我找配對"},
+        ),
+        (
+            "新的配對",
+            global_context,
+            "match.ayue_query",
+            {"question": "新的配對"},
+        ),
+        (
+            "想找人一起去上海玩",
+            global_context,
+            "match.ayue_query",
+            {"question": "想找人一起去上海玩"},
+        ),
+        (
+            "查 Google 日曆接下來一個月",
+            global_context,
+            "calendar.query",
+            {"source": "google", "range": "upcoming"},
+        ),
+        (
+            "google calender for next month",
+            global_context,
+            "calendar.query",
+            {"source": "google", "range": "upcoming"},
+        ),
+        (
+            "查自己的行事曆",
+            global_context,
+            "calendar.query",
+            {"source": "personal", "range": "upcoming"},
+        ),
+        (
+            "查 personal 行事曆",
+            global_context,
+            "calendar.query",
+            {"source": "personal", "range": "upcoming"},
+        ),
+        (
+            "查共同約會",
+            global_context,
+            "date.query",
+            {"contact_name": ""},
+        ),
+        (
+            "查我和小美的共同約會",
+            global_context,
+            "date.query",
+            {"contact_name": "小美"},
+        ),
+    )
+    for phrase, current_context, intent, arguments in cases:
+        proposal = deterministic_proposal(phrase, context=current_context)
+        assert proposal is not None, phrase
+        assert proposal.intent == intent, phrase
+        assert proposal.arguments == arguments, phrase
+
+    start_match = deterministic_proposal("新的配對", context=global_context)
+    assert start_match is not None
+    assert requires_confirmation(start_match) is True
+    assert confirmation_phrase(start_match) == "確認開始配對"
+
+
 def test_advisor_toggle_is_never_claimed_as_changed():
     proposal = deterministic_proposal(
         "幫我關閉 AI 戀愛顧問",
@@ -571,6 +811,105 @@ def test_compact_po_phrase_opens_a_caption_draft():
     assert proposal is not None
     assert proposal.intent == "post.open_draft"
     assert "海邊" in proposal.arguments["caption"]
+
+
+def test_story_request_stays_in_the_post_flow_instead_of_matching():
+    proposal = deterministic_proposal(
+        "幫我編故事", context=safe_context({"scope": "global", "revision": 2}),
+    )
+
+    assert proposal is not None
+    assert proposal.intent == "post.open_draft"
+    assert "故事" in proposal.arguments["caption"]
+
+
+def test_profile_post_navigation_uses_newest_first_screen_refs():
+    context = safe_context({
+        "scope": "profile",
+        "revision": 5,
+        "permissions": {"screen_read": True, "profile": True},
+        "screen": {
+            "surface_id": "surface-4",
+            "ready": True,
+            "items": [
+                {
+                    "ref": "surface-4-5-1",
+                    "kind": "post",
+                    "label": "第1篇：最新",
+                    "actions": ["post.open"],
+                },
+                {
+                    "ref": "surface-4-5-2",
+                    "kind": "post",
+                    "label": "第2篇：較舊",
+                    "actions": ["post.open"],
+                },
+            ],
+            "available_actions": ["post.open"],
+        },
+    })
+    newest = deterministic_proposal("打開最新貼文", context=context)
+    second = deterministic_proposal("查看第2篇貼文", context=context)
+
+    assert newest is not None and newest.intent == "post.open"
+    assert newest.arguments["target_ref"] == "surface-4-5-1"
+    assert second is not None and second.intent == "post.open"
+    assert second.arguments["target_ref"] == "surface-4-5-2"
+
+
+def test_post_wording_stays_in_post_flow_and_calendar_updates_are_structured():
+    global_context = safe_context({"scope": "global", "revision": 4})
+    post_context = safe_context({"scope": "post", "revision": 4})
+    post = deterministic_proposal("我要po文章，文字內容幫我編", context=global_context)
+    post_edit = deterministic_proposal("幫我編文字內容", context=post_context)
+    calendar_context = safe_context({
+        "scope": "calendar",
+        "revision": 9,
+        "permissions": {
+            "screen_read": True,
+            "calendar_read": True,
+            "calendar_write": True,
+        },
+        "screen": {
+            "surface_id": "surface-1",
+            "ready": True,
+            "items": [{
+                "ref": "surface-1-9-1",
+                "kind": "calendar_event",
+                "label": "晚餐",
+                "actions": ["calendar.update"],
+                "attributes": {"source_type": "personal", "status": "confirmed"},
+            }],
+            "selected_ref": "surface-1-9-1",
+            "available_actions": ["calendar.update"],
+        },
+    })
+    update = deterministic_proposal(
+        "把晚餐改到明天晚上七點，地點改成駁二",
+        context=calendar_context,
+    )
+
+    assert post is not None and post.intent == "post.open_draft"
+    assert post_edit is not None and post_edit.intent == "post.replace_caption"
+    assert update is not None and update.intent == "calendar.update"
+    assert update.arguments["target_ref"] == "surface-1-9-1"
+    assert update.arguments["start_time"] == "19:00"
+    assert update.arguments["location"] == "駁二"
+    assert "date" in update.arguments
+
+
+def test_calendar_update_accepts_title_without_accepting_untrusted_fields():
+    proposal = validate_proposal({
+        "intent": "calendar.update",
+        "arguments": {
+            "target": "晚餐",
+            "title": "看電影",
+            "event_id": "must-not-pass",
+        },
+    }, base_revision=1)
+
+    assert proposal is not None
+    assert proposal.arguments == {"target": "晚餐", "title": "看電影"}
 
 
 def test_assistant_reply_redacts_common_sensitive_values():
@@ -623,3 +962,31 @@ def test_non_demo_mode_disables_account_allowlist_but_still_rejects_empty_id():
     })
     assert settings.allows_user("any-signed-in-user") is True
     assert settings.allows_user("") is False
+
+
+def test_proxy_rollout_is_explicit_and_bounded():
+    settings = AppVoiceSettings.from_env({
+        "VOICE_APP_TOOL_ROUTING_MODE": "canary",
+        "VOICE_APP_PROXY_USER_IDS": "owner-a,*",
+        "VOICE_APP_TASKS_ENABLED": "on",
+        "VOICE_APP_TASK_WORKERS": "99",
+        "VOICE_APP_TASK_PER_USER_CONCURRENCY": "0",
+    })
+    assert settings.routing_mode_for_user("owner-a") == "proxy"
+    assert settings.routing_mode_for_user("any-owner") == "proxy"
+    assert settings.tasks_enabled is True
+    assert settings.task_workers == 16
+    assert settings.task_per_user_concurrency == 1
+
+    invalid = AppVoiceSettings.from_env({
+        "VOICE_APP_TOOL_ROUTING_MODE": "unknown",
+    })
+    assert invalid.routing_mode_for_user("owner-a") == "legacy"
+
+
+def test_template_rollout_is_available_as_a_first_class_routing_mode():
+    settings = AppVoiceSettings.from_env({
+        "VOICE_APP_TOOL_ROUTING_MODE": "template",
+    })
+
+    assert settings.routing_mode_for_user("any-owner") == "template"

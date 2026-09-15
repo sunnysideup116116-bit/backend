@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hmac
 import json
+import logging
 import os
 import re
 import sys
@@ -45,6 +46,15 @@ from .memory import (
 from .provider import AppVoiceProvider
 from .settings import AppVoiceSettings
 from .weather import GoogleVoiceWeatherService, resolve_weather_location
+from .task_service import (
+    VoiceTaskService,
+    start_voice_task_worker,
+    stop_voice_task_worker,
+)
+from .template_dispatcher import TEMPLATE_TOOL_COUNT
+
+
+LOGGER = logging.getLogger("app_voice.runtime")
 
 
 def _saved_weather_location(user_id: str) -> str:
@@ -70,6 +80,19 @@ def _saved_weather_location(user_id: str) -> str:
     return location[:80] if len(location) >= 2 else ""
 
 
+def _authenticate_appwrite_owner(authorization: str) -> str:
+    try:
+        from services.appwrite_identity_service import authenticate_owner
+    except ImportError:
+        # Isolated app-voice tests use protocol v3 unless an authenticator is injected.
+        raise VoiceMemoryError("voice_identity_unavailable")
+    try:
+        return str(authenticate_owner(authorization) or "")
+    except Exception as error:
+        code = str(getattr(error, "code", "voice_identity_unavailable"))
+        raise VoiceMemoryError(code) from error
+
+
 class AppVoiceSessionRequest(BaseModel):
     installation_id: str = Field(min_length=16, max_length=128)
     user_id: str = Field(min_length=1, max_length=128)
@@ -77,6 +100,16 @@ class AppVoiceSessionRequest(BaseModel):
     consent_accepted_at: str = Field(min_length=10, max_length=64)
     input_mode: str = Field(default="on_device_text", max_length=40)
     output_mode: str = Field(default="gemini_live_duplex", max_length=40)
+    client_protocol_version: int = Field(default=3, ge=1, le=4)
+
+
+class AppVoiceTaskCancelRequest(BaseModel):
+    expected_revision: int | None = Field(default=None, ge=0)
+
+
+class AppVoiceTaskInputRequest(BaseModel):
+    expected_revision: int | None = Field(default=None, ge=0)
+    values: dict[str, Any] = Field(min_length=1, max_length=8)
 
 
 @dataclass
@@ -99,6 +132,9 @@ class AppVoiceRuntime:
         memory_service: Any | None = None,
         weather_service: Any | None = None,
         weather_location_provider: Any | None = None,
+        task_service: VoiceTaskService | None = None,
+        defer_task_service: bool = False,
+        identity_authenticator: Any | None = None,
     ):
         self.settings = settings or AppVoiceSettings.from_env()
         resolved_keys = collect_google_api_keys() if keys is None else keys
@@ -120,6 +156,36 @@ class AppVoiceRuntime:
             else GoogleVoiceWeatherService.from_env_or_none()
         )
         self.weather_location_provider = weather_location_provider
+        self.task_service_injected = task_service is not None
+        self._task_service_deferred = bool(defer_task_service and task_service is None)
+        if task_service is not None:
+            self.tasks = task_service
+        elif self._task_service_deferred:
+            self.tasks = VoiceTaskService(
+                None,
+                None,
+                enabled=False,
+                worker_count=self.settings.task_workers,
+                per_user_concurrency=self.settings.task_per_user_concurrency,
+            )
+        else:
+            self.tasks = VoiceTaskService.from_database(
+                enabled=self.settings.tasks_enabled,
+                worker_count=self.settings.task_workers,
+                per_user_concurrency=self.settings.task_per_user_concurrency,
+            )
+        self.identity_authenticator = identity_authenticator or _authenticate_appwrite_owner
+        self.identity_authenticator_injected = identity_authenticator is not None
+
+    def initialize_task_service(self) -> None:
+        if not self._task_service_deferred:
+            return
+        self.tasks = VoiceTaskService.from_database(
+            enabled=self.settings.tasks_enabled,
+            worker_count=self.settings.task_workers,
+            per_user_concurrency=self.settings.task_per_user_concurrency,
+        )
+        self._task_service_deferred = False
 
     def queue_memory_finalize(
         self, ticket: AppVoiceTicket, turns: list[dict[str, str]],
@@ -248,14 +314,42 @@ def _confirmation_preview(proposal: VoiceProposal, context: dict[str, Any]) -> s
 def create_router(runtime: AppVoiceRuntime) -> APIRouter:
     app_router = APIRouter(prefix="/api/app-voice", tags=["App Voice Assistant"])
 
+    async def verify_owner(authorization: str) -> str:
+        if runtime.identity_authenticator_injected:
+            return str(runtime.identity_authenticator(authorization) or "")
+        return str(await asyncio.to_thread(runtime.identity_authenticator, authorization) or "")
+
+    async def run_task_call(function: Any, *args: Any, **kwargs: Any) -> Any:
+        if runtime.task_service_injected:
+            return function(*args, **kwargs)
+        return await asyncio.to_thread(function, *args, **kwargs)
+
     @app_router.get("/capability")
     async def capability() -> dict[str, Any]:
+        configured_routing_mode = runtime.settings.tool_routing_mode
+        max_model_tools = (
+            TEMPLATE_TOOL_COUNT
+            if configured_routing_mode == "template"
+            else 7
+            if configured_routing_mode == "proxy"
+            else 36
+        )
         return {
             "enabled": runtime.settings.enabled,
-            "protocol_version": 3,
+            "protocol_version": 4,
             "action_catalog_version": CATALOG["version"],
             "screen_context_version": 1,
             "structured_action_results": True,
+            "tool_routing_version": 2,
+            "task_protocol_version": 1,
+            "task_interactions": True,
+            "guide_protocol_version": 1,
+            "personal_routines": True,
+            "authenticated_session_required": True,
+            "max_model_tools": max_model_tools,
+            "voice_runtime_template": configured_routing_mode == "template",
+            "max_operations_per_request": 8,
+            "task_service": runtime.tasks.enabled,
             "demo_only": runtime.settings.demo_only,
             "session_memory": runtime.memory is not None,
             "session_memory_storage": "appwrite_internal" if runtime.memory else "disabled",
@@ -311,6 +405,10 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                 "direct_shared_dates", "date_invitation_response", "shared_date_form_update",
                 "shared_date_form_confirm",
                 "current_weather_and_air_quality",
+                "guided_app_help", "voice_permission_repair",
+                "unified_pending_digest", "authorized_app_search",
+                "fixed_workflows", "personal_voice_routines",
+                "structured_task_interactions",
             ],
         }
 
@@ -323,6 +421,7 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
         user_id = req.user_id
         username = ""
         memory = VoiceMemoryRecord()
+        authenticated_owner = ""
         if runtime.memory is not None:
             try:
                 owner, memory = await asyncio.to_thread(
@@ -338,12 +437,30 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                 } else 503
                 raise HTTPException(status_code=status, detail=error.code) from error
             user_id = owner.user_id
+            authenticated_owner = owner.user_id
             username = owner.username
             print(
                 "[APP_VOICE_MEMORY] loaded "
                 f"revision={memory.revision} "
                 f"chars={len(memory.older_summary) + len(memory.recent_summary)}"
             )
+        elif req.client_protocol_version >= 4:
+            try:
+                authenticated_owner = await verify_owner(
+                    str(request.headers.get("authorization") or ""),
+                )
+            except VoiceMemoryError as error:
+                code = str(getattr(error, "code", "voice_identity_unavailable"))
+                status = 401 if code in {
+                    "appwrite_jwt_required", "appwrite_authentication_failed",
+                    "voice_memory_jwt_required", "voice_memory_authentication_failed",
+                } else 503
+                raise HTTPException(status_code=status, detail=code) from error
+            if not authenticated_owner or not hmac.compare_digest(
+                authenticated_owner, str(req.user_id),
+            ):
+                raise HTTPException(status_code=401, detail="voice_identity_user_mismatch")
+            user_id = authenticated_owner
         if not runtime.settings.allows_user(user_id):
             raise HTTPException(status_code=403, detail="app_voice_demo_account_required")
         ip = runtime.client_ip(request)
@@ -351,6 +468,11 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
         if not runtime.limiter.allow_session(identity):
             raise HTTPException(status_code=429, detail="app_voice_rate_limit")
         ip_hash = fingerprint(runtime.secret, "app-voice-ip", ip)
+        protocol_version = 4 if req.client_protocol_version >= 4 else 3
+        routing_mode = (
+            runtime.settings.routing_mode_for_user(user_id)
+            if protocol_version >= 4 else "legacy"
+        )
         ticket, ttl = runtime.tickets.issue(
             identity,
             user_id,
@@ -359,6 +481,8 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
             session_id=uuid.uuid4().hex,
             memory_older_summary=memory.older_summary,
             memory_recent_summary=memory.recent_summary,
+            protocol_version=protocol_version,
+            routing_mode=routing_mode,
         )
         return {
             "ticket": ticket,
@@ -366,6 +490,140 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
             "websocket_url": "wss://service.misproject.us.ci/api/app-voice",
             "max_duration_seconds": runtime.settings.max_session_seconds,
             "demo_only": runtime.settings.demo_only,
+            "protocol_version": protocol_version,
+            "tool_routing_mode": routing_mode,
+        }
+
+    async def authenticated_task_owner(request: Request) -> str:
+        try:
+            owner = await verify_owner(str(request.headers.get("authorization") or ""))
+        except VoiceMemoryError as error:
+            code = str(getattr(error, "code", "voice_identity_unavailable"))
+            status = 401 if code in {
+                "appwrite_jwt_required", "appwrite_authentication_failed",
+                "voice_memory_jwt_required", "voice_memory_authentication_failed",
+            } else 503
+            raise HTTPException(status_code=status, detail=code) from error
+        if not owner:
+            raise HTTPException(status_code=401, detail="voice_identity_invalid")
+        return owner
+
+    @app_router.get("/tasks")
+    async def list_voice_tasks(
+        request: Request, filter: str = "active", limit: int = 20,
+    ) -> dict[str, Any]:
+        owner = await authenticated_task_owner(request)
+        if filter not in {"active", "recent", "all"}:
+            raise HTTPException(status_code=400, detail="voice_task_filter_invalid")
+        if not runtime.tasks.enabled:
+            return {"task_protocol_version": 1, "tasks": []}
+        try:
+            tasks = await run_task_call(
+                runtime.tasks.list_tasks, owner, filter, limit=max(1, min(limit, 20)),
+            )
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {"task_protocol_version": 1, "tasks": tasks}
+
+    @app_router.post("/tasks/{task_ref}/cancel")
+    async def cancel_voice_task(
+        task_ref: str, body: AppVoiceTaskCancelRequest, request: Request,
+    ) -> dict[str, Any]:
+        owner = await authenticated_task_owner(request)
+        if not re.fullmatch(r"(?:task|batch)_[0-9a-f]{32}", task_ref):
+            raise HTTPException(status_code=404, detail="voice_task_not_found")
+        try:
+            tasks = await run_task_call(
+                runtime.tasks.cancel,
+                owner,
+                task_ref,
+                expected_revision=body.expected_revision,
+            )
+        except ValueError as error:
+            code = str(error)
+            status = 409 if code == "voice_task_revision_stale" else 404
+            raise HTTPException(status_code=status, detail=code) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {"status": "ok", "tasks": tasks}
+
+    def task_error(error: ValueError) -> HTTPException:
+        code = str(error)
+        if code == "voice_task_not_found":
+            return HTTPException(status_code=404, detail=code)
+        if code == "voice_task_revision_stale":
+            return HTTPException(status_code=409, detail=code)
+        return HTTPException(status_code=400, detail=code)
+
+    @app_router.post("/tasks/{task_ref}/retry")
+    async def retry_voice_task(
+        task_ref: str, body: AppVoiceTaskCancelRequest, request: Request,
+    ) -> dict[str, Any]:
+        owner = await authenticated_task_owner(request)
+        try:
+            row = await run_task_call(
+                runtime.tasks.retry, owner, task_ref,
+                expected_revision=body.expected_revision,
+            )
+        except ValueError as error:
+            raise task_error(error) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {"status": "ok", "task": runtime.tasks.project(row)}
+
+    @app_router.post("/tasks/{task_ref}/input")
+    async def provide_voice_task_input(
+        task_ref: str, body: AppVoiceTaskInputRequest, request: Request,
+    ) -> dict[str, Any]:
+        owner = await authenticated_task_owner(request)
+        try:
+            row = await run_task_call(
+                runtime.tasks.provide_input, owner, task_ref, body.values,
+                expected_revision=body.expected_revision,
+            )
+        except ValueError as error:
+            raise task_error(error) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {"status": "ok", "task": runtime.tasks.project(row)}
+
+    @app_router.post("/tasks/{task_ref}/dismiss")
+    async def dismiss_voice_task(
+        task_ref: str, body: AppVoiceTaskCancelRequest, request: Request,
+    ) -> dict[str, Any]:
+        owner = await authenticated_task_owner(request)
+        try:
+            row = await run_task_call(
+                runtime.tasks.dismiss, owner, task_ref,
+                expected_revision=body.expected_revision,
+            )
+        except ValueError as error:
+            raise task_error(error) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {"status": "ok", "task": runtime.tasks.project(row)}
+
+    @app_router.post("/tasks/{task_ref}/undo")
+    async def undo_voice_task(
+        task_ref: str, body: AppVoiceTaskCancelRequest, request: Request,
+    ) -> dict[str, Any]:
+        owner = await authenticated_task_owner(request)
+        try:
+            created = await run_task_call(
+                runtime.tasks.create_undo_batch,
+                owner,
+                task_ref,
+                session_id=f"rest-{uuid.uuid4().hex}",
+                expected_revision=body.expected_revision,
+            )
+        except ValueError as error:
+            raise task_error(error) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {
+            "status": "queued",
+            "batch_ref": created.batch.get("batch_ref"),
+            "tasks": [runtime.tasks.project(row) for row in created.tasks],
         }
 
     @app_router.websocket("")
@@ -390,6 +648,16 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
             ticket = runtime.tickets.consume(str(hello.get("ticket") or ""))
             if ticket is None:
                 await websocket.close(code=1008, reason="invalid_ticket")
+                return
+            try:
+                client_protocol_version = int(
+                    hello.get("client_protocol_version") or 3,
+                )
+            except (TypeError, ValueError):
+                await websocket.close(code=1008, reason="protocol_mismatch")
+                return
+            if client_protocol_version != ticket.protocol_version:
+                await websocket.close(code=1008, reason="protocol_mismatch")
                 return
             current_ip = fingerprint(runtime.secret, "app-voice-ip", runtime.client_ip(websocket))
             if not hmac.compare_digest(ticket.ip_fingerprint, current_ip):
@@ -448,7 +716,20 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                 "type": "ready",
                 "user_id": ticket.user_id,
                 "max_duration_seconds": runtime.settings.max_session_seconds,
+                "protocol_version": ticket.protocol_version,
+                "tool_routing_mode": ticket.routing_mode,
             })
+            if ticket.protocol_version >= 4 and runtime.tasks.enabled:
+                try:
+                    await send_event({
+                        "type": "task_snapshot",
+                        "task_protocol_version": 1,
+                        "tasks": await run_task_call(
+                            runtime.tasks.list_tasks, ticket.user_id, "all", limit=20,
+                        ),
+                    })
+                except RuntimeError:
+                    await send_event({"type": "error", "code": "voice_task_storage_unavailable"})
 
             if (
                 output_mode == "gemini_live_duplex"
@@ -475,12 +756,23 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                         weather_service=runtime.weather,
                         weather_location_provider=runtime.weather_location_provider,
                         weather_user_id=ticket.user_id,
+                        user_id=ticket.user_id,
+                        voice_session_id=ticket.session_id,
+                        capability_secret=runtime.secret,
+                        routing_mode=ticket.routing_mode,
+                        task_service=(
+                            runtime.tasks if ticket.protocol_version >= 4 else None
+                        ),
                     )
                     await send_event({"type": "closed", "reconnect": True})
                     await websocket.close(code=1000)
                 except WebSocketDisconnect:
                     pass
-                except Exception:
+                except Exception as error:
+                    LOGGER.exception(
+                        "App Voice duplex session failed (error_type=%s)",
+                        type(error).__name__,
+                    )
                     try:
                         await send_event({
                             "type": "error",
@@ -819,5 +1111,17 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
     return app_router
 
 
-_runtime = AppVoiceRuntime(weather_location_provider=_saved_weather_location)
+_runtime = AppVoiceRuntime(
+    weather_location_provider=_saved_weather_location,
+    defer_task_service=True,
+)
 router = create_router(_runtime)
+
+
+def start_app_voice_task_services() -> None:
+    _runtime.initialize_task_service()
+    start_voice_task_worker(_runtime.tasks)
+
+
+def stop_app_voice_task_services() -> None:
+    stop_voice_task_worker()

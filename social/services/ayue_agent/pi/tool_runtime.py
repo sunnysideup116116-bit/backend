@@ -6,6 +6,7 @@ schemas, injects server authority, executes reads, and prepares one confirmation
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from typing import Any, Callable
@@ -32,6 +33,10 @@ from services.ayue_agent.shared.write_actions import prepare_write_confirmation
 
 MAX_DOMAIN_READS = 3
 MAX_TOTAL_READS = 9
+
+
+def _place_anchor_key(value: Any) -> str:
+    return re.sub(r"[\s,，、·•()（）\-–—]+", "", str(value or "")).casefold()
 
 
 class PiToolRuntime:
@@ -86,6 +91,58 @@ class PiToolRuntime:
     def project(self, **kwargs: Any) -> dict[str, Any]:
         """Domain-facing result envelope."""
         return self._project(**kwargs)
+
+    def _private_place_anchor(self, anchor: Any) -> dict[str, Any] | None:
+        requested = _place_anchor_key(anchor)
+        if not requested:
+            return None
+        matches: list[dict[str, Any]] = []
+        for stored in self.results:
+            private_data = stored.get("private_data") if isinstance(stored, dict) else None
+            for candidate in (private_data or {}).get("place_anchor_candidates") or []:
+                if not isinstance(candidate, dict):
+                    continue
+                name = str(candidate.get("name") or "").strip()
+                address = str(candidate.get("address_summary") or "").strip()
+                forms = {
+                    _place_anchor_key(name),
+                    _place_anchor_key(address),
+                    _place_anchor_key(f"{name}{address}"),
+                    _place_anchor_key(f"{address}{name}"),
+                }
+                if requested in forms:
+                    matches.append(candidate)
+        unique: dict[tuple[str, str, float, float], dict[str, Any]] = {}
+        for item in matches:
+            try:
+                latitude = float(item["latitude"])
+                longitude = float(item["longitude"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
+                continue
+            identity = (
+                str(item.get("provider") or ""),
+                str(item.get("place_id") or item.get("map_url") or ""),
+                latitude,
+                longitude,
+            )
+            unique[identity] = item
+        if len(unique) != 1:
+            return None
+        candidate = next(iter(unique.values()))
+        label = " ".join(
+            value for value in (
+                str(candidate.get("name") or "").strip(),
+                str(candidate.get("address_summary") or "").strip(),
+            ) if value
+        )[:160]
+        return {
+            "requested_anchor": str(anchor or "").strip(),
+            "label": label,
+            "latitude": float(candidate["latitude"]),
+            "longitude": float(candidate["longitude"]),
+        }
 
     def _create_confirmation(self, *, agent_name: str, tool_name: str,
                              arguments: dict[str, Any], payload: dict[str, Any],
@@ -155,6 +212,10 @@ class PiToolRuntime:
             safe_args = executor_arguments_for_turn(spec, mentioned_ids, arguments)
         except Exception:
             return self._project(name=name, status="failed", error_code="executor_args_invalid")
+        trusted_place_anchor = (
+            self._private_place_anchor(safe_args.get("anchor"))
+            if name == "places.search_nearby" else None
+        )
         if name == "web.extract":
             from .web_tools import extraction_urls_allowed
             urls = [str(url) for url in (arguments.get("urls") or [])]
@@ -169,10 +230,14 @@ class PiToolRuntime:
             self.total_reads += 1
         started = time.perf_counter()
         self._progress("tool_started", text=spec.progress_text, tool_name=name)
+        raw_ctx = self.turn._raw_ctx
+        previous_private_anchor = getattr(raw_ctx, "_pi_trusted_place_anchor", None)
+        if trusted_place_anchor is not None:
+            object.__setattr__(raw_ctx, "_pi_trusted_place_anchor", trusted_place_anchor)
         try:
             result = execute_tool(
                 ToolCall(name=name, arguments=safe_args),
-                self.turn._raw_ctx,
+                raw_ctx,
                 clock=self.turn.clock,
             )
         except Exception:
@@ -180,6 +245,8 @@ class PiToolRuntime:
                            duration_ms=round((time.perf_counter() - started) * 1000))
             self.trace.setdefault("tool_results", []).append({"tool": name, "ok": False, "code": "tool_exception"})
             return self._project(name=name, status="failed", error_code="tool_exception")
+        finally:
+            object.__setattr__(raw_ctx, "_pi_trusted_place_anchor", previous_private_anchor)
         duration_ms = round((time.perf_counter() - started) * 1000)
         self._progress("tool_finished", outcome="ok" if result.ok else "error",
                        tool_name=name, duration_ms=duration_ms)
@@ -188,6 +255,9 @@ class PiToolRuntime:
             "ok": bool(result.ok),
             "code": result.error_code,
         })
+        if result.ok and result.private_data:
+            self.results.append({"tool": name, "private_data": dict(result.private_data)})
+            self.results = self.results[-8:]
         return self._project(
             name=name,
             status="ok" if result.ok else "failed",

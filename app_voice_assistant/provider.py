@@ -25,7 +25,8 @@ def _calendar_range_needs_model(
     if (
         proposal is None
         or proposal.intent != "calendar.query"
-        or proposal.arguments != {"range": "upcoming"}
+        or proposal.arguments.get("range") != "upcoming"
+        or set(proposal.arguments) - {"range", "source"}
     ):
         return False
     value = str(text or "")
@@ -55,12 +56,14 @@ class AppVoiceProvider:
         *,
         voice_config: dict[str, str] | None = None,
         conversation_memory: str = "",
+        routing_mode: str = "legacy",
     ) -> AppVoiceDuplexSession:
         return AppVoiceDuplexSession(
             self.settings,
             self.keys,
             voice_config=voice_config,
             conversation_memory=conversation_memory,
+            routing_mode=routing_mode,
         )
 
     def _safe_context_with_memory(self, context: dict[str, Any]) -> dict[str, Any]:
@@ -76,15 +79,38 @@ class AppVoiceProvider:
         safe = self._safe_context_with_memory(context)
         local = deterministic_proposal(text, context=safe)
         needs_calendar_model = _calendar_range_needs_model(text, local)
+        if local is not None and local.intent == "post.open_draft":
+            # Let Gemini compose the caption, but never let a failed or
+            # misclassified composition turn an explicit post request into a
+            # matching/public-Ayue request.
+            if self.gemini_available:
+                generated = await self._gemini_turn(text, context=safe)
+                if generated is not None and generated.intent in {
+                    "post.open_draft", "post.replace_caption", "post.append_caption",
+                }:
+                    return generated
+            return local
         if (
             local is not None
-            and local.intent != "post.open_draft"
             and not needs_calendar_model
         ):
             return local
         if self.gemini_available:
             generated = await self._gemini_turn(text, context=safe)
             if generated is not None:
+                if (
+                    generated.intent == "calendar.query"
+                    and local is not None
+                    and local.intent == "calendar.query"
+                    and "source" in local.arguments
+                    and "source" not in generated.arguments
+                ):
+                    generated = VoiceProposal(
+                        generated.intent,
+                        {**generated.arguments, "source": local.arguments["source"]},
+                        generated.reply,
+                        generated.base_revision,
+                    )
                 return generated
         return local
 
@@ -223,19 +249,20 @@ class AppVoiceProvider:
         prompt = f"""
 你是 Folks App 的語音指令解析器。只能輸出 JSON，欄位為 intent、arguments、reply。
 允許 intent：app.navigate、profile.open、profile.patch、profile.request_commit、settings.open、
-settings.set、post.open_draft、post.replace_caption、post.append_caption、
+settings.set、post.open、post.open_draft、post.replace_caption、post.append_caption、
 post.request_publish、calendar.query、calendar.create、calendar.update、calendar.cancel、
 personality.explore、ayue.public_query、ayue.private_query、contacts.query、self.query、
 memory.query、memory.add、ui.choice.activate、ui.target.select、chat.open、chat.request_send、
 weather.query、assistant.reply、assistant.cancel、assistant.close。
 app.navigate destination 只能是 chat、matching、profile、settings、profile_edit、
 voice_settings、calendar、matching_ayue、match_hub、memory、create_post。
-calendar.query 查指定期間時 arguments 只能有 start_date 與 end_date，格式皆為 YYYY-MM-DD，
+calendar.query 的 source 只能是 all、personal 或 google：未指定來源用 all，
+「Google 日曆」用 google，「App／個人／自己的行事曆」用 personal。查指定期間時另用 start_date 與 end_date，格式皆為 YYYY-MM-DD，
 而且包含起訖日；不限制過去或未來跨度。今天、明天、本週等簡單查詢也可只用 range，
 值只能是 today、tomorrow、week、weekend、next_week、upcoming。
 calendar.create arguments 只能有 title、date（YYYY-MM-DD）、start_time（HH:mm）、
 可選 end_time、location、notes。calendar.update 以自然語言 target 指定既有行程，
-只能修改 date、start_time、end_time、location、notes；calendar.cancel 只能有 target。
+只能修改 title、date、start_time、end_time、location、notes；calendar.cancel 只能有 target 與可選 date（YYYY-MM-DD）。
 不得輸出 event_id。所有行事曆讀寫都由 App 直接處理，不使用 ayue.public_query。
 目前台灣日期是 {today}，請先將今天、明天、後天或下週等相對日期換算成 YYYY-MM-DD。
 personality.explore 用於開始或繼續語音個性探索，arguments 只能有 message。

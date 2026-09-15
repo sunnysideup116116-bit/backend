@@ -21,6 +21,8 @@ class AppVoiceTicket:
     session_id: str = ""
     memory_older_summary: str = ""
     memory_recent_summary: str = ""
+    protocol_version: int = 3
+    routing_mode: str = "legacy"
 
 
 class AppVoiceTicketStore:
@@ -39,6 +41,8 @@ class AppVoiceTicketStore:
         session_id: str = "",
         memory_older_summary: str = "",
         memory_recent_summary: str = "",
+        protocol_version: int = 3,
+        routing_mode: str = "legacy",
     ) -> tuple[str, int]:
         token = secrets.token_urlsafe(32)
         now = time.monotonic()
@@ -53,6 +57,8 @@ class AppVoiceTicketStore:
                 session_id=session_id,
                 memory_older_summary=memory_older_summary,
                 memory_recent_summary=memory_recent_summary,
+                protocol_version=max(1, min(int(protocol_version or 3), 4)),
+                routing_mode="proxy" if routing_mode == "proxy" else "legacy",
             )
         return token, self._ttl
 

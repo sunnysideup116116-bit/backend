@@ -1,12 +1,501 @@
 {
-  "version": 3,
+  "version": 13,
   "target_permissions": {
     "contact": "chat_list",
     "calendar_event": "calendar_read",
-    "match_invitation": "match_read"
+    "match_invitation": "match_read",
+    "post": "profile"
+  },
+  "argument_schemas": {
+    "app.navigate": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "destination": {"type": "string", "enum": ["chat", "matching", "profile", "settings", "profile_edit", "voice_settings", "calendar", "matching_ayue", "match_hub", "memory", "create_post"]}
+      },
+      "required": ["destination"]
+    },
+    "app.digest.query": {"type": "object", "additionalProperties": false, "properties": {}},
+    "app.search": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "query": {"type": "string", "minLength": 1, "maxLength": 120},
+        "domains": {
+          "type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": true,
+          "items": {"type": "string", "enum": ["contacts", "calendar", "shared_dates", "memory", "matching"]}
+        }
+      },
+      "required": ["query", "domains"]
+    },
+    "assistant.cancel": {"type": "object", "additionalProperties": false, "properties": {}},
+    "assistant.close": {"type": "object", "additionalProperties": false, "properties": {}},
+    "assistant.reply": {"type": "object", "additionalProperties": false, "properties": {}},
+    "ayue.private_query": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "contact_name": {"type": "string", "maxLength": 40},
+        "question": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
+      },
+      "required": ["question"]
+    },
+    "ayue.public_query": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "domain": {"type": "string", "enum": ["matching", "web", "places", "memory", "profile"]},
+        "question": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
+      },
+      "required": ["domain", "question"]
+    },
+    "calendar.cancel": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "target": {"type": "string", "maxLength": 80},
+        "date": {"type": "string", "format": "date"},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
+      },
+      "anyOf": [{"required": ["target"]}, {"required": ["target_ref"]}]
+    },
+    "calendar.create": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "title": {"type": "string", "minLength": 1, "maxLength": 80},
+        "date": {"type": "string", "format": "date"},
+        "start_time": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+        "end_time": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+        "location": {"type": "string", "maxLength": 120},
+        "notes": {"type": "string", "maxLength": 500}
+      },
+      "required": ["title", "date", "start_time"]
+    },
+    "calendar.query": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "source": {"type": "string", "enum": ["all", "personal", "google"]},
+        "range": {"type": "string", "enum": ["today", "tomorrow", "week", "weekend", "next_week", "upcoming"]},
+        "start_date": {"type": "string", "format": "date"},
+        "end_date": {"type": "string", "format": "date"}
+      },
+      "dependentRequired": {"start_date": ["end_date"], "end_date": ["start_date"]}
+    },
+    "calendar.update": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "target": {"type": "string", "maxLength": 80},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"},
+        "title": {"type": "string", "maxLength": 80},
+        "date": {"type": "string", "format": "date"},
+        "start_time": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+        "end_time": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+        "location": {"type": "string", "maxLength": 120},
+        "notes": {"type": "string", "maxLength": 500}
+      },
+      "allOf": [
+        {"anyOf": [{"required": ["target"]}, {"required": ["target_ref"]}]},
+        {"anyOf": [{"required": ["title"]}, {"required": ["date"]}, {"required": ["start_time"]}, {"required": ["end_time"]}, {"required": ["location"]}, {"required": ["notes"]}]}
+      ]
+    },
+    "chat.open": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "contact_name": {"type": "string", "maxLength": 40},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
+      },
+      "anyOf": [{"required": ["contact_name"]}, {"required": ["target_ref"]}]
+    },
+    "chat.request_send": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "contact_name": {"type": "string", "maxLength": 40},
+        "message": {"type": "string", "minLength": 1, "maxLength": 500},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
+      },
+      "required": ["message"],
+      "anyOf": [{"required": ["contact_name"]}, {"required": ["target_ref"]}]
+    },
+    "contacts.query": {"type": "object", "additionalProperties": false, "properties": {}},
+    "date.confirm": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "contact_name": {"type": "string", "maxLength": 80},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
+      }
+    },
+    "date.query": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "contact_name": {"type": "string", "maxLength": 80},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
+      }
+    },
+    "date.respond": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "contact_name": {"type": "string", "maxLength": 80},
+        "accepted": {"type": "boolean"},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
+      },
+      "required": ["accepted"]
+    },
+    "date.update": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "contact_name": {"type": "string", "maxLength": 80},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"},
+        "changes": {
+          "type": "object", "additionalProperties": false, "minProperties": 1,
+          "properties": {
+            "date": {"type": "string", "format": "date"},
+            "start_time": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+            "end_time": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+            "activity": {"type": "string", "maxLength": 120},
+            "location": {"type": "string", "maxLength": 120},
+            "notes": {"type": "string", "maxLength": 500},
+            "budget": {"type": "string", "maxLength": 120}
+          }
+        }
+      },
+      "required": ["changes"]
+    },
+    "match.ayue_query": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "question": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
+      },
+      "required": ["question"]
+    },
+    "match.query": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"view": {"type": "string", "enum": ["status", "hub"]}},
+      "required": ["view"]
+    },
+    "memory.add": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "label": {"type": "string", "minLength": 1, "maxLength": 40},
+        "stance": {"type": "string", "enum": ["like", "dislike", "require", "avoid"]}
+      },
+      "required": ["label", "stance"]
+    },
+    "memory.query": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"query": {"type": "string", "maxLength": 120}}
+    },
+    "personality.explore": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"message": {"type": "string", "minLength": 1, "maxLength": 1000}},
+      "required": ["message"]
+    },
+    "post.append_caption": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"caption": {"type": "string", "minLength": 1, "maxLength": 2000}},
+      "required": ["caption"]
+    },
+    "post.open_draft": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"caption": {"type": "string", "minLength": 1, "maxLength": 2000}},
+      "required": ["caption"]
+    },
+    "post.open": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
+      },
+      "required": ["target_ref"]
+    },
+    "post.replace_caption": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"caption": {"type": "string", "minLength": 1, "maxLength": 2000}},
+      "required": ["caption"]
+    },
+    "post.request_publish": {"type": "object", "additionalProperties": false, "properties": {}},
+    "post.select_recent_photos": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 5}}
+    },
+    "profile.open": {"type": "object", "additionalProperties": false, "properties": {}},
+    "profile.patch": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "changes": {
+          "type": "object", "additionalProperties": false, "minProperties": 1,
+          "properties": {
+            "name": {"type": "string", "minLength": 1, "maxLength": 40},
+            "phone": {"type": "string", "pattern": "^09[0-9]{8}$"},
+            "age": {"type": "integer", "minimum": 18, "maximum": 120},
+            "region": {"type": "string", "maxLength": 20},
+            "city": {"type": "string", "minLength": 1, "maxLength": 40},
+            "district": {"type": "string", "minLength": 1, "maxLength": 40},
+            "userinfo": {"type": "string", "minLength": 1, "maxLength": 500}
+          }
+        }
+      },
+      "required": ["changes"]
+    },
+    "profile.request_commit": {"type": "object", "additionalProperties": false, "properties": {}},
+    "routine.delete": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 30}},
+      "required": ["name"]
+    },
+    "routine.run": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 30}},
+      "required": ["name"]
+    },
+    "routine.save": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 30},
+        "template_id": {"type": "string", "enum": ["daily_briefing", "open_match_hub", "open_calendar", "search_app", "search_memory"]},
+        "arguments": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "query": {"type": "string", "maxLength": 120},
+            "domains": {
+              "type": "array", "maxItems": 5, "uniqueItems": true,
+              "items": {"type": "string", "enum": ["contacts", "calendar", "shared_dates", "memory", "matching"]}
+            }
+          }
+        }
+      },
+      "required": ["name", "template_id", "arguments"]
+    },
+    "self.query": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"detail": {"type": "string", "enum": ["name", "summary"]}}
+    },
+    "settings.open": {"type": "object", "additionalProperties": false, "properties": {}},
+    "settings.set": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "key": {"type": "string", "enum": ["notifications.global", "location.enabled", "ai.proactive_care", "ui.liquid_glass", "ui.dark_mode"]},
+        "enabled": {"type": "boolean"}
+      },
+      "required": ["key", "enabled"]
+    },
+    "weather.query": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"location": {"type": "string", "maxLength": 120}}
+    },
+    "ui.choice.activate": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"action": {"type": "string", "enum": ["confirm", "cancel"]}},
+      "required": ["action"]
+    },
+    "ui.target.select": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}},
+      "required": ["target_ref"]
+    },
+    "workflow.daily_briefing": {"type": "object", "additionalProperties": false, "properties": {}},
+    "workflow.plan_date": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "contact_name": {"type": "string", "minLength": 1, "maxLength": 80},
+        "changes": {
+          "type": "object", "additionalProperties": false, "minProperties": 1,
+          "properties": {
+            "date": {"type": "string", "format": "date"},
+            "start_time": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+            "end_time": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+            "activity": {"type": "string", "maxLength": 120},
+            "location": {"type": "string", "maxLength": 120},
+            "notes": {"type": "string", "maxLength": 500},
+            "budget": {"type": "string", "maxLength": 120}
+          }
+        }
+      },
+      "required": ["contact_name", "changes"]
+    },
+    "workflow.prepare_post": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "caption": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "count": {"type": "integer", "minimum": 1, "maximum": 5}
+      },
+      "required": ["caption", "count"]
+    },
+    "workflow.update_profile": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "changes": {
+          "type": "object", "additionalProperties": false, "minProperties": 1,
+          "properties": {
+            "name": {"type": "string", "minLength": 1, "maxLength": 40},
+            "phone": {"type": "string", "pattern": "^09[0-9]{8}$"},
+            "age": {"type": "integer", "minimum": 18, "maximum": 120},
+            "region": {"type": "string", "maxLength": 20},
+            "city": {"type": "string", "minLength": 1, "maxLength": 40},
+            "district": {"type": "string", "minLength": 1, "maxLength": 40},
+            "userinfo": {"type": "string", "minLength": 1, "maxLength": 500}
+          }
+        }
+      },
+      "required": ["changes"]
+    }
+  },
+  "guides": {
+    "navigation": {
+      "title": "開啟 App 頁面",
+      "summary": "可以用語音開啟聊天、配對、個人、設定、行事曆、阿月記憶與發文等支援頁面。",
+      "keywords": ["打開", "前往", "進入", "切換", "頁面", "導覽"],
+      "steps": ["說出想前往的功能", "阿月會以 App 原本的動畫開啟對應頁面"],
+      "requirements": ["已開啟動畫導覽權限"],
+      "limitations": ["只能開啟白名單頁面，不能指定任意 route"],
+      "action_ids": ["app.navigate", "profile.open", "settings.open"]
+    },
+    "profile": {
+      "title": "個人資料",
+      "summary": "可開啟個資編輯頁、修改支援的草稿欄位，並在確認後儲存。",
+      "keywords": ["個資", "個人資料", "名字", "年齡", "電話", "地區", "自介", "儲存個資"],
+      "steps": ["開啟個人資料編輯頁", "填入使用者明確提供的欄位", "使用者口頭確認後儲存"],
+      "requirements": ["已開啟個人資料權限"],
+      "limitations": ["年齡、電話與地區必須通過現有驗證", "未確認前不會正式儲存"],
+      "destination": "profile_edit",
+      "action_ids": ["profile.open", "profile.patch", "profile.request_commit", "self.query"]
+    },
+    "settings": {
+      "title": "App 設定",
+      "summary": "可開啟設定頁，調整通知、定位、AI 主動關心、流體玻璃與深色模式。",
+      "keywords": ["設定", "通知", "定位", "深色模式", "流體玻璃", "主動關心"],
+      "steps": ["說明要調整的設定與開啟或關閉", "需要確認的敏感設定會先請使用者確認"],
+      "requirements": ["已開啟設定操作權限"],
+      "limitations": ["系統通知與定位權限仍可能需要 Android 系統對話框"],
+      "destination": "voice_settings",
+      "action_ids": ["settings.open", "settings.set"]
+    },
+    "posts": {
+      "title": "貼文草稿與發布",
+      "summary": "可開啟發文頁、撰寫或修改文字、選取最近照片，並在確認後發布。",
+      "keywords": ["貼文", "發文", "文章", "文案", "文字內容", "草稿", "caption", "照片", "相簿", "發布", "最新貼文", "第幾篇貼文", "查看貼文"],
+      "steps": ["開啟發文草稿並填入文字", "選擇 1 到 5 張圖片", "口頭確認後發布"],
+      "requirements": ["草稿、相簿與發布權限依操作分別開啟"],
+      "limitations": ["只能依最新與張數選照，不能辨識照片內容", "沒有圖片不能發布"],
+      "destination": "create_post",
+      "action_ids": ["post.open", "post.open_draft", "post.replace_caption", "post.append_caption", "post.select_recent_photos", "post.request_publish"]
+    },
+    "calendar": {
+      "title": "行事曆與 Google 日曆",
+      "summary": "可分別查詢 App 個人行事曆、Google 日曆，或合併查詢所有來源。",
+      "keywords": ["行事曆", "Google 日曆", "個人行事曆", "行程", "行程表", "空檔", "衝突", "新增行程", "修改行程", "編輯行程", "取消行程"],
+      "steps": ["先確認要查 App、Google 或所有來源", "新增與變更會先讀回內容", "口頭確認後只寫入 App 個人行事曆"],
+      "requirements": ["查詢需行事曆讀取權限", "變更另需行事曆寫入權限"],
+      "limitations": ["Google 日曆在語音中只讀", "共同約會需使用共同約會流程", "修改與取消必須能唯一辨識目標行程"],
+      "destination": "calendar",
+      "action_ids": ["calendar.query", "calendar.create", "calendar.update", "calendar.cancel"]
+    },
+    "shared_dates": {
+      "title": "共同約會",
+      "summary": "可查看約會邀請、回覆邀請、填寫或調整共同安排，並確認本人這一方。",
+      "keywords": ["約會", "約會邀請", "共同約會", "見面", "改期", "確認安排"],
+      "steps": ["先讀取最新邀請或共同表單", "說明對象與安排", "有寫入時口頭確認"],
+      "requirements": ["已配對的聯絡人", "行事曆讀取／寫入權限"],
+      "limitations": ["本人確認不代表對方已確認", "接受邀請只是開始協調"],
+      "destination": "calendar",
+      "action_ids": ["date.query", "date.respond", "date.update", "date.confirm"]
+    },
+    "matching": {
+      "title": "配對與阿月牽線",
+      "summary": "可查看配對進度、開啟牽線中心，或處理目前邀請。",
+      "keywords": ["配對", "配對進度", "配對結果", "阿月牽線", "邀請", "接受", "婉拒", "撤回"],
+      "steps": ["查看目前狀態或開啟牽線中心", "如要回覆邀請，先指定目標並確認"],
+      "requirements": ["配對讀取權限", "回覆或搜尋需配對操作權限"],
+      "limitations": ["歷史邀請不會被當成新邀請"],
+      "destination": "match_hub",
+      "action_ids": ["match.query", "match.ayue_query", "ayue.public_query"]
+    },
+    "chat": {
+      "title": "聯絡人與聊天",
+      "summary": "可列出真實已接受聯絡人、開啟指定聊天室，或由私人阿月讀取當前關係聊天。",
+      "keywords": ["好友", "聯絡人", "聊天室", "聊天內容", "讀取對話", "打開聊天", "傳訊息", "回覆他"],
+      "steps": ["列出或指定聯絡人", "開啟聊天，或確認後讓私人阿月讀取關係內容", "傳送前讀回內容並口頭確認"],
+      "requirements": ["開聊天室需聯絡人權限", "讀聊天內容另需私人阿月與聊天內容權限"],
+      "limitations": ["名稱不明確時必須先選擇對象", "未確認不會傳送"],
+      "destination": "chat",
+      "action_ids": ["contacts.query", "chat.open", "chat.request_send", "ayue.private_query"]
+    },
+    "memory": {
+      "title": "本人資料與阿月記憶",
+      "summary": "可讀取本人安全資料、長期偏好與近期語音摘要，並在確認後新增偏好。",
+      "keywords": ["我是誰", "你知道我什麼", "記憶", "記住", "偏好", "喜歡", "不喜歡"],
+      "steps": ["說明想查詢的記憶或本人資料", "新增長期偏好時先口頭確認"],
+      "requirements": ["已開啟記憶讀取或寫入權限"],
+      "limitations": ["近期語音摘要可能過期，不能用來授權操作"],
+      "destination": "memory",
+      "action_ids": ["self.query", "memory.query", "memory.add"]
+    },
+    "weather": {
+      "title": "目前天氣與空氣品質",
+      "summary": "可查詢指定地點或已儲存地點的即時天氣與 AQI。",
+      "keywords": ["天氣", "溫度", "降雨", "濕度", "風", "紫外線", "AQI", "空氣品質"],
+      "steps": ["說出地點，或使用設定中的預設所在地", "阿月同時查詢即時天氣與空氣品質"],
+      "requirements": [],
+      "limitations": ["目前只支援即時狀況，不提供未來預報"],
+      "action_ids": ["weather.query"]
+    },
+    "personality": {
+      "title": "個性探索",
+      "summary": "可透過連續問答開始或繼續個性探索。",
+      "keywords": ["個性", "人格", "性格", "探索", "問卷"],
+      "steps": ["說要開始個性探索", "依阿月的問題自然回答", "完成或明確說停止"],
+      "requirements": ["已開啟公開阿月與記憶相關權限"],
+      "limitations": ["探索期間的每次回答都會繼續原流程"],
+      "action_ids": ["personality.explore"]
+    },
+    "voice_controls": {
+      "title": "語音助理控制",
+      "summary": "可查看目前畫面、選擇畫面項目、確認或取消待處理操作，以及關閉語音模式。",
+      "keywords": ["目前畫面", "第二個", "確認", "取消", "停止聆聽", "關閉語音"],
+      "steps": ["指定目前畫面或待確認操作", "阿月依實際狀態處理"],
+      "requirements": [],
+      "limitations": ["說先不要講只停止播音，不會自動取消背景任務"],
+      "action_ids": ["ui.choice.activate", "ui.target.select", "assistant.cancel", "assistant.close", "assistant.reply"]
+    },
+    "productivity": {
+      "title": "統一待辦摘要與 App 搜尋",
+      "summary": "可一次整理配對、約會、行事曆與未讀狀態，或只在已授權的 App 領域搜尋。",
+      "keywords": ["待辦", "有什麼要處理", "每日摘要", "搜尋 App", "找資料", "統一搜尋"],
+      "steps": ["說明要看待辦摘要或搜尋關鍵字", "阿月只查詢目前已授權的資料領域", "結果會依領域分段整理"],
+      "requirements": ["需開啟 App 狀態讀取；各資料領域仍使用原本權限"],
+      "limitations": ["不會搜尋未授權的私密聊天內容", "摘要是當下狀態，不是未來預測"],
+      "action_ids": ["app.digest.query", "app.search", "workflow.daily_briefing"]
+    },
+    "workflows": {
+      "title": "多步驟 App 工作流",
+      "summary": "用固定步驟處理發文準備、共同約會與個資更新，每個寫入仍通過原本確認邊界。",
+      "keywords": ["幫我整套完成", "多步驟", "工作流", "準備貼文", "安排約會", "更新個資"],
+      "steps": ["說明想完成的流程與必要資料", "Server 用固定模板展開工作", "需要寫入時逐步確認，並在任務列表顯示進度"],
+      "requirements": ["需開啟流程涵蓋的各項權限"],
+      "limitations": ["模型不能自行增減或跳過模板步驟", "任一依賴的寫入失敗後不會繼續"],
+      "action_ids": ["workflow.prepare_post", "workflow.plan_date", "workflow.update_profile"]
+    },
+    "routines": {
+      "title": "個人快捷與例行工作",
+      "summary": "可將安全的固定模板存成自訂名稱，以後只說名稱就能執行。",
+      "keywords": ["快捷", "例行", "routine", "早安流程", "存成捷徑", "執行捷徑", "刪除捷徑"],
+      "steps": ["選擇已核准的快捷模板並取名", "存檔前口頭確認", "之後可直接說「執行＋快捷名稱」"],
+      "requirements": ["快捷僅能使用安全白名單模板", "執行時會再檢查當下權限"],
+      "limitations": ["不儲存 user ID、資料庫 ID 或 capability ref", "不允許把傳訊息或發布等高風險寫入存成快捷"],
+      "destination": "voice_settings",
+      "action_ids": ["routine.save", "routine.run", "routine.delete"]
+    }
   },
   "actions": {
     "app.navigate": {
+      "title": "開啟 App 頁面",
+      "domain": "navigation",
+      "aliases": [
+        "打開頁面", "前往", "跳到頁面", "切換頁面",
+        "打開行事曆", "開啟行事曆頁面", "跳到行事曆",
+        "打開配對", "開啟配對頁面", "跳到配對頁面",
+        "聊天室", "開聊天室", "幫我開聊天室", "打開聊天室", "開啟聊天室", "開啟聊天列表",
+        "打開阿月記憶", "打開發文"
+      ],
+      "risk": "control",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "navigation",
       "confirmation": false,
       "parameters": [
@@ -14,25 +503,75 @@
       ],
       "target_kinds": []
     },
+    "app.digest.query": {
+      "title": "查看統一待辦摘要",
+      "domain": "productivity",
+      "aliases": ["我有什麼要處理", "待辦摘要", "每日摘要", "給我總覽"],
+      "risk": "read",
+      "execution_kind": "background_device",
+      "cancellable": true,
+      "progress_percent_supported": false,
+      "permission": "status_read",
+      "confirmation": false,
+      "parameters": [],
+      "target_kinds": []
+    },
+    "app.search": {
+      "title": "搜尋已授權 App 資料",
+      "domain": "productivity",
+      "aliases": ["在 App 裡找", "統一搜尋", "搜尋我的資料", "幫我找資料"],
+      "risk": "read",
+      "execution_kind": "background_device",
+      "cancellable": true,
+      "progress_percent_supported": false,
+      "permission": "status_read",
+      "confirmation": false,
+      "parameters": ["query", "domains"],
+      "target_kinds": []
+    },
     "assistant.cancel": {
+      "title": "取消目前操作",
+      "domain": "voice_controls",
+      "aliases": ["取消", "算了", "先不要"],
+      "risk": "control",
+      "execution_kind": "inline_device",
+      "cancellable": false,
       "permission": null,
       "confirmation": false,
       "parameters": [],
       "target_kinds": []
     },
     "assistant.close": {
+      "title": "關閉語音模式",
+      "domain": "voice_controls",
+      "aliases": ["結束語音", "停止聽", "休息一下"],
+      "risk": "control",
+      "execution_kind": "inline_device",
+      "cancellable": false,
       "permission": null,
       "confirmation": false,
       "parameters": [],
       "target_kinds": []
     },
     "assistant.reply": {
+      "title": "一般對話",
+      "domain": "voice_controls",
+      "aliases": ["陪我聊聊", "一般問答"],
+      "risk": "control",
+      "execution_kind": "inline_device",
+      "cancellable": false,
       "permission": null,
       "confirmation": false,
       "parameters": [],
       "target_kinds": []
     },
     "ayue.private_query": {
+      "title": "詢問私人阿月",
+      "domain": "chat",
+      "aliases": ["問私人阿月", "讀取聊天室內容", "摘要聊天內容", "分析我們的對話", "關於我們的事", "私人關係建議"],
+      "risk": "read",
+      "execution_kind": "background_device",
+      "cancellable": true,
       "permission": "private_ayue",
       "confirmation": false,
       "parameters": [
@@ -48,9 +587,16 @@
         "chat_list",
         "private_ayue",
         "chat_content"
-      ]
+      ],
+      "discovery_permissions": ["chat_list", "chat_content"]
     },
     "ayue.public_query": {
+      "title": "詢問公開阿月",
+      "domain": "matching",
+      "aliases": ["問阿月", "公開建議", "查資料", "哪裡好玩", "好玩的地方", "景點推薦", "推薦去處"],
+      "risk": "read",
+      "execution_kind": "background_device",
+      "cancellable": true,
       "permission": "public_ayue",
       "confirmation": false,
       "parameters": [
@@ -68,10 +614,17 @@
       ]
     },
     "calendar.cancel": {
+      "title": "取消行程",
+      "domain": "calendar",
+      "aliases": ["刪除行程", "取消行程"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "calendar_write",
       "confirmation": true,
       "parameters": [
         "target",
+        "date",
         "target_ref"
       ],
       "target_kinds": [
@@ -81,9 +634,16 @@
       "target_permissions": [
         "calendar_read",
         "calendar_write"
-      ]
+      ],
+      "discovery_permissions": ["calendar_read"]
     },
     "calendar.create": {
+      "title": "新增行程",
+      "domain": "calendar",
+      "aliases": ["建立行程", "加入行事曆", "新增行程"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "calendar_write",
       "confirmation": true,
       "parameters": [
@@ -97,9 +657,16 @@
       "target_kinds": []
     },
     "calendar.query": {
+      "title": "查詢行事曆",
+      "domain": "calendar",
+      "aliases": ["查行程", "查 Google 日曆", "查個人行事曆", "有空嗎", "行程衝突"],
+      "risk": "read",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "calendar_read",
       "confirmation": false,
       "parameters": [
+        "source",
         "range",
         "start_date",
         "end_date"
@@ -107,11 +674,18 @@
       "target_kinds": []
     },
     "calendar.update": {
+      "title": "修改行程",
+      "domain": "calendar",
+      "aliases": ["改行程", "行程改期", "編輯行程", "改行程名稱"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "calendar_write",
       "confirmation": true,
       "parameters": [
         "target",
         "target_ref",
+        "title",
         "date",
         "start_time",
         "end_time",
@@ -125,9 +699,16 @@
       "target_permissions": [
         "calendar_read",
         "calendar_write"
-      ]
+      ],
+      "discovery_permissions": ["calendar_read"]
     },
     "chat.open": {
+      "title": "開啟指定聯絡人聊天室",
+      "domain": "chat",
+      "aliases": ["開啟某人聊天室", "幫我開某人聊天室", "打開指定聊天室", "進入聯絡人聊天室"],
+      "risk": "control",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "chat_list",
       "confirmation": false,
       "parameters": [
@@ -140,6 +721,12 @@
       "tool": "open_chat"
     },
     "chat.request_send": {
+      "title": "傳送聊天訊息",
+      "domain": "chat",
+      "aliases": ["傳訊息", "幫我告訴", "回覆他"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "chat_send",
       "confirmation": true,
       "parameters": [
@@ -154,15 +741,28 @@
       "target_permissions": [
         "chat_list",
         "chat_send"
-      ]
+      ],
+      "discovery_permissions": ["chat_list"]
     },
     "contacts.query": {
+      "title": "列出聯絡人",
+      "domain": "chat",
+      "aliases": ["好友有誰", "聯絡人", "可以傳給誰"],
+      "risk": "read",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "chat_list",
       "confirmation": false,
       "parameters": [],
       "target_kinds": []
     },
     "date.confirm": {
+      "title": "確認共同約會",
+      "domain": "shared_dates",
+      "aliases": ["確認安排", "確認共同約會"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "calendar_write",
       "confirmation": true,
       "parameters": [
@@ -177,9 +777,16 @@
         "chat_list",
         "calendar_read",
         "calendar_write"
-      ]
+      ],
+      "discovery_permissions": ["chat_list", "calendar_read"]
     },
     "date.query": {
+      "title": "查詢約會邀請",
+      "domain": "shared_dates",
+      "aliases": ["約會邀請", "共同約會", "查約會"],
+      "risk": "read",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "calendar_read",
       "confirmation": false,
       "parameters": [
@@ -193,9 +800,16 @@
       "target_permissions": [
         "chat_list",
         "calendar_read"
-      ]
+      ],
+      "discovery_permissions": ["chat_list"]
     },
     "date.respond": {
+      "title": "回覆約會邀請",
+      "domain": "shared_dates",
+      "aliases": ["接受約會", "拒絕約會", "回覆約會"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "calendar_write",
       "confirmation": true,
       "parameters": [
@@ -211,9 +825,16 @@
         "chat_list",
         "calendar_read",
         "calendar_write"
-      ]
+      ],
+      "discovery_permissions": ["chat_list", "calendar_read"]
     },
     "date.update": {
+      "title": "修改共同約會",
+      "domain": "shared_dates",
+      "aliases": ["改約會", "約會改期", "填約會表單"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "calendar_write",
       "confirmation": true,
       "parameters": [
@@ -229,9 +850,20 @@
         "chat_list",
         "calendar_read",
         "calendar_write"
-      ]
+      ],
+      "discovery_permissions": ["chat_list", "calendar_read"]
     },
     "match.ayue_query": {
+      "title": "配對建議或搜尋",
+      "domain": "matching",
+      "aliases": [
+        "幫我找對象", "幫我找新對象", "幫我找新的配對",
+        "幫我找配對", "找配對", "找新的配對", "新的配對", "開始配對", "開始找對象", "重新配對",
+        "找人一起", "找旅伴", "新的配對建議", "配對建議", "阿月牽線"
+      ],
+      "risk": "read",
+      "execution_kind": "background_device",
+      "cancellable": true,
       "permission": "match_ayue",
       "confirmation": false,
       "parameters": [
@@ -245,9 +877,16 @@
       "target_permissions": [
         "match_read",
         "match_actions"
-      ]
+      ],
+      "discovery_permissions": ["match_read"]
     },
     "match.query": {
+      "title": "查詢配對狀態",
+      "domain": "matching",
+      "aliases": ["配對進度", "配對結果", "牽線中心"],
+      "risk": "read",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "match_read",
       "confirmation": false,
       "parameters": [
@@ -256,6 +895,12 @@
       "target_kinds": []
     },
     "memory.add": {
+      "title": "新增阿月記憶",
+      "domain": "memory",
+      "aliases": ["記住我", "新增偏好", "幫我記住"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "memory_write",
       "confirmation": true,
       "parameters": [
@@ -265,6 +910,12 @@
       "target_kinds": []
     },
     "memory.query": {
+      "title": "查詢阿月記憶",
+      "domain": "memory",
+      "aliases": ["你記得什麼", "阿月記憶", "長期偏好"],
+      "risk": "read",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "memory_read",
       "confirmation": false,
       "parameters": [
@@ -273,6 +924,13 @@
       "target_kinds": []
     },
     "personality.explore": {
+      "title": "個性探索",
+      "domain": "personality",
+      "aliases": ["人格測驗", "性格探索", "開始個性探索"],
+      "risk": "write",
+      "execution_kind": "background_device",
+      "cancellable": true,
+      "discovery_permissions": ["memory_read"],
       "permission": "public_ayue",
       "confirmation": false,
       "parameters": [
@@ -281,6 +939,12 @@
       "target_kinds": []
     },
     "post.append_caption": {
+      "title": "追加貼文文字",
+      "domain": "posts",
+      "aliases": ["補上貼文", "追加內容", "繼續寫貼文"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "post_draft",
       "confirmation": false,
       "parameters": [
@@ -289,6 +953,12 @@
       "target_kinds": []
     },
     "post.open_draft": {
+      "title": "開啟貼文草稿",
+      "domain": "posts",
+      "aliases": ["寫貼文", "開始發文", "打開草稿"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "post_draft",
       "confirmation": false,
       "parameters": [
@@ -296,7 +966,27 @@
       ],
       "target_kinds": []
     },
+    "post.open": {
+      "title": "查看個人貼文",
+      "domain": "posts",
+      "aliases": ["查看個人貼文", "打開個人貼文", "最新個人貼文", "第幾篇個人貼文"],
+      "risk": "read",
+      "execution_kind": "inline_device",
+      "cancellable": false,
+      "permission": "profile",
+      "confirmation": false,
+      "parameters": ["target_ref"],
+      "target_kinds": ["post"],
+      "tool": "open_post",
+      "target_permissions": ["profile"]
+    },
     "post.replace_caption": {
+      "title": "取代貼文文字",
+      "domain": "posts",
+      "aliases": ["改貼文", "取代內容", "重寫貼文"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "post_draft",
       "confirmation": false,
       "parameters": [
@@ -305,12 +995,24 @@
       "target_kinds": []
     },
     "post.request_publish": {
+      "title": "發布貼文",
+      "domain": "posts",
+      "aliases": ["發布", "po 文", "送出貼文"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "post_publish",
       "confirmation": true,
       "parameters": [],
       "target_kinds": []
     },
     "post.select_recent_photos": {
+      "title": "選取最近照片",
+      "domain": "posts",
+      "aliases": ["最近照片", "最新照片", "選相片"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "gallery",
       "confirmation": false,
       "parameters": [
@@ -319,12 +1021,24 @@
       "target_kinds": []
     },
     "profile.open": {
+      "title": "開啟個資編輯",
+      "domain": "profile",
+      "aliases": ["編輯個資", "開個人資料", "打開個資"],
+      "risk": "control",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "profile",
       "confirmation": false,
       "parameters": [],
       "target_kinds": []
     },
     "profile.patch": {
+      "title": "修改個資草稿",
+      "domain": "profile",
+      "aliases": ["改名字", "改年齡", "改自介", "改地區"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "profile",
       "confirmation": false,
       "parameters": [
@@ -333,12 +1047,67 @@
       "target_kinds": []
     },
     "profile.request_commit": {
+      "title": "儲存個人資料",
+      "domain": "profile",
+      "aliases": ["儲存個資", "存個人資料", "保存個人資料"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "profile",
       "confirmation": true,
       "parameters": [],
       "target_kinds": []
     },
+    "routine.delete": {
+      "title": "刪除個人語音捷徑",
+      "domain": "routines",
+      "aliases": ["刪除捷徑", "移除例行工作", "不要這個 routine"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
+      "permission": "status_read",
+      "confirmation": true,
+      "parameters": ["name"],
+      "target_kinds": []
+    },
+    "routine.run": {
+      "title": "執行個人語音捷徑",
+      "domain": "routines",
+      "aliases": ["執行捷徑", "跑例行工作", "開始 routine", "執行早安流程"],
+      "risk": "read",
+      "execution_kind": "background_device",
+      "cancellable": true,
+      "permission": "status_read",
+      "confirmation": false,
+      "parameters": ["name"],
+      "target_kinds": []
+    },
+    "routine.save": {
+      "title": "儲存個人語音捷徑",
+      "domain": "routines",
+      "aliases": ["存成捷徑", "新增例行工作", "記住這個流程", "建立 routine"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
+      "permission": "status_read",
+      "confirmation": true,
+      "parameters": ["name", "template_id", "arguments"],
+      "target_kinds": [],
+      "routine_templates": {
+        "daily_briefing": {"title": "每日待辦摘要", "required_arguments": []},
+        "open_match_hub": {"title": "開啟阿月牽線", "required_arguments": []},
+        "open_calendar": {"title": "開啟行事曆", "required_arguments": []},
+        "search_app": {"title": "搜尋已授權 App 資料", "required_arguments": ["query", "domains"]},
+        "search_memory": {"title": "搜尋阿月記憶", "required_arguments": ["query"]}
+      }
+    },
     "self.query": {
+      "title": "查詢本人資料",
+      "domain": "memory",
+      "aliases": ["我是誰", "我的資料", "你知道我什麼"],
+      "risk": "read",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "memory_read",
       "confirmation": false,
       "parameters": [
@@ -347,12 +1116,24 @@
       "target_kinds": []
     },
     "settings.open": {
+      "title": "開啟設定",
+      "domain": "settings",
+      "aliases": ["開設定", "打開設定", "進入設定"],
+      "risk": "control",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "settings",
       "confirmation": false,
       "parameters": [],
       "target_kinds": []
     },
     "settings.set": {
+      "title": "調整 App 設定",
+      "domain": "settings",
+      "aliases": ["開通知", "關通知", "深色模式", "定位設定"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "settings",
       "confirmation": false,
       "parameters": [
@@ -362,6 +1143,13 @@
       "target_kinds": []
     },
     "weather.query": {
+      "title": "查詢目前天氣與 AQI",
+      "domain": "weather",
+      "aliases": ["天氣", "會下雨嗎", "空氣品質", "aqi"],
+      "risk": "read",
+      "execution_kind": "background_server",
+      "cancellable": true,
+      "progress_percent_supported": true,
       "permission": null,
       "confirmation": false,
       "parameters": [
@@ -371,6 +1159,12 @@
       "tool": "read_weather"
     },
     "ui.choice.activate": {
+      "title": "操作畫面確認按鈕",
+      "domain": "voice_controls",
+      "aliases": ["按確認", "按取消", "確認畫面"],
+      "risk": "control",
+      "execution_kind": "inline_device",
+      "cancellable": false,
       "permission": null,
       "confirmation": false,
       "parameters": [
@@ -379,6 +1173,12 @@
       "target_kinds": []
     },
     "ui.target.select": {
+      "title": "選擇畫面項目",
+      "domain": "voice_controls",
+      "aliases": ["選第二個", "選這個", "選擇項目"],
+      "risk": "control",
+      "execution_kind": "inline_device",
+      "cancellable": true,
       "permission": "screen_read",
       "confirmation": false,
       "parameters": [
@@ -390,6 +1190,80 @@
         "match_invitation"
       ],
       "tool": "select_screen_target"
+    },
+    "workflow.daily_briefing": {
+      "title": "執行每日狀態檢查流程",
+      "domain": "productivity",
+      "aliases": ["每日狀態", "早安摘要", "今日總覽", "把重要的都查一次"],
+      "risk": "read",
+      "execution_kind": "background_device",
+      "cancellable": true,
+      "progress_percent_supported": false,
+      "permission": "status_read",
+      "discovery_permissions": ["match_read", "calendar_read"],
+      "confirmation": false,
+      "parameters": [],
+      "target_kinds": [],
+      "workflow_steps": [
+        {"key": "matching", "action_id": "match.query", "arguments": {"view": "status"}},
+        {"key": "dates", "action_id": "date.query", "arguments": {}},
+        {"key": "calendar", "action_id": "calendar.query", "arguments": {"range": "today"}}
+      ]
+    },
+    "workflow.plan_date": {
+      "title": "執行共同約會安排流程",
+      "domain": "workflows",
+      "aliases": ["整套安排約會", "讀取並更新約會", "完成共同約會流程"],
+      "risk": "write",
+      "execution_kind": "background_device",
+      "cancellable": true,
+      "progress_percent_supported": false,
+      "permission": "calendar_write",
+      "discovery_permissions": ["calendar_read", "chat_list"],
+      "confirmation": false,
+      "parameters": ["contact_name", "changes"],
+      "target_kinds": [],
+      "workflow_steps": [
+        {"key": "read", "action_id": "date.query", "argument_map": {"contact_name": "contact_name"}},
+        {"key": "update", "action_id": "date.update", "depends_on": ["read"], "argument_map": {"contact_name": "contact_name", "changes": "changes"}},
+        {"key": "confirm", "action_id": "date.confirm", "depends_on": ["update"], "argument_map": {"contact_name": "contact_name"}}
+      ]
+    },
+    "workflow.prepare_post": {
+      "title": "執行貼文準備與發布流程",
+      "domain": "workflows",
+      "aliases": ["從草稿到發布", "準備完並發布貼文", "整套發文"],
+      "risk": "write",
+      "execution_kind": "background_device",
+      "cancellable": true,
+      "progress_percent_supported": false,
+      "permission": "post_draft",
+      "discovery_permissions": ["gallery", "post_publish"],
+      "confirmation": false,
+      "parameters": ["caption", "count"],
+      "target_kinds": [],
+      "workflow_steps": [
+        {"key": "draft", "action_id": "post.open_draft", "argument_map": {"caption": "caption"}},
+        {"key": "photos", "action_id": "post.select_recent_photos", "depends_on": ["draft"], "argument_map": {"count": "count"}},
+        {"key": "publish", "action_id": "post.request_publish", "depends_on": ["photos"]}
+      ]
+    },
+    "workflow.update_profile": {
+      "title": "執行個人資料更新流程",
+      "domain": "workflows",
+      "aliases": ["整套修改並儲存個資", "更新完個人資料", "填完並存個資"],
+      "risk": "write",
+      "execution_kind": "background_device",
+      "cancellable": true,
+      "progress_percent_supported": false,
+      "permission": "profile",
+      "confirmation": false,
+      "parameters": ["changes"],
+      "target_kinds": [],
+      "workflow_steps": [
+        {"key": "patch", "action_id": "profile.patch", "argument_map": {"changes": "changes"}},
+        {"key": "save", "action_id": "profile.request_commit", "depends_on": ["patch"]}
+      ]
     }
   }
 }

@@ -19,6 +19,7 @@ from services.ayue_agent.contracts import (
 from services.ayue_agent.pi import public_turn, tool_runtime
 from services.ayue_agent.pi import runtime as pi_runtime
 from services.ai_service import ToolCallResult
+from services.ayue_agent.contracts import ToolResult
 from services.ayue_agent.pi.registry import tool_schemas
 from services.ayue_agent.shared.confirmation import ConfirmationManager, project_match_choice_history
 from services.ayue_agent.shared.contact_selections import ContactSelectionManager
@@ -168,6 +169,102 @@ def test_confirmed_surfing_search_reaches_executor_once(monkeypatch):
     assert len(submitted) == 1
     assert submitted[0]["search_context"]["invitation_topic"] == "衝浪"
     assert "delivery_mode" not in submitted[0]
+
+
+def test_same_turn_place_result_reuses_private_coordinates_without_prompt_leak(monkeypatch):
+    store = mongomock.MongoClient().test
+    _, turn = make_turn("找嘉義餐廳，再找那間附近的飲料店")
+    runtime = tool_runtime.PiToolRuntime(
+        turn, run_id="places-chain", trace={}, confirmation_collection=store.c,
+        contact_selection_collection=store.s, operation_batch_collection=store.b,
+    )
+    calls = []
+
+    def execute(call, ctx, **_kwargs):
+        calls.append(call.arguments)
+        if len(calls) == 1:
+            return ToolResult(
+                ok=True,
+                data={"places": [{
+                    "name": "鳴笛中式餐廳嘉義分店", "category": "restaurant",
+                    "distance_m": 100, "address_summary": "嘉義市中山路528號",
+                    "map_url": "https://www.google.com/maps/place/example",
+                    "provider": "google", "place_id": "ChIJexample",
+                }]},
+                private_data={"place_anchor_candidates": [{
+                    "name": "鳴笛中式餐廳嘉義分店", "address_summary": "嘉義市中山路528號",
+                    "provider": "google", "place_id": "ChIJexample",
+                    "map_url": "https://www.google.com/maps/place/example",
+                    "latitude": 23.479, "longitude": 120.449,
+                }]},
+            )
+        trusted = getattr(ctx, "_pi_trusted_place_anchor", None)
+        assert trusted["requested_anchor"] == "鳴笛中式餐廳嘉義分店"
+        assert trusted["latitude"] == 23.479
+        assert trusted["longitude"] == 120.449
+        return ToolResult(ok=True, data={"places": []})
+
+    monkeypatch.setattr(tool_runtime, "execute_tool", execute)
+    first = runtime.read("places.search_nearby", {
+        "anchor": "嘉義", "categories": ["restaurant"], "limit": 5,
+    })
+    second = runtime.read("places.search_nearby", {
+        "anchor": "鳴笛中式餐廳嘉義分店", "categories": ["cafe"],
+        "cuisine": "飲料店", "limit": 5,
+    })
+
+    assert first["status"] == "ok" and second["status"] == "ok"
+    assert "latitude" not in str(first)
+    assert "longitude" not in str(first)
+    assert getattr(turn._raw_ctx, "_pi_trusted_place_anchor", None) is None
+
+
+def test_invalid_private_place_coordinates_are_ignored(monkeypatch):
+    store = mongomock.MongoClient().test
+    _, turn = make_turn("找店")
+    runtime = tool_runtime.PiToolRuntime(
+        turn, run_id="invalid-place-anchor", trace={}, confirmation_collection=store.c,
+        contact_selection_collection=store.s, operation_batch_collection=store.b,
+    )
+    runtime.results.append({"private_data": {"place_anchor_candidates": [{
+        "name": "同名店", "provider": "google", "place_id": "bad",
+        "latitude": "not-a-number", "longitude": 999,
+    }]}})
+
+    def execute(_call, ctx, **_kwargs):
+        assert getattr(ctx, "_pi_trusted_place_anchor", None) is None
+        return ToolResult(ok=True, data={"places": []})
+
+    monkeypatch.setattr(tool_runtime, "execute_tool", execute)
+    result = runtime.read("places.search_nearby", {
+        "anchor": "同名店", "categories": ["cafe"], "limit": 3,
+    })
+    assert result["status"] == "ok"
+
+
+def test_ambiguous_same_name_place_candidates_never_reuse_coordinates(monkeypatch):
+    store = mongomock.MongoClient().test
+    _, turn = make_turn("找同名店附近")
+    runtime = tool_runtime.PiToolRuntime(
+        turn, run_id="ambiguous-place-anchor", trace={}, confirmation_collection=store.c,
+        contact_selection_collection=store.s, operation_batch_collection=store.b,
+    )
+    runtime.results.append({"private_data": {"place_anchor_candidates": [
+        {"name": "同名店", "address_summary": "嘉義市一號", "provider": "google",
+         "place_id": "one", "latitude": 23.47, "longitude": 120.44},
+        {"name": "同名店", "address_summary": "嘉義市二號", "provider": "google",
+         "place_id": "two", "latitude": 23.48, "longitude": 120.45},
+    ]}})
+
+    def execute(_call, ctx, **_kwargs):
+        assert getattr(ctx, "_pi_trusted_place_anchor", None) is None
+        return ToolResult(ok=True, data={"places": []})
+
+    monkeypatch.setattr(tool_runtime, "execute_tool", execute)
+    result = runtime.read("places.search_nearby", {
+        "anchor": "同名店", "categories": ["cafe"], "limit": 3,
+    })
+    assert result["status"] == "ok"
 
 
 def test_unsafe_provider_stream_is_held_before_public_tokens(monkeypatch):

@@ -361,6 +361,27 @@ def _public_sources(observations: list[dict]) -> list[dict[str, str]]:
     return output
 
 
+def _tool_recovery_prompt(name: str, observations: list[dict]) -> str:
+    if not name.startswith("places."):
+        return ""
+    place_failures = [
+        str(item.get("error_code") or "")
+        for item in observations
+        if isinstance(item, dict)
+        and str(item.get("tool") or "").startswith("places.")
+        and item.get("status") == "failed"
+    ]
+    if (
+        place_failures.count("location_not_found") < 2
+        and "public_read_budget_exhausted" not in place_failures
+    ):
+        return ""
+    return (
+        "地點工具已連續無法解析後續搜尋中心。請停止呼叫工具，使用本回合已成功的地點結果自然回答；"
+        "清楚區分已完成與未完成部分，不得把第一階段候選冒充成完整結果，也不得宣稱已執行任何變更。"
+    )
+
+
 def run_pi_turn(
     turn: Any,
     *,
@@ -543,6 +564,10 @@ def run_pi_turn(
             "observations": projected,
             "stop": terminal or bool(schema_error and python_schema_failures[name] >= 2),
         }
+        recovery_prompt = _tool_recovery_prompt(name, observations)
+        if recovery_prompt and not terminal:
+            response["disableTools"] = True
+            response["recoveryPrompt"] = recovery_prompt
         if budget_class == "complex":
             response["upgradeBudget"] = True
         return response

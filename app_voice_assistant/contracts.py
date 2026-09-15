@@ -47,6 +47,7 @@ PUBLIC_AYUE_DOMAINS = frozenset({
 CALENDAR_QUERY_RANGES = frozenset({
     "today", "tomorrow", "week", "weekend", "next_week", "upcoming",
 })
+CALENDAR_SOURCES = frozenset({"all", "personal", "google"})
 VOICE_NAMES = frozenset({
     "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus",
     "Aoede", "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel",
@@ -57,6 +58,13 @@ VOICE_NAMES = frozenset({
 })
 VOICE_SPEEDS = frozenset({"slow", "normal", "fast"})
 VOICE_LANGUAGES = frozenset({"zh-TW", "zh-CN", "en-US"})
+APP_SEARCH_DOMAINS = frozenset({
+    "contacts", "calendar", "shared_dates", "memory", "matching",
+})
+ROUTINE_TEMPLATES = frozenset({
+    "daily_briefing", "open_match_hub", "open_calendar",
+    "search_app", "search_memory",
+})
 FEATURE_STATUS_KEYS = frozenset({
     "assistant_enabled", "wake_word_enabled", "location_enabled",
     "notifications_enabled", "proactive_care_enabled", "liquid_glass_enabled",
@@ -70,6 +78,7 @@ TAIWAN_CITIES = (
 )
 _EMAIL_RE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
 _PHONE_RE = re.compile(r"(?<!\d)09\d{8}(?!\d)")
+_ROUTINE_NAME_RE = re.compile(r"[A-Za-z0-9_\- \u4e00-\u9fff]{1,30}")
 _PASSWORD_RE = re.compile(
     r"((?:密碼|密码|password)\s*(?:是|為|为|=|:|：)?\s*)[^\s，,。；;]{1,128}",
     re.IGNORECASE,
@@ -144,6 +153,15 @@ def _weather_location(value: str) -> str | None:
         location,
         flags=re.IGNORECASE,
     )
+    # Removing two requested weather subjects can leave a standalone joiner
+    # (for example, "台北天氣與空氣品質" -> "台北 與").  Strip only
+    # whitespace-delimited joiners so real place names such as 中和區 remain intact.
+    location = re.sub(
+        r"(?:^|\s)(?:與|与|和|及|以及|跟|還有|还有|and)(?=\s|$)",
+        " ",
+        location,
+        flags=re.IGNORECASE,
+    )
     return re.sub(r"\s+", " ", location).strip(" ，,。.!！?？、")[:120]
 
 
@@ -164,6 +182,70 @@ def _explicit_calendar_range(value: str) -> tuple[str, str] | None:
     return parsed[0].isoformat(), parsed[1].isoformat()
 
 
+def _calendar_source(value: str) -> str:
+    compact = normalized_phrase(value)
+    if any(marker in compact for marker in (
+        "google日曆", "google行事曆", "googlecalendar", "googlecalender",
+    )):
+        return "google"
+    if any(marker in compact for marker in (
+        "app行事曆", "阿月行事曆", "個人行事曆", "个人日历",
+        "自己的行事曆", "自己的日曆", "自己行事曆", "自己日曆",
+        "我的行事曆", "我的日曆", "本機行事曆", "本機日曆",
+        "personal行事曆", "personal日曆", "personalcalendar",
+        "mycalendar", "myappcalendar",
+    )):
+        return "personal"
+    return "all"
+
+
+def _is_match_start_request(value: str) -> bool:
+    compact = normalized_phrase(value)
+    if compact in {
+        "新的配對", "新配對", "新的配對建議", "找個新配對",
+        "newmatch", "newmatching", "newmatchsuggestion",
+    }:
+        return True
+    return any(phrase in compact for phrase in (
+        "幫我找新的配對", "找新的配對", "找新配對",
+        "尋找新的配對", "尋找新配對", "尋找配對對象",
+        "幫我找新對象", "找新對象", "尋找新對象",
+        "開始新的配對", "開始新一輪配對", "開始配對",
+        "開始配對搜尋", "開始找對象", "開始尋找對象",
+        "幫我找配對", "找配對", "重新配對", "重新找對象",
+        "媒合新對象", "幫我配對", "我要配對",
+        "想找人一起", "找人一起", "找個人一起", "找對象一起",
+        "想找旅伴", "找旅伴", "尋找旅伴",
+        "findnewmatch", "findanewmatch", "findmeanewmatch",
+        "searchforanewmatch", "startmatching", "startnewmatch",
+        "startanewmatch", "startnewmatchsearch", "startanewmatchsearch",
+        "findmatchingpartner", "findnewpartner", "findmeanewpartner",
+        "matchmewithsomeone",
+    ))
+
+
+def _current_contact(context: dict[str, Any]) -> tuple[str, str]:
+    screen = context.get("screen") if isinstance(context.get("screen"), dict) else {}
+    items = [
+        item for item in (screen.get("items") or [])
+        if isinstance(item, dict) and item.get("kind") == "contact"
+    ]
+    selected_ref = str(screen.get("selected_ref") or "")
+    selected = next(
+        (item for item in items if item.get("ref") == selected_ref),
+        items[0] if len(items) == 1 else None,
+    )
+    if selected is not None:
+        return (
+            str(selected.get("label") or "")[:40],
+            str(selected.get("ref") or "")[:80],
+        )
+    feature_status = context.get("feature_status")
+    if isinstance(feature_status, dict):
+        return str(feature_status.get("contact_name") or "")[:40], ""
+    return "", ""
+
+
 def visible_choice_action(value: Any) -> str | None:
     compact = normalized_phrase(value)
     if compact in {
@@ -174,6 +256,7 @@ def visible_choice_action(value: Any) -> str | None:
         return "confirm"
     if compact in {
         "取消", "不要", "不用", "不同意", "算了", "先不要",
+        "這次先不用", "這次不用", "先不用",
         "幫我取消", "取消吧",
         "cancel", "cancelled", "no",
     }:
@@ -186,6 +269,11 @@ def safe_reply(value: Any) -> str:
     text = _PASSWORD_RE.sub(r"\1[已隱藏]", text)
     text = _EMAIL_RE.sub("[Email 已隱藏]", text)
     return _PHONE_RE.sub("[電話已隱藏]", text)
+
+
+def _routine_name(value: Any) -> str:
+    name = re.sub(r"\s+", " ", str(value or "")).strip()[:30]
+    return name if _ROUTINE_NAME_RE.fullmatch(name) else ""
 
 
 def _small_number(value: str) -> int | None:
@@ -201,6 +289,272 @@ def _small_number(value: str) -> int | None:
         ones = digits.get(right, 0) if right else 0
         return tens * 10 + ones
     return digits.get(value)
+
+
+def _current_calendar_target(context: dict[str, Any]) -> tuple[str, str]:
+    """Return a single safe personal-calendar target from the current screen."""
+    screen = context.get("screen") if isinstance(context.get("screen"), dict) else {}
+    if screen.get("ready") is not True:
+        return "", ""
+    items = []
+    for item in screen.get("items") or []:
+        if not isinstance(item, dict) or item.get("kind") != "calendar_event":
+            continue
+        if not {
+            "calendar.update",
+            "calendar.cancel",
+        }.intersection(item.get("actions") or []):
+            continue
+        attributes = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+        # Shared dates and Google events have their own write boundary. They
+        # must never be silently converted into a personal-calendar update.
+        if str(attributes.get("source_type") or "") in {"date", "google"}:
+            continue
+        items.append(item)
+    selected_ref = str(screen.get("selected_ref") or "")
+    selected = next((item for item in items if item.get("ref") == selected_ref), None)
+    if selected is None and len(items) == 1:
+        selected = items[0]
+    if selected is None:
+        return "", ""
+    return (
+        str(selected.get("label") or "")[:80],
+        str(selected.get("ref") or "")[:80],
+    )
+
+
+def _calendar_update_date(raw: str) -> str | None:
+    today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+    if "後天" in raw or "后天" in raw:
+        return (today + timedelta(days=2)).isoformat()
+    if "明天" in raw:
+        return (today + timedelta(days=1)).isoformat()
+    if "今天" in raw or "今日" in raw:
+        return today.isoformat()
+    explicit = _CALENDAR_EXPLICIT_DATE_RE.search(raw)
+    if explicit is None:
+        explicit = re.search(r"(?<!\d)(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)", raw)
+    if explicit is None:
+        return None
+    try:
+        return date(
+            int(explicit.group(1)),
+            int(explicit.group(2)),
+            int(explicit.group(3)),
+        ).isoformat()
+    except ValueError:
+        return None
+
+
+def _calendar_update_clocks(raw: str) -> list[str]:
+    values: list[tuple[int, str]] = []
+    chinese_clock = re.compile(
+        r"(上午|下午|晚上|傍晚|中午|凌晨)?\s*"
+        r"([零〇一二兩三四五六七八九十\d]{1,3})\s*[點点時时]"
+        r"(?:(半)|([零〇一二兩三四五六七八九十\d]{1,3})\s*分)?"
+    )
+    for match in chinese_clock.finditer(raw):
+        hour = _small_number(match.group(2))
+        minute = 30 if match.group(3) else _small_number(match.group(4) or "零")
+        if hour is None or minute is None or hour > 23 or minute > 59:
+            continue
+        period = match.group(1) or ""
+        if period in {"下午", "晚上", "傍晚"} and hour < 12:
+            hour += 12
+        elif period == "中午" and hour < 11:
+            hour += 12
+        elif period == "凌晨" and hour == 12:
+            hour = 0
+        values.append((match.start(), f"{hour:02d}:{minute:02d}"))
+    numeric_clock = re.compile(
+        r"(?<!\d)(上午|下午|晚上|傍晚|中午|凌晨)?\s*"
+        r"(\d{1,2})\s*[:：]\s*(\d{2})(?!\d)"
+    )
+    for match in numeric_clock.finditer(raw):
+        hour, minute = int(match.group(2)), int(match.group(3))
+        if hour > 23 or minute > 59:
+            continue
+        period = match.group(1) or ""
+        if period in {"下午", "晚上", "傍晚"} and hour < 12:
+            hour += 12
+        elif period == "中午" and hour < 11:
+            hour += 12
+        elif period == "凌晨" and hour == 12:
+            hour = 0
+        values.append((match.start(), f"{hour:02d}:{minute:02d}"))
+    values.sort(key=lambda item: item[0])
+    return [value for _, value in values]
+
+
+def _calendar_update_text(raw: str, labels: tuple[str, ...], limit: int) -> str | None:
+    label_pattern = "|".join(re.escape(label) for label in labels)
+    match = re.search(
+        rf"(?:{label_pattern})\s*(?:改成|改到|換成|換到|設為|設定為|是|為|为)\s*"
+        r"[「『]?(.+?)[」』]?(?=$|[，,。；;])",
+        raw,
+    )
+    if match is None:
+        return None
+    value = re.sub(r"\s+", " ", match.group(1)).strip(" ，,。；;「」『』")
+    return value[:limit] if value else None
+
+
+def _deterministic_calendar_update(
+    raw: str, *, context: dict[str, Any], revision: int,
+) -> VoiceProposal | None:
+    if not any(word in raw for word in ("修改", "編輯", "更改", "調整", "改到", "改成", "換成")):
+        return None
+    target, target_ref = _current_calendar_target(context)
+    explicit_target = re.search(
+        r"(?:把|將|将|修改|編輯|更改|調整)\s*[「『]?(.+?)[」』]?\s*"
+        r"(?:的)?(?:日期|時間|時段|地點|位置|備註|標題|名稱)?\s*"
+        r"(?:改到|改成|調整到|換成|換到|設為|設定為)",
+        raw,
+    )
+    if explicit_target is not None:
+        candidate = explicit_target.group(1).strip(" 的「」『』")
+        if normalized_phrase(candidate) not in {
+            "這個行程", "这个行程", "目前行程", "目前這個行程", "目前这个行程",
+            "行程", "日曆", "行事曆",
+        } and candidate:
+            target = candidate[:80]
+
+    changes: dict[str, str] = {}
+    event_date = _calendar_update_date(raw)
+    if event_date is not None:
+        changes["date"] = event_date
+    clocks = _calendar_update_clocks(raw)
+    if len(clocks) >= 2:
+        changes["start_time"], changes["end_time"] = clocks[:2]
+    elif len(clocks) == 1:
+        if re.search(r"結束(?:時間)?|到幾點|到几点", raw):
+            changes["end_time"] = clocks[0]
+        else:
+            changes["start_time"] = clocks[0]
+    location = _calendar_update_text(raw, ("地點", "位置"), 120)
+    if location is not None:
+        changes["location"] = location
+    notes = _calendar_update_text(raw, ("備註", "备注"), 500)
+    if notes is not None:
+        changes["notes"] = notes
+    title = _calendar_update_text(raw, ("標題", "名稱", "行程名稱"), 80)
+    if title is not None:
+        changes["title"] = title
+    if not target and not target_ref:
+        return None
+    if not changes:
+        return None
+    arguments: dict[str, Any] = {"target": target, **changes}
+    if target_ref:
+        arguments["target_ref"] = target_ref
+    return validate_proposal({
+        "intent": "calendar.update",
+        "arguments": arguments,
+        "reply": "我已準備修改行程，確認後會直接更新。",
+    }, base_revision=revision)
+
+
+def _deterministic_calendar_cancel(
+    raw: str, *, context: dict[str, Any], revision: int,
+) -> VoiceProposal | None:
+    """Build a safe cancel proposal without accepting a database event id.
+
+    Calendar cancellation is intentionally conservative: an explicit quoted
+    title, a cleaned natural-language title, or the one selected personal
+    event on the current calendar surface is required. Dates and times are
+    only hints for the user-facing utterance; the Flutter executor resolves
+    the final personal event and its current revision before writing.
+    """
+    if not any(word in raw.lower() for word in (
+        "取消", "刪除", "移除", "刪掉", "cancel", "delete", "remove",
+    )):
+        return None
+
+    target, target_ref = _current_calendar_target(context)
+    event_date = _calendar_update_date(raw)
+    if event_date is None:
+        month_day = re.search(
+            r"(?<!\d)(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|號|号)?(?!\d)",
+            raw,
+        )
+        if month_day is not None:
+            today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+            try:
+                event_date = date(
+                    today.year,
+                    int(month_day.group(1)),
+                    int(month_day.group(2)),
+                ).isoformat()
+            except ValueError:
+                event_date = None
+    quoted = re.search(r"[「『]([^」』]{1,80})[」』]", raw)
+    if quoted is not None:
+        candidate = quoted.group(1).strip()
+    else:
+        candidate = re.sub(
+            r"^(?:幫我|請|我要|可以)?\s*"
+            r"(?:取消|刪除|移除|刪掉|cancel|delete|remove)\s*",
+            "",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        candidate = re.sub(
+            r"^(?:我的|我自己的)?(?:個人)?"
+            r"(?:行事曆|日曆|行程表|行程|日程|事件)"
+            r"(?:中|裡|里面|裡面|裏面|中的|裡的|裡面的)?\s*",
+            "",
+            candidate,
+        )
+        candidate = re.sub(
+            r"^(?:今天|今日|明天|後天|后天|這週|這周|下週|下周)\s*(?:的)?",
+            "",
+            candidate,
+        )
+        candidate = re.sub(
+            r"(?:的)?(?:行程|日程|事件)$",
+            "",
+            candidate,
+        )
+        candidate = candidate.strip(" \t\r\n，,。；;：:的")
+
+    # Dates are a disambiguating hint, not part of the event title. Keep the
+    # canonical date in the proposal so the device can resolve duplicate
+    # titles safely instead of trying to match the whole spoken sentence.
+    candidate = re.sub(
+        r"^\d{4}\s*(?:年|[-/.])\s*\d{1,2}\s*(?:月|[-/.])\s*"
+        r"\d{1,2}\s*(?:日)?\s*(?:的)?",
+        "",
+        candidate,
+    )
+    candidate = re.sub(
+        r"^\d{1,2}\s*月\s*\d{1,2}\s*(?:日|號|号)?\s*(?:的)?",
+        "",
+        candidate,
+    )
+    candidate = re.sub(r"^(?:今天|今日|明天|後天|后天)\s*(?:的)?", "", candidate)
+    candidate = re.sub(r"(?:的)?(?:行程|日程|事件)$", "", candidate).strip(
+        " \t\r\n，,。；;：:的"
+    )
+
+    if normalized_phrase(candidate) in {
+        "這個", "這項", "目前", "目前這個", "這個行程", "目前行程",
+        "行程", "日曆", "行事曆", "事件",
+    }:
+        candidate = ""
+    if candidate:
+        target = candidate[:80]
+    if not target and not target_ref:
+        return None
+    arguments: dict[str, Any] = {"target": target}
+    if event_date is not None:
+        arguments["date"] = event_date
+    if target_ref:
+        arguments["target_ref"] = target_ref
+    return validate_proposal({
+        "intent": "calendar.cancel",
+        "arguments": arguments,
+        "reply": "我已準備取消這個行程，確認後才會刪除。",
+    }, base_revision=revision)
 
 
 def _deterministic_calendar_create(raw: str, revision: int) -> VoiceProposal | None:
@@ -284,6 +638,10 @@ def safe_context(value: Any) -> dict[str, Any]:
         for key in FEATURE_STATUS_KEYS
         if isinstance(status_raw.get(key), bool)
     }
+    if permissions.get("chat_list") is True:
+        contact_name = safe_reply(status_raw.get("contact_name"))[:40]
+        if contact_name:
+            feature_status["contact_name"] = contact_name
     config_value = raw.get("voice_config")
     config_raw = config_value if isinstance(config_value, dict) else {}
     voice_name = str(config_raw.get("voice_name") or "Achird")
@@ -294,6 +652,20 @@ def safe_context(value: Any) -> dict[str, Any]:
         r"\s+", " ", str(config_raw.get("self_name") or ""),
     ).strip()[:40]
     self_name = "" if _EMAIL_RE.search(raw_self_name) else raw_self_name
+    routines: list[dict[str, str]] = []
+    raw_routines = config_raw.get("routines")
+    for raw_routine in (
+        raw_routines[:8] if isinstance(raw_routines, list) else []
+    ):
+        if not isinstance(raw_routine, dict):
+            continue
+        name = _routine_name(raw_routine.get("name"))
+        template_id = str(raw_routine.get("template_id") or "").strip()
+        if (
+            not name or template_id not in ROUTINE_TEMPLATES
+        ):
+            continue
+        routines.append({"name": name, "template_id": template_id})
     return {
         "scope": str(raw.get("scope") or "global")[:40],
         "screen": safe_screen(raw.get("screen"), permissions),
@@ -310,6 +682,7 @@ def safe_context(value: Any) -> dict[str, Any]:
             ),
             "input_language": input_language if input_language in {"zh-en", "zh-TW", "en-US"} else "zh-en",
             **({"self_name": self_name} if self_name else {}),
+            **({"routines": routines} if routines else {}),
         },
     }
 
@@ -400,8 +773,9 @@ def context_allows_proposal(context: dict[str, Any], proposal: VoiceProposal) ->
     if proposal.intent == "match.ayue_query":
         question = str(proposal.arguments.get("question") or "")
         if (
-            any(word in question for word in (
-                "開始找", "幫我找", "取消搜尋", "接受", "婉拒", "拒絕", "撤回",
+            _is_match_start_request(question)
+            or any(word in question for word in (
+                "取消搜尋", "接受", "婉拒", "拒絕", "撤回",
             ))
             or normalized_phrase(question) in {
                 "確認", "確定", "取消", "confirm", "confirmed", "cancel", "yes", "no",
@@ -426,7 +800,10 @@ def context_allows_proposal(context: dict[str, Any], proposal: VoiceProposal) ->
             "確認", "確定", "取消", "confirm", "confirmed", "cancel", "yes", "no",
         }
         if domain == "matching" and (
-            any(word in question for word in ("開始找", "幫我找", "取消搜尋", "接受", "婉拒", "拒絕", "撤回"))
+            _is_match_start_request(question)
+            or any(word in question for word in (
+                "取消搜尋", "接受", "婉拒", "拒絕", "撤回",
+            ))
             or delegated_confirmation
         ):
             return permissions.get("match_actions") is True
@@ -437,6 +814,11 @@ def context_allows_proposal(context: dict[str, Any], proposal: VoiceProposal) ->
 def requires_confirmation(proposal: VoiceProposal) -> bool:
     if ACTIONS.get(proposal.intent, {}).get("confirmation"):
         return True
+    if (
+        proposal.intent == "match.ayue_query"
+        and _is_match_start_request(proposal.arguments.get("question") or "")
+    ):
+        return True
     return (
         proposal.intent == "settings.set"
         and proposal.arguments.get("key") in CONFIRMED_SETTING_KEYS
@@ -444,6 +826,15 @@ def requires_confirmation(proposal: VoiceProposal) -> bool:
 
 
 def confirmation_phrase(proposal: VoiceProposal) -> str:
+    if (
+        proposal.intent == "match.ayue_query"
+        and _is_match_start_request(proposal.arguments.get("question") or "")
+    ):
+        return "確認開始配對"
+    if proposal.intent == "routine.save":
+        return "確認儲存捷徑"
+    if proposal.intent == "routine.delete":
+        return "確認刪除捷徑"
     if proposal.intent == "date.confirm":
         return "確認安排"
     if proposal.intent == "date.update":
@@ -544,6 +935,134 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
     if intent == "ui.target.select":
         if not target_ref:
             return None
+    elif intent == "post.open":
+        if not target_ref:
+            return None
+    elif intent == "app.digest.query" or intent == "workflow.daily_briefing":
+        args = {}
+    elif intent == "app.search":
+        query = re.sub(r"\s+", " ", str(raw_args.get("query") or "")).strip()[:120]
+        domains = raw_args.get("domains")
+        if (
+            not query
+            or not isinstance(domains, list)
+            or not 1 <= len(domains) <= 5
+        ):
+            return None
+        cleaned_domains = list(dict.fromkeys(str(item) for item in domains))
+        if len(cleaned_domains) != len(domains) or any(
+            item not in APP_SEARCH_DOMAINS for item in cleaned_domains
+        ):
+            return None
+        args = {"query": query, "domains": cleaned_domains}
+    elif intent in {"routine.run", "routine.delete"}:
+        name = _routine_name(raw_args.get("name"))
+        if not name:
+            return None
+        args = {"name": name}
+    elif intent == "routine.save":
+        name = _routine_name(raw_args.get("name"))
+        template_id = str(raw_args.get("template_id") or "").strip()
+        supplied = raw_args.get("arguments")
+        if (
+            not name
+            or template_id not in ROUTINE_TEMPLATES
+            or not isinstance(supplied, dict)
+        ):
+            return None
+        routine_arguments: dict[str, Any] = {}
+        if template_id in {"search_app", "search_memory"}:
+            query = re.sub(r"\s+", " ", str(supplied.get("query") or "")).strip()[:120]
+            if not query:
+                return None
+            routine_arguments["query"] = query
+        if template_id == "search_app":
+            domains = supplied.get("domains")
+            if not isinstance(domains, list) or not 1 <= len(domains) <= 5:
+                return None
+            cleaned_domains = list(dict.fromkeys(str(item) for item in domains))
+            if len(cleaned_domains) != len(domains) or any(
+                item not in APP_SEARCH_DOMAINS for item in cleaned_domains
+            ):
+                return None
+            routine_arguments["domains"] = cleaned_domains
+        allowed_routine_keys = (
+            {"query", "domains"} if template_id == "search_app"
+            else {"query"} if template_id == "search_memory"
+            else set()
+        )
+        if set(supplied) - allowed_routine_keys:
+            return None
+        args = {
+            "name": name,
+            "template_id": template_id,
+            "arguments": routine_arguments,
+        }
+    elif intent == "workflow.prepare_post":
+        caption = str(raw_args.get("caption") or "").strip()[:2000]
+        try:
+            count = int(raw_args.get("count"))
+        except (TypeError, ValueError):
+            return None
+        if not caption or not 1 <= count <= 5:
+            return None
+        args = {"caption": caption, "count": count}
+    elif intent == "workflow.plan_date":
+        contact_name = re.sub(
+            r"\s+", " ", str(raw_args.get("contact_name") or ""),
+        ).strip()[:80]
+        changes = raw_args.get("changes")
+        allowed = {
+            "date", "start_time", "end_time", "activity",
+            "location", "notes", "budget",
+        }
+        if not contact_name or not isinstance(changes, dict) or not changes or set(changes) - allowed:
+            return None
+        clean_changes: dict[str, str] = {}
+        for key, item in changes.items():
+            if not isinstance(item, str) or len(item) > (500 if key == "notes" else 120):
+                return None
+            clean_changes[key] = item.strip()
+        try:
+            if "date" in clean_changes:
+                date.fromisoformat(clean_changes["date"])
+        except ValueError:
+            return None
+        for key in ("start_time", "end_time"):
+            if key in clean_changes and not re.fullmatch(
+                r"(?:[01]\d|2[0-3]):[0-5]\d", clean_changes[key],
+            ):
+                return None
+        args = {"contact_name": contact_name, "changes": clean_changes}
+    elif intent == "workflow.update_profile":
+        changes = raw_args.get("changes") if isinstance(raw_args.get("changes"), dict) else {}
+        clean_profile: dict[str, Any] = {}
+        for key, item in changes.items():
+            if key not in PROFILE_FIELDS:
+                continue
+            if key == "age":
+                try:
+                    age = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if 18 <= age <= 120:
+                    clean_profile[key] = age
+            elif key == "phone":
+                phone = re.sub(r"[\s\-().]", "", unicodedata.normalize("NFKC", str(item)))
+                if re.fullmatch(r"09\d{8}", phone):
+                    clean_profile[key] = phone
+            elif key == "region":
+                region = str(item).replace("臺", "台").strip()
+                if region in TAIWAN_CITIES:
+                    clean_profile[key] = region
+            else:
+                limit = 500 if key == "userinfo" else 40
+                text = re.sub(r"\s+", " ", str(item or "")).strip()[:limit]
+                if text:
+                    clean_profile[key] = text
+        if not clean_profile:
+            return None
+        args = {"changes": clean_profile}
     elif intent in {"date.query", "date.respond", "date.update", "date.confirm"}:
         target = re.sub(r"\s+", " ", str(raw_args.get("contact_name") or "")).strip()[:80]
         args = {"contact_name": target}
@@ -581,6 +1100,9 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
             return None
         args["destination"] = destination
     elif intent == "calendar.query":
+        source = str(raw_args.get("source") or "").strip()
+        if source and source not in CALENDAR_SOURCES:
+            return None
         start_date = str(raw_args.get("start_date") or "").strip()
         end_date = str(raw_args.get("end_date") or "").strip()
         if bool(start_date) != bool(end_date):
@@ -602,6 +1124,8 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
             if requested_range not in CALENDAR_QUERY_RANGES:
                 return None
             args["range"] = requested_range
+        if source:
+            args["source"] = source
     elif intent == "calendar.create":
         title = re.sub(r"\s+", " ", str(raw_args.get("title") or "")).strip()[:80]
         event_date = str(raw_args.get("date") or "").strip()
@@ -641,7 +1165,7 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
                 if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value_text):
                     return None
                 clean[key] = value_text
-        for key, limit in (("location", 120), ("notes", 500)):
+        for key, limit in (("title", 80), ("location", 120), ("notes", 500)):
             if key in raw_args:
                 clean[key] = re.sub(r"\s+", " ", str(raw_args.get(key) or "")).strip()[:limit]
         if len(clean) == 1:
@@ -652,6 +1176,15 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
         if not target and not target_ref:
             return None
         args["target"] = target
+        event_date = str(raw_args.get("date") or "").strip()
+        if event_date:
+            try:
+                parsed_date = date.fromisoformat(event_date)
+            except ValueError:
+                return None
+            if parsed_date.isoformat() != event_date:
+                return None
+            args["date"] = event_date
     elif intent == "personality.explore":
         message = re.sub(r"\s+", " ", str(raw_args.get("message") or "")).strip()[:1000]
         if not message:
@@ -773,6 +1306,7 @@ def deterministic_proposal(
     text: str, *, context: dict[str, Any], generated_caption: str | None = None,
 ) -> VoiceProposal | None:
     raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    raw_lower = raw.lower()
     compact = normalized_phrase(raw)
     revision = int(context.get("revision") or 0)
     response_language = str(
@@ -884,7 +1418,19 @@ def deterministic_proposal(
     if any(term in compact for term in ("約會邀請", "共同約會", "dateinvitation", "dateinvites", "shareddate")) and not any(
         term in compact for term in ("接受", "拒絕", "改", "調整", "確認", "accept", "decline", "update", "confirm", "change")
     ):
-        return VoiceProposal("date.query", {"contact_name": ""}, "我查看你的約會邀請與共同安排。", revision)
+        named_shared_date = re.search(
+            r"(?:查|查看|讀取|看看)?(?:我)?(?:和|跟)\s*"
+            r"([^，,。！？!?]{1,40}?)(?:的)?(?:共同約會|約會安排)",
+            raw,
+        )
+        contact_name = (
+            named_shared_date.group(1).strip(" 的「」『』“”\"'")
+            if named_shared_date is not None else ""
+        )
+        return VoiceProposal(
+            "date.query", {"contact_name": contact_name},
+            "我查看你的約會邀請與共同安排。", revision,
+        )
     if any(phrase in compact for phrase in (
         "配對進度", "媒合進度", "搜尋進度", "配對狀態", "媒合狀態",
         "配對結果", "配對好了嗎", "媒合好了嗎", "配到誰", "配對到誰",
@@ -894,6 +1440,10 @@ def deterministic_proposal(
             "match.query", {"view": "status"},
             "我直接查看目前配對狀態。", revision,
         )
+    if _is_match_start_request(raw):
+        return VoiceProposal(
+            "match.ayue_query", {"question": raw}, working_reply, revision,
+        )
     if any(phrase in compact for phrase in (
         "打開阿月牽線", "開啟阿月牽線", "查看阿月牽線", "阿月牽線內容",
         "朗讀阿月牽線", "牽線邀請內容", "有哪些牽線", "有哪些邀請",
@@ -902,19 +1452,136 @@ def deterministic_proposal(
             "match.query", {"view": "hub"},
             "我直接打開並讀取阿月牽線。", revision,
         )
+    generic_chat_open = {
+        "聊天室", "聊天列表", "開聊天室", "打開聊天室", "開啟聊天室",
+        "進入聊天室", "前往聊天室", "去聊天室", "去聊天",
+        "幫我開聊天室", "幫我打開聊天室", "幫我開啟聊天室",
+        "我要開聊天室", "打開聊天列表", "開啟聊天列表",
+        "openchat", "openchatlist", "openmessages",
+    }
+    if compact in generic_chat_open:
+        return VoiceProposal(
+            "app.navigate", {"destination": "chat"}, "好，我幫你開啟聊天列表。", revision,
+        )
+    named_chat_open = re.search(
+        r"(?:(?:幫我|請|我要)?(?:打開|開啟|開|進入|前往))(?:和|跟)?\s*"
+        r"([^，,。！？!?]{1,40}?)(?:的)?(?:聊天室|聊天頁面|對話)$",
+        raw,
+    ) or re.fullmatch(
+        r"(?:和|跟)?\s*([^，,。！？!?]{1,40}?)的"
+        r"(?:聊天室|聊天頁面|對話)",
+        raw.strip(),
+    )
+    if named_chat_open:
+        contact_name = named_chat_open.group(1).strip(" 的「」『』“”\"'")
+        if contact_name:
+            return VoiceProposal(
+                "chat.open", {"contact_name": contact_name},
+                f"我開啟{contact_name}的聊天室。", revision,
+            )
+    chat_read_requested = (
+        any(marker in compact for marker in (
+            "讀取", "查看", "看看", "念出", "摘要", "總結", "分析",
+            "read", "summarize", "analyse", "analyze",
+        ))
+        and any(marker in compact for marker in (
+            "聊天", "對話", "訊息", "裡面的內容", "里面的内容", "messages", "chat",
+        ))
+    )
+    if chat_read_requested:
+        named_chat_read = re.search(
+            r"(?:讀取|查看|看看|摘要|總結|分析)(?:一下)?"
+            r"(?:和|跟)?\s*([^，,。！？!?]{1,40}?)的"
+            r"(?:聊天室|聊天|對話)(?:內容|記錄|紀錄|訊息)?",
+            raw,
+        )
+        contact_name = (
+            named_chat_read.group(1).strip(" 的「」『』“”\"'")
+            if named_chat_read is not None else ""
+        )
+        target_ref = ""
+        if not contact_name and str(context.get("scope") or "") in {
+            "chat", "ayue_private",
+        }:
+            contact_name, target_ref = _current_contact(context)
+        if contact_name or target_ref:
+            arguments = {"contact_name": contact_name, "question": raw}
+            if target_ref:
+                arguments["target_ref"] = target_ref
+            return VoiceProposal(
+                "ayue.private_query", arguments, working_reply, revision,
+            )
+    private_ayue_requested = any(
+        marker in compact
+        for marker in (
+            "阿月悄悄話", "阿月悄悄话", "悄悄話", "悄悄话",
+            "privateayue", "privatechat",
+        )
+    )
+    if private_ayue_requested:
+        contact_name, target_ref = ("", "")
+        if str(context.get("scope") or "") in {"chat", "ayue_private"}:
+            contact_name, target_ref = _current_contact(context)
+        named_private = re.search(
+            r"(?:和|跟|對|对)\s*([^，,。！？!?]{1,40}?)\s*(?:的)?"
+            r"(?:阿月)?(?:悄悄話|悄悄话)",
+            raw,
+        )
+        if named_private is not None:
+            contact_name = named_private.group(1).strip(" 的「」『』“”\"'")
+        if contact_name or target_ref:
+            arguments = {"contact_name": contact_name, "question": raw}
+            if target_ref:
+                arguments["target_ref"] = target_ref
+            return VoiceProposal(
+                "ayue.private_query", arguments, working_reply, revision,
+            )
     navigation = {
         "打開聊天": "chat", "開啟聊天": "chat", "去聊天頁面": "chat",
         "打開配對": "matching", "開啟配對": "matching", "去配對頁面": "matching",
+        "打開配對頁面": "matching", "開啟配對頁面": "matching",
+        "前往配對頁面": "matching", "跳到配對頁面": "matching",
         "打開個人頁面": "profile", "開啟個人頁面": "profile", "去個人頁面": "profile",
         "打開設定": "settings", "開啟設定": "settings", "去設定頁面": "settings",
         "編輯個人資料": "profile_edit", "打開編輯個人資料": "profile_edit",
         "打開語音助理設定": "voice_settings", "阿月語音助理設定": "voice_settings",
         "打開行事曆": "calendar", "開啟行事曆": "calendar",
+        "打開行事曆頁面": "calendar", "開啟行事曆頁面": "calendar",
+        "前往行事曆": "calendar", "跳到行事曆": "calendar",
         "打開配對阿月": "matching_ayue", "開啟配對阿月": "matching_ayue",
         "打開阿月記住的事": "memory", "查看阿月記憶": "memory",
         "打開發文頁": "create_post", "我要發文": "create_post",
     }
     destination = navigation.get(compact)
+    if destination is None and any(
+        verb in compact
+        for verb in (
+            "打開", "開啟", "前往", "跳到", "切換到", "帶我到", "带我到", "進入",
+            "open", "goto", "navigateto", "switchto", "takemeto", "enterthe",
+        )
+    ):
+        navigation_targets = (
+            (("語音助理設定",), "voice_settings"),
+            (("配對阿月",), "matching_ayue"),
+            (("阿月記住的事", "阿月記憶", "記憶頁"), "memory"),
+            (("編輯個人資料", "個人資料編輯"), "profile_edit"),
+            (("行事曆", "行程頁"), "calendar"),
+            (("發文頁", "貼文草稿"), "create_post"),
+            (("配對頁", "配對主頁"), "matching"),
+            (("聊天頁", "訊息頁"), "chat"),
+            (("個人頁", "個人主頁"), "profile"),
+            (("設定頁",), "settings"),
+            (("calendar",), "calendar"),
+            (("matchingpage", "matchpage"), "matching"),
+            (("chatpage", "messagespage"), "chat"),
+            (("profilepage",), "profile"),
+            (("settingspage",), "settings"),
+        )
+        destination = next((
+            target
+            for phrases, target in navigation_targets
+            if any(phrase in compact for phrase in phrases)
+        ), None)
     if destination:
         return VoiceProposal(
             "app.navigate", {"destination": destination}, "好，我幫你打開。", revision,
@@ -967,19 +1634,77 @@ def deterministic_proposal(
             "profile.request_commit", {},
             "我已準備儲存目前變更。請說「確認儲存個人資料」。", revision,
         )
-    if ("貼文" in raw or "po" in raw.lower()) and any(
-        word in raw for word in ("幫我", "寫", "撰寫", "發一個", "po")
+    post_open_verbs = ("看", "查看", "檢視", "打開", "開啟", "開", "open", "show", "view")
+    post_open_markers = ("貼文", "文章", "動態", "post", "story")
+    if (
+        str(context.get("scope") or "") == "profile"
+        and any(word in raw_lower for word in post_open_verbs)
+        and any(marker.lower() in raw_lower for marker in post_open_markers)
+    ):
+        screen = context.get("screen") if isinstance(context.get("screen"), dict) else {}
+        post_items = [
+            item for item in screen.get("items") or []
+            if isinstance(item, dict) and item.get("kind") == "post"
+        ]
+        if post_items:
+            target_index = 0  # The profile page deliberately keeps newest first.
+            if not any(word in raw_lower for word in ("最新", "最近", "第一", "first", "latest", "newest")):
+                ordinal_match = re.search(
+                    r"第\s*([一二兩三四五六七八九十\d]{1,3})\s*(?:篇|則|個)?",
+                    raw,
+                    flags=re.IGNORECASE,
+                )
+                if ordinal_match is not None:
+                    ordinal = _small_number(ordinal_match.group(1))
+                    if ordinal is None or not 1 <= ordinal <= len(post_items):
+                        return None
+                    target_index = ordinal - 1
+            target_ref = str(post_items[target_index].get("ref") or "").strip()
+            if target_ref:
+                return VoiceProposal(
+                    "post.open",
+                    {"target_ref": target_ref},
+                    "我打開個人頁面上的那篇貼文。",
+                    revision,
+                )
+    post_markers = ("貼文", "發文", "文章", "文案", "文字內容", "故事", "po", "story")
+    post_verbs = (
+        "幫我", "寫", "撰寫", "編", "邊", "編輯", "修改", "重寫", "發一個", "po",
+        "write", "compose", "draft",
+    )
+    if any(marker.lower() in raw_lower for marker in post_markers) and any(
+        word.lower() in raw_lower for word in post_verbs
     ):
         topic = raw
         match = re.search(r"關於(.+?)(?:的(?:故事|貼文)|$)", raw)
         if match:
             topic = match.group(1).strip(" ，。")
+        elif "故事" in raw or "story" in raw_lower:
+            topic = re.sub(
+                r"^(?:請|請幫我|幫我|可以)?\s*"
+                r"(?:編|寫|撰寫|創作|write|compose|draft)\s*"
+                r"(?:一點|一個|一段|一則|a|an|the)?\s*",
+                "",
+                raw,
+                flags=re.IGNORECASE,
+            )
+            topic = re.sub(r"(?:的)?(?:故事|story)$", "", topic, flags=re.IGNORECASE)
+            topic = topic.strip(" ，。的") or "日常生活"
         caption = generated_caption or (
             f"今天想記錄一段關於{topic}的故事。\n\n"
             "有些片刻不需要特別安排，回想起來仍然會讓人微笑。"
         )
+        post_intent = (
+            "post.replace_caption"
+            if str(context.get("scope") or "") == "post"
+            and any(word in raw_lower for word in (
+                "編", "邊", "編輯", "修改", "重寫", "文字內容",
+                "write", "compose", "draft",
+            ))
+            else "post.open_draft"
+        )
         return VoiceProposal(
-            "post.open_draft", {"caption": caption[:2000]},
+            post_intent, {"caption": caption[:2000]},
             "好的，我幫你整理成貼文草稿。", revision,
         )
     if any(phrase in compact for phrase in (
@@ -1042,12 +1767,49 @@ def deterministic_proposal(
                 "我可以把這件事存進阿月記憶。", revision,
             )
     public_domain = None
-    if any(word in raw for word in ("行事曆", "行程", "空檔", "有空")):
-        if any(word in raw for word in (
-            "新增", "建立", "加入", "修改", "改到", "改成", "取消", "刪除",
-        )):
-            return _deterministic_calendar_create(raw, revision)
+    if (
+        any(word in raw for word in (
+            "行事曆", "日曆", "日历", "行程", "空檔", "有空",
+        ))
+        or "calendar" in compact
+        or "calender" in compact
+        or (
+            any(word in raw.lower() for word in (
+                "取消", "刪除", "移除", "刪掉", "cancel", "delete", "remove",
+            ))
+            and (
+                _CALENDAR_EXPLICIT_DATE_RE.search(raw) is not None
+                or re.search(
+                    r"(?<!\d)\d{1,2}\s*月\s*\d{1,2}\s*(?:日|號|号)?(?!\d)",
+                    raw,
+                ) is not None
+            )
+        )
+        or (
+            str(context.get("scope") or "") == "calendar"
+            and any(word in raw for word in (
+                "修改", "編輯", "更改", "調整", "改到", "改成", "換成",
+                "取消", "刪除", "移除", "刪掉", "cancel", "delete", "remove",
+            ))
+        )
+    ):
+        calendar_write_words = (
+            "新增", "建立", "加入", "修改", "編輯", "更改", "調整",
+            "改到", "改成", "換成", "取消", "刪除", "移除", "刪掉",
+            "cancel", "delete", "remove",
+        )
+        if any(word in raw for word in calendar_write_words):
+            if any(word in raw for word in ("新增", "建立", "加入")):
+                return _deterministic_calendar_create(raw, revision)
+            if any(word in raw for word in ("修改", "編輯", "更改", "調整", "改到", "改成", "換成")):
+                return _deterministic_calendar_update(
+                    raw, context=context, revision=revision,
+                )
+            return _deterministic_calendar_cancel(
+                raw, context=context, revision=revision,
+            )
         else:
+            source = _calendar_source(raw)
             explicit_range = _explicit_calendar_range(raw)
             if _CALENDAR_EXPLICIT_DATE_RE.search(raw) and explicit_range is None:
                 return None
@@ -1055,6 +1817,7 @@ def deterministic_proposal(
                 return VoiceProposal(
                     "calendar.query",
                     {
+                        "source": source,
                         "start_date": explicit_range[0],
                         "end_date": explicit_range[1],
                     },
@@ -1073,10 +1836,14 @@ def deterministic_proposal(
             elif any(word in raw for word in ("這週", "这周", "七天")):
                 calendar_range = "week"
             return VoiceProposal(
-                "calendar.query", {"range": calendar_range},
+                "calendar.query", {"source": source, "range": calendar_range},
                 working_reply, revision,
             )
-    elif any(word in raw for word in ("附近", "餐廳", "咖啡廳", "景點", "距離", "營業")):
+    elif any(word in raw for word in (
+        "附近", "餐廳", "咖啡廳", "景點", "距離", "營業",
+        "哪裡好玩", "哪裡有好玩", "好玩的", "可以去哪裡",
+        "去哪玩", "推薦去處", "景點推薦", "好吃的",
+    )):
         public_domain = "places"
     elif any(word in raw for word in ("上網查", "網路查", "最新消息", "公開資訊")):
         public_domain = "web"

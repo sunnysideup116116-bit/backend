@@ -543,8 +543,9 @@ def search_nearby_places(
     anchor_label: str, lat: float, lon: float, categories: list[str], *, limit: int,
     cuisine: str = "", radius_m: int = 1500,
     enrichments: Iterable[str] | None = None,
+    include_private_coordinates: bool = False,
 ) -> list[dict[str, Any]]:
-    """Resolve a bounded set of public places; no raw Google payload escapes."""
+    """Resolve bounded places; coordinates are opt-in for server-only chaining."""
     if not google_place_cards_enabled():
         raise GooglePlacesError("google_places_disabled")
     requested_enrichments = _normalize_enrichments(enrichments)
@@ -646,6 +647,8 @@ def search_nearby_places(
                 "provider": "google",
                 "place_id": place_id,
                 "photo_url": _photo_url(item),
+                "_latitude": item_lat,
+                "_longitude": item_lon,
                 **_place_enrichment(item, place_enrichments),
             })
         places = sorted(places, key=lambda item: (item["distance_m"], item["name"]))[:safe_limit]
@@ -658,7 +661,16 @@ def search_nearby_places(
             route = walking.get(str(place.get("place_id") or ""))
             if route:
                 place.update(route)
-    return places
+    if include_private_coordinates:
+        return places
+    return [
+        {
+            key: value
+            for key, value in place.items()
+            if key not in {"_latitude", "_longitude"}
+        }
+        for place in places
+    ]
 
 
 def resolve_place(

@@ -3,11 +3,21 @@ import json
 from dataclasses import replace
 from types import SimpleNamespace
 
-from fastapi import FastAPI
+import mongomock
+import pytest
+
+from fastapi import FastAPI, HTTPException
 
 from app_voice_assistant.provider import AppVoiceProvider
-from app_voice_assistant.router import AppVoiceRuntime, AppVoiceSessionRequest, create_router
+from app_voice_assistant.router import (
+    AppVoiceRuntime,
+    AppVoiceSessionRequest,
+    AppVoiceTaskCancelRequest,
+    AppVoiceTaskInputRequest,
+    create_router,
+)
 from app_voice_assistant.settings import AppVoiceSettings
+from app_voice_assistant.task_service import VoiceTaskService
 
 
 class FakeProvider:
@@ -93,7 +103,14 @@ def test_capability_and_demo_allowlist():
     assert capability["enabled"] is True
     assert capability["demo_only"] is True
     assert capability["default_tts_mode"] == "gemini_live_duplex"
-    assert capability["protocol_version"] == 3
+    assert capability["protocol_version"] == 4
+    assert capability["tool_routing_version"] == 2
+    assert capability["task_protocol_version"] == 1
+    assert capability["task_interactions"] is True
+    assert capability["guide_protocol_version"] == 1
+    assert capability["personal_routines"] is True
+    assert capability["authenticated_session_required"] is True
+    assert capability["max_model_tools"] == 36
     assert capability["full_duplex_live"] is False
     assert capability["structured_confirmation"] is True
     assert capability["barge_in"] is True
@@ -116,6 +133,173 @@ def test_capability_and_demo_allowlist():
     issued = asyncio.run(routes["/api/app-voice/session"](req, request))
     assert issued["ticket"]
     assert issued["websocket_url"].endswith("/api/app-voice")
+
+
+def test_template_mode_advertises_the_direct_tool_surface():
+    configured = settings(tool_routing_mode="template")
+    runtime = AppVoiceRuntime(
+        settings=configured,
+        keys=[],
+        provider=AppVoiceProvider(configured, []),
+    )
+    app = FastAPI()
+    app.include_router(create_router(runtime))
+    routes = {
+        route.path: route.endpoint
+        for route in app.routes
+        if hasattr(route, "endpoint")
+    }
+
+    capability = asyncio.run(routes["/api/app-voice/capability"]())
+
+    assert capability["max_model_tools"] == 15
+    assert capability["voice_runtime_template"] is True
+
+
+def test_protocol_v4_requires_verified_owner_and_binds_proxy_mode():
+    runtime = AppVoiceRuntime(
+        settings=settings(
+            tool_routing_mode="proxy",
+            proxy_user_ids=frozenset(),
+        ),
+        keys=[], provider=FakeProvider(),
+        identity_authenticator=lambda authorization: (
+            "test-user-id" if authorization == "Bearer jwt" else ""
+        ),
+    )
+    app = FastAPI()
+    app.include_router(create_router(runtime))
+    routes = {route.path: route.endpoint for route in app.routes if hasattr(route, "endpoint")}
+    with pytest.raises(HTTPException) as missing_auth:
+        asyncio.run(routes["/api/app-voice/session"](
+            AppVoiceSessionRequest(
+                installation_id="installation-id-123456",
+                user_id="test-user-id",
+                consent_version="demo-free-gemini-live-v2",
+                consent_accepted_at="2026-09-15T12:00:00Z",
+                client_protocol_version=4,
+            ),
+            SimpleNamespace(headers={}, client=SimpleNamespace(host="127.0.0.1")),
+        ))
+    assert missing_auth.value.status_code == 401
+
+    request = SimpleNamespace(
+        headers={"authorization": "Bearer jwt"},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+    issued = asyncio.run(routes["/api/app-voice/session"](
+        AppVoiceSessionRequest(
+            installation_id="installation-id-123456",
+            user_id="test-user-id",
+            consent_version="demo-free-gemini-live-v2",
+            consent_accepted_at="2026-09-15T12:00:00Z",
+            client_protocol_version=4,
+        ),
+        request,
+    ))
+    assert issued["protocol_version"] == 4
+    assert issued["tool_routing_mode"] == "proxy"
+
+
+def test_protocol_v3_stays_on_legacy_routing_even_during_proxy_rollout():
+    runtime = AppVoiceRuntime(
+        settings=settings(tool_routing_mode="proxy"),
+        keys=[], provider=FakeProvider(),
+    )
+    app = FastAPI()
+    app.include_router(create_router(runtime))
+    routes = {route.path: route.endpoint for route in app.routes if hasattr(route, "endpoint")}
+    request = SimpleNamespace(headers={}, client=SimpleNamespace(host="127.0.0.1"))
+    issued = asyncio.run(routes["/api/app-voice/session"](
+        AppVoiceSessionRequest(
+            installation_id="installation-id-123456",
+            user_id="test-user-id",
+            consent_version="demo-free-gemini-live-v2",
+            consent_accepted_at="2026-09-15T12:00:00Z",
+            client_protocol_version=3,
+        ),
+        request,
+    ))
+    assert issued["protocol_version"] == 3
+    assert issued["tool_routing_mode"] == "legacy"
+
+
+def test_owner_scoped_task_routes_list_and_cancel():
+    db = mongomock.MongoClient().db
+    tasks = VoiceTaskService(db.batches, db.tasks, enabled=True)
+    created = tasks.create_batch(
+        user_id="test-user-id", session_id="s1",
+        operations=[{
+            "operation_key": "one", "depends_on": [], "arguments": {},
+            "action": {
+                "capability_id": "contacts.query", "title": "列出聯絡人",
+                "execution_kind": "inline_device", "risk": "read",
+                "cancellable": True,
+            },
+        }],
+    )
+    runtime = AppVoiceRuntime(
+        settings=settings(tasks_enabled=True), keys=[], provider=FakeProvider(),
+        task_service=tasks,
+        identity_authenticator=lambda authorization: (
+            "test-user-id" if authorization == "Bearer jwt" else ""
+        ),
+    )
+    app = FastAPI()
+    app.include_router(create_router(runtime))
+    routes = {route.path: route.endpoint for route in app.routes if hasattr(route, "endpoint")}
+    request = SimpleNamespace(headers={"authorization": "Bearer jwt"})
+    listed = asyncio.run(routes["/api/app-voice/tasks"](request, "all", 20))
+    assert listed["tasks"][0]["task_ref"] == created.tasks[0]["task_ref"]
+    cancelled = asyncio.run(routes["/api/app-voice/tasks/{task_ref}/cancel"](
+        created.tasks[0]["task_ref"],
+        AppVoiceTaskCancelRequest(expected_revision=1),
+        request,
+    ))
+    assert cancelled["tasks"][0]["status"] == "cancelled"
+
+
+def test_owner_scoped_task_interaction_routes_validate_and_requeue():
+    db = mongomock.MongoClient().db
+    tasks = VoiceTaskService(db.batches, db.tasks, enabled=True)
+    created = tasks.create_batch(
+        user_id="test-user-id", session_id="s1",
+        operations=[{
+            "operation_key": "one", "depends_on": [],
+            "arguments": {"query": "old"},
+            "action": {
+                "capability_id": "memory.query", "title": "搜尋記憶",
+                "execution_kind": "inline_device", "risk": "read",
+                "cancellable": True,
+            },
+        }],
+    )
+    waiting = tasks.update(
+        created.tasks[0]["task_id"], status="waiting_input", stage="needs_input",
+        expected_statuses={"queued"},
+    )
+    runtime = AppVoiceRuntime(
+        settings=settings(tasks_enabled=True), keys=[], provider=FakeProvider(),
+        task_service=tasks,
+        identity_authenticator=lambda authorization: (
+            "test-user-id" if authorization == "Bearer jwt" else ""
+        ),
+    )
+    app = FastAPI()
+    app.include_router(create_router(runtime))
+    routes = {route.path: route.endpoint for route in app.routes if hasattr(route, "endpoint")}
+    request = SimpleNamespace(headers={"authorization": "Bearer jwt"})
+    updated = asyncio.run(routes["/api/app-voice/tasks/{task_ref}/input"](
+        created.tasks[0]["task_ref"],
+        AppVoiceTaskInputRequest(
+            expected_revision=waiting["revision"], values={"query": "new"},
+        ),
+        request,
+    ))
+    assert updated["task"]["status"] == "queued"
+    assert tasks.get_by_ref(
+        "test-user-id", created.tasks[0]["task_ref"],
+    )["arguments"] == {"query": "new"}
 
 
 def test_spoken_confirmation_is_bound_and_wrong_phrase_never_executes():

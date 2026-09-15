@@ -1,5 +1,14 @@
 # Voice Assistant 能力與限制
 
+## 2026-09-15：Gemini Live template routing
+
+- App Voice protocol v4 現在可使用 `VOICE_APP_TOOL_ROUTING_MODE=template`。它沿用 Gemini Live 原生雙向 WebSocket、Server VAD、PCM16 與 barge-in，但把模型可見工具收斂為 15 個 domain-level tools，不再要求每個簡單請求先執行 capability search。
+- 聊天室、配對、日曆、地點與明確的 App 讀取請求若 Gemini 沒有發出 function call，Server 會以最終使用者逐字稿做確定性 fallback；仍會通過既有 permission、scope、revision、target binding 與 Flutter action result 邊界，不會直接寫入 App。
+- 自然月份會由台灣日期展開為包含起訖日的區間；例如「查這個月行事曆」會查本月第一日至最後一日，而不是只查 `upcoming`。
+- 長任務與 delegated Ayue 會先回覆「稍等一下」；語音工具結果回傳後才允許模型說完成。模板模式的 synthetic fallback 不會送不存在的 Gemini tool-call ID，避免 Live API protocol error。
+- `legacy` 與 `proxy` 仍保留作 fallback；實際部署的 `Server/.env` 已切換至 template，所有已驗證使用者仍使用同一個 Appwrite JWT 與 owner-scoped task service。
+- 本次驗證：App Voice Server 188 項通過；template direct dispatcher、deterministic fallback 與 real Gemini Live WSS smoke 覆蓋聊天室、找新配對、整月日曆及高雄地點，均產生正確 action 且沒有 error event。Flutter 語音相關 Dart analyzer 無問題。
+
 ## 2026-09-13：短期記憶、Google 即時氣象與任意行事曆區間
 
 - 記憶收尾日誌曾出現 `voice_memory_summary_failed`；現在 DeepSeek 仍優先嘗試兩次，也會接受被 Markdown 包住或帶額外欄位的有效 JSON。兩次都失敗時改用同樣受遮蔽、本人姓名移除與 200 字限制保護的本機滾動摘要，仍遞增 Appwrite revision，不再遺失整段 session。
@@ -11,7 +20,7 @@
 - 每個有效氣象查詢都會並行且各呼叫一次 Google Weather `currentConditions:lookup` 與 Air Quality `currentConditions:lookup`，不使用快取替代任何一個來源。回傳目前天氣、溫度、體感、降雨機率、濕度、風速、UV、台灣 AQI、主要污染物與一般族群健康建議；單一來源失敗時會回傳另一來源並明示資料不完整。
 - `GOOGLE_WEATHER_API_KEY`、`GOOGLE_AIR_QUALITY_API_KEY` 與地名解析 key 可獨立設定；留空時沿用既有受限的 `GOOGLE_PLACES_SERVER_API_KEY`。目前 Server key 已實測 Weather 與 Air Quality 均回 200。
 - `read_calendar`／`calendar.query` 除原本今天、明天、本週等預設值外，新增包含起訖日的 `start_date`、`end_date`。可查任意過去、現在或未來區間，不設固定回溯、展望或跨度上限；回覆仍只口述前五筆，避免超長語音。
-- action catalog 已升為 v3；正式 capability 會回報 `voice_weather=true`、`voice_weather_sources=[google_weather, google_air_quality]` 與 `current_weather_and_air_quality`。
+- 當時 action catalog 升為 v3；目前已由 protocol v4 catalog 取代，capability 仍回報 `voice_weather=true`、`voice_weather_sources=[google_weather, google_air_quality]` 與 `current_weather_and_air_quality`。
 - 本次驗證：App Voice Server 121 項通過；Flutter 五組語音與 action 契約 83 項通過；相關 Dart 靜態分析與 capability 產物同步檢查通過。內網 Appwrite storage smoke 驗證 DeepSeek 強制失敗仍寫入 revision 1、關閉-only session 不增加 revision、結束套話未保存，測試文件隨後以 204 刪除；既有摘要與 DeepSeek 輸出中的舊結束套話也有清理回歸。真實 Gemini 文字備援把「去年三月一日到五月三十一日」解析為 `2025-03-01` 至 `2025-05-31`；Gemini Live 對「今天天氣如何」選出 `read_weather(args={})`，確認未說地點時會交由 Server 套用 Agent 地區。先前含明確地點的 Live smoke 與 Google Weather／Air Quality 雙來源也均成功。
 - 官方介面：[Weather current conditions](https://developers.google.com/maps/documentation/weather/current-conditions)、[Air Quality current conditions](https://developers.google.com/maps/documentation/air-quality/current-conditions)。
 
@@ -327,11 +336,15 @@ AI 指示不得自行虛構同行者、精確地點或沒有被使用者說出�
 
 ### `GET /api/app-voice/capability`
 
-提供 protocol v3、full-duplex、持久 Live session、Server VAD、session resumption、function calling、demo-only 狀態、session 時限與同意版本。
+提供 protocol v4、full-duplex、持久 Live session、Server VAD、session resumption、function calling、demo-only 狀態、session 時限與同意版本。v4 另回報 capability proxy v2、task protocol v1、guide protocol v1、task interaction 與 personal routine 支援、7 個最大模型工具與每次最多 8 項操作。
 
 ### `POST /api/app-voice/session`
 
-使用安裝 ID、Appwrite userId、同意版本、輸入模式與輸出模式申請一次性 ticket。短期記憶啟用時必須帶 `Authorization: Bearer <Appwrite JWT>`；Server 會以內網 Appwrite 驗證 JWT 與 userId 相同後才讀取該帳號的摘要。
+使用安裝 ID、Appwrite userId、同意版本、輸入模式、輸出模式與 Client protocol 申請一次性 ticket。Protocol v4 一律必須帶 `Authorization: Bearer <Appwrite JWT>`，Server 驗證 JWT 與 userId 相同後才綁定 proxy 與 task owner；v3 legacy 在過渡期保留舊行為。
+
+### `GET /api/app-voice/tasks` / `POST /api/app-voice/tasks/{task_ref}/{cancel|retry|input|dismiss|undo}`
+
+這些 owner-scoped API 一律驗證 Appwrite JWT。查詢 API 回傳 active、recent 或 all 的最近 20 項；所有修改 API 都以 `expected_revision` 防止舊畫面覆寫新狀態。
 
 ### `WSS /api/app-voice`
 
@@ -345,6 +358,11 @@ Client 可傳送：
 - PCM16 binary audio
 - `audio_end`
 - `action_result`
+- `task_cancel`
+- `task_retry`
+- `task_input`
+- `task_dismiss`
+- `task_undo`
 - `stop`
 
 Server 可回傳：
@@ -357,6 +375,11 @@ Server 可回傳：
 - `state`
 - `action_proposal`
 - `confirmation_required`
+- `confirmation_expired`
+- `task_snapshot`
+- `task_update`
+- `guide_update`
+- `permission_repair`
 - `audio`
 - `audio_chunk`
 - `audio_complete`
@@ -367,11 +390,37 @@ Server 可回傳：
 
 ### Gemini Live function call 安全閘道
 
+- Proxy 模式只暴露 `find_app_capabilities`、`run_app_capabilities`、`describe_current_screen`、`read_tasks`、`cancel_task`、`resolve_pending_interaction`、`close_voice_mode` 七個固定工具。
+- 執行前必須先搜尋能力；`capability_ref` 綁定 owner、session、catalog、權限、scope/revision 並於 120 秒過期。
+- `capabilities.json` v5 同時提供結構化的操作步驟、前置條件、限制與固定 workflow；說明模式不會發出可執行 ref。
+- action 標題、別名、完整 argument JSON Schema、風險、執行位置、可取消性與 Flutter metadata 都來自同一份 catalog；新增 action 不會改變模型看到的 7 個工具。
+- perform 搜尋只在用戶意圖夠明確且功能目前可用時發出 ref；模糊領域詞只回傳說明並要求追問。
+
+### Durable task 行為
+
+- 多項操作與 background capability 才建立 Mongo task batch；單一快速操作仍沿用 `action_proposal → action_result`。
+- 唯讀任務每帳號最多並行 3 項；寫入與 UI control 依原始順序串行，前置失敗後的寫入停在 `waiting_input`。
+- Server background worker 預設上限 4，以 lease 與 attempt 回收中斷的唯讀工作；不確定是否已送出的寫入不自動重做。
+- 等待 App 超過 10 分鐘轉 `expired`；確認 30 秒逾時轉 `waiting_input`；terminal task 7 天後由 TTL 清除。
+- 插話只停止播音，不取消 task。queued 可立即取消；running read 採 cooperative cancellation；已送出的寫入不可取消或自動復原。
+- 語音關閉後 task 仍留在 Server，不播音也不發 push；下次開啟透過 owner-scoped snapshot 恢復 UI。
+
 - 一般問候、「你是誰」與不需要操作 App 的問題直接回答，不呼叫工具。
 - 操作工具包含 `navigate_app`、`describe_current_screen`、`read_calendar`、`read_match_status`、`read_match_hub`、`read_self_profile`、`read_memories`、`add_memory`、個資／設定／貼文工具、`ask_public_ayue`、`ask_private_ayue`、`activate_visible_choice`、`list_contacts`、`open_chat`、`send_chat_message` 與相容用 `ask_matching_ayue`；所有 arguments 都由 schema 限定。
 - 所有 function arguments 仍必須通過現有 `validate_proposal`、scope、revision、圖片與發布狀態驗證；Gemini 不能指定 route、API、user ID 或檔案路徑。
 - 確認時 Gemini 只能呼叫 `confirm_pending_action`，Server 以自己保留的 pending action 比對口頭「確認／確定／confirm」；若模型誤重送原設定工具，Server 也不會產生第二個確認。委派型確認會送回原 domain 的 pending 狀態機。
 - function call ID、tool response 與 Flutter action ID 會去重；重連重放相同 call 時回傳已快取結果，不重複執行。
+
+## Catalog v5 體驗層
+
+- Gemini 仍只看到 protocol v4 的 7 個固定工具；新增能力是 catalog action、固定 workflow 或 task interaction，不增加模型 function 數。
+- `find_app_capabilities(mode=explain)` 可回傳導覽教練步驟，Flutter 會顯示可切換步驟的教學卡；有缺少權限時另顯示權限修復卡，只會帶使用者前往原本設定頁，不會自動授權。
+- `app.digest.query` 可並行整理已授權的配對、共同約會、今日行程與聯絡人狀態。`app.search` 只查詢請求中列出且當下已授權的 contacts、calendar、shared_dates、memory 或 matching 領域。
+- 固定 workflow 包含每日狀態檢查、貼文準備與發布、共同約會安排、個資更新。Server 先展開成既有 action，每個寫入仍經過原本權限、scope、revision、confirmation 與 idempotency 邊界。
+- `waiting_input`、`failed` 與 `expired` 任務可帶結構化 interaction card。使用者可重試、修改已允許的參數後重試，或結束任務；斷線後結果不明的寫入不允許重放。
+- 任務復原目前只開放 30 秒內的深色模式與流體玻璃設定，且只能使用一次；已傳送訊息、已發布貼文、行事曆與約會寫入不會自動復原。
+- 每台裝置最多儲存 8 個個人語音捷徑。只允許每日摘要、開啟配對中心、開啟行事曆、已授權 App 搜尋與記憶搜尋模板；不允許將傳訊息或發布等高風險寫入存成捷徑。
+- WebSocket 新增 `guide_update`、`permission_repair`、`task_retry`、`task_input`、`task_dismiss` 與 `task_undo`；REST 同步提供 owner-scoped retry/input/dismiss/undo endpoint。所有 task mutation 都支援 expected revision 檢查。
 
 ## 安全與額度限制
 
@@ -385,6 +434,7 @@ Server 可回傳：
 - 多把 Google API Key 不會增加同一 Google project 的總額度。
 - `VOICE_APP_DEMO_ONLY=on` 時，只允許設定於 `VOICE_APP_TEST_USER_IDS` 的帳號；名單為空時會拒絕所有 session。
 - `VOICE_APP_DEMO_ONLY=off` 時，測試帳號 allowlist 不生效；短期記憶啟用時仍須以有效 Appwrite JWT 證明 userId，且每帳號與全站額度限制仍然有效。
+- v4 operational metric 只記錄 routing mode、capability ID，搜尋排名、延遲、結果碼與 task stage；不記錄 query、arguments、owner ID 或逐字稿。
 - 目前本機 `Server/.env` 設為 `VOICE_APP_DEMO_ONLY=off`，因此暫時不限制測試帳號。
 
 ## 畢業專題測試帳號

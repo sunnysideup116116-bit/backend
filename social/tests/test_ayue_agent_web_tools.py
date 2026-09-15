@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 import requests
 
 from services.ayue_agent.contracts import AgentTurnContext, PublicAgentTurnContext, ToolCall
-from services.ayue_agent.pi.runtime import _public_sources
+from services.ayue_agent.pi.runtime import _public_sources, _tool_recovery_prompt
 from services.ayue_agent.pi.places_tools import _normalize_nearby
 from services.ayue_agent.pi.reply import failed_reply
 from services.ayue_agent.shared.web_guard import web_extract_urls_allowed
@@ -152,6 +152,33 @@ class AyueWebToolsTests(unittest.TestCase):
         self.assertIn("部分查詢結果", reply)
         self.assertIn("沒有建立或執行", reply)
         self.assertNotIn("不相關飲料文章", reply)
+
+    def test_places_failure_never_masquerades_as_a_complete_candidate_list(self):
+        reply = failed_reply("pi_step_limit", observations=[{
+            "status": "ok", "tool": "places.search_nearby", "result": {"places": [{
+                "name": "第一階段餐廳", "address_summary": "嘉義市",
+            }]},
+        }])
+        self.assertIn("部分地點資料", reply)
+        self.assertIn("後續搜尋未能可靠完成", reply)
+        self.assertNotIn("附近場所查詢已完成，可以先看看", reply)
+        self.assertNotIn("第一階段餐廳", reply)
+
+    def test_repeated_place_resolution_failure_forces_prose_recovery(self):
+        observations = [
+            {"status": "ok", "tool": "places.search_nearby", "error_code": None},
+            {"status": "failed", "tool": "places.search_nearby",
+             "error_code": "location_not_found"},
+            {"status": "failed", "tool": "places.search_nearby",
+             "error_code": "location_not_found"},
+        ]
+        prompt = _tool_recovery_prompt("places.search_nearby", observations)
+        self.assertIn("停止呼叫工具", prompt)
+        self.assertIn("不得把第一階段候選冒充成完整結果", prompt)
+        self.assertEqual(
+            _tool_recovery_prompt("web.search", observations),
+            "",
+        )
 
     def test_profile_location_is_coarse_and_safe(self):
         location = normalize_profile_location("高雄市", "鹽埕區")

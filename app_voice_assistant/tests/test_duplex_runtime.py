@@ -2,13 +2,20 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import mongomock
+
 from app_voice_assistant.duplex_runtime import _proposal_from_function, run_duplex_session
+from app_voice_assistant.capability_proxy import CapabilityRefSigner
+from app_voice_assistant.task_service import VoiceTaskService
 
 
-def message(*, tool_calls=None, content=None, cancellation=None, go_away=None):
+def message(
+    *, tool_calls=None, content=None, cancellation=None, go_away=None,
+    voice_activity=None,
+):
     return SimpleNamespace(
         go_away=go_away,
-        voice_activity=None,
+        voice_activity=voice_activity,
         server_content=content,
         tool_call=(
             SimpleNamespace(function_calls=tool_calls)
@@ -158,6 +165,989 @@ def test_duplex_confirmation_calls_the_app_once_and_returns_tool_result():
         })
         await task
         assert live.closed is True
+
+    asyncio.run(scenario())
+
+
+def test_proxy_auto_runs_one_verified_navigation_without_a_second_model_call():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        context = {
+            "scope": "global", "revision": 2,
+            "permissions": {"navigation": True},
+        }
+        task = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            initial_context=context, max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="find", name="find_app_capabilities",
+            args={"query": "打開行事曆", "mode": "perform"},
+        )]))
+        await wait_until(lambda: any(event.get("type") == "action_proposal" for event in events))
+        proposal = next(event for event in events if event.get("type") == "action_proposal")
+        assert proposal["intent"] == "app.navigate"
+        assert proposal["arguments"] == {"destination": "calendar"}
+        await socket.incoming.put({
+            "type": "websocket.receive",
+            "text": json.dumps({
+                "type": "action_result", "action_id": proposal["action_id"],
+                "success": True, "message": "已開啟行事曆。",
+            }),
+        })
+        await wait_until(lambda: any(item[0] == "find" for item in live.tool_responses))
+        assert next(item[2] for item in live.tool_responses if item[0] == "find")["status"] == "success"
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_proxy_auto_run_uses_trusted_match_read_defaults():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        context = {
+            "scope": "global", "revision": 2,
+            "permissions": {"match_read": True},
+        }
+        task = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            initial_context=context, max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="find-match", name="find_app_capabilities",
+            args={"query": "幫我查目前的配對進度", "mode": "perform"},
+        )]))
+        await wait_until(lambda: any(
+            event.get("type") == "action_proposal" for event in events
+        ))
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == "match.query"
+        assert proposal["arguments"] == {"view": "status"}
+        await socket.incoming.put({
+            "type": "websocket.receive",
+            "text": json.dumps({
+                "type": "action_result", "action_id": proposal["action_id"],
+                "success": True, "message": "配對進度 40%。",
+            }),
+        })
+        await wait_until(lambda: any(
+            item[0] == "find-match" for item in live.tool_responses
+        ))
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_proxy_new_match_confirms_once_then_queues_and_ignores_model_duplicate():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        db = mongomock.MongoClient().db
+        tasks = VoiceTaskService(db.batches, db.tasks, enabled=True)
+        context = {
+            "scope": "global", "revision": 1,
+            "permissions": {
+                "match_ayue": True, "match_read": True, "match_actions": True,
+            },
+        }
+        running = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            task_service=tasks, initial_context=context,
+            max_session_seconds=30, send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="find-new-match", name="find_app_capabilities",
+            args={"query": "幫我找新的配對", "mode": "perform"},
+        )]))
+        await wait_until(lambda: any(
+            item[0] == "find-new-match" for item in live.tool_responses
+        ))
+        response = next(
+            item[2] for item in live.tool_responses
+            if item[0] == "find-new-match"
+        )
+        assert response["status"] == "awaiting_confirmation"
+        assert response["spoken_prompt"] == "如果要繼續，請說「確認」。"
+        confirmation = next(
+            event for event in events
+            if event.get("type") == "confirmation_required"
+        )
+        assert confirmation["intent"] == "match.ayue_query"
+        assert confirmation["phrase"] == "確認開始配對"
+        assert not any(
+            event.get("type") == "action_proposal" for event in events
+        )
+        await socket.incoming.put({
+            "type": "websocket.receive",
+            "text": json.dumps({
+                "type": "confirmation_response",
+                "confirmation_id": confirmation["confirmation_id"],
+                "accepted": True,
+                "spoken_phrase": "確認開始配對",
+            }),
+        })
+        await wait_until(lambda: any(
+            event.get("type") == "action_proposal" for event in events
+        ))
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == "match.ayue_query"
+        assert proposal["arguments"] == {"question": "幫我找新的配對"}
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="duplicate-confirm", name="resolve_pending_interaction",
+            args={"action": "confirm", "spoken_phrase": "確認"},
+        )]))
+        await wait_until(lambda: any(
+            item[0] == "duplicate-confirm" for item in live.tool_responses
+        ))
+        duplicate = next(
+            item[2] for item in live.tool_responses
+            if item[0] == "duplicate-confirm"
+        )
+        assert duplicate["status"] == "already_confirmed"
+        assert sum(
+            event.get("type") == "action_proposal" for event in events
+        ) == 1
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await running
+
+    asyncio.run(scenario())
+
+
+def test_proxy_routes_the_models_shortened_new_match_phrase():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        db = mongomock.MongoClient().db
+        tasks = VoiceTaskService(db.batches, db.tasks, enabled=True)
+        context = {
+            "scope": "global", "revision": 1,
+            "permissions": {
+                "match_ayue": True, "match_read": True,
+                "match_actions": True,
+            },
+        }
+        running = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            task_service=tasks, initial_context=context,
+            max_session_seconds=30, send_event=lambda event: _append(events, event),
+        ))
+        transcript = SimpleNamespace(text="幫我找新的配對", finished=True)
+        await live.incoming.put(message(
+            voice_activity=SimpleNamespace(
+                voice_activity_type="VOICE_ACTIVITY_TYPE_ACTIVITY_START",
+            ),
+            content=SimpleNamespace(
+                interim_input_transcription=None,
+                input_transcription=transcript,
+                output_transcription=None,
+                interrupted=False,
+                model_turn=None,
+                turn_complete=False,
+            ),
+            tool_calls=[SimpleNamespace(
+                id="find-short-match", name="find_app_capabilities",
+                args={"query": "新的配對", "mode": "perform"},
+            )],
+        ))
+        await wait_until(lambda: any(
+            item[0] == "find-short-match" for item in live.tool_responses
+        ))
+        response = next(
+            item[2] for item in live.tool_responses
+            if item[0] == "find-short-match"
+        )
+        assert response["status"] == "awaiting_confirmation"
+        confirmation = next(
+            event for event in events
+            if event.get("type") == "confirmation_required"
+        )
+        assert confirmation["intent"] == "match.ayue_query"
+        assert confirmation["arguments"] == {"question": "新的配對"}
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await running
+
+    asyncio.run(scenario())
+
+
+def test_proxy_preserves_new_match_when_model_rewrites_it_as_progress():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        db = mongomock.MongoClient().db
+        tasks = VoiceTaskService(db.batches, db.tasks, enabled=True)
+        context = {
+            "scope": "global", "revision": 1,
+            "permissions": {
+                "match_ayue": True, "match_read": True,
+                "match_actions": True,
+            },
+        }
+        running = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            task_service=tasks, initial_context=context,
+            max_session_seconds=30, send_event=lambda event: _append(events, event),
+        ))
+        transcript = SimpleNamespace(text="新的配對", finished=True)
+        await live.incoming.put(message(
+            voice_activity=SimpleNamespace(
+                voice_activity_type="VOICE_ACTIVITY_TYPE_ACTIVITY_START",
+            ),
+            content=SimpleNamespace(
+                interim_input_transcription=None,
+                input_transcription=transcript,
+                output_transcription=None,
+                interrupted=False,
+                model_turn=None,
+                turn_complete=False,
+            ),
+            tool_calls=[SimpleNamespace(
+                id="rewritten-match", name="find_app_capabilities",
+                args={"query": "最新配對進度", "mode": "perform"},
+            )],
+        ))
+        await wait_until(lambda: any(
+            item[0] == "rewritten-match" for item in live.tool_responses
+        ))
+        response = next(
+            item[2] for item in live.tool_responses
+            if item[0] == "rewritten-match"
+        )
+        assert response["status"] == "awaiting_confirmation"
+        confirmation = next(
+            event for event in events
+            if event.get("type") == "confirmation_required"
+        )
+        assert confirmation["intent"] == "match.ayue_query"
+        assert confirmation["arguments"] == {"question": "新的配對"}
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await running
+
+    asyncio.run(scenario())
+
+
+def test_proxy_auto_opens_a_named_chat_with_the_resolved_contact():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        context = {
+            "scope": "global", "revision": 1,
+            "permissions": {"chat_list": True},
+        }
+        running = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            initial_context=context, max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="find-chat", name="find_app_capabilities",
+            args={"query": "開啟和小美的聊天室", "mode": "perform"},
+        )]))
+        await wait_until(lambda: any(
+            event.get("type") == "action_proposal" for event in events
+        ))
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == "chat.open"
+        assert proposal["arguments"] == {"contact_name": "小美"}
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await running
+
+    asyncio.run(scenario())
+
+
+def test_proxy_auto_queues_places_advice_and_returns_waiting_prompt():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        db = mongomock.MongoClient().db
+        tasks = VoiceTaskService(db.batches, db.tasks, enabled=True)
+        context = {
+            "scope": "global", "revision": 1,
+            "permissions": {"public_ayue": True, "places": True},
+        }
+        running = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            task_service=tasks, initial_context=context,
+            max_session_seconds=30, send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="find-places", name="find_app_capabilities",
+            args={"query": "高雄哪裡有好玩的", "mode": "perform"},
+        )]))
+        await wait_until(lambda: any(
+            item[0] == "find-places" for item in live.tool_responses
+        ))
+        response = next(
+            item[2] for item in live.tool_responses if item[0] == "find-places"
+        )
+        assert response["status"] == "queued"
+        assert response["spoken_prompt"] == "我找一下，稍等一下。"
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == "ayue.public_query"
+        assert proposal["arguments"] == {
+            "domain": "places", "question": "高雄哪裡有好玩的",
+        }
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await running
+
+    asyncio.run(scenario())
+
+
+def test_proxy_chat_content_read_waits_for_private_confirmation():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        db = mongomock.MongoClient().db
+        tasks = VoiceTaskService(db.batches, db.tasks, enabled=True)
+        context = {
+            "scope": "chat", "revision": 4,
+            "permissions": {
+                "chat_list": True, "chat_content": True,
+                "private_ayue": True, "screen_read": True,
+            },
+            "screen": {
+                "surface_id": "surface-1", "ready": True,
+                "selected_ref": "surface-1-4-1",
+                "available_actions": ["chat.open", "ayue.private_query"],
+                "items": [{
+                    "ref": "surface-1-4-1", "kind": "contact",
+                    "label": "小美",
+                    "actions": ["chat.open", "ayue.private_query"],
+                }],
+            },
+        }
+        running = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            task_service=tasks, initial_context=context,
+            max_session_seconds=30, send_event=lambda event: _append(events, event),
+        ))
+        transcript = SimpleNamespace(text="讀取裡面的內容", finished=True)
+        await live.incoming.put(message(
+            content=SimpleNamespace(
+                interim_input_transcription=None,
+                input_transcription=transcript,
+                output_transcription=None,
+                interrupted=False,
+                model_turn=None,
+                turn_complete=False,
+            ),
+            tool_calls=[SimpleNamespace(
+                id="read-chat", name="describe_current_screen", args={},
+            )],
+        ))
+        await wait_until(lambda: any(
+            item[0] == "read-chat" for item in live.tool_responses
+        ))
+        response = next(
+            item[2] for item in live.tool_responses if item[0] == "read-chat"
+        )
+        assert response["status"] == "confirmation_required"
+        assert "聊天內容" in response["spoken_prompt"]
+        assert "確認" in response["spoken_prompt"]
+        assert any(
+            event.get("type") == "confirmation_required"
+            and event.get("intent") == "ayue.private_query"
+            for event in events
+        )
+        assert not any(
+            event.get("type") == "action_proposal" for event in events
+        )
+        confirmation_transcript = SimpleNamespace(text="確認", finished=True)
+        await live.incoming.put(message(
+            voice_activity=SimpleNamespace(
+                voice_activity_type="VOICE_ACTIVITY_TYPE_ACTIVITY_START",
+            ),
+            content=SimpleNamespace(
+                interim_input_transcription=None,
+                input_transcription=confirmation_transcript,
+                output_transcription=None,
+                interrupted=False,
+                model_turn=None,
+                turn_complete=False,
+            ),
+            tool_calls=[SimpleNamespace(
+                id="confirm-chat-read", name="resolve_pending_interaction",
+                args={
+                    "action": "confirm",
+                    "spoken_phrase": "好的，正在讀取。",
+                },
+            )],
+        ))
+        await wait_until(lambda: any(
+            event.get("type") == "action_proposal" for event in events
+        ))
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == "ayue.private_query"
+        assert proposal["arguments"]["contact_name"] == "小美"
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await running
+
+    asyncio.run(scenario())
+
+
+def test_proxy_reroutes_match_progress_away_from_read_tasks():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        context = {
+            "scope": "global", "revision": 1,
+            "permissions": {"match_read": True},
+        }
+        task = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            initial_context=context, max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+        transcript = SimpleNamespace(text="幫我查目前的配對進度", finished=True)
+        await live.incoming.put(message(
+            content=SimpleNamespace(
+                interim_input_transcription=None,
+                input_transcription=transcript,
+                output_transcription=None,
+                interrupted=False,
+                model_turn=None,
+                turn_complete=False,
+            ),
+            tool_calls=[SimpleNamespace(
+                id="wrong-task-tool", name="read_tasks", args={"filter": "active"},
+            )],
+        ))
+        await wait_until(lambda: any(
+            event.get("type") == "action_proposal" for event in events
+        ))
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == "match.query"
+        assert proposal["arguments"] == {"view": "status"}
+        await socket.incoming.put({
+            "type": "websocket.receive",
+            "text": json.dumps({
+                "type": "action_result", "action_id": proposal["action_id"],
+                "success": True, "message": "配對進度 50%。",
+            }),
+        })
+        await wait_until(lambda: any(
+            item[0] == "wrong-task-tool" for item in live.tool_responses
+        ))
+        assert next(
+            item[2] for item in live.tool_responses
+            if item[0] == "wrong-task-tool"
+        )["status"] == "success"
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_proxy_multi_operation_creates_durable_task_updates():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        db = mongomock.MongoClient().db
+        tasks = VoiceTaskService(db.batches, db.tasks, enabled=True)
+        context = {
+            "scope": "global", "revision": 1,
+            "permissions": {"navigation": True, "chat_list": True},
+        }
+        signer = CapabilityRefSigner(b"secret")
+        task = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            task_service=tasks, initial_context=context,
+            max_session_seconds=30, send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="batch", name="run_app_capabilities",
+            args={"operations": [
+                {
+                    "operation_key": "open_chat",
+                    "capability_ref": signer.issue(
+                        "app.navigate", user_id="u1", session_id="s1", context=context,
+                    ),
+                    "arguments": {"destination": "chat"},
+                },
+                {
+                    "operation_key": "list_contacts",
+                    "capability_ref": signer.issue(
+                        "contacts.query", user_id="u1", session_id="s1", context=context,
+                    ),
+                    "arguments": {}, "depends_on": ["open_chat"],
+                },
+            ]},
+        )]))
+        await wait_until(lambda: any(item[0] == "batch" for item in live.tool_responses))
+        response = next(item[2] for item in live.tool_responses if item[0] == "batch")
+        assert response["status"] == "queued"
+        assert response["spoken_prompt"] == "我找一下，稍等一下。"
+        assert len(response["tasks"]) == 2
+        await wait_until(lambda: any(event.get("type") == "action_proposal" for event in events))
+        first = next(event for event in events if event.get("type") == "action_proposal")
+        assert first["task_id"]
+        await socket.incoming.put({
+            "type": "websocket.receive", "text": json.dumps({
+                "type": "action_result", "action_id": first["action_id"],
+                "success": True, "message": "已開啟聊天。",
+            }),
+        })
+        await wait_until(lambda: len([
+            event for event in events if event.get("type") == "action_proposal"
+        ]) == 2)
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_proxy_explain_pushes_guide_and_permission_repair_cards():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            initial_context={
+                "scope": "global", "revision": 1,
+                "permissions": {"status_read": True},
+            },
+            max_session_seconds=30, send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="help", name="find_app_capabilities",
+            args={"query": "貼文怎麼發布", "mode": "explain"},
+        )]))
+        await wait_until(lambda: any(item[0] == "help" for item in live.tool_responses))
+        assert any(event.get("type") == "guide_update" for event in events)
+        repair = next(
+            event for event in events if event.get("type") == "permission_repair"
+        )
+        assert repair["repair"]["destination"] == "voice_settings"
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_proxy_fixed_profile_workflow_expands_before_task_execution():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        db = mongomock.MongoClient().db
+        tasks = VoiceTaskService(db.batches, db.tasks, enabled=True)
+        context = {
+            "scope": "global", "revision": 1,
+            "permissions": {"profile": True},
+        }
+        signer = CapabilityRefSigner(b"secret")
+        running = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            task_service=tasks, initial_context=context,
+            max_session_seconds=30, send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="profile-workflow", name="run_app_capabilities",
+            args={"operations": [{
+                "operation_key": "profile",
+                "capability_ref": signer.issue(
+                    "workflow.update_profile",
+                    user_id="u1", session_id="s1", context=context,
+                ),
+                "arguments": {"changes": {"age": 25}},
+            }]},
+        )]))
+        await wait_until(lambda: any(
+            item[0] == "profile-workflow" for item in live.tool_responses
+        ))
+        response = next(
+            item[2] for item in live.tool_responses
+            if item[0] == "profile-workflow"
+        )
+        assert response["status"] == "queued"
+        assert [item["capability_id"] for item in response["tasks"]] == [
+            "profile.patch", "profile.request_commit",
+        ]
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == "profile.patch"
+        assert proposal["arguments"] == {"changes": {"age": 25}}
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await running
+
+    asyncio.run(scenario())
+
+
+def test_post_workflow_can_queue_publish_before_photos_make_draft_ready():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        db = mongomock.MongoClient().db
+        tasks = VoiceTaskService(db.batches, db.tasks, enabled=True)
+        context = {
+            "scope": "global", "revision": 1, "can_publish": False,
+            "permissions": {
+                "post_draft": True, "gallery": True, "post_publish": True,
+            },
+        }
+        signer = CapabilityRefSigner(b"secret")
+        running = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            task_service=tasks, initial_context=context,
+            max_session_seconds=30, send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="post-workflow", name="run_app_capabilities",
+            args={"operations": [{
+                "operation_key": "post",
+                "capability_ref": signer.issue(
+                    "workflow.prepare_post",
+                    user_id="u1", session_id="s1", context=context,
+                ),
+                "arguments": {"caption": "今天很開心", "count": 2},
+            }]},
+        )]))
+        await wait_until(lambda: any(
+            item[0] == "post-workflow" for item in live.tool_responses
+        ))
+        response = next(
+            item[2] for item in live.tool_responses if item[0] == "post-workflow"
+        )
+        assert response["status"] == "queued"
+        assert [item["capability_id"] for item in response["tasks"]] == [
+            "post.open_draft", "post.select_recent_photos", "post.request_publish",
+        ]
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await running
+
+    asyncio.run(scenario())
+
+
+def test_confirmed_durable_write_returns_queued_before_device_result():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        db = mongomock.MongoClient().db
+        tasks = VoiceTaskService(db.batches, db.tasks, enabled=True)
+        context = {
+            "scope": "global", "revision": 1,
+            "permissions": {"settings": True},
+        }
+        signer = CapabilityRefSigner(b"secret")
+        capability_ref = signer.issue(
+            "settings.set", user_id="u1", session_id="s1", context=context,
+        )
+        running = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            task_service=tasks, initial_context=context,
+            max_session_seconds=30, send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="write-batch", name="run_app_capabilities",
+            args={"operations": [
+                {
+                    "operation_key": "notifications",
+                    "capability_ref": capability_ref,
+                    "arguments": {"key": "notifications.global", "enabled": False},
+                },
+                {
+                    "operation_key": "location",
+                    "capability_ref": capability_ref,
+                    "arguments": {"key": "location.enabled", "enabled": False},
+                },
+            ]},
+        )]))
+        await wait_until(lambda: any(item[0] == "write-batch" for item in live.tool_responses))
+        assert next(
+            item[2] for item in live.tool_responses if item[0] == "write-batch"
+        )["status"] == "awaiting_confirmation"
+
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="confirm-task", name="resolve_pending_interaction",
+            args={"action": "confirm", "spoken_phrase": "確認"},
+        )]))
+        await wait_until(lambda: any(item[0] == "confirm-task" for item in live.tool_responses))
+        response = next(
+            item[2] for item in live.tool_responses if item[0] == "confirm-task"
+        )
+        assert response["status"] == "queued"
+        assert response["task"]["status"] == "waiting_device"
+        assert any(event.get("type") == "action_proposal" for event in events)
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await running
+
+    asyncio.run(scenario())
+
+
+def test_proxy_runs_at_most_three_independent_reads_per_user():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        db = mongomock.MongoClient().db
+        tasks = VoiceTaskService(
+            db.batches, db.tasks, enabled=True, per_user_concurrency=3,
+        )
+        context = {
+            "scope": "global", "revision": 1,
+            "permissions": {"chat_list": True},
+        }
+        signer = CapabilityRefSigner(b"secret")
+        capability_ref = signer.issue(
+            "contacts.query", user_id="u1", session_id="s1", context=context,
+        )
+        task = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            task_service=tasks, initial_context=context,
+            max_session_seconds=30, send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="parallel", name="run_app_capabilities",
+            args={"operations": [
+                {
+                    "operation_key": f"read-{index}",
+                    "capability_ref": capability_ref,
+                    "arguments": {},
+                }
+                for index in range(4)
+            ]},
+        )]))
+        await wait_until(lambda: any(item[0] == "parallel" for item in live.tool_responses))
+        await wait_until(lambda: len([
+            event for event in events if event.get("type") == "action_proposal"
+        ]) == 3)
+        proposals = [
+            event for event in events if event.get("type") == "action_proposal"
+        ]
+        await socket.incoming.put({
+            "type": "websocket.receive", "text": json.dumps({
+                "type": "action_result", "action_id": proposals[0]["action_id"],
+                "success": True, "message": "已讀取。",
+            }),
+        })
+        await wait_until(lambda: len([
+            event for event in events if event.get("type") == "action_proposal"
+        ]) == 4)
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_serialized_operations_resume_across_batches_without_overlap():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        db = mongomock.MongoClient().db
+        tasks = VoiceTaskService(db.batches, db.tasks, enabled=True)
+        context = {
+            "scope": "global", "revision": 1,
+            "permissions": {"navigation": True},
+        }
+        signer = CapabilityRefSigner(b"secret")
+        capability_ref = signer.issue(
+            "app.navigate", user_id="u1", session_id="s1", context=context,
+        )
+        running = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            task_service=tasks, initial_context=context,
+            max_session_seconds=30, send_event=lambda event: _append(events, event),
+        ))
+
+        def operations(prefix):
+            return [
+                {
+                    "operation_key": f"{prefix}-{index}",
+                    "capability_ref": capability_ref,
+                    "arguments": {"destination": destination},
+                }
+                for index, destination in enumerate(("chat", "calendar"), start=1)
+            ]
+
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="batch-one", name="run_app_capabilities",
+            args={"operations": operations("one")},
+        )]))
+        await wait_until(lambda: any(item[0] == "batch-one" for item in live.tool_responses))
+        await wait_until(lambda: len([
+            event for event in events if event.get("type") == "action_proposal"
+        ]) == 1)
+
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="batch-two", name="run_app_capabilities",
+            args={"operations": operations("two")},
+        )]))
+        await wait_until(lambda: any(item[0] == "batch-two" for item in live.tool_responses))
+        proposals = [
+            event for event in events if event.get("type") == "action_proposal"
+        ]
+        assert len(proposals) == 1
+        await live.incoming.put(message(content=SimpleNamespace(
+            interim_input_transcription=None,
+            input_transcription=None,
+            interrupted=True,
+            output_transcription=None,
+            model_turn=None,
+            turn_complete=False,
+        )))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="tasks-after-interrupt", name="read_tasks",
+            args={"filter": "active"},
+        )]))
+        await wait_until(lambda: any(
+            item[0] == "tasks-after-interrupt" for item in live.tool_responses
+        ))
+        first_task = tasks.get_task("u1", proposals[0]["task_id"])
+        assert first_task["status"] == "waiting_device"
+
+        for expected_count in (2, 3):
+            await socket.incoming.put({
+                "type": "websocket.receive", "text": json.dumps({
+                    "type": "action_result",
+                    "action_id": proposals[-1]["action_id"],
+                    "success": True, "message": "已開啟。",
+                }),
+            })
+            await wait_until(lambda: len([
+                event for event in events if event.get("type") == "action_proposal"
+            ]) == expected_count)
+            proposals = [
+                event for event in events if event.get("type") == "action_proposal"
+            ]
+
+        assert proposals[0]["batch_id"] == proposals[1]["batch_id"]
+        assert proposals[2]["batch_id"] != proposals[0]["batch_id"]
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await running
+
+    asyncio.run(scenario())
+
+
+def test_active_session_watches_external_task_completion_without_reading_old_results():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        db = mongomock.MongoClient().db
+        tasks = VoiceTaskService(db.batches, db.tasks, enabled=True)
+
+        def task_operation(key):
+            return {
+                "operation_key": key, "depends_on": [], "arguments": {},
+                "action": {
+                    "capability_id": "contacts.query", "title": key,
+                    "execution_kind": "inline_device", "risk": "read",
+                    "cancellable": True,
+                },
+            }
+
+        old = tasks.create_batch(
+            user_id="u1", session_id="old", operations=[task_operation("old")],
+        ).tasks[0]
+        tasks.set_action(old["task_id"], action_id="old-action")
+        tasks.complete_action("u1", "old-action", success=True, message="old result")
+
+        running = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="identity", user_id="u1", voice_session_id="s1",
+            capability_secret=b"secret", routing_mode="proxy",
+            task_service=tasks,
+            initial_context={"scope": "global", "permissions": {"chat_list": True}},
+            max_session_seconds=30, send_event=lambda event: _append(events, event),
+        ))
+        await wait_until(lambda: any(
+            event.get("type") == "task_snapshot" for event in events
+        ))
+        assert not any("[APP_VOICE_TASK_RESULT]" in item for item in live.text)
+
+        fresh = tasks.create_batch(
+            user_id="u1", session_id="external",
+            operations=[task_operation("fresh")],
+        ).tasks[0]
+        tasks.set_action(fresh["task_id"], action_id="fresh-action")
+        tasks.complete_action(
+            "u1", "fresh-action", success=True, message="fresh result",
+        )
+        fresh_two = tasks.create_batch(
+            user_id="u1", session_id="external",
+            operations=[task_operation("fresh-two")],
+        ).tasks[0]
+        tasks.set_action(fresh_two["task_id"], action_id="fresh-action-two")
+        tasks.complete_action(
+            "u1", "fresh-action-two", success=True, message="fresh result two",
+        )
+        await wait_until(
+            lambda: any("[APP_VOICE_TASK_RESULT]" in item for item in live.text),
+            timeout=2,
+        )
+        task_results = [
+            item for item in live.text if "[APP_VOICE_TASK_RESULT]" in item
+        ]
+        assert len(task_results) == 1
+        assert fresh["task_ref"] in task_results[0]
+        assert fresh_two["task_ref"] in task_results[0]
+        assert old["task_ref"] not in task_results[0]
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await running
 
     asyncio.run(scenario())
 
@@ -1060,6 +2050,214 @@ def test_duplex_permission_denies_matching_and_reports_its_own_access():
         await socket.incoming.put({
             "type": "websocket.receive",
             "text": json.dumps({"type": "stop"}),
+        })
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_template_direct_navigation_skips_capability_search():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket,
+            provider=FakeProvider(live),
+            limiter=FakeLimiter(),
+            identity="test",
+            user_id="u1",
+            voice_session_id="s1",
+            initial_context={
+                "scope": "global",
+                "revision": 2,
+                "permissions": {"navigation": True},
+            },
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+            routing_mode="template",
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="template-navigation",
+            name="navigate_app",
+            args={"destination": "calendar"},
+        )]))
+        await wait_until(lambda: any(
+            event.get("type") == "action_proposal" for event in events
+        ))
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == "app.navigate"
+        assert proposal["arguments"] == {"destination": "calendar"}
+        assert not any(
+            response[1] == "find_app_capabilities"
+            for response in live.tool_responses
+        )
+
+        await socket.incoming.put({
+            "type": "websocket.receive",
+            "text": json.dumps({
+                "type": "action_result",
+                "action_id": proposal["action_id"],
+                "success": True,
+                "message": "已開啟行事曆。",
+            }),
+        })
+        await wait_until(lambda: any(
+            response[0] == "template-navigation"
+            and response[2].get("status") == "success"
+            for response in live.tool_responses
+        ))
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_template_fast_path_dispatches_when_live_omits_a_function_call():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket,
+            provider=FakeProvider(live),
+            limiter=FakeLimiter(),
+            identity="test",
+            user_id="u1",
+            voice_session_id="s1",
+            initial_context={
+                "scope": "global",
+                "revision": 2,
+                "permissions": {"navigation": True},
+            },
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+            routing_mode="template",
+        ))
+        await live.incoming.put(message(content=SimpleNamespace(
+            interim_input_transcription=None,
+            input_transcription=SimpleNamespace(
+                text="幫我開聊天室", finished=True,
+            ),
+            interrupted=False,
+            output_transcription=None,
+            model_turn=None,
+            turn_complete=False,
+        )))
+        await wait_until(lambda: any(
+            event.get("type") == "action_proposal" for event in events
+        ))
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == "app.navigate"
+        assert proposal["arguments"] == {"destination": "chat"}
+        assert live.tool_responses == []
+
+        await socket.incoming.put({
+            "type": "websocket.receive",
+            "text": json.dumps({
+                "type": "action_result",
+                "action_id": proposal["action_id"],
+                "success": True,
+                "message": "聊天列表已開啟。",
+            }),
+        })
+        await live.incoming.put(message(content=SimpleNamespace(
+            interim_input_transcription=None,
+            input_transcription=None,
+            interrupted=False,
+            output_transcription=None,
+            model_turn=None,
+            turn_complete=True,
+        )))
+        await wait_until(lambda: any(
+            "APP_VOICE_DIRECT_RESULT" in text for text in live.text
+        ))
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_template_new_match_never_claims_started_before_confirmation():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket,
+            provider=FakeProvider(live),
+            limiter=FakeLimiter(),
+            identity="test",
+            user_id="u1",
+            voice_session_id="s1",
+            initial_context={
+                "scope": "global",
+                "revision": 2,
+                "permissions": {
+                    "match_ayue": True,
+                    "match_read": True,
+                    "match_actions": True,
+                },
+            },
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+            routing_mode="template",
+        ))
+        await live.incoming.put(message(content=SimpleNamespace(
+            interim_input_transcription=None,
+            input_transcription=SimpleNamespace(
+                text="幫我找新的配對", finished=True,
+            ),
+            interrupted=False,
+            output_transcription=None,
+            model_turn=None,
+            turn_complete=False,
+        )))
+        await wait_until(lambda: any(
+            event.get("type") == "confirmation_required" for event in events
+        ))
+        confirmation = next(
+            event for event in events
+            if event.get("type") == "confirmation_required"
+        )
+        assert confirmation["intent"] == "match.ayue_query"
+        assert confirmation["spoken_prompt"] == "如果要繼續，請說「確認」。"
+        assert not any(
+            event.get("type") == "action_proposal" for event in events
+        )
+        assert not any("已開始" in text or "actively looking" in text for text in live.text)
+
+        await socket.incoming.put({
+            "type": "websocket.receive",
+            "text": json.dumps({
+                "type": "confirmation_response",
+                "confirmation_id": confirmation["confirmation_id"],
+                "accepted": True,
+                "spoken_phrase": "確認",
+            }),
+        })
+        await wait_until(lambda: any(
+            event.get("type") == "action_proposal" for event in events
+        ))
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == "match.ayue_query"
+        await socket.incoming.put({
+            "type": "websocket.receive",
+            "text": json.dumps({
+                "type": "action_result",
+                "action_id": proposal["action_id"],
+                "success": True,
+                "message": "已開始尋找新的配對對象。",
+            }),
+        })
+        await socket.incoming.put({
+            "type": "websocket.disconnect",
         })
         await task
 

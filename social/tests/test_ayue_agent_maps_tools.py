@@ -40,6 +40,31 @@ class AyueMapsToolsTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.data["origin_kind"], "saved_profile")
         self.assertEqual(nearby.call_args.args[0], "高雄市鹽埕區")
+        candidate = result.private_data["place_anchor_candidates"][0]
+        self.assertEqual(candidate["latitude"], 22.6)
+        self.assertEqual(candidate["longitude"], 120.2)
+        self.assertNotIn("latitude", result.data["places"][0])
+        self.assertNotIn("longitude", result.data["places"][0])
+
+    def test_nearby_uses_runtime_trusted_anchor_without_regeocoding(self):
+        ctx = AgentTurnContext(user_id="owner", room_id="room", message="找那間附近的飲料店")
+        object.__setattr__(ctx, "_pi_trusted_place_anchor", {
+            "requested_anchor": "鳴笛中式餐廳嘉義分店",
+            "label": "鳴笛中式餐廳嘉義分店 嘉義市中山路528號",
+            "latitude": 23.479,
+            "longitude": 120.449,
+        })
+        with patch("services.ayue_agent.tools.google_place_cards_enabled", return_value=True), \
+             patch("services.ayue_agent.tools.nominatim_search",
+                   side_effect=AssertionError("must not re-geocode a trusted anchor")), \
+             patch("services.ayue_agent.tools.search_nearby_places", return_value=[]) as google:
+            result = execute_tool(ToolCall(name="places.search_nearby", arguments={
+                "anchor": "鳴笛中式餐廳嘉義分店", "categories": ["cafe"],
+                "cuisine": "飲料店", "limit": 5,
+            }), ctx)
+        self.assertTrue(result.ok)
+        self.assertEqual(google.call_args.args[1:3], (23.479, 120.449))
+        self.assertTrue(google.call_args.kwargs["include_private_coordinates"])
 
     def test_short_district_anchor_is_expanded_with_saved_city(self):
         ctx = AgentTurnContext(

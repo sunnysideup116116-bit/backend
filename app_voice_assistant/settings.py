@@ -37,6 +37,11 @@ class AppVoiceSettings:
     global_concurrency: int
     tts_per_user_per_day: int
     test_user_ids: frozenset[str]
+    tool_routing_mode: str
+    proxy_user_ids: frozenset[str]
+    tasks_enabled: bool
+    task_workers: int
+    task_per_user_concurrency: int
 
     @classmethod
     def from_env(
@@ -61,6 +66,14 @@ class AppVoiceSettings:
             for value in env.get("VOICE_APP_TEST_USER_IDS", "").split(",")
             if value.strip()
         )
+        proxy_ids = frozenset(
+            value.strip()
+            for value in env.get("VOICE_APP_PROXY_USER_IDS", "").split(",")
+            if value.strip()
+        )
+        routing_mode = str(env.get("VOICE_APP_TOOL_ROUTING_MODE", "legacy")).strip().lower()
+        if routing_mode not in {"legacy", "canary", "proxy", "template"}:
+            routing_mode = "legacy"
         memory_enabled = _enabled(env.get("VOICE_MEMORY_ENABLED"), False)
         default_consent_version = (
             "demo-free-gemini-live-ollama-memory-v1"
@@ -101,6 +114,13 @@ class AppVoiceSettings:
             global_concurrency=bounded("VOICE_APP_GLOBAL_CONCURRENCY", 4, 1, 1000),
             tts_per_user_per_day=bounded("VOICE_APP_TTS_PER_DAY", 60, 1, 1000),
             test_user_ids=test_ids,
+            tool_routing_mode=routing_mode,
+            proxy_user_ids=proxy_ids,
+            tasks_enabled=_enabled(env.get("VOICE_APP_TASKS_ENABLED"), False),
+            task_workers=bounded("VOICE_APP_TASK_WORKERS", 4, 1, 16),
+            task_per_user_concurrency=bounded(
+                "VOICE_APP_TASK_PER_USER_CONCURRENCY", 3, 1, 8,
+            ),
         )
 
     def allows_user(self, user_id: str) -> bool:
@@ -110,3 +130,12 @@ class AppVoiceSettings:
         if not self.demo_only:
             return True
         return cleaned in self.test_user_ids
+
+    def routing_mode_for_user(self, user_id: str) -> str:
+        if self.tool_routing_mode in {"proxy", "template"}:
+            return self.tool_routing_mode
+        if self.tool_routing_mode == "canary" and (
+            "*" in self.proxy_user_ids or str(user_id or "").strip() in self.proxy_user_ids
+        ):
+            return "proxy"
+        return "legacy"

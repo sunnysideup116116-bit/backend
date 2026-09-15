@@ -6,9 +6,11 @@ existing domain services instead of owning matching, calendar, or memory data.
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, time as time_value, timedelta, timezone
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from database import matches_coll, profiles_coll
 from services.calendar_service import (
@@ -847,6 +849,71 @@ def _safe_place_failure_subject(tool_name: str, arguments: dict[str, Any]) -> st
     return subject
 
 
+def _private_place_coordinates(place: dict[str, Any]) -> tuple[float, float] | None:
+    latitude = place.get("_latitude")
+    longitude = place.get("_longitude")
+    if latitude is None or longitude is None:
+        try:
+            query = parse_qs(urlsplit(str(place.get("map_url") or "")).query)
+            latitude = (query.get("mlat") or [None])[0]
+            longitude = (query.get("mlon") or [None])[0]
+        except (TypeError, ValueError):
+            return None
+    try:
+        lat, lon = float(latitude), float(longitude)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(lat) or not math.isfinite(lon):
+        return None
+    if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+        return None
+    return lat, lon
+
+
+def _place_anchor_private_data(places: list[dict[str, Any]]) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    for place in places[:8]:
+        if not isinstance(place, dict):
+            continue
+        coordinates = _private_place_coordinates(place)
+        name = str(place.get("name") or "").strip()[:140]
+        if not coordinates or not name:
+            continue
+        latitude, longitude = coordinates
+        candidates.append({
+            "name": name,
+            "address_summary": str(place.get("address_summary") or "").strip()[:180],
+            "provider": str(place.get("provider") or "openstreetmap")[:32],
+            "place_id": str(place.get("place_id") or "")[:180],
+            "map_url": str(place.get("map_url") or "")[:1000],
+            "latitude": latitude,
+            "longitude": longitude,
+        })
+    return {"place_anchor_candidates": candidates} if candidates else {}
+
+
+def _trusted_place_anchor(ctx: AgentTurnContext, requested_anchor: str) -> dict[str, Any] | None:
+    raw = getattr(ctx, "_pi_trusted_place_anchor", None)
+    if not isinstance(raw, dict) or str(raw.get("requested_anchor") or "") != requested_anchor:
+        return None
+    try:
+        latitude = float(raw["latitude"])
+        longitude = float(raw["longitude"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not math.isfinite(latitude) or not math.isfinite(longitude):
+        return None
+    if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
+        return None
+    return {
+        "label": str(raw.get("label") or requested_anchor).strip()[:160] or requested_anchor,
+        "lat": latitude,
+        "lon": longitude,
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+
 def _place_failure_observation(
     tool_name: str, arguments: dict[str, Any], error_code: str | None,
 ) -> dict[str, Any] | None:
@@ -881,6 +948,7 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
     if not anchor:
         return ToolResult(ok=False, error_code="location_required", user_message="你想從哪個地點開始找？")
     anchor = _canonical_place_anchor(ctx, anchor)
+    trusted_anchor = _trusted_place_anchor(ctx, anchor)
     categories = [str(item) for item in (arguments.get("categories") or [])]
     cuisine = str(arguments.get("cuisine") or "").strip()
     safe_limit = int(arguments.get("limit") or 3)
@@ -922,12 +990,13 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
     # take away the existing OpenStreetMap place discovery capability.
     if google_place_cards_enabled():
         try:
-            point = device_location or nominatim_search(anchor)
+            point = trusted_anchor or device_location or nominatim_search(anchor)
             google_places = search_nearby_places(
                 str(point.get("label") or anchor), float(point["lat"]), float(point["lon"]), categories,
                 limit=provider_limit, cuisine=cuisine,
                 radius_m=int(arguments.get("radius_m") or 1500),
                 enrichments=arguments.get("enrichments") or [],
+                include_private_coordinates=True,
             )
             # Keep Google's canonical business name inside the provider adapter;
             # only the bounded public label crosses the typed tool boundary.
@@ -957,14 +1026,25 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
             data = nearby_places(
                 anchor, categories,
                 radius_m=int(arguments.get("radius_m") or 1500), limit=provider_limit,
-                latitude=(device_location or {}).get("latitude"),
-                longitude=(device_location or {}).get("longitude"),
+                latitude=(trusted_anchor or device_location or {}).get("latitude"),
+                longitude=(trusted_anchor or device_location or {}).get("longitude"),
             )
         except MapClientError as exc:
             return ToolResult(ok=False, error_code=exc.code, user_message="")
         data = {**data, "places": _without_presented(list(data.get("places") or []))}
+    raw_places = [dict(place) for place in (data.get("places") or []) if isinstance(place, dict)]
+    private_data = _place_anchor_private_data(raw_places)
+    public_places = [
+        {
+            key: value
+            for key, value in place.items()
+            if key not in {"_latitude", "_longitude", "provider_name"}
+        }
+        for place in raw_places
+    ]
     return ToolResult(ok=True, data={
         **data,
+        "places": public_places,
         "origin_kind": origin_kind,
         "requested_categories": categories[:3],
         "requested_cuisine": cuisine[:30],
@@ -973,7 +1053,7 @@ def _places_nearby(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResu
         "ordering": str(arguments.get("ordering") or "distance"),
         "exclude_previously_presented": exclude_previously_presented,
         "excluded_presented_count": len(excluded_identities),
-    })
+    }, private_data=private_data)
 
 
 def _places_distance(ctx: AgentTurnContext, arguments: dict[str, Any]) -> ToolResult:
