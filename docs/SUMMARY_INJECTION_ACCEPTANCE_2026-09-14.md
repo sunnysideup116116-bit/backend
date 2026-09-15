@@ -1,4 +1,6 @@
-# Conversation summary injection: canary acceptance
+# Conversation summary injection: canary acceptance (historical)
+
+> **Superseded current status (2026-09-15):** The canary below was a historical Public V3/DAG acceptance. Summary v5 is now deployed on Public Pi with an approved controlled all-account rollout, mixed-ID support, bounded review repair, and 46/46 profile eligibility. See [global stability acceptance](../../artifacts/summary-global-stability-2026-09-15.md) and [current progress notes](PROGRESS_REPORT_CONTEXT_MEMORY_EVENT_2026-09-15.md). The historical measurements and claims below remain unchanged as evidence for that date only.
 
 ## Verified outcome
 

@@ -1,8 +1,43 @@
-> **架構更新註記**：本文保留其 domain／歷史內容；其中公開 V3 Planner、Scheduler、subagent 或 DAG 的描述已被 Pi 正式架構取代。\n\n# Event-Driven Proactive Matchmaker Guide
+> **架構更新註記**：本文保留其 domain／歷史內容；其中公開 V3 Planner、Scheduler、subagent 或 DAG 的描述已被 Pi 正式架構取代。
+>
+# Event-Driven Proactive Matchmaker Guide
 
 本文件是「事件驅動主動媒人」功能的完整技術與操作指南。閱讀者不需要先理解
 `matchmaker_new`；正式實作已整合在 `social` 與
 `matchmaker_agent`。
+
+## Current implementation and acceptance (2026-09-15)
+
+The current Kaohsiung pilot discovers public events for the next 30 days across
+five categories: market, music, sports, festival, and food. The embedded Event
+worker runs through the normal `start_all.sh` lifecycle and uses persistent
+checkpoints, leases, retries, and incremental inventory refresh. It does not
+clear and rebuild the complete Event inventory on every run.
+
+The latest recorded weekly cycle is Run 19. It searched 63 candidates, wrote 10
+validated events, and left 29 active events after reconciliation (6 market, 6
+music, 5 sports, 6 festival, 6 food). Relevance readiness completed with 84
+`EVENT_RELEVANCE` links. Thirty-six users were scanned: 12 draft proposals were
+created, 14 were already covered by an activity proposal, 10 had no suitable
+candidate, and 0 users failed. The cycle outcome was `partial` solely because
+three source URLs were unavailable. This is bounded partial failure handling,
+not a claim that all sources or all users always succeed.
+
+For the presentation flow, use:
+
+```text
+Weekly Event Discovery
+  -> Event Validation + Event/Concept Graph
+  -> Event Relevance and Avoidance Analysis
+  -> Fair, Batched Opportunity Scan (up to 30 users / up to 3 proposals per batch)
+  -> Canonical Mongo Proposal
+  -> User 1 consent -> User 2 pending invitation
+  -> User 2 consent -> Create or Reuse Pair Chat
+```
+
+The proposal is an opportunity, not an automatic connection. Neo4j identifies
+shared event opportunities; MongoDB owns proposal state, consent, cooldowns,
+history, and the event snapshot. The final decision always belongs to the users.
 
 ## 1. 功能目標
 
@@ -54,7 +89,7 @@
 
 ```mermaid
 flowchart TD
-    S["Weekly Scheduler"] --> Z["Reset Event Inventory"]
+    S["Weekly Scheduler"] --> Z["Incremental Event Inventory Refresh"]
     Z --> W["Tavily Search by Category"]
     M0["Manual Steps 1 / 2 / 3"] --> Z
     W --> X["Bounded Web Extraction"]

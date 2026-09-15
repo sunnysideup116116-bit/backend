@@ -28,9 +28,9 @@ Read-only reproduction found the same cause in all three failed `source_unavaila
 
 ## Controlled deployment and recovery
 
-Work is isolated from concurrent uncommitted Pi/voice work. Do not load unfinished teammate changes merely to restart the summary worker. Confirm the shared deployment checkout is ready, integrate without overwriting it, and restart **only through `Server/start_all.sh`**. Existing explicit approval intentionally becomes invalid for the new fingerprint until renewed; do not patch approval records by hand or add a demo bypass.
+Work was isolated from concurrent uncommitted Pi/voice work. The repair was merged into local `main` and deployed through `Server/start_all.sh`; the matching approval is now active. Do not patch approval records by hand or add a demo bypass.
 
-From the deployed Server root, after restart and health checks:
+The deployment and recovery record is [global stability acceptance](../artifacts/summary-global-stability-2026-09-15.md). The matching commands, shown for reproducibility, were:
 
 ```bash
 .local-venv/social/bin/python scripts/manage_summary_rollout.py approve-benchmark --report validation/summary-mixed-id-benchmark-2026-09-15.json
@@ -43,4 +43,9 @@ Recovery is dry-run first and selects only current-policy failed `source_unavail
 
 After recovery, verify the target room's revision/watermark advances past the system event, pending count falls, and authenticated status reports usable summary. Verify a subsequent ordinary turn schedules further maintenance; preserve any genuine review/failure outcome rather than forcing it through. Complete a public Pi recall check with facts absent from the raw recent-message window. Approval and aggregate quality remain separate: 50 synthetic passes are not 50 live user samples.
 
-**Deployment/recovery not yet performed at this implementation checkpoint.** The original jobs and approval record were left unchanged pending restart coordination with concurrent Pi/voice work. This document records a verified code repair, not completed all-account production acceptance.
+## 2026-09-15 deployed result
+
+- New fingerprint approval is active with `approval_valid=true`; 46/46 current profiles are eligible and a new owner ID resolves through the wildcard rule.
+- The three confirmed `source_unavailable` mixed-ID jobs were recovered; no `source_unavailable` job remains. The target room advanced from revision 17 to 20 during recovery; later review recovery advanced it to revision 26 with `summary_available=true` and `injection_enabled=true`.
+- The mixed-ID live acceptance inserted only labelled synthetic fixtures in a separate demo room. The worker loaded all 11 mixed-ID records, excluded the system-event content, and reached `queued → running → queued → ready`; Pi recalled facts absent from recent history/profile through the validated summary.
+- This fixed the ID failure mode, not every possible semantic review. Three other rooms remain held for `review`; the live observational dashboard is still below the 50-sample / 95%-pass target. Functional all-account availability is accepted; broad production-quality completion is not claimed.

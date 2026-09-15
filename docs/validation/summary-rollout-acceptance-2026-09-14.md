@@ -1,4 +1,6 @@
-# Summary rollout operations acceptance — 2026-09-14
+# Summary rollout operations acceptance — 2026-09-14 (historical checkpoint)
+
+> This document records the pre-deployment 50-case checkpoint. It is superseded by the deployed 70-case repair and global stability record in [SUMMARY_REVIEW_REPAIR.md](../../SUMMARY_REVIEW_REPAIR.md) and [global stability acceptance](../../../artifacts/summary-global-stability-2026-09-15.md). The old counts and “deployment not yet performed” wording describe the state on September 14 only.
 
 ## Completed implementation
 

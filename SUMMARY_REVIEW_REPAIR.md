@@ -29,9 +29,9 @@ Final isolated regression: **1,376 passed + 63 subtests**, 34.76 seconds. Final 
 
 ## Deployment and private-data boundary
 
-This work is isolated from concurrent Pi/voice edits. No production files, approval records, jobs, or chats have been changed by this repair checkpoint. Production replay/recovery is pending explicit owner consent to send the necessary old summary and source messages to the existing Ollama / DeepSeek cloud model. Do not bypass that requirement via a worker, another script, or a different provider.
+This work was isolated from concurrent Pi/voice edits. The user explicitly consented to sending the required owner and rollout data to the configured Ollama / DeepSeek cloud model. The repair, approval, restart, and owner recovery have now been deployed. Do not bypass the configured provider, owner scope, or quality gate.
 
-After consent, integration and restart through the sole `Server/start_all.sh` entry, validate and approve the final report, then dry-run and apply owner-specific recovery:
+The deployed sequence used the sole `Server/start_all.sh` entry, validated and approved the final report, then dry-ran and applied owner-specific recovery:
 
 ```bash
 .local-venv/social/bin/python scripts/manage_summary_rollout.py approve-benchmark --report validation/summary-review-repair-final.json
@@ -40,4 +40,10 @@ After consent, integration and restart through the sole `Server/start_all.sh` en
 .local-venv/social/bin/python scripts/recover_summary_review.py --owner <confirmed-owner> --apply
 ```
 
-Verify multiple subsequent compaction cycles and live Pi recall outside the recent-message window. A passing synthetic suite is not proof that the user's production room has recovered or that all-account production quality has passed.
+## 2026-09-15 deployed result
+
+- The final 70-case report was approved and remains bound to the running policy/model/provider/fingerprint. Global `*` consumption is active for 46/46 profiles and future owners.
+- Sunny's production room recovered from review: revision 25 → 26, retaining Clove, peak Diamond, current Platinum, and resolving the stale character question. Status is `ready`, job `complete`, `summary_available=true`, `injection_enabled=true`.
+- The first private replay had one empty provider body and succeeded on the bounded contract retry; the later production recovery stored the validated result. This is evidence of bounded recovery, not a guarantee of first-attempt model success.
+- Three unrelated rooms remain held as review. Live metrics remain below the original 50-sample / 95%-pass observational target; no review result was force-promoted.
+- Verify multiple subsequent compaction cycles and live Pi recall outside the recent-message window. A passing synthetic suite is not proof that every account was manually tested or every old room has a summary.

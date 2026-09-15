@@ -46,7 +46,7 @@ User 保留穩定 ID、同步公開 name；初始 PREFERS 不覆寫既有或停�
 
 ## Context、工具與串流
 
-Summary v5 的全域試行批准、線上健康監測與逐份摘要驗證分開。經本機operator審核的獨立50例報告可批准受控試行；`*`仍需有效批准或原readiness，逐份owner/room/policy/evaluation檢查不變。正常聊天將摘要維護排入持久job，Social啟停有lease與有界重試的重建worker。狀態查詢為唯讀且需owner JWT；詳見 [Summary rollout](docs/SUMMARY_ROLLOUT_OPERATIONS.md)。
+Summary v5 的全域試行批准、線上健康監測與逐份摘要驗證分開。經本機 operator 審核的獨立 70 例報告可批准受控試行；`*` 需要有效的 policy/model/provider/fingerprint 綁定批准，或在未批准時遵守原 readiness gate，逐份 owner/room/policy/evaluation 檢查不變。正常聊天將摘要維護排入持久 job，Social 啟停有 lease 與有界重試的重建 worker。狀態查詢為唯讀且需 owner JWT；詳見 [Summary rollout](docs/SUMMARY_ROLLOUT_OPERATIONS.md)。
 
 Public Context Builder 保留最近訊息、通過驗證的 conversation continuity、owner 記憶、正式 Match/Calendar/Relationship 投影與裝置位置權限。Pi prompt 只取得 bounded、安全投影；其他房間、未發布結果與 authority fields 不可進入模型。
 
@@ -74,4 +74,4 @@ python scripts/retire_public_dag_state.py --verify
 
 ## Compaction v5 整合
 
-摘要來源改為9,000字元預算內的完整訊息連續前綴，不截斷單則尾段；超額訊息延後且不推進watermark。有可用來源卻產生全空摘要時最多修復一次，失敗保留上一份現行政策合格摘要。舊policy摘要需重新生成；owner/room隔離與全域readiness門檻不變。此domain修正沿用Pi既有conversation_continuity接線，不恢復DAG。
+摘要來源改為 9,000 字元預算內的完整訊息連續前綴，不截斷單則尾段；超額訊息延後且不推進 watermark。系統支援 ObjectId 與合法 `system-event:<sha256>` 訊息 ID，系統事件內容仍排除於摘要來源。有可用來源卻產生全空摘要時拒絕保存；欄位超限會要求有界 contract retry，品質 review 會進行一次 feedback-driven semantic repair，失敗保留上一份現行政策合格摘要。舊 policy 摘要需重新生成；owner/room 隔離與逐份 evaluation 閘門不變。此 domain 修正沿用 Pi 既有 `conversation_continuity` 接線，不恢復 DAG。

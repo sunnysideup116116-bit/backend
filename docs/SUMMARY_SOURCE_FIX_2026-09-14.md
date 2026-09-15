@@ -1,4 +1,6 @@
-# Complete-source compaction and empty-summary guard
+# Complete-source compaction and empty-summary guard (historical checkpoint)
+
+> This dated document records the first complete-source fix before later mixed-ID and review-repair deployment. Current behavior and acceptance are in [SUMMARY_MIXED_ID_FIX.md](../SUMMARY_MIXED_ID_FIX.md), [SUMMARY_REVIEW_REPAIR.md](../SUMMARY_REVIEW_REPAIR.md), and [global stability acceptance](../../artifacts/summary-global-stability-2026-09-15.md).
 
 ## Changes
 
@@ -20,7 +22,7 @@ Older-policy summaries cannot be injected or used as recursive baselines. Their 
 - The original failing 1473-character case now sends all 1473 characters to both stages. Actual generated continuity: `故事主角確定為白鷺，先前暫用的青松已作廢。` The evaluator passed it. Previously only 900 characters were supplied and the empty summary incorrectly passed.
 - `bash -n start_all.sh` and whitespace checks passed.
 
-## Delivery boundary
+## Historical delivery boundary
 
 Implemented in an isolated DAG checkout on top of `f081257` plus the earlier documentation commit. Pi and the shared development checkout are unchanged. This fix has not been deployed to the running public service, so the earlier v4 demo HTTP acceptance must not be presented as v5 deployment acceptance.
 

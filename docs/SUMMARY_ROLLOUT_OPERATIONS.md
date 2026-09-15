@@ -5,11 +5,18 @@
 There are two distinct evidence sets:
 
 - Live `conversation_compaction_shadow_runs` remains unchanged. Its minimum 50 samples and quality thresholds are still reported by the original readiness function.
-- The independent synthetic benchmark contains 50 cases across 10 scenario families, five casts per family. Its report is stored in `validation/summary-v5-benchmark.json`, not inserted into live evaluation statistics. It checks expected facts and excluded strings in addition to the model evaluator; these bounded assertions are not a complete semantic proof.
+- The independent synthetic benchmark contains 70 cases across 14 scenario families, including 20 dense cases with saturated prior summaries, corrections, answered questions, topic changes, and excluded content. Its final report is stored in `validation/summary-review-repair-final.json`, not inserted into live evaluation statistics. It checks expected facts and excluded strings in addition to the model evaluator; these bounded assertions are not a complete semantic proof.
 
 A local operator may approve **controlled global trial** using a qualifying benchmark. Approval is stored separately in `conversation_summary_rollouts`, bound to the exact compaction policy, model, provider, algorithm fingerprint and report digest. It does not claim that the live 50-sample gate passed. This is an explicit deployment-policy change from an exclusively live-readiness-gated rollout.
 
-The existing `CONTEXT_MODE=on` and `CONTEXT_USER_ALLOWLIST=*` are still required. Each room's summary must independently pass owner, room, policy and evaluation checks; approval does not inject invalid summaries or turn temporary conversation into durable preferences. New accounts use the same rule without listing individual IDs.
+The current approved deployment uses the final 70/70 report, fingerprint
+`728ed50d7f2e74f87a219d520b10655191341c0480afcdb4c38cc5e0074f0f2d`, and
+`deepseek-v4-flash:cloud` through Ollama. The wildcard context rule is active for
+all current owners and future owners. At the latest acceptance snapshot, 46/46
+profiles were eligible and enabled; this is controlled availability, not proof
+that every account has been manually tested.
+
+The existing `CONTEXT_MODE=on` and `CONTEXT_USER_ALLOWLIST=*` are still required. `COMPACTION_MODE=shadow` names the safe producer/recording path; it does not mean that approved summaries remain shadow-only. Each room's summary must independently pass owner, room, policy and evaluation checks; approval does not inject invalid summaries or turn temporary conversation into durable preferences. New accounts use the same rule without listing individual IDs.
 
 ## Approval, health and pause
 
@@ -17,8 +24,8 @@ From Server root:
 
 ```bash
 .local-venv/social/bin/python scripts/manage_summary_rollout.py status
-.local-venv/social/bin/python scripts/manage_summary_rollout.py approve-benchmark --report docs/validation/summary-v5-benchmark.json
-.local-venv/social/bin/python scripts/manage_summary_rollout.py approve-benchmark --report docs/validation/summary-v5-benchmark.json --apply
+.local-venv/social/bin/python scripts/manage_summary_rollout.py approve-benchmark --report validation/summary-review-repair-final.json
+.local-venv/social/bin/python scripts/manage_summary_rollout.py approve-benchmark --report validation/summary-review-repair-final.json --apply
 .local-venv/social/bin/python scripts/manage_summary_rollout.py pause --apply
 ```
 
@@ -68,4 +75,18 @@ This enumerates bounded profile/normal-room metadata and reports counts only. It
 .local-venv/social/bin/python scripts/run_offline_tests.py social -k 'summary_operations or compaction'
 ```
 
-The live benchmark requires mongomock/test dependencies and model access. It replaces the database module with an in-memory implementation before loading services, and forces the recorded Ollama provider. Two concurrent cases maximum; all final results and retries are retained. Fixture output is not written into live success counters. The accompanying report has 50/50 accepted cases; semantic coverage remains limited to this corpus.
+The live benchmark requires mongomock/test dependencies and model access. It replaces the database module with an in-memory implementation before loading services, and forces the recorded Ollama provider. Two concurrent cases maximum; all final results and retries are retained. Fixture output is not written into live success counters. The final report has 70/70 accepted cases, including dense retention-repair scenarios; semantic coverage remains limited to this corpus.
+
+## Current deployed snapshot (2026-09-15)
+
+The approved rollout survived restart and the owner-specific review recovery
+completed. The target room reached summary revision 26, with
+`summary_available=true` and `injection_enabled=true`; 25 newest messages remain
+outside the summary by design. A read-only Context reconstruction included the
+validated summary while preserving owner and room isolation.
+
+The live dashboard remains separate from approval. Its latest snapshot contains
+45 source evaluations, pass rate 0.9333, and review rate 0.0667, so the original
+50-sample / 95%-pass observational target has not passed. Three rooms remain
+held for review; they are not forced into context. Short conversations continue
+to use recent history without generating a summary.

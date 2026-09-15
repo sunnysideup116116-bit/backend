@@ -76,7 +76,7 @@
 
 ### 3.3 Context Engine 邊界（現況）
 
-`context.py:build_public_agent_turn_context` 每回合組 bounded context（原文最多 32 則／8,000 字元、帶方向 `relevant_memories` ≤8 筆）。`memory.search_my_profile(query)` 可向 Graph 補查 preview 以外的本人 durable 偏好；先 query 匹配再限 8 筆，回傳 unavailable/truncated，未命中不代表從未提過。新 Context Engine 若建置，只能輸出 bounded、versioned typed bundle；Public／Private runtime 各自套用 privacy adapter。Retrieval 必須先做 owner／room／accepted-relation 硬隔離，再做相關度排序、budget、dedup；失敗時回 bounded empty projection 與 error code，不得改抓 raw data。
+`context.py:build_public_agent_turn_context` 每回合組 bounded context：HTTP adapter 先抓最多 32 筆作 sentinel，最終 projection 最多保留 12 則／6,000 字元，帶方向 `relevant_memories` ≤8 筆。`memory.search_my_profile(query)` 可向 Graph 補查 preview 以外的本人 durable 偏好；先 query 匹配再限 8 筆，回傳 unavailable/truncated，未命中不代表從未提過。新 Context Engine 若建置，只能輸出 bounded、versioned typed bundle；Public／Private runtime 各自套用 privacy adapter。Retrieval 必須先做 owner／room／accepted-relation 硬隔離，再做相關度排序、budget、dedup；失敗時回 bounded empty projection 與 error code，不得改抓 raw data。
 
 ## 4. 配對狀態真相（canonical lifecycle）
 

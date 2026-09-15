@@ -14,6 +14,6 @@
 
 ## Compaction v5 整合
 
-另已提供持久摘要重建、owner驗證的進度API，以及policy/model/provider綁定的operator全域試行批准。50例合成報告與正式線上樣本分開，不宣稱線上50筆門檻已通過；低使用量只標示監測不足，實際品質退化仍可暫停。詳見 [操作指南](SUMMARY_ROLLOUT_OPERATIONS.md)。
+另已提供持久摘要重建、owner 驗證的進度 API，以及 policy/model/provider/fingerprint 綁定的 operator 全域試行批准。70 例合成報告與正式線上樣本分開，不宣稱線上 50 筆門檻已通過；低使用量只標示監測不足，實際品質退化仍可暫停。2026-09-15 已完成受控全帳號部署驗收，46/46 現有 profile 通過資格判定。詳見 [操作指南](SUMMARY_ROLLOUT_OPERATIONS.md)。
 
-摘要來源改為9,000字元預算內的完整訊息連續前綴，不截斷單則尾段；超額訊息延後且不推進watermark。有可用來源卻產生全空摘要時最多修復一次，失敗保留上一份現行政策合格摘要。舊policy摘要需重新生成；owner/room隔離與全域readiness門檻不變。此domain修正沿用Pi既有conversation_continuity接線，不恢復DAG。
+摘要來源改為 9,000 字元預算內的完整訊息連續前綴，不截斷單則尾段；超額訊息延後且不推進 watermark。ObjectId 與合法 `system-event` ID 均可安全讀取，事件內容不進摘要。欄位超限和品質 review 都有界修復；失敗保留上一份現行政策合格摘要。舊 policy 摘要需重新生成；owner/room 隔離與逐份 evaluation 閘門不變。此 domain 修正沿用 Pi 既有 `conversation_continuity` 接線，不恢復 DAG。

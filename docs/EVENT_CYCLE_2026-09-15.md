@@ -52,3 +52,19 @@ Embedding／relevance readiness 為 ready、pending 0，共有 84 條 EVENT_RELE
 `weekly_progress.created_proposal_count`、`saved_card_count`、`pending_delivery_count` 與 failed user 數。
 完整 checkpoints 位於 Mongo `event_weekly_runs`／`event_weekly_users`，用上述 run ID 定位。
 若恢復或重試，沿用這筆工作；不要重複 enqueue 新一輪或刪除既有 checkpoint。
+
+## 簡報對照
+
+本輪結果對應簡報中的：
+
+```text
+Weekly Event Discovery
+→ Event Validation + Event/Concept Graph
+→ Event Relevance and Avoidance Analysis
+→ Fair, Batched Opportunity Scan
+→ Canonical Mongo Proposal
+→ User 1 Consent → User 2 Pending → User 2 Consent
+→ Create or Reuse Pair Chat
+```
+
+英文 speaker notes 見 [Context／Memory／Event progress notes](PROGRESS_REPORT_CONTEXT_MEMORY_EVENT_2026-09-15.md)。報告時建議說 `partial because of three unavailable source URLs`，不要說成配對狀態或雙方 consent 失敗；也不要把 12 張 draft 卡說成 12 組已完成配對。

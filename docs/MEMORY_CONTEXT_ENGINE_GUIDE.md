@@ -1,4 +1,6 @@
-> **架構更新註記**：本文保留其 domain／歷史內容；其中公開 V3 Planner、Scheduler、subagent 或 DAG 的描述已被 Pi 正式架構取代。\n\n# Memory、Graph 與 Context Engine 擴充指南
+> **架構更新註記**：本文保留其 domain／歷史內容；其中公開 V3 Planner、Scheduler、subagent 或 DAG 的描述已被 Pi 正式架構取代。
+>
+# Memory、Graph 與 Context Engine 擴充指南
 
 本文件給負責「長期建議、Graph Memory、Context Engine」的開發者。開始修改前也必須閱讀 [`AGENTS.md`](./AGENTS.md) 與 [`AYUE_V3_ARCHITECTURE.md`](./AYUE_V3_ARCHITECTURE.md)。
 
@@ -142,11 +144,21 @@ Saved owner message
 
 ### 2.3 對話壓縮與延續性（Compaction 機制）
 
-目前新增operator批准的受控全域試行、owner-only進度API與持久重建worker。獨立合成benchmark可用作明確的operator批准依据，但不灌入線上評估數據；未批准仍沿用原readiness門檻。批准後低使用量僅反映健康資料不足／過期，足夠線上樣本顯示品質退化才自動暫停。政策、模型或程式指紋改變須重新批准，逐份摘要驗證不變。詳見 [操作指南](SUMMARY_ROLLOUT_OPERATIONS.md)。
+目前有 operator 批准的受控全域試行、owner-only 進度 API 與持久重建 worker。獨立合成 benchmark 可作為明確的 operator 批准依據，但不灌入線上評估數據；未批准時 `*` 才沿用原 readiness 門檻。批准後低使用量僅反映健康資料不足／過期，足夠線上樣本顯示品質退化才自動暫停。政策、模型或程式指紋改變須重新批准，逐份摘要驗證不變。詳見 [操作指南](SUMMARY_ROLLOUT_OPERATIONS.md)。
 
-#### 2026-09-14 指定帳號正式注入驗收
+#### 2026-09-15 目前部署狀態
 
-已於當時部署的 Public V3 DAG，以指定 demo 帳號完成真實摘要生成／評估、模型輸入核對、無摘要對照組，以及正式公開聊天 API 驗收。`COMPACTION_MODE=shadow` 是現有生成模式；摘要消費另由 `CONTEXT_MODE=on` 與明確 owner allowlist 控制。明確 canary 可使用逐份通過驗證的摘要，`*` 仍受全域 readiness gate 限制。此結果不代表全部帳號或後續 Pi runtime 已驗證。完整方法、部署設定與簡報用語見 [驗收紀錄](SUMMARY_INJECTION_ACCEPTANCE_2026-09-14.md)。正式 `.env` 不納入版本庫。
+目前以 `conversation_compaction_policy_v5` 在 Public Pi runtime 服務。受控全域試行已由 operator 以 70 例／14 類合成 benchmark 批准，並綁定 exact policy、model、provider 與 algorithm fingerprint。compaction producer 仍使用 `COMPACTION_MODE=shadow` 的安全 shadow-run 標籤；summary consumer 則由 `CONTEXT_MODE=on`、`CONTEXT_USER_ALLOWLIST=*` 與有效 approval 啟用，因此不是 shadow-only。46/46 現有 profile 通過 eligibility，新註冊 owner 也走同一 wildcard 規則。
+
+每回合 Context 仍只注入通過 owner／room／policy／source／evaluation 檢查的 room-specific continuity。長對話 compaction 以完整訊息連續前綴工作：最多 9,000 字元來源、最多 11 則舊訊息、保留最新 20 則；支援 Mongo `ObjectId` 與合法 `system-event:<sha256>` ID，system-event 內容不進摘要。欄位超限會要求有界 contract retry；品質 review 會以具體 issue codes 做一次 semantic repair，仍不合格就保留上一份合格摘要與 watermark。
+
+重建已改為持久 job：owner／room scope、atomic claim、lease renewal、bounded retry、worker restart recovery、status API 和去重都保留。`GET /api/conversation/summary-status` 只回狀態／數量，`POST /api/conversation/summary-rebuild` 只接受 owner JWT 與 room ID；兩者不回摘要原文或 rollout authority。Context Builder 仍是 read-only，不直接改 memory 或 application state。
+
+目前是「受控全帳號可用」而非全量品質門檻完成：最後監測快照為 45 筆 live evaluations、pass 0.9333、review 0.0667，原定 50 筆／95% observational gate 尚未通過；review-held room 不會被強制注入。短對話使用近期歷史，不需要產生摘要。完整修復與部署證據見 [global stability acceptance](../../artifacts/summary-global-stability-2026-09-15.md)、[mixed-ID repair](../SUMMARY_MIXED_ID_FIX.md) 與 [review repair](../SUMMARY_REVIEW_REPAIR.md)。
+
+#### 2026-09-14 指定帳號歷史 canary 驗收
+
+這是當時以 Public V3 DAG、指定 demo 帳號完成的真實摘要生成／評估與公開聊天 API canary；它保留作為歷史證據，不代表目前 Pi runtime、全帳號部署或最新 review repair。當時的 12-message／6,000-character budget 也不是現行 compaction budget。現行狀態請以本節 2026-09-15 段落及 [global stability acceptance](../../artifacts/summary-global-stability-2026-09-15.md) 為準。正式 `.env` 不納入版本庫。
 
 - **觸發條件**：單一聊天室累積訊息超過 **30 句**時觸發。
 - **壓縮策略**：從最舊最多 **11 則**訊息選取符合 9,000 字元來源預算的完整連續前綴，保留至少最新 **20 則**未壓縮訊息。不再逐則截前900字；生成與評估使用同一份完整來源。單則超過來源預算時回 `source_over_budget` 並延後，不略過該則，也不推進其 watermark。
@@ -154,9 +166,9 @@ Saved owner message
 - **聊天室範圍**：永久 legacy room 與 `ai_rooms` 中經 server 驗證屬於 owner 的新版聊天室各自壓縮；刪除、偽造或他人 room fail closed。壓縮前的 profile coverage 使用同一 owner-room validator。
 - **用途隔離**：只有 `message-use-v1` 的 `ordinary` message 送入摘要模型；被排除的訊息仍計入批次 watermark，但不送入 generation/evaluation。整批皆被排除時保留既有合格摘要並直接推進 watermark，不呼叫模型。舊版或未標記來源不作為遞迴摘要基底。
 - **政策版本**：目前 compaction policy 為 `conversation_compaction_policy_v5`；舊版摘要不再注入或作為遞迴基底，既有原文保留，後續維護回合由原文重新選批。
-- **空摘要檢查**：來源有可重用文字卻得到全空摘要時，以 `empty_summary` 進行一次有界修復；仍為空則不呼叫 evaluator、不更新合格摘要或 watermark。純閒聊也可能因此保守延後；不為填滿摘要而捏造內容。生成／評估失敗保留上一份現行政策的合格摘要。
+- **輸出與 review 修復**：來源有可重用文字卻得到全空摘要時，以 `empty_summary` 進行有界修復；欄位超限／不安全 normalization 會拒絕並帶 field/count feedback 重試。品質 review 會以原始 prior/source 和 issue codes 進行一次 semantic repair，再重新評估；仍不合格則不更新合格摘要或 watermark。純閒聊也可能因此保守延後；不為填滿摘要而捏造內容。生成／評估失敗保留上一份現行政策的合格摘要。
 - **模型契約**：generation／evaluation 讀取 `generate_chat_completion()` 的 `ChatResult.content`；測試不得再用不符合正式 contract 的純字串掩蓋介面漂移。
-- **啟用閘門**：個別 canary user 可由明確 allowlist 讀取通過評估的摘要；`*` 全域 token 另要求 rollout readiness（至少 50 筆、pass ≥95%、review ≤5%、unavailable ≤2%、指標未過期），結果快取 60 秒。未達標時只保留 shadow generation，不注入 context。
+- **啟用閘門**：摘要 consumption 需 `CONTEXT_MODE=on`、wildcard／owner allowlist 與逐份摘要 validation。明確 operator approval 綁定 exact policy/model/provider/fingerprint 後可啟用受控 `*` global trial；未批准時 `*` 回到原 rollout readiness（至少 50 筆、pass ≥95%、review ≤5%、unavailable ≤2%、指標未過期）。approval、live health 與逐份摘要 validation 分離；review-held 摘要不注入，consumer decision 最多 cache 60 秒。
 
 #### 2026-09-04 整合環境基線
 
@@ -196,20 +208,20 @@ disable／correct 先移除對應 cache key，較晚的旧讀取不得恢復它�
 
 `owner_memory_projection.preference_wording` 將 typed stance 投影為「喜歡／不喜歡／避免／需要：標籤」，
 最多 8 筆；排除異 owner、want、disabled、未帶 stance 的舊文字及不安全標籤。
-Public Planner 的 direct-chat 路徑只接收這個帶方向的封閉文字格式；Profile／Relationship slice 與 Synthesizer
+Public agent 的 direct-chat 路徑只接收這個帶方向的封閉文字格式；Profile／Relationship slice 與 Pi presentation
 沿用同一份 relevant_memories，防止普通聊天漏掉偏好。Context Builder 自身仍只讀、不刷新或寫 DB。
 Concept.kind（interest／activity／partner_trait 等）與 User relation 的 PREFERS／AVOIDS 是不同欄位。DatingApp 記憶頁現行只呈現 prefer／avoid：like/require → prefer，dislike/avoid → avoid；不把 kind 當偏好方向。
 
-`services/ayue_agent/context.py` 是 Public V3 唯一 Context Builder。現在的 budget：
+`services/ayue_agent/context.py` 是 Public runtime 唯一 Context Builder。HTTP adapter 先抓最多 32 筆（含一筆 sentinel 用來標記是否超出來源），最後 projection 的 budget 是：
 
-- 最近 32 則訊息，合計最多 8,000 字元。
+- 最近 12 則訊息，合計最多 6,000 字元。
 - 本人近期情境一份。
 - 本人長期記憶最多 8 筆。
 - 配對搜尋與牽線收件匣的安全狀態；單卡相容欄位不表示帳號只能有一張卡。
 - 經 server 驗證的公開 mention。
 - Asia/Taipei turn clock 與 capability version。
 
-Context Builder 只組合安全 projection，不負責重新萃取、修正或寫入記憶。原文視窗和 compaction watermark 使用相同的 `(timestamp, _id)` 排序；超出 32 則／8,000 字元時回 bounded recent-only projection，不宣稱完整覆蓋。
+Context Builder 只組合安全 projection，不負責重新萃取、修正或寫入記憶。原文視窗和 compaction watermark 使用相同的 `(timestamp, _id)` 排序；超出 12 則／6,000 字元時回 bounded recent-only projection，並以 adapter 的 sentinel 標示來源是否超過 32 筆，不宣稱完整覆蓋。
 
 ### 2.6 已知技術債（不要沿用成新架構）
 
