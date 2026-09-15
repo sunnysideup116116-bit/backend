@@ -32,6 +32,12 @@ Calendar command/preflight、contact selection、operation batch、write executo
 
 ## Background and voice boundaries
 
+Registration Graph `registration-bootstrap-v1`：Social profiling 初始化／profile 更新只 enqueue，
+既有 memory outbox worker 重新驗證 Appwrite，透過 9001 `POST /api/users/registration-projection`
+同步 User.id/name。`POST /api/memory/apply` 的 `surface=registration_interest` 採 insert-only 初始
+偏好，不覆蓋既有／停用記憶。`GET /api/registration-graph/status` 只提供版本與 worker 活性，
+不回帳號資料；供補資料 CLI 防止對舊 worker 投遞新 job。詳見 [bootstrap contract](../REGISTRATION_GRAPH_BOOTSTRAP.md)。
+
 - Profile extraction 與 proactive care 是 owner-message 背景流程，不由 Pi 工具啟動。
 - App voice 的 `ayue.public_query` 使用公開 Pi HTTP API；private query 繼續使用 Private V2。
 - Registration voice 與 App voice 的 Gemini session 不改為 Pi。

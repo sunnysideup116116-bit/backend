@@ -118,6 +118,11 @@ Saved owner message
 
 ### 2.2.1 使用者勾選的婉拒回饋
 
+另有明確註冊表單來源的 [註冊興趣 bootstrap](REGISTRATION_GRAPH_BOOTSTRAP.md)：
+註冊初始化排入既有 outbox，重新驗證 Appwrite，本人興趣沿用 typed extractor 與 memory facade，
+只對沒有任何既有／停用記憶的帳號 insert-only 補 PREFERS。User 以 id 唯一識別、name 顯示暱稱。
+此例外不放寬聊天來源限制，不修改近期情境，不另建自由文字 extractor。
+
 提案視窗的 `explicit_reasons` 是本人明確選擇並同意記錄的結構化回饋，不是從 match state 或對方特質推測本人的偏好：
 
 ```text

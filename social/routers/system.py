@@ -598,11 +598,23 @@ def update_profile(req: ProfileUpdateRequest):
         {"$set": fields},
         upsert=True,
     )
+    from services.registration_graph_service import enqueue_registration_bootstrap
+    enqueue_registration_bootstrap(req.user_id)
+    if "name" in fields:
+        enqueue_registration_bootstrap(req.user_id, name_revision=fields["name"])
     return {
         "status": "success",
         "user_id": req.user_id,
         "updated_fields": sorted(fields),
     }
+
+@router.get("/registration-graph/status")
+def registration_graph_status():
+    from services.registration_graph_service import VERSION
+    from services import memory_outbox_service
+    thread = memory_outbox_service._worker_thread
+    return {"version": VERSION, "worker_running": bool(thread and thread.is_alive())}
+
 
 @router.post("/settings/mediator")
 def update_mediator_tone(req: MediatorToneRequest):

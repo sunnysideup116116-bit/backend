@@ -35,6 +35,10 @@ Public HTTP / App voice delegation
 
 ## 共用與獨立功能
 
+註冊興趣的 [Graph bootstrap](docs/REGISTRATION_GRAPH_BOOTSTRAP.md) 是明確表單來源的背景流程，
+沿用既有 Profile typed extractor、memory facade 與 outbox worker，不新增 Pi 工具或另一個聊天 runtime。
+User 保留穩定 ID、同步公開 name；初始 PREFERS 不覆寫既有或停用記憶。
+
 - 主動關心維持 Profile extraction → follow-up candidate → proactive scheduler → grounded message；它不使用公開 Agent 的推理 loop。
 - App voice 與 registration voice 維持 Gemini runtime。App voice 轉交公開阿月時呼叫同一個 Pi HTTP contract；直接行事曆操作維持既有 typed API。
 - Private Ayue 維持 `private_v2.py`，使用 private context 與搬至 shared 的 confirmation manager；不改成 Pi。

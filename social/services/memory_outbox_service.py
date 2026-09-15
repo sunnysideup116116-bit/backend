@@ -156,13 +156,17 @@ def process_memory_outbox_once(limit: int = 3) -> dict[str, int]:
                 pass
             continue
         try:
-            apply_profile_memory_proposals(
-                str(record.get("user_id") or ""),
-                list(record.get("memories") or [])[:3],
-                str(record.get("surface") or "outbox_retry")[:40],
-                str(record.get("message_id")) if record.get("message_id") else None,
-                str(record.get("match_id")) if record.get("match_id") else None,
-            )
+            if record.get("job_kind") in {"registration_bootstrap", "registration_identity"}:
+                from services.registration_graph_service import process_registration_job
+                process_registration_job(record)
+            else:
+                apply_profile_memory_proposals(
+                    str(record.get("user_id") or ""),
+                    list(record.get("memories") or [])[:3],
+                    str(record.get("surface") or "outbox_retry")[:40],
+                    str(record.get("message_id")) if record.get("message_id") else None,
+                    str(record.get("match_id")) if record.get("match_id") else None,
+                )
         except MemoryWriteError as exc:
             _finish_failure(record, exc.error_code, now=time.time())
             failed += 1

@@ -23,6 +23,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
+from registration_graph import RegistrationProjection, project_identity, seed_registration
 from matchmaker import (
     MatchmakerAgent,
     MatchEvaluationError,
@@ -1217,6 +1218,18 @@ async def graph_health_endpoint():
         print(f"⚠️ Graph health check failed: {type(exc).__name__}")
         return {"status": "unavailable"}
 
+@app.post("/api/users/registration-projection")
+def registration_projection(req: RegistrationProjection):
+    URI, AUTH, DATABASE = _neo4j_config()
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH) as driver:
+            with driver.session(database=DATABASE) as session:
+                session.run("CREATE CONSTRAINT registration_user_id IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE").consume()
+                return session.execute_write(project_identity, req)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="registration_projection_unavailable") from exc
+
+
 @app.post("/api/memory/apply")
 async def apply_memory(req: MemoryApplyRequest):
     """Atomically write validated proposals and their idempotency marker."""
@@ -1253,9 +1266,16 @@ async def apply_memory(req: MemoryApplyRequest):
             with driver.session(database=DATABASE) as session:
                 session.run("CREATE CONSTRAINT memory_observation_message_id IF NOT EXISTS FOR (o:MemoryObservation) REQUIRE o.message_id IS UNIQUE").consume()
 
+                if req.surface == "registration_interest":
+                    seeded = session.execute_write(seed_registration, req.user_id, req.message_id, req.memories)
+                    return {"memories": seeded, "status": "success" if seeded else "skipped"}
+
                 def write_memory(tx):
                     if req.message_id:
                         observed = tx.run("""
+                            MERGE (u:User {id:$user_id})
+                            SET u.registration_projection_lock=coalesce(u.registration_projection_lock,0)+1
+                            WITH u
                             MERGE (o:MemoryObservation {message_id:$message_id})
                             ON CREATE SET o.owner_user_id=$user_id,o.created_at=$now
                             RETURN o.created_at=$now AS created
@@ -1265,6 +1285,7 @@ async def apply_memory(req: MemoryApplyRequest):
                     tx.run("""
                         UNWIND $memories AS item
                         MERGE (u:User {id:$user_id})
+                        SET u.registration_projection_lock=coalesce(u.registration_projection_lock,0)+1
                         MERGE (c:Concept {key:item.key})
                         ON CREATE SET c.label=item.label, c.kind='preference'
                         ON MATCH SET c.label=coalesce(c.label,item.label)

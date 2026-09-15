@@ -673,6 +673,9 @@ def handle_assessment_ui_message(
                 ]},
                 {"$set": {"initial_interest": interest}},
             )
+        if initialize or initial_interest is not None:
+            from services.registration_graph_service import enqueue_registration_bootstrap
+            enqueue_registration_bootstrap(user_id)
     now = time.time()
     profile = profiles_coll.find_one({"user_id": user_id}) or {}
     session = _session(profile)
