@@ -110,8 +110,11 @@ class ConversationCompactionObservabilityV1(BaseModel):
     summary_char_count: int = Field(ge=0, le=3720)
     generation_latency_ms: int = Field(ge=0, le=300000)
     evaluation_latency_ms: int = Field(ge=0, le=300000)
-    generation_attempt_count: int = Field(default=1, ge=0, le=2)
-    evaluation_attempt_count: int = Field(default=1, ge=0, le=2)
+    generation_attempt_count: int = Field(default=1, ge=0, le=4)
+    evaluation_attempt_count: int = Field(default=1, ge=0, le=4)
+    semantic_repair_attempted: bool = False
+    initial_issue_codes: list[CompactionIssueCode] = Field(default_factory=list, max_length=11)
+    repair_result_code: str = Field(default="not_attempted", pattern=r"^[a-z][a-z0-9_]{0,39}$")
     generation_result_code: str = Field(default="legacy_unknown", pattern=r"^[a-z][a-z0-9_]{0,39}$")
     evaluation_result_code: str = Field(default="legacy_unknown", pattern=r"^[a-z][a-z0-9_]{0,39}$")
     profile_coverage_status: str = Field(pattern=r"^[a-z][a-z0-9_]{0,39}$")

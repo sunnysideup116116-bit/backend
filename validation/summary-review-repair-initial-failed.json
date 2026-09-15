@@ -1,0 +1,4203 @@
+{
+  "version": "summary-benchmark-v1",
+  "policy": "conversation_compaction_policy_v5",
+  "model": "deepseek-v4-flash:cloud",
+  "provider": "ollama",
+  "algorithm_sha256": "227f042cc614580110d02c13676a66f79184403b24a11908a7db70dd1d1ebb38",
+  "synthetic": true,
+  "production_writes": false,
+  "started_at": 1789444714.7606146,
+  "cases": [
+    {
+      "name": "correction_Noah",
+      "family": "correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色暫稱曾為 Mira，後改稱 Noah，Mira 已作廢。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "角色最終定名為 Noah，先前名稱 Mira 不再使用。"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 31,
+        "summary_item_count": 2,
+        "summary_char_count": 58,
+        "generation_latency_ms": 1688,
+        "evaluation_latency_ms": 2077,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.77
+    },
+    {
+      "name": "facts_Noah",
+      "family": "facts",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Silver Garden 虛構故事"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名稱：Silver Garden，角色 Noah 正在尋找 Copper Letter"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 53,
+        "summary_item_count": 2,
+        "summary_char_count": 63,
+        "generation_latency_ms": 3717,
+        "evaluation_latency_ms": 1957,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 5.68
+    },
+    {
+      "name": "recursive_Noah",
+      "family": "recursive",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事主角叫 Noah",
+          "信封用 Copper Letter 開啟"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 37,
+        "summary_item_count": 2,
+        "summary_char_count": 30,
+        "generation_latency_ms": 1616,
+        "evaluation_latency_ms": 1750,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.37
+    },
+    {
+      "name": "topic_switch_Noah",
+      "family": "topic_switch",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "拼圖"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Silver Garden"
+        ],
+        "unresolved_questions": [
+          "Copper Letter 藏在哪裡尚未決定"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 21,
+        "summary_item_count": 3,
+        "summary_char_count": 42,
+        "generation_latency_ms": 2988,
+        "evaluation_latency_ms": 1709,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.7
+    },
+    {
+      "name": "roles_Noah",
+      "family": "roles",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Noah的角色設定：害怕雷聲",
+          "Copper Letter的故事橋段設計"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色Noah害怕雷聲"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [
+          "Ayue承諾稍後幫Owner設計Copper Letter的故事橋段"
+        ],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 47,
+        "summary_item_count": 4,
+        "summary_char_count": 78,
+        "generation_latency_ms": 2363,
+        "evaluation_latency_ms": 1339,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.7
+    },
+    {
+      "name": "unconfirmed_Noah",
+      "family": "unconfirmed",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色名字确定为Noah，不是Mira。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 32,
+        "summary_item_count": 1,
+        "summary_char_count": 19,
+        "generation_latency_ms": 1512,
+        "evaluation_latency_ms": 1326,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.84
+    },
+    {
+      "name": "source_instruction_Noah",
+      "family": "source_instruction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Silver Garden。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 74,
+        "summary_item_count": 1,
+        "summary_char_count": 19,
+        "generation_latency_ms": 1744,
+        "evaluation_latency_ms": 1037,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.78
+    },
+    {
+      "name": "long_correction_Noah",
+      "family": "long_correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "故事暫名 Silver Garden，主角 Noah 尋找 Copper Letter"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事暫名 Silver Garden",
+          "主角確定為 Noah",
+          "Noah 尋找 Copper Letter"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "主角名字由 Mira 更正為 Noah，尋找目標為 Copper Letter"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 1433,
+        "summary_item_count": 5,
+        "summary_char_count": 131,
+        "generation_latency_ms": 1428,
+        "evaluation_latency_ms": 1335,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.76
+    },
+    {
+      "name": "excluded_Noah",
+      "family": "excluded",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "虛構主角叫 Noah。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 4,
+        "input_char_count": 11,
+        "summary_item_count": 1,
+        "summary_char_count": 11,
+        "generation_latency_ms": 1592,
+        "evaluation_latency_ms": 1997,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.59
+    },
+    {
+      "name": "facts_Felix",
+      "family": "facts",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Moon Harbor 的虛構故事，角色 Felix 尋找 Amber Book"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事設定：Moon Harbor，角色 Felix，目標是尋找 Amber Book"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 49,
+        "summary_item_count": 2,
+        "summary_char_count": 82,
+        "generation_latency_ms": 1288,
+        "evaluation_latency_ms": 1614,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.9
+    },
+    {
+      "name": "mixed_language_Noah",
+      "family": "mixed_language",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "虚构故事Silver Garden，主角Noah寻找Copper Letter，结尾未定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事设定：Silver Garden，主角Noah，目标寻找Copper Letter，结尾尚未决定"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 91,
+        "summary_item_count": 2,
+        "summary_char_count": 94,
+        "generation_latency_ms": 5173,
+        "evaluation_latency_ms": 1430,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 6.6
+    },
+    {
+      "name": "correction_Felix",
+      "family": "correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色最终定名为Felix，先前暂称Iris已作废。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "角色名称由Iris改为Felix，Iris不再使用。"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 32,
+        "summary_item_count": 2,
+        "summary_char_count": 51,
+        "generation_latency_ms": 1593,
+        "evaluation_latency_ms": 1845,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.44
+    },
+    {
+      "name": "recursive_Felix",
+      "family": "recursive",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事主角叫 Felix"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "信封用 Amber Book 開啟"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 35,
+        "summary_item_count": 2,
+        "summary_char_count": 28,
+        "generation_latency_ms": 2664,
+        "evaluation_latency_ms": 1461,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.13
+    },
+    {
+      "name": "topic_switch_Felix",
+      "family": "topic_switch",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "拼圖"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Moon Harbor"
+        ],
+        "unresolved_questions": [
+          "Amber Book 藏在哪裡尚未決定"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 21,
+        "summary_item_count": 3,
+        "summary_char_count": 37,
+        "generation_latency_ms": 3620,
+        "evaluation_latency_ms": 1643,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 5.26
+    },
+    {
+      "name": "roles_Felix",
+      "family": "roles",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "角色 Felix 的設定",
+          "Amber Book 故事橋段設計"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "Owner 構思的角色 Felix 害怕雷聲"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [
+          "Ayue 承諾稍後幫 Owner 設計 Amber Book 的故事橋段"
+        ],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 45,
+        "summary_item_count": 4,
+        "summary_char_count": 87,
+        "generation_latency_ms": 1687,
+        "evaluation_latency_ms": 1526,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.21
+    },
+    {
+      "name": "unconfirmed_Felix",
+      "family": "unconfirmed",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "確認角色名字"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色名字確定為 Felix，不是 Iris"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 33,
+        "summary_item_count": 2,
+        "summary_char_count": 27,
+        "generation_latency_ms": 2082,
+        "evaluation_latency_ms": 1658,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.74
+    },
+    {
+      "name": "source_instruction_Felix",
+      "family": "source_instruction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Moon Harbor。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 72,
+        "summary_item_count": 1,
+        "summary_char_count": 17,
+        "generation_latency_ms": 3495,
+        "evaluation_latency_ms": 1249,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.74
+    },
+    {
+      "name": "excluded_Felix",
+      "family": "excluded",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "虛構主角叫 Felix。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 4,
+        "input_char_count": 12,
+        "summary_item_count": 1,
+        "summary_char_count": 12,
+        "generation_latency_ms": 1586,
+        "evaluation_latency_ms": 1794,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.38
+    },
+    {
+      "name": "long_correction_Felix",
+      "family": "long_correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Moon Harbor 故事設定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事暫名 Moon Harbor，主角確定為 Felix，他尋找的是 Amber Book。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "主角名由 Iris 更正為 Felix，目標改為尋找 Amber Book。"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 1429,
+        "summary_item_count": 3,
+        "summary_char_count": 100,
+        "generation_latency_ms": 2136,
+        "evaluation_latency_ms": 2081,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.22
+    },
+    {
+      "name": "mixed_language_Felix",
+      "family": "mixed_language",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Moon Harbor故事設定：主角Felix尋找Amber Book"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事背景為虛構的Moon Harbor，主角Felix在尋找Amber Book。"
+        ],
+        "unresolved_questions": [
+          "故事結尾尚未決定。"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 87,
+        "summary_item_count": 3,
+        "summary_char_count": 85,
+        "generation_latency_ms": 5602,
+        "evaluation_latency_ms": 2359,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 7.96
+    },
+    {
+      "name": "correction_Oscar",
+      "family": "correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色最終定名為 Oscar，先前暫稱 Luna 已作廢。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 32,
+        "summary_item_count": 1,
+        "summary_char_count": 28,
+        "generation_latency_ms": 1065,
+        "evaluation_latency_ms": 1957,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.02
+    },
+    {
+      "name": "facts_Oscar",
+      "family": "facts",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Cloud Library",
+          "Glass Key"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名稱是Cloud Library，角色Oscar正在尋找Glass Key。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 50,
+        "summary_item_count": 3,
+        "summary_char_count": 62,
+        "generation_latency_ms": 7981,
+        "evaluation_latency_ms": 1405,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 9.39
+    },
+    {
+      "name": "recursive_Oscar",
+      "family": "recursive",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事主角叫Oscar",
+          "信封用Glass Key開啟"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "信封開啟方式確定為Glass Key"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 34,
+        "summary_item_count": 3,
+        "summary_char_count": 42,
+        "generation_latency_ms": 4935,
+        "evaluation_latency_ms": 2268,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 7.2
+    },
+    {
+      "name": "topic_switch_Oscar",
+      "family": "topic_switch",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "拼图"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Cloud Library"
+        ],
+        "unresolved_questions": [
+          "Glass Key 藏在哪裡尚未決定"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 21,
+        "summary_item_count": 3,
+        "summary_char_count": 38,
+        "generation_latency_ms": 3950,
+        "evaluation_latency_ms": 1432,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 5.38
+    },
+    {
+      "name": "unconfirmed_Oscar",
+      "family": "unconfirmed",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色名字确定为Oscar，不是Luna。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 33,
+        "summary_item_count": 1,
+        "summary_char_count": 20,
+        "generation_latency_ms": 1230,
+        "evaluation_latency_ms": 1495,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.73
+    },
+    {
+      "name": "roles_Oscar",
+      "family": "roles",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "角色Oscar的设定",
+          "Glass Key故事桥段设计"
+        ],
+        "owner_goals": [
+          "希望Ayue设计Glass Key的故事桥段"
+        ],
+        "known_continuity": [
+          "Oscar是owner构思的角色，害怕雷声"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [
+          "Ayue答应稍后帮owner设计Glass Key的故事桥段"
+        ],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 44,
+        "summary_item_count": 5,
+        "summary_char_count": 98,
+        "generation_latency_ms": 2398,
+        "evaluation_latency_ms": 1794,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.19
+    },
+    {
+      "name": "source_instruction_Oscar",
+      "family": "source_instruction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "故事名為 Cloud Library"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Cloud Library"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 74,
+        "summary_item_count": 2,
+        "summary_char_count": 36,
+        "generation_latency_ms": 1194,
+        "evaluation_latency_ms": 1142,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.34
+    },
+    {
+      "name": "excluded_Oscar",
+      "family": "excluded",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "虛構主角叫 Oscar。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 4,
+        "input_char_count": 12,
+        "summary_item_count": 1,
+        "summary_char_count": 12,
+        "generation_latency_ms": 891,
+        "evaluation_latency_ms": 1895,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.79
+    },
+    {
+      "name": "long_correction_Oscar",
+      "family": "long_correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "故事暫名 Cloud Library，主角 Oscar 尋找 Glass Key"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事暫名 Cloud Library",
+          "主角確定叫 Oscar",
+          "Oscar 尋找 Glass Key"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "主角名字由 Luna 更正為 Oscar，尋找目標為 Glass Key"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 1430,
+        "summary_item_count": 5,
+        "summary_char_count": 123,
+        "generation_latency_ms": 1461,
+        "evaluation_latency_ms": 1915,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.38
+    },
+    {
+      "name": "mixed_language_Oscar",
+      "family": "mixed_language",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Cloud Library 虛構故事設定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事為虛構的 Cloud Library，主角 Oscar 尋找 Glass Key，結尾尚未決定"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 88,
+        "summary_item_count": 2,
+        "summary_char_count": 69,
+        "generation_latency_ms": 1767,
+        "evaluation_latency_ms": 1670,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.44
+    },
+    {
+      "name": "facts_Hugo",
+      "family": "facts",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "虛構故事設定：Winter Station，角色Hugo尋找Velvet Map"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名稱Winter Station，角色Hugo，目標是尋找Velvet Map"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 51,
+        "summary_item_count": 2,
+        "summary_char_count": 81,
+        "generation_latency_ms": 1947,
+        "evaluation_latency_ms": 1701,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.65
+    },
+    {
+      "name": "correction_Hugo",
+      "family": "correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色最終定名為 Hugo，先前暫稱 Aria 已作廢。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 31,
+        "summary_item_count": 1,
+        "summary_char_count": 27,
+        "generation_latency_ms": 1253,
+        "evaluation_latency_ms": 1665,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.92
+    },
+    {
+      "name": "topic_switch_Hugo",
+      "family": "topic_switch",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "拼圖"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Winter Station"
+        ],
+        "unresolved_questions": [
+          "Velvet Map 藏在哪裡尚未決定"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 21,
+        "summary_item_count": 3,
+        "summary_char_count": 40,
+        "generation_latency_ms": 3181,
+        "evaluation_latency_ms": 1497,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.68
+    },
+    {
+      "name": "recursive_Hugo",
+      "family": "recursive",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事主角叫 Hugo",
+          "信封用 Velvet Map 開啟"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "信封用 Velvet Map 開啟"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 34,
+        "summary_item_count": 3,
+        "summary_char_count": 44,
+        "generation_latency_ms": 3741,
+        "evaluation_latency_ms": 3808,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 7.55
+    },
+    {
+      "name": "unconfirmed_Hugo",
+      "family": "unconfirmed",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "確認角色名稱"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色名稱確定為 Hugo，非 Aria"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 32,
+        "summary_item_count": 2,
+        "summary_char_count": 25,
+        "generation_latency_ms": 3420,
+        "evaluation_latency_ms": 1321,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.74
+    },
+    {
+      "name": "source_instruction_Hugo",
+      "family": "source_instruction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Winter Station。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 75,
+        "summary_item_count": 1,
+        "summary_char_count": 20,
+        "generation_latency_ms": 1301,
+        "evaluation_latency_ms": 1386,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.69
+    },
+    {
+      "name": "excluded_Hugo",
+      "family": "excluded",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "虛構主角名為 Hugo。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 4,
+        "input_char_count": 11,
+        "summary_item_count": 1,
+        "summary_char_count": 12,
+        "generation_latency_ms": 5304,
+        "evaluation_latency_ms": 1745,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 7.05
+    },
+    {
+      "name": "roles_Hugo",
+      "family": "roles",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Hugo的角色設定",
+          "Velvet Map的故事橋段"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "owner構思的角色Hugo害怕雷聲"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [
+          "ayue答應稍後幫owner設計Velvet Map的故事橋段"
+        ],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 44,
+        "summary_item_count": 4,
+        "summary_char_count": 73,
+        "generation_latency_ms": 18633,
+        "evaluation_latency_ms": 2875,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 21.51
+    },
+    {
+      "name": "long_correction_Hugo",
+      "family": "long_correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "故事暫名 Winter Station，主角 Hugo 尋找 Velvet Map"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事暫名 Winter Station，主角確定為 Hugo，目標是尋找 Velvet Map；先前暫稱 Aria 已作廢"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "主角定名 Hugo，尋找 Velvet Map，取代先前暫名"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 1431,
+        "summary_item_count": 3,
+        "summary_char_count": 132,
+        "generation_latency_ms": 3026,
+        "evaluation_latency_ms": 2816,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 5.84
+    },
+    {
+      "name": "facts_Theo",
+      "family": "facts",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "River Theater 故事設定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "這是虛構故事，名稱是 River Theater，角色叫 Theo，正在尋找 Golden Compass。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 54,
+        "summary_item_count": 2,
+        "summary_char_count": 72,
+        "generation_latency_ms": 4305,
+        "evaluation_latency_ms": 1931,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 6.24
+    },
+    {
+      "name": "mixed_language_Hugo",
+      "family": "mixed_language",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Winter Station 故事設定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事為虛構作品《Winter Station》，主角是 Hugo，正在尋找 Velvet Map。"
+        ],
+        "unresolved_questions": [
+          "故事結尾尚未決定。"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 89,
+        "summary_item_count": 3,
+        "summary_char_count": 77,
+        "generation_latency_ms": 4994,
+        "evaluation_latency_ms": 3037,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 8.03
+    },
+    {
+      "name": "correction_Theo",
+      "family": "correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色暫稱Nora，但最終決定改稱Theo，Nora已作廢。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "角色名稱由Nora改為Theo，先前名稱作廢。"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 31,
+        "summary_item_count": 2,
+        "summary_char_count": 52,
+        "generation_latency_ms": 5690,
+        "evaluation_latency_ms": 5410,
+        "generation_attempt_count": 2,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success_after_retry",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 11.1
+    },
+    {
+      "name": "recursive_Theo",
+      "family": "recursive",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事主角叫Theo",
+          "信封用Golden Compass開啟"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "角色名稱改為Theo",
+          "信封開啟方式確定為Golden Compass"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 38,
+        "summary_item_count": 4,
+        "summary_char_count": 61,
+        "generation_latency_ms": 6798,
+        "evaluation_latency_ms": 3881,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 10.68
+    },
+    {
+      "name": "topic_switch_Theo",
+      "family": "topic_switch",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "拼圖"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 River Theater"
+        ],
+        "unresolved_questions": [
+          "Golden Compass 藏在哪裡尚未決定"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 21,
+        "summary_item_count": 3,
+        "summary_char_count": 43,
+        "generation_latency_ms": 3835,
+        "evaluation_latency_ms": 4231,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 8.07
+    },
+    {
+      "name": "roles_Theo",
+      "family": "roles",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Theo角色设定：害怕雷声",
+          "Golden Compass故事桥段设计"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "Theo是owner构思的角色，害怕雷声"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [
+          "Ayue承诺稍后帮owner设计Golden Compass的故事桥段"
+        ],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 48,
+        "summary_item_count": 4,
+        "summary_char_count": 88,
+        "generation_latency_ms": 6320,
+        "evaluation_latency_ms": 4904,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 11.23
+    },
+    {
+      "name": "unconfirmed_Theo",
+      "family": "unconfirmed",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色名字确定为Theo，不是Nora。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 32,
+        "summary_item_count": 1,
+        "summary_char_count": 19,
+        "generation_latency_ms": 4000,
+        "evaluation_latency_ms": 4958,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 8.96
+    },
+    {
+      "name": "source_instruction_Theo",
+      "family": "source_instruction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "River Theater 故事"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 River Theater"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 74,
+        "summary_item_count": 2,
+        "summary_char_count": 34,
+        "generation_latency_ms": 4046,
+        "evaluation_latency_ms": 7379,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 11.43
+    },
+    {
+      "name": "excluded_Theo",
+      "family": "excluded",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "虛構主角名為 Theo。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 4,
+        "input_char_count": 11,
+        "summary_item_count": 1,
+        "summary_char_count": 12,
+        "generation_latency_ms": 4741,
+        "evaluation_latency_ms": 4703,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 9.45
+    },
+    {
+      "name": "long_correction_Theo",
+      "family": "long_correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "故事創作：暫名 River Theater，主角 Theo 尋找 Golden Compass，場景含虛構樹木與道路"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事暫名 River Theater，主角確定為 Theo，目標是尋找 Golden Compass",
+          "故事場景為虛構，包含樹木與道路的描寫"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "主角名字由 Nora 更正為 Theo，尋找目標為 Golden Compass"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 1434,
+        "summary_item_count": 4,
+        "summary_char_count": 166,
+        "generation_latency_ms": 6873,
+        "evaluation_latency_ms": 4893,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 11.77
+    },
+    {
+      "name": "mixed_language_Theo",
+      "family": "mixed_language",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "River Theater 故事設定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "這是虛構故事：River Theater，主角 Theo 尋找 Golden Compass，結尾尚未決定。"
+        ],
+        "unresolved_questions": [
+          "故事結尾尚未決定"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 92,
+        "summary_item_count": 3,
+        "summary_char_count": 80,
+        "generation_latency_ms": 4645,
+        "evaluation_latency_ms": 5000,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 9.65
+    },
+    {
+      "name": "dense_correction_0",
+      "family": "dense_correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Fictional traveller name is Nori0.",
+          "Traveller moved to Westfield0; Eastfield0 is old residence.",
+          "Traveller was born in Northport0.",
+          "Traveller reads Moonbook0.",
+          "Traveller carries Copperkey0.",
+          "Traveller drinks Greentea0."
+        ],
+        "unresolved_questions": [
+          "Which game does the traveller play?",
+          "Which character does the traveller use?",
+          "What is the highest rank?",
+          "What is the current rank?",
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 115,
+        "summary_item_count": 11,
+        "summary_char_count": 369,
+        "generation_latency_ms": 6129,
+        "evaluation_latency_ms": 4112,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 10.24
+    },
+    {
+      "name": "dense_answers_0",
+      "family": "dense_answers",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Traveller Nori0 lives in Eastfield0, born in Northport0, reads Moonbook0, carries Copperkey0, drinks Greentea0.",
+          "Game is Orbitstrike, character is Reed, highest rank Diamond, current rank Platinum."
+        ],
+        "unresolved_questions": [
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 128,
+        "summary_item_count": 3,
+        "summary_char_count": 232,
+        "generation_latency_ms": 14778,
+        "evaluation_latency_ms": 4225,
+        "generation_attempt_count": 2,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success_after_retry",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 19.0
+    },
+    {
+      "name": "dense_topic_switch_0",
+      "family": "dense_topic_switch",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Paper planes called Kite0."
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "Fictional traveller name is Nori0.",
+          "Traveller lives in Eastfield0.",
+          "Traveller was born in Northport0.",
+          "Traveller reads Moonbook0.",
+          "Traveller carries Copperkey0.",
+          "Traveller drinks Greentea0."
+        ],
+        "unresolved_questions": [
+          "Which game does the traveller play?",
+          "Which character does the traveller use?",
+          "What is the highest rank?",
+          "What is the current rank?",
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 113,
+        "summary_item_count": 12,
+        "summary_char_count": 366,
+        "generation_latency_ms": 5107,
+        "evaluation_latency_ms": 3567,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 8.68
+    },
+    {
+      "name": "dense_excluded_0",
+      "family": "dense_excluded",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Traveller is Nori0, lives in Eastfield0, born in Northport0.",
+          "Traveller reads Moonbook0, carries Copperkey0, drinks Greentea0.",
+          "Traveller plays Orbitstrike and uses Reed."
+        ],
+        "unresolved_questions": [
+          "What is the highest rank?",
+          "What is the current rank?",
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 63,
+        "summary_item_count": 6,
+        "summary_char_count": 253,
+        "generation_latency_ms": 14657,
+        "evaluation_latency_ms": 3686,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 18.34
+    },
+    {
+      "name": "dense_answers_1",
+      "family": "dense_answers",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Traveller: name Nori1, lives in Eastfield1, born in Northport1, reads Moonbook1, carries Copperkey1, drinks Greentea1.",
+          "Game: Orbitstrike, character: Reed, highest rank Diamond, current rank Platinum."
+        ],
+        "unresolved_questions": [
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 128,
+        "summary_item_count": 3,
+        "summary_char_count": 235,
+        "generation_latency_ms": 20320,
+        "evaluation_latency_ms": 2989,
+        "generation_attempt_count": 2,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success_after_retry",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 23.31
+    },
+    {
+      "name": "dense_correction_1",
+      "family": "dense_correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Fictional traveller name is Nori1.",
+          "Traveller lives in Westfield1; Eastfield1 is old residence.",
+          "Traveller was born in Northport1.",
+          "Traveller reads Moonbook1.",
+          "Traveller carries Copperkey1.",
+          "Traveller drinks Greentea1."
+        ],
+        "unresolved_questions": [
+          "Which game does the traveller play?",
+          "Which character does the traveller use?",
+          "What is the highest rank?",
+          "What is the current rank?",
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 115,
+        "summary_item_count": 11,
+        "summary_char_count": 369,
+        "generation_latency_ms": 4965,
+        "evaluation_latency_ms": 3360,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 8.33
+    },
+    {
+      "name": "dense_topic_switch_1",
+      "family": "dense_topic_switch",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Paper planes called Kite1"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "Fictional traveller name is Nori1.",
+          "Traveller lives in Eastfield1.",
+          "Traveller was born in Northport1.",
+          "Traveller reads Moonbook1.",
+          "Traveller carries Copperkey1.",
+          "Traveller drinks Greentea1."
+        ],
+        "unresolved_questions": [
+          "Which game does the traveller play?",
+          "Which character does the traveller use?",
+          "What is the highest rank?",
+          "What is the current rank?",
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 113,
+        "summary_item_count": 12,
+        "summary_char_count": 365,
+        "generation_latency_ms": 4718,
+        "evaluation_latency_ms": 3113,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 7.83
+    },
+    {
+      "name": "dense_excluded_1",
+      "family": "dense_excluded",
+      "outcome": "generation_failed",
+      "summary": null,
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "unavailable",
+        "retention": null,
+        "unsupported_content": null,
+        "role_confusion": null,
+        "canonical_state_leak": null,
+        "confidence": 0.0,
+        "issue_codes": [
+          "generation_unavailable"
+        ]
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 63,
+        "summary_item_count": 0,
+        "summary_char_count": 0,
+        "generation_latency_ms": 10825,
+        "evaluation_latency_ms": 0,
+        "generation_attempt_count": 2,
+        "evaluation_attempt_count": 0,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "invalid_schema",
+        "evaluation_result_code": "not_attempted",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [
+        "Nori1",
+        "Eastfield1",
+        "Northport1",
+        "Moonbook1",
+        "Copperkey1",
+        "Greentea1",
+        "Orbitstrike",
+        "Reed"
+      ],
+      "leaked": [],
+      "content_pass": false,
+      "passed": false,
+      "seconds": 10.83
+    },
+    {
+      "name": "dense_answers_2",
+      "family": "dense_answers",
+      "outcome": "generation_failed",
+      "summary": null,
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "unavailable",
+        "retention": null,
+        "unsupported_content": null,
+        "role_confusion": null,
+        "canonical_state_leak": null,
+        "confidence": 0.0,
+        "issue_codes": [
+          "generation_unavailable"
+        ]
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 128,
+        "summary_item_count": 0,
+        "summary_char_count": 0,
+        "generation_latency_ms": 9259,
+        "evaluation_latency_ms": 0,
+        "generation_attempt_count": 2,
+        "evaluation_attempt_count": 0,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "invalid_schema",
+        "evaluation_result_code": "not_attempted",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [
+        "Nori2",
+        "Eastfield2",
+        "Northport2",
+        "Moonbook2",
+        "Copperkey2",
+        "Greentea2",
+        "Orbitstrike",
+        "Reed",
+        "Diamond",
+        "Platinum"
+      ],
+      "leaked": [],
+      "content_pass": false,
+      "passed": false,
+      "seconds": 9.26
+    },
+    {
+      "name": "dense_correction_2",
+      "family": "dense_correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Fictional traveller name is Nori2.",
+          "Traveller lives in Westfield2.",
+          "Traveller was born in Northport2.",
+          "Traveller reads Moonbook2.",
+          "Traveller carries Copperkey2.",
+          "Traveller drinks Greentea2."
+        ],
+        "unresolved_questions": [
+          "Which game does the traveller play?",
+          "Which character does the traveller use?",
+          "What is the highest rank?",
+          "What is the current rank?",
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 115,
+        "summary_item_count": 11,
+        "summary_char_count": 340,
+        "generation_latency_ms": 3084,
+        "evaluation_latency_ms": 2767,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 5.85
+    },
+    {
+      "name": "dense_topic_switch_2",
+      "family": "dense_topic_switch",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Paper planes called Kite2"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "Fictional traveller name is Nori2.",
+          "Traveller lives in Eastfield2.",
+          "Traveller was born in Northport2.",
+          "Traveller reads Moonbook2.",
+          "Traveller carries Copperkey2.",
+          "Traveller drinks Greentea2."
+        ],
+        "unresolved_questions": [
+          "Which game does the traveller play?",
+          "Which character does the traveller use?",
+          "What is the highest rank?",
+          "What is the current rank?",
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 113,
+        "summary_item_count": 12,
+        "summary_char_count": 365,
+        "generation_latency_ms": 3912,
+        "evaluation_latency_ms": 2361,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 6.27
+    },
+    {
+      "name": "dense_answers_3",
+      "family": "dense_answers",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Traveller: Nori3, lives in Eastfield3, born in Northport3, reads Moonbook3, carries Copperkey3, drinks Greentea3.",
+          "Game is Orbitstrike, character is Reed, highest rank Diamond, current rank Platinum."
+        ],
+        "unresolved_questions": [
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 128,
+        "summary_item_count": 3,
+        "summary_char_count": 234,
+        "generation_latency_ms": 9186,
+        "evaluation_latency_ms": 2535,
+        "generation_attempt_count": 2,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success_after_retry",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 11.72
+    },
+    {
+      "name": "dense_excluded_2",
+      "family": "dense_excluded",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Traveller's game and character"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "Fictional traveller name is Nori2.",
+          "Traveller lives in Eastfield2.",
+          "Traveller was born in Northport2.",
+          "Traveller reads Moonbook2, carries Copperkey2, drinks Greentea2.",
+          "Traveller plays Orbitstrike.",
+          "Traveller uses Reed."
+        ],
+        "unresolved_questions": [
+          "What is the highest rank?",
+          "What is the current rank?",
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 63,
+        "summary_item_count": 10,
+        "summary_char_count": 326,
+        "generation_latency_ms": 16638,
+        "evaluation_latency_ms": 3706,
+        "generation_attempt_count": 2,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success_after_retry",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 20.35
+    },
+    {
+      "name": "dense_correction_3",
+      "family": "dense_correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Fictional traveller name is Nori3.",
+          "Traveller lives in Westfield3.",
+          "Traveller was born in Northport3.",
+          "Traveller reads Moonbook3.",
+          "Traveller carries Copperkey3.",
+          "Traveller drinks Greentea3."
+        ],
+        "unresolved_questions": [
+          "Which game does the traveller play?",
+          "Which character does the traveller use?",
+          "What is the highest rank?",
+          "What is the current rank?",
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 115,
+        "summary_item_count": 11,
+        "summary_char_count": 340,
+        "generation_latency_ms": 2190,
+        "evaluation_latency_ms": 3322,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 5.51
+    },
+    {
+      "name": "dense_topic_switch_3",
+      "family": "dense_topic_switch",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Paper planes called Kite3"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "Fictional traveller name is Nori3.",
+          "Traveller lives in Eastfield3.",
+          "Traveller was born in Northport3.",
+          "Traveller reads Moonbook3.",
+          "Traveller carries Copperkey3.",
+          "Traveller drinks Greentea3."
+        ],
+        "unresolved_questions": [
+          "Which game does the traveller play?",
+          "Which character does the traveller use?",
+          "What is the highest rank?",
+          "What is the current rank?",
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 113,
+        "summary_item_count": 12,
+        "summary_char_count": 365,
+        "generation_latency_ms": 3185,
+        "evaluation_latency_ms": 3174,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 6.36
+    },
+    {
+      "name": "dense_excluded_3",
+      "family": "dense_excluded",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Traveller is Nori3, lives in Eastfield3, born in Northport3.",
+          "Traveller reads Moonbook3, carries Copperkey3, drinks Greentea3.",
+          "Traveller plays Orbitstrike and uses Reed."
+        ],
+        "unresolved_questions": [
+          "What is the highest rank?",
+          "What is the current rank?",
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 63,
+        "summary_item_count": 6,
+        "summary_char_count": 253,
+        "generation_latency_ms": 7768,
+        "evaluation_latency_ms": 2039,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 9.81
+    },
+    {
+      "name": "dense_answers_4",
+      "family": "dense_answers",
+      "outcome": "generation_failed",
+      "summary": null,
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "unavailable",
+        "retention": null,
+        "unsupported_content": null,
+        "role_confusion": null,
+        "canonical_state_leak": null,
+        "confidence": 0.0,
+        "issue_codes": [
+          "generation_unavailable"
+        ]
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 128,
+        "summary_item_count": 0,
+        "summary_char_count": 0,
+        "generation_latency_ms": 5176,
+        "evaluation_latency_ms": 0,
+        "generation_attempt_count": 2,
+        "evaluation_attempt_count": 0,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "invalid_schema",
+        "evaluation_result_code": "not_attempted",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [
+        "Nori4",
+        "Eastfield4",
+        "Northport4",
+        "Moonbook4",
+        "Copperkey4",
+        "Greentea4",
+        "Orbitstrike",
+        "Reed",
+        "Diamond",
+        "Platinum"
+      ],
+      "leaked": [],
+      "content_pass": false,
+      "passed": false,
+      "seconds": 5.18
+    },
+    {
+      "name": "dense_correction_4",
+      "family": "dense_correction",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Fictional traveller name is Nori4.",
+          "Traveller lives in Westfield4; Eastfield4 is the old residence, no longer current.",
+          "Traveller was born in Northport4.",
+          "Traveller reads Moonbook4.",
+          "Traveller carries Copperkey4.",
+          "Traveller drinks Greentea4."
+        ],
+        "unresolved_questions": [
+          "Which game does the traveller play?",
+          "Which character does the traveller use?",
+          "What is the highest rank?",
+          "What is the current rank?",
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 115,
+        "summary_item_count": 11,
+        "summary_char_count": 392,
+        "generation_latency_ms": 3315,
+        "evaluation_latency_ms": 2726,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 6.04
+    },
+    {
+      "name": "dense_topic_switch_4",
+      "family": "dense_topic_switch",
+      "outcome": "stored",
+      "summary": {
+        "active_topics": [
+          "Paper planes called Kite4"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "Fictional traveller name is Nori4.",
+          "Traveller lives in Eastfield4.",
+          "Traveller was born in Northport4.",
+          "Traveller reads Moonbook4.",
+          "Traveller carries Copperkey4.",
+          "Traveller drinks Greentea4."
+        ],
+        "unresolved_questions": [
+          "Which game does the traveller play?",
+          "Which character does the traveller use?",
+          "What is the highest rank?",
+          "What is the current rank?",
+          "Where will the traveller go tomorrow?"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 1,
+        "input_char_count": 113,
+        "summary_item_count": 12,
+        "summary_char_count": 365,
+        "generation_latency_ms": 4838,
+        "evaluation_latency_ms": 1909,
+        "generation_attempt_count": 1,
+        "evaluation_attempt_count": 1,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "success",
+        "evaluation_result_code": "success",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 6.75
+    },
+    {
+      "name": "dense_excluded_4",
+      "family": "dense_excluded",
+      "outcome": "generation_failed",
+      "summary": null,
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "unavailable",
+        "retention": null,
+        "unsupported_content": null,
+        "role_confusion": null,
+        "canonical_state_leak": null,
+        "confidence": 0.0,
+        "issue_codes": [
+          "generation_unavailable"
+        ]
+      },
+      "observability": {
+        "version": "conversation-compaction-observability-v1",
+        "policy_version": "conversation_compaction_policy_v5",
+        "input_message_count": 2,
+        "input_char_count": 63,
+        "summary_item_count": 0,
+        "summary_char_count": 0,
+        "generation_latency_ms": 4937,
+        "evaluation_latency_ms": 0,
+        "generation_attempt_count": 2,
+        "evaluation_attempt_count": 0,
+        "semantic_repair_attempted": false,
+        "initial_issue_codes": [],
+        "repair_result_code": "not_attempted",
+        "generation_result_code": "invalid_schema",
+        "evaluation_result_code": "not_attempted",
+        "profile_coverage_status": "error",
+        "profile_requeued_count": 0
+      },
+      "missing": [
+        "Nori4",
+        "Eastfield4",
+        "Northport4",
+        "Moonbook4",
+        "Copperkey4",
+        "Greentea4",
+        "Orbitstrike",
+        "Reed"
+      ],
+      "leaked": [],
+      "content_pass": false,
+      "passed": false,
+      "seconds": 4.94
+    }
+  ],
+  "corpus_sha256": "8f65afbd1ebebbc47ef237d309ecf1eb87f1046d2f90766e8e05b3a127a284d3",
+  "scope": "Actual writer pipeline; independently checked anchors plus original evaluator. Synthetic prior summaries only.",
+  "finished_at": 1789444965.8593636,
+  "case_count": 70,
+  "pass_count": 66,
+  "critical_failures": [],
+  "unavailable_count": 4,
+  "review_count": 0,
+  "qualified": false
+}
