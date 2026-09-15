@@ -67,9 +67,9 @@ def main():
     from services.message_use_service import metadata_for_use
     from services.ai_service import _resolve_chat_model
     corpus_hash=hashlib.sha256(json.dumps(cases,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
-    algorithm='\n'.join(inspect.getsource(f) for f in [c._reusable_message_text,c._complete_message_prefix,c._prompt_messages,c._generate_summary,c._evaluate_summary,c._evaluation_projection,c.ConversationSummaryV1])
+    from services.conversation_summary_operations import algorithm_fingerprint
     report={'version':'summary-benchmark-v1','policy':c.COMPACTION_POLICY_VERSION,'model':_resolve_chat_model(),'provider':'ollama',
-            'algorithm_sha256':hashlib.sha256(algorithm.encode()).hexdigest(),'corpus_sha256':corpus_hash,
+            'algorithm_sha256':algorithm_fingerprint(),'corpus_sha256':corpus_hash,
             'started_at':time.time(),'synthetic':True,'production_writes':False,'cases':[]}
 
     def evaluate(case):

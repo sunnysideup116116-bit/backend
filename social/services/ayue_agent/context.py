@@ -12,6 +12,7 @@ from bson.objectid import ObjectId
 
 from database import matches_coll, profiles_coll
 from services.conversation_compaction_service import load_validated_conversation_continuity
+from services.conversation_message_ids import message_id_order_key
 from services.profile_projection import safe_recent_context
 from services.owner_memory_projection import preference_wording
 from services.profile_location import safe_profile_location
@@ -206,7 +207,7 @@ def _message_is_after_watermark(item: dict[str, Any], watermark: dict[str, Any] 
     message_id = str(item.get("_id") or item.get("message_id") or "")
     covered_id = str(watermark.get("covered_through_message_id") or "")
     try:
-        return ObjectId(message_id) > ObjectId(covered_id)
+        return message_id_order_key(message_id) > message_id_order_key(covered_id)
     except Exception:
         return False
 

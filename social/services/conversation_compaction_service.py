@@ -31,6 +31,9 @@ from services.message_use_service import (
     is_reusable_for_compaction,
     message_use,
 )
+from services.conversation_message_ids import (
+    UnsupportedConversationMessageId, decode_message_id,
+)
 
 
 CONVERSATION_COMPACTIONS = db["conversation_compactions"]
@@ -135,13 +138,17 @@ def _message_query_after(compaction: dict[str, Any] | None) -> dict[str, Any]:
         return {}
     timestamp = float(compaction.get("covered_through_timestamp", 0) or 0)
     try:
-        message_id = ObjectId(str(compaction.get("covered_through_message_id") or ""))
+        message_id = decode_message_id(str(compaction.get("covered_through_message_id") or ""))
     except Exception:
         return {"_id": {"$exists": False}}
-    return {"$or": [
+    after = [
         {"timestamp": {"$gt": timestamp}},
         {"timestamp": timestamp, "_id": {"$gt": message_id}},
-    ]}
+    ]
+    # Mongo comparisons are type-bracketed, but sort order spans BSON types.
+    if isinstance(message_id, str):
+        after.append({"timestamp": timestamp, "_id": {"$type": "objectId"}})
+    return {"$or": after}
 
 
 def _load_current_compaction(user_id: str, room_id: str) -> dict[str, Any] | None:
@@ -165,7 +172,7 @@ def _validated_recursive_baseline(
     if not record or record.owner_user_id != user_id or record.room_id != room_id:
         return None
     try:
-        ObjectId(record.covered_through_message_id)
+        decode_message_id(record.covered_through_message_id)
     except Exception:
         return None
     evaluation = record.evaluation
@@ -252,7 +259,7 @@ def queue_conversation_compaction_shadow(background_tasks, user_id: str, room_id
 
 
 def _load_exact_batch(user_id: str, room_id: str, message_ids: list[str]) -> list[dict[str, Any]]:
-    object_ids = [ObjectId(message_id) for message_id in message_ids]
+    object_ids = [decode_message_id(message_id) for message_id in message_ids]
     messages = list(messages_coll.find(
         {"_id": {"$in": object_ids}, "room_id": room_id},
         {
@@ -273,6 +280,8 @@ def _load_exact_batch(user_id: str, room_id: str, message_ids: list[str]) -> lis
 
 
 def _reusable_message_text(user_id: str, message: dict[str, Any]) -> str:
+    if isinstance(message.get("_id"), str) and message["_id"].startswith("system-event:"):
+        return ""
     if not is_reusable_for_compaction(message):
         return ""
     content = message.get("content")
@@ -741,6 +750,8 @@ def run_conversation_compaction_shadow(
         return {"status": "stale"}
     try:
         messages = _load_exact_batch(user_id, room_id, message_ids)
+    except UnsupportedConversationMessageId:
+        return {"status": "source_invalid_id"}
     except Exception:
         return {"status": "source_unavailable"}
     if not messages:

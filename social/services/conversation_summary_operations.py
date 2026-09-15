@@ -21,6 +21,7 @@ from services import conversation_compaction_service as c
 from services.ai_service import _resolve_chat_model
 from services.codex_chat_provider import selected_provider
 from services.ai_room_service import get_room
+from services.conversation_message_ids import decode_message_id, message_id_order_key
 
 JOBS = db['conversation_summary_jobs']
 ROLLOUTS = db['conversation_summary_rollouts']
@@ -32,7 +33,9 @@ _lock = threading.Lock()
 @lru_cache(maxsize=1)
 def algorithm_fingerprint():
     functions = [c._reusable_message_text, c._complete_message_prefix, c._prompt_messages,
-                 c._generate_summary, c._evaluate_summary, c._evaluation_projection, c.ConversationSummaryV1]
+                 c._generate_summary, c._evaluate_summary, c._evaluation_projection, c.ConversationSummaryV1,
+                 decode_message_id, message_id_order_key, c._load_exact_batch,
+                 c._message_query_after, c._validated_recursive_baseline]
     return hashlib.sha256('\n'.join(inspect.getsource(f) for f in functions).encode()).hexdigest()
 
 
@@ -221,7 +224,7 @@ def run_rebuild_once():
             code = 'batch_budget_reached'
     elif code == 'below_threshold':
         state = 'complete'
-    elif code in {'source_over_budget', 'invalid_scope', 'disabled'}:
+    elif code in {'source_over_budget', 'source_invalid_id', 'invalid_scope', 'disabled'}:
         state = 'blocked'
     else:
         state = 'retry_wait' if attempts < 3 else 'failed'

@@ -1,0 +1,2120 @@
+{
+  "version": "summary-benchmark-v1",
+  "policy": "conversation_compaction_policy_v5",
+  "model": "deepseek-v4-flash:cloud",
+  "provider": "ollama",
+  "algorithm_sha256": "7cda4ffc4e9c1ce83ecb9a39b8c7ff1c0620a7e171e773c7408b74ba116bd960",
+  "corpus_sha256": "c56e9d40c704d7c2570e07b87dbece2ba42f348f9316aa238da7143fe20a59aa",
+  "started_at": 1789441217.1682491,
+  "synthetic": true,
+  "production_writes": false,
+  "cases": [
+    {
+      "name": "correction_Noah",
+      "family": "correction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色最终定名為 Noah，先前暫稱 Mira 已作廢。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "角色名稱由 Mira 改為 Noah。"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.26
+    },
+    {
+      "name": "facts_Noah",
+      "family": "facts",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Silver Garden是虛構故事，角色Noah正在尋找Copper Letter。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.5
+    },
+    {
+      "name": "recursive_Noah",
+      "family": "recursive",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事主角叫 Noah"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "信封用 Copper Letter 開啟"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.72
+    },
+    {
+      "name": "topic_switch_Noah",
+      "family": "topic_switch",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "拼圖"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Silver Garden"
+        ],
+        "unresolved_questions": [
+          "Copper Letter 藏在哪裡尚未決定"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.6
+    },
+    {
+      "name": "roles_Noah",
+      "family": "roles",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色 Noah 害怕雷聲"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [
+          "稍後幫你設計 Copper Letter 的故事橋段"
+        ],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.68
+    },
+    {
+      "name": "unconfirmed_Noah",
+      "family": "unconfirmed",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色名确定为Noah，不是Mira。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.03
+    },
+    {
+      "name": "source_instruction_Noah",
+      "family": "source_instruction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Silver Garden"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.62
+    },
+    {
+      "name": "excluded_Noah",
+      "family": "excluded",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "虛構主角叫 Noah。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.3
+    },
+    {
+      "name": "long_correction_Noah",
+      "family": "long_correction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "故事創作"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事暫名 Silver Garden",
+          "主角確定為 Noah，尋找 Copper Letter"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "主角名字由暫稱改為 Noah，尋找目標為 Copper Letter"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.31
+    },
+    {
+      "name": "mixed_language_Noah",
+      "family": "mixed_language",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "Silver Garden 虚构故事设定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事主角为 Noah，寻找 Copper Letter",
+          "故事为虚构，结尾尚未决定"
+        ],
+        "unresolved_questions": [
+          "故事结尾如何安排？"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.74
+    },
+    {
+      "name": "facts_Felix",
+      "family": "facts",
+      "generation_attempts": 2,
+      "generation_code": "success_after_retry",
+      "summary": {
+        "active_topics": [
+          "Moon Harbor故事设定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名称为Moon Harbor",
+          "角色名为Felix",
+          "Felix正在寻找Amber Book"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.73
+    },
+    {
+      "name": "correction_Felix",
+      "family": "correction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色最終定名為 Felix，先前暫稱 Iris 已作廢。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.4
+    },
+    {
+      "name": "recursive_Felix",
+      "family": "recursive",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事主角叫 Felix"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "信封用 Amber Book 开启"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.49
+    },
+    {
+      "name": "topic_switch_Felix",
+      "family": "topic_switch",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "拼圖"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Moon Harbor"
+        ],
+        "unresolved_questions": [
+          "Amber Book 藏在哪裡尚未決定"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.05
+    },
+    {
+      "name": "roles_Felix",
+      "family": "roles",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "owner構思的角色Felix害怕雷聲"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [
+          "ayue承諾稍後幫owner設計Amber Book的故事橋段"
+        ],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.3
+    },
+    {
+      "name": "unconfirmed_Felix",
+      "family": "unconfirmed",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色名确定为 Felix。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.62
+    },
+    {
+      "name": "source_instruction_Felix",
+      "family": "source_instruction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Moon Harbor"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.89
+    },
+    {
+      "name": "excluded_Felix",
+      "family": "excluded",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "虛構主角叫 Felix。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.92
+    },
+    {
+      "name": "mixed_language_Felix",
+      "family": "mixed_language",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "Moon Harbor故事设定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "虚构故事Moon Harbor，主角Felix寻找Amber Book，结尾尚未决定"
+        ],
+        "unresolved_questions": [
+          "故事结尾如何决定？"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.98
+    },
+    {
+      "name": "long_correction_Felix",
+      "family": "long_correction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "Moon Harbor 故事設定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事暫名 Moon Harbor",
+          "主角確定為 Felix",
+          "Felix 尋找 Amber Book"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "主角名字由 Iris 更正為 Felix"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.56
+    },
+    {
+      "name": "facts_Oscar",
+      "family": "facts",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "虛構故事名為 Cloud Library，角色 Oscar 正在尋找 Glass Key。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.09
+    },
+    {
+      "name": "correction_Oscar",
+      "family": "correction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色最終定名為 Oscar，先前暫稱 Luna 已作廢。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "角色名稱由 Luna 改為 Oscar。"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 4.08
+    },
+    {
+      "name": "recursive_Oscar",
+      "family": "recursive",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事主角叫 Oscar"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "信封用 Glass Key 開啟"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.29
+    },
+    {
+      "name": "topic_switch_Oscar",
+      "family": "topic_switch",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "拼圖"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Cloud Library"
+        ],
+        "unresolved_questions": [
+          "Glass Key 藏在哪裡尚未決定"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.81
+    },
+    {
+      "name": "roles_Oscar",
+      "family": "roles",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Oscar 害怕雷聲。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [
+          "稍後幫你設計 Glass Key 的故事橋段。"
+        ],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.6
+    },
+    {
+      "name": "unconfirmed_Oscar",
+      "family": "unconfirmed",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色名字确定为Oscar，不是Luna。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.46
+    },
+    {
+      "name": "source_instruction_Oscar",
+      "family": "source_instruction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "Cloud Library"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Cloud Library"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.0
+    },
+    {
+      "name": "excluded_Oscar",
+      "family": "excluded",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "虛構主角叫 Oscar。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.53
+    },
+    {
+      "name": "long_correction_Oscar",
+      "family": "long_correction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "故事創作：Cloud Library"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事暫名 Cloud Library",
+          "主角確定為 Oscar",
+          "Oscar 尋找 Glass Key"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "主角名字由 Luna 更正為 Oscar，尋找目標為 Glass Key"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.95
+    },
+    {
+      "name": "facts_Hugo",
+      "family": "facts",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "虛構故事：名稱 Winter Station，角色 Hugo，正在尋找 Velvet Map。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.35
+    },
+    {
+      "name": "mixed_language_Oscar",
+      "family": "mixed_language",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "Cloud Library 故事設定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "這是虛構故事 Cloud Library，主角 Oscar 尋找 Glass Key，結尾尚未決定。"
+        ],
+        "unresolved_questions": [
+          "故事結尾尚未決定。"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.98
+    },
+    {
+      "name": "recursive_Hugo",
+      "family": "recursive",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事主角叫 Hugo"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "信封用 Velvet Map 開啟"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.05
+    },
+    {
+      "name": "correction_Hugo",
+      "family": "correction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色最終定名為 Hugo，先前暫稱 Aria 已作廢。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.89
+    },
+    {
+      "name": "topic_switch_Hugo",
+      "family": "topic_switch",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "拼圖"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Winter Station"
+        ],
+        "unresolved_questions": [
+          "Velvet Map 藏在哪裡尚未決定"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.23
+    },
+    {
+      "name": "roles_Hugo",
+      "family": "roles",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Hugo 害怕雷聲。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [
+          "稍後幫你設計 Velvet Map 的故事橋段。"
+        ],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.89
+    },
+    {
+      "name": "source_instruction_Hugo",
+      "family": "source_instruction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 Winter Station"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.7
+    },
+    {
+      "name": "unconfirmed_Hugo",
+      "family": "unconfirmed",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色名确定为Hugo"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.64
+    },
+    {
+      "name": "excluded_Hugo",
+      "family": "excluded",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "虛構主角叫Hugo。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.5
+    },
+    {
+      "name": "mixed_language_Hugo",
+      "family": "mixed_language",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "Winter Station 故事设定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "虚构故事 Winter Station，主角 Hugo，寻找 Velvet Map，结尾尚未决定。"
+        ],
+        "unresolved_questions": [
+          "故事结尾尚未决定。"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.63
+    },
+    {
+      "name": "long_correction_Hugo",
+      "family": "long_correction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "Winter Station故事设定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事暂名Winter Station",
+          "主角确定为Hugo，他寻找Velvet Map"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "主角名定为Hugo，目标为寻找Velvet Map"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 5.74
+    },
+    {
+      "name": "facts_Theo",
+      "family": "facts",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "虛構故事：River Theater，角色Theo，尋找Golden Compass。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.82
+    },
+    {
+      "name": "correction_Theo",
+      "family": "correction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色最终定名为Theo，先前暂称Nora已作废。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "将角色名从Nora改为Theo。"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 5.18
+    },
+    {
+      "name": "topic_switch_Theo",
+      "family": "topic_switch",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "拼图"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 River Theater"
+        ],
+        "unresolved_questions": [
+          "Golden Compass 藏在哪裡尚未決定"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.76
+    },
+    {
+      "name": "roles_Theo",
+      "family": "roles",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "Theo 害怕雷聲。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [
+          "稍後幫你設計 Golden Compass 的故事橋段。"
+        ],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.6
+    },
+    {
+      "name": "unconfirmed_Theo",
+      "family": "unconfirmed",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "角色名字确定为Theo，不是Nora。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.84
+    },
+    {
+      "name": "source_instruction_Theo",
+      "family": "source_instruction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事名為 River Theater"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.29
+    },
+    {
+      "name": "excluded_Theo",
+      "family": "excluded",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "虛構主角叫 Theo。"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 1.0,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.5
+    },
+    {
+      "name": "long_correction_Theo",
+      "family": "long_correction",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "故事創作"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事暫名 River Theater",
+          "主角確定為 Theo",
+          "Theo 尋找 Golden Compass"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 3.45
+    },
+    {
+      "name": "mixed_language_Theo",
+      "family": "mixed_language",
+      "generation_attempts": 1,
+      "generation_code": "success",
+      "summary": {
+        "active_topics": [
+          "River Theater 故事設定"
+        ],
+        "owner_goals": [],
+        "known_continuity": [
+          "這是虛構故事 River Theater，主角是 Theo，正在尋找 Golden Compass。"
+        ],
+        "unresolved_questions": [
+          "故事結尾尚未決定。"
+        ],
+        "ayue_commitments": [],
+        "recent_decisions": []
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 2.77
+    },
+    {
+      "name": "recursive_Theo",
+      "family": "recursive",
+      "generation_attempts": 2,
+      "generation_code": "success_after_retry",
+      "summary": {
+        "active_topics": [],
+        "owner_goals": [],
+        "known_continuity": [
+          "故事主角叫 Theo"
+        ],
+        "unresolved_questions": [],
+        "ayue_commitments": [],
+        "recent_decisions": [
+          "角色改名為 Theo",
+          "信封用 Golden Compass 開啟"
+        ]
+      },
+      "evaluation": {
+        "version": "conversation-compaction-evaluation-v1",
+        "status": "pass",
+        "retention": {
+          "active_topics": true,
+          "owner_goals": true,
+          "known_continuity": true,
+          "unresolved_questions": true,
+          "ayue_commitments": true,
+          "recent_decisions": true
+        },
+        "unsupported_content": false,
+        "role_confusion": false,
+        "canonical_state_leak": false,
+        "confidence": 0.95,
+        "issue_codes": []
+      },
+      "evaluation_attempts": 1,
+      "evaluation_code": "success",
+      "missing": [],
+      "leaked": [],
+      "content_pass": true,
+      "passed": true,
+      "seconds": 31.11
+    }
+  ],
+  "finished_at": 1789441323.110305,
+  "case_count": 50,
+  "pass_count": 50,
+  "critical_failures": [],
+  "unavailable_count": 0,
+  "review_count": 0,
+  "qualified": true
+}
