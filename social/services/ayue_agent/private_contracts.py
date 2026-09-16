@@ -88,3 +88,16 @@ class PrivateAgentResult(AgentResult):
     """Private-only metadata; shared AgentResult remains Public-compatible."""
 
     handoff: PrivateSurfaceHandoff | None = None
+    # These fields are server-owned telemetry for the Private runtime.  They
+    # are intentionally excluded from the HTTP payload so the client cannot
+    # mistake a candidate or receipt for a completed write.
+    relationship_memory_candidate: dict[str, str] | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
+    post_date_feedback_recorded: bool = Field(
+        default=False,
+        exclude=True,
+        repr=False,
+    )

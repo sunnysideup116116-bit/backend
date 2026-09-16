@@ -1,4 +1,4 @@
-"""Private mediator HTTP adapters for the current isolated V2 runtime."""
+"""Private mediator HTTP adapters for the isolated Private Pi runtime."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import queue
 import threading
 import time
 import uuid
+from contextvars import ContextVar
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -16,14 +17,16 @@ from database import matches_coll, messages_coll, profiles_coll
 from models import MediatorPrivateRequest
 from services.appwrite_identity_service import authenticated_owner_matches
 from services.ayue_agent.private_contracts import PrivateClientAction
+from services.ayue_agent.private_pi.runtime import run_private_pi_turn
 from services.ayue_agent.private_v2 import (
     mark_private_confirmation_presented,
-    run_private_agent_turn_v2,
 )
 from services.ayue_agent.product_identity import PRIVATE_RUNTIME_FALLBACK_REPLY
 from services.chat_service import generate_room_id, save_message
 from services.profile_task_service import queue_profile_skills  # compatibility import; Private never invokes it
 from services.relationship_engagement_service import (
+    # Compatibility exports retained for older integrations/tests; the
+    # Private Pi runtime now decides when these consumers are appropriate.
     consume_pending_post_date_feedback,
     consume_pending_probe_answer,
     find_accepted_match,
@@ -33,6 +36,15 @@ from services.relationship_engagement_service import (
 )
 
 router = APIRouter()
+
+# Keep the old symbol name as a compatibility seam for tests and downstream
+# integrations while routing production turns through the isolated Private Pi
+# runtime.  A request-local source id avoids a second "latest message" query
+# without changing the public endpoint/request contract.
+run_private_agent_turn_v2 = run_private_pi_turn
+_SOURCE_MESSAGE_ID: ContextVar[str] = ContextVar(
+    "private_source_message_id", default="",
+)
 
 @router.get("/mediator/private/{other_id}")
 
@@ -144,9 +156,17 @@ def _run_private_v2_saved_turn(
     agent_run_id: str | None = None,
     on_token=None,
     external_calendar_authorized: bool = False,
+    source_message_id: str | None = None,
 ) -> dict:
-    """Persist exactly one private V2 final after the owner message is saved."""
-    if req.choice_action is None:
+    """Persist exactly one Private Pi final after the owner message is saved.
+
+    The Pi runtime decides whether a message is a post-date answer, probe
+    answer, or memory candidate.  The adapter must not pre-consume those
+    workflows based only on the fact that a user message arrived.
+    """
+    if source_message_id is None:
+        source_message_id = _SOURCE_MESSAGE_ID.get("")
+    if req.choice_action is None and not source_message_id:
         try:
             source = messages_coll.find_one(
                 {"room_id": room_id, "sender_id": req.user_id},
@@ -156,42 +176,13 @@ def _run_private_v2_saved_turn(
         except Exception:
             source = {}
         source_message_id = str(source.get("_id") or "")
-        try:
-            user_doc = profiles_coll.find_one({"user_id": req.user_id}) or {}
-        except Exception:
-            user_doc = {}
-        pending_reply = None
-        if external_calendar_authorized:
-            pending_reply = consume_pending_post_date_feedback(
-                match_doc,
-                user_doc,
-                req.user_id,
-                req.other_id,
-                req.message,
-                source_message_id=source_message_id,
-            )
-        if pending_reply is None:
-            pending_reply = consume_pending_probe_answer(
-                match_doc, user_doc, req.user_id, req.other_id, req.message,
-            )
-        from services.relationship_memory_service import enqueue_relationship_memory_extraction
-
-        if external_calendar_authorized:
-            enqueue_relationship_memory_extraction(
-                req.user_id,
-                req.other_id,
-                str(match_doc.get("_id") or ""),
-                source_message_id,
-            )
-        if pending_reply is not None:
-            save_private_mediator_reply(room_id, pending_reply)
-            return {"reply": pending_reply, "pending_step": None}
     result = run_private_agent_turn_v2(
         user_id=req.user_id, other_id=req.other_id, message=req.message,
         match_doc=match_doc, on_progress=on_progress, agent_run_id=agent_run_id,
         on_token=on_token,
         choice_id=req.choice_id, choice_action=req.choice_action,
         external_calendar_authorized=external_calendar_authorized,
+        source_message_id=str(source_message_id or ""),
     )
     reply = result.reply or PRIVATE_RUNTIME_FALLBACK_REPLY
     handoff = result.handoff.model_dump() if getattr(result, "handoff", None) else None
@@ -202,7 +193,7 @@ def _run_private_v2_saved_turn(
             label="回阿月主聊天室 →",
             value=handoff["original_message"],
         ).model_dump()]
-    event_type = "agentic_private_redirect" if handoff else "agentic_private_v2"
+    event_type = "agentic_private_redirect" if handoff else "agentic_private_pi"
     saved_reply = save_private_mediator_reply(
         room_id,
         reply,
@@ -218,9 +209,15 @@ def _run_private_v2_saved_turn(
             message_id=str(saved_reply["message_id"]),
             persisted_content=str(saved_reply.get("content") or ""),
         )
+    agent_mode = str(getattr(result, "agent_mode", "") or "pi")
+    agent_version = (
+        "pi_private.v1" if agent_mode == "pi"
+        else str(getattr(result, "agent_version", "") or "v2")
+    )
     return {
         "reply": reply, "pending_step": None, "agent_run_id": result.agent_run_id,
-        "agent_mode": "v2", "agent_version": "v2", "conversation_intent": result.conversation_intent,
+        "agent_mode": agent_mode, "agent_version": agent_version,
+        "conversation_intent": result.conversation_intent,
         "handoff": handoff,
         "actions": actions,
         "choice_prompt": result.choice_prompt,
@@ -247,8 +244,10 @@ def mediator_private_chat(
 
     room_id = generate_mediator_private_room_id(req.user_id, req.other_id)
 
+    source_message_id = ""
     if req.choice_action is None:
-        save_message(room_id, req.user_id, req.message)
+        saved = save_message(room_id, req.user_id, req.message)
+        source_message_id = str((saved or {}).get("message_id") or (saved or {}).get("_id") or "")
 
     profiles_coll.update_one(
 
@@ -268,12 +267,11 @@ def mediator_private_chat(
         req.user_id,
     ):
         turn_options["external_calendar_authorized"] = True
-    return _run_private_v2_saved_turn(
-        req,
-        match_doc,
-        room_id,
-        **turn_options,
-    )
+    token = _SOURCE_MESSAGE_ID.set(source_message_id)
+    try:
+        return _run_private_v2_saved_turn(req, match_doc, room_id, **turn_options)
+    finally:
+        _SOURCE_MESSAGE_ID.reset(token)
 
 @router.post("/mediator/private/stream")
 def mediator_private_chat_stream(
@@ -294,9 +292,17 @@ def mediator_private_chat_stream(
     )
 
     def emit(event: dict) -> None:
-        if event.get("type") not in {"run_started", "tool_started", "tool_finished", "token"}:
+        if event.get("type") not in {
+            "run_started", "stage", "tool_started", "tool_finished", "token",
+        }:
             return
-        safe = {key: event[key] for key in ("type", "agent_run_id", "step_id", "text", "outcome") if key in event}
+        safe = {
+            key: event[key]
+            for key in (
+                "type", "agent_run_id", "step_id", "text", "outcome", "duration_ms",
+            )
+            if key in event
+        }
         event_queue.put_nowait(safe)
 
     def worker() -> None:
@@ -307,20 +313,26 @@ def mediator_private_chat_stream(
 
         try:
             room_id = generate_mediator_private_room_id(req.user_id, req.other_id)
+            source_message_id = ""
             if req.choice_action is None:
-                save_message(room_id, req.user_id, req.message)
+                saved = save_message(room_id, req.user_id, req.message)
+                source_message_id = str((saved or {}).get("message_id") or (saved or {}).get("_id") or "")
             emit({"type": "run_started", "agent_run_id": fallback_run_id})
             turn_options = {"on_token": emit_token}
             if external_calendar_authorized:
                 turn_options["external_calendar_authorized"] = True
-            response = _run_private_v2_saved_turn(
-                req,
-                match_doc,
-                room_id,
-                emit,
-                fallback_run_id,
-                **turn_options,
-            )
+            token = _SOURCE_MESSAGE_ID.set(source_message_id)
+            try:
+                response = _run_private_v2_saved_turn(
+                    req,
+                    match_doc,
+                    room_id,
+                    emit,
+                    fallback_run_id,
+                    **turn_options,
+                )
+            finally:
+                _SOURCE_MESSAGE_ID.reset(token)
             event_queue.put({"type": "final", "response": response})
         except Exception:
             event_queue.put({"type": "error", "agent_run_id": fallback_run_id, "reply": PRIVATE_RUNTIME_FALLBACK_REPLY})
