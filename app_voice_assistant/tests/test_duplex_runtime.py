@@ -28,13 +28,17 @@ def message(
 
 
 class FakeLive:
-    def __init__(self):
+    def __init__(self, *, non_blocking_tools=()):
         self.incoming = asyncio.Queue()
         self.tool_responses = []
         self.audio = []
         self.text = []
         self.closed = False
         self.reconnect_count = 0
+        self.non_blocking_tools = frozenset(non_blocking_tools)
+
+    def is_non_blocking_tool(self, name):
+        return name in self.non_blocking_tools
 
     async def connect(self):
         return False
@@ -89,6 +93,82 @@ async def wait_until(predicate, timeout=1):
         if asyncio.get_running_loop().time() >= deadline:
             raise TimeoutError("condition")
         await asyncio.sleep(0)
+
+
+def test_non_blocking_weather_keeps_live_tool_receiver_responsive(monkeypatch):
+    class ControlledWeather:
+        def __init__(self):
+            self.locations = []
+
+        def query(self, location):
+            self.locations.append(location)
+            return {
+                "status": "ok",
+                "sources_called": ["google_weather", "google_air_quality"],
+                "message": "台北目前 29°C。",
+            }
+
+    async def scenario():
+        live = FakeLive(non_blocking_tools={"read_weather"})
+        socket = FakeWebSocket()
+        weather = ControlledWeather()
+        weather_started = asyncio.Event()
+        release_weather = asyncio.Event()
+
+        async def controlled_to_thread(function, *args):
+            weather_started.set()
+            await release_weather.wait()
+            return function(*args)
+
+        monkeypatch.setattr(asyncio, "to_thread", controlled_to_thread)
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket,
+            provider=FakeProvider(live),
+            limiter=FakeLimiter(),
+            identity="test",
+            initial_context={},
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+            weather_service=weather,
+        ))
+        try:
+            await live.incoming.put(message(tool_calls=[SimpleNamespace(
+                id="slow-weather",
+                name="read_weather",
+                args={"location": "台北"},
+            )]))
+            await asyncio.wait_for(weather_started.wait(), timeout=1)
+
+            await live.incoming.put(message(tool_calls=[SimpleNamespace(
+                id="capabilities-while-weather-runs",
+                name="get_voice_capabilities",
+                args={},
+            )]))
+            await wait_until(lambda: any(
+                response[0] == "capabilities-while-weather-runs"
+                for response in live.tool_responses
+            ))
+            assert not any(
+                response[0] == "slow-weather"
+                for response in live.tool_responses
+            )
+
+            release_weather.set()
+            await wait_until(lambda: any(
+                response[0] == "slow-weather"
+                for response in live.tool_responses
+            ))
+            assert weather.locations == ["台北"]
+        finally:
+            release_weather.set()
+            await socket.incoming.put({
+                "type": "websocket.receive",
+                "text": json.dumps({"type": "stop"}),
+            })
+            await task
+
+    asyncio.run(scenario())
 
 
 def test_duplex_confirmation_calls_the_app_once_and_returns_tool_result():
@@ -284,7 +364,7 @@ def test_proxy_new_match_confirms_once_then_queues_and_ignores_model_duplicate()
             if item[0] == "find-new-match"
         )
         assert response["status"] == "awaiting_confirmation"
-        assert response["spoken_prompt"] == "如果要繼續，請說「確認」。"
+        assert response["spoken_prompt"] == "要開始配對的話，說「開始」或「可以開始」。"
         confirmation = next(
             event for event in events
             if event.get("type") == "confirmation_required"
@@ -300,7 +380,7 @@ def test_proxy_new_match_confirms_once_then_queues_and_ignores_model_duplicate()
                 "type": "confirmation_response",
                 "confirmation_id": confirmation["confirmation_id"],
                 "accepted": True,
-                "spoken_phrase": "確認開始配對",
+                "spoken_phrase": "可以開始了",
             }),
         })
         await wait_until(lambda: any(
@@ -1597,6 +1677,39 @@ def test_match_hub_live_tool_maps_to_the_direct_read_contract():
     assert proposal.base_revision == 7
 
 
+def test_legacy_tools_map_private_safety_and_photo_positions_to_v4_actions():
+    private = _proposal_from_function(
+        SimpleNamespace(
+            name="open_chat",
+            args={"mode": "private_ayue", "contact_name": "小美"},
+        ),
+        revision=7,
+    )
+    blocked = _proposal_from_function(
+        SimpleNamespace(name="list_contacts", args={"view": "blocked"}),
+        revision=7,
+    )
+    block = _proposal_from_function(
+        SimpleNamespace(
+            name="send_chat_message",
+            args={"operation": "block", "contact_name": "小明"},
+        ),
+        revision=7,
+    )
+    photo = _proposal_from_function(
+        SimpleNamespace(
+            name="select_recent_post_photos",
+            args={"positions": [3]},
+        ),
+        revision=7,
+    )
+
+    assert private is not None and private.intent == "ayue.private_open"
+    assert blocked is not None and blocked.intent == "safety.blocked_users_query"
+    assert block is not None and block.intent == "safety.block_user"
+    assert photo is not None and photo.arguments == {"positions": [3]}
+
+
 def test_english_progress_prompt_never_mentions_another_ayue():
     async def scenario():
         live = FakeLive()
@@ -2182,6 +2295,63 @@ def test_template_fast_path_dispatches_when_live_omits_a_function_call():
     asyncio.run(scenario())
 
 
+def test_template_fast_path_keeps_private_open_and_exact_photo_position():
+    async def run_case(text, permissions, expected_intent, expected_arguments):
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket,
+            provider=FakeProvider(live),
+            limiter=FakeLimiter(),
+            identity="test",
+            user_id="u1",
+            voice_session_id="s1",
+            initial_context={
+                "scope": "global",
+                "revision": 3,
+                "permissions": permissions,
+            },
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+            routing_mode="template",
+        ))
+        await live.incoming.put(message(content=SimpleNamespace(
+            interim_input_transcription=None,
+            input_transcription=SimpleNamespace(text=text, finished=True),
+            interrupted=False,
+            output_transcription=None,
+            model_turn=None,
+            turn_complete=False,
+        )))
+        await wait_until(lambda: any(
+            event.get("type") == "action_proposal" for event in events
+        ))
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == expected_intent
+        assert proposal["arguments"] == expected_arguments
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    async def scenario():
+        await run_case(
+            "帶我到與小美的阿月悄悄話",
+            {"private_ayue": True, "chat_list": True},
+            "ayue.private_open",
+            {"contact_name": "小美"},
+        )
+        await run_case(
+            "幫我選第三章圖片",
+            {"gallery": True},
+            "post.select_recent_photos",
+            {"positions": [3]},
+        )
+
+    asyncio.run(scenario())
+
+
 def test_template_new_match_never_claims_started_before_confirmation():
     async def scenario():
         live = FakeLive()
@@ -2225,7 +2395,7 @@ def test_template_new_match_never_claims_started_before_confirmation():
             if event.get("type") == "confirmation_required"
         )
         assert confirmation["intent"] == "match.ayue_query"
-        assert confirmation["spoken_prompt"] == "如果要繼續，請說「確認」。"
+        assert confirmation["spoken_prompt"] == "要開始配對的話，說「開始」或「可以開始」。"
         assert not any(
             event.get("type") == "action_proposal" for event in events
         )
@@ -2237,7 +2407,7 @@ def test_template_new_match_never_claims_started_before_confirmation():
                 "type": "confirmation_response",
                 "confirmation_id": confirmation["confirmation_id"],
                 "accepted": True,
-                "spoken_phrase": "確認",
+                "spoken_phrase": "開始",
             }),
         })
         await wait_until(lambda: any(

@@ -31,15 +31,18 @@ VOICE_PERMISSION_KEYS = frozenset({
     "public_ayue", "private_ayue", "chat_list", "chat_content", "chat_send",
     "calendar_read", "calendar_write", "web_search", "places",
     "location_precise", "memory_read", "memory_write", "status_read",
+    "safety_actions",
 })
 SENSITIVE_PERMISSION_DEFAULTS = frozenset({
     "match_actions", "private_ayue", "chat_content", "chat_send",
     "calendar_write", "location_precise", "memory_write",
+    "safety_actions",
 })
 NAVIGATION_DESTINATIONS = frozenset({
     "chat", "matching", "profile", "settings", "profile_edit",
     "voice_settings", "calendar", "matching_ayue", "match_hub",
     "memory", "create_post",
+    "blocked_users",
 })
 PUBLIC_AYUE_DOMAINS = frozenset({
     "matching", "web", "places", "memory", "profile",
@@ -772,6 +775,10 @@ def context_allows_proposal(context: dict[str, Any], proposal: VoiceProposal) ->
         if any(word in question for word in ("通知對方", "傳給", "送出", "安排約會", "發起約會")):
             return permissions.get("match_actions") is True
         return True
+    if proposal.intent == "ayue.private_open":
+        return permissions.get("chat_list") is True
+    if proposal.intent == "safety.block_user":
+        return permissions.get("chat_list") is True
     if proposal.intent == "personality.explore":
         return permissions.get("memory_read") is True
     if proposal.intent == "match.ayue_query":
@@ -859,6 +866,10 @@ def confirmation_phrase(proposal: VoiceProposal) -> str:
         return "確認取消行程"
     if proposal.intent == "ayue.private_query":
         return "確認讀取私人聊天"
+    if proposal.intent == "safety.block_user":
+        return "確認封鎖使用者"
+    if proposal.intent == "safety.unblock_user":
+        return "確認解除封鎖使用者"
     if proposal.intent == "chat.request_send":
         return "確認傳送訊息"
     if proposal.intent == "memory.add":
@@ -881,6 +892,26 @@ def confirmation_matches(text: str, proposal: VoiceProposal) -> bool:
     """Match a spoken confirmation without accepting a bare action phrase."""
     actual = normalized_phrase(text)
     expected = normalized_phrase(confirmation_phrase(proposal))
+    if expected == "確認開始配對":
+        if actual in {
+            "可以", "可以啊", "可以的", "沒問題", "沒問題啊",
+            "好啊", "好喔", "好哦", "行", "行啊", "來吧",
+            "對", "對啊", "對的", "當然", "當然可以", "繼續", "繼續吧",
+            "開始", "開始吧", "開始了", "開始配對", "開始配對吧",
+            "開始找", "開始找人", "開始找對象", "就開始吧",
+            "start", "startnow", "goahead", "proceed", "letsgo",
+            "letsstart", "let'sstart", "sure", "ok", "okay",
+        }:
+            return True
+        if re.fullmatch(
+            r"(?:嗯(?:嗯)?|對(?:的|啊)?|當然|好(?:的|啊|喔|哦)?|可以|"
+            r"沒問題|行(?:啊)?|那(?:就)?|"
+            r"好那(?:就)?|我們|那我們|我想|我要|現在|先|直接|請|幫我){0,3}"
+            r"(?:開始|開始配對|開始找|開始找人|開始找對象)"
+            r"(?:吧|了|喔|哦|啊|看看|看看吧|試試|試試看|試試吧)?",
+            actual,
+        ):
+            return True
     if actual in {
         "確認", "確定", "同意", "好", "好的", "好確認", "好確定",
         "confirm", "confirmed", "yes", "yesconfirm",
@@ -1206,6 +1237,15 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
         if not question:
             return None
         args = {"contact_name": contact_name, "question": question}
+    elif intent in {"ayue.private_open", "safety.block_user", "safety.unblock_user"}:
+        contact_name = re.sub(
+            r"\s+", " ", str(raw_args.get("contact_name") or ""),
+        ).strip()[:40]
+        if not contact_name and not target_ref:
+            return None
+        args = {"contact_name": contact_name} if contact_name else {}
+    elif intent == "safety.blocked_users_query":
+        args = {}
     elif intent == "contacts.query":
         args = {}
     elif intent == "self.query":
@@ -1286,13 +1326,31 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
             return None
         args["caption"] = caption
     elif intent == "post.select_recent_photos":
-        try:
-            count = int(raw_args.get("count") or 3)
-        except (TypeError, ValueError):
-            return None
-        if not 1 <= count <= 5:
-            return None
-        args["count"] = count
+        raw_positions = raw_args.get("positions")
+        if raw_positions is not None:
+            if raw_args.get("count") not in (None, ""):
+                return None
+            if not isinstance(raw_positions, list) or not 1 <= len(raw_positions) <= 5:
+                return None
+            positions: list[int] = []
+            for item in raw_positions:
+                if not isinstance(item, int) or isinstance(item, bool):
+                    return None
+                position = item
+                if not 1 <= position <= 20:
+                    return None
+                positions.append(position)
+            if len(set(positions)) != len(positions):
+                return None
+            args["positions"] = positions
+        else:
+            try:
+                count = int(raw_args.get("count") or 3)
+            except (TypeError, ValueError):
+                return None
+            if not 1 <= count <= 5:
+                return None
+            args["count"] = count
     elif intent == "match.ayue_query":
         question = re.sub(r"\s+", " ", str(raw_args.get("question") or "")).strip()[:1000]
         if not question:

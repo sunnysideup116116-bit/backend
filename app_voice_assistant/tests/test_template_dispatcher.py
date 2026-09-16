@@ -176,3 +176,106 @@ def test_template_authoritative_router_expands_natural_month_to_inclusive_dates(
         "start_date": expected_start,
         "end_date": expected_end,
     }
+
+
+def test_template_router_handles_private_navigation_safety_and_photo_positions():
+    private = authoritative_template_proposal(
+        "帶我到與小美的阿月悄悄話",
+        context={"revision": 9},
+    )
+    blocked = authoritative_template_proposal(
+        "我的封鎖名單有誰",
+        context={"revision": 9},
+    )
+    block = authoritative_template_proposal(
+        "幫我封鎖小明",
+        context={"revision": 9},
+    )
+    unblock = authoritative_template_proposal(
+        "解除封鎖小華",
+        context={"revision": 9},
+    )
+    photo = authoritative_template_proposal(
+        "幫我選第三張圖片",
+        context={"revision": 9},
+    )
+    photo_homophone = authoritative_template_proposal(
+        "幫我選第三章圖片",
+        context={"revision": 9},
+    )
+
+    assert private is not None
+    assert private.intent == "ayue.private_open"
+    assert private.arguments == {"contact_name": "小美"}
+    assert blocked is not None
+    assert blocked.intent == "safety.blocked_users_query"
+    assert block is not None
+    assert block.intent == "safety.block_user"
+    assert block.arguments == {"contact_name": "小明"}
+    assert unblock is not None
+    assert unblock.intent == "safety.unblock_user"
+    assert unblock.arguments == {"contact_name": "小華"}
+    assert photo is not None
+    assert photo.intent == "post.select_recent_photos"
+    assert photo.arguments == {"positions": [3]}
+    assert photo_homophone is not None
+    assert photo_homophone.arguments == {"positions": [3]}
+
+
+def test_template_tools_keep_new_actions_inside_existing_bounded_surface():
+    tools = template_live_tools(FakeTypes)
+    declarations = {
+        item.name: item for item in tools[0].function_declarations
+    }
+    navigate_destinations = declarations["navigate_app"].parameters_json_schema[
+        "properties"
+    ]["destination"]["enum"]
+    read_domains = declarations["read_app_data"].parameters_json_schema[
+        "properties"
+    ]["domain"]["enum"]
+    write_schema = declarations["write_app_action"].parameters_json_schema[
+        "properties"
+    ]
+
+    assert len(declarations) == TEMPLATE_TOOL_COUNT
+    assert "blocked_users" in navigate_destinations
+    assert "blocked_users" in read_domains
+    assert {"block_user", "unblock_user"} <= set(write_schema["action"]["enum"])
+    assert write_schema["positions"]["items"]["maximum"] == 20
+
+
+def test_template_function_calls_map_new_actions_through_validation():
+    private = template_proposal_from_function(
+        call("open_chat", {
+            "mode": "private_ayue",
+            "contact_name": "小美",
+        }),
+        revision=7,
+    )
+    blocked = template_proposal_from_function(
+        call("read_app_data", {"domain": "blocked_users"}),
+        revision=7,
+    )
+    photo = template_proposal_from_function(
+        call("write_app_action", {
+            "action": "select_recent_photos",
+            "positions": [3],
+        }),
+        revision=7,
+    )
+    block = template_proposal_from_function(
+        call("write_app_action", {
+            "action": "block_user",
+            "contact_name": "小明",
+        }),
+        revision=7,
+    )
+
+    assert private is not None and private.intent == "ayue.private_open"
+    assert blocked is not None and blocked.intent == "safety.blocked_users_query"
+    assert photo is not None and photo.arguments == {"positions": [3]}
+    assert block is not None and block.intent == "safety.block_user"
+    assert template_tool_call_for_proposal(private) == (
+        "open_chat",
+        {"mode": "private_ayue", "contact_name": "小美"},
+    )

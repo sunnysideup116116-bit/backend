@@ -131,7 +131,11 @@ def _proposal_from_function(call: Any, *, revision: int) -> VoiceProposal | None
         intent = "post.request_publish"
     elif name == "select_recent_post_photos":
         intent = "post.select_recent_photos"
-        arguments["count"] = raw.get("count")
+        positions = raw.get("positions")
+        if isinstance(positions, list) and positions:
+            arguments["positions"] = positions
+        else:
+            arguments["count"] = raw.get("count")
     elif name == "open_post":
         intent = "post.open"
         arguments = {}
@@ -191,7 +195,11 @@ def _proposal_from_function(call: Any, *, revision: int) -> VoiceProposal | None
             "question": raw.get("question"),
         }
     elif name == "list_contacts":
-        intent = "contacts.query"
+        intent = (
+            "safety.blocked_users_query"
+            if str(raw.get("view") or "accepted") == "blocked"
+            else "contacts.query"
+        )
     elif name == "read_self_profile":
         intent = "self.query"
         arguments["detail"] = raw.get("detail")
@@ -208,14 +216,21 @@ def _proposal_from_function(call: Any, *, revision: int) -> VoiceProposal | None
         intent = "ui.choice.activate"
         arguments["action"] = raw.get("action")
     elif name == "open_chat":
-        intent = "chat.open"
+        intent = (
+            "ayue.private_open"
+            if str(raw.get("mode") or "chat") == "private_ayue"
+            else "chat.open"
+        )
         arguments["contact_name"] = raw.get("contact_name")
     elif name == "send_chat_message":
-        intent = "chat.request_send"
-        arguments = {
-            "contact_name": raw.get("contact_name"),
-            "message": raw.get("message"),
-        }
+        operation = str(raw.get("operation") or "send")
+        intent = {
+            "block": "safety.block_user",
+            "unblock": "safety.unblock_user",
+        }.get(operation, "chat.request_send")
+        arguments = {"contact_name": raw.get("contact_name")}
+        if intent == "chat.request_send":
+            arguments["message"] = raw.get("message")
     if "target_ref" in raw:
         arguments["target_ref"] = raw["target_ref"]
     return validate_proposal(
@@ -282,6 +297,8 @@ async def run_duplex_session(
     template_fast_path_transcript = ""
     template_fast_path_call_ids: set[str] = set()
     tool_response_cache: dict[str, tuple[str, dict[str, Any]]] = {}
+    non_blocking_tool_tasks: dict[str, asyncio.Task[None]] = {}
+    non_blocking_tool_started_at: dict[str, float] = {}
     capability_argument_defaults: dict[str, dict[str, Any]] = {}
     background_actions: dict[str, VoiceProposal] = {}
     task_actions: dict[str, tuple[str, str]] = {}
@@ -355,6 +372,18 @@ async def run_duplex_session(
         name = str(call.name or "")
         if not call_id:
             return
+        tool_started_at = non_blocking_tool_started_at.pop(call_id, None)
+        if tool_started_at is not None:
+            outcome = str(
+                response.get("status") or response.get("error_code") or "ok"
+            )
+            record_voice_metric(
+                "non_blocking_tool_completed",
+                routing_mode=active_routing_mode,
+                capability_id=name,
+                latency_ms=(time.monotonic() - tool_started_at) * 1000,
+                result_code=outcome,
+            )
         if call_id in template_fast_path_call_ids:
             # A deterministic template fallback is an internal dispatch, not
             # a Gemini-issued function call. Sending a tool response with its
@@ -382,6 +411,11 @@ async def run_duplex_session(
                 "zh-CN": "如果要继续，请说“确认”。",
                 "en-US": 'To continue, say "confirm".',
             },
+            "match_start_confirm": {
+                "zh-TW": "要開始配對的話，說「開始」或「可以開始」。",
+                "zh-CN": "要开始配对的话，说“开始”或“可以开始”。",
+                "en-US": 'To start matching, say "start" or "go ahead".',
+            },
             "private_confirm": {
                 "zh-TW": "這次會讀取你看得到的聊天內容，要繼續請說「確認」。",
                 "zh-CN": "这次会读取你可以看到的聊天内容，要继续请说“确认”。",
@@ -389,6 +423,14 @@ async def run_duplex_session(
             },
         }
         return prompts[kind].get(language, prompts[kind]["zh-TW"])
+
+    def action_confirmation_prompt(proposal: VoiceProposal) -> str:
+        kind = (
+            "match_start_confirm"
+            if confirmation_phrase(proposal) == "確認開始配對"
+            else "confirm"
+        )
+        return localized_prompt(kind)
 
     async def emit_task_update(row: dict[str, Any] | None) -> None:
         if row is None or task_service is None or stopped:
@@ -636,7 +678,7 @@ async def run_duplex_session(
                 "intent": proposal.intent,
                 "arguments": proposal.arguments,
                 "phrase": phrase,
-                "spoken_prompt": localized_prompt("confirm"),
+                "spoken_prompt": action_confirmation_prompt(proposal),
                 "scope": pending.scope,
                 "base_revision": pending.revision,
                 "expires_at": pending.expires_at,
@@ -755,11 +797,10 @@ async def run_duplex_session(
         call_id = str(call.id or "")
         if call_id in tool_response_cache:
             cached_name, cached_response = tool_response_cache[call_id]
-            await live.send_tool_response(
-                call_id=call_id,
+            await tool_response(SimpleNamespace(
+                id=call_id,
                 name=cached_name,
-                response=cached_response,
-            )
+            ), cached_response)
             return
         if template_enabled and template_fast_path_transcript and call_id not in template_fast_path_call_ids:
             direct = authoritative_template_proposal(
@@ -978,7 +1019,7 @@ async def run_duplex_session(
                                     if waiting_confirmation
                                     and pending is not None
                                     and pending.proposal.intent == "ayue.private_query"
-                                    else localized_prompt("confirm")
+                                    else action_confirmation_prompt(pending.proposal)
                                     if waiting_confirmation
                                     else localized_prompt("working")
                                 ),
@@ -1365,7 +1406,7 @@ async def run_duplex_session(
                     "spoken_prompt": (
                         localized_prompt("private_confirm")
                         if waiting_confirmation and pending and pending.proposal.intent == "ayue.private_query"
-                        else localized_prompt("confirm")
+                        else action_confirmation_prompt(pending.proposal)
                         if waiting_confirmation
                         else localized_prompt("working")
                     ),
@@ -1411,7 +1452,7 @@ async def run_duplex_session(
                 await tool_response(call, {
                     "status": "awaiting_confirmation",
                     "phrase": pending.phrase,
-                    "spoken_prompt": localized_prompt("confirm"),
+                    "spoken_prompt": action_confirmation_prompt(pending.proposal),
                     "message": "請先完成或取消目前待確認的操作。",
                 })
                 return
@@ -1579,7 +1620,7 @@ async def run_duplex_session(
                 await tool_response(call, {
                     "status": "awaiting_confirmation",
                     "phrase": pending.phrase,
-                    "spoken_prompt": localized_prompt("confirm"),
+                    "spoken_prompt": action_confirmation_prompt(pending.proposal),
                     "message": (
                         "不得重新建立原操作。若使用者剛說確認，"
                         "只呼叫 confirm_pending_action。"
@@ -1725,7 +1766,7 @@ async def run_duplex_session(
                     "intent": proposal.intent,
                     "arguments": proposal.arguments,
                     "phrase": phrase,
-                    "spoken_prompt": localized_prompt("confirm"),
+                    "spoken_prompt": action_confirmation_prompt(proposal),
                     "scope": pending.scope,
                     "base_revision": pending.revision,
                     "expires_at": pending.expires_at,
@@ -1733,7 +1774,7 @@ async def run_duplex_session(
                 await tool_response(call, {
                     "status": "confirmation_required",
                     "phrase": phrase,
-                    "spoken_prompt": localized_prompt("confirm"),
+                    "spoken_prompt": action_confirmation_prompt(proposal),
                     "message": "只能逐字朗讀 spoken_prompt 一次。",
                 })
                 return
@@ -1859,7 +1900,7 @@ async def run_duplex_session(
                 await tool_response(call, {
                     "status": "confirmation_mismatch",
                     "phrase": phrase,
-                    "message": localized_prompt("confirm"),
+                    "message": action_confirmation_prompt(pending.proposal),
                 })
                 return
             confirmed = pending
@@ -1964,6 +2005,104 @@ async def run_duplex_session(
         current_audio_allowed = None
         first_chunk = None
         suppress_current_turn = False
+
+    def is_non_blocking_tool(name: str) -> bool:
+        checker = getattr(live, "is_non_blocking_tool", None)
+        return bool(callable(checker) and checker(name))
+
+    def mark_non_blocking_tool_started(call: Any) -> None:
+        call_id = str(call.id or "")
+        name = str(call.name or "")
+        if not call_id or call_id in non_blocking_tool_started_at:
+            return
+        non_blocking_tool_started_at[call_id] = time.monotonic()
+        record_voice_metric(
+            "non_blocking_tool_started",
+            routing_mode=active_routing_mode,
+            capability_id=name,
+            result_code="started",
+        )
+
+    async def run_non_blocking_tool(call: Any) -> None:
+        call_id = str(call.id or "")
+        name = str(call.name or "")
+        try:
+            await handle_function(call)
+        except asyncio.CancelledError:
+            tool_started_at = non_blocking_tool_started_at.pop(call_id, None)
+            record_voice_metric(
+                "non_blocking_tool_cancelled",
+                routing_mode=active_routing_mode,
+                capability_id=name,
+                latency_ms=(
+                    (time.monotonic() - tool_started_at) * 1000
+                    if tool_started_at is not None else None
+                ),
+                result_code="cancelled",
+            )
+            raise
+        except Exception:
+            try:
+                await tool_response(call, {
+                    "status": "failed",
+                    "error_code": "tool_execution_failed",
+                    "message": "目前暫時無法完成這項查詢，請稍後再試。",
+                })
+            except Exception:
+                tool_started_at = non_blocking_tool_started_at.pop(call_id, None)
+                record_voice_metric(
+                    "non_blocking_tool_completed",
+                    routing_mode=active_routing_mode,
+                    capability_id=name,
+                    latency_ms=(
+                        (time.monotonic() - tool_started_at) * 1000
+                        if tool_started_at is not None else None
+                    ),
+                    result_code="response_failed",
+                )
+        finally:
+            current = asyncio.current_task()
+            if non_blocking_tool_tasks.get(call_id) is current:
+                non_blocking_tool_tasks.pop(call_id, None)
+
+    async def invoke_tool_call(call: Any) -> None:
+        call_id = str(call.id or "")
+        name = str(call.name or "")
+        non_blocking = is_non_blocking_tool(name)
+        if non_blocking:
+            mark_non_blocking_tool_started(call)
+        if non_blocking and name == "read_weather" and call_id:
+            current = non_blocking_tool_tasks.get(call_id)
+            if current is None or current.done():
+                if len(non_blocking_tool_tasks) >= 4:
+                    await tool_response(call, {
+                        "status": "busy",
+                        "error_code": "too_many_background_tools",
+                        "message": "目前同時處理的查詢較多，請稍後再試。",
+                    })
+                    return
+                non_blocking_tool_tasks[call_id] = asyncio.create_task(
+                    run_non_blocking_tool(call),
+                )
+            return
+        async with state_lock:
+            await handle_function(call)
+
+    async def cancel_non_blocking_tools(reason: str) -> None:
+        tasks = list(non_blocking_tool_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        non_blocking_tool_tasks.clear()
+        for call_id, tool_started_at in list(non_blocking_tool_started_at.items()):
+            non_blocking_tool_started_at.pop(call_id, None)
+            record_voice_metric(
+                "non_blocking_tool_cancelled",
+                routing_mode=active_routing_mode,
+                latency_ms=(time.monotonic() - tool_started_at) * 1000,
+                result_code=reason,
+            )
 
     async def deliver_background_result(message: str | dict[str, Any], source: str) -> None:
         rendered = json.dumps(message, ensure_ascii=False) if isinstance(message, dict) else safe_reply(message)[:1200]
@@ -2116,10 +2255,13 @@ async def run_duplex_session(
             last_user_transcript, context=context,
         )
         if proposal is None or proposal.intent not in {
-            "app.navigate", "chat.open", "calendar.query", "match.query",
+            "app.navigate", "chat.open", "ayue.private_open",
+            "calendar.query", "match.query",
             "date.query", "contacts.query", "memory.query", "self.query",
             "ayue.private_query", "ayue.public_query", "match.ayue_query",
-            "weather.query",
+            "weather.query", "post.select_recent_photos",
+            "safety.blocked_users_query", "safety.block_user",
+            "safety.unblock_user",
         }:
             return
         tool_shape = template_tool_call_for_proposal(proposal)
@@ -2134,7 +2276,7 @@ async def run_duplex_session(
         # sent back as a fresh short model turn.
         suppress_current_turn = True
         next_reply_code = "app_action"
-        await handle_function(SimpleNamespace(
+        await invoke_tool_call(SimpleNamespace(
             id=call_id,
             name=tool_name,
             args=tool_args,
@@ -2303,10 +2445,13 @@ async def run_duplex_session(
 
         if response.tool_call:
             for call in response.tool_call.function_calls or []:
-                async with state_lock:
-                    await handle_function(call)
+                await invoke_tool_call(call)
         if response.tool_call_cancellation:
             cancelled = set(response.tool_call_cancellation.ids or [])
+            for call_id in cancelled:
+                task = non_blocking_tool_tasks.get(str(call_id))
+                if task is not None:
+                    task.cancel()
             for action_id, tool in list(awaiting_results.items()):
                 if tool.call_id in cancelled:
                     if tool.task_id:
@@ -2699,6 +2844,7 @@ async def run_duplex_session(
                 break
     finally:
         remember("user", last_user_transcript)
+        await cancel_non_blocking_tools("session_closed")
         if pending is not None and pending.task_id and task_service is not None:
             task_service.update(
                 pending.task_id, status="waiting_input", stage="session_closed",

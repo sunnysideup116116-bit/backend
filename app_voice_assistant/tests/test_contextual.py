@@ -151,6 +151,24 @@ def test_target_schemas_follow_shared_catalog():
             assert not {'contact_name', 'target'} & set(schema.get('required', []))
 
 
+def test_only_allowlisted_template_tools_can_be_non_blocking():
+    declarations = {
+        declaration.name: declaration
+        for declaration in _live_tools(
+            types,
+            "template",
+            frozenset({"read_weather", "ask_app_ayue"}),
+        )[0].function_declarations
+    }
+    assert declarations["read_weather"].behavior.value == "NON_BLOCKING"
+    assert declarations["ask_app_ayue"].behavior.value == "NON_BLOCKING"
+    for name in (
+        "write_app_action", "confirm_pending_action", "navigate_app",
+        "cancel_current_action", "close_voice_mode",
+    ):
+        assert declarations[name].behavior.value == "BLOCKING"
+
+
 @pytest.mark.parametrize('change_before_confirm', [False, 'revision', 'surface'])
 def test_live_screen_target_confirmation_and_structured_result(change_before_confirm):
     async def scenario():

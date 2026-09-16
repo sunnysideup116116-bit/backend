@@ -1,16 +1,17 @@
 {
-  "version": 13,
+  "version": 14,
   "target_permissions": {
     "contact": "chat_list",
     "calendar_event": "calendar_read",
     "match_invitation": "match_read",
-    "post": "profile"
+    "post": "profile",
+    "blocked_user": "safety_actions"
   },
   "argument_schemas": {
     "app.navigate": {
       "type": "object", "additionalProperties": false,
       "properties": {
-        "destination": {"type": "string", "enum": ["chat", "matching", "profile", "settings", "profile_edit", "voice_settings", "calendar", "matching_ayue", "match_hub", "memory", "create_post"]}
+        "destination": {"type": "string", "enum": ["chat", "matching", "profile", "settings", "profile_edit", "voice_settings", "calendar", "matching_ayue", "match_hub", "memory", "create_post", "blocked_users"]}
       },
       "required": ["destination"]
     },
@@ -37,6 +38,14 @@
         "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
       },
       "required": ["question"]
+    },
+    "ayue.private_open": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "contact_name": {"type": "string", "maxLength": 40},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
+      },
+      "anyOf": [{"required": ["contact_name"]}, {"required": ["target_ref"]}]
     },
     "ayue.public_query": {
       "type": "object", "additionalProperties": false,
@@ -212,7 +221,30 @@
     "post.request_publish": {"type": "object", "additionalProperties": false, "properties": {}},
     "post.select_recent_photos": {
       "type": "object", "additionalProperties": false,
-      "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 5}}
+      "properties": {
+        "count": {"type": "integer", "minimum": 1, "maximum": 5},
+        "positions": {
+          "type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1, "maximum": 20}
+        }
+      }
+    },
+    "safety.block_user": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "contact_name": {"type": "string", "maxLength": 40},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
+      },
+      "anyOf": [{"required": ["contact_name"]}, {"required": ["target_ref"]}]
+    },
+    "safety.blocked_users_query": {"type": "object", "additionalProperties": false, "properties": {}},
+    "safety.unblock_user": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "contact_name": {"type": "string", "maxLength": 40},
+        "target_ref": {"type": "string", "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"}
+      },
+      "anyOf": [{"required": ["contact_name"]}, {"required": ["target_ref"]}]
     },
     "profile.open": {"type": "object", "additionalProperties": false, "properties": {}},
     "profile.patch": {
@@ -370,9 +402,9 @@
       "title": "貼文草稿與發布",
       "summary": "可開啟發文頁、撰寫或修改文字、選取最近照片，並在確認後發布。",
       "keywords": ["貼文", "發文", "文章", "文案", "文字內容", "草稿", "caption", "照片", "相簿", "發布", "最新貼文", "第幾篇貼文", "查看貼文"],
-      "steps": ["開啟發文草稿並填入文字", "選擇 1 到 5 張圖片", "口頭確認後發布"],
+      "steps": ["開啟發文草稿並填入文字", "可選最近 1 到 5 張，或指定最新排序的第幾張", "口頭確認後發布"],
       "requirements": ["草稿、相簿與發布權限依操作分別開啟"],
-      "limitations": ["只能依最新與張數選照，不能辨識照片內容", "沒有圖片不能發布"],
+      "limitations": ["只能依最新排序、張數或序號選照，不能辨識照片內容", "單一序號可選第 1 到 20 張", "沒有圖片不能發布"],
       "destination": "create_post",
       "action_ids": ["post.open", "post.open_draft", "post.replace_caption", "post.append_caption", "post.select_recent_photos", "post.request_publish"]
     },
@@ -397,24 +429,34 @@
       "action_ids": ["date.query", "date.respond", "date.update", "date.confirm"]
     },
     "matching": {
-      "title": "配對與阿月牽線",
-      "summary": "可查看配對進度、開啟牽線中心，或處理目前邀請。",
-      "keywords": ["配對", "配對進度", "配對結果", "阿月牽線", "邀請", "接受", "婉拒", "撤回"],
-      "steps": ["查看目前狀態或開啟牽線中心", "如要回覆邀請，先指定目標並確認"],
+      "title": "配對、阿月牽線與公開建議",
+      "summary": "可查看配對進度、開啟牽線中心、處理目前邀請，或詢問公開阿月的地點與資料建議。",
+      "keywords": ["配對", "配對進度", "配對結果", "阿月牽線", "邀請", "接受", "婉拒", "撤回", "附近", "所在地", "哪裡好玩", "景點", "餐廳", "地點推薦"],
+      "steps": ["查看目前狀態或開啟牽線中心", "如要回覆邀請，先指定目標並確認", "查詢地點時，手機定位未開啟仍先使用設定中的「所在地」"],
       "requirements": ["配對讀取權限", "回覆或搜尋需配對操作權限"],
-      "limitations": ["歷史邀請不會被當成新邀請"],
+      "limitations": ["歷史邀請不會被當成新邀請", "手機精確定位是可選的，只有 App 也沒有儲存所在地時才詢問使用者"],
       "destination": "match_hub",
       "action_ids": ["match.query", "match.ayue_query", "ayue.public_query"]
     },
     "chat": {
       "title": "聯絡人與聊天",
-      "summary": "可列出真實已接受聯絡人、開啟指定聊天室，或由私人阿月讀取當前關係聊天。",
-      "keywords": ["好友", "聯絡人", "聊天室", "聊天內容", "讀取對話", "打開聊天", "傳訊息", "回覆他"],
-      "steps": ["列出或指定聯絡人", "開啟聊天，或確認後讓私人阿月讀取關係內容", "傳送前讀回內容並口頭確認"],
+      "summary": "可列出真實已接受聯絡人、開啟指定聊天室或阿月悄悄話，也可由私人阿月讀取當前關係聊天。",
+      "keywords": ["好友", "聯絡人", "聊天室", "阿月悄悄話", "聊天內容", "讀取對話", "打開聊天", "傳訊息", "回覆他"],
+      "steps": ["列出或指定聯絡人", "開啟真實聊天或指定聯絡人的阿月悄悄話", "需讀取關係聊天時另行授權", "傳送前讀回內容並口頭確認"],
       "requirements": ["開聊天室需聯絡人權限", "讀聊天內容另需私人阿月與聊天內容權限"],
       "limitations": ["名稱不明確時必須先選擇對象", "未確認不會傳送"],
       "destination": "chat",
-      "action_ids": ["contacts.query", "chat.open", "chat.request_send", "ayue.private_query"]
+      "action_ids": ["contacts.query", "chat.open", "chat.request_send", "ayue.private_open", "ayue.private_query"]
+    },
+    "safety": {
+      "title": "封鎖與解除封鎖",
+      "summary": "可查看封鎖名單，並在口頭確認後封鎖聯絡人或解除封鎖。",
+      "keywords": ["封鎖", "解除封鎖", "取消封鎖", "封鎖名單", "黑名單", "安全與隱私"],
+      "steps": ["先查看聯絡人或封鎖名單", "名稱不明確時先請使用者選擇", "變更前必須口頭確認"],
+      "requirements": ["已開啟封鎖與解除封鎖權限"],
+      "limitations": ["只能操作已驗證的聯絡人或封鎖名單項目"],
+      "destination": "blocked_users",
+      "action_ids": ["safety.blocked_users_query", "safety.block_user", "safety.unblock_user"]
     },
     "memory": {
       "title": "本人資料與阿月記憶",
@@ -589,6 +631,21 @@
         "chat_content"
       ],
       "discovery_permissions": ["chat_list", "chat_content"]
+    },
+    "ayue.private_open": {
+      "title": "開啟指定聯絡人的阿月悄悄話",
+      "domain": "chat",
+      "aliases": ["打開阿月悄悄話", "前往阿月悄悄話", "切到阿月悄悄話", "與某人的阿月悄悄話"],
+      "risk": "control",
+      "execution_kind": "inline_device",
+      "cancellable": true,
+      "permission": "private_ayue",
+      "confirmation": false,
+      "parameters": ["contact_name", "target_ref"],
+      "target_kinds": ["contact"],
+      "tool": "open_chat",
+      "target_permissions": ["chat_list", "private_ayue"],
+      "discovery_permissions": ["chat_list"]
     },
     "ayue.public_query": {
       "title": "詢問公開阿月",
@@ -1009,16 +1066,56 @@
     "post.select_recent_photos": {
       "title": "選取最近照片",
       "domain": "posts",
-      "aliases": ["最近照片", "最新照片", "選相片"],
+      "aliases": ["最近照片", "最新照片", "選相片", "選第三張圖片", "相簿第幾張"],
       "risk": "write",
       "execution_kind": "inline_device",
       "cancellable": true,
       "permission": "gallery",
       "confirmation": false,
-      "parameters": [
-        "count"
-      ],
+      "parameters": ["count", "positions"],
       "target_kinds": []
+    },
+    "safety.block_user": {
+      "title": "封鎖使用者",
+      "domain": "safety",
+      "aliases": ["封鎖聯絡人", "封鎖這個人", "把某人加入黑名單"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
+      "permission": "safety_actions",
+      "confirmation": true,
+      "parameters": ["contact_name", "target_ref"],
+      "target_kinds": ["contact"],
+      "tool": "send_chat_message",
+      "target_permissions": ["chat_list", "safety_actions"],
+      "discovery_permissions": ["chat_list"]
+    },
+    "safety.blocked_users_query": {
+      "title": "查看封鎖名單",
+      "domain": "safety",
+      "aliases": ["封鎖名單", "黑名單", "我封鎖了誰", "查看已封鎖使用者"],
+      "risk": "read",
+      "execution_kind": "inline_device",
+      "cancellable": false,
+      "permission": "safety_actions",
+      "confirmation": false,
+      "parameters": [],
+      "target_kinds": []
+    },
+    "safety.unblock_user": {
+      "title": "解除封鎖使用者",
+      "domain": "safety",
+      "aliases": ["解除封鎖", "取消封鎖", "移出黑名單"],
+      "risk": "write",
+      "execution_kind": "inline_device",
+      "cancellable": true,
+      "permission": "safety_actions",
+      "confirmation": true,
+      "parameters": ["contact_name", "target_ref"],
+      "target_kinds": ["blocked_user"],
+      "tool": "send_chat_message",
+      "target_permissions": ["safety_actions"],
+      "discovery_permissions": ["safety_actions"]
     },
     "profile.open": {
       "title": "開啟個資編輯",

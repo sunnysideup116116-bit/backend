@@ -22,13 +22,114 @@ from .contracts import VoiceProposal, deterministic_proposal, validate_proposal
 
 TEMPLATE_TOOL_COUNT = 15
 
+_SPOKEN_NUMBERS = {
+    "一": 1, "二": 2, "兩": 2, "两": 2, "三": 3, "四": 4,
+    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+
+
+def _spoken_position(value: str) -> int | None:
+    raw = str(value or "").strip()
+    if raw.isdigit():
+        number = int(raw)
+        return number if 1 <= number <= 20 else None
+    if raw in _SPOKEN_NUMBERS:
+        return _SPOKEN_NUMBERS[raw]
+    if len(raw) == 2 and raw.startswith("十") and raw[1] in _SPOKEN_NUMBERS:
+        return 10 + _SPOKEN_NUMBERS[raw[1]]
+    if len(raw) == 2 and raw.endswith("十") and raw[0] in _SPOKEN_NUMBERS:
+        return _SPOKEN_NUMBERS[raw[0]] * 10
+    return None
+
+
+def _requested_photo_positions(text: str) -> list[int]:
+    positions: list[int] = []
+    for match in re.finditer(
+        r"第\s*([0-9]{1,2}|[一二兩两三四五六七八九十]{1,2})\s*(?:張|章)", text,
+    ):
+        position = _spoken_position(match.group(1))
+        if position is not None and position not in positions:
+            positions.append(position)
+    return positions[:5]
+
+
+def _clean_contact_name(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(value or "")).strip(" ，,。！？!?")
+    cleaned = re.sub(r"^(?:幫我|請|把|將|與|和|跟)\s*", "", cleaned)
+    cleaned = re.sub(r"(?:這個人|這位使用者|的)$", "", cleaned).strip()
+    return cleaned[:40]
+
+
+def _extended_template_proposal(
+    text: str, *, revision: int,
+) -> VoiceProposal | None:
+    """Handle narrow App-only intents without widening the shared router."""
+
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw:
+        return None
+
+    positions = _requested_photo_positions(raw)
+    if positions and any(word in raw for word in ("照片", "相片", "圖片", "相簿")):
+        return _proposal(
+            "post.select_recent_photos", {"positions": positions},
+            revision=revision,
+        )
+
+    private_open = re.search(
+        r"(?:打開|開啟|切到|切去|前往|進入|帶我到|我要到|到)\s*"
+        r"(?:與|和|跟)?\s*([^，。！？!?]{1,40}?)\s*(?:的)?\s*"
+        r"(?:阿月悄悄話|悄悄話)",
+        raw,
+    )
+    if private_open:
+        contact_name = _clean_contact_name(private_open.group(1))
+        if contact_name:
+            return _proposal(
+                "ayue.private_open", {"contact_name": contact_name},
+                revision=revision,
+            )
+
+    if any(phrase in raw for phrase in ("封鎖名單", "黑名單", "我封鎖了誰")):
+        return _proposal("safety.blocked_users_query", {}, revision=revision)
+
+    unblock = (
+        re.search(r"(?:解除|取消)\s*封鎖\s*([^，。！？!?]{1,40})", raw)
+        or re.search(r"(?:把|將)?\s*([^，。！？!?]{1,40}?)\s*(?:解除|取消)封鎖", raw)
+    )
+    if unblock:
+        contact_name = _clean_contact_name(unblock.group(1))
+        if contact_name:
+            return _proposal(
+                "safety.unblock_user", {"contact_name": contact_name},
+                revision=revision,
+            )
+
+    block = (
+        re.search(r"(?:幫我|請)?\s*封鎖\s*([^，。！？!?]{1,40})", raw)
+        or re.search(r"(?:把|將)\s*([^，。！？!?]{1,40}?)\s*封鎖", raw)
+    )
+    if block:
+        contact_name = _clean_contact_name(block.group(1))
+        if contact_name:
+            return _proposal(
+                "safety.block_user", {"contact_name": contact_name},
+                revision=revision,
+            )
+    return None
+
 
 def authoritative_template_proposal(
     text: str, *, context: dict[str, Any], revision: int | None = None,
 ) -> VoiceProposal | None:
     """Return deterministic routing with complete natural-month intervals."""
 
-    proposal = deterministic_proposal(text, context=context)
+    effective_revision = (
+        int(context.get("revision") or 0) if revision is None else revision
+    )
+    proposal = _extended_template_proposal(text, revision=effective_revision)
+    if proposal is None:
+        proposal = deterministic_proposal(text, context=context)
     if proposal is None or proposal.intent != "calendar.query":
         return proposal
     raw = str(text or "")
@@ -131,7 +232,11 @@ def template_proposal_from_function(
 
     if name == "open_chat":
         return _proposal(
-            "chat.open",
+            (
+                "ayue.private_open"
+                if str(raw.get("mode") or "chat") == "private_ayue"
+                else "chat.open"
+            ),
             _with_target(raw, {"contact_name": raw.get("contact_name")}),
             revision=revision,
         )
@@ -159,6 +264,8 @@ def template_proposal_from_function(
             )
         if domain == "contacts":
             return _proposal("contacts.query", {}, revision=revision)
+        if domain == "blocked_users":
+            return _proposal("safety.blocked_users_query", {}, revision=revision)
         if domain == "memory":
             return _proposal(
                 "memory.query", {"query": raw.get("query", "")},
@@ -252,8 +359,19 @@ def template_proposal_from_function(
             arguments = {}
             intent = "post.request_publish"
         elif action == "select_recent_photos":
-            arguments = {"count": raw.get("count")}
+            positions = raw.get("positions")
+            arguments = (
+                {"positions": positions}
+                if isinstance(positions, list) and positions
+                else {"count": raw.get("count")}
+            )
             intent = "post.select_recent_photos"
+        elif action == "block_user":
+            arguments = {"contact_name": raw.get("contact_name")}
+            intent = "safety.block_user"
+        elif action == "unblock_user":
+            arguments = {"contact_name": raw.get("contact_name")}
+            intent = "safety.unblock_user"
         elif action == "calendar_create":
             arguments = {
                 key: raw.get(key)
@@ -335,6 +453,8 @@ def template_tool_call_for_proposal(
         return "navigate_app", arguments
     if intent == "chat.open":
         return "open_chat", arguments
+    if intent == "ayue.private_open":
+        return "open_chat", {"mode": "private_ayue", **arguments}
     if intent == "calendar.query":
         return "read_app_data", {"domain": "calendar", **arguments}
     if intent == "match.query":
@@ -343,6 +463,8 @@ def template_tool_call_for_proposal(
         return "read_app_data", {"domain": "dates", **arguments}
     if intent == "contacts.query":
         return "read_app_data", {"domain": "contacts", **arguments}
+    if intent == "safety.blocked_users_query":
+        return "read_app_data", {"domain": "blocked_users"}
     if intent == "memory.query":
         return "read_app_data", {"domain": "memory", **arguments}
     if intent == "self.query":
@@ -357,6 +479,12 @@ def template_tool_call_for_proposal(
         return "ask_app_ayue", {"domain": "matching", **arguments}
     if intent == "weather.query":
         return "read_weather", arguments
+    if intent == "post.select_recent_photos":
+        return "write_app_action", {"action": "select_recent_photos", **arguments}
+    if intent == "safety.block_user":
+        return "write_app_action", {"action": "block_user", **arguments}
+    if intent == "safety.unblock_user":
+        return "write_app_action", {"action": "unblock_user", **arguments}
     return None
 
 
@@ -377,7 +505,7 @@ def template_live_tools(types: Any) -> list[Any]:
                     "enum": [
                         "chat", "matching", "profile", "settings", "profile_edit",
                         "voice_settings", "calendar", "matching_ayue", "match_hub",
-                        "memory", "create_post",
+                        "memory", "create_post", "blocked_users",
                     ],
                 },
             }, required=["destination"]),
@@ -389,7 +517,8 @@ def template_live_tools(types: Any) -> list[Any]:
                 "Use calendar for schedules, matching for match status, dates for shared "
                 "dates, contacts for chat recipients, memory for long-term memory, profile "
                 "for the signed-in user's profile, posts to open a post currently shown on "
-                "that profile, chat_content for an authorized chat read, "
+                "that profile, chat_content for an authorized chat read, blocked_users for "
+                "the signed-in user's safety list, "
                 "and help for App operation instructions."
             ),
             parameters_json_schema=_schema({
@@ -397,7 +526,7 @@ def template_live_tools(types: Any) -> list[Any]:
                     "type": "string",
                     "enum": [
                         "calendar", "matching", "dates", "contacts", "memory",
-                        "profile", "posts", "chat_content", "help",
+                        "profile", "posts", "chat_content", "blocked_users", "help",
                     ],
                 },
                 "query": {"type": "string", "maxLength": 1000},
@@ -430,7 +559,9 @@ def template_live_tools(types: Any) -> list[Any]:
                 "Ask the correct App Ayue domain to perform a reasoning or recommendation "
                 "request. Use matching for new pairing, places for nearby recommendations, "
                 "web for current public information, memory/profile for those App domains, "
-                "and private for an accepted contact's private chat context."
+                "and private for an accepted contact's private chat context. For places, "
+                "when device location is disabled, still use the saved App profile location; "
+                "ask for a location only if the App reports that no saved location exists."
             ),
             parameters_json_schema=_schema({
                 "domain": {
@@ -446,6 +577,9 @@ def template_live_tools(types: Any) -> list[Any]:
             name="write_app_action",
             description=(
                 "Prepare one App change. For post_caption use mode=open, replace, or append; "
+                "for select_recent_photos pass count for the newest N photos or positions "
+                "for exact 1-based newest-photo positions; for block/unblock pass the spoken "
+                "contact name; "
                 "for calendar_update include target and any explicitly requested title, date, "
                 "time, location, or notes. The Server validates all fields and requests spoken "
                 "confirmation when required. Never claim success before the App result is ok."
@@ -458,6 +592,7 @@ def template_live_tools(types: Any) -> list[Any]:
                         "post_publish", "select_recent_photos", "calendar_create",
                         "calendar_update", "calendar_cancel", "date_respond", "date_update",
                         "date_confirm", "memory_add", "chat_send", "visible_choice", "match_start",
+                        "block_user", "unblock_user",
                     ],
                 },
                 "changes": {"type": "object"},
@@ -472,6 +607,12 @@ def template_live_tools(types: Any) -> list[Any]:
                 "mode": {"type": "string", "enum": ["open", "replace", "append"]},
                 "caption": {"type": "string", "maxLength": 2000},
                 "count": {"type": "integer", "minimum": 1, "maximum": 5},
+                "positions": {
+                    "type": "array", "minItems": 1, "maxItems": 5,
+                    "uniqueItems": True,
+                    "items": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "description": "1-based newest-photo positions, for example [3].",
+                },
                 "title": {"type": "string", "maxLength": 80},
                 "date": {"type": "string", "description": "YYYY-MM-DD."},
                 "start_time": {"type": "string", "description": "HH:mm."},
@@ -492,10 +633,15 @@ def template_live_tools(types: Any) -> list[Any]:
         ),
         types.FunctionDeclaration(
             name="open_chat",
-            description="Open a named accepted contact's real chat. Keep the spoken display name.",
+            description=(
+                "Open a named accepted contact's real chat, or set mode=private_ayue "
+                "to open that contact's Ayue private conversation without asking or sending "
+                "a question. Keep the spoken display name."
+            ),
             parameters_json_schema=_schema({
                 "contact_name": {"type": "string", "maxLength": 40},
                 "target_ref": {"type": "string", "maxLength": 80},
+                "mode": {"type": "string", "enum": ["chat", "private_ayue"]},
             }, required=["contact_name"]),
         ),
         types.FunctionDeclaration(

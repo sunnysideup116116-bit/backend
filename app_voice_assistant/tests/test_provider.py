@@ -1,6 +1,8 @@
 import asyncio
+from types import SimpleNamespace
 
 from app_voice_assistant.contracts import VoiceProposal
+from app_voice_assistant.duplex_session import AppVoiceDuplexSession
 from app_voice_assistant.provider import AppVoiceProvider
 from app_voice_assistant.settings import AppVoiceSettings
 
@@ -31,6 +33,41 @@ def test_repeated_generic_tts_reply_uses_the_bounded_memory_cache():
 
     assert first == second
     assert calls == ["設定已更新。"]
+
+
+def test_non_blocking_tool_response_uses_when_idle_scheduling():
+    class RawSession:
+        def __init__(self):
+            self.responses = []
+
+        async def send_tool_response(self, *, function_responses):
+            self.responses.append(function_responses)
+
+    settings = AppVoiceSettings.from_env({
+        "VOICE_APP_ASYNC_TOOLS_ENABLED": "on",
+        "VOICE_APP_NON_BLOCKING_TOOLS": "read_weather,ask_app_ayue",
+    })
+    live = AppVoiceDuplexSession(settings, SimpleNamespace())
+    raw = RawSession()
+    live._session = raw
+
+    asyncio.run(live.send_tool_response(
+        call_id="weather-call",
+        name="read_weather",
+        response={"status": "ok"},
+    ))
+    weather = raw.responses[-1]
+    assert weather.scheduling.value == "WHEN_IDLE"
+    assert weather.will_continue is False
+
+    asyncio.run(live.send_tool_response(
+        call_id="write-call",
+        name="write_app_action",
+        response={"status": "confirmation_required"},
+    ))
+    write = raw.responses[-1]
+    assert write.scheduling is None
+    assert write.will_continue is None
 
 
 def test_only_unresolved_natural_calendar_ranges_use_the_model():

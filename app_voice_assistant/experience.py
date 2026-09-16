@@ -40,6 +40,7 @@ PERMISSION_LABELS = {
     "memory_read": "阿月記憶讀取",
     "memory_write": "阿月記憶新增",
     "status_read": "App 狀態讀取",
+    "safety_actions": "封鎖與解除封鎖",
 }
 
 

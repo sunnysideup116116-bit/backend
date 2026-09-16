@@ -238,6 +238,68 @@ def test_legacy_recent_photo_phrase_never_claims_visual_search():
     assert visual is None
 
 
+def test_recent_photo_positions_are_strict_and_keep_spoken_order():
+    proposal = validate_proposal({
+        "intent": "post.select_recent_photos",
+        "arguments": {"positions": [3, 1]},
+    }, base_revision=8)
+
+    assert proposal is not None
+    assert proposal.arguments == {"positions": [3, 1]}
+    assert validate_proposal({
+        "intent": "post.select_recent_photos",
+        "arguments": {"positions": [3, 3]},
+    }, base_revision=8) is None
+    assert validate_proposal({
+        "intent": "post.select_recent_photos",
+        "arguments": {"positions": [21]},
+    }, base_revision=8) is None
+    assert validate_proposal({
+        "intent": "post.select_recent_photos",
+        "arguments": {"count": 1, "positions": [3]},
+    }, base_revision=8) is None
+
+
+def test_private_open_and_safety_actions_are_typed_and_permission_bound():
+    private = validate_proposal({
+        "intent": "ayue.private_open",
+        "arguments": {"contact_name": "小美", "room_id": "forged"},
+    }, base_revision=2)
+    block = validate_proposal({
+        "intent": "safety.block_user",
+        "arguments": {"contact_name": "小美", "user_id": "forged"},
+    }, base_revision=2)
+    unblock = validate_proposal({
+        "intent": "safety.unblock_user",
+        "arguments": {"target_ref": "surface-2-3-1"},
+    }, base_revision=2)
+    permissions = safe_context({"permissions": {
+        "private_ayue": True,
+        "chat_list": True,
+        "safety_actions": True,
+    }})
+
+    assert private is not None
+    assert private.arguments == {"contact_name": "小美"}
+    assert context_allows_proposal(permissions, private) is True
+    assert block is not None
+    assert block.arguments == {"contact_name": "小美"}
+    assert requires_confirmation(block) is True
+    assert confirmation_phrase(block) == "確認封鎖使用者"
+    assert context_allows_proposal(permissions, block) is True
+    assert unblock is not None
+    assert unblock.arguments == {"target_ref": "surface-2-3-1"}
+    assert requires_confirmation(unblock) is True
+    assert confirmation_phrase(unblock) == "確認解除封鎖使用者"
+    denied = safe_context({"permissions": {
+        "private_ayue": True,
+        "chat_list": False,
+        "safety_actions": True,
+    }})
+    assert context_allows_proposal(denied, private) is False
+    assert context_allows_proposal(denied, block) is False
+
+
 def test_navigation_and_delegation_are_typed_and_domain_permission_bound():
     navigation = validate_proposal({
         "intent": "app.navigate",
@@ -589,6 +651,35 @@ def test_setting_confirmation_accepts_safe_stt_variants_but_not_bare_action():
     assert confirmation_matches("好的", proposal) is True
     assert confirmation_matches("confirm", proposal) is True
     assert confirmation_matches("關閉訊息通知", proposal) is False
+
+
+def test_match_start_confirmation_accepts_natural_permission_but_not_rejection():
+    proposal = deterministic_proposal(
+        "幫我找新的配對",
+        context=safe_context({"scope": "global", "revision": 0}),
+    )
+
+    assert proposal is not None
+    assert confirmation_phrase(proposal) == "確認開始配對"
+    for phrase in (
+        "開始", "開始吧", "可以", "可以開始了", "好喔", "好，那就開始吧",
+        "嗯，可以開始", "對，可以開始", "幫我開始配對", "來吧", "繼續",
+        "start", "go ahead",
+    ):
+        assert confirmation_matches(phrase, proposal) is True, phrase
+    for phrase in (
+        "不要開始", "先不要", "取消", "還沒開始", "等一下", "我不想開始",
+    ):
+        assert confirmation_matches(phrase, proposal) is False, phrase
+
+    calendar = deterministic_proposal(
+        "明天早上十點新增一個跑步行程",
+        context=safe_context({"scope": "calendar", "revision": 0}),
+    )
+    assert calendar is not None
+    assert confirmation_matches("可以", calendar) is False
+    assert confirmation_matches("開始", calendar) is False
+    assert confirmation_matches("可以開始", calendar) is False
 
 
 def test_personality_exploration_is_bounded_and_requires_its_read_permissions():
@@ -996,3 +1087,22 @@ def test_template_rollout_is_available_as_a_first_class_routing_mode():
     })
 
     assert settings.routing_mode_for_user("any-owner") == "template"
+
+
+def test_async_live_tools_are_opt_in_and_fail_closed_to_safe_names():
+    disabled = AppVoiceSettings.from_env({
+        "VOICE_APP_NON_BLOCKING_TOOLS": "read_weather,ask_app_ayue",
+    })
+    assert disabled.async_tools_enabled is False
+    assert disabled.non_blocking_tools == frozenset()
+
+    enabled = AppVoiceSettings.from_env({
+        "VOICE_APP_ASYNC_TOOLS_ENABLED": "on",
+        "VOICE_APP_NON_BLOCKING_TOOLS": (
+            "read_weather,ask_app_ayue,write_app_action,confirm_pending_action"
+        ),
+    })
+    assert enabled.async_tools_enabled is True
+    assert enabled.non_blocking_tools == frozenset({
+        "read_weather", "ask_app_ayue",
+    })

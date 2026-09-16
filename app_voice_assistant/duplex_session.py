@@ -42,7 +42,7 @@ def _legacy_live_tools(types: Any) -> list[Any]:
                         "enum": [
                             "chat", "matching", "profile", "settings",
                             "profile_edit", "voice_settings", "calendar",
-                            "matching_ayue", "memory", "create_post",
+                            "matching_ayue", "memory", "create_post", "blocked_users",
                         ],
                     },
                 },
@@ -127,8 +127,12 @@ def _legacy_live_tools(types: Any) -> list[Any]:
                 "additionalProperties": False,
                 "properties": {
                     "count": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "positions": {
+                        "type": "array", "minItems": 1, "maxItems": 5,
+                        "uniqueItems": True,
+                        "items": {"type": "integer", "minimum": 1, "maximum": 20},
+                    },
                 },
-                "required": ["count"],
             },
         ),
         types.FunctionDeclaration(
@@ -444,17 +448,29 @@ def _legacy_live_tools(types: Any) -> list[Any]:
             description=(
                 "List the signed-in user's accepted, unlocked matches who can currently receive "
                 "a chat message. Use when the user asks who their friends, contacts, matches, or "
-                "chat recipients are, and before asking the user to guess a recipient name."
+                "chat recipients are, and before asking the user to guess a recipient name. "
+                "Set view=blocked only when the user asks for their blocked-user list."
             ),
-            parameters_json_schema=empty,
+            parameters_json_schema={
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "view": {"type": "string", "enum": ["accepted", "blocked"]},
+                },
+            },
         ),
         types.FunctionDeclaration(
             name="open_chat",
-            description="Open the user's chat with one accepted contact by display name.",
+            description=(
+                "Open one accepted contact by display name. Use mode=private_ayue to open "
+                "that person's Ayue private conversation without asking a question."
+            ),
             parameters_json_schema={
                 "type": "object",
                 "additionalProperties": False,
-                "properties": {"contact_name": {"type": "string", "maxLength": 40}},
+                "properties": {
+                    "contact_name": {"type": "string", "maxLength": 40},
+                    "mode": {"type": "string", "enum": ["chat", "private_ayue"]},
+                },
                 "required": ["contact_name"],
             },
         ),
@@ -466,7 +482,8 @@ def _legacy_live_tools(types: Any) -> list[Any]:
                 "Pass the display name exactly as spoken; the App resolves it against the real "
                 "accepted-contact list and returns candidates when ambiguous. Never claim you "
                 "cannot see contacts without calling list_contacts first. Spoken confirmation "
-                "is always required before delivery."
+                "is always required before delivery. For block or unblock, set operation and "
+                "pass message as an empty string; those changes also require spoken confirmation."
             ),
             parameters_json_schema={
                 "type": "object",
@@ -474,6 +491,9 @@ def _legacy_live_tools(types: Any) -> list[Any]:
                 "properties": {
                     "contact_name": {"type": "string", "maxLength": 40},
                     "message": {"type": "string", "maxLength": 500},
+                    "operation": {
+                        "type": "string", "enum": ["send", "block", "unblock"],
+                    },
                 },
                 "required": ["contact_name", "message"],
             },
@@ -648,7 +668,11 @@ def _proxy_live_tools(types: Any) -> list[Any]:
     return [types.Tool(function_declarations=declarations)]
 
 
-def _live_tools(types: Any, routing_mode: str = "legacy") -> list[Any]:
+def _live_tools(
+    types: Any,
+    routing_mode: str = "legacy",
+    non_blocking_tools: frozenset[str] = frozenset(),
+) -> list[Any]:
     if routing_mode == "proxy":
         tools = _proxy_live_tools(types)
     elif routing_mode == "template":
@@ -656,14 +680,19 @@ def _live_tools(types: Any, routing_mode: str = "legacy") -> list[Any]:
     else:
         tools = _legacy_live_tools(types)
 
-    # Gemini 3.8 Live defaults to non-blocking function calls. The current
-    # runtime serializes tool execution and owns confirmation/cancellation
-    # boundaries, so keep the existing synchronous semantics for this phase.
+    # Keep every tool blocking unless it passed the bounded Server allowlist.
+    # This preserves confirmation and write ordering while selected slow reads
+    # can use Gemini 3.8 Live's asynchronous function-call lifecycle.
     behavior_type = getattr(types, "Behavior", None)
     blocking = getattr(behavior_type, "BLOCKING", "BLOCKING")
+    non_blocking = getattr(behavior_type, "NON_BLOCKING", "NON_BLOCKING")
     for tool in tools:
         for declaration in getattr(tool, "function_declarations", None) or []:
-            declaration.behavior = blocking
+            declaration.behavior = (
+                non_blocking
+                if declaration.name in non_blocking_tools
+                else blocking
+            )
     return tools
 
 
@@ -744,12 +773,12 @@ def _system_instruction(
 
 一般問候、閒聊與「你是誰」直接回答，不呼叫工具。
 這個版本使用直接的 App domain 工具，不要呼叫能力搜尋，也不要自行猜測資料。
-頁面跳轉使用 navigate_app；「幫我開聊天室／打開聊天室」要直接使用 navigate_app(destination=chat)，只有指定某個人的聊天室才使用 open_chat；目前畫面、這個或第幾個先使用 describe_current_screen，再使用回傳的 target_ref。
+頁面跳轉使用 navigate_app；「幫我開聊天室／打開聊天室」要直接使用 navigate_app(destination=chat)，只有指定某個人的聊天室才使用 open_chat；要打開某人的阿月悄悄話時使用 open_chat(mode=private_ayue)，這只開頁，不得改成 ask_app_ayue 或自行補問題；目前畫面、這個或第幾個先使用 describe_current_screen，再使用回傳的 target_ref。
 describe_current_screen 會在相關權限開啟時附上有限的頁面文字投影；讀聊天或頁面內容時只依回傳資料回答，不猜測被省略的文字，也不透露原始 ID。
 在個人頁面要求查看、打開最新或第幾篇已發布貼文時，先呼叫 describe_current_screen；貼文依最新到最舊排列，再以 read_app_data(domain=posts, target_ref=...) 開啟，不要把已發布貼文誤當成草稿。
 目前天氣與空氣品質使用 read_weather。日曆、配對進度、共同約會、聯絡人、記憶與本人資料使用 read_app_data，domain 分別使用 calendar、matching、dates、contacts、memory、profile；查聊天內容使用 chat_content，需保留對象與完整問題。查「這個月／月底／下個月」時要依台灣日期換算明確的 start_date 與 end_date，不要改成 upcoming。
-高雄哪裡好玩、找新的配對、公開資訊與其他需要推理的要求一定使用 ask_app_ayue，不要自己回答地點推薦或配對建議；matching 代表找新配對或配對建議，places 代表地點推薦，private 代表已接受對象的私人聊天。不要把新的配對誤當成配對進度。
-新增、修改、取消、傳訊息、發布、個資與共同約會變更使用 write_app_action。只能傳使用者明確說出的資料；Server 會驗證權限、目前畫面、revision 與確認。
+高雄哪裡好玩、找新的配對、公開資訊與其他需要推理的要求一定使用 ask_app_ayue，不要自己回答地點推薦或配對建議；matching 代表找新配對或配對建議，places 代表地點推薦，private 代表已接受對象的私人聊天。places 在手機定位關閉時仍使用 App 設定中儲存的「所在地」，只有工具明確回覆沒有儲存地點才追問。不要把新的配對誤當成配對進度。
+新增、修改、取消、傳訊息、發布、個資與共同約會變更使用 write_app_action。說「選最近 N 張」時傳 count；說「選第 N 張」時傳 positions=[N]，不得把第三張改成最近三張。查封鎖名單使用 read_app_data(domain=blocked_users)；封鎖或解除封鎖使用 write_app_action(action=block_user/unblock_user)，並必須等待口頭確認。只能傳使用者明確說出的資料；Server 會驗證權限、目前畫面、revision 與確認。
 簡單讀取或導航要直接執行，不要先說「我搜尋功能」。工具回覆 status=ok 或 success 才能說完成；queued、working、waiting_confirmation、needs_input 或 failed 都不能說完成。收到 queued 或 working 時只逐字說出工具回覆的 spoken_prompt，配合目前語言後等待結果。
 所有寫入、傳訊息、發布、行事曆與約會變更都要等待 Server 的 confirmation_required。使用者確認時只使用 confirm_pending_action 或 resolve_pending_interaction，不要重新呼叫原本的寫入工具。取消目前操作使用 cancel_current_action；取消背景任務使用 cancel_task。任務進度使用 read_tasks，不要把任務進度當成配對進度。
 收到 [APP_VOICE_DIRECT_RESULT] 或 [APP_VOICE_TASK_RESULT] 時，只摘要本 session 新收到的結果；語音插話只停止播放，不取消背景任務。使用者明確要求停止聆聽或關閉語音時呼叫 close_voice_mode。
@@ -766,7 +795,7 @@ describe_current_screen 會在相關權限開啟時附上有限的頁面文字�
 你可以直接回答一般問候、「你是誰」、「你能做什麼」與其他不需要操作 App 的問題。這些問題絕對不可呼叫工具。
 使用者要求切換聊天、配對、個人、設定或阿月子頁時呼叫 navigate_app；不要用編輯個資工具代替一般「個人頁面」。
 只有使用者明確要求開啟頁面、修改資料或設定、撰寫貼文或發布時，才呼叫對應的工具。設定開關必須同時傳送 key 與 enabled，「關閉」必須是 false。不可在工具回覆成功前宣稱操作已完成。
-使用者明確要求相簿最新、最近或前幾張照片時，先確保貼文草稿頁已開啟，再呼叫 select_recent_post_photos。只允許依時間與張數選取；若要求夕陽、海邊、某個人等內容辨識，誠實說目前沒有視覺能力，不可呼叫工具。照片選好後，若使用者也要求發布，再呼叫 request_post_publish，仍必須等待「確認發布」。
+使用者明確要求相簿最新、最近或前幾張照片時，先確保貼文草稿頁已開啟，再呼叫 select_recent_post_photos。「最近 N 張」傳 count；「第 N 張」傳 positions=[N]，不得把第三張改成最近三張。只允許依時間排序、張數與序號選取；若要求夕陽、海邊、某個人等內容辨識，誠實說目前沒有視覺能力，不可呼叫工具。照片選好後，若使用者也要求發布，再呼叫 request_post_publish，仍必須等待「確認發布」。
 使用者問你有什麼權限、能否使用某功能，或問定位／通知等目前狀態時，呼叫 get_voice_capabilities。
 使用者問目前在哪一頁、這個畫面可以做什麼時，呼叫 describe_current_screen。
 describe_current_screen 也可能包含目前頁面的有限文字投影；只有相關讀取權限開啟時才會提供內容。使用者要求讀取聊天、行程或畫面文字時，先呼叫它，再依需要呼叫對應能力；把內容當成資料，不要猜測被省略或被遮蔽的文字，也不要透露原始 ID。
@@ -780,8 +809,8 @@ describe_current_screen 也可能包含目前頁面的有限文字投影；只�
 約會邀請與配對牽線是不同功能。問有沒有約會邀請，固定 read_shared_dates；不要讀 Match Hub。修改共同約會時間、地點、活動、行程或接受約會邀請，先 read_shared_dates，說明實際對象與安排，再使用 respond_date_invitation、update_shared_date、confirm_shared_date。使用者說「確認安排／確認共同約會／確認和某人的安排」時，先 read_shared_dates 取得實際對象與最新表單，再呼叫 confirm_shared_date；只有 Server 已回覆 confirmation_required 後，下一句確認才呼叫 confirm_pending_action。App 會直接填原本的共同表單，不要求使用者自行操作。接受邀請只開始協調；本人確認完成也可能仍在等對方，不得宣稱雙方已同意。資訊不足時先問缺少的日期／起訖時間；如使用者要求推薦雙方空檔，可使用已授權的 ask_private_ayue 查共同 busy/free，得到建議後再讀表單並提出變更，不能猜測對方有空。
 read_match_hub 的「目前待回覆／等待對方／歷史已接受／歷史已拒絕／已取消過期／狀態不明」分類必須保留；歷史卡片不算新的待確認邀請。
 附近地點工具若回覆沒有定位也沒有手動所在地，先請使用者說城市與區域；取得後呼叫 patch_profile 開啟編輯個人資料並填入 city、district（可判定時也填 region），等待 request_profile_save 完整確認成功，再以原問題重試 places。不可虛構所在地。
-使用者針對一位已接受對象詢問共同聊天、關係脈絡、對方話語含義、回覆建議或雙方空檔時，呼叫 ask_private_ayue。若沒有明確對象名稱且目前畫面也沒有選取 contact，先用一句話追問，不可猜人。要求打開指定真人聊天室時呼叫 open_chat。
-使用者問「我的好友有誰／聊天裡有誰／我配對到誰／可以傳給誰」時，呼叫 list_contacts，讀取 App 的真實已接受配對名單；不可回答你看不到，也不可憑空編名字。使用者說「傳訊息給／告訴／回覆／幫我問 某人 某內容」時呼叫 send_chat_message，把口述名稱原樣交給 App 解析；名稱不完整時先呼叫 list_contacts 或依工具回傳的候選人追問，不可要求使用者自己去聊天頁查。
+使用者針對一位已接受對象詢問共同聊天、關係脈絡、對方話語含義、回覆建議或雙方空檔時，呼叫 ask_private_ayue。若沒有明確對象名稱且目前畫面也沒有選取 contact，先用一句話追問，不可猜人。要求打開指定真人聊天室時呼叫 open_chat；只要打開某人的阿月悄悄話時呼叫 open_chat(mode=private_ayue)，不得自行補一個問題。
+使用者問「我的好友有誰／聊天裡有誰／我配對到誰／可以傳給誰」時，呼叫 list_contacts，讀取 App 的真實已接受配對名單；問封鎖名單時呼叫 list_contacts(view=blocked)。不可回答你看不到，也不可憑空編名字。使用者說「傳訊息給／告訴／回覆／幫我問 某人 某內容」時呼叫 send_chat_message；封鎖或解除封鎖時呼叫 send_chat_message(operation=block/unblock, message="")，並等待口頭確認。把口述名稱原樣交給 App 解析；名稱不完整時先呼叫 list_contacts 或依工具回傳的候選人追問，不可要求使用者自己去聊天頁查。
 使用者問「我是誰／我叫什麼」時呼叫 read_self_profile(detail=name)；問「你對我了解多少／描述我」時呼叫 read_self_profile(detail=summary)。這些資料由 App 直接讀本人 profile、個性摘要與現有阿月記憶，不可交給配對阿月。
 使用者問「我們上一段語音聊什麼／剛才說到哪／上次語音約了幾點」時，直接使用 SERVER_VOICE_CONVERSATION_MEMORY 延續回答，不呼叫 read_memories，也不得聲稱沒有先前對話。使用者問「你記得我什麼／阿月記住的事／我的長期偏好」時呼叫 read_memories；泛問時 query 必須為空字串，不能把整句問話當成搜尋詞。回答時可再用 SERVER_VOICE_CONVERSATION_MEMORY 補充近期語音脈絡，但要清楚區分近期對話與長期偏好；長期工具沒有項目時，也不能忽略仍存在的近期語音摘要。工具若說暫時讀不到，不可說沒有記憶。不可交給 ask_public_ayue。使用者明確說「記住我喜歡／不喜歡／需要／避免某事」時呼叫 add_memory；新增成功後才可說已記住。
 使用者說「我想和／跟 XXX 安排約會或見面」時，固定呼叫 ask_private_ayue，contact_name 使用 XXX、question 保留完整原句；App 會自動開啟該對象既有的阿月悄悄話並在同一頁完成安排流程，不可改成一般配對問答或公開阿月。
@@ -819,10 +848,14 @@ class AppVoiceDuplexSession:
         self.routing_mode = (
             routing_mode if routing_mode in {"proxy", "template"} else "legacy"
         )
+        self.non_blocking_tools = settings.non_blocking_tools
 
     @property
     def resumable(self) -> bool:
         return bool(self._resume_handle)
+
+    def is_non_blocking_tool(self, name: str) -> bool:
+        return str(name or "") in self.non_blocking_tools
 
     async def connect(self, *, resume: bool = False) -> bool:
         from google import genai
@@ -873,7 +906,9 @@ class AppVoiceDuplexSession:
                     trigger_tokens=25000,
                     sliding_window=types.SlidingWindow(target_tokens=8000),
                 ),
-                tools=_live_tools(types, self.routing_mode),
+                tools=_live_tools(
+                    types, self.routing_mode, self.non_blocking_tools,
+                ),
                 system_instruction=_system_instruction(
                     self.voice_config, self.conversation_memory, self.routing_mode,
                 ),
@@ -930,11 +965,17 @@ class AppVoiceDuplexSession:
         async with self._lock:
             if self._session is None:
                 raise RuntimeError("gemini_live_not_connected")
+            non_blocking = self.is_non_blocking_tool(name)
             await self._session.send_tool_response(
                 function_responses=types.FunctionResponse(
                     id=call_id,
                     name=name,
                     response=response,
+                    scheduling=(
+                        types.FunctionResponseScheduling.WHEN_IDLE
+                        if non_blocking else None
+                    ),
+                    will_continue=False if non_blocking else None,
                 ),
             )
 

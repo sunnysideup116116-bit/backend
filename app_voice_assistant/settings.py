@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 _TRUE = {"1", "true", "on", "yes"}
 _SERVER_ENV = Path(__file__).resolve().parents[1] / ".env"
+_SAFE_NON_BLOCKING_TOOLS = frozenset({"read_weather", "ask_app_ayue"})
 
 
 def _enabled(value: str | None, default: bool) -> bool:
@@ -39,6 +40,8 @@ class AppVoiceSettings:
     test_user_ids: frozenset[str]
     tool_routing_mode: str
     proxy_user_ids: frozenset[str]
+    async_tools_enabled: bool
+    non_blocking_tools: frozenset[str]
     tasks_enabled: bool
     task_workers: int
     task_per_user_concurrency: int
@@ -74,6 +77,20 @@ class AppVoiceSettings:
         routing_mode = str(env.get("VOICE_APP_TOOL_ROUTING_MODE", "legacy")).strip().lower()
         if routing_mode not in {"legacy", "canary", "proxy", "template"}:
             routing_mode = "legacy"
+        async_tools_enabled = _enabled(
+            env.get("VOICE_APP_ASYNC_TOOLS_ENABLED"), False,
+        )
+        requested_non_blocking_tools = frozenset(
+            value.strip()
+            for value in env.get(
+                "VOICE_APP_NON_BLOCKING_TOOLS", "read_weather,ask_app_ayue",
+            ).split(",")
+            if value.strip()
+        )
+        non_blocking_tools = (
+            requested_non_blocking_tools & _SAFE_NON_BLOCKING_TOOLS
+            if async_tools_enabled else frozenset()
+        )
         memory_enabled = _enabled(env.get("VOICE_MEMORY_ENABLED"), False)
         default_consent_version = (
             "demo-free-gemini-live-ollama-memory-v1"
@@ -116,6 +133,8 @@ class AppVoiceSettings:
             test_user_ids=test_ids,
             tool_routing_mode=routing_mode,
             proxy_user_ids=proxy_ids,
+            async_tools_enabled=async_tools_enabled,
+            non_blocking_tools=non_blocking_tools,
             tasks_enabled=_enabled(env.get("VOICE_APP_TASKS_ENABLED"), False),
             task_workers=bounded("VOICE_APP_TASK_WORKERS", 4, 1, 16),
             task_per_user_concurrency=bounded(
