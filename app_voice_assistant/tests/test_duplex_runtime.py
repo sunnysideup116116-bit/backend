@@ -1213,7 +1213,7 @@ def test_duplex_contact_list_reads_app_result_without_guessing_names():
     asyncio.run(scenario())
 
 
-def test_visible_confirmation_reroutes_a_wrong_message_tool_to_the_button():
+def test_visible_start_phrase_reroutes_a_wrong_message_tool_to_the_button():
     async def scenario():
         live = FakeLive()
         socket = FakeWebSocket()
@@ -1232,7 +1232,7 @@ def test_visible_confirmation_reroutes_a_wrong_message_tool_to_the_button():
             max_session_seconds=30,
             send_event=lambda event: _append(events, event),
         ))
-        transcript = SimpleNamespace(text="確認", finished=True)
+        transcript = SimpleNamespace(text="那我們開始吧", finished=True)
         await live.incoming.put(message(
             content=SimpleNamespace(
                 interim_input_transcription=None,
@@ -1245,7 +1245,7 @@ def test_visible_confirmation_reroutes_a_wrong_message_tool_to_the_button():
             tool_calls=[SimpleNamespace(
                 id="wrong-send-call",
                 name="send_chat_message",
-                args={"contact_name": "確認", "message": "確認"},
+                args={"contact_name": "朋友", "message": "那我們開始吧"},
             )],
         ))
         await wait_until(lambda: any(

@@ -271,6 +271,7 @@ async def run_duplex_session(
     current_audio_allowed: bool | None = None
     live_turn_active = False
     last_user_transcript = ""
+    input_transcript_finished = False
     next_reply_code = "conversation"
     close_after_turn = False
     first_chunk: bytes | None = None
@@ -2142,7 +2143,8 @@ async def run_duplex_session(
     async def handle_live_message(response: Any) -> bool:
         nonlocal current_response_id, current_sequence
         nonlocal current_transcript, current_audio_allowed
-        nonlocal last_user_transcript, next_reply_code, close_after_turn
+        nonlocal last_user_transcript, input_transcript_finished
+        nonlocal next_reply_code, close_after_turn
         nonlocal first_chunk, last_completed_first_chunk
         nonlocal checking_replayed_turn, suppress_current_turn
         nonlocal progress_turn_pending
@@ -2153,17 +2155,25 @@ async def run_duplex_session(
             await send_event({"type": "state", "state": "reconnecting"})
             return True
 
-        if response.voice_activity:
-            activity = str(response.voice_activity.voice_activity_type or "")
-            if activity.endswith("ACTIVITY_START"):
+        activity = ""
+        voice_activity = getattr(response, "voice_activity", None)
+        if voice_activity:
+            activity = str(voice_activity.voice_activity_type or "")
+        else:
+            vad_signal = getattr(response, "voice_activity_detection_signal", None)
+            if vad_signal:
+                activity = str(vad_signal.vad_signal_type or "")
+        if activity:
+            if activity.endswith(("ACTIVITY_START", "SOS")):
                 last_user_transcript = ""
+                input_transcript_finished = False
                 template_fast_path_transcript = ""
                 template_fast_path_call_ids.clear()
                 await send_event({
                     "type": "microphone_state",
                     "state": "speech_started",
                 })
-            elif activity.endswith("ACTIVITY_END"):
+            elif activity.endswith(("ACTIVITY_END", "EOS")):
                 await send_event({
                     "type": "microphone_state",
                     "state": "speech_ended",
@@ -2175,6 +2185,13 @@ async def run_duplex_session(
                 live_turn_active = True
             if checking_replayed_turn and content.turn_complete and not content.model_turn:
                 checking_replayed_turn = False
+            if content.interrupted:
+                # A barge-in starts a new input segment. Clear the previous
+                # segment before processing any transcript delivered with the
+                # interruption event itself.
+                last_user_transcript = ""
+                input_transcript_finished = False
+                await reset_output(interrupted=True)
             interim = content.interim_input_transcription
             if interim and interim.text and not suppress_current_turn:
                 await send_event({
@@ -2184,6 +2201,12 @@ async def run_duplex_session(
                 })
             incoming = content.input_transcription
             if incoming and incoming.text and not suppress_current_turn:
+                # Input transcription is delivered independently from VAD, so
+                # the next segment can arrive before a new ACTIVITY_START.
+                # A finished transcription is the reliable fallback boundary.
+                if input_transcript_finished:
+                    last_user_transcript = ""
+                    input_transcript_finished = False
                 last_user_transcript = _append_transcript(
                     last_user_transcript,
                     str(incoming.text),
@@ -2196,8 +2219,7 @@ async def run_duplex_session(
                 if incoming.finished is True:
                     remember("user", last_user_transcript)
                     await dispatch_template_fast_path()
-            if content.interrupted:
-                await reset_output(interrupted=True)
+                    input_transcript_finished = True
             outgoing = content.output_transcription
             if outgoing and outgoing.text and not suppress_current_turn:
                 current_transcript = _append_transcript(
@@ -2251,6 +2273,11 @@ async def run_duplex_session(
                         })
                         current_sequence += 1
             if content.turn_complete:
+                # Some Live responses do not set input_transcription.finished.
+                # Model turn completion is the fallback boundary for the next
+                # user segment when VAD and transcription arrive out of order.
+                if last_user_transcript:
+                    input_transcript_finished = True
                 live_turn_active = False
                 if not suppress_current_turn and last_user_transcript:
                     remember("user", last_user_transcript)

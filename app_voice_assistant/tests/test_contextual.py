@@ -140,6 +140,10 @@ def test_result_protocol_keeps_legacy_messages_and_bounds_new_data():
 
 def test_target_schemas_follow_shared_catalog():
     declarations = {d.name: d for d in _live_tools(types)[0].function_declarations}
+    assert {
+        getattr(declaration.behavior, 'value', declaration.behavior)
+        for declaration in declarations.values()
+    } == {'BLOCKING'}
     for action in ACTIONS.values():
         if action['target_kinds']:
             schema = declarations[action['tool']].parameters_json_schema

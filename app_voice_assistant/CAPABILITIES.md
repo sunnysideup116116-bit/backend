@@ -131,7 +131,7 @@ GitNexus 檢查目前整個未提交工作區（含本次之前已有的聊天�
 
 ### AI 語音輸出
 
-- Android 預設使用單一持久 `gemini-3.1-flash-live-preview` audio-to-audio session，同時承載輸入音訊、VAD、轉錄、function call 與 24 kHz PCM16 回覆。
+- Android 預設使用單一持久 `gemini-3.8-live` audio-to-audio session，同時承載輸入音訊、VAD、轉錄、function call 與 24 kHz PCM16 回覆。
 - Android 原生層使用 `AudioTrack.MODE_STREAM` 即時排入 PCM；「打斷」會 pause、flush 並丟棄舊 response ID 音訊。
 - AudioTrack 輸出使用 `USAGE_VOICE_COMMUNICATION`，手機音量鍵調整「通話音量」；「使用手機擴音」只改變通訊輸出裝置，不改回媒體模式。錄音端保留 `VOICE_COMMUNICATION` 與 AEC。
 - Android 的非 PCM 備援使用完整 Gemini TTS WAV；不會回退本機聲音。Web／桌面不開放語音工作階段。
@@ -270,8 +270,8 @@ AI 指示不得自行虛構同行者、精確地點或沒有被使用者說出�
 - Gemini Live 提供獨立 `read_match_status` 與 `read_match_hub` function，分別轉成 `match.query(view=status|hub)`；這兩種唯讀操作直接等待 Flutter 回傳 canonical 結果，不建立背景阿月委派，也不先播放「我找一下」。只有配對建議、開始／取消搜尋等需要對話推理的需求才進入公開阿月聊天室。
 - 語音阿月先說「我找一下，稍等一下」，Flutter 會以既有動畫切到配對分頁，再開啟固定的 `MatchChatPage`；使用者可以在同一個聊天室看到自己的問題、處理狀態與逐段串流回覆。
 - 中間提示不再說「配對阿月／阿月悄悄話」，只說「我找一下，稍等一下」；簡體與英文模式分別使用對應語言，不會在 English 模式突然播中文提示。
-- 語音委派不傳 `ai_room_id`、不呼叫建立聊天室，固定沿用原本的永久公開阿月對話；連續追問不會每次新增聊天室。
-- 固定聊天室開啟後會註冊語音 page scope；後續問題與口頭確認直接交給畫面上的同一個串流 controller，不會退回首頁、另開聊天室或等輪詢後才顯示。帳號分區 refresh signal 僅保留給背景／相容流程補同步。
+- 每次新的語音 session 第一次委派公開阿月時會建立一個專用 `ai_room_id`；同一 session 的連續追問重用該房間，只有語音真正關閉後再啟動才建立下一個房間。
+- 專用聊天室開啟後會註冊語音 page scope；後續問題與口頭確認直接交給畫面上的同一個串流 controller，不會每一輪退回首頁或另開聊天室。帳號分區 refresh signal 僅保留給背景／相容流程補同步。
 - 串流完成後才將 canonical reply 回傳給語音 session 朗讀；逾時、離線、未登入或權限關閉都不會假裝取得結果。
 - Live 語音阿月會先理解 canonical reply，再用第一人稱與自然對話方式回答；不得逐字照念、提到轉送流程，或加入配對阿月原答案沒有的事實與承諾。
 
@@ -283,7 +283,7 @@ AI 指示不得自行虛構同行者、精確地點或沒有被使用者說出�
 - 三種寫入都需要 `calendar_write` 與 30 秒 Server confirmation；修改／取消因需要先解析事件，另需 `calendar_read`。個人行程使用 canonical PATCH／cancel API；雙人約會改期沿用既有 reschedule API，不繞過對方確認狀態。
 - 「配對進度／狀態／結果」使用 `read_match_status` 直接呼叫 `/api/match/status`，朗讀搜尋狀態、百分比、目前處理階段、待本人回覆數與等待對方數；需要 `match_read`，不需要先問公開阿月，也不依賴 `public_ayue`／`match_ayue` 權限。唯讀狀態不強迫切頁，需要看邀請時可接著說「打開阿月牽線」。
 - 「我配對到誰、是否有要確認」同一個 direct read 會讀 `/api/match/status` 與 `/api/contacts`：朗讀已接受且可聊天的對象名稱、待本人確認與等待對方的數量。
-- `ask_public_ayue` 僅用於 matching、web、places、memory 或 profile；會切到永久公開阿月聊天室並使用畫面本身的 `streamPublicMessage`，讓問題與回覆即時可見，但不會為每次查詢新增聊天室。
+- `ask_public_ayue` 僅用於 matching、web、places、memory 或 profile；會切到本次語音 session 的專用公開阿月聊天室並使用畫面本身的 `streamPublicMessage`，讓問題與回覆即時可見。
 - 可查看配對進度、牽線卡與已接受對象；可使用公開 Web 搜尋、頁面摘要、附近餐廳／咖啡廳／景點、營業資訊、評分、價位與距離；可讀取本人阿月記憶及自我摘要。
 - 配對對話內的確認仍由既有 choice 協定負責；語音以目前可見按鈕的原 `choice_id` 執行 callback，避免把「確認」當成新問題而重複產生確認卡。
 - 行事曆新增、修改或取消只有 direct API 回傳成功事件後才算完成；失敗不會照念模型的成功句。
@@ -328,8 +328,8 @@ AI 指示不得自行虛構同行者、精確地點或沒有被使用者說出�
 
 ### 語音個性探索
 
-- 說「開始個性探索」會呼叫 `personality_exploration_turn`，透過 `personality.explore` 將開始訊息送入原本永久公開阿月房間。
-- 阿月會用語音提出下一題；使用者可直接說出自然回答，Gemini Live 會在同一 session 將每一輪繼續送回同一工具，不切換成打字模式或新建聊天室。
+- 說「開始個性探索」會呼叫 `personality_exploration_turn`，透過 `personality.explore` 將開始訊息送入本次語音 session 的專用公開阿月房間。
+- 阿月會用語音提出下一題；使用者可直接說出自然回答，Gemini Live 會在同一 session 將每一輪繼續送回同一工具，不切換成打字模式，也不會每一題新建聊天室。
 - 只有使用者明確說停止探索、探索完成或語音 session 結束才離開這個互動模式。需要 `public_ayue` 與 `memory_read` 權限。
 
 ## Server 提供的介面

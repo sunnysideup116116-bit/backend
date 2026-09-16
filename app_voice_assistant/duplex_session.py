@@ -650,10 +650,21 @@ def _proxy_live_tools(types: Any) -> list[Any]:
 
 def _live_tools(types: Any, routing_mode: str = "legacy") -> list[Any]:
     if routing_mode == "proxy":
-        return _proxy_live_tools(types)
-    if routing_mode == "template":
-        return template_live_tools(types)
-    return _legacy_live_tools(types)
+        tools = _proxy_live_tools(types)
+    elif routing_mode == "template":
+        tools = template_live_tools(types)
+    else:
+        tools = _legacy_live_tools(types)
+
+    # Gemini 3.8 Live defaults to non-blocking function calls. The current
+    # runtime serializes tool execution and owns confirmation/cancellation
+    # boundaries, so keep the existing synchronous semantics for this phase.
+    behavior_type = getattr(types, "Behavior", None)
+    blocking = getattr(behavior_type, "BLOCKING", "BLOCKING")
+    for tool in tools:
+        for declaration in getattr(tool, "function_declarations", None) or []:
+            declaration.behavior = blocking
+    return tools
 
 
 def _system_instruction(
@@ -829,7 +840,6 @@ class AppVoiceDuplexSession:
             )
             config = types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
-                thinking_config=types.ThinkingConfig(thinking_level="minimal"),
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(

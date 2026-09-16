@@ -142,6 +142,12 @@ def test_visible_choice_confirmation_is_a_button_action_not_new_chat_text():
         "arguments": {"action": "confirm", "choice_id": "must-not-pass"},
     }, base_revision=2).arguments == {"action": "confirm"}
 
+    for phrase in ("那我們開始吧", "重新開始探索", "繼續吧"):
+        started = deterministic_proposal(phrase, context=context)
+        assert started is not None
+        assert started.intent == "ui.choice.activate"
+        assert started.arguments == {"action": "confirm"}
+
 
 def test_self_and_memory_requests_are_direct_typed_actions():
     context = safe_context({"permissions": {

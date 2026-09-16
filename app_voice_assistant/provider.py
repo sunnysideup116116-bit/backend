@@ -163,9 +163,6 @@ class AppVoiceProvider:
             try:
                 config = types.LiveConnectConfig(
                     response_modalities=["AUDIO"],
-                    thinking_config=types.ThinkingConfig(
-                        thinking_level="minimal",
-                    ),
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(
                             prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -290,7 +287,7 @@ date、start_time、end_time、activity、location、notes、budget；日期 YYY
 未提供地點時保留空字串，讓 Server 使用設定中的預設所在地。不可猜測其他位置，
 也不可改用公開阿月或 Web 搜尋。
 目前安全狀態若 feature_status.visible_choice_pending=true，使用者說確認、確定、同意、好、
-取消、不要或不同意時必須使用 ui.choice.activate，arguments 只能是
+開始吧、重新開始探索、繼續、取消、不要或不同意時必須使用 ui.choice.activate，arguments 只能是
 {{"action":"confirm"}} 或 {{"action":"cancel"}}；不可把這些確認詞送成 chat.request_send、
 ayue.public_query 或 ayue.private_query 的新文字。
 profile.patch changes 只能有 name、phone、age、region、city、district、userinfo。

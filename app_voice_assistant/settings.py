@@ -93,9 +93,9 @@ class AppVoiceSettings:
             ),
             live_model=(
                 env.get(
-                    "VOICE_APP_LIVE_MODEL", "gemini-3.1-flash-live-preview",
+                    "VOICE_APP_LIVE_MODEL", "gemini-3.8-live",
                 ).strip()
-                or "gemini-3.1-flash-live-preview"
+                or "gemini-3.8-live"
             ),
             tts_model=(
                 env.get("VOICE_APP_TTS_MODEL", "gemini-3.1-flash-tts-preview").strip()

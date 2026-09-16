@@ -101,6 +101,107 @@ def test_transcript_keeps_english_spaces_repeated_words_and_chinese():
     assert len(_append_transcript("a" * 300, " more words")) > 240
 
 
+def test_final_transcript_starts_a_new_turn_without_activity_start():
+    async def scenario():
+        live, socket, events = FakeLive(), FakeWebSocket(), []
+        task = asyncio.create_task(run_duplex_session(
+            socket,
+            provider=FakeProvider(live),
+            limiter=FakeLimiter(),
+            identity="test",
+            initial_context={"scope": "global", "revision": 0},
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+
+        content = lambda text: SimpleNamespace(
+            interim_input_transcription=None,
+            input_transcription=SimpleNamespace(text=text, finished=True),
+            output_transcription=None,
+            interrupted=False,
+            model_turn=None,
+            turn_complete=False,
+        )
+        await live.incoming.put(message(
+            voice_activity=SimpleNamespace(
+                voice_activity_type="VOICE_ACTIVITY_TYPE_ACTIVITY_START",
+            ),
+            content=content("第一輪內容"),
+        ))
+        await wait_until(lambda: len([
+            item for item in events if item.get("type") == "user_transcript"
+        ]) == 1)
+
+        # The Live API does not guarantee that VAD and transcription events
+        # arrive in order. This second turn intentionally has no activity start.
+        await live.incoming.put(message(content=content("第二輪內容")))
+        await wait_until(lambda: len([
+            item for item in events if item.get("type") == "user_transcript"
+        ]) == 2)
+
+        transcripts = [
+            item["text"] for item in events if item.get("type") == "user_transcript"
+        ]
+        assert transcripts == ["第一輪內容", "第二輪內容"]
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_model_turn_complete_starts_a_new_turn_when_finished_is_missing():
+    async def scenario():
+        live, socket, events = FakeLive(), FakeWebSocket(), []
+        task = asyncio.create_task(run_duplex_session(
+            socket,
+            provider=FakeProvider(live),
+            limiter=FakeLimiter(),
+            identity="test",
+            initial_context={"scope": "global", "revision": 0},
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+
+        def content(text=None, *, turn_complete=False):
+            return SimpleNamespace(
+                interim_input_transcription=None,
+                input_transcription=(
+                    SimpleNamespace(text=text, finished=None)
+                    if text is not None else None
+                ),
+                output_transcription=None,
+                interrupted=False,
+                model_turn=None,
+                turn_complete=turn_complete,
+            )
+
+        await live.incoming.put(message(
+            voice_activity=SimpleNamespace(
+                voice_activity_type="VOICE_ACTIVITY_TYPE_ACTIVITY_START",
+            ),
+            content=content("第一輪內容"),
+        ))
+        await wait_until(lambda: len([
+            item for item in events if item.get("type") == "user_transcript"
+        ]) == 1)
+        await live.incoming.put(message(content=content(turn_complete=True)))
+
+        # The next utterance has neither a VAD start event nor a finished flag.
+        await live.incoming.put(message(content=content("第二輪內容")))
+        await wait_until(lambda: len([
+            item for item in events if item.get("type") == "user_transcript"
+        ]) == 2)
+
+        transcripts = [
+            item["text"] for item in events if item.get("type") == "user_transcript"
+        ]
+        assert transcripts == ["第一輪內容", "第二輪內容"]
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
 def test_live_shared_date_confirmation_and_long_read_results():
     async def scenario():
         live, socket, events = FakeLive(), FakeWebSocket(), []
