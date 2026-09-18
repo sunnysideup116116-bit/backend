@@ -49,3 +49,8 @@ This project is indexed by GitNexus as **ayue_for_demo** (9140 symbols, 22130 re
 - 修改 Server 程式、服務、依賴、環境變數或啟動流程後，必須確保這支腳本仍能啟動完整服務。
 - 不得刪除、改名、繞過或破壞 `start_all.sh`；若新增服務或改變必要啟動參數，必須將相容調整整合進這支腳本。
 - 整合測試及交付前的實際啟動驗證也必須使用 `start_all.sh`，不得以個別 `uvicorn`、Python module 或其他替代指令冒充完整啟動驗證。
+
+## Repository Push Contract
+
+- 本 `Server/` repository 就是 backend；任何 Server push 固定使用 `legacy-origin` 的 `main`：`https://github.com/sunnysideup116116-bit/backend`。
+- 不得把 Server 推送到 `origin`（`https://github.com/chenjia0510/ayue_for_demo.git`）；`origin` 不是 Server 的正式推送目的地。
