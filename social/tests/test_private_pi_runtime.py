@@ -6,7 +6,12 @@ from unittest.mock import patch
 
 from services.ayue_agent.private_pi import runtime
 from services.ayue_agent.private_pi.context import PrivatePiTurnContext
-from services.ayue_agent.private_pi.registry import PRIVATE_TOOL_NAMES, tool_schemas
+from services.ayue_agent.private_pi.policy import PRIVATE_PI_POLICY
+from services.ayue_agent.private_pi.registry import (
+    PRIVATE_TOOL_MAP,
+    PRIVATE_TOOL_NAMES,
+    tool_schemas,
+)
 from services.ayue_agent.private_v2 import PRIVATE_CONFIRMATIONS, PrivateAgentTurnContextV2
 from services.ayue_agent.shared.confirmation import ConfirmationManager
 from services.ayue_agent.shared.test_store import MemoryCollection
@@ -40,7 +45,15 @@ def _context(
         ],
         local_time="2026-09-16 12:00",
         owner_relationship_memories=[
-            {"topic": "相處感受", "owner_view": "我覺得很自在", "source": "owner_private"},
+            {
+                "topic": "相處感受",
+                "owner_view": "我覺得很自在、我覺得對方很帥",
+                "views": [
+                    {"text": "我覺得很自在", "updated_at": 100},
+                    {"text": "我覺得對方很帥", "updated_at": 110},
+                ],
+                "source": "owner_private",
+            },
         ],
     )
     return PrivatePiTurnContext(
@@ -70,6 +83,7 @@ def teardown_function(_function):
 def test_registry_is_private_only_and_context_drops_authority_fields():
     assert all(name.startswith("private.") for name in PRIVATE_TOOL_NAMES)
     assert not any(name.startswith(("web.", "calendar.", "match.")) for name in PRIVATE_TOOL_NAMES)
+    assert "private.relationship.respond_to_probe" not in PRIVATE_TOOL_NAMES
     assert {schema["name"] for schema in tool_schemas()} == set(PRIVATE_TOOL_NAMES)
 
     ctx = _context("我該怎麼接電影話題？")
@@ -83,7 +97,64 @@ def test_registry_is_private_only_and_context_drops_authority_fields():
     assert "hidden" not in serialized
     assert "shared:1" not in serialized
     assert "other_id" not in serialized
-    assert safe["owner_relationship_memories"][0]["owner_view"] == "我覺得很自在"
+    memory = safe["owner_relationship_memories"][0]
+    assert memory["owner_view"] == "我覺得很自在、我覺得對方很帥"
+    assert [item["text"] for item in memory["views"]] == [
+        "我覺得很自在", "我覺得對方很帥",
+    ]
+
+
+def test_private_policy_requires_contextual_owner_view_memory_capture():
+    description = PRIVATE_TOOL_MAP[
+        "private.relationship.capture_memory_candidate"
+    ].description
+    assert "每回合的關係記憶判斷" in PRIVATE_PI_POLICY
+    assert "它好冷漠" in PRIVATE_PI_POLICY
+    assert "必須先呼叫 private.relationship.capture_memory_candidate" in PRIVATE_PI_POLICY
+    assert "只有本回合訊息" in description
+    assert "查看或管理既有記憶的要求不得呼叫此工具" in description
+    assert "必須呼叫 private.surface.present_relationship_memories" in PRIVATE_PI_POLICY
+
+
+def test_model_can_present_relationship_memory_entry_with_copy_and_placement():
+    ctx = _context("讓我看看你記得哪些關於他的事")
+    progress: list[dict] = []
+    with patch.object(runtime, "pi_available", return_value=True), \
+         patch.object(runtime, "build_private_pi_context", return_value=ctx), \
+         patch.object(
+             runtime,
+             "run_bridge",
+             side_effect=_bridge_that_calls(
+                 "private.surface.present_relationship_memories",
+                 {
+                     "title": "關於小晴，我記得這些",
+                     "summary": "你可以進去確認，也能修改或撤銷。",
+                     "label": "看看記憶",
+                    "placement": "before_answer",
+                 },
+                 reply="都整理在這裡。",
+             ),
+         ):
+        result = runtime.run_private_pi_turn(
+            user_id="owner",
+            other_id="other",
+            message=ctx.base.message,
+            match_doc={"_id": "match", "status": "accepted", "proposal_revision": 3},
+            on_progress=progress.append,
+        )
+
+    assert result.relationship_memory_entry is not None
+    assert result.relationship_memory_entry.model_dump() == {
+        "kind": "relationship_memory_entry",
+        "title": "關於小晴，我記得這些",
+        "summary": "你可以進去確認，也能修改或撤銷。",
+        "label": "看看記憶",
+        "placement": "before_reply",
+    }
+    assert any(
+        event.get("type") == "tool_started" and "記憶入口" in event.get("text", "")
+        for event in progress
+    )
 
 
 def test_private_pi_reads_shared_history_and_emits_activity_events():
@@ -113,6 +184,125 @@ def test_private_pi_reads_shared_history_and_emits_activity_events():
     assert all("private" not in str(event.get("text") or "").lower() for event in progress)
 
 
+def test_fixed_fallback_is_reserved_for_a_provider_timeout():
+    ctx = _context("幫我整理一下")
+
+    def bridge(_initial, model_call, _tool_call, **_kwargs):
+        response = model_call([], 10**12, [])
+        return {"finalText": "", "error": response.get("error")}
+
+    with (
+        patch.object(runtime, "pi_available", return_value=True),
+        patch.object(runtime, "build_private_pi_context", return_value=ctx),
+        patch.object(runtime, "run_bridge", side_effect=bridge),
+        patch.object(runtime, "generate_chat_completion_with_tools", side_effect=TimeoutError),
+    ):
+        timeout_result = runtime.run_private_pi_turn(
+            user_id="owner", other_id="other", message=ctx.base.message,
+            match_doc={"_id": "match", "status": "accepted", "proposal_revision": 3},
+        )
+
+    assert timeout_result.reply == runtime.PRIVATE_RUNTIME_FALLBACK_REPLY
+    assert timeout_result.fallback_reason == "pi_provider_timeout"
+
+    with (
+        patch.object(runtime, "pi_available", return_value=True),
+        patch.object(runtime, "build_private_pi_context", return_value=ctx),
+        patch.object(runtime, "run_bridge", side_effect=bridge),
+        patch.object(
+            runtime,
+            "generate_chat_completion_with_tools",
+            side_effect=ConnectionError("provider offline"),
+        ),
+    ):
+        provider_result = runtime.run_private_pi_turn(
+            user_id="owner", other_id="other", message=ctx.base.message,
+            match_doc={"_id": "match", "status": "accepted", "proposal_revision": 3},
+        )
+
+    assert provider_result.reply != runtime.PRIVATE_RUNTIME_FALLBACK_REPLY
+    assert provider_result.fallback_reason == "pi_provider_error"
+    assert "模型服務" in provider_result.reply
+
+
+def test_reply_validation_keeps_normal_system_tool_and_permission_language():
+    reply = "這是一般的系統提醒；你可以說說想用哪個工具，以及需要什麼權限。"
+    assert runtime._safe_reply(reply, []) == reply
+    assert runtime._safe_reply("x" * 3601, []) is None
+    assert runtime._safe_reply("這次會讀取 user_id", []) is None
+
+
+def test_unavailable_or_context_failure_does_not_use_timeout_copy():
+    ctx = _context("幫我整理一下")
+    with patch.object(runtime, "pi_available", return_value=False):
+        unavailable = runtime.run_private_pi_turn(
+            user_id="owner", other_id="other", message=ctx.base.message,
+            match_doc={"_id": "match", "status": "accepted"},
+        )
+    assert unavailable.reply != runtime.PRIVATE_RUNTIME_FALLBACK_REPLY
+    assert unavailable.fallback_reason == "pi_runtime_unavailable"
+
+    with (
+        patch.object(runtime, "pi_available", return_value=True),
+        patch.object(
+            runtime,
+            "build_private_pi_context",
+            side_effect=RuntimeError("context down"),
+        ),
+    ):
+        context_failure = runtime.run_private_pi_turn(
+            user_id="owner", other_id="other", message=ctx.base.message,
+            match_doc={"_id": "match", "status": "accepted"},
+        )
+    assert context_failure.reply != runtime.PRIVATE_RUNTIME_FALLBACK_REPLY
+    assert context_failure.fallback_reason == "pi_context_failed"
+
+
+def test_memory_candidate_is_enqueued_before_a_later_provider_failure():
+    ctx = _context("我喜歡他，幫我記住")
+
+    def bridge(initial, _model_call, tool_call, **_kwargs):
+        tool_call(
+            "private.relationship.capture_memory_candidate",
+            {"candidates": [{
+                "category": "impression",
+                "evidence_span": "我喜歡他",
+                "statement": "我對對方有好感",
+            }]},
+        )
+        return {"finalText": "", "error": "pi_provider_error"}
+
+    with (
+        patch.object(runtime, "pi_available", return_value=True),
+        patch.object(runtime, "build_private_pi_context", return_value=ctx),
+        patch.object(runtime, "run_bridge", side_effect=bridge),
+        patch.object(runtime, "enqueue_relationship_memory_extraction", return_value=True) as enqueue,
+    ):
+        result = runtime.run_private_pi_turn(
+            user_id="owner", other_id="other", message=ctx.base.message,
+            source_message_id="source-1",
+            match_doc={"_id": "match", "status": "accepted", "proposal_revision": 3},
+        )
+
+    enqueue.assert_called_once_with(
+        "owner", "other", "match", "source-1",
+        candidates=[{
+            "category": "impression",
+            "evidence_span": "我喜歡他",
+            "statement": "我對對方有好感",
+        }],
+    )
+    assert result.relationship_memory_candidate == {
+        "candidates": [{
+            "category": "impression", "evidence_span": "我喜歡他",
+            "statement": "我對對方有好感",
+        }],
+    }
+    assert result.relationship_memory_entry is not None
+    assert result.relationship_memory_entry.label == "查看或管理"
+    assert result.fallback_reason == "pi_provider_error"
+
+
 def test_date_coordination_reuses_one_confirmation_for_rephrased_turn():
     first = _context("幫我問他要不要一起安排約會？")
     second = _context("要不要一起安排約會？")
@@ -127,10 +317,14 @@ def test_date_coordination_reuses_one_confirmation_for_rephrased_turn():
         )
         manager = ConfirmationManager(PRIVATE_CONFIRMATIONS)
         assert initial.choice_prompt and initial.choice_prompt["state"] == "pending"
-        assert manager.bind_final_preview(
-            user_id="owner", origin_run_id=initial.agent_run_id,
-            final_content=initial.reply,
+        prepared = manager.record_for_choice(
+            user_id="owner",
+            room_id=first.base.room_id,
+            surface="private_ayue",
+            choice_id=initial.choice_prompt["id"],
+            require_pending=False,
         )
+        assert prepared and prepared["expected_persisted_fingerprint"]
         assert manager.mark_presented(
             user_id="owner", origin_run_id=initial.agent_run_id,
             message_id="assistant-1", persisted_content=initial.reply,
@@ -150,18 +344,63 @@ def test_date_coordination_reuses_one_confirmation_for_rephrased_turn():
     assert len(records) == 1
 
 
+def test_date_choice_confirm_and_cancel_resolve_the_visible_card():
+    for action, expected_state in (("confirm", "confirmed"), ("cancel", "cancelled")):
+        PRIVATE_CONFIRMATIONS.clear()
+        ctx = _context("幫我問他要不要一起安排約會？")
+        match = {"_id": "match", "status": "accepted", "proposal_revision": 3}
+        with patch.object(runtime, "pi_available", return_value=True), \
+             patch.object(runtime, "build_private_pi_context", return_value=ctx), \
+             patch.object(
+                 runtime,
+                 "run_bridge",
+                 side_effect=_bridge_that_calls("private.date.start_coordination", reply=""),
+             ), \
+             patch.object(
+                 runtime,
+                 "_execute_write",
+                 return_value=(True, "date_invite_created", None),
+             ) as execute:
+            initial = runtime.run_private_pi_turn(
+                user_id="owner", other_id="other", message=ctx.base.message,
+                source_message_id="source-1", match_doc=match,
+            )
+            manager = ConfirmationManager(PRIVATE_CONFIRMATIONS)
+            assert manager.mark_presented(
+                user_id="owner",
+                origin_run_id=initial.agent_run_id,
+                message_id="assistant-1",
+                persisted_content=initial.reply,
+            )
+            resolved = runtime.run_private_pi_turn(
+                user_id="owner", other_id="other", message="",
+                choice_id=initial.choice_prompt["id"], choice_action=action,
+                match_doc=match,
+            )
+
+        assert resolved.choice_resolution["state"] == expected_state
+        assert manager.list_active(
+            user_id="owner",
+            room_id=ctx.base.room_id,
+            surface="private_ayue",
+            interaction_mode="bubble_buttons_v1",
+        ) == []
+        assert execute.call_count == (1 if action == "confirm" else 0)
+
+
 def test_cancel_tool_requires_an_explicit_cancel_phrase():
     assert runtime._explicit_cancel_requested("取消這張確認")
     assert runtime._explicit_cancel_requested("先不要")
     assert not runtime._explicit_cancel_requested("要不要一起安排約會？")
 
 
-def test_memory_tool_only_queues_explicit_owner_feeling():
-    operation = _context("我想要約他去約會，可以幫我安排嗎？")
-    feeling = _context("我跟他相處很自在，希望慢慢認識。")
+def test_memory_tool_trusts_agent_semantics_but_requires_source_evidence():
+    invalid = _context("我只想安排約會")
+    feeling = _context("我很在乎他")
+    progress: list[dict] = []
     enqueue_patch = patch.object(runtime, "enqueue_relationship_memory_extraction", return_value=True)
     with patch.object(runtime, "pi_available", return_value=True), \
-         patch.object(runtime, "build_private_pi_context", side_effect=[operation, feeling]), \
+         patch.object(runtime, "build_private_pi_context", side_effect=[invalid, feeling]), \
          patch.object(
              runtime,
              "run_bridge",
@@ -170,35 +409,51 @@ def test_memory_tool_only_queues_explicit_owner_feeling():
                      "private.relationship.capture_memory_candidate",
                      {
                          "category": "future_intent",
-                         "evidence_span": "我想要約他去約會",
+                         "evidence_span": "訊息裡沒有這句",
+                         "statement": "我想安排一次約會",
                      },
                  )(initial, model, tool, **kwargs)
-                 if "約他去約會" in initial["prompt"]
+                 if "只想安排約會" in initial["prompt"]
                  else _bridge_that_calls(
                      "private.relationship.capture_memory_candidate",
                      {
                          "category": "impression",
-                         "evidence_span": "我跟他相處很自在",
+                         "evidence_span": "我很在乎他",
+                         "statement": "我很重視和對方的關係",
                      },
                  )(initial, model, tool, **kwargs)
              ),
              ), enqueue_patch as enqueue:
         rejected = runtime.run_private_pi_turn(
-            user_id="owner", other_id="other", message=operation.base.message,
-            source_message_id="m-op",
+            user_id="owner", other_id="other", message=invalid.base.message,
+            source_message_id="m-invalid",
             match_doc={"_id": "match", "status": "accepted", "proposal_revision": 3},
         )
         accepted = runtime.run_private_pi_turn(
             user_id="owner", other_id="other", message=feeling.base.message,
             source_message_id="m-feeling",
             match_doc={"_id": "match", "status": "accepted", "proposal_revision": 3},
+            on_progress=progress.append,
         )
 
     assert rejected.relationship_memory_candidate is None
     assert accepted.relationship_memory_candidate == {
-        "category": "impression", "evidence_span": "我跟他相處很自在",
+        "candidates": [{
+            "category": "impression", "evidence_span": "我很在乎他",
+            "statement": "我很重視和對方的關係",
+        }],
     }
+    assert accepted.relationship_memory_entry is not None
     assert enqueue.call_count == 1
+    assert any(
+        event.get("type") == "tool_started"
+        and "記憶整理" in str(event.get("text") or "")
+        for event in progress
+    )
+    assert any(
+        event.get("type") == "tool_finished" and event.get("outcome") == "ok"
+        for event in progress
+    )
 
 
 def test_post_date_feedback_tool_does_not_require_calendar_jwt():

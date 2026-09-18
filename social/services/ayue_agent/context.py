@@ -433,14 +433,6 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     )]
     mentioned_ids, validation_overflow = validated_mentioned_contact_ids(ctx.user_id, ctx.mentioned_ids)
     owner_relationship_memories: list[dict[str, Any]] = []
-    if (
-        len(mentioned_ids) == 1
-        and not validation_overflow
-        and bool(getattr(ctx, "external_calendar_authorized", False))
-    ):
-        from services.relationship_memory_service import relationship_memory_context
-
-        owner_relationship_memories = relationship_memory_context(ctx.user_id, mentioned_ids[0])
     focused_match, focused_authority = _focused_match_projection(ctx)
     match_search = {
         **(match_state["search"] or {}),

@@ -27,6 +27,7 @@ class AyueAgentRegistryTests(unittest.TestCase):
             "calendar_events", "calendar_event_find", "calendar_next_event", "current_time", "match_status",
             "counterparty_summary", "recent_context", "relationship_evidence", "mentioned_contact_summary", "accepted_contact_list", "memory_profile",
             "self_profile", "calendar_mutation_verification", "contact_evidence",
+            "my_relationship_views",
         }
         for tool_name in READ_ONLY_TOOLS:
             spec = TOOL_REGISTRY[tool_name]

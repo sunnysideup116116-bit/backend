@@ -22,6 +22,7 @@ class RelationshipMemoryActionRequest(BaseModel):
     expected_version: int = Field(ge=1)
     action: str
     statement: str | None = Field(default=None, max_length=300)
+    facet_id: str | None = Field(default=None, max_length=100)
 
 
 def _require_owner(request: Request, user_id: str) -> None:
@@ -53,6 +54,7 @@ def relationship_memory_action(req: RelationshipMemoryActionRequest, request: Re
         expected_version=req.expected_version,
         statement=req.statement,
         delete=action in {"delete", "undo"},
+        facet_id=req.facet_id,
     )
     if not updated:
         raise HTTPException(status_code=409, detail="記憶已更新，請重新整理")

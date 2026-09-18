@@ -41,14 +41,17 @@ from .tool_registry import ToolRisk, get_tool_spec, validate_executor_arguments
 from .public_relationship_projection import (
     anonymize_counterparty_payload,
     accepted_contact_ids_by_display_name,
+    accepted_contact_ids_by_refs,
     accepted_contact_summaries,
     contact_evidence_by_refs,
     display_name as _display_name,
     mentioned_contact_summary,
     other_id as _other_id,
     public_text as _public_text,
+    recent_relationship_reference_id,
     safe_match_reason as _safe_proposal_summary,
     safe_public_profile as _public_counterparty_profile,
+    validated_mentioned_contact_ids,
     verified_common_ground as _verified_common_ground,
 )
 from .web_tools import extract_web, search_web
@@ -589,6 +592,121 @@ def _mentioned_contact_summary(ctx: AgentTurnContext, other_ids: list[str]) -> T
             "safe_label": str(contacts[0].get("display_name") or "對方"),
         }
     return ToolResult(ok=True, data={"contacts": contacts}, private_data=private_data)
+
+
+def _my_relationship_views(
+    ctx: AgentTurnContext, arguments: dict[str, Any],
+) -> ToolResult:
+    source = str(arguments.get("target_source") or "")
+    other_ids: list[str] = []
+    if source == "mention":
+        other_ids, overflow = validated_mentioned_contact_ids(ctx.user_id, ctx.mentioned_ids)
+        if overflow or len(other_ids) != 1:
+            return ToolResult(
+                ok=False,
+                error_code="relationship_target_ambiguous",
+                user_message="請指定一位已接受的聯絡人，我才能讀取你對他的看法。",
+            )
+    elif source == "name":
+        name = str(arguments.get("target_evidence_span") or "").strip()
+        normalized_message = re.sub(r"\s+", "", str(ctx.message or "")).casefold()
+        if not name or re.sub(r"\s+", "", name).casefold() not in normalized_message:
+            return ToolResult(
+                ok=False,
+                error_code="relationship_target_not_grounded",
+                user_message="請直接說出這位聯絡人的名字。",
+            )
+        other_ids = accepted_contact_ids_by_display_name(ctx.user_id, name)
+        if len(other_ids) != 1:
+            return ToolResult(
+                ok=False,
+                error_code=(
+                    "relationship_target_ambiguous" if len(other_ids) > 1
+                    else "relationship_target_not_found"
+                ),
+                user_message="我無法唯一確認你說的是哪位已接受聯絡人。",
+            )
+    elif source == "contact_refs":
+        other_ids, unavailable = accepted_contact_ids_by_refs(
+            ctx.user_id,
+            list(arguments.get("contact_refs") or []),
+            reference_scope=_contact_reference_scope(ctx),
+        )
+        if unavailable or not other_ids:
+            return ToolResult(
+                ok=False,
+                error_code="relationship_reference_invalid",
+                user_message="這些聯絡人參照已失效，請重新列出聯絡人。",
+            )
+    elif source == "recent_contact":
+        recent_id = str(
+            getattr(ctx, "_pi_recent_relationship_contact_id", "")
+            or recent_relationship_reference_id(ctx.user_id, ctx.room_id)
+            or ""
+        )
+        validated, overflow = validated_mentioned_contact_ids(ctx.user_id, [recent_id])
+        if overflow or len(validated) != 1:
+            return ToolResult(
+                ok=False,
+                error_code="relationship_recent_target_missing",
+                user_message="我還不確定你指的是誰，請說名字或指定一位聯絡人。",
+            )
+        other_ids = validated
+    else:
+        return ToolResult(ok=False, error_code="relationship_target_invalid")
+
+    from services.relationship_memory_service import (
+        list_relationship_memories,
+        relationship_memory_access_allowed,
+    )
+
+    contacts: list[dict[str, Any]] = []
+    valid_ids: list[str] = []
+    for other_user_id in other_ids[:3]:
+        if not relationship_memory_access_allowed(ctx.user_id, other_user_id):
+            continue
+        rows = list_relationship_memories(ctx.user_id, other_user_id)
+        valid_ids.append(other_user_id)
+        contacts.append({
+            "display_name": _display_name(other_user_id),
+            "source": "owner_private_relationship_memory",
+            "groups": [
+                {
+                    "topic": row["topic"],
+                    "category": row.get("category") or "",
+                    "views": [
+                        {
+                            "text": facet["text"],
+                            "updated_at": float(facet.get("updated_at", 0) or 0),
+                        }
+                        for facet in row.get("facets") or []
+                    ],
+                }
+                for row in rows
+                if row.get("facets")
+            ],
+        })
+    if not valid_ids:
+        return ToolResult(
+            ok=False,
+            error_code="relationship_not_accepted",
+            user_message="這位目前不是可讀取私人關係看法的已接受聯絡人。",
+        )
+    private_data = {}
+    if len(valid_ids) == 1:
+        private_data["relationship_contact_reference"] = {
+            "other_id": valid_ids[0],
+            "safe_label": _display_name(valid_ids[0]),
+        }
+    return ToolResult(
+        ok=True,
+        data={
+            "status": "ok" if any(item["groups"] for item in contacts) else "empty",
+            "contacts": contacts,
+            "truncated": len(other_ids) > 3,
+        },
+        private_data=private_data,
+    )
 
 
 def _contact_reference_scope(ctx: AgentTurnContext) -> str:
@@ -1139,6 +1257,7 @@ def execute_tool(
         "relationship_evidence": lambda: _relationship_evidence(ctx, arguments.get("other_id")),
         "contact_evidence": lambda: _contact_evidence(ctx, arguments.get("contact_refs") or []),
         "mentioned_contact_summary": lambda: _mentioned_contact_summary(ctx, arguments.get("other_ids") or []),
+        "my_relationship_views": lambda: _my_relationship_views(ctx, arguments),
         "accepted_contact_list": lambda: _accepted_contact_list(ctx),
         "memory_profile": lambda: _memory_profile(ctx, arguments),
         "self_profile": lambda: _self_profile(ctx),

@@ -74,11 +74,6 @@ class PrivatePiTurnContext:
         )
 
     @property
-    def pending_probe(self) -> bool:
-        pending = self.profile_state.get("pending_private_feedback") or {}
-        return bool(pending.get("other_id") == self.base.other_id and pending.get("probe_id"))
-
-    @property
     def pending_confirmation(self) -> bool:
         try:
             records = ConfirmationManager(PRIVATE_CONFIRMATIONS).list_active(
@@ -154,9 +149,17 @@ class PrivatePiTurnContext:
             ],
             "owner_relationship_memories": [
                 {
-                    key: _safe_value(value)
-                    for key, value in item.items()
-                    if key in {"topic", "owner_view", "source"}
+                    "topic": _safe_value(item.get("topic")),
+                    "owner_view": _safe_value(item.get("owner_view")),
+                    "views": [
+                        {
+                            "text": _safe_value(view.get("text")),
+                            "updated_at": view.get("updated_at"),
+                        }
+                        for view in (item.get("views") or [])
+                        if isinstance(view, dict) and view.get("text")
+                    ],
+                    "source": _safe_value(item.get("source")),
                 }
                 for item in (base.owner_relationship_memories or [])[:8]
                 if isinstance(item, dict)
@@ -164,7 +167,6 @@ class PrivatePiTurnContext:
             "pending_interactions": {
                 "confirmation": self.pending_confirmation,
                 "post_date_feedback": self.pending_post_date_feedback,
-                "probe": self.pending_probe,
             },
         }
 
@@ -201,7 +203,7 @@ def build_private_pi_context(
     try:
         profile_state = profiles_coll.find_one(
             {"user_id": user_id},
-            {"_id": 0, "pending_post_date_feedback": 1, "pending_private_feedback": 1},
+            {"_id": 0, "pending_post_date_feedback": 1},
         ) or {}
     except Exception:
         profile_state = {}

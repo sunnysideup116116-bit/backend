@@ -6,6 +6,10 @@ from fastapi import BackgroundTasks
 from models import DirectChatRequest, MediatorPrivateRequest
 from routers import private_mediator, public_chat
 from services.ayue_agent.contracts import AgentResult
+from services.ayue_agent.private_contracts import (
+    PrivateAgentResult,
+    PrivateRelationshipMemoryEntry,
+)
 
 
 class ChatChoiceRouteTests(unittest.TestCase):
@@ -80,6 +84,56 @@ class ChatChoiceRouteTests(unittest.TestCase):
 
         self.assertEqual(response["reply"], "已取消")
         save_message.assert_not_called()
+
+    def test_private_saved_reply_persists_relationship_memory_entry(self):
+        req = MediatorPrivateRequest(
+            user_id="owner", other_id="other", message="讓我看看記憶",
+        )
+        result = PrivateAgentResult(
+            handled=True,
+            reply="放在這裡。",
+            agent_run_id="b" * 32,
+            relationship_memory_entry=PrivateRelationshipMemoryEntry(
+                title="我記得的相處線索",
+                summary="進去看看，也可以修改或撤銷。",
+                label="查看記憶",
+                placement="after_reply",
+            ),
+        )
+        saved = {"message_id": "message-memory", "content": "放在這裡。"}
+        with patch.object(
+            private_mediator, "run_private_agent_turn_v2", return_value=result,
+        ), patch.object(
+            private_mediator, "save_private_mediator_reply", return_value=saved,
+        ) as save_reply:
+            response = private_mediator._run_private_v2_saved_turn(
+                req, {"status": "accepted"}, "private-room",
+            )
+
+        entry = response["relationship_memory_entry"]
+        self.assertEqual(entry["kind"], "relationship_memory_entry")
+        self.assertEqual(entry["placement"], "after_reply")
+        self.assertEqual(
+            save_reply.call_args.kwargs["relationship_memory_entry"], entry,
+        )
+
+    def test_private_reply_metadata_keeps_relationship_memory_entry_for_history(self):
+        entry = {
+            "kind": "relationship_memory_entry",
+            "title": "阿月記住的事",
+            "summary": "查看目前這段關係的記憶。",
+            "label": "打開看看",
+            "placement": "before_reply",
+        }
+        with patch.object(private_mediator, "save_message", return_value={}) as save:
+            private_mediator.save_private_mediator_reply(
+                "private-room",
+                "入口放在上面。",
+                relationship_memory_entry=entry,
+            )
+
+        metadata = save.call_args.kwargs["metadata"]
+        self.assertEqual(metadata["relationship_memory_entry"], entry)
 
 
 if __name__ == "__main__":

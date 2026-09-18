@@ -27,18 +27,18 @@ from services.proposal_namespace import (
 )
 from services.match_card_projection import proposal_card_state
 from services.relationship_engagement_service import (
+    LEGACY_PRIVATE_PROBE_EVENT_TYPES,
+    cleanup_legacy_private_probe_state,
     find_accepted_match,
     generate_mediator_private_room_id,
-    participant_probe_field,
-    participant_probe_state,
     queue_due_feedback,
     relationship_unread_field,
 )
 
 
 RELATIONSHIP_EVENT_TYPES = {
-    "feedback_request", "feedback_consent_request", "probe_result", "gentle_closure",
-    "mutual_interest", "probe_question", "date_coordination_request", "date_coordination_result",
+    "gentle_closure", "mutual_interest",
+    "date_coordination_request", "date_coordination_result",
 }
 PROPOSAL_EVENT_TYPES = {"incoming_match_intro", "match_proposal", "incoming_match_interest"}
 AUTOMATIC_PROPOSAL_SOURCES = {
@@ -147,6 +147,10 @@ def proactive_check(user_id: str, conversation_active: bool = False) -> dict:
     user_doc = profiles_coll.find_one({"user_id": user_id})
     if not user_doc:
         return {"has_new": False}
+    # Remove legacy probe events/pending state on every poll.  The operation
+    # is idempotent and also closes a race where an old event was queued before
+    # this request read the profile.
+    cleanup_legacy_private_probe_state(user_id, user_doc=user_doc)
 
     post_date_doc = profiles_coll.find_one_and_update(
         {"user_id": user_id, "post_date_followup_delivery.message": {"$exists": True}},
@@ -167,7 +171,6 @@ def proactive_check(user_id: str, conversation_active: bool = False) -> dict:
             "metadata": {"event_type": "post_date_followup"},
         }
 
-    queue_due_feedback(user_id)
     notice_doc = profiles_coll.find_one_and_update(
         {"user_id": user_id, "memory_notices.0": {"$exists": True}},
         {"$pop": {"memory_notices": -1}},
@@ -181,7 +184,18 @@ def proactive_check(user_id: str, conversation_active: bool = False) -> dict:
             "message": notice.get("message"), "memory": notice.get("memory"),
         }
 
-    event = claim_next_mediator_event(user_id)
+    event = None
+    for _ in range(8):
+        candidate = claim_next_mediator_event(user_id)
+        if not candidate:
+            break
+        if _is_legacy_private_probe_event(candidate):
+            # A producer racing with cleanup may have inserted one after the
+            # profile update.  It has already been removed from the inbox by
+            # the claim; skip it and keep looking for valid events.
+            continue
+        event = candidate
+        break
     if event:
         return _deliver_claimed_event(user_id, event)
     if not conversation_active:
@@ -196,6 +210,13 @@ def proactive_check(user_id: str, conversation_active: bool = False) -> dict:
                 response["origin_room_id"] = marker["origin_room_id"]
             return response
     return {"has_new": False}
+
+
+def _is_legacy_private_probe_event(event: dict | None) -> bool:
+    return (
+        isinstance(event, dict)
+        and str(event.get("type") or "") in LEGACY_PRIVATE_PROBE_EVENT_TYPES
+    )
 
 
 def _event_match(user_id: str, event: dict) -> dict | None:
@@ -287,6 +308,8 @@ def _source_pointer_message(match: dict, *, fallback: str = "") -> str:
 
 
 def _deliver_claimed_event(user_id: str, event: dict) -> dict:
+    if _is_legacy_private_probe_event(event):
+        return {"has_new": False, "legacy_probe_suppressed": True}
     event_type = event.get("type", "mediator_message")
     other_id = event.get("other_id")
     event_match = _event_match(user_id, event)
@@ -303,33 +326,12 @@ def _deliver_claimed_event(user_id: str, event: dict) -> dict:
 def _deliver_relationship_event(
     user_id: str, other_id: str, event: dict, event_match: dict, message_metadata: dict,
 ) -> dict:
+    if _is_legacy_private_probe_event(event):
+        return {"has_new": False, "legacy_probe_suppressed": True}
     event_type = event.get("type", "mediator_message")
     room_id = generate_mediator_private_room_id(user_id, other_id)
-    if event_type in {"feedback_request", "probe_question"}:
-        profiles_coll.update_one(
-            {"user_id": user_id},
-            {"$pull": {"mediator_inbox": {
-                "type": {"$in": ["feedback_request", "probe_question"]},
-                "match_id": event.get("match_id"),
-            }}},
-        )
-        state = participant_probe_state(event_match, user_id)
-        if event.get("probe_id") and state.get("probe_id") != event.get("probe_id"):
-            return {"has_new": False, "deduplicated": True}
-        asked_at = float(state.get("asked_at", 0))
-        duplicate_query = {"room_id": room_id, "metadata.event_type": event_type}
-        if event.get("probe_id"):
-            duplicate_query["metadata.probe_id"] = event["probe_id"]
-        else:
-            duplicate_query["timestamp"] = {"$gte": asked_at - 1}
-        duplicate = asked_at and messages_coll.find_one(duplicate_query)
-        if duplicate and state.get("status") in {"awaiting_answer", "awaiting_sentiment", "awaiting_consent"}:
-            return {"has_new": False, "deduplicated": True}
 
     delivered_message = event.get("message", "阿月有一則新消息。")
-    if event_type == "feedback_request":
-        delivered_message = "你跟這位聊起來感覺如何？"
-        message_metadata["actions"] = []
     message_type = "gif" if event_type == "match_connected_gif" else (
         "mediator_card" if message_metadata["actions"] else "text"
     )
@@ -345,21 +347,7 @@ def _deliver_relationship_event(
     ) or event_match
     role = "from" if event_match.get("from_user") == user_id else "to"
     unread_count = int((updated_match.get("private_unread", {}) or {}).get(role, 1))
-    if event_type in {"feedback_request", "probe_question"}:
-        state = participant_probe_state(event_match, user_id)
-        requester_id = event.get("requester_id") or state.get("requester_id")
-        probe_kind = event.get("probe_kind") or state.get("kind", "sentiment")
-        stage = "sentiment" if probe_kind == "sentiment" else "probe_answer"
-        profiles_coll.update_one({"user_id": user_id}, {"$set": {"pending_private_feedback": {
-            "match_id": str(event_match["_id"]), "other_id": other_id, "stage": stage,
-            "kind": probe_kind, "origin": event.get("origin", "auto"),
-            "requester_id": requester_id, "probe_id": event.get("probe_id"),
-        }}})
-        matches_coll.update_one({"_id": event_match["_id"]}, {"$set": {
-            participant_probe_field(event_match, user_id) + ".status": "awaiting_sentiment" if stage == "sentiment" else "awaiting_answer",
-            participant_probe_field(event_match, user_id) + ".asked_at": time.time(),
-        }})
-    elif event_type == "date_coordination_request":
+    if event_type == "date_coordination_request":
         profiles_coll.update_one({"user_id": user_id}, {"$set": {"pending_date_coordination": {
             "match_id": str(event_match["_id"]), "other_id": other_id,
             "stage": "availability", "data": {},

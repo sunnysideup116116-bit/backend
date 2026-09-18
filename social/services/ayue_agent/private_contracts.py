@@ -84,14 +84,31 @@ class PrivateClientAction(BaseModel):
     value: str
 
 
+class PrivateRelationshipMemoryEntry(BaseModel):
+    """Model-authored presentation for the owner-scoped memory page.
+
+    Navigation authority stays on the client: this object contains copy and
+    placement only, never a user id, relationship id, or destination URL.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["relationship_memory_entry"] = "relationship_memory_entry"
+    title: str = Field(min_length=1, max_length=40)
+    summary: str = Field(min_length=1, max_length=160)
+    label: str = Field(min_length=1, max_length=32)
+    placement: Literal["before_reply", "after_reply"] = "after_reply"
+
+
 class PrivateAgentResult(AgentResult):
     """Private-only metadata; shared AgentResult remains Public-compatible."""
 
     handoff: PrivateSurfaceHandoff | None = None
+    relationship_memory_entry: PrivateRelationshipMemoryEntry | None = None
     # These fields are server-owned telemetry for the Private runtime.  They
     # are intentionally excluded from the HTTP payload so the client cannot
     # mistake a candidate or receipt for a completed write.
-    relationship_memory_candidate: dict[str, str] | None = Field(
+    relationship_memory_candidate: dict[str, object] | None = Field(
         default=None,
         exclude=True,
         repr=False,

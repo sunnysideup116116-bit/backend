@@ -231,7 +231,6 @@ class ChatRouterCharacterizationTests(unittest.TestCase):
              patch.object(module.profiles_coll, "update_one"), \
              patch.object(module.profiles_coll, "find_one", return_value={"user_id": "owner"}), \
              patch.object(module, "queue_profile_skills") as queue_profile, \
-             patch.object(module, "consume_pending_probe_answer", return_value=None), \
              patch.object(module, "_run_private_v2_saved_turn", return_value=expected) as run_v2:
             response = endpoint(req, tasks)
 

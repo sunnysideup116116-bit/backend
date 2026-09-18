@@ -51,6 +51,21 @@ class _MentionedContactSummaryArguments(BaseModel):
     other_ids: list[str] = Field(min_length=1, max_length=3)
 
 
+class _MyRelationshipViewsArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_source: Literal["mention", "name", "contact_refs", "recent_contact"]
+    target_evidence_span: str = Field(default="", max_length=30)
+    contact_refs: list[str] = Field(default_factory=list, max_length=3)
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> "_MyRelationshipViewsArguments":
+        if self.target_source == "name" and not self.target_evidence_span.strip():
+            raise ValueError("name target requires target_evidence_span")
+        if self.target_source == "contact_refs" and not self.contact_refs:
+            raise ValueError("contact_refs target requires refs")
+        return self
+
+
 class _DateCoordinationStartArguments(BaseModel):
     """Authority-free target reference for the confirmed date-card write."""
 
@@ -359,6 +374,33 @@ class _MentionedContactSummaryOutput(BaseModel):
     contacts: list[_MentionedContactOutput] = Field(default_factory=list)
 
 
+class _RelationshipViewFacetOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str
+    updated_at: float = 0
+
+
+class _RelationshipViewGroupOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    topic: str
+    category: str = ""
+    views: list[_RelationshipViewFacetOutput] = Field(default_factory=list)
+
+
+class _MyRelationshipViewContactOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    display_name: str
+    source: Literal["owner_private_relationship_memory"]
+    groups: list[_RelationshipViewGroupOutput] = Field(default_factory=list)
+
+
+class _MyRelationshipViewsOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["ok", "empty"]
+    contacts: list[_MyRelationshipViewContactOutput] = Field(default_factory=list, max_length=3)
+    truncated: bool = False
+
+
 class _AcceptedContactListOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     contacts: list[_MentionedContactOutput] = Field(default_factory=list, max_length=8)
@@ -621,6 +663,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         executor_arguments_model=_MentionedContactSummaryArguments,
         output_model=_MentionedContactSummaryOutput,
         argument_source=ToolArgumentSource.MENTIONED_CONTACTS,
+    ),
+    "relationship.get_my_views": ToolSpec(
+        "relationship.get_my_views", ToolRisk.READ, "my_relationship_views",
+        "讀取本人對一至三位已接受聯絡人的私人主觀看法。談到與該人的相處、是否繼續認識、本人過去怎麼看對方或比較已認識對象時使用；只讀取本人記憶，不含對方私人資料，也不會寫入。",
+        "我翻翻你之前怎麼看這段關係～",
+        planner_arguments_model=_MyRelationshipViewsArguments,
+        executor_arguments_model=_MyRelationshipViewsArguments,
+        output_model=_MyRelationshipViewsOutput,
+        argument_source=ToolArgumentSource.PLANNER_GROUNDED,
     ),
     "relationship.list_accepted_contacts": ToolSpec(
         "relationship.list_accepted_contacts", ToolRisk.READ, "accepted_contact_list",

@@ -18,9 +18,9 @@ from services.ai_service import generate_chat_completion_with_tools
 from services.ayue_agent.private_contracts import (
     PrivateAgentResult,
     PrivateSurfaceHandoff,
+    PrivateRelationshipMemoryEntry,
 )
 from services.ayue_agent.private_v2 import (
-    PRIVATE_CLARIFICATION_REPLY,
     PRIVATE_CONFIRMATIONS,
     PRIVATE_RUNTIME_FALLBACK_REPLY,
     _execute_read,
@@ -36,7 +36,6 @@ from services.ayue_agent.shared.confirmation import (
 )
 from services.relationship_engagement_service import (
     consume_pending_post_date_feedback,
-    consume_pending_probe_answer,
 )
 from services.relationship_memory_service import enqueue_relationship_memory_extraction
 from .bridge_client import provider_messages, run_bridge
@@ -53,26 +52,21 @@ _INTERNAL_KEYS = {
     "message_id", "source_message_id", "revision", "pair_revision",
 }
 _MEMORY_CATEGORIES = {"impression", "preference", "boundary", "future_intent"}
+_MEMORY_ENTRY_SUMMARIES = {
+    "impression": "查看我整理的相處感受，也可以修改或撤銷。",
+    "preference": "查看我整理的關係偏好，也可以修改或撤銷。",
+    "boundary": "查看我整理的相處界線，也可以修改或撤銷。",
+    "future_intent": "查看我整理的未來期待，也可以修改或撤銷。",
+}
 _FEEDBACK_ACTIONS = {"answer", "decline"}
-_MEMORY_SUBJECTIVE_RE = re.compile(
-    r"(?:^|[，。！？\s])(?:我|本人)[^。！？]{0,40}?"
-    r"(?:覺得|感覺|喜歡|不喜歡|在意|希望|期待|想(?:要)?|需要|擔心|"
-    r"很在乎|沒感覺|無感|自在|舒服|不安|尷尬|緊張|開心|難過|失望|界線)",
-)
-_MEMORY_OPERATION_RE = re.compile(
-    r"(?:幫我|請(?:你)?|能不能|可以(?:幫我)?|要不要|怎麼(?:辦|回|約)|"
-    r"約(?:他|她|對方)|問(?:他|她|對方)|通知對方|查(?:一下|詢)?|"
-    r"找(?:一下)?|確認(?:一下)?(?:是否|要不要|約會|安排|行程|卡)|取消|"
-    r"想知道|請問|什麼|哪個|哪裡|誰|為什麼|"
-    r"嗎[？?]?$|[？?])",
-)
 _EXPLICIT_CANCEL_RE = re.compile(
     r"^\s*(?:(?:取消|撤回|收起)[^\r\n]{0,40}|"
     r"先不要|不用(?:了)?|不要(?:了|安排|問了)?)(?:[。！!，,\s]|$)",
 )
 _FORBIDDEN_REPLY = re.compile(
-    r"(?:user_id|other_id|room_id|event_id|match_id|revision|資料庫|prompt|"
-    r"tool|工具|系統|權限|PRIVATE|seed_user|demo_user|\[\[confirmation\]\])",
+    r"(?:\b(?:user_id|other_id|room_id|event_id|match_id|revision|"
+    r"source_message_id|agent_run_id|tool_name)\b|資料庫|prompt|"
+    r"seed_user|demo_user|\[\[\s*confirmation\s*\]\])",
     re.IGNORECASE,
 )
 _MEMORY_CLAIM = re.compile(r"(?:我已?記住|我已?記下|已經保存|已經存下|幫你記錄好了)")
@@ -80,6 +74,44 @@ _INTERNAL_VALUE_RE = re.compile(
     r"(?:@?seed_user_[\w-]+|@?demo_user|@?user[_-]?\d+)",
     re.IGNORECASE,
 )
+
+_PRIVATE_FAILURE_REPLIES = {
+    "pi_provider_error": "模型服務目前無法使用，這次沒有完成處理；請稍後再試。",
+    "pi_deadline_exceeded": "這次處理逾時，尚未完成；請稍後再試。",
+    "pi_process_exited": "私聊服務這次中斷了，尚未完成；請稍後再試。",
+    "pi_protocol_invalid": "私聊服務這次沒有完成有效回覆，請稍後再試。",
+    "pi_runtime_failed": "私聊服務這次沒有完成有效回覆，請稍後再試。",
+    "pi_runtime_unavailable": "私聊服務目前尚未就緒，請稍後再試。",
+    "pi_node_unavailable": "私聊服務目前尚未就緒，請稍後再試。",
+    "pi_model_budget_exhausted": "這次回覆處理步數已用完，尚未完成；請稍後重試。",
+    "pi_step_limit": "這次回覆處理步數已用完，尚未完成；請稍後重試。",
+    "pi_tool_budget_exhausted": "這次操作步數已用完，尚未完成；請稍後重試。",
+    "pi_tool_schema_invalid": "這次操作的參數沒有通過安全檢查，尚未完成；請換個說法再試。",
+    "pi_memory_enqueue_failed": "這次沒有把你的想法排入記憶處理，尚未保存；請稍後再試。",
+    "pi_confirmation_bind_failed": "這次沒有準備好約會確認，尚未通知對方；請稍後再試。",
+    "pi_private_reply_invalid": "我這次沒整理出可靠的回覆，請再說一次，我會重新處理。",
+    "pi_reply_invalid": "我這次沒整理出可靠的回覆，請再說一次，我會重新處理。",
+}
+
+
+def _is_model_timeout(exc: BaseException) -> bool:
+    """Classify only an exception raised while the provider call is active."""
+    if isinstance(exc, TimeoutError):
+        return True
+    name = type(exc).__name__.lower()
+    message = str(exc or "").lower()
+    return "timeout" in name or "timed out" in message or "deadline exhausted" in message
+
+
+def _failure_reply(code: str | None) -> str:
+    normalized = str(code or "pi_runtime_failed")
+    # The fixed conversational fallback is reserved for a provider timeout.
+    if normalized == "pi_provider_timeout":
+        return PRIVATE_RUNTIME_FALLBACK_REPLY
+    return _PRIVATE_FAILURE_REPLIES.get(
+        normalized,
+        "這次私聊沒有完成有效回覆，尚未執行未確認的變更；請稍後再試。",
+    )
 
 
 def _strip_internal(value: Any) -> Any:
@@ -98,31 +130,28 @@ def _strip_internal(value: Any) -> Any:
 
 def _safe_reply(text: Any, observations: list[dict[str, Any]]) -> str | None:
     reply = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not reply or len(reply) > 600 or _FORBIDDEN_REPLY.search(reply):
+    if not reply or len(reply) > 3600 or _FORBIDDEN_REPLY.search(reply):
         return None
-    if not any(
-        item.get("status") == "memory_saved"
+    saved = any(
+        isinstance(item, dict)
+        and item.get("status") in {"memory_saved", "ok"}
+        and isinstance(item.get("result"), dict)
+        and (
+            item["result"].get("status") == "saved"
+            or item["result"].get("saved") is True
+        )
         for item in observations
-        if isinstance(item, dict)
-    ) and _MEMORY_CLAIM.search(reply):
+    )
+    if not saved and _MEMORY_CLAIM.search(reply):
         return None
     return reply
 
 
 def _memory_candidate_allowed(message: str, evidence: str) -> bool:
-    """Apply a small server-side admission check before queuing extraction.
-
-    Pi still decides when to call the candidate tool, but obvious operation
-    requests/questions must never become relationship-memory jobs merely
-    because the evidence string is present in the message.
-    """
+    """Keep only provenance checks; the context-aware agent owns semantics."""
     text = re.sub(r"\s+", " ", str(message or "")).strip()
     span = re.sub(r"\s+", " ", str(evidence or "")).strip()
-    if not text or not span or span not in text:
-        return False
-    if _MEMORY_OPERATION_RE.search(text):
-        return False
-    return bool(_MEMORY_SUBJECTIVE_RE.search(text))
+    return bool(text and span and span in text)
 
 
 def _explicit_cancel_requested(message: str) -> bool:
@@ -328,13 +357,14 @@ def run_private_pi_turn(
     }
     if not pi_available():
         trace.update({
-            "fallback": "pi_runtime_unavailable",
+            "failure": "pi_runtime_unavailable",
+            "failure_stage": "availability",
             "latency_ms": round((time.perf_counter() - started) * 1000),
         })
         _trace(run_id, trace)
         return PrivateAgentResult(
             handled=True,
-            reply=PRIVATE_RUNTIME_FALLBACK_REPLY,
+            reply=_failure_reply("pi_runtime_unavailable"),
             conversation_intent="private_clarification",
             agent_run_id=run_id,
             agent_mode="pi",
@@ -353,16 +383,20 @@ def run_private_pi_turn(
         )
         trace["context_ms"] = round((time.perf_counter() - context_started) * 1000)
     except Exception as exc:
-        trace["exception"] = type(exc).__name__
+        trace.update({
+            "exception": type(exc).__name__,
+            "failure": "pi_context_failed",
+            "failure_stage": "context",
+        })
         trace["latency_ms"] = round((time.perf_counter() - started) * 1000)
         _trace(run_id, trace)
         return PrivateAgentResult(
             handled=True,
-            reply=PRIVATE_RUNTIME_FALLBACK_REPLY,
+            reply="目前無法讀取這段關係的安全脈絡，這次沒有完成處理；請稍後再試。",
             conversation_intent="private_clarification",
             agent_run_id=run_id,
             agent_mode="pi",
-            fallback_reason=type(exc).__name__,
+            fallback_reason="pi_context_failed",
         )
 
     if choice_action is not None:
@@ -384,7 +418,9 @@ def run_private_pi_turn(
     terminal_intent = "private_confirmation"
     handoff: PrivateSurfaceHandoff | None = None
     choice_created = False
-    memory_candidate: dict[str, str] | None = None
+    memory_candidate: dict[str, object] | None = None
+    memory_enqueue_status: str | None = None
+    relationship_memory_entry: PrivateRelationshipMemoryEntry | None = None
     post_date_feedback_recorded = False
     model_call_count = 0
     tool_call_count = 0
@@ -432,8 +468,12 @@ def run_private_pi_turn(
                 conversation_messages=provider_messages(messages),
             )
         except Exception as exc:
-            trace.setdefault("model_errors", []).append(type(exc).__name__)
-            return {"error": "pi_provider_error"}
+            code = "pi_provider_timeout" if _is_model_timeout(exc) else "pi_provider_error"
+            trace.setdefault("model_errors", []).append({
+                "type": type(exc).__name__,
+                "code": code,
+            })
+            return {"error": code}
         text = str(getattr(completion, "content", "") or "") or "".join(fragments)
         normalized_tool_calls: list[dict[str, Any]] = []
         for call in list(getattr(completion, "tool_calls", []) or []):
@@ -474,7 +514,9 @@ def run_private_pi_turn(
 
     def tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         nonlocal terminal, terminal_reply, handoff, choice_created
-        nonlocal terminal_intent, memory_candidate, post_date_feedback_recorded, tool_call_count
+        nonlocal terminal_intent, memory_candidate, memory_enqueue_status
+        nonlocal relationship_memory_entry
+        nonlocal post_date_feedback_recorded, tool_call_count
         tool_started_at = time.perf_counter()
         tool_call_count += 1
         trace["tool_calls"] = tool_call_count
@@ -566,6 +608,27 @@ def run_private_pi_turn(
                 terminal = True
                 terminal_reply = PRIVATE_REDIRECT_COPY["warm"]
                 result = {"redirect": True}
+            elif name == "private.surface.present_relationship_memories":
+                title = str(arguments.get("title") or "").strip()[:40]
+                summary = str(arguments.get("summary") or "").strip()[:160]
+                label = str(arguments.get("label") or "").strip()[:32]
+                placement_value = str(arguments.get("placement") or "").strip().lower()
+                placement = (
+                    "before_reply"
+                    if placement_value.startswith("before")
+                    else "after_reply"
+                )
+                if not title or not summary or not label:
+                    status, error_code = "failed", "tool_schema_invalid"
+                    result = {"needs_clarification": True}
+                else:
+                    relationship_memory_entry = PrivateRelationshipMemoryEntry(
+                        title=title,
+                        summary=summary,
+                        label=label,
+                        placement=placement,
+                    )
+                    result = {"presented": True, "placement": placement}
             elif name == "private.relationship.record_post_date_feedback":
                 action = str(arguments.get("action") or "")
                 evidence = str(arguments.get("evidence_span") or "")[:300]
@@ -597,41 +660,85 @@ def run_private_pi_turn(
                             "shared_with_counterparty": False,
                         }
             elif name == "private.relationship.capture_memory_candidate":
-                category = str(arguments.get("category") or "")
-                evidence = str(arguments.get("evidence_span") or "")[:300]
-                if (
-                    category not in _MEMORY_CATEGORIES
-                    or not _memory_candidate_allowed(message, evidence)
-                ):
-                    status, error_code = "failed", "tool_schema_invalid"
-                    result = {"needs_clarification": True}
-                else:
-                    memory_candidate = {"category": category, "evidence_span": evidence}
-                    result = {"status": "queued_for_review", "saved": False}
-            elif name == "private.relationship.respond_to_probe":
-                action = str(arguments.get("action") or "")
-                evidence = str(arguments.get("evidence_span") or "")[:300]
-                if action not in _FEEDBACK_ACTIONS or not evidence or evidence not in message:
-                    status, error_code = "failed", "tool_schema_invalid"
-                    result = {"needs_clarification": True}
-                elif not ctx.pending_probe:
-                    result = {"status": "not_related", "recorded": False}
-                else:
-                    consumed = consume_pending_probe_answer(
-                        match_doc,
-                        ctx.profile_state,
-                        user_id,
-                        other_id,
-                        message,
-                    )
-                    if consumed:
-                        terminal = True
-                        terminal_reply = consumed
-                        terminal_intent = "private_feedback"
-                    result = {
-                        "status": "recorded" if consumed else "not_related",
-                        "recorded": bool(consumed),
+                raw_candidates = arguments.get("candidates")
+                if not isinstance(raw_candidates, list):
+                    raw_candidates = [{
+                        "category": arguments.get("category"),
+                        "evidence_span": arguments.get("evidence_span"),
+                        "statement": arguments.get("statement"),
+                    }]
+                candidates: list[dict[str, str]] = []
+                for raw_candidate in raw_candidates[:8]:
+                    if not isinstance(raw_candidate, dict):
+                        continue
+                    candidate = {
+                        "category": str(raw_candidate.get("category") or "impression")[:40],
+                        "evidence_span": str(raw_candidate.get("evidence_span") or "")[:300],
+                        "statement": str(raw_candidate.get("statement") or "").strip()[:120],
                     }
+                    if candidate not in candidates:
+                        candidates.append(candidate)
+                valid_candidates = bool(candidates) and all(
+                    candidate["category"] in _MEMORY_CATEGORIES
+                    and bool(candidate["statement"])
+                    and _memory_candidate_allowed(message, candidate["evidence_span"])
+                    for candidate in candidates
+                )
+                if not valid_candidates:
+                    # This is a normal semantic rejection, not a malformed
+                    # tool call. It must not trigger generic schema fallback.
+                    status, error_code = "skipped", "memory_candidate_not_explicit"
+                    result = {"needs_clarification": True}
+                else:
+                    enqueue_result: Any
+                    try:
+                        enqueue_result = enqueue_relationship_memory_extraction(
+                            user_id,
+                            other_id,
+                            str(match_doc.get("_id") or ""),
+                            ctx.source_message_id,
+                            candidates=candidates,
+                        )
+                    except Exception as exc:
+                        enqueue_result = {
+                            "status": "failed",
+                            "reason": type(exc).__name__,
+                        }
+                    if isinstance(enqueue_result, dict):
+                        queue_status = str(enqueue_result.get("status") or "failed")
+                        queue_reason = str(enqueue_result.get("reason") or "")
+                    else:
+                        # Existing integrations/tests may still return bool.
+                        queue_status = "queued" if enqueue_result else "failed"
+                        queue_reason = "compatibility_result"
+                    if queue_status in {"queued", "already_queued", "already_saved"}:
+                        memory_enqueue_status = queue_status
+                        memory_candidate = {
+                            "candidates": candidates,
+                        }
+                        result = {
+                            "status": queue_status,
+                            "saved": queue_status == "already_saved",
+                            "reason": queue_reason,
+                        }
+                    elif queue_status == "skipped":
+                        if memory_enqueue_status not in {"queued", "already_queued", "already_saved"}:
+                            memory_enqueue_status = queue_status
+                        status, error_code = "skipped", queue_reason or "memory_candidate_skipped"
+                        result = {
+                            "status": "skipped",
+                            "saved": False,
+                            "reason": queue_reason,
+                        }
+                    else:
+                        if memory_enqueue_status not in {"queued", "already_queued", "already_saved"}:
+                            memory_enqueue_status = "failed"
+                        status, error_code = "failed", queue_reason or "memory_enqueue_failed"
+                        result = {
+                            "status": "failed",
+                            "saved": False,
+                            "reason": queue_reason,
+                        }
             else:
                 status, error_code = "failed", "tool_not_allowed"
         except Exception as exc:
@@ -641,7 +748,8 @@ def run_private_pi_turn(
             result = {"needs_clarification": True}
             if count >= 2:
                 terminal = True
-                terminal_reply = PRIVATE_CLARIFICATION_REPLY
+                terminal_reply = _failure_reply("pi_tool_schema_invalid")
+                terminal_intent = "private_clarification"
 
         item = project(name, status, result, error_code)
         emit(
@@ -655,17 +763,17 @@ def run_private_pi_turn(
         return {"observations": [item], "stop": False}
 
     def final_validate(text: str, repair_attempted: bool) -> dict[str, Any]:
-        del repair_attempted
         reply = _safe_reply(text, observations)
         if reply:
             return {"accept": True, "text": reply}
         return {
-            "accept": False,
-            "disableTools": True,
-            "repairPrompt": (
+                "accept": False,
+                "disableTools": True,
+                "repairPrompt": (
                 "上一個答案沒有通過 Private 安全檢查。只能使用目前已驗證的 context 與 tool result，"
                 "重寫成繁體中文自然短答；不要提及內部欄位，不要聲稱尚未完成的邀請或記憶已成功。"
-            ),
+                f"這是第 {1 if not repair_attempted else 2} 次驗證。"
+                ),
             "error": "pi_private_reply_invalid",
         }
 
@@ -692,11 +800,56 @@ def run_private_pi_turn(
             max_tool_calls=8,
         )
         failure = str(bridge_result.get("error") or "") or None
+        if memory_enqueue_status == "failed" and not failure and not terminal:
+            failure = "pi_memory_enqueue_failed"
         if bridge_result.get("budget_exhausted") and not terminal:
             failure = failure or "pi_step_limit"
+        trace["tool_failures"] = [
+            {
+                "tool": str(item.get("tool") or "")[:100],
+                "code": str(item.get("code") or "")[:80],
+                "attempt": int(item.get("attempt") or 0),
+                "argument_fields": [
+                    str(field)[:120]
+                    for field in (item.get("argumentFields") or [])[:24]
+                ],
+            }
+            for item in (bridge_result.get("toolFailures") or [])[:4]
+            if isinstance(item, dict)
+        ]
+        trace["reply_repair_attempted"] = bool(bridge_result.get("repair_attempted"))
+        if failure:
+            trace.update({
+                "failure": failure,
+                "failure_stage": (
+                    "model" if failure.startswith("pi_provider_")
+                    else "protocol" if failure.startswith("pi_")
+                    else "bridge"
+                ),
+            })
     except Exception as exc:
-        failure = "pi_deadline_exceeded" if str(exc) == "pi_deadline_exceeded" else "pi_runtime_failed"
-        trace["exception"] = type(exc).__name__
+        error_text = str(exc or "")
+        failure = (
+            error_text
+            if error_text in {
+                "pi_deadline_exceeded",
+                "pi_process_exited",
+                "pi_protocol_invalid",
+                "pi_model_budget_exhausted",
+                "pi_tool_budget_exhausted",
+                "pi_tool_schema_invalid",
+                "pi_reply_invalid",
+                "pi_private_reply_invalid",
+                "pi_provider_error",
+                "pi_provider_timeout",
+            }
+            else "pi_runtime_failed"
+        )
+        trace.update({
+            "exception": type(exc).__name__,
+            "failure": failure,
+            "failure_stage": "bridge",
+        })
 
     reply = ""
     conversation_intent = "private_advice"
@@ -707,31 +860,32 @@ def run_private_pi_turn(
         reply = terminal_reply or "請先完成畫面上的確認，這次還沒有執行變更。"
         conversation_intent = terminal_intent
     elif failure:
-        reply = PRIVATE_RUNTIME_FALLBACK_REPLY
+        reply = _failure_reply(failure)
         conversation_intent = "private_clarification"
     else:
-        reply = _safe_reply(str(bridge_result.get("finalText") or ""), observations) or PRIVATE_CLARIFICATION_REPLY
+        reply = _safe_reply(str(bridge_result.get("finalText") or ""), observations)
+        if not reply:
+            failure = "pi_reply_invalid"
+            trace.update({
+                "failure": failure,
+                "failure_stage": "final_validation",
+            })
+            reply = _failure_reply(failure)
 
-    memory_queued = False
-    if memory_candidate and not failure and ctx.source_message_id:
+    preview_bound = True
+    if choice_created:
         try:
-            memory_queued = bool(
-                enqueue_relationship_memory_extraction(
-                    user_id,
-                    other_id,
-                    str(match_doc.get("_id") or ""),
-                    ctx.source_message_id,
-                )
+            preview_bound = manager.bind_final_preview(
+                user_id=user_id,
+                origin_run_id=run_id,
+                final_content=reply,
             )
         except Exception:
-            memory_queued = False
-        if memory_queued:
-            observations.append({
-                "status": "memory_candidate_queued",
-                "tool": "private.relationship.capture_memory_candidate",
-                "result": {"saved": False},
-                "error_code": None,
-            })
+            preview_bound = False
+        if not preview_bound:
+            failure = "pi_confirmation_bind_failed"
+            reply = _failure_reply(failure)
+            conversation_intent = "private_clarification"
 
     if on_token and reply:
         for start_at in range(0, len(reply), 18):
@@ -739,14 +893,33 @@ def run_private_pi_turn(
 
     choice_prompt = None
     try:
-        choice_prompt = manager.choice_for_run(
-            user_id=user_id,
-            room_id=ctx.base.room_id,
-            surface=SURFACE_PRIVATE,
-            origin_run_id=run_id,
-        )
+        if preview_bound:
+            choice_prompt = manager.choice_for_run(
+                user_id=user_id,
+                room_id=ctx.base.room_id,
+                surface=SURFACE_PRIVATE,
+                origin_run_id=run_id,
+            )
     except Exception:
         choice_prompt = None
+
+    if memory_candidate is not None and relationship_memory_entry is None:
+        memory_candidates = memory_candidate.get("candidates")
+        categories = {
+            str(item.get("category") or "")
+            for item in (memory_candidates if isinstance(memory_candidates, list) else [])
+            if isinstance(item, dict)
+        }
+        category = next(iter(categories)) if len(categories) == 1 else ""
+        relationship_memory_entry = PrivateRelationshipMemoryEntry(
+            title="阿月記住的事",
+            summary=_MEMORY_ENTRY_SUMMARIES.get(
+                category,
+                "查看我整理的關係記憶，也可以修改或撤銷。",
+            ),
+            label="查看或管理",
+            placement="after_reply",
+        )
 
     result = PrivateAgentResult(
         handled=True,
@@ -756,6 +929,7 @@ def run_private_pi_turn(
         agent_mode="pi",
         fallback_reason=failure,
         handoff=handoff,
+        relationship_memory_entry=relationship_memory_entry,
         choice_prompt=choice_prompt,
         profile_write_allowed=False if memory_candidate or choice_created else True,
         profile_write_reason=(
@@ -763,13 +937,15 @@ def run_private_pi_turn(
             else "confirmation" if choice_created
             else "casual"
         ),
-        relationship_memory_candidate=(memory_candidate if memory_queued else None),
+        relationship_memory_candidate=(memory_candidate if memory_candidate else None),
         post_date_feedback_recorded=post_date_feedback_recorded,
     )
     trace.update({
         "pi_model_calls": model_call_count,
         "pi_tool_calls": tool_call_count,
-        "memory_candidate_queued": memory_queued,
+        "memory_candidate_queued": bool(memory_candidate),
+        "memory_enqueue_status": memory_enqueue_status,
+        "relationship_memory_entry_presented": relationship_memory_entry is not None,
         "post_date_feedback_recorded": post_date_feedback_recorded,
         "result": {"intent": result.conversation_intent, "fallback": result.fallback_reason},
         "latency_ms": round((time.perf_counter() - started) * 1000),

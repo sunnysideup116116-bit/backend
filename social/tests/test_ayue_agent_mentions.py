@@ -98,6 +98,85 @@ class AyueAgentMentionTests(unittest.TestCase):
         self.assertEqual(result.data["total_count"], 1)
         self.assertNotIn("calendar", str(result.data))
 
+    def test_my_relationship_views_returns_owner_facets_without_evidence(self):
+        ctx = AgentTurnContext(
+            user_id="owner",
+            room_id="room",
+            message="@小安，我之前怎麼看他？",
+            mentioned_ids=["contact-a"],
+        )
+        rows = [{
+            "topic": "相處感受",
+            "category": "impression",
+            "facets": [
+                {"facet_id": "private-id", "text": "我覺得對方聊天偏冷淡",
+                 "updated_at": 100},
+                {"facet_id": "private-id-2", "text": "我覺得對方外表很帥",
+                 "updated_at": 110},
+            ],
+        }]
+        with patch(
+            "services.ayue_agent.tools.validated_mentioned_contact_ids",
+            return_value=(["contact-a"], False),
+        ), patch(
+            "services.ayue_agent.tools._display_name", return_value="小安",
+        ), patch(
+            "services.relationship_memory_service.relationship_memory_access_allowed",
+            return_value=True,
+        ), patch(
+            "services.relationship_memory_service.list_relationship_memories",
+            return_value=rows,
+        ):
+            result = execute_tool(
+                ToolCall(
+                    name="relationship.get_my_views",
+                    arguments={
+                        "target_source": "mention",
+                        "target_evidence_span": "",
+                        "contact_refs": [],
+                    },
+                ),
+                ctx,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["status"], "ok")
+        self.assertEqual(
+            [item["text"] for item in result.data["contacts"][0]["groups"][0]["views"]],
+            ["我覺得對方聊天偏冷淡", "我覺得對方外表很帥"],
+        )
+        self.assertNotIn("facet_id", str(result.data))
+        self.assertNotIn("evidence", str(result.data))
+
+    def test_my_relationship_views_fails_closed_for_blocked_pair(self):
+        ctx = AgentTurnContext(
+            user_id="owner", room_id="room", message="@小安我以前怎麼看他",
+            mentioned_ids=["contact-a"],
+        )
+        with patch(
+            "services.ayue_agent.tools.validated_mentioned_contact_ids",
+            return_value=(["contact-a"], False),
+        ), patch(
+            "services.relationship_memory_service.relationship_memory_access_allowed",
+            return_value=False,
+        ), patch(
+            "services.relationship_memory_service.list_relationship_memories",
+        ) as memories:
+            result = execute_tool(
+                ToolCall(
+                    name="relationship.get_my_views",
+                    arguments={
+                        "target_source": "mention",
+                        "target_evidence_span": "",
+                        "contact_refs": [],
+                    },
+                ),
+                ctx,
+            )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "relationship_not_accepted")
+        memories.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

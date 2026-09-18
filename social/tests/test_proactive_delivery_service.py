@@ -44,7 +44,49 @@ class ProactiveDeliveryServiceTests(unittest.TestCase):
             message_type="gif", metadata=delivery._metadata(event),
         )
 
-    def test_relationship_event_is_delivered_to_private_surface_and_updates_state(self):
+    def test_legacy_probe_cleanup_is_idempotent_and_only_cancels_inflight_state(self):
+        match = {
+            "_id": "match-1",
+            "from_user": "owner",
+            "to_user": "other",
+            "status": "accepted",
+            "mediator_state": {
+                "participants": {
+                    "from": {
+                        "status": "awaiting_answer",
+                        "probe_id": "probe-1",
+                        "kind": "fun_fact",
+                    },
+                },
+            },
+        }
+        with (
+            patch.object(delivery.profiles_coll, "update_one") as profile_update,
+            patch.object(delivery.matches_coll, "find", return_value=[match]),
+            patch.object(
+                delivery.matches_coll,
+                "update_one",
+                return_value=MagicMock(modified_count=1),
+            ) as match_update,
+        ):
+            stats = delivery.cleanup_legacy_private_probe_state("owner", now=5000)
+
+        self.assertEqual(stats["matches"], 1)
+        profile_update.assert_called_once()
+        profile_mutation = profile_update.call_args.args[1]
+        self.assertIn("mediator_inbox", profile_mutation["$pull"])
+        self.assertIn("pending_private_feedback", profile_mutation["$unset"])
+        match_mutation = match_update.call_args.args[1]["$set"]
+        self.assertEqual(
+            match_mutation["mediator_state.participants.from.status"],
+            "cancelled",
+        )
+        self.assertEqual(
+            match_mutation["mediator_state.participants.from.cancel_reason"],
+            "legacy_probe_disabled",
+        )
+
+    def test_legacy_probe_event_is_suppressed_without_state_or_message_writes(self):
         event = {
             "event_id": "event-1",
             "type": "probe_question",
@@ -82,31 +124,38 @@ class ProactiveDeliveryServiceTests(unittest.TestCase):
              patch.object(delivery, "claim_next_mediator_event", return_value=event), \
              patch.object(delivery, "_event_match", return_value=match), \
              patch.object(delivery, "save_message") as save, \
-             patch.object(delivery, "consume_proactive_delivery") as consume:
+             patch.object(delivery, "consume_proactive_delivery", return_value=None) as consume:
             response = delivery.proactive_check("owner")
 
-        self.assertEqual(response["surface"], "relationship_private")
-        self.assertEqual(response["unread_count"], 1)
-        self.assertEqual(response["message"], event["message"])
-        save.assert_called_once()
-        self.assertEqual(save.call_args.args[:3], (
-            "mediator_private::owner::other", "ai_assistant", event["message"],
-        ))
+        self.assertEqual(response, {"has_new": False})
+        save.assert_not_called()
         find_message.assert_not_called()
-        self.assertEqual(update_profile.call_count, 2)
-        pending = update_profile.call_args_list[1].args[1]["$set"]["pending_private_feedback"]
-        self.assertEqual(pending, {
-            "match_id": "match-1",
-            "other_id": "other",
-            "stage": "probe_answer",
-            "kind": "fun_fact",
-            "origin": "auto",
-            "requester_id": None,
-            "probe_id": "probe-1",
-        })
-        update_match.assert_called_once()
-        status_update = update_match.call_args.args[1]["$set"]
-        self.assertEqual(status_update["mediator_state.participants.from.status"], "awaiting_answer")
+        update_match.assert_not_called()
+        consume.assert_called_once_with("owner")
+
+    def test_legacy_probe_does_not_block_a_following_valid_event(self):
+        old_event = {"event_id": "old", "type": "probe_question", "message": "週末？"}
+        valid_event = {"event_id": "valid", "type": "match_search_empty"}
+        with (
+            patch.object(delivery.profiles_coll, "find_one", return_value={"user_id": "owner"}),
+            patch.object(delivery.profiles_coll, "find_one_and_update", return_value=None),
+            patch.object(
+                delivery,
+                "claim_next_mediator_event",
+                side_effect=[old_event, valid_event],
+            ) as claim,
+            patch.object(
+                delivery,
+                "_deliver_claimed_event",
+                return_value={"has_new": True, "type": "match_search_empty"},
+            ) as deliver,
+            patch.object(delivery, "consume_proactive_delivery") as consume,
+        ):
+            response = delivery.proactive_check("owner")
+
+        self.assertEqual(response["has_new"], True)
+        self.assertEqual(claim.call_count, 2)
+        deliver.assert_called_once_with("owner", valid_event)
         consume.assert_not_called()
 
     def test_stale_proposal_is_not_saved_or_replaced_by_care_message(self):

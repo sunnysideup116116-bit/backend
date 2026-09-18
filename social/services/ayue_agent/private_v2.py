@@ -53,6 +53,12 @@ else:
     PRIVATE_CONFIRMATIONS = db["v3_pending_confirmations"]
 PRIVATE_CONFIRM_TTL = 15 * 60
 MAX_STEPS = 3
+
+
+class _PrivateProviderTimeout(RuntimeError):
+    """Internal marker for a timeout raised by a legacy Private model call."""
+
+
 YES = {"好", "好的", "可以", "確認", "確定", "要", "yes", "ok"}
 NO = {"不要", "不用", "取消", "先不要", "no"}
 
@@ -183,10 +189,7 @@ def build_private_turn_context_v2(
             "updated_at": str(relationship_summary.get("updated_at") or "")[:40],
             "source": "shared_pair_chat_only",
         },
-        owner_relationship_memories=(
-            relationship_memory_context(user_id, other_id)
-            if external_calendar_authorized else []
-        ),
+        owner_relationship_memories=relationship_memory_context(user_id, other_id),
     )
 
 PRIVATE_SCOPE_POLICY = """
@@ -297,6 +300,10 @@ def _plan(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]]) ->
         if decision.evidence_span and decision.evidence_span not in ctx.message:
             return None
         return decision
+    except TimeoutError as exc:
+        # Preserve the provider timeout boundary for the caller. Other planner
+        # failures remain ordinary invalid plans and do not use the timeout copy.
+        raise _PrivateProviderTimeout() from exc
     except Exception:
         return None
 
@@ -493,6 +500,8 @@ def _compose(ctx: PrivateAgentTurnContextV2, observations: list[dict[str, Any]],
         reply = str(getattr(response, "content", response) or "").strip()
         if reply and not re.search(r"(?:私人資料|工具|prompt|seed_user|資料庫)", reply, re.I):
             return reply[:360]
+    except TimeoutError as exc:
+        raise _PrivateProviderTimeout() from exc
     except Exception:
         pass
     if observations and observations[-1].get("tool") == "private.relationship.get_shared_history":
@@ -753,9 +762,26 @@ def run_private_agent_turn_v2(
                 compose_started = time.perf_counter()
                 result = AgentResult(handled=True, reply=compose_reply("warm"), conversation_intent="private_advice", agent_run_id=run_id, agent_mode="v2")
                 trace["model_ms"].append(round((time.perf_counter() - compose_started) * 1000))
+    except _PrivateProviderTimeout as exc:
+        trace["exception"] = type(exc).__name__
+        result = AgentResult(
+            handled=True,
+            reply=PRIVATE_RUNTIME_FALLBACK_REPLY,
+            conversation_intent="private_clarification",
+            agent_run_id=run_id,
+            agent_mode="v2",
+            fallback_reason="pi_provider_timeout",
+        )
     except Exception as exc:
         trace["exception"] = type(exc).__name__
-        result = AgentResult(handled=True, reply=PRIVATE_RUNTIME_FALLBACK_REPLY, conversation_intent="private_clarification", agent_run_id=run_id, agent_mode="v2", fallback_reason=type(exc).__name__)
+        result = AgentResult(
+            handled=True,
+            reply="私聊服務這次沒有完成有效回覆，請稍後再試。",
+            conversation_intent="private_clarification",
+            agent_run_id=run_id,
+            agent_mode="v2",
+            fallback_reason="pi_runtime_failed",
+        )
     if on_token and not streamed_reply_started:
         safe_reply = str(result.reply or "")
         for start in range(0, len(safe_reply), 12):

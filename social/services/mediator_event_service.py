@@ -24,6 +24,12 @@ EVENT_PRIORITIES = {
     "feedback_request": 35,
     "probe_question": 30,
 }
+LEGACY_PRIVATE_PROBE_EVENT_TYPES = frozenset({
+    "probe_question",
+    "feedback_request",
+    "feedback_consent_request",
+    "probe_result",
+})
 
 
 def event_priority(event_type: str) -> int:
@@ -31,6 +37,11 @@ def event_priority(event_type: str) -> int:
 
 
 def queue_mediator_event(user_id: str, message: str, event_type: str, **extra):
+    # These events belonged to the removed Private probe workflow.  Keeping
+    # this guard at the shared enqueue boundary closes producers that bypass
+    # the old engagement helpers.
+    if str(event_type or "") in LEGACY_PRIVATE_PROBE_EVENT_TYPES:
+        return None
     event = {
         "event_id": uuid.uuid4().hex,
         "type": event_type,

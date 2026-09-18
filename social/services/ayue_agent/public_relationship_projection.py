@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import re
 import hashlib
+import time
 import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
-from database import matches_coll, profiles_coll
+from database import db, matches_coll, profiles_coll
 from pypinyin import Style, lazy_pinyin
 from services.language_service import normalize_zh_tw
 from services.match_state_service import verified_accepted_match_query
@@ -27,6 +28,8 @@ MAX_CONTACT_RESOLUTION_CANDIDATES = 50
 _INTERNAL_REFERENCE_RE = re.compile(r"(?:@?seed_user_[\w-]+|@?demo_user|@?user[_-]?\d+)", re.IGNORECASE)
 _PUBLIC_REASON_KINDS = frozenset({"shared_graph", "shared_context", "shared_value"})
 CONTACT_REF_PREFIX = "relref_"
+RELATIONSHIP_REFERENCES = db["v3.relationship_references"]
+RELATIONSHIP_REFERENCE_TTL_SECONDS = 24 * 60 * 60
 
 
 def contact_reference(
@@ -37,6 +40,42 @@ def contact_reference(
         f"{user_id}:{reference_scope}:{other_user_id}".encode("utf-8")
     ).hexdigest()
     return f"{CONTACT_REF_PREFIX}{digest[:24]}"
+
+
+def remember_relationship_reference(
+    user_id: str,
+    room_id: str,
+    other_user_id: str,
+    *,
+    safe_label: str,
+) -> None:
+    if not user_id or not room_id or not other_user_id:
+        return
+    current = time.time()
+    RELATIONSHIP_REFERENCES.update_one(
+        {"user_id": user_id, "room_id": room_id},
+        {"$set": {
+            "other_user_id": other_user_id,
+            "safe_label": public_text(safe_label, 40),
+            "updated_at": current,
+            "expires_at": current + RELATIONSHIP_REFERENCE_TTL_SECONDS,
+        }},
+        upsert=True,
+    )
+
+
+def recent_relationship_reference_id(user_id: str, room_id: str) -> str:
+    try:
+        row = RELATIONSHIP_REFERENCES.find_one({
+            "user_id": user_id,
+            "room_id": room_id,
+            "expires_at": {"$gt": time.time()},
+        }) or {}
+    except Exception:
+        return ""
+    other_user_id = str(row.get("other_user_id") or "")
+    valid, overflow = validated_mentioned_contact_ids(user_id, [other_user_id])
+    return valid[0] if len(valid) == 1 and not overflow else ""
 
 
 def public_text(value: Any, limit: int = 160) -> str:
@@ -165,6 +204,34 @@ def validated_mentioned_contact_ids(user_id: str, candidate_ids: list[str] | Non
 def mentioned_contact_refs(user_id: str, other_user_ids: list[str]) -> list[dict[str, str]]:
     """Build prompt-safe entity references after server-side validation."""
     return [{"display_name": display_name(other_user_id)} for other_user_id in other_user_ids[:MAX_MENTIONED_CONTACTS]]
+
+
+def accepted_contact_ids_by_refs(
+    user_id: str,
+    contact_refs: list[str],
+    *,
+    reference_scope: str,
+) -> tuple[list[str], list[str]]:
+    """Resolve turn-scoped opaque refs back to accepted contacts executor-side."""
+    wanted = [str(value).strip() for value in contact_refs[:MAX_MENTIONED_CONTACTS] if str(value).strip()]
+    if not wanted:
+        return [], []
+    found: dict[str, str] = {}
+    try:
+        matches = list(matches_coll.find(
+            verified_accepted_match_query(user_id),
+            {"_id": 0, "from_user": 1, "to_user": 1},
+        ))
+    except Exception:
+        return [], wanted
+    for match in matches:
+        other_user_id = other_id(match, user_id)
+        if not other_user_id:
+            continue
+        ref = contact_reference(user_id, other_user_id, reference_scope)
+        if ref in wanted:
+            found[ref] = other_user_id
+    return [found[ref] for ref in wanted if ref in found], [ref for ref in wanted if ref not in found]
 
 
 def accepted_contact_ids_by_display_name(user_id: str, name_hint: str) -> list[str]:

@@ -21,21 +21,17 @@ from services.ayue_agent.private_pi.runtime import run_private_pi_turn
 from services.ayue_agent.private_v2 import (
     mark_private_confirmation_presented,
 )
-from services.ayue_agent.product_identity import PRIVATE_RUNTIME_FALLBACK_REPLY
-from services.chat_service import generate_room_id, save_message
+from services.chat_service import save_message
 from services.profile_task_service import queue_profile_skills  # compatibility import; Private never invokes it
 from services.relationship_engagement_service import (
-    # Compatibility exports retained for older integrations/tests; the
-    # Private Pi runtime now decides when these consumers are appropriate.
-    consume_pending_post_date_feedback,
-    consume_pending_probe_answer,
+    cleanup_legacy_private_probe_state,
     find_accepted_match,
     generate_mediator_private_room_id,
-    participant_probe_state,
     relationship_unread_field,
 )
 
 router = APIRouter()
+_PRIVATE_ADAPTER_ERROR_REPLY = "這次私聊服務沒有完成有效回覆，請稍後再試。"
 
 # Keep the old symbol name as a compatibility seam for tests and downstream
 # integrations while routing production turns through the isolated Private Pi
@@ -78,6 +74,15 @@ def get_mediator_private_messages(other_id: str, user_id: str):
     matches_coll.update_one({"_id": match_doc["_id"]}, {"$set": {unread_field: 0}})
 
     user_doc = profiles_coll.find_one({"user_id": user_id}) or {}
+    cleanup_legacy_private_probe_state(user_id, user_doc=user_doc)
+    user_doc = {
+        key: value for key, value in user_doc.items()
+        if key not in {
+            "pending_private_feedback",
+            "pending_feedback_match_id",
+            "pending_feedback_other_id",
+        }
+    }
 
     pending = user_doc.get("pending_private_feedback") or {}
 
@@ -113,9 +118,9 @@ def get_mediator_private_messages(other_id: str, user_id: str):
 
         ),
 
-        "probe_state": participant_probe_state(match_doc, user_id),
+        "probe_state": {},
 
-        "other_probe_state": participant_probe_state(match_doc, other_id),
+        "other_probe_state": {},
 
         "mediator_tone": user_doc.get("mediator_tone", "friend")
 
@@ -130,6 +135,7 @@ def save_private_mediator_reply(
     actions=None,
     handoff=None,
     choice_prompt=None,
+    relationship_memory_entry=None,
 ):
 
     message_type = "mediator_card" if actions else "text"
@@ -138,6 +144,8 @@ def save_private_mediator_reply(
         metadata["handoff"] = handoff
     if choice_prompt:
         metadata["choice_prompt"] = dict(choice_prompt)
+    if relationship_memory_entry:
+        metadata["relationship_memory_entry"] = dict(relationship_memory_entry)
 
     return save_message(
 
@@ -184,8 +192,18 @@ def _run_private_v2_saved_turn(
         external_calendar_authorized=external_calendar_authorized,
         source_message_id=str(source_message_id or ""),
     )
-    reply = result.reply or PRIVATE_RUNTIME_FALLBACK_REPLY
+    reply = str(getattr(result, "reply", "") or "").strip()
+    if not reply:
+        # The runtime owns timeout/error classification.  An empty adapter
+        # result is an adapter failure and must not masquerade as a provider
+        # timeout through the conversational fallback copy.
+        reply = _PRIVATE_ADAPTER_ERROR_REPLY
     handoff = result.handoff.model_dump() if getattr(result, "handoff", None) else None
+    memory_entry = (
+        result.relationship_memory_entry.model_dump()
+        if getattr(result, "relationship_memory_entry", None)
+        else None
+    )
     actions = []
     if handoff:
         actions = [PrivateClientAction(
@@ -201,6 +219,7 @@ def _run_private_v2_saved_turn(
         actions=actions,
         handoff=handoff,
         choice_prompt=result.choice_prompt,
+        relationship_memory_entry=memory_entry,
     )
     if result.choice_prompt and saved_reply.get("message_id"):
         mark_private_confirmation_presented(
@@ -222,6 +241,7 @@ def _run_private_v2_saved_turn(
         "actions": actions,
         "choice_prompt": result.choice_prompt,
         "choice_resolution": result.choice_resolution,
+        "relationship_memory_entry": memory_entry,
     }
 
 
@@ -241,7 +261,7 @@ def mediator_private_chat(
         raise HTTPException(status_code=403, detail="只能在已接受配對中私聊媒人")
 
 
-
+    cleanup_legacy_private_probe_state(req.user_id)
     room_id = generate_mediator_private_room_id(req.user_id, req.other_id)
 
     source_message_id = ""
@@ -283,6 +303,7 @@ def mediator_private_chat_stream(
     match_doc = find_accepted_match(req.user_id, req.other_id)
     if not match_doc:
         raise HTTPException(status_code=403, detail="只能在已接受配對中私聊媒人")
+    cleanup_legacy_private_probe_state(req.user_id)
     event_queue: queue.Queue[dict | None] = queue.Queue()
     fallback_run_id = uuid.uuid4().hex
     worker_done = threading.Event()
@@ -335,7 +356,11 @@ def mediator_private_chat_stream(
                 _SOURCE_MESSAGE_ID.reset(token)
             event_queue.put({"type": "final", "response": response})
         except Exception:
-            event_queue.put({"type": "error", "agent_run_id": fallback_run_id, "reply": PRIVATE_RUNTIME_FALLBACK_REPLY})
+            event_queue.put({
+                "type": "error",
+                "agent_run_id": fallback_run_id,
+                "reply": _PRIVATE_ADAPTER_ERROR_REPLY,
+            })
         finally:
             try:
                 asyncio.run(worker_tasks())

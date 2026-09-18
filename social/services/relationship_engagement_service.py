@@ -8,10 +8,8 @@ functions while the HTTP adapters are split in separate phases.
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
-import uuid
 
 from bson.objectid import ObjectId
 
@@ -21,16 +19,13 @@ from services.mediator_event_service import queue_mediator_event
 from services.match_state_service import verified_accepted_match_query
 
 
-PROBE_PENDING_TTL = 72 * 3600
 PROBE_IN_FLIGHT_STATUSES = {"queued", "awaiting_answer", "awaiting_sentiment", "awaiting_consent"}
-LOW_SENSITIVITY_PROBES = {"fun_fact", "weekend", "conversation_hook", "availability"}
-PROBE_QUESTIONS = {
-    "sentiment": "你跟這位聊起來感覺如何？",
-    "fun_fact": "有沒有一件關於你的有趣小事，可以讓我之後幫你們找話題？",
-    "weekend": "你這週末大概想怎麼過？",
-    "conversation_hook": "如果要讓對方更好開話題，你希望我透露哪個輕鬆的小線索？",
-    "availability": "你近期哪個時間比較方便認識新朋友？",
-}
+LEGACY_PRIVATE_PROBE_EVENT_TYPES = frozenset({
+    "probe_question",
+    "feedback_request",
+    "feedback_consent_request",
+    "probe_result",
+})
 _DECLINE_FEEDBACK_RE = re.compile(r"(?:不想聊|不方便說|先跳過|略過|不回答|不要問)")
 _UNRELATED_REQUEST_RE = re.compile(
     r"(?:天氣|氣溫|下雨|新聞|股票|匯率|導航|查(?:一下)?|搜尋|"
@@ -69,31 +64,80 @@ def participant_probe_field(match_doc: dict, user_id: str) -> str:
     return f"mediator_state.participants.{participant_role(match_doc, user_id)}"
 
 
-def probe_policy(user_id: str) -> tuple[str, int, int, int]:
-    doc = profiles_coll.find_one({"user_id": user_id}, {"probe_mode": 1}) or {}
-    mode = doc.get("probe_mode", "balanced")
-    if mode == "manual":
-        return mode, 10**9, 10**9, 86400
-    if mode == "active":
-        return mode, 6, 600, 21600
-    if os.getenv("MEDIATOR_DEMO_FAST_PROBE", "0") == "1":
-        return mode, 6, 120, 300
-    return mode, 8, 1800, 86400
-
-
 def trigger_proactive_match(user_id: str, source: str = "automatic", force_new: bool = False) -> None:
     """Retained for old imports, but post-chat activity must never start matching."""
     return None
 
 
-def choose_probe_kind(match_doc: dict, requested_kind: str | None = None) -> str:
-    if requested_kind in PROBE_QUESTIONS:
-        return requested_kind
-    recent = [item.get("kind") for item in (match_doc.get("probe_history", []) or [])[-5:]]
-    for kind in ("fun_fact", "conversation_hook", "weekend", "availability", "sentiment"):
-        if (not recent or kind != recent[-1]) and kind not in recent[-3:]:
-            return kind
-    return "fun_fact"
+def cleanup_legacy_private_probe_state(
+    user_id: str,
+    *,
+    user_doc: dict | None = None,
+    now: float | None = None,
+) -> dict[str, int]:
+    """Cancel old Private probe state and remove queued probe events.
+
+    This cleanup is idempotent and deliberately narrow: it only touches the
+    legacy probe inbox entries/pending fields and an in-flight participant
+    probe state.  Date follow-up state, confirmations, memories and chat
+    history remain intact.
+    """
+    current = time.time() if now is None else float(now)
+    if not user_id:
+        return {"profiles": 0, "matches": 0}
+    profiles_changed = 0
+    try:
+        result = profiles_coll.update_one(
+            {"user_id": user_id},
+            {
+                "$pull": {
+                    "mediator_inbox": {
+                        "type": {"$in": sorted(LEGACY_PRIVATE_PROBE_EVENT_TYPES)},
+                    },
+                },
+                "$unset": {
+                    "pending_private_feedback": "",
+                    "pending_feedback_match_id": "",
+                    "pending_feedback_other_id": "",
+                },
+            },
+        )
+        profiles_changed = int(getattr(result, "modified_count", 0) or 0)
+    except Exception:
+        profiles_changed = 0
+
+    matches_changed = 0
+    try:
+        candidates = list(matches_coll.find(verified_accepted_match_query(user_id)))
+    except Exception:
+        candidates = []
+    for match_doc in candidates:
+        if not isinstance(match_doc, dict) or not match_doc.get("_id"):
+            continue
+        field = participant_probe_field(match_doc, user_id)
+        state = participant_probe_state(match_doc, user_id)
+        if (
+            state.get("status") not in PROBE_IN_FLIGHT_STATUSES
+            or not state.get("probe_id")
+        ):
+            continue
+        try:
+            result = matches_coll.update_one(
+                {
+                    "_id": match_doc["_id"],
+                    f"{field}.probe_id": state.get("probe_id"),
+                    f"{field}.status": {"$in": sorted(PROBE_IN_FLIGHT_STATUSES)},
+                },
+                {"$set": {
+                    f"{field}.status": "cancelled",
+                    f"{field}.cancel_reason": "legacy_probe_disabled",
+                    f"{field}.cancelled_at": current,
+                }},
+            )
+            matches_changed += int(getattr(result, "modified_count", 0) or 0)
+        except Exception:
+            continue
+    return {"profiles": profiles_changed, "matches": matches_changed}
 
 
 def classify_feedback(message: str) -> str:
@@ -274,201 +318,23 @@ def summarize_relationship(match_id, room_id: str) -> None:
 
 
 def queue_due_feedback(user_id: str) -> None:
-    from services.proactive_followup_service import (
-        followup_mode_for_user,
-        is_proactive_care_enabled,
-    )
-
-    try:
-        profile = profiles_coll.find_one(
-            {"user_id": user_id},
-            {"proactive_care_enabled": 1, "proactive_frequency": 1,
-             "last_automatic_relationship_prompt_at": 1},
-        ) or {}
-    except Exception:
-        return
-    if followup_mode_for_user(user_id) != "on" or not is_proactive_care_enabled(profile):
-        return
-    mode, min_messages, idle_seconds, cooldown_seconds = probe_policy(user_id)
-    if mode == "manual":
-        return
-    now = time.time()
-    last_prompt = float(profile.get("last_automatic_relationship_prompt_at", 0) or 0)
-    if last_prompt and now - last_prompt < 3600:
-        return
-    # Keep one stable candidate snapshot for this poll.  The loop updates the
-    # same collection and must not let those writes change which rows belong
-    # to the current delivery pass.
-    candidates = list(matches_coll.find(verified_accepted_match_query(user_id)))
-    for match_doc in candidates:
-        count = int(match_doc.get("shared_message_count", 0))
-        if count < min_messages or float(match_doc.get("last_chat_at", now)) > now - idle_seconds:
-            continue
-        state = participant_probe_state(match_doc, user_id)
-        status = state.get("status", "idle")
-        if status in PROBE_IN_FLIGHT_STATUSES:
-            if float(state.get("asked_at", now)) < now - PROBE_PENDING_TTL:
-                matches_coll.update_one(
-                    {"_id": match_doc["_id"]},
-                    {"$set": {participant_probe_field(match_doc, user_id) + ".status": "expired"}},
-                )
-            continue
-        last_count = int(state.get("message_count_snapshot", 0))
-        if state.get("completed_at") and (count - last_count < 6 or now < float(state.get("cooldown_until", 0))):
-            continue
-        other_id = match_doc["to_user"] if match_doc["from_user"] == user_id else match_doc["from_user"]
-        kind = choose_probe_kind(match_doc)
-        probe_id = uuid.uuid4().hex
-        state_field = participant_probe_field(match_doc, user_id)
-        probe_state = {
-            "status": "queued", "trigger": "auto", "requester_id": None, "probe_id": probe_id,
-            "kind": kind, "question": PROBE_QUESTIONS[kind], "asked_at": now,
-            "message_count_snapshot": count, "cooldown_until": now + cooldown_seconds,
-        }
-        claimed = matches_coll.update_one(
-            {
-                "_id": match_doc["_id"],
-                "$or": [
-                    {f"{state_field}.status": {"$nin": list(PROBE_IN_FLIGHT_STATUSES)}},
-                    {f"{state_field}.asked_at": {"$lt": now - PROBE_PENDING_TTL}},
-                ],
-            },
-            {"$set": {state_field: probe_state}, "$push": {"probe_history": {
-                "probe_id": probe_id, "kind": kind, "asked_to": user_id, "asked_at": now,
-                "status": "queued", "trigger": "auto",
-            }}},
-        )
-        if not claimed.modified_count:
-            continue
-        queued_event = queue_mediator_event(
-            user_id, PROBE_QUESTIONS[kind], "probe_question", match_id=str(match_doc["_id"]),
-            other_id=other_id, origin="auto", probe_kind=kind, probe_id=probe_id,
-        )
-        if queued_event:
-            profile_query = {"user_id": user_id}
-            if "proactive_care_enabled" in profile:
-                profile_query["proactive_care_enabled"] = True
-            profiles_coll.update_one(
-                profile_query,
-                {"$set": {"last_automatic_relationship_prompt_at": now}},
-            )
-        return
+    """Compatibility no-op; automatic Private probes are disabled."""
+    del user_id
+    return None
 
 
 def queue_manual_fun_fact_probe(match_doc: dict, requester_id: str, target_id: str) -> bool:
-    """Ask one low-sensitivity question, without re-asking it during cooldown."""
-    now = time.time()
-    previous = participant_probe_state(match_doc, target_id)
-    if previous.get("kind") == "fun_fact":
-        if previous.get("status") in PROBE_IN_FLIGHT_STATUSES:
-            return False
-        if previous.get("status") in {"completed", "declined"} and float(previous.get("cooldown_until", 0) or 0) > now:
-            return False
-    probe_id = uuid.uuid4().hex
-    state_field = participant_probe_field(match_doc, target_id)
-    state = {
-        "status": "queued", "trigger": "manual", "requester_id": requester_id,
-        "probe_id": probe_id, "kind": "fun_fact", "question": PROBE_QUESTIONS["fun_fact"],
-        "asked_at": now, "message_count_snapshot": int(match_doc.get("shared_message_count", 0)),
-        "cooldown_until": now + 7 * 86400,
-    }
-    claimed = matches_coll.update_one(
-        {
-            "_id": match_doc["_id"],
-            "$or": [
-                {f"{state_field}.status": {"$nin": list(PROBE_IN_FLIGHT_STATUSES | {"completed", "declined"})}},
-                {f"{state_field}.cooldown_until": {"$lte": now}},
-                {f"{state_field}.asked_at": {"$lt": now - PROBE_PENDING_TTL}},
-            ],
-        },
-        {
-            "$set": {state_field: state},
-            "$push": {"probe_history": {
-                "probe_id": probe_id, "kind": "fun_fact", "asked_to": target_id,
-                "asked_at": now, "status": "queued", "trigger": "manual",
-                "requester_id": requester_id,
-            }},
-        },
-    )
-    if not claimed.modified_count:
-        return False
-    queue_mediator_event(
-        target_id, PROBE_QUESTIONS["fun_fact"], "probe_question", match_id=str(match_doc["_id"]),
-        other_id=requester_id, origin="manual", requester_id=requester_id,
-        probe_kind="fun_fact", probe_id=probe_id,
-    )
-    return True
+    """Compatibility no-op; manual Private fun-fact probes are disabled."""
+    del match_doc, requester_id, target_id
+    return False
 
 
 def consume_pending_probe_answer(
     match_doc: dict, user_doc: dict, user_id: str, other_id: str, message: str,
 ) -> str | None:
-    """Consume a delivered probe once so it cannot fall through to the chat model."""
-    pending = user_doc.get("pending_private_feedback") or {}
-    if not pending:
-        return None
-    if pending.get("match_id") != str(match_doc.get("_id") or "") or pending.get("other_id") != other_id:
-        return None
-    probe_id = pending.get("probe_id")
-    state_field = participant_probe_field(match_doc, user_id)
-    state = participant_probe_state(match_doc, user_id)
-    if not probe_id or state.get("probe_id") != probe_id or state.get("status") not in {"awaiting_answer", "awaiting_sentiment"}:
-        profiles_coll.update_one(
-            {"user_id": user_id, "pending_private_feedback.probe_id": probe_id},
-            {"$unset": {"pending_private_feedback": ""}},
-        )
-        return None
-    answer = re.sub(r"\s+", " ", message or "").strip()
-    if not answer:
-        return "這題我還沒收到內容；你想回答時再跟我說就好。"
-    declined = bool(_DECLINE_FEEDBACK_RE.search(answer))
-    kind = state.get("kind") or pending.get("kind") or "sentiment"
-    if not declined and _UNRELATED_REQUEST_RE.search(answer):
-        return None
-    if (
-        not declined
-        and kind == "sentiment"
-        and answer not in _SHORT_FEEDBACKS
-        and not _RELATIONSHIP_FEEDBACK_RE.search(answer)
-    ):
-        return None
-    now = time.time()
-    completed_state = {
-        **state, "status": "declined" if declined else "completed", "answered_at": now,
-        "answer": answer, "completed_at": now,
-    }
-    if declined:
-        completed_state.pop("answer", None)
-    result_record = {
-        "probe_id": probe_id, "kind": kind, "answer": answer if not declined else "",
-        "answered_by": user_id, "requester_id": state.get("requester_id"),
-        "status": completed_state["status"], "answered_at": now,
-        "shareable": bool(kind in LOW_SENSITIVITY_PROBES and not declined),
-    }
-    updated = matches_coll.update_one(
-        {
-            "_id": match_doc["_id"], f"{state_field}.probe_id": probe_id,
-            f"{state_field}.status": {"$in": ["awaiting_answer", "awaiting_sentiment"]},
-        },
-        {"$set": {state_field: completed_state, f"mediator_state.probe_results.{probe_id}": result_record}},
-    )
-    if not updated.modified_count:
-        return "這題已經處理完成，我不會再重問。"
-    profiles_coll.update_one(
-        {"user_id": user_id, "pending_private_feedback.probe_id": probe_id},
-        {"$unset": {"pending_private_feedback": ""}},
-    )
-    requester_id = state.get("requester_id")
-    if requester_id and requester_id != user_id and kind in LOW_SENSITIVITY_PROBES and not declined:
-        queue_mediator_event(
-            requester_id, f"我幫你問到一個可聊的點：對方說「{answer}」。你可以順著這個接話。",
-            "probe_result", match_id=str(match_doc["_id"]), other_id=user_id, probe_id=probe_id,
-        )
-    if declined:
-        return "收到，這題我先幫你跳過，也不會再拿同一題來問。"
-    if kind == "sentiment":
-        return "收到，這是你的私下想法；我先不替你轉述。"
-    return "收到，我記下來了，之後會用這個幫你們找話題。"
+    """Compatibility no-op; old probe answers are no longer consumed."""
+    del match_doc, user_doc, user_id, other_id, message
+    return None
 
 
 def consume_pending_post_date_feedback(

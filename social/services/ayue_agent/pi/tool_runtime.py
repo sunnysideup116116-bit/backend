@@ -20,6 +20,9 @@ from services.ayue_agent.tool_registry import (
     tool_call_key,
 )
 from services.ayue_agent.tools import execute_tool
+from services.ayue_agent.public_relationship_projection import (
+    remember_relationship_reference,
+)
 from services.ayue_agent.shared.confirmation import (
     INTERACTION_BUBBLE,
     SURFACE_PUBLIC,
@@ -258,6 +261,24 @@ class PiToolRuntime:
         if result.ok and result.private_data:
             self.results.append({"tool": name, "private_data": dict(result.private_data)})
             self.results = self.results[-8:]
+            relationship_ref = result.private_data.get("relationship_contact_reference")
+            if isinstance(relationship_ref, dict):
+                other_id = str(relationship_ref.get("other_id") or "")
+                if other_id:
+                    object.__setattr__(
+                        raw_ctx,
+                        "_pi_recent_relationship_contact_id",
+                        other_id,
+                    )
+                    try:
+                        remember_relationship_reference(
+                            self.turn.user_id,
+                            self.turn.room_id,
+                            other_id,
+                            safe_label=str(relationship_ref.get("safe_label") or "對方"),
+                        )
+                    except Exception:
+                        pass
         return self._project(
             name=name,
             status="ok" if result.ok else "failed",
