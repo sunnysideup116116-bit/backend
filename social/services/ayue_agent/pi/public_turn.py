@@ -104,6 +104,22 @@ def _bind_interactions(
     if not messages and result.reply:
         messages = [normalize_public_language(normalize_public_reply(result.reply))]
     reply = "\n\n".join(messages)
+    if result.assessment_state == "awaiting_commit":
+        session = (ctx.user_profile or {}).get("agentic_assessment_session") or {}
+        session_id = str(session.get("session_id") or "")
+        if session_id and reply:
+            revision = int(result.assessment_revision or session.get("revision", 0) or 0)
+            confirmations.create_confirmation(
+                user_id=ctx.user_id, room_id=ctx.room_id, surface=SURFACE_PUBLIC,
+                agent_name="assessment", tool_name=ASSESSMENT_COMMIT_ACTION,
+                arguments={}, payload={
+                    "session_id": session_id, "revision": revision,
+                    "kind": result.assessment_kind or session.get("kind"),
+                },
+                origin_run_id=run_id, preview=reply,
+                interaction_mode=INTERACTION_BUBBLE,
+                idempotency_key=f"assessment-preview:{session_id}:{revision}:{run_id}",
+            )
     selection = selections.selection_for_run(
         user_id=ctx.user_id, room_id=ctx.room_id, origin_run_id=run_id,
     )
@@ -270,6 +286,15 @@ def _handle_choice(
             user_id=ctx.user_id, room_id=ctx.room_id, surface=SURFACE_PUBLIC,
             choice_id=choice_id, outcome="cancelled", result_summary="使用者取消目前操作，未執行變更。",
         )
+        if (resolution and resolution.get("state") == "cancelled"
+                and record.get("tool_name") == ASSESSMENT_COMMIT_ACTION):
+            payload = dict(record.get("payload") or {})
+            outcome = cancel_assessment_session(
+                ctx.user_id, str(payload.get("session_id") or ""), payload.get("kind"),
+            )
+            return _assessment_result(outcome, payload, run_id).model_copy(
+                update={"choice_resolution": resolution},
+            )
         return AgentResult(handled=True, reply=reply, messages=[reply], presentation_class="transaction",
                            conversation_intent="confirmation_cancelled", agent_run_id=run_id,
                            agent_mode="pi", choice_resolution=resolution)
@@ -334,7 +359,7 @@ def _handle_assessment(ctx: Any, run_id: str) -> AgentResult | None:
     if ctx.assessment_action == "cancel" or assessment_cancel_choice(ctx.message):
         return _assessment_result(cancel_assessment_session(ctx.user_id, session_id, kind), session, run_id)
     if awaiting_assessment_commit(ctx.user_profile):
-        reply = "這份探索結果已整理好，請使用畫面上的確認或取消按鈕。"
+        reply = str(session.get("last_reply") or "這份探索結果已整理好，請使用畫面上的確認或取消按鈕。")
         return AgentResult(handled=True, reply=reply, messages=[reply], conversation_intent="assessment",
                            agent_run_id=run_id, agent_mode="pi", profile_write_allowed=False,
                            profile_write_reason="assessment", assessment_state="awaiting_commit",

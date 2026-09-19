@@ -858,7 +858,7 @@ def test_chat_places_matching_and_calendar_sources_are_deterministic():
 
     start_match = deterministic_proposal("新的配對", context=global_context)
     assert start_match is not None
-    assert requires_confirmation(start_match) is True
+    assert requires_confirmation(start_match) is False  # Matching Ayue owns its search confirmation.
     assert confirmation_phrase(start_match) == "確認開始配對"
 
 

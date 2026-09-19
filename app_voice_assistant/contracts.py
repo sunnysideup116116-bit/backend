@@ -204,6 +204,15 @@ def _calendar_source(value: str) -> str:
 
 def _is_match_start_request(value: str) -> bool:
     compact = normalized_phrase(value)
+    if re.search(r'(?:不要|不用|不想)(?:再|幫我|替我)?(?:找|配對)', compact):
+        return False
+    if any(phrase in compact for phrase in (
+        '不要配對', '不想配對', '不要找', '不用找', '取消配對',
+        "don'tfind", 'donotfind', 'stopmatching', 'cancelmatching',
+    )):
+        return False
+    if '配對' in compact and any(term in compact for term in ('新的人', '新人', '新對象')):
+        return True
     if compact in {
         "新的配對", "新配對", "新的配對建議", "找個新配對",
         "newmatch", "newmatching", "newmatchsuggestion",
@@ -255,10 +264,13 @@ def visible_choice_action(value: Any) -> str | None:
         "確認", "確定", "同意", "好", "好的", "可以", "沒問題",
         "就這樣", "幫我確認", "請確認", "確認吧", "好啊",
         "開始", "開始吧", "那就開始", "那就開始吧", "我們開始吧",
+        "可以開始", "可以開始吧", "可以開始了", "幫我開始", "請開始", "直接開始",
+        "好喔", "好哦", "行", "來吧",
         "那我們開始吧", "好那開始吧", "好那我們開始吧",
         "重新開始", "重新開始探索", "開始探索",
         "繼續", "繼續吧", "繼續探索",
         "confirm", "confirmed", "yes", "ok", "okay",
+        "start", "goahead", "begin", "proceed",
     }:
         return "confirm"
     if compact in {
@@ -267,6 +279,21 @@ def visible_choice_action(value: Any) -> str | None:
         "幫我取消", "取消吧",
         "cancel", "cancelled", "no",
     }:
+        return "cancel"
+    # Whole-utterance grammar accepts conversational fillers, not arbitrary
+    # sentences containing a confirmation word (e.g. 開始前我想問 or 不要開始).
+    if re.fullmatch(
+        r"(?:嗯+|好(?:的|啊)?|那(?:就)?|我們|請|麻煩(?:你)?|幫我)*"
+        r"(?:可以|直接)?(?:確認|確定|同意|開始(?:個性探索|性格探索|探索)?|"
+        r"重新開始(?:探索)?|繼續(?:探索)?|套用(?:探索結果|結果)?|儲存|就這樣)"
+        r"(?:吧|啊|喔|哦|囉|了)*", compact,
+    ):
+        return "confirm"
+    if re.fullmatch(
+        r"(?:嗯+|那(?:就)?|請|麻煩(?:你)?|幫我|先)*"
+        r"(?:取消|不要(?:開始|套用|儲存)?|不用(?:開始|套用|儲存)?|不同意|算了)"
+        r"(?:吧|啊|喔|哦|囉|了)*", compact,
+    ):
         return "cancel"
     return None
 
@@ -825,11 +852,8 @@ def context_allows_proposal(context: dict[str, Any], proposal: VoiceProposal) ->
 def requires_confirmation(proposal: VoiceProposal) -> bool:
     if ACTIONS.get(proposal.intent, {}).get("confirmation"):
         return True
-    if (
-        proposal.intent == "match.ayue_query"
-        and _is_match_start_request(proposal.arguments.get("question") or "")
-    ):
-        return True
+    # This intent only hands the request to Matching Ayue. Its existing
+    # server-owned choice card confirms the actual search write.
     return (
         proposal.intent == "settings.set"
         and proposal.arguments.get("key") in CONFIRMED_SETTING_KEYS
@@ -1650,12 +1674,24 @@ def deterministic_proposal(
         )
     if "戀愛顧問" in raw:
         return VoiceProposal("settings.open", {}, "AI 戀愛顧問目前尚未提供可調整設定。", revision)
-    if any(phrase in raw for phrase in (
+    exploration_requested = any(phrase in compact for phrase in (
         "開始個性探索", "個性探索", "人格探索", "性格探索",
         "開始性格測驗", "開始人格測驗",
-    )):
+    ))
+    get_to_know_request = bool(re.search(
+        r"(?:我(?:希望|想要|想)(?:你|妳)?(?:可以|能夠|能)?|"
+        r"(?:你|妳)(?:可以|能不能|能夠|能)|讓(?:你|妳))"
+        r"(?:再)?(?:更|多|更加|更深入)(?:地|一點)?(?:認識|了解|瞭解)我",
+        compact,
+    ))
+    exploration_declined = any(phrase in compact for phrase in (
+        "不要", "不想", "不用", "不需要", "停止", "結束", "取消", "先別",
+    ))
+    if (exploration_requested or get_to_know_request) and not exploration_declined:
         return VoiceProposal(
-            "personality.explore", {"message": raw},
+            "personality.explore", {"message": (
+                raw if exploration_requested else f"我想開始性格探索。{raw}"
+            )},
             working_reply, revision,
         )
     private_date = re.search(
@@ -1828,6 +1864,20 @@ def deterministic_proposal(
                 "memory.add", {"label": label[:40], "stance": stance},
                 "我可以把這件事存進阿月記憶。", revision,
             )
+    external_event = (
+        re.search(r"活動|展覽|演唱會|音樂會|市集|講座|\bevents?\b|\bconcerts?\b|\bexhibitions?\b|\bfestivals?\b", raw_lower)
+        and re.search(r"找|查|推薦|有沒有|有哪些|哪裡|什麼|\bfind\b|\bsearch\b|\blook\s*up\b|\bwhat\b|\bany\b", raw_lower)
+        and not re.search(r"我的活動|我的行事曆|我的日曆|我(?:今天|明天|後天|當天|那天)?(?:有什麼|有哪些|有沒有)活動|行事曆裡|日曆裡|已安排|新增|加入|建立|修改|取消|刪除|不要|不用|不想|\bmy\s+(?:calendar|events)\b|\b(?:add|create|cancel|delete)\b", raw_lower)
+    )
+    if external_event:
+        question = raw
+        if re.search(r"當天|那天|同一天|那一天|that day|same day|then", raw_lower):
+            reference = str(context.get("_calendar_reference") or "").strip()
+            if not reference:
+                # Let the conversational model resolve the date or ask for it.
+                return None
+            question = f"日期沿用先前的行事曆查詢：{reference}。請查公開活動：{raw}"
+        return VoiceProposal("ayue.public_query", {"domain": "web", "question": question}, working_reply, revision)
     public_domain = None
     if (
         any(word in raw for word in (

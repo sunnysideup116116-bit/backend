@@ -85,6 +85,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from agent_quota.api import router as agent_quota_router
+from agent_quota.service import start_worker as start_quota_worker, stop_worker as stop_quota_worker
+app.include_router(agent_quota_router)
+app.router.add_event_handler("startup", start_quota_worker)
+app.router.add_event_handler("shutdown", stop_quota_worker)
+
 app.include_router(frontend.router)
 app.include_router(chat.router)
 app.include_router(match.router)

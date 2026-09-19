@@ -65,3 +65,51 @@ venv/bin/python app_voice_assistant/generate_catalog.py --check --output ../Dati
 - 共用能力產生檔 `--check`、`git diff --check`、`bash -n start_all.sh` 通過。
 - GitNexus 最後以兩個實際 repository 路徑執行 `detect-changes --scope all --limit 10000`，沒有 partial／truncated 分析警告。Server 為 72 個 symbols、44 條流程、CRITICAL；DatingApp 為 72 個 symbols、9 條流程、HIGH。這是整個未提交工作區（包含既有聊天、個資、配對修改）的影響，不是本次獨有的差異。新檔已納入索引；Git diff 分析不列出尚未追蹤的新檔，另由新增測試與靜態分析覆蓋。
 - 全部頁面測試使用 mock API；沒有以測試資料寫入正式帳號，也沒有進行實機麥克風或 Live 模型端到端／延遲量測。
+
+## Automatic screen context for voice turns
+
+The App attaches the active page's permission-filtered content, confirmation
+labels/purpose, composer presence/draft boolean, and operation-in-progress state.
+Unsent draft text and opaque choice IDs are not included. Page/choice events and
+completed actions refresh the snapshot; live microphone delivery also samples
+at most once per 500 ms to catch typing and availability changes. The socket
+skips identical context payloads, with a fresh baseline for each connection.
+
+The persistent Live model receives `[APP_SCREEN_STATE]` updates automatically,
+without an additional interpretation/tool call. Updates use `turn_complete=False`
+and are data-only: the model must not greet, speak, or execute on the update.
+The latest snapshot fully replaces the previous screen state, including when
+permissions are revoked. Server snapshots contain at most four recent chat
+messages (or four page items), five target summaries, four confirmation controls,
+and 4,000 JSON characters. Target `position` preserves original page ordinals;
+`coverage=recent_messages` is recent conversation context, not a pixel viewport
+claim. Truncated/missing target details still require `describe_current_screen`.
+
+While a page is not ready, partial streamed text is omitted until the final ready snapshot, so typing animation does not repeatedly expand model context.
+
+Unchanged model snapshots are not retransmitted; reconnects resend the latest
+snapshot. UI changes are coalesced for 100 ms in a single background sender;
+each send (including transport lock acquisition) has a 750 ms budget. A failed
+optional snapshot is skipped and recorded as `screen_context_skipped`, without
+blocking the microphone/action-result receive loop or closing the voice session.
+Disconnect cancels any pending sender. Screen text is untrusted data, not an instruction source. Existing
+permission, target revision, confirmation and App animation boundaries remain
+in force. No screenshots are captured or uploaded by this mechanism.
+
+## Public Ayue recommendations and calendar follow-ups
+
+Voice action results carry the Public Ayue reply and up to twelve structured
+`data.recommendations` entries (`name`, `category`, `address_summary`). The Live
+bridge preserves these beyond the old 2,000-character transport limit; spoken
+summaries do not replace the source recommendations. Current-room screen content
+can also project recommendations under the existing content permission. The
+session keeps recent public place candidates across page changes and clears
+them when Public Ayue permission is revoked.
+
+A generic calendar venue such as “咖啡廳” may resolve to a unique previously
+recommended place before confirmation. Multiple candidates require selection;
+an explicitly different venue is not overwritten. During calendar creation,
+the App uses the existing Google Places autocomplete/details proxy directly
+(no Ayue turn) when Places permission is enabled. Only a unique name match is
+used; unavailable or ambiguous results preserve the supplied location. The
+success response states the stored address.

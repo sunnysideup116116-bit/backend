@@ -32,7 +32,14 @@ from matchmaker import (
 )
 
 # ????FastAPI ?蝔? (撠望????銝?鈭?)
+# Shared accounting is importable when invoked through start_all.sh or tests.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'social'))
+from agent_quota.internal import MatchmakerQuotaMiddleware, start_worker, stop_worker
 app = FastAPI()
+app.add_middleware(MatchmakerQuotaMiddleware)
+app.router.add_event_handler('startup', start_worker)
+app.router.add_event_handler('shutdown', stop_worker)
 
 
 @app.get("/health")

@@ -5,7 +5,8 @@ import re
 import os
 import uuid
 from typing import Callable
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
+from agent_quota.api import budgeted
 from models import (
     MatchRequest, AcceptRequest, MatchDecisionRequest, ProactiveEventRequest,
     EventDiscoveryRequest, EventOpportunityScanRequest,
@@ -1404,7 +1405,8 @@ def _existing_job_match_result(match_doc: dict, user_id: str, user_doc: dict) ->
 def _request_matchmaker_selection(payload: dict, *, timeout: float) -> list[dict]:
     """Evaluate one qualified batch. An empty result must be explicit, never a failure."""
     try:
-        response = requests.post("http://127.0.0.1:9001/api/match", json=payload, timeout=timeout)
+        from agent_quota.internal import signed_headers
+        response = requests.post("http://127.0.0.1:9001/api/match", json=payload, timeout=timeout, headers=signed_headers())
     except requests.Timeout:
         raise MatchSearchPipelineError("matchmaker_timeout", "matchmaker_request") from None
     except requests.RequestException:
@@ -1956,7 +1958,9 @@ def create_proactive_match_proposal(user_id: str, source: str = "automatic", for
 register_match_search_pipeline(generate_matches_for_user)
 
 @router.post("/request")
-def request_next_match(req: MatchRequest, background_tasks: BackgroundTasks):
+@budgeted("matching")
+def request_next_match(req: MatchRequest, background_tasks: BackgroundTasks, request: Request = None):
+    req.source = "manual"
     del background_tasks
     state = load_match_state(req.user_id)
     active = state.get("active_proposal")
@@ -2165,7 +2169,9 @@ def get_single_match_state(user_id: str, match_id: str):
     return response
 
 @router.post("")
-def match_endpoint(req: MatchRequest):
+@budgeted("matching")
+def match_endpoint(req: MatchRequest, request: Request = None):
+    req.source = "manual"
     origin_room_id = str(req.origin_room_id or "").strip()
     if origin_room_id and get_room(origin_room_id, req.user_id) is None:
         raise HTTPException(status_code=403, detail="來源聊天室不是你的聊天室")

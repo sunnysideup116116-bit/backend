@@ -171,7 +171,7 @@ def test_common_new_match_and_navigation_phrases_are_executable():
         assert action["capability_ref"]
         assert action["suggested_arguments"] == arguments
         if action_id == "match.ayue_query":
-            assert action["confirmation_required"] is True
+            assert action["confirmation_required"] is False
         assert result["recommended_operations"] == [{
             "operation_key": "op1",
             "capability_ref": action["capability_ref"],

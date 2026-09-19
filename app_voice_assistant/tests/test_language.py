@@ -2,6 +2,8 @@ from google.genai import types
 from app_voice_assistant.language import input_language_codes, display_transcript
 from app_voice_assistant.contracts import safe_context
 from app_voice_assistant.duplex_session import _system_instruction
+from app_voice_assistant.duplex_runtime import session_started_prompt
+from app_voice_assistant.provider import response_language_label
 
 
 def test_language_preferences_are_bounded_and_independent_of_reply_language():
@@ -19,6 +21,28 @@ def test_language_preferences_are_bounded_and_independent_of_reply_language():
     assert "candy" in instruction
     assert "主要說英文" in instruction
     assert "台灣繁體中文" in instruction
+    english_instruction = _system_instruction(
+        {"input_language": "en-US", "response_language": "en-US"},
+    )
+    assert "response_language=en-US" in english_instruction
+    assert "不可因為控制訊息" in english_instruction
+
+
+def test_initial_live_control_message_follows_response_language():
+    english = session_started_prompt({
+        "voice_config": {"response_language": "en-US", "self_name": "Sunny"},
+    })
+    assert "response_language=en-US" in english
+    assert "Voice mode is ready" in english
+    assert "語音模式已就緒" not in english
+    assert "Sunny" in english
+
+    simplified = session_started_prompt({
+        "voice_config": {"response_language": "zh-CN"},
+    })
+    assert "语音模式已就绪" in simplified
+    assert response_language_label("en-US") == "English"
+    assert response_language_label("untrusted") == "台灣繁體中文"
 
 
 def test_display_conversion_preserves_english_spacing_and_translates_script_only():

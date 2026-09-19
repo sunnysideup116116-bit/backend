@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from agent_quota.api import require_quota, owner_from_request
+from agent_quota.service import SCOPE
+
 import asyncio
 import base64
 import hmac
@@ -461,6 +464,11 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
             ):
                 raise HTTPException(status_code=401, detail="voice_identity_user_mismatch")
             user_id = authenticated_owner
+        if not authenticated_owner:
+            authenticated_owner = await asyncio.to_thread(owner_from_request, request)
+            if authenticated_owner != user_id:
+                raise HTTPException(403, detail="appwrite_user_mismatch")
+        await asyncio.to_thread(require_quota, authenticated_owner)
         if not runtime.settings.allows_user(user_id):
             raise HTTPException(status_code=403, detail="app_voice_demo_account_required")
         ip = runtime.client_ip(request)
@@ -633,6 +641,7 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
             return
         await websocket.accept()
         acquired = False
+        quota_token = None
         live_audio_task: asyncio.Task[None] | None = None
         ticket: AppVoiceTicket | None = None
         memory_turns: list[dict[str, str]] = []
@@ -668,6 +677,7 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                 await websocket.close(code=1013)
                 return
             acquired = True
+            quota_token = SCOPE.set((ticket.user_id, "voice", ticket.session_id))
             output_mode = str(hello.get("output_mode") or "gemini_tts")
             input_mode = str(hello.get("input_mode") or "on_device_text")
             memory_record = VoiceMemoryRecord(
@@ -1105,6 +1115,8 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                 await asyncio.gather(live_audio_task, return_exceptions=True)
             if acquired:
                 runtime.limiter.release()
+            if quota_token is not None:
+                SCOPE.reset(quota_token)
             if ticket is not None and acquired:
                 runtime.queue_memory_finalize(ticket, memory_turns)
 

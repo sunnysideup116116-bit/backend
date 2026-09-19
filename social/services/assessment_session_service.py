@@ -469,7 +469,7 @@ def _completion_reply(kind: str, draft: dict[str, Any]) -> str:
     summary = _safe_text(draft.get("summary"), 140)
     label = "基本性格" if kind == "big_five" else "深層資料"
     body = f"我整理好一版{label}摘要：{summary}。" if summary else f"我整理好一版{label}資料。"
-    return body + "這是新的草稿，回覆「確認」才會套用；想保留原本資料可回覆「取消」。"
+    return body
 
 
 def advance_assessment_session(

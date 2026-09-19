@@ -34,3 +34,6 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
+
+# Durable AI quota delivery queue (contains account identifiers)
+.runtime/

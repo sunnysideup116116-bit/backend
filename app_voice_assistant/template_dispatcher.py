@@ -311,6 +311,10 @@ def template_proposal_from_function(
     if name == "ask_app_ayue":
         domain = str(raw.get("domain") or "")
         question = raw.get("question")
+        if domain == "personality":
+            return _proposal(
+                "personality.explore", {"message": question}, revision=revision,
+            )
         if domain == "matching":
             return _proposal(
                 "match.ayue_query", {"question": question}, revision=revision,
@@ -451,6 +455,8 @@ def template_tool_call_for_proposal(
     arguments = dict(proposal.arguments)
     if intent == "app.navigate":
         return "navigate_app", arguments
+    if intent == "ui.choice.activate":
+        return "write_app_action", {"action": "visible_choice", "choice": arguments["action"]}
     if intent == "chat.open":
         return "open_chat", arguments
     if intent == "ayue.private_open":
@@ -473,6 +479,8 @@ def template_tool_call_for_proposal(
         return "read_app_data", {"domain": "posts", **arguments}
     if intent == "ayue.private_query":
         return "ask_app_ayue", {"domain": "private", **arguments}
+    if intent == "personality.explore":
+        return "ask_app_ayue", {"domain": "personality", "question": arguments["message"]}
     if intent == "ayue.public_query":
         return "ask_app_ayue", {"domain": arguments.pop("domain", "web"), **arguments}
     if intent == "match.ayue_query":
@@ -558,6 +566,9 @@ def template_live_tools(types: Any) -> list[Any]:
             description=(
                 "Ask the correct App Ayue domain to perform a reasoning or recommendation "
                 "request. Use matching for new pairing, places for nearby recommendations, "
+                "personality to start or continue personality exploration with Matching Ayue "
+                "(including requests to get to know the user better); send every answer "
+                "through personality and never invent exploration questions yourself. "
                 "web for current public information, memory/profile for those App domains, "
                 "and private for an accepted contact's private chat context. For places, "
                 "when device location is disabled, still use the saved App profile location; "
@@ -566,7 +577,7 @@ def template_live_tools(types: Any) -> list[Any]:
             parameters_json_schema=_schema({
                 "domain": {
                     "type": "string",
-                    "enum": ["matching", "places", "web", "memory", "profile", "private"],
+                    "enum": ["matching", "places", "web", "memory", "profile", "private", "personality"],
                 },
                 "question": {"type": "string", "maxLength": 1000},
                 "contact_name": {"type": "string", "maxLength": 40},
@@ -577,6 +588,8 @@ def template_live_tools(types: Any) -> list[Any]:
             name="write_app_action",
             description=(
                 "Prepare one App change. For post_caption use mode=open, replace, or append; "
+                "calendar_create needs title, date and time, not a street address. "
+                "Pass the venue name and known area; the App automatically looks up Google Places. "
                 "for select_recent_photos pass count for the newest N photos or positions "
                 "for exact 1-based newest-photo positions; for block/unblock pass the spoken "
                 "contact name; "

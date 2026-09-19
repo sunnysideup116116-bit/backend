@@ -14,6 +14,8 @@ from fastapi import WebSocket
 from .language import display_transcript
 from .capabilities import CATALOG, ACTIONS, available_actions
 from .contextual import bind_target, safe_result
+from .screen_context import screen_context_payload
+from .recommendations import resolve_calendar_recommendation
 from .weather import resolve_weather_location
 from .capability_proxy import (
     CapabilityRefError,
@@ -50,6 +52,25 @@ from .contracts import (
 
 
 SendEvent = Callable[[dict[str, Any]], Awaitable[None]]
+SCREEN_CONTEXT_TIMEOUT_SECONDS = 0.75
+SCREEN_CONTEXT_COALESCE_SECONDS = 0.1
+
+
+def session_started_prompt(context: dict[str, Any]) -> str:
+    """Build the first Live control message in the configured reply language."""
+    config = context.get("voice_config") or {}
+    language = str(config.get("response_language") or "zh-TW")
+    messages = {
+        "zh-TW": "語音模式已就緒，請用一個很短的句子主動打招呼；有安全名稱時可以自然稱呼。",
+        "zh-CN": "语音模式已就绪，请用一句很短的话主动打招呼；有安全名称时可以自然称呼。",
+        "en-US": "Voice mode is ready. Greet the user in one short sentence; use the safe display name when available.",
+    }
+    return (
+        "[VOICE_SESSION_STARTED]\n"
+        f"response_language={language}\n"
+        f"user_display_name={str(config.get('self_name') or '')[:40]}\n"
+        f"{messages.get(language, messages['zh-TW'])}"
+    )
 
 
 @dataclass
@@ -266,6 +287,7 @@ async def run_duplex_session(
     """Bridge one app WebSocket to one persistent, full-duplex Gemini session."""
 
     context = safe_context(initial_context)
+    recent_public_places: list[dict[str, str]] = []
     provider_routing_mode = (
         routing_mode if routing_mode in {"proxy", "template"} else "legacy"
     )
@@ -275,6 +297,50 @@ async def run_duplex_session(
         routing_mode=provider_routing_mode,
     )
     await live.connect()
+    last_screen_payload: str | None = None
+    screen_sync_lock = asyncio.Lock()
+    screen_sync_task: asyncio.Task[None] | None = None
+    screen_update_generation = 0
+
+    async def sync_screen_context(*, force: bool = False) -> bool:
+        nonlocal last_screen_payload
+        started_at = time.monotonic()
+        try:
+            # Include lock acquisition in the budget: screen updates share the
+            # Live transport with audio and must never hold it indefinitely.
+            async with asyncio.timeout(SCREEN_CONTEXT_TIMEOUT_SECONDS):
+                async with screen_sync_lock:
+                    payload = screen_context_payload(context)
+                    if force or payload != last_screen_payload:
+                        await live.send_screen_context(payload)
+                        last_screen_payload = payload
+            return True
+        except Exception as error:
+            record_voice_metric(
+                "screen_context_skipped", routing_mode=provider_routing_mode,
+                result_code="timeout" if isinstance(error, TimeoutError) else "send_failed",
+                latency_ms=(time.monotonic() - started_at) * 1000,
+            )
+            return False
+
+    def queue_screen_context() -> None:
+        nonlocal screen_sync_task, screen_update_generation
+        screen_update_generation += 1
+        if screen_sync_task is not None and not screen_sync_task.done():
+            return
+
+        async def flush() -> None:
+            while not stopped:
+                await asyncio.sleep(SCREEN_CONTEXT_COALESCE_SECONDS)
+                generation = screen_update_generation
+                # Read the latest context after coalescing, including revoked
+                # permissions. Do not accumulate stale payloads or retry loops.
+                if not await sync_screen_context():
+                    return
+                if generation == screen_update_generation:
+                    return
+
+        screen_sync_task = asyncio.create_task(flush())
     pending: DuplexConfirmation | None = None
     awaiting_results: dict[str, PendingToolResult] = {}
     state_lock = asyncio.Lock()
@@ -1679,6 +1745,14 @@ async def run_duplex_session(
                     "message": "這個操作不在 App 安全白名單內。",
                 })
                 return
+            if context.get('permissions', {}).get('public_ayue') is True:
+                screen_places = ((context.get('screen') or {}).get('content') or {}).get('recommendations') or []
+                proposal, place_question = resolve_calendar_recommendation(
+                    proposal, screen_places or recent_public_places,
+                )
+                if place_question:
+                    await tool_response(call, {'status': 'needs_input', 'message': place_question})
+                    return
             bound, target_error = bind_target(proposal.intent, proposal.arguments, context)
             if target_error:
                 await tool_response(call, {"status": "needs_input", "error_code": target_error,
@@ -1691,6 +1765,13 @@ async def run_duplex_session(
                     "message": "這項功能沒有被使用者授權，請不要執行或宣稱完成。",
                 })
                 return
+            if proposal.intent == "calendar.query":
+                start_date = proposal.arguments.get("start_date")
+                end_date = proposal.arguments.get("end_date")
+                context["_calendar_reference"] = (
+                    f"{start_date} 至 {end_date or start_date}"
+                    if start_date else last_user_transcript[:300]
+                )
             if proposal.intent == "post.request_publish" and not context.get("can_publish"):
                 await tool_response(call, {
                     "status": "not_ready",
@@ -2105,7 +2186,7 @@ async def run_duplex_session(
             )
 
     async def deliver_background_result(message: str | dict[str, Any], source: str) -> None:
-        rendered = json.dumps(message, ensure_ascii=False) if isinstance(message, dict) else safe_reply(message)[:1200]
+        rendered = json.dumps(message, ensure_ascii=False) if isinstance(message, dict) else str(message)[:12000]
         marker = (
             "[APP_VOICE_TASK_RESULT]" if source == "task"
             else "[APP_VOICE_DIRECT_RESULT]" if source == "direct"
@@ -2117,7 +2198,8 @@ async def run_duplex_session(
             f"{rendered}\n"
             "這是已完成的工具結果。請理解重點後，直接以阿月第一人稱自然回答使用者，"
             "不要逐字照念、不要說你在轉述、不要提到有多個阿月，"
-            "也不要增加結果沒有的事實或承諾。",
+            "也不要增加結果沒有的事實或承諾。完整結果及 recommendations 是本次對話的參考資料；"
+            "口頭可以摘要，但之後仍須記得未唸出的店名、地址與推薦，不能把摘要當成完整清單。",
         )
 
     async def flush_background_results(*, delay: float = 0.0) -> None:
@@ -2262,6 +2344,8 @@ async def run_duplex_session(
             "weather.query", "post.select_recent_photos",
             "safety.blocked_users_query", "safety.block_user",
             "safety.unblock_user",
+            "personality.explore",
+            "ui.choice.activate",
         }:
             return
         tool_shape = template_tool_call_for_proposal(proposal)
@@ -2468,6 +2552,7 @@ async def run_duplex_session(
     async def reconnect_live() -> None:
         nonlocal pending, checking_replayed_turn
         resumed = await live.reconnect()
+        await sync_screen_context(force=True)
         checking_replayed_turn = resumed
         if not resumed:
             lost_confirmation: DuplexConfirmation | None = None
@@ -2552,11 +2637,8 @@ async def run_duplex_session(
 
     receiver = asyncio.create_task(receive_live())
     try:
-        await live.send_text(
-            "[VOICE_SESSION_STARTED]\n"
-            f"user_display_name={str((context.get('voice_config') or {}).get('self_name') or '')[:40]}\n"
-            "語音模式已就緒，請用一個很短的句子主動打招呼；有安全名稱時可以自然稱呼。",
-        )
+        await sync_screen_context()
+        await live.send_text(session_started_prompt(context))
         while True:
             remaining = max_session_seconds - (time.monotonic() - started)
             if remaining <= 0:
@@ -2593,6 +2675,14 @@ async def run_duplex_session(
             kind = control.get("type")
             if kind == "context_changed":
                 next_context = safe_context(control.get("context"))
+                if next_context.get('permissions', {}).get('public_ayue') is not True:
+                    recent_public_places = []
+                else:
+                    screen_places = ((next_context.get('screen') or {}).get('content') or {}).get('recommendations') or []
+                    if screen_places:
+                        recent_public_places = screen_places
+                if context.get("_calendar_reference"):
+                    next_context["_calendar_reference"] = context["_calendar_reference"]
                 async with state_lock:
                     if pending and (
                         next_context["scope"] != pending.scope
@@ -2614,6 +2704,9 @@ async def run_duplex_session(
                             ))
                             await schedule_ready_tasks(stale.batch_id)
                     context = next_context
+                # UI animation/streaming updates must not block this receive
+                # loop: it also carries microphone frames and action results.
+                queue_screen_context()
             elif kind == "utterance" and template_enabled:
                 text = str(control.get("text") or "").strip()[:2000]
                 if not text:
@@ -2680,6 +2773,10 @@ async def run_duplex_session(
                         last_delegated_expires_at = time.time() + 120
                     if control.get("result_version") == 1:
                         result_text = safe_result(control)
+                        places = (result_text.get('data') or {}).get('recommendations') or []
+                        if (control.get('success') is True and proposal.intent in {'ayue.public_query', 'match.ayue_query'}
+                                and places):
+                            recent_public_places = places
                     if task_info and task_service is not None:
                         task_id, batch_id = task_info
                         updated = task_service.complete_action(
@@ -2843,6 +2940,9 @@ async def run_duplex_session(
             elif kind == "stop":
                 break
     finally:
+        if screen_sync_task is not None:
+            screen_sync_task.cancel()
+            await asyncio.gather(screen_sync_task, return_exceptions=True)
         remember("user", last_user_transcript)
         await cancel_non_blocking_tools("session_closed")
         if pending is not None and pending.task_id and task_service is not None:

@@ -211,6 +211,11 @@ class MatchmakerAgent:
                             model=self.model, messages=messages,
                             temperature=0.7, max_tokens=budget,
                         )
+                        from agent_quota.service import record_usage
+                        import uuid
+                        usage = getattr(response, 'usage', None)
+                        if usage:
+                            record_usage(uuid.uuid4().hex, usage.prompt_tokens, usage.completion_tokens)
                         try:
                             return _match_content(response)
                         except MatchEvaluationError as exc:

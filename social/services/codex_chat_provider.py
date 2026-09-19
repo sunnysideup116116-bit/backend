@@ -450,6 +450,7 @@ def proposal_schema(tools):
 def generate(prompt, *, model, system_prompt=None, tools=None, json_output=False,
              deadline_monotonic=None, on_token=None):
     from jsonschema import Draft202012Validator
+    from agent_quota.service import record_usage
 
     started = time.monotonic()
     plain_text = not tools and not json_output
@@ -493,9 +494,10 @@ def generate(prompt, *, model, system_prompt=None, tools=None, json_output=False
             if method == "error" and params.get("turnId") == turn_id and not params.get("willRetry", False):
                 raise CodexProviderError("Codex turn failed")
             if method == "thread/tokenUsage/updated" and params.get("turnId") == turn_id:
-                usage = params.get("tokenUsage", {}).get("last", {})
+                usage = params.get("tokenUsage", {}).get("total") or params.get("tokenUsage", {}).get("last", {})
                 input_tokens = int(usage.get("inputTokens") or 0)
                 output_tokens = int(usage.get("outputTokens") or 0)
+                record_usage("codex:" + thread_id + ":" + turn_id, input_tokens, output_tokens)
             if (plain_text and on_token and method == "item/agentMessage/delta"
                     and params.get("turnId") == turn_id
                     and streaming_item is not None and params.get("itemId") == streaming_item):

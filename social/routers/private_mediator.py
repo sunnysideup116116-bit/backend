@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import copy_context
+from agent_quota.api import budgeted
+from agent_quota.service import unmetered
 import json
 import queue
 import threading
@@ -248,6 +251,7 @@ def _run_private_v2_saved_turn(
 
 @router.post("/mediator/private")
 
+@budgeted("private")
 def mediator_private_chat(
     req: MediatorPrivateRequest,
     background_tasks: BackgroundTasks,
@@ -294,6 +298,7 @@ def mediator_private_chat(
         _SOURCE_MESSAGE_ID.reset(token)
 
 @router.post("/mediator/private/stream")
+@budgeted("private")
 def mediator_private_chat_stream(
     req: MediatorPrivateRequest,
     background_tasks: BackgroundTasks,
@@ -363,7 +368,8 @@ def mediator_private_chat_stream(
             })
         finally:
             try:
-                asyncio.run(worker_tasks())
+                with unmetered():
+                    asyncio.run(worker_tasks())
             except Exception:
                 pass
             worker_done.set()
@@ -382,7 +388,7 @@ def mediator_private_chat_stream(
                 break
             yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
 
-    threading.Thread(target=worker, name="ayue-private-stream", daemon=True).start()
+    threading.Thread(target=copy_context().run, args=(worker,), name="ayue-private-stream", daemon=True).start()
     return StreamingResponse(
         event_stream(),
         media_type="application/x-ndjson",

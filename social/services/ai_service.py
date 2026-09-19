@@ -1,3 +1,4 @@
+from agent_quota.service import tracked_ollama
 import json
 import os
 import time
@@ -189,7 +190,7 @@ ollama_client = Client(
 def _chat_with_deadline(*, deadline_monotonic: float | None = None, **payload):
     """Keep the deadline local to this call, including lazy stream iteration."""
     if deadline_monotonic is None:
-        return ollama_client.chat(**payload)
+        return tracked_ollama(ollama_client.chat(**payload))
 
     def check_deadline() -> None:
         if time.monotonic() >= deadline_monotonic:
@@ -200,7 +201,7 @@ def _chat_with_deadline(*, deadline_monotonic: float | None = None, **payload):
             token = _OLLAMA_DEADLINE.set(deadline_monotonic)
             try:
                 check_deadline()
-                for chunk in ollama_client.chat(**payload):
+                for chunk in tracked_ollama(ollama_client.chat(**payload)):
                     check_deadline()
                     yield chunk
                 check_deadline()
@@ -211,7 +212,7 @@ def _chat_with_deadline(*, deadline_monotonic: float | None = None, **payload):
     token = _OLLAMA_DEADLINE.set(deadline_monotonic)
     try:
         check_deadline()
-        response = ollama_client.chat(**payload)
+        response = tracked_ollama(ollama_client.chat(**payload))
         check_deadline()
         return response
     finally:
@@ -348,12 +349,12 @@ def generate_chat_completion(
     started = time.perf_counter()
 
     if on_token is None:
-        response = ollama_client.chat(**payload)
+        response = tracked_ollama(ollama_client.chat(**payload))
         content = response["message"]["content"].strip()
         input_tokens = int(response.get("prompt_eval_count") or 0)
         output_tokens = int(response.get("eval_count") or 0)
     else:
-        response = ollama_client.chat(**payload, stream=True)
+        response = tracked_ollama(ollama_client.chat(**payload, stream=True))
         content_parts: list[str] = []
         input_tokens = 0
         output_tokens = 0

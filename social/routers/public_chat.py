@@ -5,6 +5,9 @@ Public Ayue delegates to the production Pi runtime.
 """
 
 import asyncio
+from contextvars import copy_context
+from agent_quota.api import budgeted
+from agent_quota.service import unmetered
 import ipaddress
 import json
 import queue
@@ -600,6 +603,7 @@ def _sanitize_public_stream_event(event: dict) -> dict | None:
 
 
 @router.post("/direct_chat/stream")
+@budgeted("matching")
 def direct_chat_stream(
     req: DirectChatRequest, background_tasks: BackgroundTasks, request: Request = None,
 ):
@@ -671,7 +675,8 @@ def direct_chat_stream(
             worker_done.set()
             try:
                 enqueue(None, terminal=True)
-                asyncio.run(worker_background_tasks())
+                with unmetered():
+                    asyncio.run(worker_background_tasks())
             except Exception:
                 pass
 
@@ -699,7 +704,7 @@ def direct_chat_stream(
             yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
             last_delivery = time.monotonic()
 
-    threading.Thread(target=worker, name="ayue-direct-chat-stream", daemon=True).start()
+    threading.Thread(target=copy_context().run, args=(worker,), name="ayue-direct-chat-stream", daemon=True).start()
     return StreamingResponse(
         event_stream(),
         media_type="application/x-ndjson",
@@ -711,6 +716,7 @@ def direct_chat_stream(
 
 
 @router.post("/direct_chat")
+@budgeted("matching")
 def direct_chat(
     req: DirectChatRequest,
     background_tasks: BackgroundTasks,

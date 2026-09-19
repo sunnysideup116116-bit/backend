@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from agent_quota.service import record_gemini
 import base64
 import io
 import json
@@ -38,6 +39,14 @@ def _calendar_range_needs_model(
         r"\s*(?:天|週|周|月|季|年))",
         value,
     ))
+
+
+def response_language_label(value: str | None) -> str:
+    return {
+        "zh-TW": "台灣繁體中文",
+        "zh-CN": "簡體中文",
+        "en-US": "English",
+    }.get(str(value or ""), "台灣繁體中文")
 
 
 class AppVoiceProvider:
@@ -183,6 +192,8 @@ class AppVoiceProvider:
                     await session.send_realtime_input(
                         text=f"請逐字朗讀，不要回答：{spoken}",
                     )
+                    import uuid
+                    quota_call = uuid.uuid4().hex
                     responses = aiter(session.receive())
                     while True:
                         try:
@@ -192,6 +203,7 @@ class AppVoiceProvider:
                             )
                         except StopAsyncIteration:
                             break
+                        record_gemini(response, quota_call)
                         content = response.server_content
                         if content and content.model_turn:
                             for part in content.model_turn.parts or []:
@@ -243,6 +255,10 @@ class AppVoiceProvider:
         from google.genai import types
 
         today = datetime.now(ZoneInfo("Asia/Taipei")).date().isoformat()
+        response_language = str(
+            (context.get("voice_config") or {}).get("response_language") or "zh-TW"
+        )
+        reply_language = response_language_label(response_language)
         prompt = f"""
 你是 Folks App 的語音指令解析器。只能輸出 JSON，欄位為 intent、arguments、reply。
 允許 intent：app.navigate、profile.open、profile.patch、profile.request_commit、settings.open、
@@ -298,7 +314,7 @@ ui.liquid_glass、ui.dark_mode，enabled 必須是 boolean。
 使用者說要你休息、先不要聽、停止聆聽、安靜一下、不用再聽、關閉或結束語音模式時使用 assistant.close；
 只取消目前操作但不離開語音模式時使用 assistant.cancel。
 一般問候、「你是誰」或不要求操作 App 的問題使用 assistant.reply，絕對不能假裝開啟頁面。
-reply 請用自然、親切的台灣繁體中文口語，一到兩個短句，不要使用生硬公告語氣。
+reply 請固定使用 {reply_language}，一到兩個短句，不要因為使用者上一句或控制訊息的語言切換；語氣自然、親切，不要使用生硬公告語氣。
 畫面指代補充規則：screen.items 是本頁依順序列出的項目；screen.selected_ref 是目前選取項目。
 使用者說「他／這個／第二個」時，chat.open、chat.request_send、ayue.private_query、date.*、
 calendar.update、calendar.cancel 或 matching 的 ayue.public_query 可以額外傳 target_ref，值只能取自本頁 items.ref。
@@ -323,6 +339,7 @@ screen.ready=false、沒有選取且有多個候選，或項目未列出時先�
                     temperature=0.2,
                 ),
             )
+            record_gemini(response)
             value = json.loads(response.text or "{}")
             return value if isinstance(value, dict) else {}
         finally:
@@ -361,6 +378,7 @@ screen.ready=false、沒有選取且有多個候選，或項目未列出時先�
                     ),
                 ),
             )
+            record_gemini(response)
             for part in response.candidates[0].content.parts:
                 inline = getattr(part, "inline_data", None)
                 data = getattr(inline, "data", None) if inline is not None else None

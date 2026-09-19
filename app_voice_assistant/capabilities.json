@@ -983,7 +983,7 @@
     "personality.explore": {
       "title": "個性探索",
       "domain": "personality",
-      "aliases": ["人格測驗", "性格探索", "開始個性探索"],
+      "aliases": ["人格測驗", "性格探索", "開始個性探索", "更認識我", "更了解我", "更瞭解我"],
       "risk": "write",
       "execution_kind": "background_device",
       "cancellable": true,

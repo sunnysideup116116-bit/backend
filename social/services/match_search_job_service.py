@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+from agent_quota.service import SCOPE, service as quota_service, task_scope
+
 import threading
 import time
 import uuid
@@ -177,6 +180,12 @@ def enqueue_match_search(
         except Exception:
             # The authoritative reservation will fail closed in the worker.
             pass
+    quota_scope = SCOPE.get()
+    # Only authenticated foreground adapters establish this scope. Background
+    # jobs cannot become billable because of a source label (nor vice versa).
+    billable = quota_scope is not None
+    if billable and not (quota_scope and quota_scope[0] == user_id and quota_scope[1] == 'matching'):
+        quota_service.check(user_id)
     if _has_live_match(user_id):
         return {"status": "already_active"}
     now = time.time()
@@ -191,6 +200,7 @@ def enqueue_match_search(
         else PREVIEW_ON_MATCH
     )
     job = {
+        "quota_billable": billable,
         "job_id": uuid.uuid4().hex,
         "user_id": user_id,
         "active_user_id": user_id,
@@ -673,10 +683,12 @@ def run_one_match_search_job() -> bool:
             pipeline_kwargs["origin_room_id"] = str(job.get("origin_room_id") or "")[:240]
         if str(job.get("delivery_mode") or PREVIEW_ON_MATCH) == INVITE_ON_MATCH:
             pipeline_kwargs["delivery_mode"] = INVITE_ON_MATCH
-        result = _pipeline(
-            str(job.get("user_id") or ""), str(job.get("source") or "automatic"),
-            **pipeline_kwargs,
-        )
+        scope = task_scope(str(job['user_id']), 'matching', str(job['job_id'])) if job.get('quota_billable') else nullcontext()
+        with scope:
+            result = _pipeline(
+                str(job.get("user_id") or ""), str(job.get("source") or "automatic"),
+                **pipeline_kwargs,
+            )
     except MatchSearchPipelineError as exc:
         if _finish_job(job, "failed", error_code=exc.code, failure_stage=exc.stage):
             queue_mediator_event(

@@ -13,6 +13,16 @@ def _text(value, limit=120):
     return re.sub(r'(?<!\d)09\d{8}(?!\d)', '[電話已隱藏]', text)
 
 
+def safe_recommendations(value):
+    if not isinstance(value, list):
+        return []
+    return [
+        {key: _text(item.get(key), 180) for key in ('name', 'category', 'address_summary')}
+        for item in value[:12]
+        if isinstance(item, dict) and isinstance(item.get('name'), str) and item['name'].strip()
+    ]
+
+
 def _safe_content(value, permissions):
     if not isinstance(value, dict):
         return {}
@@ -78,6 +88,7 @@ def _safe_content(value, permissions):
             isinstance(raw_items, list) and len(raw_items) > len(items)
         ),
         'items': items,
+        'recommendations': safe_recommendations(value.get('recommendations')),
     }
     # Keep a malicious or accidentally oversized page projection bounded even
     # after field-level truncation.
@@ -116,6 +127,24 @@ def safe_screen(value, permissions):
     content = _safe_content(value.get('content'), permissions)
     if content:
         safe['content'] = content
+    controls = value.get('controls')
+    safe['controls'] = [
+        {
+            'kind': 'confirmation',
+            'title': _text(control.get('title'), 120),
+            'confirm_label': _text(control.get('confirm_label'), 24),
+            'cancel_label': _text(control.get('cancel_label'), 24),
+            'enabled': control.get('enabled') is True,
+            'visible': control.get('visible') is True,
+        }
+        for control in (controls[:4] if isinstance(controls, list) else [])
+        if isinstance(control, dict) and control.get('kind') == 'confirmation'
+    ]
+    composer = value.get('composer')
+    if isinstance(composer, dict):
+        safe['composer'] = {key: composer.get(key) is True
+                            for key in ('present', 'has_draft', 'typing')}
+    safe['operation_in_progress'] = value.get('operation_in_progress') is True
     return safe
 
 
@@ -207,6 +236,8 @@ def safe_result(value):
                 result[key] = [item(value) for value in raw[key][:20] if isinstance(value, dict)]
         if isinstance(raw.get('selected'), dict):
             result['selected'] = item(raw['selected'])
+        if 'recommendations' in raw:
+            result['recommendations'] = safe_recommendations(raw['recommendations'])
         return result
     result = {'status': status,
               'message': str(value.get('message') or '')[:12000] or ('操作已完成。' if success else '操作沒有完成。')}

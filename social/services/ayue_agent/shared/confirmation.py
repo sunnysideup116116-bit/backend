@@ -72,6 +72,9 @@ def match_choice_labels(record: dict[str, Any]) -> dict[str, str]:
 def confirmation_display(record: dict[str, Any]) -> dict[str, str] | None:
     """Return bounded, Server-owned facts for a visible confirmation component."""
     action = str(record.get("tool_name") or "")
+    if action == ASSESSMENT_COMMIT_ACTION:
+        # The analysis is already the message above this card.
+        return {"title": "套用探索結果", "consequence": "套用後更新個人資料"}
     labels = {
         "calendar.submit_commands": ("確認行事曆變更", "確認後才會寫入行事曆"),
         "relationship.start_date_coordination": ("建立約會邀請", "確認後才會送出邀請"),

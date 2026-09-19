@@ -56,6 +56,11 @@ class FakeLive:
     async def send_text(self, text):
         self.text.append(text)
 
+    async def send_screen_context(self, payload):
+        if not hasattr(self, 'screen_contexts'):
+            self.screen_contexts = []
+        self.screen_contexts.append(payload)
+
     async def send_tool_response(self, *, call_id, name, response):
         self.tool_responses.append((call_id, name, response))
 
@@ -363,26 +368,11 @@ def test_proxy_new_match_confirms_once_then_queues_and_ignores_model_duplicate()
             item[2] for item in live.tool_responses
             if item[0] == "find-new-match"
         )
-        assert response["status"] == "awaiting_confirmation"
-        assert response["spoken_prompt"] == "要開始配對的話，說「開始」或「可以開始」。"
-        confirmation = next(
-            event for event in events
-            if event.get("type") == "confirmation_required"
-        )
-        assert confirmation["intent"] == "match.ayue_query"
-        assert confirmation["phrase"] == "確認開始配對"
+        assert response["status"] == "queued"
+        # Only the handoff is queued; the public room's card confirms search.
         assert not any(
-            event.get("type") == "action_proposal" for event in events
+            event.get("type") == "confirmation_required" for event in events
         )
-        await socket.incoming.put({
-            "type": "websocket.receive",
-            "text": json.dumps({
-                "type": "confirmation_response",
-                "confirmation_id": confirmation["confirmation_id"],
-                "accepted": True,
-                "spoken_phrase": "可以開始了",
-            }),
-        })
         await wait_until(lambda: any(
             event.get("type") == "action_proposal" for event in events
         ))
@@ -392,17 +382,13 @@ def test_proxy_new_match_confirms_once_then_queues_and_ignores_model_duplicate()
         assert proposal["intent"] == "match.ayue_query"
         assert proposal["arguments"] == {"question": "幫我找新的配對"}
         await live.incoming.put(message(tool_calls=[SimpleNamespace(
-            id="duplicate-confirm", name="resolve_pending_interaction",
-            args={"action": "confirm", "spoken_phrase": "確認"},
+            id="find-new-match", name="find_app_capabilities",
+            args={"query": "幫我找新的配對", "mode": "perform"},
         )]))
-        await wait_until(lambda: any(
-            item[0] == "duplicate-confirm" for item in live.tool_responses
-        ))
-        duplicate = next(
-            item[2] for item in live.tool_responses
-            if item[0] == "duplicate-confirm"
-        )
-        assert duplicate["status"] == "already_confirmed"
+        await wait_until(lambda: sum(
+            item[0] == "find-new-match" for item in live.tool_responses
+        ) == 2)
+        assert live.tool_responses[-1][2]["status"] == "queued"
         assert sum(
             event.get("type") == "action_proposal" for event in events
         ) == 1
@@ -458,10 +444,10 @@ def test_proxy_routes_the_models_shortened_new_match_phrase():
             item[2] for item in live.tool_responses
             if item[0] == "find-short-match"
         )
-        assert response["status"] == "awaiting_confirmation"
+        assert response["status"] == "queued"
         confirmation = next(
             event for event in events
-            if event.get("type") == "confirmation_required"
+            if event.get("type") == "action_proposal"
         )
         assert confirmation["intent"] == "match.ayue_query"
         assert confirmation["arguments"] == {"question": "新的配對"}
@@ -517,10 +503,10 @@ def test_proxy_preserves_new_match_when_model_rewrites_it_as_progress():
             item[2] for item in live.tool_responses
             if item[0] == "rewritten-match"
         )
-        assert response["status"] == "awaiting_confirmation"
+        assert response["status"] == "queued"
         confirmation = next(
             event for event in events
-            if event.get("type") == "confirmation_required"
+            if event.get("type") == "action_proposal"
         )
         assert confirmation["intent"] == "match.ayue_query"
         assert confirmation["arguments"] == {"question": "新的配對"}
@@ -2388,42 +2374,24 @@ def test_template_new_match_never_claims_started_before_confirmation():
             turn_complete=False,
         )))
         await wait_until(lambda: any(
-            event.get("type") == "confirmation_required" for event in events
-        ))
-        confirmation = next(
-            event for event in events
-            if event.get("type") == "confirmation_required"
-        )
-        assert confirmation["intent"] == "match.ayue_query"
-        assert confirmation["spoken_prompt"] == "要開始配對的話，說「開始」或「可以開始」。"
-        assert not any(
-            event.get("type") == "action_proposal" for event in events
-        )
-        assert not any("已開始" in text or "actively looking" in text for text in live.text)
-
-        await socket.incoming.put({
-            "type": "websocket.receive",
-            "text": json.dumps({
-                "type": "confirmation_response",
-                "confirmation_id": confirmation["confirmation_id"],
-                "accepted": True,
-                "spoken_phrase": "開始",
-            }),
-        })
-        await wait_until(lambda: any(
             event.get("type") == "action_proposal" for event in events
         ))
         proposal = next(
-            event for event in events if event.get("type") == "action_proposal"
+            event for event in events
+            if event.get("type") == "action_proposal"
         )
         assert proposal["intent"] == "match.ayue_query"
+        assert not any(
+            event.get("type") == "confirmation_required" for event in events
+        )
+        assert not any("已開始" in text or "actively looking" in text for text in live.text)
         await socket.incoming.put({
             "type": "websocket.receive",
             "text": json.dumps({
                 "type": "action_result",
                 "action_id": proposal["action_id"],
                 "success": True,
-                "message": "已開始尋找新的配對對象。",
+                "message": "配對阿月已開啟，請確認畫面上的搜尋卡片。",
             }),
         })
         await socket.incoming.put({
