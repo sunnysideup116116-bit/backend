@@ -8,7 +8,8 @@ from .service import AppwriteStore, StoreError, key, DEFAULT_TOKENS, DAILY_REFIL
 SCHEMA = {
     'agent_quota_settings': {'initial_tokens': ('integer', DEFAULT_TOKENS),
                              'daily_refill_tokens': ('integer', DAILY_REFILL_TOKENS)},
-    'agent_quotas': {'user_id': ('string', ''), 'max_tokens': ('integer', DEFAULT_TOKENS),
+    'agent_quotas': {'user_id': ('string', ''), 'user_name': ('string', ''),
+                     'max_tokens': ('integer', DEFAULT_TOKENS),
                      'remaining_tokens': ('integer', DEFAULT_TOKENS), 'infinity': ('boolean', False),
                      'used_tokens': ('integer', 0), 'matching_tokens': ('integer', 0),
                      'private_tokens': ('integer', 0), 'voice_tokens': ('integer', 0),

@@ -36,6 +36,15 @@ def quota_status(request: Request):
         raise HTTPException(503, detail={'code': exc.code, 'message': exc.message}) from exc
 
 
+@router.post('/sync-name')
+def sync_quota_user_name(request: Request):
+    owner = owner_from_request(request)
+    try:
+        return {'user_name': service.sync_user_name(owner)}
+    except QuotaError as exc:
+        raise HTTPException(503, detail={'code': exc.code, 'message': exc.message}) from exc
+
+
 class RedeemRequest(BaseModel):
     code: str = Field(min_length=1, max_length=128)
 

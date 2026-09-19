@@ -18,6 +18,7 @@ class MemoryStore:
                      ('agent_quota_codes', key('Sunnyfan116')): {'code': 'Sunnyfan116', 'enabled': True}}
         self.lock = threading.RLock()
         self.unavailable = False
+        self.names = {}
 
     def get(self, collection, document, tx=None):
         if self.unavailable:
@@ -33,6 +34,9 @@ class MemoryStore:
 
     def update(self, collection, document, data, tx=None):
         self.rows[collection, document].update(data)
+
+    def user_name(self, owner):
+        return self.names.get(owner, '')
 
     @contextmanager
     def transaction(self):
@@ -61,6 +65,13 @@ def test_defaults_independent_manual_fields_and_percent(quota):
     assert quota.status('old')['remaining_percent'] == 10
     quota.store.update('agent_quotas', 'old', {'max_tokens': 0})
     assert quota.status('old')['remaining_percent'] == 0
+
+
+def test_quota_document_syncs_current_profile_name(quota):
+    quota.store.names['owner'] = 'Candy'
+    assert quota.status('owner')['user_name'] == 'Candy'
+    quota.store.names['owner'] = '新名稱'
+    assert quota.status('owner')['user_name'] == '新名稱'
 
 
 def test_overrun_no_debt_cumulative_usage_and_replay(quota):

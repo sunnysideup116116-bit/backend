@@ -92,6 +92,21 @@ class AppwriteStore:
                 return None
             raise
 
+    def user_name(self, owner):
+        """Return the app-facing profile name, falling back to Appwrite Users."""
+        profile = self.get('user_profiles', owner)
+        if profile:
+            name = str(profile.get('name') or '').strip()
+            if name:
+                return name[:128]
+        try:
+            account = self.request('GET', f'/users/{quote(owner, safe="")}')
+        except StoreError as exc:
+            if exc.status == 404:
+                return ''
+            raise
+        return str(account.get('name') or '').strip()[:128]
+
     def create(self, collection, document, data, tx=None):
         payload = {'documentId': document, 'data': data, 'permissions': []}
         if tx:
@@ -130,7 +145,7 @@ class QuotaService:
             self._store = AppwriteStore()
         return self._store
 
-    def account(self, owner, *, now=None):
+    def account(self, owner, *, now=None, sync_name=False):
         row = self.store.get('agent_quotas', owner)
         if row is not None:
             return row
@@ -138,8 +153,10 @@ class QuotaService:
         if settings is None:
             raise QuotaError()
         initial = max(0, int(settings['initial_tokens']))
+        user_name = self.store.user_name(owner) if sync_name else ''
         data = {'user_id': owner, 'max_tokens': initial, 'remaining_tokens': initial,
                 'infinity': False, 'used_tokens': 0, 'revision': '',
+                'user_name': user_name,
                 'last_refill_at': (now or datetime.now(timezone.utc)).isoformat(),
                 'refill_policy_version': REFILL_POLICY_VERSION,
                 **{f'{f}_tokens': 0 for f in FEATURES}}
@@ -150,8 +167,36 @@ class QuotaService:
                 raise
             return self.store.get('agent_quotas', owner)
 
+    def sync_user_name(self, owner, *, now=None):
+        """Copy the current app profile name into the quota document."""
+        desired = self.store.user_name(owner)
+        with self.owner_lock(owner):
+            row = self.account(owner, now=now, sync_name=False)
+            if str(row.get('user_name') or '') == desired:
+                return desired
+            for attempt in range(8):
+                try:
+                    with self.store.transaction() as tx:
+                        current = self.store.get('agent_quotas', owner, tx)
+                        if str(current.get('user_name') or '') != desired:
+                            self.store.update('agent_quotas', owner, {
+                                'user_name': desired,
+                                'revision': uuid.uuid4().hex,
+                            }, tx)
+                    return desired
+                except StoreError as exc:
+                    if exc.status != 409 or attempt == 7:
+                        raise
+                    time.sleep(0.01 * (attempt + 1))
+
     def status(self, owner, *, now=None):
         try:
+            try:
+                current = now or datetime.now(timezone.utc)
+                self.sync_user_name(owner, now=current)
+            except Exception:
+                # A profile-name read must not block an otherwise healthy quota.
+                LOG.warning('Agent quota user name sync pending', exc_info=False)
             # Settle older observed usage before admitting a new task.
             self.replay(owner=owner, strict=True)
             current = now or datetime.now(timezone.utc)
@@ -164,7 +209,7 @@ class QuotaService:
             row = self.refill(owner, now=current, daily_tokens=daily)
             maximum = max(0, int(row['max_tokens']))
             remaining = max(0, int(row['remaining_tokens']))
-            return {k: row[k] for k in ('max_tokens', 'remaining_tokens', 'infinity', 'used_tokens',
+            return {k: row.get(k) for k in ('user_name', 'max_tokens', 'remaining_tokens', 'infinity', 'used_tokens',
                     *(f'{f}_tokens' for f in FEATURES))} | {
                 'remaining_percent': min(100, remaining * 100 / maximum) if maximum else 0,
                 'last_refill_at': row['last_refill_at'],
@@ -190,7 +235,7 @@ class QuotaService:
         if now.tzinfo is None:
             raise ValueError('refill time must include a timezone')
         with self.owner_lock(owner):
-            row = self.account(owner, now=now)
+            row = self.account(owner, now=now, sync_name=False)
             if not self._refill_update(row, now, daily_tokens):
                 return row
             for attempt in range(8):
@@ -297,7 +342,7 @@ class QuotaService:
             return self._settle_locked(ident, event)
 
     def _settle_locked(self, ident, event):
-        self.account(event['user_id'])
+        self.account(event['user_id'], sync_name=False)
         for attempt in range(8):
             try:
                 with self.store.transaction() as tx:
@@ -347,7 +392,7 @@ class QuotaService:
 
     def _redeem_locked(self, owner, code):
         try:
-            self.account(owner)
+            self.account(owner, sync_name=False)
             ident = key(owner + ':' + code)
             for attempt in range(8):
                 try:

@@ -29,6 +29,7 @@ def migrate():
         for row in rows:
             # Settle pending usage before crediting the new policy.
             service.replay(owner=row['$id'], strict=True)
+            service.sync_user_name(row['$id'])
             service.refill(row['$id'], now=current)
             upgraded += 1
         if len(rows) < 100:

@@ -9,7 +9,7 @@
 | 集合 | 用途／可調欄位 |
 | --- | --- |
 | `agent_quota_settings` | 文件 `default` 的 `initial_tokens` 預設 150000，控制之後初始化的帳號；`daily_refill_tokens` 預設 40000，控制每日補充量。 |
-| `agent_quotas` | 文件 ID 為帳號 ID。`max_tokens` 是百分比分母；`remaining_tokens` 是可用額度，兩者分開修改。`infinity=true` 開啟無限額度。`last_refill_at` 是後端維護的補額時間（Appwrite datetime）；`refill_policy_version` 用於一次性升級去重。 |
+| `agent_quotas` | 文件 ID 為帳號 ID。`user_name` 即時同步 `user_profiles.name`，沒有個人資料名稱時回退到 Appwrite Users 名稱；`max_tokens` 是百分比分母；`remaining_tokens` 是可用額度，兩者分開修改。`infinity=true` 開啟無限額度。`last_refill_at` 是後端維護的補額時間（Appwrite datetime）；`refill_policy_version` 用於一次性升級去重。 |
 | `agent_quota_usage` | 每次模型呼叫的輸入、輸出、實際扣額與任務識別；不存對話內容。 |
 | `agent_quota_codes` | `Sunnyfan116` 開啟無限，只有此碼可重複使用；`enabled=false` 停止所有後續兌換，不影響已啟用者。 |
 | `agent_quota_redemptions` | 保留首次兌換紀錄；一般代碼每帳號一次，僅精確的 `Sunnyfan116` 例外。重複使用 Sunnyfan116 不新增重複文件。 |
@@ -59,6 +59,7 @@ Appwrite 交易同時提交餘額和用量紀錄；跨程序帳號鎖序列化�
 ## API
 
 - `GET /api/agent-quota`：本人上限、餘額、infinity、總用量、三功能用量、剩餘百分比，以及 `last_refill_at`、`daily_refill_tokens`、`refill_timezone`、`refill_time`、`next_refill_at`。
+- `POST /api/agent-quota/sync-name`：重新讀取本人 Appwrite 個人資料名稱並更新 `agent_quotas.user_name`。
 - `POST /api/agent-quota/redeem`，JSON `{"code":"Sunnyfan116"}`：精確輸入 `Sunnyfan116` 可重複回傳 `redeemed`；其他代碼在重複使用時回傳 `already_redeemed`，無效或停用回傳 `invalid_code`，並附上最新額度。
 - 所有操作需要 `Authorization: Bearer <Appwrite JWT>`；無法透過 request body 指定別人的額度。
 - 403：`detail.code=agent_quota_exhausted`；503：`detail.code=agent_quota_unavailable`。`detail.message` 為畫面與語音可用的中文訊息。
