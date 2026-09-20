@@ -32,6 +32,13 @@ MATCHMAKER_REQUIRED = (
     "NEO4J_PASSWORD",
     "NEO4J_DATABASE",
 )
+CENTRAL_SOCIAL_MODEL_KEYS = (
+    "OLLAMA_CHAT_MODEL",
+    "GOOGLE_EMBEDDING_MODEL",
+)
+CENTRAL_MATCHMAKER_MODEL_KEYS = (
+    "LLM_MODEL_ID",
+)
 GOOGLE_CALENDAR_REQUIRED = (
     "GOOGLE_CALENDAR_CLIENT_ID",
     "GOOGLE_CALENDAR_CLIENT_SECRET",
@@ -93,9 +100,21 @@ def parse_env(path: Path) -> dict[str, str]:
     return values
 
 
-def validate_environment(social_path: Path, matchmaker_path: Path) -> ValidationResult:
+def validate_environment(
+    social_path: Path,
+    matchmaker_path: Path,
+    server_path: Path | None = None,
+) -> ValidationResult:
+    server_path = server_path or social_path.resolve().parents[1] / ".env"
+    server = parse_env(server_path) if server_path.is_file() else {}
     social = parse_env(social_path)
     matchmaker = parse_env(matchmaker_path)
+    for key in CENTRAL_SOCIAL_MODEL_KEYS:
+        if key in server:
+            social[key] = server[key]
+    for key in CENTRAL_MATCHMAKER_MODEL_KEYS:
+        if key in server:
+            matchmaker[key] = server[key]
     missing_social = tuple(key for key in SOCIAL_REQUIRED if not social.get(key, "").strip())
     try:
         risk_timeout = float(social.get("RISK_TIMEOUT_SEC", ""))
@@ -261,6 +280,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=server_root / "matchmaker_agent" / ".env",
     )
+    parser.add_argument("--server-env", type=Path, default=server_root / ".env")
     parser.add_argument("--check-services", action="store_true")
     parser.add_argument("--risk-url", default="http://127.0.0.1:8001/health")
     return parser
@@ -268,7 +288,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
-    result = validate_environment(args.social_env, args.matchmaker_env)
+    result = validate_environment(args.social_env, args.matchmaker_env, args.server_env)
     print(result.render())
     if not result.ok:
         return 1

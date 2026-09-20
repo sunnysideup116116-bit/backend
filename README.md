@@ -193,7 +193,7 @@ Event、Memory／Compaction、Neo4j Concept 的完整契約分別見 `docs/EVENT
 
 ## 環境變數（`.env`）
 
-頂層 `Server/.env` 為共用設定；`social/.env` 與 `matchmaker_agent/.env` 由 `scripts/provision_ayue_v3_env.sh` 產生。
+頂層 `Server/.env` 為共用設定，並且是所有模型選擇的唯一來源；`social/.env` 與 `matchmaker_agent/.env` 只保留服務專屬憑證與行為設定，由 `scripts/provision_ayue_v3_env.sh` 產生。
 
 重點變數：
 
@@ -201,7 +201,7 @@ Event、Memory／Compaction、Neo4j Concept 的完整契約分別見 `docs/EVENT
 |------|------|
 | MongoDB | `MONGO_URI`、`MONGO_DB_NAME`（Atlas 雲端，含 `$vectorSearch`） |
 | Neo4j | `NEO4J_URI`、`NEO4J_USERNAME`、`NEO4J_PASSWORD`、`NEO4J_DATABASE` |
-| LLM | `OLLAMA_HOST`、`OLLAMA_API_KEY`、`OLLAMA_CHAT_MODEL`、`OLLAMA_FAST_CHAT_MODEL`、`GOOGLE_AI_STUDIO_API_KEY`、`GOOGLE_EMBEDDING_MODEL` |
+| LLM | 根目錄 `.env`：`OLLAMA_CHAT_MODEL`、`OLLAMA_FAST_CHAT_MODEL`、`VOICE_MEMORY_OLLAMA_MODEL`、`VOICE_REGISTRATION_MODEL`、`VOICE_APP_TEXT_MODEL`、`VOICE_APP_LIVE_MODEL`、`VOICE_APP_TTS_MODEL`、`LLM_MODEL_ID`、`EVENT_EXTRACTION_MODEL_ID`、`EVENT_EXTRACTION_FALLBACK_MODEL_ID`、`GOOGLE_EMBEDDING_MODEL`；服務 `.env`：`OLLAMA_HOST`、`OLLAMA_API_KEY`、`GOOGLE_AI_STUDIO_API_KEY` |
 | 工具 | `TAVILY_API_KEY`、`TAVILY_PROJECT`、`GIPHY_API_KEY`、`GOOGLE_PLACES_SERVER_API_KEY`、`GOOGLE_MAPS_BROWSER_API_KEY` |
 | 風險 | `RISK_SERVICE_URL`、`RISK_TIMEOUT_SEC`、`GUARDRAIL_PROVIDER`、`GUARDRAIL_BASE_URL`、`GUARDRAIL_MODEL_PATH`、`GUARDRAIL_SERVER_BIN`、`GUARDRAIL_PORT` |
 | 媒婆 | `MATCH_AGENT_CANDIDATE_LIMIT`、`MATCH_VECTOR_QUALIFICATION_MIN` |

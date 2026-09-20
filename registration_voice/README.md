@@ -9,7 +9,6 @@ Gemini tool calls, validation, and session tickets remain on Server.
 ```dotenv
 VOICE_REGISTRATION_ENABLED=on
 VOICE_LOCAL_RATE_LIMIT_ENABLED=off
-VOICE_REGISTRATION_MODEL=gemini-3.1-flash-live-preview
 VOICE_REGISTRATION_THINKING_LEVEL=low
 VOICE_SILENCE_DURATION_MS=500
 VOICE_MAX_SESSION_SECONDS=120
@@ -20,8 +19,9 @@ Changing it to `on` applies the configured per-identity and global limits after
 restarting through `Server/start_all.sh`. The 120-second audio/session safety
 boundary remains active in either mode.
 
-Put these values in `Server/.env`. `registration_voice/.env.example` contains
-the complete feature-specific template. Spoken input is limited by policy to
+Put these values in `Server/.env`; model selection, including
+`VOICE_REGISTRATION_MODEL`, is also defined there. `registration_voice/.env.example`
+contains the complete feature-specific template. Spoken input is limited by policy to
 Taiwan Mandarin and English, and Chinese transcript/form output is always
 Traditional Chinese. Other languages are rejected without changing the form.
 `VOICE_SILENCE_DURATION_MS=500` means a 0.5-second pause ends the current

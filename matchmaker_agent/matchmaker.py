@@ -14,9 +14,20 @@ import httpx
 from openai import OpenAI, AsyncOpenAI, APIError, APITimeoutError
 from neo4j import GraphDatabase
 from pathlib import Path
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
-load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+_ROOT_MODEL_ENV_KEYS = frozenset({
+    "LLM_MODEL_ID",
+    "EVENT_EXTRACTION_MODEL_ID",
+    "EVENT_EXTRACTION_FALLBACK_MODEL_ID",
+})
+
+if os.getenv("AYUE_SKIP_DOTENV", "").strip().lower() not in {"1", "true", "on"}:
+    server_env = Path(__file__).resolve().parents[1] / ".env"
+    for key, value in dotenv_values(server_env, interpolate=False).items():
+        if key in _ROOT_MODEL_ENV_KEYS and value is not None:
+            os.environ.setdefault(key, value)
+    load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 MATCH_LLM_TIMEOUT_SECONDS = 60.0
 MATCH_MAX_OUTPUT_TOKENS = 4096
@@ -83,7 +94,7 @@ class MatchmakerAgent:
         )
         self.model = os.getenv("LLM_MODEL_ID")
         self.event_model = os.getenv(
-            "EVENT_EXTRACTION_MODEL_ID", "deepseek-v4-flash:cloud",
+            "EVENT_EXTRACTION_MODEL_ID", "deepseek-v4.1-flash:cloud",
         )
         self.system_prompt = """你叫阿月，是一位熟悉台灣校園生活的 AI 媒人。
 你的語氣像熟朋友：溫暖、直率、有觀察力，可以小吐槽但不要刻薄或施壓。

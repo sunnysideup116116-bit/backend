@@ -1,7 +1,8 @@
 # Experimental GPT mode (personal evaluation)
 
 `./start_all.sh` and `./start_all.sh ollama` retain Ollama. Existing main/fast
-Ollama configuration, including `deepseek-v4-flash:cloud`, is unchanged.
+Ollama configuration, including the root `.env` default
+`deepseek-v4.1-flash:cloud`, is unchanged.
 `./start_all.sh gpt` selects official Codex app-server managed ChatGPT OAuth.
 `./start_all.sh --help` exits without touching services.
 

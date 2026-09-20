@@ -792,8 +792,8 @@ POST /api/match/events/lifecycle/run
 | Variable | Default | 說明 |
 | --- | --- | --- |
 | `LLM_API_KEY` / `LLM_BASE_URL` | required | Ollama/OpenAI-compatible provider |
-| `LLM_MODEL_ID` | required | 一般 matchmaker model |
-| `EVENT_EXTRACTION_MODEL_ID` | `deepseek-v4-flash:cloud` example | 活動抽取模型 |
+| `LLM_MODEL_ID` | root `Server/.env` required | 一般 matchmaker model |
+| `EVENT_EXTRACTION_MODEL_ID` | root `Server/.env`, `deepseek-v4.1-flash:cloud` default | 活動抽取模型 |
 | `EVENT_RELEVANCE_MAX_PER_USER` | `3` | 每人 Event 正向連結上限 |
 | `NEO4J_URI` / `USERNAME` / `PASSWORD` | required | Aura connection |
 | `NEO4J_DATABASE` | `neo4j` | database name |

@@ -6338,7 +6338,7 @@ if (metadata.event_type === "date_coordination_form") {
                     modelSelector.title = '模型由伺服器設定';
                     thinkingSelector.title = '思考層級由伺服器設定';
                 }
-                const currentModel = data.model || data.default_model || 'deepseek-v4-flash:cloud';
+                const currentModel = data.model || data.default_model || 'deepseek-v4.1-flash:cloud';
                 for (const opt of modelSelector.options) {
                     opt.selected = opt.value === currentModel;
                 }

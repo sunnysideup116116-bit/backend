@@ -24,14 +24,14 @@ The table records variable names and public defaults only. Secret values from `s
 | `RISK_TIMEOUT_SEC` | yes for pair chat | `20` | existing Server env, example | Number greater than or equal to 20 |
 | `OLLAMA_HOST` | yes | `https://ollama.com` | `social.env`, existing Server env, example | HTTPS/HTTP endpoint reachable |
 | `OLLAMA_API_KEY` | yes for configured remote host | none | `social.env`, existing Server env | Non-empty; never printed |
-| `OLLAMA_CHAT_MODEL` | yes | `deepseek-v4-flash:cloud` | `social.env`, existing Server env, example | Non-empty |
-| `OLLAMA_FAST_CHAT_MODEL` | no | main chat model | example/runtime | Empty means reuse main model |
+| `OLLAMA_CHAT_MODEL` | yes | `deepseek-v4.1-flash:cloud` | root `Server/.env` | Non-empty |
+| `OLLAMA_FAST_CHAT_MODEL` | no | main chat model | root `Server/.env` | Empty means reuse main model |
 | `AYUE_OLLAMA_TIMEOUT_SECONDS` | no | `30` | example/runtime | Number from 5 through 120 |
 | `AYUE_LOCAL_DEBUG_TRACE` | no | `off` | `social.env`, example | Boolean |
 | `AYUE_RUNTIME_MODEL_SETTINGS_TOKEN` | no | empty | deployment secret | Never exposed to Flutter |
-| `AYUE_ALLOWED_RUNTIME_MODELS` | no | empty | deployment config | Bounded allowlist |
+| `AYUE_ALLOWED_RUNTIME_MODELS` | no | empty | root `Server/.env` deployment config | Bounded allowlist |
 | `GOOGLE_AI_STUDIO_API_KEY` | yes for embeddings/profile features | none | `social.env`, existing Server env | Non-empty; never printed |
-| `GOOGLE_EMBEDDING_MODEL` | yes | `models/gemini-embedding-2` | `social.env`, existing Server env, example | Non-empty |
+| `GOOGLE_EMBEDDING_MODEL` | yes | `models/gemini-embedding-2` | root `Server/.env` | Non-empty |
 | `AYUE_DEFAULT_TIMEZONE` | no | `Asia/Taipei` | example/runtime | Valid IANA timezone |
 | `AYUE_CALENDAR_STATE_MONGO` | no | `on` | example/runtime | Boolean |
 | `AYUE_GOOGLE_CALENDAR_ENABLED` | no | `off` | `social.env`, example | Boolean; missing credentials keep only this integration unavailable |

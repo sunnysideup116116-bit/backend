@@ -1,10 +1,34 @@
 import os
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from services.gpt_settings import load_gpt_settings
 
 load_gpt_settings()
 
+_ROOT_MODEL_ENV_KEYS = frozenset({
+    "OLLAMA_CHAT_MODEL",
+    "OLLAMA_FAST_CHAT_MODEL",
+    "GOOGLE_EMBEDDING_MODEL",
+    "VOICE_MEMORY_OLLAMA_MODEL",
+    "AYUE_ALLOWED_RUNTIME_MODELS",
+    "AYUE_OLLAMA_PLANNER_MODEL",
+    "AYUE_OLLAMA_CALENDAR_MODEL",
+    "AYUE_OLLAMA_PLACES_MODEL",
+    "AYUE_OLLAMA_MATCH_MODEL",
+    "AYUE_OLLAMA_RELATIONSHIP_MODEL",
+    "AYUE_OLLAMA_PROFILE_MODEL",
+    "AYUE_OLLAMA_WEB_MODEL",
+    "AYUE_OLLAMA_SYNTHESIZER_MODEL",
+})
+
 if os.getenv("AYUE_SKIP_DOTENV", "").strip().lower() not in {"1", "true", "on"}:
+    # Keep model selection authoritative in Server/.env while allowing service
+    # .env files to continue owning their service-specific credentials.
+    parent_env = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+    if os.path.exists(parent_env):
+        for key, value in dotenv_values(parent_env, interpolate=False).items():
+            if key in _ROOT_MODEL_ENV_KEYS and value is not None:
+                os.environ.setdefault(key, value)
+
     social_env = os.path.abspath(os.path.join(os.path.dirname(__file__), ".env"))
     if os.path.exists(social_env):
         load_dotenv(social_env, override=False)
@@ -12,7 +36,6 @@ if os.getenv("AYUE_SKIP_DOTENV", "").strip().lower() not in {"1", "true", "on"}:
         load_dotenv(override=False)
 
     # 確保絕對路徑載入根目錄 Server/.env，統一從根目錄讀取共用金鑰
-    parent_env = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
     if os.path.exists(parent_env):
         load_dotenv(parent_env, override=False)
 
@@ -43,7 +66,7 @@ def _collect_google_api_keys() -> list[str]:
 
 GOOGLE_API_KEYS: list[str] = _collect_google_api_keys()
 GOOGLE_API_KEY = GOOGLE_API_KEYS[0] if GOOGLE_API_KEYS else None
-OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "deepseek-v4-flash:cloud")
+OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "deepseek-v4.1-flash:cloud")
 # Fast-tier routing is opt-in. An empty fast model preserves the main model.
 OLLAMA_FAST_CHAT_MODEL = (
     os.getenv("OLLAMA_FAST_CHAT_MODEL", "").strip() or OLLAMA_CHAT_MODEL

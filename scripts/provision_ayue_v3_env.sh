@@ -53,6 +53,38 @@ write_selected_env() {
     local temporary
     temporary="$(mktemp "$canonical_root/.env-build.XXXXXX")"
     if ! awk -v example="$example" -v target="$target" '
+        BEGIN {
+            # Models are configured only in Server/.env. Do not retain an old
+            # per-service value when provisioning is run again.
+            central_model_keys["OLLAMA_CHAT_MODEL"] = 1
+            central_model_keys["OLLAMA_FAST_CHAT_MODEL"] = 1
+            central_model_keys["GOOGLE_EMBEDDING_MODEL"] = 1
+            central_model_keys["VOICE_MEMORY_OLLAMA_MODEL"] = 1
+            central_model_keys["VOICE_REGISTRATION_MODEL"] = 1
+            central_model_keys["VOICE_APP_TEXT_MODEL"] = 1
+            central_model_keys["VOICE_APP_LIVE_MODEL"] = 1
+            central_model_keys["VOICE_APP_TTS_MODEL"] = 1
+            central_model_keys["AYUE_ALLOWED_RUNTIME_MODELS"] = 1
+            central_model_keys["AYUE_OLLAMA_PLANNER_MODEL"] = 1
+            central_model_keys["AYUE_OLLAMA_CALENDAR_MODEL"] = 1
+            central_model_keys["AYUE_OLLAMA_PLACES_MODEL"] = 1
+            central_model_keys["AYUE_OLLAMA_MATCH_MODEL"] = 1
+            central_model_keys["AYUE_OLLAMA_RELATIONSHIP_MODEL"] = 1
+            central_model_keys["AYUE_OLLAMA_PROFILE_MODEL"] = 1
+            central_model_keys["AYUE_OLLAMA_WEB_MODEL"] = 1
+            central_model_keys["AYUE_OLLAMA_SYNTHESIZER_MODEL"] = 1
+            central_model_keys["AYUE_GPT_PLANNER_MODEL"] = 1
+            central_model_keys["AYUE_GPT_CALENDAR_MODEL"] = 1
+            central_model_keys["AYUE_GPT_PLACES_MODEL"] = 1
+            central_model_keys["AYUE_GPT_MATCH_MODEL"] = 1
+            central_model_keys["AYUE_GPT_RELATIONSHIP_MODEL"] = 1
+            central_model_keys["AYUE_GPT_PROFILE_MODEL"] = 1
+            central_model_keys["AYUE_GPT_WEB_MODEL"] = 1
+            central_model_keys["AYUE_GPT_SYNTHESIZER_MODEL"] = 1
+            central_model_keys["LLM_MODEL_ID"] = 1
+            central_model_keys["EVENT_EXTRACTION_MODEL_ID"] = 1
+            central_model_keys["EVENT_EXTRACTION_FALLBACK_MODEL_ID"] = 1
+        }
         {
             line = $0
             sub(/\r$/, "", line)
@@ -63,6 +95,9 @@ write_selected_env() {
             key = line
             sub(/=.*/, "", key)
             gsub(/[[:space:]]/, "", key)
+            if (key in central_model_keys) {
+                next
+            }
             sub(/^[^=]*=/, "", line)
             # Examples are the canonical allowlist. Keep extra keys only when
             # already present in this target, never by importing arbitrary keys.

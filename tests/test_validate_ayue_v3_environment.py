@@ -87,6 +87,24 @@ class AyueEnvironmentValidatorTests(unittest.TestCase):
         for secret in ("social-secret", "google-secret", "match-secret", "graph-secret"):
             self.assertNotIn(secret, rendered)
 
+    def test_root_model_settings_replace_service_model_settings(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            social_values = self._valid_social()
+            social_values.pop("OLLAMA_CHAT_MODEL")
+            social_values.pop("GOOGLE_EMBEDDING_MODEL")
+            match_values = self._valid_matchmaker()
+            match_values.pop("LLM_MODEL_ID")
+            social = self._write_env(directory, "social.env", social_values)
+            matchmaker = self._write_env(directory, "match.env", match_values)
+            server = self._write_env(directory, ".env", {
+                "OLLAMA_CHAT_MODEL": "root-chat-model",
+                "GOOGLE_EMBEDDING_MODEL": "root-embedding-model",
+                "LLM_MODEL_ID": "root-match-model",
+            })
+            result = self.validator.validate_environment(social, matchmaker, server)
+        self.assertTrue(result.ok, result.render())
+
     def test_mongo_and_neo4j_connectors_are_closed(self):
         social = self._valid_social()
         matchmaker = self._valid_matchmaker()
