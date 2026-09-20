@@ -38,6 +38,7 @@ from services.relationship_engagement_service import (
     consume_pending_post_date_feedback,
 )
 from services.relationship_memory_service import enqueue_relationship_memory_extraction
+from services.ayue_agent.shared.reply_style import strip_display_emoji
 from .bridge_client import provider_messages, run_bridge
 from .context import PrivatePiTurnContext, build_private_pi_context
 from .policy import PRIVATE_PI_POLICY
@@ -129,7 +130,7 @@ def _strip_internal(value: Any) -> Any:
 
 
 def _safe_reply(text: Any, observations: list[dict[str, Any]]) -> str | None:
-    reply = re.sub(r"\s+", " ", str(text or "")).strip()
+    reply = re.sub(r"\s+", " ", strip_display_emoji(str(text or ""))).strip()
     if not reply or len(reply) > 3600 or _FORBIDDEN_REPLY.search(reply):
         return None
     saved = any(

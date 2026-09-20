@@ -56,3 +56,8 @@ def test_informal_unverified_schedule_claim_is_rejected():
 def test_future_schedule_offer_remains_publishable():
     reply = "我可以幫你安排；建立確認卡並由你確認後才會新增。"
     assert validate_pi_reply(reply, []) == reply
+
+
+def test_pi_reply_removes_display_emoji():
+    assert validate_pi_reply("我懂你🙂，我們慢慢來💛。", []) == "我懂你，我們慢慢來。"
+    assert validate_pi_reply("可以呀❤️", []) == "可以呀"

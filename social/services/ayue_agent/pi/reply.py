@@ -6,6 +6,7 @@ import re
 from services.ayue_agent.capabilities import normalize_public_language
 from services.ayue_agent.shared.public_reply import validate_public_reply
 from services.ayue_agent.shared.model_context_text import strip_model_time_annotations
+from services.ayue_agent.shared.reply_style import strip_display_emoji
 from services.ayue_agent.web_tools import is_safe_public_url
 from services.language_service import normalize_public_reply
 
@@ -135,6 +136,11 @@ def validate_pi_reply_result(reply: str, observations: list[dict]) -> PiReplyVal
         return PiReplyValidation(
             None, "pi_unverified_completion_claim", stage="authority_binding",
             public_reason="unverified_completion_claim", repairable=True,
+        )
+    text = strip_display_emoji(text)
+    if not text:
+        return PiReplyValidation(
+            None, "pi_public_empty_reply", public_reason="empty_reply", repairable=True,
         )
     return PiReplyValidation(text)
 

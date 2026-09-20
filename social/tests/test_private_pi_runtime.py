@@ -232,6 +232,10 @@ def test_reply_validation_keeps_normal_system_tool_and_permission_language():
     assert runtime._safe_reply("這次會讀取 user_id", []) is None
 
 
+def test_private_reply_removes_display_emoji():
+    assert runtime._safe_reply("我懂你🙂，慢慢來💛。", []) == "我懂你，慢慢來。"
+
+
 def test_unavailable_or_context_failure_does_not_use_timeout_copy():
     ctx = _context("幫我整理一下")
     with patch.object(runtime, "pi_available", return_value=False):
