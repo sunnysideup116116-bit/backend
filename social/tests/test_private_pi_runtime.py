@@ -114,6 +114,7 @@ def test_private_policy_requires_contextual_owner_view_memory_capture():
     assert "只有本回合訊息" in description
     assert "查看或管理既有記憶的要求不得呼叫此工具" in description
     assert "必須呼叫 private.surface.present_relationship_memories" in PRIVATE_PI_POLICY
+    assert "Markdown `-` 條列" in PRIVATE_PI_POLICY
 
 
 def test_model_can_present_relationship_memory_entry_with_copy_and_placement():

@@ -35,6 +35,8 @@ class AyueProductIdentityTests(unittest.TestCase):
     def test_public_pi_receives_canonical_identity(self):
         self.assertIn("公開阿月", POLICY)
         self.assertIn("繁體中文", POLICY)
+        self.assertIn("Markdown `-` 條列", POLICY)
+        self.assertIn("不要為了格式列點", POLICY)
         for question, reply in PUBLIC_VOICE_FEW_SHOTS:
             self.assertNotIn(question, POLICY)
             self.assertNotIn(reply, POLICY)
