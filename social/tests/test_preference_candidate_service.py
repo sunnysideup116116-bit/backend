@@ -21,6 +21,7 @@ def test_internal_preference_adapter_revalidates_and_filters_ids(monkeypatch):
 
     assert result["candidate_ids"] == ["candidate"]
     assert result["canonical_key"] == "k_pop"
+    assert result["query_provenance"] == "deterministic_alias"
     assert result["candidate_count_before_filter"] == 4
     assert result["candidate_count_after_filter"] == 3
     sent = post.call_args.kwargs["json"]

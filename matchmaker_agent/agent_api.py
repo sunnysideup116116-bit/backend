@@ -70,6 +70,9 @@ GLOBAL_RULE_CHAR_LIMIT = max(10, min(int(os.getenv("MATCH_GLOBAL_RULE_CHAR_LIMIT
 GLOBAL_RULE_SIMILARITY_THRESHOLD = max(
     0.0, min(float(os.getenv("MATCH_GLOBAL_RULE_SIMILARITY_THRESHOLD", "0.38")), 1.0)
 )
+PREFERENCE_SEMANTIC_INDEX_NAME = "concept_embedding_index"
+PREFERENCE_SEMANTIC_DIMENSIONS = 768
+PREFERENCE_SEMANTIC_GRAPH_TIMEOUT_SECONDS = 3.0
 
 
 def compact_global_rule(text: str) -> str:
@@ -1128,6 +1131,20 @@ class PreferenceCandidateRequest(BaseModel):
     excluded_user_ids: list[str] = Field(default_factory=list, max_length=200)
     limit: int = Field(default=20, ge=1, le=100)
 
+
+class PreferenceSemanticCandidateRequest(BaseModel):
+    requester_user_id: str = Field(min_length=1, max_length=128)
+    topic: str = Field(min_length=1, max_length=80)
+    query_embedding: list[float] | None = Field(default=None, max_length=768)
+    embedding_model: str = Field(default="", max_length=100)
+    excluded_user_ids: list[str] = Field(default_factory=list, max_length=200)
+    neighbor_limit: int = Field(default=24, ge=1, le=32)
+    concept_limit: int = Field(default=8, ge=1, le=12)
+    per_concept_limit: int = Field(default=10, ge=1, le=20)
+    candidate_limit: int = Field(default=40, ge=1, le=50)
+    evidence_limit: int = Field(default=3, ge=1, le=5)
+    min_similarity: float = Field(default=0.82, ge=0.75, le=1.0, allow_inf_nan=False)
+
 class MemoryActionRequest(BaseModel):
     user_id: str
     key: str
@@ -1307,6 +1324,272 @@ def preference_candidates(req: PreferenceCandidateRequest):
         return {
             "status": "error", "error_code": "preference_graph_unavailable",
             "canonical_key": identity.key, "candidate_ids": [],
+        }
+
+
+def _semantic_index_metadata(session) -> dict:
+    record = session.run(Query("""
+        SHOW VECTOR INDEXES YIELD name, state, populationPercent, options, labelsOrTypes, properties
+        WHERE name = $index_name
+        RETURN name, state, populationPercent, options, labelsOrTypes, properties
+    """, timeout=PREFERENCE_SEMANTIC_GRAPH_TIMEOUT_SECONDS),
+        index_name=PREFERENCE_SEMANTIC_INDEX_NAME).single()
+    if not record:
+        return {
+            "exists": False, "state": "MISSING", "dimension": 0,
+            "population_percent": 0.0,
+            "schema_valid": False,
+        }
+    options = record.get("options") if isinstance(record.get("options"), dict) else {}
+    config = options.get("indexConfig") if isinstance(options.get("indexConfig"), dict) else {}
+    try:
+        dimension = int(config.get("vector.dimensions", 0) or 0)
+    except (TypeError, ValueError):
+        dimension = 0
+    try:
+        population = float(record.get("populationPercent", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        population = 0.0
+    return {
+        "exists": True,
+        "state": str(record.get("state") or "UNKNOWN")[:24].upper(),
+        "dimension": dimension,
+        "population_percent": max(0.0, min(population, 100.0)),
+        "schema_valid": bool(record.get("labelsOrTypes") == ["Concept"]
+                             and record.get("properties") == ["embedding"]
+                             and str(config.get("vector.similarity_function", "")).lower() == "cosine"),
+    }
+
+
+def _valid_semantic_embedding(value) -> list[float] | None:
+    if not isinstance(value, list) or len(value) != PREFERENCE_SEMANTIC_DIMENSIONS:
+        return None
+    try:
+        vector = [float(item) for item in value]
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(item) for item in vector):
+        return None
+    magnitude = math.sqrt(sum(item * item for item in vector))
+    return vector if math.isfinite(magnitude) and magnitude > 0.0 else None
+
+
+@app.get("/api/preferences/semantic-readiness")
+def preference_semantic_readiness():
+    """Read-only readiness audit; it never creates indexes or writes Concepts."""
+    URI, AUTH, DATABASE = _neo4j_config()
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH, connection_timeout=3.0,
+                                  connection_acquisition_timeout=3.0, max_transaction_retry_time=0.0) as driver:
+            with driver.session(database=DATABASE, default_access_mode="READ") as session:
+                index = _semantic_index_metadata(session)
+                coverage = session.run(Query("""
+                    MATCH (concept:Concept)<-[:PREFERS]-(:User)
+                    WITH DISTINCT concept
+                    RETURN count(concept) AS total,
+                           sum(CASE WHEN concept.embedding IS NOT NULL
+                               AND size(concept.embedding) = $dimensions
+                               THEN 1 ELSE 0 END) AS embedded
+                """, timeout=PREFERENCE_SEMANTIC_GRAPH_TIMEOUT_SECONDS),
+                    dimensions=PREFERENCE_SEMANTIC_DIMENSIONS).single()
+        total = int(coverage.get("total", 0) if coverage else 0)
+        embedded = int(coverage.get("embedded", 0) if coverage else 0)
+        retrieval_ready = bool(
+            index["exists"] and index["state"] == "ONLINE"
+            and index["dimension"] == PREFERENCE_SEMANTIC_DIMENSIONS
+            and index["schema_valid"]
+        )
+        return {
+            "status": "success",
+            "index": index,
+            "embedding_coverage": {
+                "preference_concept_count": max(0, total),
+                "embedded_preference_concept_count": max(0, embedded),
+                "coverage_ratio": round(embedded / total, 4) if total else 0.0,
+            },
+            "expected_dimensions": PREFERENCE_SEMANTIC_DIMENSIONS,
+            "expected_task": "semantic_similarity",
+            # Historical nodes do not carry a model/task fingerprint.  An
+            # operator must confirm one embedding space before active rollout.
+            "historical_embedding_fingerprint": "unknown",
+            "retrieval_ready": retrieval_ready,
+            "active_enable_ready": False,
+        }
+    except Exception as exc:
+        print(f"[PREFERENCE_SEMANTIC] readiness_failed error={type(exc).__name__}")
+        return {
+            "status": "error", "error_code": "semantic_readiness_unavailable",
+            "historical_embedding_fingerprint": "unknown",
+            "retrieval_ready": False, "active_enable_ready": False,
+        }
+
+
+@app.post("/api/preferences/semantic-candidates")
+def preference_semantic_candidates(req: PreferenceSemanticCandidateRequest):
+    """Read bounded semantic Concept neighbours and their explicit PREFERS owners."""
+    identity = canonicalize_concept(req.topic)
+    if not identity:
+        return {"status": "skipped", "canonical_key": "", "candidates": []}
+    excluded = sorted({
+        str(value).strip()[:128]
+        for value in req.excluded_user_ids
+        if str(value or "").strip()
+    })[:200]
+    URI, AUTH, DATABASE = _neo4j_config()
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH, connection_timeout=3.0,
+                                  connection_acquisition_timeout=3.0, max_transaction_retry_time=0.0) as driver:
+            with driver.session(database=DATABASE, default_access_mode="READ") as session:
+                index = _semantic_index_metadata(session)
+                if not (
+                    index["exists"] and index["state"] == "ONLINE"
+                    and index["dimension"] == PREFERENCE_SEMANTIC_DIMENSIONS
+                    and index["schema_valid"]
+                ):
+                    return {
+                        "status": "error", "error_code": "semantic_index_unavailable",
+                        "canonical_key": identity.key, "candidates": [], "index": index,
+                    }
+                query_embedding = _valid_semantic_embedding(req.query_embedding)
+                embedding_source = "request"
+                if query_embedding is None and req.query_embedding is None:
+                    row = session.run(Query("""
+                        MATCH (concept:Concept {key:$key})
+                        RETURN concept.embedding AS embedding,
+                               concept.embedding_model AS model,
+                               concept.embedding_task AS task
+                    """, timeout=PREFERENCE_SEMANTIC_GRAPH_TIMEOUT_SECONDS),
+                        key=identity.key).single()
+                    if (row and req.embedding_model
+                            and row.get("model") == req.embedding_model
+                            and row.get("task") == "semantic_similarity"):
+                        query_embedding = _valid_semantic_embedding(row.get("embedding"))
+                    embedding_source = "concept"
+                if query_embedding is None:
+                    if req.query_embedding is not None:
+                        return {
+                            "status": "error", "error_code": "semantic_query_embedding_invalid",
+                            "canonical_key": identity.key, "candidates": [],
+                        }
+                    return {
+                        "status": "query_embedding_required",
+                        "canonical_key": identity.key,
+                        "normalized_topic": identity.label,
+                        "candidates": [],
+                    }
+                neighbours = list(session.run(Query("""
+                    CALL db.index.vector.queryNodes(
+                        $index_name, $neighbor_limit, $query_embedding
+                    ) YIELD node AS concept, score
+                    WHERE score >= $min_similarity
+                      AND concept.key <> $canonical_key
+                      AND EXISTS { MATCH (concept)<-[:PREFERS]-(:User) }
+                    WITH concept, score
+                    ORDER BY score DESC, concept.key ASC
+                    LIMIT $concept_limit
+                    RETURN concept.key AS concept_key, score AS similarity,
+                           concept.embedding_model AS model, concept.embedding_task AS task
+                """, timeout=PREFERENCE_SEMANTIC_GRAPH_TIMEOUT_SECONDS),
+                    index_name=PREFERENCE_SEMANTIC_INDEX_NAME,
+                    neighbor_limit=req.neighbor_limit,
+                    query_embedding=query_embedding,
+                    min_similarity=req.min_similarity,
+                    canonical_key=identity.key,
+                    concept_limit=req.concept_limit,
+                ))
+                # Missing historical provenance cannot be waived with an env
+                # flag. Inspect only the bounded ANN result, never the corpus.
+                if any(not req.embedding_model or row.get("model") != req.embedding_model
+                       or row.get("task") != "semantic_similarity" for row in neighbours):
+                    return {
+                        "status": "error", "error_code": "semantic_readiness_unconfirmed",
+                        "canonical_key": identity.key, "candidates": [],
+                    }
+                concepts = [{"concept_key": row["concept_key"],
+                             "similarity": float(row["similarity"])} for row in neighbours]
+                rows = session.run(Query("""
+                    UNWIND $concepts AS hit
+                    MATCH (concept:Concept {key:hit.concept_key})
+                    WITH concept, hit.similarity AS score
+                    CALL {
+                        WITH concept
+                        MATCH (concept)<-[:PREFERS]-(candidate:User)
+                        WITH candidate
+                        LIMIT $per_concept_limit
+                        WITH candidate
+                        WHERE candidate.id <> $requester_user_id
+                          AND NOT (candidate.id IN $excluded_user_ids)
+                        RETURN candidate
+                    }
+                    WITH candidate, concept, score
+                    ORDER BY candidate.id ASC, score DESC, concept.key ASC
+                    WITH candidate,
+                         collect({concept_key:concept.key, similarity:score})[0..$evidence_limit]
+                         AS evidence
+                    WITH candidate, evidence, evidence[0].similarity AS best_score
+                    ORDER BY best_score DESC, candidate.id ASC
+                    LIMIT $candidate_limit
+                    RETURN candidate.id AS candidate_id, evidence, best_score
+                """, timeout=PREFERENCE_SEMANTIC_GRAPH_TIMEOUT_SECONDS),
+                    concepts=concepts,
+                    requester_user_id=req.requester_user_id,
+                    excluded_user_ids=excluded,
+                    per_concept_limit=req.per_concept_limit,
+                    evidence_limit=req.evidence_limit,
+                    candidate_limit=req.candidate_limit,
+                )
+                candidates = []
+                considered: dict[str, float] = {
+                    hit["concept_key"]: round(hit["similarity"], 4) for hit in concepts
+                }
+                for row in rows:
+                    candidate_id = str(row.get("candidate_id") or "").strip()[:128]
+                    if not candidate_id:
+                        continue
+                    evidence = []
+                    for item in list(row.get("evidence") or [])[:req.evidence_limit]:
+                        key = str(item.get("concept_key") or "").strip()[:100]
+                        try:
+                            similarity = float(item.get("similarity", 0.0))
+                        except (TypeError, ValueError):
+                            continue
+                        if (re.fullmatch(r"[a-z][a-z0-9_]{1,50}", key)
+                                and math.isfinite(similarity)
+                                and req.min_similarity <= similarity <= 1.0):
+                            similarity = round(similarity, 4)
+                            evidence.append({
+                                "concept_key": key,
+                                "similarity": similarity,
+                                "kind": "semantic_related",
+                            })
+                            considered[key] = max(considered.get(key, 0.0), similarity)
+                    evidence.sort(key=lambda item: (-item["similarity"], item["concept_key"]))
+                    if evidence:
+                        candidates.append({
+                            "candidate_id": candidate_id,
+                            "best_similarity": evidence[0]["similarity"],
+                            "evidence": evidence,
+                        })
+                candidates.sort(key=lambda item: (-item["best_similarity"], item["candidate_id"]))
+        concepts = [
+            {"concept_key": key, "similarity": score}
+            for key, score in sorted(considered.items(), key=lambda item: (-item[1], item[0]))
+        ][:req.concept_limit]
+        return {
+            "status": "success",
+            "canonical_key": identity.key,
+            "normalized_topic": identity.label,
+            "retrieval_source": "graph_semantic",
+            "embedding_source": embedding_source,
+            "candidates": candidates[:req.candidate_limit],
+            "semantic_concepts_considered": concepts,
+            "candidate_count": min(len(candidates), req.candidate_limit),
+        }
+    except Exception as exc:
+        print(f"[PREFERENCE_SEMANTIC] graph_lookup_failed error={type(exc).__name__}")
+        return {
+            "status": "error", "error_code": "semantic_graph_unavailable",
+            "canonical_key": identity.key, "candidates": [],
         }
 
 

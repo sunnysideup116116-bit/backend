@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+import math
 import time
 import hashlib
 import ipaddress
@@ -176,7 +177,45 @@ class MatchmakerAgent:
         
         memory_text = graph_memory if graph_memory else "目前圖庫中尚無該使用者的偏好或地雷紀錄。"
         system_content = self.system_prompt.replace("[GRAPH_MEMORY_PLACEHOLDER]", memory_text)
-        if context.get("search_intent") == "preference":
+        semantic_evidence_present = False
+        for candidate_index, candidate in enumerate(candidates):
+            if not isinstance(candidate, dict):
+                continue
+            evidence = candidate.get("preference_retrieval_evidence")
+            if not isinstance(evidence, list):
+                continue
+            clean = []
+            for item in evidence[:3]:
+                if not isinstance(item, dict) or item.get("kind") != "semantic_related":
+                    continue
+                key, score = item.get("concept_key"), item.get("similarity")
+                if (isinstance(key, str) and re.fullmatch(r"[a-z][a-z0-9_]{1,50}", key)
+                        and isinstance(score, (int, float)) and not isinstance(score, bool)
+                        and math.isfinite(score) and 0 <= score <= 1):
+                    clean.append({"kind": "semantic_related", "concept_key": key,
+                                  "similarity": round(score, 4)})
+            candidate = dict(candidate)
+            candidate.pop("preference_retrieval_evidence", None)
+            if clean:
+                candidate["preference_retrieval_evidence"] = clean
+                semantic_evidence_present = True
+            # Copy only when a new internal evidence field was supplied.
+            if payload["candidates"] is candidates:
+                payload["candidates"] = list(candidates)
+            payload["candidates"][candidate_index] = candidate
+        if context.get("search_intent") == "preference" and semantic_evidence_present:
+            system_content += (
+                "\n本輪是 server 驗證過的偏好搜尋。normalized_topic 是 canonical 查詢標籤；"
+                "送入的每位 candidate 都已通過本人明確保存的 PREFERS evidence 與安全資格檢查。"
+                "候選來源可能是 exact canonical（包含 deterministic alias query provenance），"
+                "或是在 exact 合格人選為零時才啟用的 semantic-related evidence。"
+                "semantic-related 只表示候選人另一項已保存偏好與查詢方向相關，並不等同於"
+                "exact preference、發起者也喜歡、或雙方已確認的共同偏好。不得把它改寫成 alias"
+                "或宣稱任何未保存的興趣；也不得因 candidate 的 current_context 是其他活動而否定"
+                "已由 server 驗證的 durable evidence。"
+            )
+        elif context.get("search_intent") == "preference":
+            # Keep the exact-only P0 prompt byte-for-byte, including mode OFF.
             system_content += (
                 "\n本輪是上述一般主題規則的明確例外，也是 server 驗證過的偏好精確搜尋。"
                 "normalized_topic 是 canonical "

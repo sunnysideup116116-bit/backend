@@ -3,6 +3,7 @@ import requests
 import json
 import re
 import os
+import math
 import uuid
 from collections import Counter
 from typing import Callable
@@ -100,6 +101,19 @@ from services.risk_block_service import (
 from services.preference_candidate_service import (
     PreferenceCandidateLookupError,
     retrieve_preference_candidate_ids,
+)
+from services.preference_semantic_service import (
+    PreferenceSemanticRetrievalError,
+    preference_semantic_mode,
+    qualified_exact_trigger_threshold,
+    retrieve_semantic_preference_candidates,
+    semantic_config,
+    semantic_embedding_space_confirmed,
+)
+from matchmaker_agent.concept_identity import (
+    canonical_evidence_span,
+    canonical_query_provenance,
+    canonicalize_concept,
 )
 from services.ayue_agent.public_relationship_projection import (
     anonymize_counterparty_text,
@@ -647,6 +661,7 @@ def candidate_qualification(
     vector_score: float = 0.0,
     allow_adjacent: bool = False,
     search_context: dict | None = None,
+    preference_evidence: list[dict] | None = None,
 ) -> dict:
     """Require reciprocal safety plus a direct or concrete semantic link.
 
@@ -699,6 +714,33 @@ def candidate_qualification(
     )
     if candidate_has_requested_preference:
         strong_reason_codes.append("requested_preference")
+    semantic_preference_evidence = []
+    minimum_similarity = semantic_config()["min_similarity"] if preference_evidence else 0.82
+    for item in list(preference_evidence or [])[:5] if search_intent == "preference" else []:
+        if not isinstance(item, dict) or item.get("kind") != "semantic_related":
+            continue
+        concept_key = str(item.get("concept_key") or "").strip()[:100]
+        try:
+            similarity = float(item.get("similarity", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if (
+            re.fullmatch(r"[a-z][a-z0-9_]{1,50}", concept_key)
+            and concept_key != preference_key
+            and math.isfinite(similarity) and minimum_similarity <= similarity <= 1.0
+            and {"like", "require"} & candidate_stances.get(concept_key, set())
+        ):
+            semantic_preference_evidence.append({
+                "kind": "semantic_related",
+                "concept_key": concept_key,
+                "similarity": round(similarity, 4),
+            })
+    semantic_preference_evidence.sort(
+        key=lambda item: (-item["similarity"], item["concept_key"]),
+    )
+    semantic_preference_evidence = semantic_preference_evidence[:3]
+    if semantic_preference_evidence and not candidate_has_requested_preference:
+        strong_reason_codes.append("semantic_related_preference")
     invitation_topic = str(search_context.get("invitation_topic") or "").strip()
     if invitation_topic and float(vector_score or 0) >= vector_qualification_minimum():
         strong_reason_codes.append("requested_topic")
@@ -728,7 +770,10 @@ def candidate_qualification(
         "direct"
         if direct_codes.intersection(strong_reason_codes)
         else "adjacent"
-        if {"requested_topic", "semantic_context_similarity"}.intersection(strong_reason_codes)
+        if {
+            "requested_topic", "semantic_context_similarity",
+            "semantic_related_preference",
+        }.intersection(strong_reason_codes)
         else "insufficient"
     )
     target_evidence = _short_list(
@@ -736,10 +781,16 @@ def candidate_qualification(
             f"指定活動主題：{invitation_topic}" if invitation_topic else "",
             target.get("current_context"), target_activity,
             f"指定偏好：{preference_topic}" if candidate_has_requested_preference else "",
+            f"本次偏好搜尋：{preference_topic}"
+            if semantic_preference_evidence and preference_topic else "",
         ], item_limit=3, char_limit=90,
     )
     candidate_evidence = _short_list(
-        [candidate.get("current_context"), candidate_activity], item_limit=3, char_limit=90,
+        [
+            candidate.get("current_context"), candidate_activity,
+            "對方有一項本人保存、與本次主題語意相關的偏好"
+            if semantic_preference_evidence else "",
+        ], item_limit=3, char_limit=90,
     )
     overlap = _short_list(
         [
@@ -747,6 +798,8 @@ def candidate_qualification(
             *(f"共同偏好：{item}" for item in shared_persistent_preferences),
             *(f"共同價值：{item}" for item in shared_values),
             f"對方有明確偏好：{preference_topic}" if candidate_has_requested_preference else "",
+            "偏好方向相關（不等同於共同偏好）"
+            if semantic_preference_evidence else "",
             f"本次指定主題：{invitation_topic}" if "requested_topic" in strong_reason_codes else "",
             "近期情境相近" if "semantic_context_similarity" in strong_reason_codes else "",
         ],
@@ -758,6 +811,8 @@ def candidate_qualification(
         "hard_conflict_keys": sorted(set(hard_conflicts)),
         "shared_preference_keys": shared_persistent_preferences[:8],
         "requested_preference_matched": candidate_has_requested_preference,
+        "semantic_related_preference_matched": bool(semantic_preference_evidence),
+        "preference_retrieval_evidence": semantic_preference_evidence,
         "strong_reason_codes": strong_reason_codes,
         # This is the shared candidate/write contract.  It deliberately
         # contains owner-provided evidence only; vector recall alone yields
@@ -771,12 +826,59 @@ def candidate_qualification(
                 "性格或語意相近不代表對方已同意認識你。",
                 "不會從近況推論對方的行程、位置或聯絡方式。",
                 *(
+                    ["語意相關偏好不等同於相同或共同偏好。"]
+                    if semantic_preference_evidence else []
+                ),
+                *(
                     [f"對方是否具備「{invitation_topic}」技能或已有出席安排，仍待本人確認。"]
                     if invitation_topic else []
                 ),
             ],
         },
     }
+
+
+def _apply_qualification_diagnostics(
+    diagnostics: dict, qualification_by_id: dict[str, dict],
+) -> None:
+    reason_counts = Counter(
+        reason
+        for item in qualification_by_id.values()
+        for reason in item.get("strong_reason_codes", [])
+    )
+    diagnostics["qualification_reason_codes"] = dict(
+        reason_counts.most_common(12)
+    )
+    diagnostics["qualification_reason_codes"]["hard_conflict"] = sum(
+        1 for item in qualification_by_id.values() if item.get("hard_conflict_keys")
+    )
+    diagnostics["qualification_reason_codes"]["insufficient_common_ground"] = sum(
+        1 for item in qualification_by_id.values()
+        if not item.get("hard_conflict_keys") and not item.get("strong_reason_codes")
+    )
+    diagnostics["shared_preferences"] = sorted({
+        key for item in qualification_by_id.values()
+        for key in item.get("shared_preference_keys", [])
+    })[:8]
+    diagnostics["hard_conflicts"] = sorted({
+        key for item in qualification_by_id.values()
+        for key in item.get("hard_conflict_keys", [])
+    })[:8]
+
+
+def _preference_evidence_is_qualified(
+    evidence: list[dict] | None, qualification: dict,
+) -> bool:
+    kinds = {
+        str(item.get("kind") or "")
+        for item in list(evidence or [])[:5]
+        if isinstance(item, dict)
+    }
+    if "semantic_related" in kinds:
+        return bool(qualification.get("semantic_related_preference_matched"))
+    if kinds.intersection({"exact_canonical", "deterministic_alias"}):
+        return bool(qualification.get("requested_preference_matched"))
+    return False
 
 
 def validated_distinctive_tags(candidate: dict) -> list[str]:
@@ -1566,6 +1668,7 @@ def generate_matches_for_user(
     """Run the existing matching pipeline for either a manual or proactive request."""
     bound_search_context = search_context_for_turn(search_context)
     search_intent = _search_intent(bound_search_context)
+    semantic_mode = preference_semantic_mode() if search_intent == "preference" else "off"
     diagnostics = {
         "search_intent": search_intent,
         "normalized_topic": str(bound_search_context.get("normalized_topic") or "")[:80],
@@ -1575,6 +1678,10 @@ def generate_matches_for_user(
         "retrieval_source": "graph_exact" if search_intent == "preference" else "vector",
         "candidate_count_before_filter": 0,
         "candidate_count_after_filter": 0,
+        "qualified_exact_count": 0,
+        "semantic_fallback_eligible": False,
+        "semantic_fallback_triggered": False,
+        "semantic_concepts_considered": [],
         "shared_preferences": [],
         "hard_conflicts": [],
         "qualification_reason_codes": {},
@@ -1703,6 +1810,11 @@ def generate_matches_for_user(
     
     top_5_candidates = []
     seen_candidates = set(excluded_users)
+    preference_evidence_by_id: dict[str, list[dict]] = {}
+    candidate_stances_by_id: dict[str, dict[str, set[str]]] = {}
+    prequalified_by_id: dict[str, dict] = {}
+    target_stances: dict[str, set[str]] | None = None
+    semantic_search_completed = False
     if search_intent == "preference":
         if not report("preference_graph_search"):
             return {"status": "stale", "matches": [], "debug_info": [],
@@ -1723,7 +1835,21 @@ def generate_matches_for_user(
             raise MatchSearchPipelineError(
                 "preference_graph_invalid_response", "preference_graph_search",
             )
+        # Preserve the P0 retrieval window/order when the feature is off.
         candidate_ids = list(lookup.get("candidate_ids") or [])[:MATCH_VECTOR_RETRIEVAL_LIMIT]
+        query_provenance = str(
+            lookup.get("query_provenance") or "exact_canonical"
+        )
+        query_identity = canonicalize_concept(preference_topic)
+        query_surface = canonical_evidence_span(query_text, query_identity) \
+            if query_identity and query_text else ""
+        if query_surface:
+            query_provenance = canonical_query_provenance(
+                query_surface, query_identity,
+            )
+        if query_provenance not in {"exact_canonical", "deterministic_alias"}:
+            query_provenance = "exact_canonical"
+        diagnostics["query_provenance"] = query_provenance
         diagnostics["candidate_count_before_filter"] = int(
             lookup.get("candidate_count_before_filter", len(candidate_ids)) or 0
         )
@@ -1742,6 +1868,7 @@ def generate_matches_for_user(
             ) from exc
         by_id = {str(row.get("user_id") or ""): row for row in rows}
         raw_candidates = [by_id[value] for value in candidate_ids if value in by_id]
+        exact_candidates = []
         for candidate in raw_candidates:
             candidate_id = candidate.get("user_id")
             if (
@@ -1750,9 +1877,164 @@ def generate_matches_for_user(
             ):
                 continue
             seen_candidates.add(candidate_id)
-            top_5_candidates.append((0.0, candidate))
-            if len(top_5_candidates) >= MATCH_CANDIDATE_POOL_SIZE:
+            preference_evidence_by_id[candidate_id] = [{
+                "kind": query_provenance,
+                "concept_key": str(lookup.get("canonical_key") or "")[:100],
+                "similarity": 1.0,
+            }]
+            exact_candidates.append(candidate)
+            if len(exact_candidates) >= MATCH_CANDIDATE_POOL_SIZE:
                 break
+        # Fallback is based on deterministic qualification, not raw Graph
+        # hits.  A blocked/profile-ineligible/hard-conflicting exact hit must
+        # not suppress a valid semantic supplement.
+        if semantic_mode == "active":
+            target_stances = _trait_stances(user_doc.get("user_id"))
+        for candidate in exact_candidates if semantic_mode == "active" else []:
+            candidate = without_expired_recent_context(candidate)
+            candidate_id = str(candidate.get("user_id") or "")
+            if not candidate_id:
+                continue
+            candidate_stances = _trait_stances(candidate_id)
+            candidate_stances_by_id[candidate_id] = candidate_stances
+            prequalified_by_id[candidate_id] = candidate_qualification(
+                user_doc,
+                candidate,
+                target_stances=target_stances,
+                candidate_stances=candidate_stances,
+                vector_score=0.0,
+                search_context=req.search_context,
+                preference_evidence=preference_evidence_by_id.get(candidate_id),
+            )
+        qualified_exact = [
+            candidate for candidate in exact_candidates
+            if (
+                prequalified_by_id.get(
+                    str(candidate.get("user_id") or ""), {}
+                ).get("eligible")
+                and prequalified_by_id.get(
+                    str(candidate.get("user_id") or ""), {}
+                ).get("requested_preference_matched")
+            )
+        ]
+        qualified_exact.sort(key=lambda candidate: str(candidate.get("user_id") or ""))
+        diagnostics["qualified_exact_count"] = len(qualified_exact)
+        top_5_candidates = [(0.0, candidate) for candidate in (
+            qualified_exact if semantic_mode == "active" else exact_candidates
+        )]
+
+        trigger_threshold = qualified_exact_trigger_threshold()
+        diagnostics["semantic_mode"] = semantic_mode
+        diagnostics["semantic_trigger_threshold"] = trigger_threshold
+        diagnostics["semantic_fallback_eligible"] = bool(
+            len(qualified_exact) < trigger_threshold
+        )
+        if len(qualified_exact) < trigger_threshold and semantic_mode == "active":
+            diagnostics["semantic_fallback_triggered"] = True
+            semantic_lookup = None
+            if not semantic_embedding_space_confirmed():
+                if qualified_exact:
+                    diagnostics["semantic_fallback_error"] = (
+                        "semantic_readiness_unconfirmed"
+                    )
+                else:
+                    raise MatchSearchPipelineError(
+                        "semantic_readiness_unconfirmed",
+                        "preference_semantic_search",
+                    )
+            else:
+                if not report("preference_semantic_search"):
+                    return {
+                        "status": "stale", "matches": [], "debug_info": [],
+                        "diagnostics": diagnostics,
+                    }
+                try:
+                    semantic_lookup = retrieve_semantic_preference_candidates(
+                        req.user_id,
+                        preference_topic,
+                        excluded_user_ids={*excluded_users, *candidate_ids},
+                    )
+                except PreferenceSemanticRetrievalError as exc:
+                    if qualified_exact:
+                        diagnostics["semantic_fallback_error"] = exc.code
+                    else:
+                        raise MatchSearchPipelineError(
+                            exc.code, "preference_semantic_search",
+                        ) from exc
+            if semantic_lookup is not None:
+                if semantic_lookup.get("canonical_key") != bound_search_context.get(
+                    "canonical_preference_key"
+                ):
+                    if qualified_exact:
+                        diagnostics["semantic_fallback_error"] = (
+                            "semantic_graph_invalid_response"
+                        )
+                        semantic_lookup = None
+                    else:
+                        raise MatchSearchPipelineError(
+                            "semantic_graph_invalid_response",
+                            "preference_semantic_search",
+                        )
+            if semantic_lookup is not None:
+                semantic_search_completed = True
+                diagnostics["retrieval_source"] = "graph_exact_then_semantic"
+                diagnostics["semantic_concepts_considered"] = list(
+                    semantic_lookup.get("semantic_concepts_considered") or []
+                )[:12]
+                semantic_ids = list(
+                    semantic_lookup.get("candidate_ids") or []
+                )[:50]
+                semantic_match = _candidate_profile_filter(
+                    user_doc,
+                    excluded_users,
+                    candidate_ids=semantic_ids,
+                    require_active_context=False,
+                )
+                try:
+                    semantic_rows = list(profiles_coll.find(
+                        semantic_match, {"_id": 0},
+                    ))
+                except Exception as exc:
+                    if qualified_exact:
+                        diagnostics["semantic_fallback_error"] = (
+                            "candidate_profile_unavailable"
+                        )
+                        semantic_rows = []
+                        semantic_search_completed = False
+                    else:
+                        raise MatchSearchPipelineError(
+                            "candidate_profile_unavailable",
+                            "preference_semantic_search",
+                        ) from exc
+                semantic_by_id = {
+                    str(row.get("user_id") or ""): row for row in semantic_rows
+                }
+                evidence_map = dict(
+                    semantic_lookup.get("evidence_by_candidate") or {}
+                )
+                for candidate_id in semantic_ids:
+                    candidate = semantic_by_id.get(candidate_id)
+                    if (
+                        not candidate or candidate_id in seen_candidates
+                        or participant_pair_key(req.user_id, candidate_id)
+                        in excluded_pair_keys
+                    ):
+                        continue
+                    evidence = list(evidence_map.get(candidate_id) or [])[:5]
+                    if not evidence:
+                        continue
+                    seen_candidates.add(candidate_id)
+                    preference_evidence_by_id[candidate_id] = evidence
+                    top_5_candidates.append((0.0, candidate))
+                    if len(top_5_candidates) >= MATCH_CANDIDATE_POOL_SIZE:
+                        break
+                diagnostics["semantic_candidate_count_before_filter"] = len(
+                    semantic_ids
+                )
+        elif semantic_mode == "shadow":
+            # Shadow observation is an explicit operator/script path.  The live
+            # search performs no provider or Graph work and gains no latency.
+            diagnostics["semantic_shadow_status"] = "separate_observation_only"
     else:
         candidate_match = _candidate_profile_filter(
             user_doc, excluded_users, require_active_context=True,
@@ -1800,8 +2082,15 @@ def generate_matches_for_user(
 
     diagnostics["candidate_pool_count"] = len(top_5_candidates)
     if not top_5_candidates:
-        return {"status": "no_suitable_candidate", "matches": [], "debug_info": [],
-                "diagnostics": diagnostics}
+        if prequalified_by_id:
+            _apply_qualification_diagnostics(diagnostics, prequalified_by_id)
+        result = {
+            "status": "no_suitable_candidate", "matches": [], "debug_info": [],
+            "diagnostics": diagnostics,
+        }
+        if semantic_search_completed:
+            result["reason_code"] = "insufficient_semantic_ground"
+        return result
 
     # Only candidates with a reciprocal safety check and a strong owner-grounded
     # link are eligible for the LLM ranking step.  The model never receives weak
@@ -1823,16 +2112,22 @@ def generate_matches_for_user(
     print(f"[TIMING][V1 /api/match] hydrate candidate deep_profile: {time.perf_counter() - step_start:.3f}s candidates={len(clean_candidates)}")
 
     vector_scores = {candidate.get("user_id"): score for score, candidate in top_5_candidates}
-    target_stances = _trait_stances(user_doc.get("user_id"))
+    if target_stances is None:
+        target_stances = _trait_stances(user_doc.get("user_id"))
     if not report("candidate_qualification", candidate_count=len(clean_candidates)):
         return {"status": "stale", "matches": [], "debug_info": [],
                 "diagnostics": diagnostics}
-    qualification_by_id = {}
+    qualification_by_id = dict(prequalified_by_id)
     for candidate in clean_candidates:
         candidate_id = candidate.get("user_id")
         if not candidate_id:
             continue
-        candidate_stances = _trait_stances(candidate_id)
+        if candidate_id in qualification_by_id:
+            continue
+        candidate_stances = candidate_stances_by_id.get(candidate_id)
+        if candidate_stances is None:
+            candidate_stances = _trait_stances(candidate_id)
+            candidate_stances_by_id[candidate_id] = candidate_stances
         qualification_by_id[candidate_id] = candidate_qualification(
             user_doc,
             candidate,
@@ -1840,38 +2135,33 @@ def generate_matches_for_user(
             candidate_stances=candidate_stances,
             vector_score=vector_scores.get(candidate_id, 0),
             search_context=req.search_context,
+            preference_evidence=preference_evidence_by_id.get(candidate_id),
         )
-    reason_counts = Counter(
-        reason
-        for item in qualification_by_id.values()
-        for reason in item.get("strong_reason_codes", [])
-    )
-    diagnostics["qualification_reason_codes"] = dict(reason_counts.most_common(12))
-    diagnostics["qualification_reason_codes"]["hard_conflict"] = sum(
-        1 for item in qualification_by_id.values() if item.get("hard_conflict_keys")
-    )
-    diagnostics["qualification_reason_codes"]["insufficient_common_ground"] = sum(
-        1 for item in qualification_by_id.values()
-        if not item.get("hard_conflict_keys") and not item.get("strong_reason_codes")
-    )
-    diagnostics["shared_preferences"] = sorted({
-        key for item in qualification_by_id.values()
-        for key in item.get("shared_preference_keys", [])
-    })[:8]
-    diagnostics["hard_conflicts"] = sorted({
-        key for item in qualification_by_id.values()
-        for key in item.get("hard_conflict_keys", [])
-    })[:8]
+    _apply_qualification_diagnostics(diagnostics, qualification_by_id)
     qualified_candidates = [
         candidate for candidate in clean_candidates
         if qualification_by_id.get(candidate.get("user_id"), {}).get("eligible")
+        and (
+            search_intent != "preference" or semantic_mode != "active"
+            or _preference_evidence_is_qualified(
+                preference_evidence_by_id.get(candidate.get("user_id")),
+                qualification_by_id.get(candidate.get("user_id"), {}),
+            )
+        )
         and participant_pair_key(req.user_id, candidate["user_id"]) not in excluded_pair_keys
     ]
     diagnostics["candidate_count_after_filter"] = len(qualified_candidates)
+    if search_intent == "preference" and semantic_mode != "active":
+        diagnostics["qualified_exact_count"] = len(qualified_candidates)
+        diagnostics["semantic_fallback_eligible"] = len(qualified_candidates) < qualified_exact_trigger_threshold()
     if not qualified_candidates:
+        reason_code = (
+            "insufficient_semantic_ground"
+            if semantic_search_completed else "insufficient_common_ground"
+        )
         return {
             "status": "no_suitable_candidate", "matches": [],
-            "reason_code": "insufficient_common_ground",
+            "reason_code": reason_code,
             "search_context": dict(req.search_context or {}),
             "diagnostics": diagnostics,
             "debug_info": [{
@@ -1904,6 +2194,12 @@ def generate_matches_for_user(
             # identity that is used only for Social-side provenance.
             "search_context": provider_search_context(req.search_context),
         }
+        for candidate_payload in payload["candidates"]:
+            evidence = qualification_by_id.get(candidate_payload.get("user_id"), {}).get(
+                "preference_retrieval_evidence"
+            )
+            if semantic_mode == "active" and evidence:
+                candidate_payload["preference_retrieval_evidence"] = evidence
         step_start = time.perf_counter()
         agent_matches = _request_matchmaker_selection(payload, timeout=remaining)
         print(f"[match-selection] batch={batch_index + 1} candidates={len(batch)} "
@@ -1961,22 +2257,42 @@ def generate_matches_for_user(
             (candidate for candidate in qualified_candidates if candidate.get("user_id") == matched_id),
             profiles_coll.find_one({"user_id": matched_id}, {"_id": 0}) or {},
         )
+        matched_preference_evidence = list(
+            preference_evidence_by_id.get(matched_id) or []
+        )[:5]
+        semantic_preference_selected = any(
+            item.get("kind") == "semantic_related"
+            for item in matched_preference_evidence
+            if isinstance(item, dict)
+        )
+        if semantic_preference_selected:
+            matched_preference_evidence = list(qualification_by_id.get(matched_id, {}).get(
+                "preference_retrieval_evidence"
+            ) or [])[:3]
+        # Existing rationale code treats a preference topic as exact evidence.
+        # Semantic candidates therefore use the established generic rationale
+        # surface; the related durable preference remains internal and cannot
+        # be disclosed as an exact/shared preference.
+        rationale_search_context = (
+            {"search_intent": "generic"}
+            if semantic_preference_selected else req.search_context
+        )
         contrast_label = _short_text((candidate_doc.get("big_five") or {}).get("summary"), 16)
         distinctive_tags = validated_distinctive_tags(candidate_doc)
         score_breakdown, reason_items, top_reasons, reason = build_validated_match_explanation(
             user_doc, candidate_doc, vector_scores.get(matched_id, 0),
-            search_context=req.search_context,
+            search_context=rationale_search_context,
         )
         receiver_breakdown, receiver_items, _, receiver_reason = build_validated_match_explanation(
             candidate_doc, user_doc, vector_scores.get(matched_id, 0),
-            search_context=req.search_context,
+            search_context=rationale_search_context,
         )
         # V4 persists two role-bound friend introductions.  They are created
         # with two separate model calls and never exposed as a two-way public
         # payload, so a role swap cannot leak into the recipient's card.
         friend_intro_v4 = build_friend_intro_v4(
             user_doc, candidate_doc, vector_scores.get(matched_id, 0), refine=True,
-            search_context=req.search_context,
+            search_context=rationale_search_context,
             auto_invite=bound_delivery_mode == INVITE_ON_MATCH,
         )
         ai_recommendation_reason = str(
@@ -2053,6 +2369,9 @@ def generate_matches_for_user(
             "created_at": time.time(),
             "state_history": [{"from": None, "to": "draft", "actor": req.user_id, "action": "created", "at": time.time()}]
         }
+        if search_intent == "preference":
+            # Never put private Concept identifiers into the public match_basis.
+            match_doc["preference_retrieval_evidence"] = matched_preference_evidence
         match_doc["delivery_mode"] = bound_delivery_mode
         if str(origin_room_id or "").strip():
             match_doc["origin_room_id"] = str(origin_room_id).strip()[:240]

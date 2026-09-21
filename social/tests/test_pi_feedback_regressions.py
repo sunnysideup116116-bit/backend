@@ -148,6 +148,30 @@ def test_pi_preference_search_is_canonical_and_confirmation_bound(monkeypatch, m
     assert "delivery_mode" not in record["payload"]
 
 
+def test_active_semantic_fallback_is_disclosed_without_claiming_common_preference(monkeypatch):
+    from services.ayue_agent.shared import write_executors
+    monkeypatch.setenv("MATCH_PREFERENCE_SEMANTIC_MODE", "active")
+    monkeypatch.setattr(
+        write_executors, "assess_match_opportunity",
+        lambda *_a, **_k: SimpleNamespace(state="ready"),
+    )
+    store = mongomock.MongoClient().test
+    _, turn = make_turn("幫我找喜歡 K-pop 的人")
+    runtime = tool_runtime.PiToolRuntime(
+        turn, run_id="preference-semantic-preview", trace={},
+        confirmation_collection=store.c,
+        contact_selection_collection=store.s,
+        operation_batch_collection=store.b,
+    )
+    result = runtime.dispatch("match.start_search", {
+        "kind": "preference", "topic": "K-pop",
+    })
+    assert result["result"]["pending_confirmation"]
+    preview = store.c.find_one({})["preview_text"]
+    assert "沒有任何通過安全檢查的精確人選" in preview
+    assert "相關不代表相同或共同偏好" in preview
+
+
 def test_explicit_preference_wording_overrides_a_misclassified_activity_kind(monkeypatch):
     from services.ayue_agent.shared import write_executors
     monkeypatch.setattr(

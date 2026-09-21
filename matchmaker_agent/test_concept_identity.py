@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pytest
 
 from concept_identity import (
+    canonical_query_provenance,
     canonicalize_concept,
     durable_memory_limit,
     has_mixed_preference_polarity,
@@ -16,6 +17,16 @@ from concept_identity import (
 def test_kpop_aliases_share_one_canonical_identity(value):
     concept = canonicalize_concept(value, suggested_key="model_can_be_wrong")
     assert (concept.key, concept.label) == ("k_pop", "K-pop")
+
+
+def test_alias_is_query_provenance_not_a_different_identity():
+    canonical = canonicalize_concept("K-pop")
+    alias = canonicalize_concept("Kpop")
+    assert canonical.key == alias.key == "k_pop"
+    assert canonical_query_provenance("K-pop", canonical) == "exact_canonical"
+    assert canonical_query_provenance("k-pop", canonical) == "exact_canonical"
+    assert canonical_query_provenance("Kpop", alias) == "deterministic_alias"
+    assert canonical_query_provenance("K pop", alias) == "deterministic_alias"
 
 
 def test_explicit_list_splits_but_descriptive_phrase_does_not():

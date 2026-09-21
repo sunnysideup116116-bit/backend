@@ -238,11 +238,15 @@ def get_embedding(text: str) -> list:
 def get_embeddings(
     texts: list[str], *, task_type: str = "retrieval_document",
     output_dimensionality: int | None = None,
+    request_timeout_seconds: float | None = None,
 ) -> list[list[float]]:
     """Return one bounded provider batch for graph projection workers."""
     safe_texts = [str(text or "")[:500] for text in list(texts or [])[:20]]
     if not safe_texts:
         return []
+    deadline = None
+    if request_timeout_seconds is not None:
+        deadline = time.monotonic() + max(0.25, min(float(request_timeout_seconds), 10.0))
     try:
         model_name = GOOGLE_EMBEDDING_MODEL.rsplit("/", 1)[-1]
         request = {"model": GOOGLE_EMBEDDING_MODEL, "content": safe_texts}
@@ -260,9 +264,17 @@ def get_embeddings(
             request["task_type"] = task_type
             if output_dimensionality:
                 request["output_dimensionality"] = int(output_dimensionality)
-
         def _call(key: str):
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("semantic_query_embedding_timeout")
+                # Share one deadline across key-pool attempts and disable SDK
+                # retries for this optional bounded path only.
+                request["request_options"] = {"timeout": remaining, "retry": None}
             result = genai.embed_content(**request)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("semantic_query_embedding_timeout")
             embeddings = result.get("embedding", [])
             if len(safe_texts) == 1 and embeddings and isinstance(embeddings[0], (int, float)):
                 return [embeddings]
@@ -270,6 +282,8 @@ def get_embeddings(
 
         return google_key_pool.execute(_call)
     except Exception as exc:
+        if deadline is not None:
+            raise HTTPException(status_code=503, detail="semantic_query_embedding_unavailable") from None
         print(f"Embedding error: {exc}")
         raise HTTPException(status_code=500, detail=f"Google Embedding 錯誤: {exc}") from exc
 

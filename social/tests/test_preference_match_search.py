@@ -1,6 +1,8 @@
 import time
 from unittest.mock import Mock
 
+import pytest
+
 from routers import match as router
 from services.match_search_context import context_embedding_source_hash
 from services.profile_projection import without_expired_recent_context
@@ -220,3 +222,380 @@ def test_preference_search_keeps_durable_evidence_but_strips_expired_context(mon
     assert result["matches"][0]["current_context"] == ""
     saved = matches.insert_one.call_args.args[0]
     assert saved["match_context_snapshot"]["candidate"]["current_context"] == ""
+
+
+def _activate_semantic(monkeypatch, result):
+    monkeypatch.setattr(router, "preference_semantic_mode", lambda: "active")
+    monkeypatch.setattr(router, "semantic_embedding_space_confirmed", lambda: True)
+    monkeypatch.setattr(router, "qualified_exact_trigger_threshold", lambda: 1)
+    lookup = Mock(return_value=result)
+    monkeypatch.setattr(router, "retrieve_semantic_preference_candidates", lookup)
+    return lookup
+
+
+def _semantic_result(candidate_id="semantic"):
+    return {
+        "canonical_key": "k_pop",
+        "candidate_ids": [candidate_id],
+        "evidence_by_candidate": {candidate_id: [{
+            "kind": "semantic_related", "concept_key": "korean_pop",
+            "similarity": 0.91,
+        }]},
+        "semantic_concepts_considered": [{
+            "concept_key": "korean_pop", "similarity": 0.91,
+        }],
+        "retrieval_source": "graph_semantic",
+    }
+
+
+def test_hard_conflicting_exact_hits_trigger_semantic_fallback(monkeypatch):
+    exact = {"user_id": "exact", "current_context": ""}
+    semantic = {"user_id": "semantic", "current_context": ""}
+    profiles, matches = _flow(monkeypatch, candidate=semantic)
+
+    def find(query, *_args, **_kwargs):
+        ids = set((query.get("user_id") or {}).get("$in") or [])
+        return [row for row in (exact, semantic) if row["user_id"] in ids]
+
+    profiles.find.side_effect = find
+    monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "candidate_ids": ["exact"], "canonical_key": "k_pop",
+        "normalized_topic": "K-pop", "query_provenance": "exact_canonical",
+        "candidate_count_before_filter": 1, "candidate_count_after_filter": 1,
+    })
+    semantic_lookup = _activate_semantic(monkeypatch, _semantic_result())
+
+    def stances(user_id):
+        return {
+            "owner": {"smoking": {"avoid"}},
+            "exact": {"k_pop": {"like"}, "smoking": {"like"}},
+            "semantic": {"korean_pop": {"like"}},
+        }.get(user_id, {})
+
+    monkeypatch.setattr(router, "_trait_stances", stances)
+    result = router.generate_matches_for_user(
+        "owner", source="automatic", search_context=_preference_context(),
+        report_progress=lambda _step: True, can_commit=lambda: True,
+    )
+    assert result["status"] == "success"
+    assert result["matches"][0]["matched_user_id"] == "semantic"
+    assert "preference_retrieval_evidence" not in result["matches"][0]
+    assert result["diagnostics"]["qualified_exact_count"] == 0
+    assert result["diagnostics"]["semantic_fallback_triggered"] is True
+    semantic_lookup.assert_called_once()
+    saved = matches.insert_one.call_args.args[0]
+    assert saved["preference_retrieval_evidence"] == [{
+        "kind": "semantic_related", "concept_key": "korean_pop",
+        "similarity": 0.91,
+    }]
+
+
+def test_exact_hits_removed_by_block_history_still_trigger_fallback(monkeypatch):
+    semantic = {"user_id": "semantic", "current_context": ""}
+    profiles, _matches = _flow(monkeypatch, candidate=semantic)
+    profiles.find.return_value = [semantic]
+    monkeypatch.setattr(router.risk_block_service, "excluded_user_ids", lambda _uid: {"blocked"})
+    router.matches_coll.find.return_value = [{
+        "from_user": "owner", "to_user": "historical", "status": "accepted",
+        "created_at": 1,
+        "last_decision": {"from": "pending", "to": "accepted", "action": "accept"},
+    }]
+    captured = {}
+
+    def exact_lookup(_owner, _topic, *, excluded_user_ids, limit):
+        captured["excluded"] = set(excluded_user_ids)
+        return {
+            "candidate_ids": [], "canonical_key": "k_pop",
+            "query_provenance": "exact_canonical",
+            "candidate_count_before_filter": 2,
+            "candidate_count_after_filter": 0,
+        }
+
+    monkeypatch.setattr(router, "retrieve_preference_candidate_ids", exact_lookup)
+    semantic_lookup = _activate_semantic(monkeypatch, _semantic_result())
+    monkeypatch.setattr(router, "_trait_stances", lambda user_id: (
+        {"korean_pop": {"like"}} if user_id == "semantic" else {}
+    ))
+    result = router.generate_matches_for_user(
+        "owner", source="automatic", search_context=_preference_context(),
+        report_progress=lambda _step: True, can_commit=lambda: True,
+    )
+    assert result["status"] == "success"
+    assert {"owner", "blocked", "historical"} <= captured["excluded"]
+    assert result["diagnostics"]["qualified_exact_count"] == 0
+    semantic_lookup.assert_called_once()
+
+
+def test_profile_ineligible_exact_hit_triggers_semantic_fallback(monkeypatch):
+    semantic = {"user_id": "semantic", "current_context": ""}
+    profiles, _matches = _flow(monkeypatch, candidate=semantic)
+
+    def find(query, *_args, **_kwargs):
+        ids = set((query.get("user_id") or {}).get("$in") or [])
+        return [semantic] if "semantic" in ids else []
+
+    profiles.find.side_effect = find
+    monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "candidate_ids": ["profile-ineligible"], "canonical_key": "k_pop",
+        "query_provenance": "exact_canonical",
+        "candidate_count_before_filter": 1, "candidate_count_after_filter": 1,
+    })
+    semantic_lookup = _activate_semantic(monkeypatch, _semantic_result())
+    monkeypatch.setattr(router, "_trait_stances", lambda user_id: (
+        {"korean_pop": {"like"}} if user_id == "semantic" else {}
+    ))
+    result = router.generate_matches_for_user(
+        "owner", source="automatic", search_context=_preference_context(),
+        report_progress=lambda _step: True, can_commit=lambda: True,
+    )
+    assert result["status"] == "success"
+    assert result["diagnostics"]["qualified_exact_count"] == 0
+    semantic_lookup.assert_called_once()
+
+
+def test_alias_exact_candidate_keeps_direct_strength_and_skips_semantic(monkeypatch):
+    candidate = {"user_id": "candidate", "current_context": ""}
+    _profiles, matches = _flow(monkeypatch, candidate=candidate)
+    monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "candidate_ids": ["candidate"], "canonical_key": "k_pop",
+        "normalized_topic": "K-pop", "query_provenance": "deterministic_alias",
+        "candidate_count_before_filter": 1, "candidate_count_after_filter": 1,
+    })
+    semantic_lookup = _activate_semantic(
+        monkeypatch, _semantic_result("must-not-be-used"),
+    )
+    monkeypatch.setattr(router, "_trait_stances", lambda user_id: (
+        {"k_pop": {"like"}} if user_id == "candidate" else {}
+    ))
+    alias_context = _preference_context()
+    alias_context["query_text"] = "幫我找喜歡 Kpop 的人"
+    result = router.generate_matches_for_user(
+        "owner", source="automatic", search_context=alias_context,
+        report_progress=lambda _step: True, can_commit=lambda: True,
+    )
+    assert result["status"] == "success"
+    assert result["diagnostics"]["qualified_exact_count"] == 1
+    assert result["diagnostics"]["query_provenance"] == "deterministic_alias"
+    assert result["diagnostics"]["semantic_fallback_triggered"] is False
+    semantic_lookup.assert_not_called()
+    assert matches.insert_one.call_args.args[0]["preference_retrieval_evidence"][0][
+        "kind"
+    ] == "deterministic_alias"
+
+
+def test_semantic_transient_failure_is_not_reported_as_no_candidates(monkeypatch):
+    candidate = {"user_id": "unused", "current_context": ""}
+    _profiles, _matches = _flow(monkeypatch, candidate=candidate)
+    monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "candidate_ids": [], "canonical_key": "k_pop",
+        "candidate_count_before_filter": 0, "candidate_count_after_filter": 0,
+    })
+    monkeypatch.setattr(router, "preference_semantic_mode", lambda: "active")
+    monkeypatch.setattr(router, "semantic_embedding_space_confirmed", lambda: True)
+    monkeypatch.setattr(router, "qualified_exact_trigger_threshold", lambda: 1)
+    monkeypatch.setattr(
+        router, "retrieve_semantic_preference_candidates",
+        Mock(side_effect=router.PreferenceSemanticRetrievalError(
+            "semantic_graph_unavailable"
+        )),
+    )
+    with pytest.raises(router.MatchSearchPipelineError) as caught:
+        router.generate_matches_for_user(
+            "owner", source="automatic", search_context=_preference_context(),
+            report_progress=lambda _step: True, can_commit=lambda: True,
+        )
+    assert caught.value.code == "semantic_graph_unavailable"
+    assert caught.value.stage == "preference_semantic_search"
+
+
+def test_normal_empty_semantic_result_uses_insufficient_semantic_ground(monkeypatch):
+    candidate = {"user_id": "unused", "current_context": ""}
+    _profiles, _matches = _flow(monkeypatch, candidate=candidate)
+    monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "candidate_ids": [], "canonical_key": "k_pop",
+        "candidate_count_before_filter": 0, "candidate_count_after_filter": 0,
+    })
+    _activate_semantic(monkeypatch, {
+        "canonical_key": "k_pop", "candidate_ids": [],
+        "evidence_by_candidate": {}, "semantic_concepts_considered": [],
+    })
+    monkeypatch.setattr(router, "_trait_stances", lambda _uid: {})
+    result = router.generate_matches_for_user(
+        "owner", source="automatic", search_context=_preference_context(),
+        report_progress=lambda _step: True, can_commit=lambda: True,
+    )
+    assert result["status"] == "no_suitable_candidate"
+    assert result["reason_code"] == "insufficient_semantic_ground"
+
+
+def test_semantic_selected_candidate_uses_privacy_safe_rationale_context(monkeypatch):
+    semantic = {"user_id": "semantic", "current_context": ""}
+    _profiles, matches = _flow(monkeypatch, candidate=semantic)
+    monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "candidate_ids": [], "canonical_key": "k_pop",
+        "candidate_count_before_filter": 0, "candidate_count_after_filter": 0,
+    })
+    _activate_semantic(monkeypatch, _semantic_result())
+    monkeypatch.setattr(router, "_trait_stances", lambda user_id: (
+        {"korean_pop": {"like"}} if user_id == "semantic" else {}
+    ))
+    explain = Mock(return_value=(
+        {"graph": 0}, [{"kind": "recommendation_tier", "text": "exploratory"}],
+        [], "一般介紹理由",
+    ))
+    intro = Mock(return_value={
+        "initiator_preview": {"viewer_text": "要先認識看看嗎？"},
+        "receiver_invitation": {"viewer_text": "有人想認識你。"},
+    })
+    monkeypatch.setattr(router, "build_validated_match_explanation", explain)
+    monkeypatch.setattr(router, "build_friend_intro_v4", intro)
+    result = router.generate_matches_for_user(
+        "owner", source="automatic", search_context=_preference_context(),
+        report_progress=lambda _step: True, can_commit=lambda: True,
+    )
+    assert result["status"] == "success"
+    assert all(
+        call.kwargs["search_context"] == {"search_intent": "generic"}
+        for call in explain.call_args_list
+    )
+    assert intro.call_args.kwargs["search_context"] == {
+        "search_intent": "generic",
+    }
+    saved = matches.insert_one.call_args.args[0]
+    public_copy = " ".join([
+        saved["reason"], saved["receiver_reason"],
+        str(saved["friend_intro_v4"]),
+    ])
+    assert "korean_pop" not in public_copy
+    assert "共同偏好" not in public_copy
+
+
+def test_shadow_mode_does_not_run_semantic_on_live_search_path(monkeypatch):
+    candidate = {"user_id": "unused", "current_context": ""}
+    _profiles, _matches = _flow(monkeypatch, candidate=candidate)
+    monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "candidate_ids": [], "canonical_key": "k_pop",
+        "candidate_count_before_filter": 0, "candidate_count_after_filter": 0,
+    })
+    monkeypatch.setattr(router, "preference_semantic_mode", lambda: "shadow")
+    monkeypatch.setattr(router, "qualified_exact_trigger_threshold", lambda: 1)
+    semantic_lookup = Mock(side_effect=AssertionError(
+        "shadow must use the separate observation path"
+    ))
+    monkeypatch.setattr(
+        router, "retrieve_semantic_preference_candidates", semantic_lookup,
+    )
+    result = router.generate_matches_for_user(
+        "owner", source="automatic", search_context=_preference_context(),
+        report_progress=lambda _step: True, can_commit=lambda: True,
+    )
+    assert result["status"] == "no_suitable_candidate"
+    assert result["diagnostics"]["semantic_shadow_status"] == (
+        "separate_observation_only"
+    )
+    semantic_lookup.assert_not_called()
+
+
+def test_active_mode_fails_closed_without_embedding_space_confirmation(monkeypatch):
+    candidate = {"user_id": "unused", "current_context": ""}
+    _profiles, _matches = _flow(monkeypatch, candidate=candidate)
+    monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "candidate_ids": [], "canonical_key": "k_pop",
+        "candidate_count_before_filter": 0, "candidate_count_after_filter": 0,
+    })
+    monkeypatch.setattr(router, "preference_semantic_mode", lambda: "active")
+    monkeypatch.setattr(router, "semantic_embedding_space_confirmed", lambda: False)
+    monkeypatch.setattr(router, "qualified_exact_trigger_threshold", lambda: 1)
+    with pytest.raises(router.MatchSearchPipelineError) as caught:
+        router.generate_matches_for_user(
+            "owner", source="automatic", search_context=_preference_context(),
+            report_progress=lambda _step: True, can_commit=lambda: True,
+        )
+    assert caught.value.code == "semantic_readiness_unconfirmed"
+
+
+def test_usable_exact_candidate_survives_semantic_failure_when_threshold_is_raised(monkeypatch):
+    exact = {"user_id": "exact", "current_context": ""}
+    _profiles, _matches = _flow(monkeypatch, candidate=exact)
+    monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "candidate_ids": ["exact"], "canonical_key": "k_pop",
+        "query_provenance": "exact_canonical",
+        "candidate_count_before_filter": 1, "candidate_count_after_filter": 1,
+    })
+    monkeypatch.setattr(router, "preference_semantic_mode", lambda: "active")
+    monkeypatch.setattr(router, "semantic_embedding_space_confirmed", lambda: True)
+    monkeypatch.setattr(router, "qualified_exact_trigger_threshold", lambda: 2)
+    monkeypatch.setattr(router, "_trait_stances", lambda user_id: (
+        {"k_pop": {"like"}} if user_id == "exact" else {}
+    ))
+    semantic_lookup = Mock(side_effect=router.PreferenceSemanticRetrievalError(
+        "semantic_graph_unavailable"
+    ))
+    monkeypatch.setattr(
+        router, "retrieve_semantic_preference_candidates", semantic_lookup,
+    )
+    result = router.generate_matches_for_user(
+        "owner", source="automatic", search_context=_preference_context(),
+        report_progress=lambda _step: True, can_commit=lambda: True,
+    )
+    assert result["status"] == "success"
+    assert result["matches"][0]["matched_user_id"] == "exact"
+    assert result["diagnostics"]["semantic_fallback_error"] == (
+        "semantic_graph_unavailable"
+    )
+
+
+def test_combined_pool_is_exact_first_then_semantic_score_order(monkeypatch):
+    exact = {"user_id": "z-exact", "current_context": ""}
+    high = {"user_id": "b-semantic-high", "current_context": ""}
+    low = {"user_id": "a-semantic-low", "current_context": ""}
+    profiles, _matches = _flow(monkeypatch, candidate=exact)
+
+    def find(query, *_args, **_kwargs):
+        ids = set((query.get("user_id") or {}).get("$in") or [])
+        return [row for row in (exact, high, low) if row["user_id"] in ids]
+
+    profiles.find.side_effect = find
+    monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "candidate_ids": ["z-exact"], "canonical_key": "k_pop",
+        "query_provenance": "exact_canonical",
+        "candidate_count_before_filter": 1, "candidate_count_after_filter": 1,
+    })
+    monkeypatch.setattr(router, "preference_semantic_mode", lambda: "active")
+    monkeypatch.setattr(router, "semantic_embedding_space_confirmed", lambda: True)
+    monkeypatch.setattr(router, "qualified_exact_trigger_threshold", lambda: 2)
+    monkeypatch.setattr(
+        router, "retrieve_semantic_preference_candidates", Mock(return_value={
+            "canonical_key": "k_pop",
+            "candidate_ids": ["b-semantic-high", "a-semantic-low"],
+            "evidence_by_candidate": {
+                "b-semantic-high": [{
+                    "kind": "semantic_related", "concept_key": "korean_pop",
+                    "similarity": .93,
+                }],
+                "a-semantic-low": [{
+                    "kind": "semantic_related", "concept_key": "asian_pop",
+                    "similarity": .84,
+                }],
+            },
+            "semantic_concepts_considered": [],
+        }),
+    )
+    monkeypatch.setattr(router, "_trait_stances", lambda user_id: {
+        "z-exact": {"k_pop": {"like"}},
+        "b-semantic-high": {"korean_pop": {"like"}},
+        "a-semantic-low": {"asian_pop": {"like"}},
+    }.get(user_id, {}))
+    order = []
+
+    def select(payload, **_kwargs):
+        order.extend(candidate["user_id"] for candidate in payload["candidates"])
+        return [{"matched_user_id": payload["candidates"][0]["user_id"]}]
+
+    monkeypatch.setattr(router, "_request_matchmaker_selection", select)
+    result = router.generate_matches_for_user(
+        "owner", source="automatic", search_context=_preference_context(),
+        report_progress=lambda _step: True, can_commit=lambda: True,
+    )
+    assert result["status"] == "success"
+    assert order == ["z-exact", "b-semantic-high", "a-semantic-low"]

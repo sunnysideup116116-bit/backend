@@ -97,6 +97,23 @@ def canonicalize_concept(label: object, suggested_key: object = "") -> Canonical
     return CanonicalConcept(key=key, label=clean)
 
 
+def canonical_query_provenance(
+    label: object, concept: CanonicalConcept | None = None,
+) -> str:
+    """Classify how a query reached one deterministic Concept identity.
+
+    This is retrieval metadata only.  It never changes the canonical key and
+    must not be used to create aliases or weaken exact-match qualification.
+    """
+    identity = concept or canonicalize_concept(label)
+    clean = _clean_label(label)
+    if not identity or not clean:
+        return ""
+    if identity.alias and clean.casefold() != identity.label.casefold():
+        return "deterministic_alias"
+    return "exact_canonical"
+
+
 def canonical_evidence_span(text: object, concept: CanonicalConcept) -> str:
     """Return an exact owner substring supporting one canonical concept."""
     source = unicodedata.normalize("NFKC", str(text or ""))

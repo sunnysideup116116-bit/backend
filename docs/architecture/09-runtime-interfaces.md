@@ -46,3 +46,11 @@ Registration Graph `registration-bootstrap-v1`：Social profiling 初始化／pr
 - App voice 的 `ayue.public_query` 使用公開 Pi HTTP API；private query 繼續使用 Private V2。
 - Registration voice 與 App voice 的 Gemini session 不改為 Pi。
 - Domain writes 始終由既有 Calendar、Match、Relationship、Profile services 擁有。
+
+## P1-A preference semantic internal APIs
+
+- `POST :9001/api/preferences/candidates`：P0 indexed exact canonical lookup，唯讀 `Concept.key <-[:PREFERS]- User`。
+- `POST :9001/api/preferences/semantic-candidates`：只在 Social 已確認 qualified exact 不足時呼叫；先查既有 `concept_embedding_index`，再依有限 Concept keys 讀取有界 `PREFERS` 關係。Body 的 `embedding_model` 為 Social configured provider model；query vector 與 ANN hit 的 model/task 必須相容。只回 internal IDs、keys、rounded scores，不回 raw memory。向量相容性無法確認時回 typed transient failure。
+- `GET :9001/api/preferences/semantic-readiness`：獨立 read-only operational audit；回報 index schema/state/dimension、PREFERS-connected Concept coverage，以及 historical fingerprint=`unknown`。不建立 index、不投影 embedding；unknown 不可用 env confirmation 覆寫為 ready。
+- Social 預設 off；`shadow` 使用獨立 CLI，不進 live request。只有 `active` 加上確認且相容的 embedding evidence 才允許同步 fallback。`0.82` 是 provisional synthetic-fixture threshold。
+- 9001 Matchmaker 僅對確實帶有 validated semantic evidence 的 batch 使用 semantic prompt；exact-only prompt 與 P0 相同。Internal evidence 是獨立欄位，公開 `match_basis`、state、history、delivery、opening 不回 matched Concept key／label。
