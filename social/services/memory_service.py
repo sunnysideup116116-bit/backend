@@ -4,6 +4,7 @@ import requests
 
 from database import db, profiles_coll
 from services.language_service import normalize_zh_tw
+from matchmaker_agent.concept_identity import durable_memory_limit
 
 AGENT_URL = "http://127.0.0.1:9001"
 MEMORY_PREFIX_RE = re.compile(r"^(?:喜歡|不喜歡|避免|需要|偏好|討厭)\s*[：:、，,]?\s*")
@@ -20,7 +21,7 @@ def _queue_memory_retry(user_id: str, proposals: list[dict], surface: str, messa
                         match_id: str | None, error_code: str) -> None:
     """Keep validated proposals for retry without storing raw chat text."""
     document = {
-        "user_id": user_id, "memories": proposals[:3], "surface": surface, "match_id": match_id,
+        "user_id": user_id, "memories": proposals[:durable_memory_limit()], "surface": surface, "match_id": match_id,
         "message_id": message_id, "status": "pending", "last_error_code": error_code,
         "updated_at": time.time(), "next_attempt_at": time.time() + 30,
     }

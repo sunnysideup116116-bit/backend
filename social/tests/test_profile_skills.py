@@ -228,8 +228,87 @@ class ProfileSkillsTests(unittest.TestCase):
         with patch("services.profile_skills.generate_chat_completion", return_value=payload):
             decision = analyze_profile_message("我不喜歡抽菸的人", "")
         self.assertFalse(decision["recent_context"]["should_update"])
-        self.assertEqual(decision["memories"][0]["key"], "smoking_partner")
+        self.assertEqual(
+            decision["memories"][0]["key"],
+            profile_skills.canonicalize_concept(decision["memories"][0]["label"]).key,
+        )
         self.assertEqual(decision["memory_codes"], ["accepted"])
+
+    def test_compound_and_separate_preferences_are_canonically_equivalent(self):
+        compound_message = "我喜歡 K-pop、J-pop、西洋音樂"
+        compound_payload = router_payload(None, [{
+            "key": "music_bundle", "label_zh_tw": "K-pop、J-pop、西洋音樂",
+            "stance": "like", "category": "activity", "confidence": 0.96,
+            "evidence_span": compound_message,
+        }], recent=False, confidence=0.0)
+        with patch("services.profile_skills.generate_chat_completion", return_value=compound_payload):
+            compound = analyze_profile_message(compound_message)["memories"]
+
+        separate = []
+        for label, key in (("K-pop", "kpop"), ("J-pop", "jpop"), ("西洋音樂", "western_music")):
+            message = f"我喜歡{label}"
+            payload = router_payload(None, [{
+                "key": key, "label_zh_tw": label, "stance": "like",
+                "category": "activity", "confidence": 0.96,
+                "evidence_span": message,
+            }], recent=False, confidence=0.0)
+            with patch("services.profile_skills.generate_chat_completion", return_value=payload):
+                separate.extend(analyze_profile_message(message)["memories"])
+
+        self.assertEqual(
+            {(item["key"], item["label"]) for item in compound},
+            {(item["key"], item["label"]) for item in separate},
+        )
+        self.assertEqual({item["key"] for item in compound}, {
+            "k_pop", "j_pop", profile_skills.canonicalize_concept("西洋音樂").key,
+        })
+
+    def test_memory_alias_is_canonicalized_and_quiet_cafe_stays_atomic(self):
+        payload = router_payload(None, [
+            {"key": "whatever", "label_zh_tw": "Kpop", "stance": "like",
+             "category": "activity", "confidence": 0.95, "evidence_span": "Kpop"},
+            {"key": "quiet", "label_zh_tw": "適合讀書的安靜咖啡廳", "stance": "like",
+             "category": "lifestyle", "confidence": 0.95,
+             "evidence_span": "適合讀書的安靜咖啡廳"},
+        ], recent=False, confidence=0.0)
+        with patch("services.profile_skills.generate_chat_completion", return_value=payload):
+            memories = analyze_profile_message("我喜歡 Kpop，也喜歡適合讀書的安靜咖啡廳")["memories"]
+        self.assertEqual(memories[0]["key"], "k_pop")
+        self.assertEqual(memories[0]["label"], "K-pop")
+        self.assertEqual(len(memories), 2)
+        self.assertEqual(memories[1]["label"], "適合讀書的安靜咖啡廳")
+
+    def test_mixed_polarity_compound_fails_closed_instead_of_losing_stance(self):
+        message = "我喜歡 K-pop、不喜歡吵鬧的音樂"
+        payload = router_payload(None, [{
+            "key": "mixed_music", "label_zh_tw": "K-pop、不喜歡吵鬧的音樂",
+            "stance": "like", "category": "activity", "confidence": 0.96,
+            "evidence_span": message,
+        }], recent=False, confidence=0.0)
+        with patch("services.profile_skills.generate_chat_completion", return_value=payload):
+            decision = analyze_profile_message(message)
+        self.assertEqual(decision["memories"], [])
+        self.assertEqual(decision["memory_codes"], ["mixed_polarity_compound"])
+
+    def test_item_level_mixed_polarity_candidates_keep_both_stances(self):
+        message = "我喜歡 K-pop、不喜歡吵鬧的音樂"
+        payload = router_payload(None, [
+            {
+                "key": "kpop", "label_zh_tw": "K-pop", "stance": "like",
+                "category": "activity", "confidence": 0.96,
+                "evidence_span": "K-pop",
+            },
+            {
+                "key": "noisy_music", "label_zh_tw": "吵鬧的音樂",
+                "stance": "avoid", "category": "activity", "confidence": 0.96,
+                "evidence_span": "不喜歡吵鬧的音樂",
+            },
+        ], recent=False, confidence=0.0)
+        with patch("services.profile_skills.generate_chat_completion", return_value=payload):
+            memories = analyze_profile_message(message)["memories"]
+        self.assertEqual([(item["label"], item["stance"]) for item in memories], [
+            ("K-pop", "like"), ("吵鬧的音樂", "avoid"),
+        ])
 
     def test_mixed_message_splits_context_and_memory(self):
         payload = router_payload("去日本旅行", [{"key": "smoking_partner", "label_zh_tw": "會抽菸的對象", "stance": "avoid", "category": "lifestyle", "confidence": 0.95}], evidence_span="我最近想去日本，而且不喜歡抽菸的人")
@@ -514,7 +593,7 @@ class ProfileSkillsTests(unittest.TestCase):
     def test_language_normalization_and_skill_packs(self):
         self.assertEqual(normalize_zh_tw("用户想去日本，等待回复约会"), "使用者想去日本,等待回覆約會")
         self.assertEqual(memory_summary([{"stance": "like", "label": "户外活动"}]), "喜歡戶外活動")
-        self.assertEqual(load_profile_skill("memory")["version"], "2")
+        self.assertEqual(load_profile_skill("memory")["version"], "3")
         self.assertEqual(load_profile_skill("recent-context")["name"], "recent-context")
 
     def test_profile_skill_rollout_and_registry(self):

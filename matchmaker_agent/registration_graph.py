@@ -5,6 +5,13 @@ import re
 import time
 
 from pydantic import BaseModel, Field
+from concept_identity import (
+    canonicalize_concept,
+    durable_memory_limit,
+    has_mixed_preference_polarity,
+    split_compound_concept_label,
+    split_explicit_preference_enumeration,
+)
 
 VERSION = "registration-bootstrap-v1"
 
@@ -51,22 +58,38 @@ def seed_registration(tx, user_id, message_id, memories):
     """, user_id=user_id).single()
     if not row or not row["seed_allowed"]:
         return []
-    clean = []
+    clean_by_key = {}
+    memory_limit = durable_memory_limit()
     protected = re.compile(r"種族|族裔|宗教|信仰|性傾向|性別認同|疾病|政治立場|國籍|殘障|黑人|白人|穆斯林|基督教|同性戀|跨性別")
-    for item in memories[:3]:
+    for item in memories[:durable_memory_limit()]:
         label = str(item.get("label") or item.get("label_zh_tw") or "").strip()[:40]
         label = re.sub(r"^(?:喜歡|偏好|興趣)\s*[:：,，]?\s*", "", label).strip()
         evidence = str(item.get("evidence_span") or "").strip()[:120]
         confidence = float(item.get("confidence") or 0)
         if (item.get("stance") != "like" or not label or not evidence
                 or not math.isfinite(confidence) or confidence < .9 or protected.search(label)
+                or has_mixed_preference_polarity(label)
                 or item.get("category") not in {"activity", "habit", "lifestyle"}):
             continue
-        # Reuse the content-addressed concept convention, not a per-user concept.
-        normalized = re.sub(r"\s+", "", label.lower())
-        key = "concept_" + hashlib.sha256(normalized.encode()).hexdigest()[:16]
-        clean.append({"key": key, "label": label, "stance": "like", "category": "interest",
-                      "confidence": confidence, "evidence_span": evidence, "last_seen_at": now})
+        labels = (
+            split_explicit_preference_enumeration(label, limit=memory_limit)
+            or split_compound_concept_label(label, limit=memory_limit)
+            or [label]
+        )
+        for atomic_label in labels:
+            identity = canonicalize_concept(atomic_label, item.get("key"))
+            if not identity:
+                continue
+            clean_by_key.setdefault(identity.key, {
+                "key": identity.key, "label": identity.label, "stance": "like",
+                "category": "interest", "confidence": confidence,
+                "evidence_span": evidence, "last_seen_at": now,
+            })
+            if len(clean_by_key) >= memory_limit:
+                break
+        if len(clean_by_key) >= memory_limit:
+            break
+    clean = list(clean_by_key.values())
     if not clean:
         return []
     tx.run("""

@@ -61,6 +61,27 @@ class ContextGraphServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "pending")
         self.assertEqual(outbox.update_one.call_args.args[1]["$set"]["status"], "pending")
 
+    @patch("services.context_graph_service.CONTEXT_GRAPH_OUTBOX")
+    @patch("services.context_graph_service.requests.post")
+    @patch("services.context_graph_service.profiles_coll")
+    @patch("services.context_graph_service.time.time", return_value=100.0)
+    def test_expired_recent_context_projects_no_active_concepts(
+        self, _time, profiles, post, _outbox,
+    ):
+        profiles.find_one.return_value = {
+            "recent_context_state": {"fields": {"activity": {"value": "看展"}}},
+            "recent_context_expires_at": 99.0,
+            "current_context_revision": 8,
+        }
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"status": "success", "concept_count": 0}
+        post.return_value = response
+        self.assertEqual(sync_current_context_projection("owner")["status"], "success")
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["concepts"], [])
+        self.assertEqual(payload["expires_at"], 100.0)
+
     @patch("services.context_graph_service.sync_current_context_projection")
     @patch("services.context_graph_service.CONTEXT_GRAPH_OUTBOX")
     def test_retry_worker_is_bounded(self, outbox, sync):

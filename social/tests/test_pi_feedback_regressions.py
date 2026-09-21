@@ -118,6 +118,78 @@ def test_pi_activity_search_schema_and_preparation_preserve_surfing(monkeypatch)
     assert "衝浪" in record["preview_text"]
 
 
+@pytest.mark.parametrize("message,topic", [
+    ("幫我找喜歡 K-pop 的人", "K-pop"),
+    ("幫我找喜歡 Kpop 的人", "K-pop"),
+])
+def test_pi_preference_search_is_canonical_and_confirmation_bound(monkeypatch, message, topic):
+    from services.ayue_agent.shared import write_executors
+    monkeypatch.setattr(
+        write_executors, "assess_match_opportunity",
+        lambda *_a, **_k: SimpleNamespace(state="ready"),
+    )
+    store = mongomock.MongoClient().test
+    _, turn = make_turn(message)
+    runtime = tool_runtime.PiToolRuntime(
+        turn, run_id="preference-run", trace={}, confirmation_collection=store.c,
+        contact_selection_collection=store.s, operation_batch_collection=store.b,
+    )
+    result = runtime.dispatch("match.start_search", {
+        "kind": "preference", "topic": topic,
+    })
+    assert result["result"]["pending_confirmation"]
+    record = store.c.find_one({})
+    context = record["payload"]["search_context"]
+    assert context["search_intent"] == "preference"
+    assert context["normalized_topic"] == "K-pop"
+    assert context["canonical_preference_key"] == "k_pop"
+    assert "明確保存" in record["preview_text"]
+    assert "不會用近期活動猜測偏好" in record["preview_text"]
+    assert "delivery_mode" not in record["payload"]
+
+
+def test_explicit_preference_wording_overrides_a_misclassified_activity_kind(monkeypatch):
+    from services.ayue_agent.shared import write_executors
+    monkeypatch.setattr(
+        write_executors, "assess_match_opportunity",
+        lambda *_a, **_k: SimpleNamespace(state="ready"),
+    )
+    store = mongomock.MongoClient().test
+    _, turn = make_turn("幫我找喜歡 Kpop 的人")
+    runtime = tool_runtime.PiToolRuntime(
+        turn, run_id="preference-intent-guard", trace={},
+        confirmation_collection=store.c,
+        contact_selection_collection=store.s,
+        operation_batch_collection=store.b,
+    )
+    result = runtime.dispatch(
+        "match.start_search", {"kind": "activity", "topic": "K-pop"},
+    )
+    assert result["result"]["pending_confirmation"]
+    context = store.c.find_one({})["payload"]["search_context"]
+    assert context["search_intent"] == "preference"
+    assert context["canonical_preference_key"] == "k_pop"
+
+
+@pytest.mark.parametrize("kind", ["preference", "activity"])
+def test_negative_preference_request_never_becomes_positive_graph_search(
+    monkeypatch, kind,
+):
+    store = mongomock.MongoClient().test
+    _, turn = make_turn("幫我找不喜歡 K-pop 的人")
+    runtime = tool_runtime.PiToolRuntime(
+        turn, run_id="negative-preference-guard", trace={},
+        confirmation_collection=store.c,
+        contact_selection_collection=store.s,
+        operation_batch_collection=store.b,
+    )
+    result = runtime.dispatch(
+        "match.start_search", {"kind": kind, "topic": "K-pop"},
+    )
+    assert result["error_code"] == "preflight_rejected"
+    assert store.c.count_documents({}) == 0
+
+
 @pytest.mark.parametrize("message,history,arguments,topic", [
     ("對", [{"role": "user", "content": "幫我找一起衝浪的人"}, {"role": "assistant", "content": "要開始找衝浪人選嗎？"}], {"kind": "activity", "topic": "衝浪"}, "衝浪"),
     ("改用近期情境就好", [{"role": "user", "content": "找衝浪人選"}], {"kind": "recent_context"}, None),

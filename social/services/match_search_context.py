@@ -13,6 +13,7 @@ import hashlib
 from typing import Any
 
 from services.language_service import normalize_zh_tw
+from matchmaker_agent.concept_identity import canonicalize_concept
 
 
 MAX_INVITATION_TOPIC_CHARS = 80
@@ -23,7 +24,11 @@ _SEARCH_CONTEXT_KEYS = (
     "invitation_topic",
     "query_text",
     "source_message_id",
+    "search_intent",
+    "normalized_topic",
+    "canonical_preference_key",
 )
+_SEARCH_INTENTS = frozenset({"activity", "recent_context", "preference", "generic"})
 
 _NEGATED_TOPIC_PREFIX_RE = re.compile(
     r"(?:沒有|不要|不想|不用|不再|先不|別|不願(?:意)?|無意|不是|不找|不考慮|先跳過)"
@@ -62,12 +67,35 @@ def safe_search_context(value: Any) -> dict[str, str]:
         "invitation_topic": MAX_INVITATION_TOPIC_CHARS,
         "query_text": MAX_QUERY_TEXT_CHARS,
         "source_message_id": MAX_SOURCE_MESSAGE_ID_CHARS,
+        "search_intent": 24,
+        "normalized_topic": MAX_INVITATION_TOPIC_CHARS,
+        "canonical_preference_key": 52,
     }
     result: dict[str, str] = {}
     for key in _SEARCH_CONTEXT_KEYS:
         text = bounded_search_text(value.get(key), limits[key])
         if text:
             result[key] = text
+    intent = result.get("search_intent", "")
+    if intent not in _SEARCH_INTENTS:
+        result.pop("search_intent", None)
+        intent = ""
+    if intent == "preference":
+        identity = canonicalize_concept(
+            result.get("normalized_topic") or result.get("invitation_topic"),
+            result.get("canonical_preference_key"),
+        )
+        if not identity:
+            return {}
+        result["normalized_topic"] = identity.label
+        result["canonical_preference_key"] = identity.key
+        result.pop("invitation_topic", None)
+    else:
+        result.pop("canonical_preference_key", None)
+        if intent != "activity":
+            result.pop("normalized_topic", None)
+        elif result.get("invitation_topic"):
+            result["normalized_topic"] = result["invitation_topic"]
     return result
 
 
@@ -189,6 +217,12 @@ def search_context_for_turn(
     query; generic ``start_search`` language remains an ordinary search.
     """
     result = safe_search_context(value)
+    if result.get("search_intent") == "preference":
+        if result.get("query_text") and message_id and not result.get("source_message_id"):
+            result["source_message_id"] = bounded_search_text(
+                message_id, MAX_SOURCE_MESSAGE_ID_CHARS,
+            )
+        return safe_search_context(result)
     recovered_source_id = ""
     query_text = result.get("query_text", "")
     if result.get("invitation_topic"):
@@ -294,6 +328,6 @@ def provider_search_context(value: Any) -> dict[str, str]:
     context = safe_search_context(value)
     return {
         key: context[key]
-        for key in ("invitation_topic", "query_text")
+        for key in ("search_intent", "normalized_topic", "invitation_topic", "query_text")
         if context.get(key)
     }

@@ -28,6 +28,11 @@ from services.risk_block_service import (
     RiskBlockServiceUnavailable,
     risk_block_service,
 )
+from services.profile_projection import (
+    active_context_signals,
+    active_recent_context,
+    without_expired_recent_context,
+)
 
 
 AGENT_EVENT_OPPORTUNITY_URL = "http://127.0.0.1:9001/api/proactive_event_match"
@@ -267,10 +272,10 @@ def run_requested_event_opportunity_scan() -> dict[str, Any]:
 def _profile_snapshot(profile: dict[str, Any]) -> dict[str, Any]:
     return {
         "user_id": str(profile.get("user_id") or ""),
-        "current_context": str(profile.get("current_context") or "")[:300],
+        "current_context": active_recent_context(profile, "")[:300],
         "public_personality": public_personality_phrase(profile),
         "context_revision": int(profile.get("current_context_revision", 0) or 0),
-        "context_signals": profile.get("context_signals") or {},
+        "context_signals": active_context_signals(profile),
     }
 
 
@@ -343,13 +348,13 @@ def create_event_opportunity(
         return {"status": "excluded_candidate"}
 
     profiles = {
-        str(row.get("user_id") or ""): row
+        str(row.get("user_id") or ""): without_expired_recent_context(row)
         for row in profiles_coll.find(
             {"user_id": {"$in": [first_user, second_user]}},
             {
                 "_id": 0, "user_id": 1, "display_name": 1, "nickname": 1,
                 "name": 1, "current_context": 1, "current_context_revision": 1,
-                "context_signals": 1, "big_five": 1,
+                "recent_context_expires_at": 1, "context_signals": 1, "big_five": 1,
             },
         )
     }

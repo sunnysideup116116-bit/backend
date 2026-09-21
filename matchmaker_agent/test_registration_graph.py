@@ -2,6 +2,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from concept_identity import canonicalize_concept
 from registration_graph import RegistrationProjection, project_identity, seed_registration, registration_message_id
 
 
@@ -42,6 +43,20 @@ def test_seed_uses_plain_concept_label(label):
     transaction = tx()
     result = seed_registration(transaction, "account1", registration_message_id("account1"), [memory(label=label)])
     assert result[0]["label"] == "爬山"
+
+
+def test_registration_seed_splits_clear_interests_into_atomic_concepts():
+    transaction = tx()
+    result = seed_registration(
+        transaction, "account1", registration_message_id("account1"),
+        [memory(label="K-pop、J-pop、西洋音樂", evidence_span="K-pop、J-pop、西洋音樂")],
+    )
+    assert [(item["key"], item["label"]) for item in result] == [
+        ("k_pop", "K-pop"),
+        ("j_pop", "J-pop"),
+        (canonicalize_concept("西洋音樂").key, "西洋音樂"),
+    ]
+    assert len({item["key"] for item in result}) == 3
 
 
 def test_existing_or_disabled_memory_blocks_all_bootstrap_edges():

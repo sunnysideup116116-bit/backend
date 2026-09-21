@@ -7,7 +7,9 @@ state; it does not decide whether a new owner message is meaningful.
 
 from __future__ import annotations
 
+import math
 import re
+import time
 from typing import Any
 
 from services.language_service import normalize_zh_tw
@@ -65,6 +67,62 @@ def safe_recent_context(value: Any, fallback: str = "") -> str:
         )
         text = f"近期活動：{activity}"
     return text or fallback
+
+
+def recent_context_is_active(
+    profile: dict[str, Any] | None, *, now: float | None = None,
+) -> bool:
+    """Respect an explicit canonical expiry while preserving legacy records."""
+    if not isinstance(profile, dict):
+        return False
+    raw_expiry = profile.get("recent_context_expires_at")
+    if raw_expiry is None or raw_expiry == "":
+        # Older profiles predate the expiry field. They remain readable until
+        # a normal profile update writes canonical expiry state.
+        return True
+    try:
+        expires_at = float(raw_expiry)
+    except (TypeError, ValueError):
+        return False
+    reference = time.time() if now is None else float(now)
+    return math.isfinite(expires_at) and expires_at > reference
+
+
+def active_recent_context(
+    profile: dict[str, Any] | None, fallback: str = "", *, now: float | None = None,
+) -> str:
+    if not recent_context_is_active(profile, now=now):
+        return fallback
+    return safe_recent_context((profile or {}).get("current_context"), fallback)
+
+
+def active_context_signals(
+    profile: dict[str, Any] | None, *, now: float | None = None,
+) -> dict[str, Any]:
+    if not recent_context_is_active(profile, now=now):
+        return {}
+    signals = (profile or {}).get("context_signals")
+    return dict(signals) if isinstance(signals, dict) else {}
+
+
+def without_expired_recent_context(
+    profile: dict[str, Any] | None, *, now: float | None = None,
+) -> dict[str, Any]:
+    """Return an in-memory matching/context projection; never mutate Mongo."""
+    result = dict(profile or {})
+    if recent_context_is_active(result, now=now):
+        result["current_context"] = safe_recent_context(
+            result.get("current_context"), "",
+        )
+        result["context_signals"] = active_context_signals(result, now=now)
+        return result
+    result.update({
+        "current_context": "",
+        "context_signals": {},
+        "context_embedding": [],
+        "context_embedding_source_hash": "",
+    })
+    return result
 
 
 def render_recent_context(fields: dict[str, Any]) -> str:

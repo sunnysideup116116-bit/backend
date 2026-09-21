@@ -36,6 +36,7 @@ EVENT_HOOK_LLM_TIMEOUT_SECONDS = 15.0
 MAX_INVITATION_TOPIC_CHARS = 80
 MAX_QUERY_TEXT_CHARS = 600
 MAX_SOURCE_MESSAGE_ID_CHARS = 128
+_SEARCH_INTENTS = frozenset({"activity", "recent_context", "preference", "generic"})
 
 
 class MatchEvaluationError(RuntimeError):
@@ -67,12 +68,23 @@ def safe_search_context(value) -> dict[str, str]:
         "invitation_topic": MAX_INVITATION_TOPIC_CHARS,
         "query_text": MAX_QUERY_TEXT_CHARS,
         "source_message_id": MAX_SOURCE_MESSAGE_ID_CHARS,
+        "search_intent": 24,
+        "normalized_topic": MAX_INVITATION_TOPIC_CHARS,
     }
     result = {}
     for key, limit in limits.items():
         text = re.sub(r"\s+", " ", str(value.get(key) or "")).strip()[:limit].rstrip()
         if text:
             result[key] = text
+    intent = result.get("search_intent", "")
+    if intent not in _SEARCH_INTENTS:
+        result.pop("search_intent", None)
+        intent = ""
+    if intent == "preference":
+        if not result.get("normalized_topic"):
+            return {}
+    elif intent != "activity":
+        result.pop("normalized_topic", None)
     return result
 
 
@@ -81,7 +93,9 @@ def provider_search_context(value) -> dict[str, str]:
     context = safe_search_context(value)
     return {
         key: context[key]
-        for key in ("invitation_topic", "query_text")
+        for key in (
+            "search_intent", "normalized_topic", "invitation_topic", "query_text",
+        )
         if context.get(key)
     }
 
@@ -162,6 +176,14 @@ class MatchmakerAgent:
         
         memory_text = graph_memory if graph_memory else "目前圖庫中尚無該使用者的偏好或地雷紀錄。"
         system_content = self.system_prompt.replace("[GRAPH_MEMORY_PLACEHOLDER]", memory_text)
+        if context.get("search_intent") == "preference":
+            system_content += (
+                "\n本輪是上述一般主題規則的明確例外，也是 server 驗證過的偏好精確搜尋。"
+                "normalized_topic 是 canonical "
+                "偏好標籤，送入的每位 candidate 都有本人明確保存的 PREFERS evidence。"
+                "不得因 candidate 的 current_context 是其他活動而否定這項偏好，也不得把"
+                "這項 evidence 擴張成發起者也喜歡、雙方共同偏好或任何未保存的相似興趣。"
+            )
         
         heuristics_text = global_heuristics if global_heuristics else "目前沒有可用的全域法則。"
         system_content = system_content.replace("[GLOBAL_HEURISTICS_PLACEHOLDER]", heuristics_text)
@@ -316,18 +338,40 @@ class MatchmakerAgent:
         WHERE event.status = 'active'
           AND event.expires_at > $now
           AND NOT (target)-[:EVENT_AVOIDANCE]->(event)
+          AND ('recent' NOT IN coalesce(target_relevance.source_kinds, [])
+               OR 'durable' IN coalesce(target_relevance.source_kinds, [])
+               OR EXISTS {
+                   MATCH (target)-[active:CURRENTLY_WANTS]->(active_concept:Concept)
+                   WHERE coalesce(active.expires_at, 0) > $now
+                     AND toLower(coalesce(active_concept.label, active_concept.key)) IN
+                         [value IN coalesce(target_relevance.user_concepts, []) |
+                          toLower(value)]
+               })
         MATCH (candidate:User)-[candidate_relevance:EVENT_RELEVANCE]->(event)
         WHERE candidate <> target
           AND NOT candidate.id IN $excluded_user_ids
           AND NOT (candidate)-[:EVENT_AVOIDANCE]->(event)
+          AND ('recent' NOT IN coalesce(candidate_relevance.source_kinds, [])
+               OR 'durable' IN coalesce(candidate_relevance.source_kinds, [])
+               OR EXISTS {
+                   MATCH (candidate)-[active:CURRENTLY_WANTS]->(active_concept:Concept)
+                   WHERE coalesce(active.expires_at, 0) > $now
+                     AND toLower(coalesce(active_concept.label, active_concept.key)) IN
+                         [value IN coalesce(candidate_relevance.user_concepts, []) |
+                          toLower(value)]
+               })
         WITH target, candidate, event, target_relevance, candidate_relevance,
              [(target)-[:AVOIDS]->(concept:Concept)
                 | toLower(coalesce(concept.label, concept.key))] AS target_dislikes,
-             [(candidate)-[:PREFERS|CURRENTLY_WANTS]->(concept:Concept)
+             [(candidate)-[positive:PREFERS|CURRENTLY_WANTS]->(concept:Concept)
+                WHERE type(positive) <> 'CURRENTLY_WANTS'
+                   OR coalesce(positive.expires_at, 0) > $now
                 | toLower(coalesce(concept.label, concept.key))] AS candidate_positive,
              [(candidate)-[:AVOIDS]->(concept:Concept)
                 | toLower(coalesce(concept.label, concept.key))] AS candidate_dislikes,
-             [(target)-[:PREFERS|CURRENTLY_WANTS]->(concept:Concept)
+             [(target)-[positive:PREFERS|CURRENTLY_WANTS]->(concept:Concept)
+                WHERE type(positive) <> 'CURRENTLY_WANTS'
+                   OR coalesce(positive.expires_at, 0) > $now
                 | toLower(coalesce(concept.label, concept.key))] AS target_positive
         WHERE none(dealbreaker IN target_dislikes WHERE dealbreaker IN candidate_positive)
           AND none(dealbreaker IN candidate_dislikes WHERE dealbreaker IN target_positive)

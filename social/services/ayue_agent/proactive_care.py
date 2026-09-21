@@ -22,7 +22,7 @@ from database import messages_coll, profiles_coll
 from services.ai_service import generate_chat_completion
 from services.chat_service import generate_room_id
 from services.ai_room_service import most_recent_ai_room
-from services.profile_projection import safe_recent_context
+from services.profile_projection import active_recent_context
 from services.message_use_service import is_reusable_for_care
 from services.ayue_agent.product_identity import AYUE_MISSION_SHORT, AYUE_VOICE_SHORT
 
@@ -179,7 +179,7 @@ def build_proactive_care_context(
         "",
     )
     safe_context = (
-        safe_recent_context(user_doc.get("current_context"), "")
+        active_recent_context(user_doc, "")
         if _recent_context_sources_are_reusable(user_id, user_doc)
         else ""
     )

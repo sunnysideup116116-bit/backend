@@ -87,6 +87,7 @@ Saved owner message
 
 - Source of truth：`recent_context_state` 與 `current_context_revision`。
 - `current_context` 是給 UI／Planner 的安全顯示 projection。
+- `recent_context_expires_at` 是 canonical active boundary；明確過期或格式無效時，所有 read projection 必須清空 `current_context`、typed signals 與 embedding，不可再用於 candidate retrieval、reasoning 或 UI。沒有 expiry 的舊 profile 暫時維持相容讀取；本階段不調整 TTL 數字。
 - 只接受 owner 已保存的原始訊息；assistant reply、history、tool result 與 match state 都不是寫入證據。
 - 每個 evidence span 必須是該 owner message 的連續原文子字串。
 - Public message 的 `metadata.message_use`（`message-use-v1`）是 profile、compaction 與 proactive surface 共用的用途標記。`ordinary` 才可重用；`calendar_operation`、`assessment`、`no_memory` 與未標記的 `unknown` 一律排除。行事曆草稿、補充、確認、取消與失敗回合都沿用同一排除標記。
@@ -107,6 +108,11 @@ Saved owner message
 
 - 正式 Graph 節點型別為 `Concept`（屬性 `{key, label, kind}`），關係只使用 `PREFERS`、`AVOIDS` 與 `CURRENTLY_WANTS`。`Trait`／`HAS_PREFERENCE` 只是 migration compatibility，新程式不得再產生。
 - 正向偏好使用 `PREFERS`；負向地雷使用 `AVOIDS`；短期意圖使用帶 `expires_at` 的 `CURRENTLY_WANTS`。
+- 每個 durable memory candidate 只表示一個 atomic concept。明確列舉可拆多筆；描述性名詞片語不可用標點或斷詞粗暴拆分。
+- 含明確正負 polarity 的單一複合 candidate fail closed；模型必須用 item-level evidence 分成獨立 candidates，避免把其中一邊的 stance 丟掉。
+- `concept_identity.py` 是 server-owned identity boundary：已知 K-pop variants 收斂成 `k_pop`／`K-pop`，未知概念使用穩定 label-derived identity；provider 提議的 key 不能直接成為 Graph identity。
+- `韓國流行音樂`／`韓流音樂` 等 semantic synonym 不在 P0 alias 表內，仍是不同 identity；semantic Concept retrieval／合併留給 P1。
+- 每訊息 limit 由 `DURABLE_MEMORY_MAX_CANDIDATES_PER_MESSAGE` 統一管理（預設 6、硬上限 8），套用於 extraction、outbox、registration 與 9001 writer。
 - Mongo `profile_memory_preview`／`profile_memory_summary` 是 bounded read projection；Graph metadata 與 evidence／lifecycle 不得藉由舊 `HAS_PREFERENCE` properties 重複儲存。
 - `message_id` 是 observation idempotency key；同一 owner message 不得增加兩次 evidence count。
 - `profile_memory_outbox` 只保存已驗證的 typed proposals 與 error code，不保存 raw chat。
@@ -138,7 +144,7 @@ Saved owner message
 
 - 「只婉拒，不記錄」、空清單或撤回邀請不啟動此流程；不能用對方 Big Five 或舊的 process-local feedback history 補出未勾選的偏好。
 - Client 不自行按「近期情境／興趣／個性」分類刪除選項。Normalizer 的舊 `DISLIKES_TRAIT` output 只作為相容輸入，轉成 typed `stance=avoid`；Graph 不產生 Trait／DISLIKES_TRAIT 舊模型。
-- 寫入沿用既有 memory validation，不另維護 feedback Cypher writer；超過三個 normalized concepts 分批交給既有 writer，不能直接截掉第四項。
+- 寫入沿用既有 memory validation，不另維護 feedback Cypher writer；單次 feedback 超過共用 runtime limit 時整次 fail closed，不分批繞過上限，也不靜默截掉後續本人已勾選原因。Request 本身另有 hard max 8。
 - `/api/feedback` 沒有勾選時回 `skipped`，有效但空的正規化結果回 `no_preferences`；正規化失敗回 502，Graph 不可用回 503，不假裝寫入成功。Feedback 失敗不撤銷已提交的 decline，也不能重送 decision 作為偏好重試。
 - API 回傳 `memories` 供 Social 寫入既有偏好 facts。畫面上的「已送出」不是 Graph 成功收據；此 optional effect 尚非 durable retry queue。
 
@@ -341,7 +347,9 @@ Neo4j 只保留配對與 Event traversal 需要的最小 relation projection。
 - 每個 candidate 的 `graph_memory` 只能代表該 candidate。
 - Matchmaker 可以把記憶當 ranking signal，不能把低信心推論寫回 Graph。
 - Hard conflict 必須在 LLM ranking 前做 deterministic qualification。
-- 沒有 Graph 或 Neo4j timeout 時可降低 ranking evidence，但不得互換角色或發明共同點。
+- Generic／activity search 沒有 Graph evidence 時可維持既有 bounded ranking；explicit preference search 則以 exact canonical Graph evidence 為 retrieval 前提，Graph unavailable 明確失敗，Graph miss 回沒有候選，不得改用 recent context 猜偏好。
+- Explicit preference flow 是 `canonical Concept → bounded PREFERS user IDs → block/history/profile filters → deterministic qualification → existing small Matchmaker batches`。Graph 分支不得 full scan，也不得繞過 quota、confirmation、mutual consent 或 proposal lifecycle。
+- P0 explicit preference 只支援正向 `PREFERS` exact evidence；「找不喜歡／避免 X 的人」沒有 typed search stance，必須 fail closed 而不是改走正向 Graph 或 activity branch。
 - 對外 proposal reason 只能使用已允許的安全 projection，不引用 key、ID、confidence 或 Graph 技術詞彙。
 
 ## 5. 長期建議的正確模型
@@ -413,6 +421,9 @@ Neo4j 只保留配對與 Event traversal 需要的最小 relation projection。
 - 矛盾 evidence 不被後到的低信心訊息靜默覆蓋。
 - 一次性活動只進近期情境，不進 durable memory。
 - 長期偏好只進 durable memory，不污染近期情境。
+- 複合與分開輸入的明確偏好在 canonical level 等價；Kpop／K-pop alias 共用 Concept。
+- Explicit preference search 不因 candidate 的 unrelated recent activity 被排除；activity search 仍由 active recent context/vector 主導。
+- 過期 recent context 不進 vector qualification、Matchmaker payload、公開 context 或 proposal snapshot。
 - Advice 不會成為 memory，也不影響 evidence count。
 - Context bundle 符合每區 budget、總字數、dedup 與 stable ordering。
 - Neo4j unavailable 時 Context Engine bounded fallback，不洩漏 raw data、不阻塞一般聊天。
@@ -429,9 +440,11 @@ Neo4j 只保留配對與 Event traversal 需要的最小 relation projection。
 - 所有正式資料 migration 先 dry-run；由 reviewer 明確批准後才 apply。
 # Demo Graph reset and degraded reads
 
-Graph reads used by matching are optional signals. Empty or unavailable Graph
-memory must remain a bounded degraded result and must not be treated as a
-successful write or as a generic pipeline crash. The local Demo Graph reset is
+Graph reads used by generic/activity matching remain optional bounded signals.
+Explicit preference search requires exact durable Graph evidence: an empty
+result is a normal bounded miss, while Graph unavailable is an explicit typed
+pipeline failure and must not silently become vector/fuzzy inference. Neither
+case is a successful write or permission to read raw data. The local Demo Graph reset is
 explicitly guarded and returns no raw Graph data. Full Demo reset clears Graph,
 Mongo app collections, and process-local fallback state in a fixed order; it
 does not promise cross-store rollback.

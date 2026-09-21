@@ -543,6 +543,58 @@ class MatchQualificationTests(unittest.TestCase):
         self.assertEqual(qualification["hard_conflict_keys"], ["surfing"])
 
     @patch("routers.match.get_user_graph_memories", return_value=[])
+    def test_requested_preference_is_direct_evidence_without_recent_context(self, _graph_memories):
+        qualification = candidate_qualification(
+            {"user_id": "owner", "current_context": "最近在游泳"},
+            {"user_id": "candidate", "current_context": "最近在爬山"},
+            target_stances={}, candidate_stances={"k_pop": {"like"}},
+            vector_score=0,
+            search_context={
+                "search_intent": "preference", "normalized_topic": "K-pop",
+                "canonical_preference_key": "k_pop",
+            },
+        )
+        self.assertTrue(qualification["eligible"])
+        self.assertIn("requested_preference", qualification["strong_reason_codes"])
+        self.assertEqual(qualification["match_basis"]["level"], "direct")
+
+    @patch("routers.match.get_user_graph_memories", return_value=[])
+    def test_requested_preference_never_bypasses_hard_conflict(self, _graph_memories):
+        qualification = candidate_qualification(
+            {"user_id": "owner"}, {"user_id": "candidate"},
+            target_stances={"k_pop": {"avoid"}},
+            candidate_stances={"k_pop": {"like"}},
+            search_context={
+                "search_intent": "preference", "normalized_topic": "K-pop",
+                "canonical_preference_key": "k_pop",
+            },
+        )
+        self.assertFalse(qualification["eligible"])
+        self.assertEqual(qualification["hard_conflict_keys"], ["k_pop"])
+
+    @patch("routers.match.get_user_graph_memories")
+    def test_preference_intro_uses_exact_topic_without_recent_context_claims(self, memories):
+        memories.side_effect = lambda user_id, _limit: (
+            [{"key": "k_pop", "label": "K-pop", "stance": "like"}]
+            if user_id == "candidate" else []
+        )
+        projection = build_friend_intro_v4(
+            {"user_id": "owner", "current_context": "最近在游泳"},
+            {"user_id": "candidate", "current_context": "最近在爬山"},
+            0,
+            search_context={
+                "search_intent": "preference", "normalized_topic": "K-pop",
+                "canonical_preference_key": "k_pop",
+            },
+        )
+        initiator = projection["initiator_preview"]["viewer_text"]
+        receiver = projection["receiver_invitation"]["viewer_text"]
+        assert "K-pop" in initiator and "明確提過喜歡" in initiator
+        assert "K-pop" in receiver and "明確提過喜歡" in receiver
+        assert "游泳" not in initiator + receiver
+        assert "爬山" not in initiator + receiver
+
+    @patch("routers.match.get_user_graph_memories", return_value=[])
     def test_user_visible_explanation_never_contains_internal_candidate_id(self, _graph_memories):
         _, _, _, reason = build_validated_match_explanation(
             {"user_id": "owner", "current_context": "近期想逛市集"},

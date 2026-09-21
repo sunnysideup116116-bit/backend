@@ -12,6 +12,7 @@ os.environ.setdefault("LLM_BASE_URL", "http://127.0.0.1:9")
 os.environ.setdefault("LLM_MODEL_ID", "stub")
 
 import agent_api
+from concept_identity import canonicalize_concept
 
 
 def graph(result):
@@ -59,7 +60,7 @@ class MemoryActionTests(unittest.TestCase):
         with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
             result = asyncio.run(agent_api.memory_action(request))
         self.assertEqual(result["status"], "success")
-        self.assertTrue(result["key"].startswith("owner_correction_"))
+        self.assertEqual(result["key"], canonicalize_concept("安靜咖啡廳").key)
         query = transaction.run.call_args.args[0]
         self.assertIn("(old:Concept {key:$key})", query)
         self.assertIn("DELETE existing", query)

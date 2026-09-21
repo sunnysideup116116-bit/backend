@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from matchmaker_agent.concept_identity import HARD_DURABLE_MEMORY_LIMIT
 
 
 RecentContextAction = Literal["update", "clear", "none"]
@@ -83,5 +84,7 @@ class ProfileExtractionDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     recent_context: RecentContextDecision
-    memories: list[DurableMemoryCandidate] = Field(default_factory=list)
+    memories: list[DurableMemoryCandidate] = Field(
+        default_factory=list, max_length=HARD_DURABLE_MEMORY_LIMIT,
+    )
     follow_up: FollowUpDecision | None = None

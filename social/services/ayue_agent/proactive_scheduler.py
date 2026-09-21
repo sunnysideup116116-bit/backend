@@ -215,6 +215,7 @@ def run_due_proactive_care_once(*, now: float | None = None, limit: int = 40) ->
                     "proactive_care_last_sent_at": 1,
                     "proactive_care_delivery_times": 1,
                     "current_context": 1,
+                    "recent_context_expires_at": 1,
                     "recent_context_state": 1,
                     "recent_context_updated_at": 1,
                     "recent_context_draft": 1,

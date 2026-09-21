@@ -34,6 +34,12 @@ from services.proactive_followup_service import (
     validate_followup_proposal,
 )
 from services.skill_loader import load_profile_skill
+from matchmaker_agent.concept_identity import (
+    canonicalize_concept,
+    durable_memory_limit,
+    has_mixed_preference_polarity,
+    split_explicit_preference_enumeration,
+)
 
 PROFILE_RUNS = db["profile_skill_runs"]
 NO_STORE_RE = re.compile(r"(?:不要記|別記|不用記|不必記)")
@@ -353,17 +359,22 @@ def _valid_evidence_span(value: Any, owner_message: str) -> str:
 
 
 def _validate_memory(item: dict[str, Any], owner_message: str) -> tuple[dict[str, Any] | None, str]:
-    key = str(item.get("key", "")).strip().lower().replace(" ", "_")
     label = _clean(item.get("label_zh_tw") or item.get("label"), 40)
     stance = str(item.get("stance", "")).strip()
     category = str(item.get("category", "lifestyle")).strip()[:30]
     confidence = _confidence(item.get("confidence"))
     evidence_span = _valid_evidence_span(item.get("evidence_span"), owner_message)
     minimum = 0.90
-    if not KEY_RE.match(key):
-        return None, "invalid_key"
     if not label or ID_RE.search(label) or PROTECTED_RE.search(label):
         return None, "unsafe_or_protected_label"
+    if (
+        has_mixed_preference_polarity(label)
+        or has_mixed_preference_polarity(evidence_span)
+    ):
+        return None, "mixed_polarity_compound"
+    identity = canonicalize_concept(label, item.get("key"))
+    if not identity or not KEY_RE.match(identity.key):
+        return None, "invalid_key"
     if stance not in {"like", "dislike", "require", "avoid"}:
         return None, "invalid_stance"
     if confidence < minimum:
@@ -372,9 +383,40 @@ def _validate_memory(item: dict[str, Any], owner_message: str) -> tuple[dict[str
         return None, "invalid_evidence_span"
     if item.get("subject") != "owner":
         return None, "not_owner_attribution"
-    return {"key": key, "label": label, "stance": stance, "category": category,
+    return {"key": identity.key, "label": identity.label, "stance": stance, "category": category,
             "confidence": confidence, "evidence_span": evidence_span,
             "reason_code": str(item.get("reason_code") or "accepted")[:60]}, "accepted"
+
+
+def _atomic_memory_candidates(
+    candidates: list[dict[str, Any]], owner_message: str,
+) -> list[dict[str, Any]]:
+    """Expand only explicit noun-like lists, then deduplicate canonical keys."""
+    output: dict[str, dict[str, Any]] = {}
+    owner_atoms = split_explicit_preference_enumeration(owner_message)
+    for candidate in candidates:
+        atoms = (
+            split_explicit_preference_enumeration(candidate.get("evidence_span"))
+            or owner_atoms
+        )
+        if atoms:
+            for atom in atoms:
+                identity = canonicalize_concept(atom)
+                if not identity or atom not in owner_message:
+                    continue
+                output.setdefault(identity.key, {
+                    **candidate,
+                    "key": identity.key,
+                    "label": identity.label,
+                    "evidence_span": atom,
+                })
+            continue
+        identity = canonicalize_concept(candidate.get("label"), candidate.get("key"))
+        if identity:
+            output.setdefault(identity.key, {
+                **candidate, "key": identity.key, "label": identity.label,
+            })
+    return list(output.values())[:durable_memory_limit()]
 
 
 def _validated_recent_proposal(raw_recent: Any, message: str, plan_id: str | None) -> tuple[dict[str, Any], bool]:
@@ -536,7 +578,7 @@ def analyze_profile_message(
 【memory skill v{memory_skill['version']}】
 {memory_skill['instructions']}
 
-請輸出 ProfileExtractionDecision JSON。recent_context.action 必須為 update、clear 或 none。episode_relation 必須為 continue、new 或 unrelated：本句是在補充／修正 active episode 時用 continue，開始不同活動時用 new，無關時用 unrelated。短句沒有時間詞也能延續；不確定時用 unrelated，禁止硬合併。每個欄位都要有 value、evidence_span、confidence、subject；subject 只能是 owner。只有確實描述本人現實活動時才 update；訊息可同時包含找人要求，但只擷取本人活動，絕不把找人、配對、提案或等待回覆寫入欄位。時間詞（例如今天、下週）是活動的時間欄位，不是拒絕理由。若提到他人，但同時清楚表達「我喜歡／不喜歡這種類型」，只能提出本人偏好記憶，不能儲存他人的特徵。
+請輸出 ProfileExtractionDecision JSON。recent_context.action 必須為 update、clear 或 none。episode_relation 必須為 continue、new 或 unrelated：本句是在補充／修正 active episode 時用 continue，開始不同活動時用 new，無關時用 unrelated。短句沒有時間詞也能延續；不確定時用 unrelated，禁止硬合併。每個欄位都要有 value、evidence_span、confidence、subject；subject 只能是 owner。只有確實描述本人現實活動時才 update；訊息可同時包含找人要求，但只擷取本人活動，絕不把找人、配對、提案或等待回覆寫入欄位。時間詞（例如今天、下週）是活動的時間欄位，不是拒絕理由。若提到他人，但同時清楚表達「我喜歡／不喜歡這種類型」，只能提出本人偏好記憶，不能儲存他人的特徵。每個 memories item 只能表示一個 atomic concept；本人明確列舉數個獨立偏好時要拆成多個 items，描述性名詞片語仍保持一個。memories 最多 {durable_memory_limit()} 筆。
 不得自行杜撰摘要。欄位與記憶標籤使用繁體中文；每個 evidence_span 必須是原訊息的連續子字串。
 
 待追問只針對本人有明確後續的生活活動或計畫。已有候選使用 existing_slot=1..3 做 update 或 close，不要重複建立；建立時必須有 topic、question_goal、evidence_span、confidence>=0.90、subject=owner。question_goal 只描述中性的後續確認，不得預設活動成功。行事曆、日曆、測驗、配對、他人資料與單純偏好不建立候選；沒有合適候選時 action=none。
@@ -564,11 +606,12 @@ follow_up 欄位：{{"action":"create|update|close|none","existing_slot":null,"t
                 retry_result["active_episode_id"] = str((safe_episode or {}).get("episode_id") or "")
                 recent = retry_result
     memories, codes = [], []
-    for item in contract.memories[:3]:
+    for item in contract.memories[:durable_memory_limit()]:
         candidate, code = _validate_memory(item.model_dump(), message)
         codes.append(code)
         if candidate:
             memories.append(candidate)
+    memories = _atomic_memory_candidates(memories, message)
     follow_up = validate_followup_proposal(contract.follow_up, message, recent)
     contract_payload = contract.model_dump()
     # Keep traces/provider output bounded to the deterministic, evidence-checked

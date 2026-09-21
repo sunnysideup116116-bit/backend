@@ -589,6 +589,10 @@ class EventPipelineTests(unittest.TestCase):
         query = session.run.call_args.args[0]
         self.assertIn("EVENT_RELEVANCE", query)
         self.assertIn("EVENT_AVOIDANCE", query)
+        self.assertIn("coalesce(active.expires_at, 0) > $now", query)
+        self.assertIn("coalesce(positive.expires_at, 0) > $now", query)
+        self.assertIn("target_relevance.user_concepts", query)
+        self.assertIn("candidate_relevance.user_concepts", query)
         self.assertIn("excluded_user_ids", query)
         self.assertNotIn("any(signal IN event_signals", query)
 
@@ -685,6 +689,10 @@ class EventPipelineTests(unittest.TestCase):
         query = session.run.call_args.args[0]
         self.assertIn("EVENT_RELEVANCE", query)
         self.assertIn("EVENT_AVOIDANCE", query)
+        self.assertIn("coalesce(active.expires_at, 0) > $now", query)
+        self.assertIn("coalesce(positive.expires_at, 0) > $now", query)
+        self.assertIn("target_relevance.user_concepts", query)
+        self.assertIn("candidate_relevance.user_concepts", query)
         self.assertIn("excluded_user_ids", query)
         self.assertNotIn("any(signal IN event_signals", query)
 

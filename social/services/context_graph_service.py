@@ -12,6 +12,7 @@ import requests
 
 from database import db, profiles_coll
 from services.language_service import normalize_zh_tw
+from services.profile_projection import recent_context_is_active
 
 
 AGENT_URL = "http://127.0.0.1:9001"
@@ -65,15 +66,17 @@ def sync_current_context_projection(user_id: str) -> dict[str, Any]:
             "current_context_revision": 1,
         },
     ) or {}
-    state = profile.get("recent_context_state") or {}
-    expires_at = float(profile.get("recent_context_expires_at") or (time.time() + 30 * 86400))
+    now = time.time()
+    active = recent_context_is_active(profile, now=now)
+    state = (profile.get("recent_context_state") or {}) if active else {}
+    expires_at = float(profile.get("recent_context_expires_at") or (now + 30 * 86400)) \
+        if active else now
     payload = {
         "user_id": user_id,
         "concepts": _projection_concepts(state),
         "expires_at": expires_at,
         "revision": int(profile.get("current_context_revision") or state.get("revision") or 0),
     }
-    now = time.time()
     CONTEXT_GRAPH_OUTBOX.update_one(
         {"user_id": user_id},
         {"$set": {**payload, "status": "pending", "updated_at": now},

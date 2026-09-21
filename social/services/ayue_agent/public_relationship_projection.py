@@ -20,6 +20,7 @@ from services.language_service import normalize_zh_tw
 from services.match_state_service import verified_accepted_match_query
 from services.match_reason_service import reason_for_viewer
 from services.public_nickname_service import contact_display_name, warm_public_nicknames
+from services.profile_projection import active_recent_context
 
 
 MAX_MENTIONED_CONTACTS = 3
@@ -135,12 +136,12 @@ def safe_public_profile(other_user_id: str | None) -> dict[str, str]:
     profile = profiles_coll.find_one(
         {"user_id": other_user_id},
         {
-            "_id": 0, "current_context": 1, "initial_interest": 1,
+            "_id": 0, "current_context": 1, "recent_context_expires_at": 1, "initial_interest": 1,
             "big_five.summary": 1,
         },
     ) or {}
     return {
-        "recent_context": public_text(profile.get("current_context"), 100),
+        "recent_context": public_text(active_recent_context(profile, ""), 100),
         "initial_interest": public_text(profile.get("initial_interest"), 80),
         "personality_summary": public_text((profile.get("big_five") or {}).get("summary"), 100),
     }
@@ -604,10 +605,11 @@ def contact_evidence_by_refs(
         found.add(ref)
         profile = profiles_coll.find_one(
             {"user_id": other_user_id},
-            {"_id": 0, "current_context": 1, "initial_interest": 1, "big_five.summary": 1},
+            {"_id": 0, "current_context": 1, "recent_context_expires_at": 1,
+             "initial_interest": 1, "big_five.summary": 1},
         ) or {}
         values = {
-            "recent_context": public_text(profile.get("current_context"), 400),
+            "recent_context": public_text(active_recent_context(profile, ""), 400),
             "initial_interest": public_text(profile.get("initial_interest"), 400),
             "personality_summary": public_text((profile.get("big_five") or {}).get("summary"), 400),
             "safe_match_reason": public_text(reason_for_viewer(match, user_id), 400),

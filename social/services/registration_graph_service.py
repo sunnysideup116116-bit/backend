@@ -10,6 +10,7 @@ import time
 from urllib.parse import urlparse
 
 import requests
+from matchmaker_agent.concept_identity import durable_memory_limit
 
 from database import db
 
@@ -106,7 +107,7 @@ def registration_memories(interest):
     if not decision.get("contract") and reason not in {"blocked_input", "protected_attribute"}:
         raise RuntimeError("registration_extraction_unavailable")
     result = []
-    for item in decision.get("memories", [])[:3]:
+    for item in decision.get("memories", [])[:durable_memory_limit()]:
         evidence = registration_evidence(item.get("evidence_span"), interest)
         if (item.get("stance") == "like"
                 and item.get("category") in {"activity", "habit", "lifestyle"}
