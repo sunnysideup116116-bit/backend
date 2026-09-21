@@ -644,6 +644,53 @@ class MatchQualificationTests(unittest.TestCase):
         self.assertEqual(tags, ["週末登山", "底片攝影", "真誠溝通", "生活平衡"])
         self.assertNotIn("模型自由生成", tags)
 
+    @patch("routers.match.get_user_graph_memories", return_value=[])
+    def test_semantic_preference_is_adjacent_and_never_shared_preference(self, _memories):
+        qualification = candidate_qualification(
+            {"user_id": "owner"}, {"user_id": "candidate"},
+            target_stances={},
+            candidate_stances={"korean_pop": {"like"}},
+            search_context={
+                "search_intent": "preference", "normalized_topic": "K-pop",
+                "canonical_preference_key": "k_pop",
+            },
+            preference_evidence=[{
+                "kind": "semantic_related", "concept_key": "korean_pop",
+                "similarity": 0.91,
+            }],
+        )
+        self.assertTrue(qualification["eligible"])
+        self.assertEqual(qualification["match_basis"]["level"], "adjacent")
+        self.assertIn(
+            "semantic_related_preference", qualification["strong_reason_codes"],
+        )
+        self.assertEqual(qualification["shared_preference_keys"], [])
+        self.assertFalse(qualification["requested_preference_matched"])
+        self.assertNotIn(
+            "共同偏好：k_pop",
+            " ".join(qualification["match_basis"]["concrete_overlap"]),
+        )
+
+    @patch("routers.match.get_user_graph_memories", return_value=[])
+    def test_semantic_preference_still_loses_to_verified_hard_conflict(self, _memories):
+        qualification = candidate_qualification(
+            {"user_id": "owner"}, {"user_id": "candidate"},
+            target_stances={"smoking": {"avoid"}},
+            candidate_stances={
+                "korean_pop": {"like"}, "smoking": {"like"},
+            },
+            search_context={
+                "search_intent": "preference", "normalized_topic": "K-pop",
+                "canonical_preference_key": "k_pop",
+            },
+            preference_evidence=[{
+                "kind": "semantic_related", "concept_key": "korean_pop",
+                "similarity": 0.91,
+            }],
+        )
+        self.assertFalse(qualification["eligible"])
+        self.assertEqual(qualification["hard_conflict_keys"], ["smoking"])
+
 
 if __name__ == "__main__":
     unittest.main()

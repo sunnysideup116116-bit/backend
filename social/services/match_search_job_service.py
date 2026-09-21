@@ -9,6 +9,8 @@ import threading
 import time
 import uuid
 import logging
+import math
+import re
 from typing import Any, Callable
 
 from pymongo import ReturnDocument
@@ -32,6 +34,7 @@ JOB_STEPS = {
     "loading_profile": 15,
     "vector_search": 40,
     "preference_graph_search": 40,
+    "preference_semantic_search": 47,
     "candidate_qualification": 55,
     "matchmaker_request": 65,
     "matchmaker_response": 75,
@@ -75,11 +78,19 @@ _FAILURE_MESSAGES = {
     "vector_search_unavailable": "我目前無法讀取候選資料，請稍後再試。",
     "preference_graph_unavailable": "我目前無法讀取偏好候選資料，請稍後再試。",
     "preference_graph_invalid_response": "偏好候選資料不完整，這次搜尋沒有完成。",
+    "semantic_readiness_unconfirmed": "語意偏好搜尋尚未通過向量相容性檢查，這次搜尋沒有完成。",
+    "semantic_index_unavailable": "語意偏好索引目前尚未就緒，請稍後再試。",
+    "semantic_graph_unavailable": "目前無法讀取語意偏好候選資料，請稍後再試。",
+    "semantic_graph_invalid_response": "語意偏好候選資料不完整，這次搜尋沒有完成。",
+    "semantic_query_embedding_unavailable": "目前無法理解這項偏好主題，請稍後再試。",
+    "semantic_query_embedding_invalid": "偏好主題的搜尋資料不完整，請稍後再試。",
+    "semantic_retrieval_timeout": "語意偏好搜尋逾時，這次沒有完成，請稍後再試。",
     "candidate_profile_unavailable": "我目前無法確認候選人的資料，請稍後再試。",
     "matchmaker_unavailable": "配對服務暫時連不上，請稍後再試。",
     "matchmaker_http_error": "配對服務回應失敗，請稍後再試。",
     "matchmaker_invalid_response": "配對服務回傳的結果不完整，請稍後再試。",
     "insufficient_common_ground": "我暫時找不到足夠的共同依據；你可以補充這次想一起做的事或主題，再決定是否重新搜尋。",
+    "insufficient_semantic_ground": "這次沒有找到證據足夠、又通過安全檢查的相關偏好人選；你可以換個更明確的偏好再試。",
     "daily_active_quota_exceeded": "今天已經幫你介紹 3 位新朋友了，明天可以再找；已送出的邀請還是能繼續回覆。",
     "unexpected_pipeline_error": "配對流程中途發生問題，請稍後再試。",
 }
@@ -398,14 +409,47 @@ def _bounded_diagnostics(value: Any) -> dict[str, Any]:
         text = str(value.get(key) or "").strip()
         if text:
             result[key] = text[:80]
+    for key, allowed in (
+        ("query_provenance", {"exact_canonical", "deterministic_alias"}),
+        ("semantic_mode", {"off", "shadow", "active"}),
+        ("semantic_shadow_status", {"separate_observation_only"}),
+    ):
+        item = value.get(key)
+        if isinstance(item, str) and item in allowed:
+            result[key] = item
+    semantic_error = value.get("semantic_fallback_error")
+    if isinstance(semantic_error, str) and semantic_error in _FAILURE_MESSAGES:
+        result["semantic_fallback_error"] = semantic_error
     for key in (
         "candidate_count_before_filter", "candidate_pool_count",
         "candidate_count_after_retrieval_filter", "candidate_count_after_filter",
+        "qualified_exact_count", "semantic_trigger_threshold",
+        "semantic_candidate_count_before_filter",
     ):
         try:
             result[key] = max(0, min(int(value.get(key, 0) or 0), 100))
         except (TypeError, ValueError):
             result[key] = 0
+    for key in ("semantic_fallback_eligible", "semantic_fallback_triggered"):
+        result[key] = bool(value.get(key))
+    concepts = value.get("semantic_concepts_considered")
+    if isinstance(concepts, list):
+        clean_concepts = []
+        for item in concepts[:12]:
+            if not isinstance(item, dict):
+                continue
+            concept_key = str(item.get("concept_key") or "").strip()[:100]
+            try:
+                similarity = round(float(item.get("similarity", 0.0)), 4)
+            except (TypeError, ValueError):
+                continue
+            if (re.fullmatch(r"[a-z][a-z0-9_]{1,50}", concept_key)
+                    and math.isfinite(similarity) and 0 <= similarity <= 1):
+                clean_concepts.append({
+                    "concept_key": concept_key,
+                    "similarity": max(0.0, min(similarity, 1.0)),
+                })
+        result["semantic_concepts_considered"] = clean_concepts
     for key in ("shared_preferences", "hard_conflicts"):
         values = value.get(key) if isinstance(value.get(key), list) else []
         result[key] = [str(item)[:52] for item in values[:8] if str(item).strip()]
@@ -758,7 +802,9 @@ def run_one_match_search_job() -> bool:
         result_reason = str((result or {}).get("reason_code") or "")
         terminal_status = (
             "insufficient_common_ground"
-            if result_reason == "insufficient_common_ground"
+            if result_reason in {
+                "insufficient_common_ground", "insufficient_semantic_ground",
+            }
             else "quota_exceeded"
             if result_reason == "daily_active_quota_exceeded"
             else "no_candidates"

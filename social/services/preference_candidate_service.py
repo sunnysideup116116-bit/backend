@@ -6,7 +6,10 @@ from typing import Any
 
 import requests
 
-from matchmaker_agent.concept_identity import canonicalize_concept
+from matchmaker_agent.concept_identity import (
+    canonical_query_provenance,
+    canonicalize_concept,
+)
 
 
 AGENT_URL = "http://127.0.0.1:9001"
@@ -78,6 +81,7 @@ def retrieve_preference_candidate_ids(
         "candidate_ids": candidate_ids,
         "canonical_key": identity.key,
         "normalized_topic": identity.label,
+        "query_provenance": canonical_query_provenance(topic, identity),
         "retrieval_source": "graph_exact",
         "candidate_count_before_filter": _bounded_count(
             payload.get("candidate_count_before_filter"), len(candidate_ids),

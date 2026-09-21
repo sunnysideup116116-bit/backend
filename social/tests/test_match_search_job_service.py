@@ -537,6 +537,14 @@ def test_retrieval_diagnostics_are_bounded_and_drop_private_fields():
         "normalized_topic": "K-pop",
         "canonical_preference_key": "k_pop",
         "retrieval_source": "graph_exact",
+        "query_provenance": "deterministic_alias",
+        "semantic_mode": "active",
+        "qualified_exact_count": 0,
+        "semantic_fallback_eligible": True,
+        "semantic_fallback_triggered": True,
+        "semantic_concepts_considered": [
+            {"concept_key": "korean_pop", "similarity": .91234},
+        ],
         "candidate_count_before_filter": 12,
         "candidate_count_after_filter": 3,
         "shared_preferences": ["k_pop"],
@@ -548,5 +556,10 @@ def test_retrieval_diagnostics_are_bounded_and_drop_private_fields():
     assert result["search_intent"] == "preference"
     assert result["canonical_preference_key"] == "k_pop"
     assert result["candidate_count_after_filter"] == 3
+    assert result["query_provenance"] == "deterministic_alias"
+    assert result["semantic_fallback_triggered"] is True
+    assert result["semantic_concepts_considered"] == [
+        {"concept_key": "korean_pop", "similarity": .9123},
+    ]
     assert "candidate_ids" not in result
     assert "raw_memory" not in result

@@ -1050,9 +1050,16 @@ def prepare_write_confirmation(
         preference_topic = str(search_context.get("normalized_topic") or "").strip() \
             if search_context.get("search_intent") == "preference" else ""
         if preference_topic:
+            from services.preference_semantic_service import preference_semantic_mode
+            semantic_notice = (
+                "若沒有任何通過安全檢查的精確人選，才會補看本人已保存、"
+                "與這個方向語意相關的偏好；相關不代表相同或共同偏好。"
+                if preference_semantic_mode() == "active" else ""
+            )
             preview = (
                 f"我會優先從明確保存『喜歡 {preference_topic}』的人選中搜尋，"
                 "再套用封鎖、過往配對、安全與名額檢查；不會用近期活動猜測偏好。"
+                f"{semantic_notice}"
                 "找到後先給你看提案，你再決定是否送出邀請。要開始嗎？"
             )
         elif topic:

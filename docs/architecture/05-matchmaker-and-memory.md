@@ -66,7 +66,7 @@ Preference exact search 是例外語意：候選集合已由 Social 以 canonica
 - 近期情境只保存本人現實活動；找人、配對、提案、等待回覆不得成為近期情境。長期記憶只保存明確且可持續的本人偏好（confidence ≥0.90，`subject=owner`）。
 - 每個 durable candidate 只能代表一個 atomic concept。只有明確、短而獨立的列舉才由 deterministic boundary 拆開；例如 `K-pop、J-pop、西洋音樂` 拆三筆，但 `適合讀書的安靜咖啡廳` 保持一筆。9001 writer 再做相同的保守防線，不能繞過 extractor 寫入清楚的複合列舉。
 - 同一 candidate／evidence 同時含明確正負 polarity 時 fail closed；只有模型提供 item-level evidence 的獨立 candidates 才分別保留 like／avoid，不能把混合句壓成單一 stance。
-- 本階段不是 semantic ontology：`韓國流行音樂` 與 `韓流音樂` 仍是不同 identity。它們的 synonym／semantic 對齊留給 P1，不能在 P0 暗中推測。
+- Concept identity 不是 semantic ontology：`韓國流行音樂` 與 `韓流音樂` 仍是不同 identity。P1-A 只能在 retrieval 階段把高分鄰近 Concept 當成 `semantic_related` evidence；不得建立 alias、MERGE Concept 或改寫 durable edge。
 - 每訊息可建立的 durable candidates 由兩個服務共用 `DURABLE_MEMORY_MAX_CANDIDATES_PER_MESSAGE`（預設 6、程式硬上限 8）；extraction、retry/outbox、registration 與 writer 都用同一界線。
 - 使用者可描述近期想做的事而沒有時間單位；不得把「缺時間詞」當作拒絕理由。
 - 顯示摘要由程式投影組合，不直接儲存模型自由文字摘要。
@@ -95,7 +95,20 @@ Preference exact search 是例外語意：候選集合已由 Social 以 canonica
 - 所有分支在 qualification／LLM 前都收斂到既有 `MATCH_CANDIDATE_POOL_SIZE=20`，Matchmaker 最多處理既有三個小 batch。Graph miss 不以 fuzzy inference 宣稱某人有未保存的偏好。
 - internal job diagnostics 只保存 bounded intent/topic/key、retrieval source、各階段 count、shared key、hard-conflict key 與 reason-code count；不保存 candidate IDs、raw messages 或 Graph payload。
 
-### 3.5 Recent Activity Context expiry
+### 3.5 Explicit preference semantic fallback（P1-A）
+
+- Feature 預設 `MATCH_PREFERENCE_SEMANTIC_MODE=off`；canary threshold 預設 1，只有 `qualified_exact_count == 0` 才能啟動。Exact Graph hits 必須先經 block/history、test cohort、profile hydration 與 hard-conflict qualification，不能用 raw hit count 壓掉 fallback。
+- `off`／live `shadow` 保留 P0 的 retrieval 順序、20 人視窗、hydration 後 qualification、空結果 reason code 與 exact-only Matchmaker prompt。提前 qualification 和 semantic evidence 強度檢查只作用於 `active`。Differential regression 直接執行 frozen P0 source 比較候選、payload、quota 與 proposal 寫入。
+- `deterministic_alias` 只是 query provenance；alias canonicalize 後仍是 exact key 與 direct evidence。Semantic evidence 永遠是 `semantic_related`，不加入 `shared_persistent_preferences`，也不呈現成 exact／共同偏好。
+- Semantic Graph endpoint 先以既有 `concept_embedding_index` 取 bounded ANN Concepts，再以 indexed `Concept.key` 展開 `PREFERS`。每 Concept 的 streaming fanout limit 在 exclusion、排序與 aggregation 前生效；熱門 Concept 可能因此 underfill，不會加大掃描。所有上限維持原設定；不存在全圖 cosine scan 或 LLM synonym inference。
+- 同一 candidate 的多個 Concept hits 先依 similarity 降序、Concept key 升序保留 bounded best evidence，再依 exact/alias first、semantic score 降序、candidate ID 升序決定 internal order；最終仍只有既有 20 人 pool。
+- 重用 query Concept 向量需要 768 維、finite/nonzero，以及 `embedding_model`／`embedding_task` 與 query space 相符；無法確認時只 embed canonical label，不保存 query vector。ANN Concepts 缺少或不符合 model/task 證據時，在 user expansion 前回 `semantic_readiness_unconfirmed`。不新增 fingerprint 寫入或補資料流程。
+- Graph／provider／index failure 在 exact 合格人選為零時是 typed transient failure；只有正常 ANN／qualification 無 ground 才是 `insufficient_semantic_ground`。Provider timeout 與 SDK retry、key failover 共用 deadline；late response 不作為結果。
+- `shadow` 使用獨立 observation CLI，live request 不呼叫 semantic。Readiness audit 唯讀檢查 index state/schema、768 維、coverage；historical fingerprint=`unknown` 時，即使 operator confirmation flag 為 on，也不會回 production ready。這項 technical debt 必須另外取得可驗證證據，這一版保持 `mode=off`／`embedding_space_confirmed=off`。
+- `0.82` 維持 provisional；fixtures 只驗證 threshold 行為，不是實測 precision。真實 calibration 留給 staging/read-only observation。
+- P1-A 不修改 generic/activity/recent-context retrieval、Event-Driven Match、Concept write path、quota、proposal dedupe、confirmation 或 mutual-consent lifecycle。
+
+### 3.6 Recent Activity Context expiry
 
 `recent_context_state`、`current_context`、typed `context_signals` 與 embedding 都是短期活動 projection，不是 durable preference。具有 `recent_context_expires_at` 且已過期（或格式無效）時，read-only projection 會清空 context/signals/embedding；matching、Public／Private context、proactive care、contacts、Event proposal snapshot、Graph projection 與 Event relevance queries 都不得再把它當 active evidence。只含 `recent` evidence 的衍生 Event link 必須仍能對回同一個未過期 `CURRENTLY_WANTS`。缺少 expiry 的舊資料暫時維持相容讀取；TTL 數值仍是既有設定，本階段沒有猜測或調整天數。
 

@@ -1,4 +1,10 @@
 import json
+import ast
+from copy import deepcopy
+from pathlib import Path
+import subprocess
+import pytest
+import matchmaker
 
 from matchmaker import MatchmakerAgent, provider_search_context, safe_search_context
 
@@ -53,3 +59,46 @@ def test_preference_match_prompt_receives_only_verified_semantics():
         "normalized_topic": "K-pop",
         "query_text": "幫我找喜歡 K-pop 的人",
     }
+
+
+def test_exact_only_llm_messages_are_identical_to_frozen_p0():
+    root = Path(__file__).resolve().parents[1]
+    try:
+        source = subprocess.check_output([
+            "git", "show", "7f130f60bb895020e67486c7f6467a921a2ec396:matchmaker_agent/matchmaker.py",
+        ], cwd=root, text=True, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError:
+        pytest.skip("P0 parity requires the frozen merge object in local git history")
+    cls = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef) and node.name == "MatchmakerAgent")
+    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "_match_messages")
+    env = dict(matchmaker.__dict__)
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "p0_matchmaker", "exec"), env)
+    agent = MatchmakerAgent.__new__(MatchmakerAgent)
+    agent.system_prompt = "BASE [GRAPH_MEMORY_PLACEHOLDER] [GLOBAL_HEURISTICS_PLACEHOLDER] [DEEP_PROFILE_PLACEHOLDER]"
+    args = ({"user_id": "owner"}, [{"user_id": "z-first"}, {"user_id": "a-second"}])
+    kwargs = {"search_context": {"search_intent": "preference", "normalized_topic": "K-pop", "query_text": "找喜歡 Kpop 的人"}}
+    assert agent._match_messages(*args, **kwargs) == env["_match_messages"](agent, *args, **kwargs)
+
+
+def test_semantic_candidate_evidence_is_role_bound_and_sanitized_for_model():
+    agent = MatchmakerAgent.__new__(MatchmakerAgent)
+    agent.system_prompt = "BASE [GRAPH_MEMORY_PLACEHOLDER]"
+    candidates = [
+        {"user_id": "exact"},
+        {"user_id": "related", "preference_retrieval_evidence": [{
+            "kind": "semantic_related", "concept_key": "korean_pop", "similarity": .91,
+            "label": "private-label", "raw_memory": "raw-owner-message",
+        }]},
+    ]
+    before = deepcopy(candidates)
+    messages = agent._match_messages({"user_id": "owner"}, candidates, search_context={
+        "search_intent": "preference", "normalized_topic": "K-pop",
+    })
+    assert "semantic-related" in messages[0]["content"]
+    payload = json.loads(messages[1]["content"])
+    assert "preference_retrieval_evidence" not in payload["candidates"][0]
+    assert payload["candidates"][1]["preference_retrieval_evidence"] == [{
+        "kind": "semantic_related", "concept_key": "korean_pop", "similarity": .91,
+    }]
+    assert "private-label" not in str(messages) and "raw-owner-message" not in str(messages)
+    assert candidates == before
