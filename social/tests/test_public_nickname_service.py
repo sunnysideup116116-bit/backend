@@ -116,18 +116,22 @@ def test_shared_status_projection_does_not_read_or_publish_appwrite_names(monkey
     appwrite_stub.assert_not_called()
 
 
+@pytest.mark.parametrize("status", ["pending", "accepted"])
 @pytest.mark.parametrize("viewer,expected", [("alice", "小晴"), ("bob", "小葵")])
-def test_state_reads_registered_name_even_when_mongo_has_no_name(monkeypatch, appwrite_stub, viewer, expected):
+def test_state_reads_registered_name_even_when_mongo_has_no_name(monkeypatch, appwrite_stub, viewer, expected, status):
     from routers import match as routes
     from tests.match_flow_store import Collection
     from tests.test_proposal_nickname import MATCH_ID, document
 
     appwrite_stub.return_value.json.return_value = {"name": expected}
-    monkeypatch.setattr(routes, "matches_coll", Collection([document()]))
+    monkeypatch.setattr(routes, "matches_coll", Collection([document(status)]))
     monkeypatch.setattr(routes, "public_display_name", lambda _: "對方")
     result = routes.get_single_match_state(viewer, str(MATCH_ID))
-    assert result["counterparty_nickname"] == expected
-    assert "other_id" not in result
+    assert result["counterparty_nickname"] == (expected if status == "accepted" else "")
+    assert ("other_id" in result) == (status == "accepted")
     assert expected not in result["viewer_reason"]
     assert expected not in result["decline_reason_options"]
-    assert appwrite_stub.call_args.args[0].endswith("/bob" if viewer == "alice" else "/alice")
+    if status == "accepted":
+        assert appwrite_stub.call_args.args[0].endswith("/bob" if viewer == "alice" else "/alice")
+    else:
+        appwrite_stub.assert_not_called()

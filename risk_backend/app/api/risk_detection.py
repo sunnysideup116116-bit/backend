@@ -388,13 +388,15 @@ async def get_risk_state(conversation_id: str, user_id: str):
             level = d.get("risk_level", "safe")
     except Exception as e:
         print(f"get_risk_state: 讀取最新風險等級失敗: {e}")
-    remaining = await chat_log_service.get_remaining_cooldown(conversation_id, user_id)
+    cooldown = await chat_log_service.get_cooldown_status(conversation_id, user_id)
+    remaining = cooldown['remaining_seconds']
     return {
         "conversation_id": conversation_id,
         "user_id": user_id,
         "risk_level": level,
         "risk_state": prior_state.model_dump(),
-        "remaining_cooldown": remaining
+        "remaining_cooldown": remaining,
+        "cooldown": cooldown,
     }
 
 @router.post("/feedback")

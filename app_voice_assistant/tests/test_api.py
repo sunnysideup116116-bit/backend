@@ -110,7 +110,7 @@ def test_capability_and_demo_allowlist():
     assert capability["guide_protocol_version"] == 1
     assert capability["personal_routines"] is True
     assert capability["authenticated_session_required"] is True
-    assert capability["max_model_tools"] == 36
+    assert capability["max_model_tools"] == 39
     assert capability["full_duplex_live"] is False
     assert capability["structured_confirmation"] is True
     assert capability["barge_in"] is True
@@ -152,7 +152,8 @@ def test_template_mode_advertises_the_direct_tool_surface():
 
     capability = asyncio.run(routes["/api/app-voice/capability"]())
 
-    assert capability["max_model_tools"] == 15
+    assert capability["max_model_tools"] == 21
+    assert capability["conversation_drafts_version"] == 1
     assert capability["voice_runtime_template"] is True
 
 

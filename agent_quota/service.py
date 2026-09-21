@@ -189,11 +189,12 @@ class QuotaService:
                         raise
                     time.sleep(0.01 * (attempt + 1))
 
-    def status(self, owner, *, now=None):
+    def status(self, owner, *, now=None, sync_name=True):
         try:
             try:
                 current = now or datetime.now(timezone.utc)
-                self.sync_user_name(owner, now=current)
+                if sync_name:
+                    self.sync_user_name(owner, now=current)
             except Exception:
                 # A profile-name read must not block an otherwise healthy quota.
                 LOG.warning('Agent quota user name sync pending', exc_info=False)

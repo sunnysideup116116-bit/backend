@@ -45,6 +45,7 @@ def test_template_tool_surface_is_bounded_and_direct():
         "describe_current_screen", "select_screen_target", "read_tasks",
         "cancel_task", "confirm_pending_action", "resolve_pending_interaction",
         "cancel_current_action", "close_voice_mode",
+        "manage_voice_draft", "plan_date", "forget_preference", "explain_app", "find_app_capabilities", "run_app_capabilities",
     ]
     assert all(item.parameters_json_schema["additionalProperties"] is False for item in declarations)
 

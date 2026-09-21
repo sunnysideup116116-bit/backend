@@ -792,6 +792,27 @@ def direct_chat(
         raise HTTPException(status_code=403, detail="目前無法傳送訊息給此聯絡人")
 
     client_message_id = req.client_message_id or uuid.uuid4().hex
+    voice_attempt = client_message_id.startswith('voice-')
+    if voice_attempt:
+        from agent_quota.api import owner_from_request
+        from services.voice_chat_status import read_delivery_receipt, read_cooldown
+        if owner_from_request(request) != req.user_id:
+            raise HTTPException(403, detail='appwrite_user_mismatch')
+        try:
+            previous = read_delivery_receipt(req.user_id, room_id, client_message_id)
+        except Exception as exc:
+            raise HTTPException(503, detail={'code': 'delivery_unknown', 'message': '暫時無法確認先前傳送結果，沒有重新傳送。'}) from exc
+        if previous is not None:
+            return {'reply': '', 'duplicate': True, 'is_blocked': previous['state'] == 'blocked',
+                    'risk_assessment': previous['risk_assessment'],
+                    'cooldown': read_cooldown(req.user_id, room_id)}
+        cooldown = read_cooldown(req.user_id, room_id)
+        if cooldown['state'] != 'clear':
+            raise HTTPException(409 if cooldown['state'] == 'active' else 503, detail={
+                'code': 'risk_cooldown' if cooldown['state'] == 'active' else 'risk_unavailable',
+                'message': '目前仍在冷卻，訊息尚未送出。' if cooldown['state'] == 'active' else '暫時無法確認冷卻狀態，訊息尚未送出。',
+                'cooldown': cooldown, 'delivery': {'state': 'not_sent'},
+            })
 
     # Image messages carry no analyzable text; skip the risk gate and any
     # text-driven assist so an empty message never reaches the LLM.
@@ -839,7 +860,8 @@ def direct_chat(
         # 被攔截的訊息不會以 receiver 可見的訊息儲存；改寫一則系統通知卡，
         # 讓 receiver 知道系統攔截了一則可能造成不適的訊息，並可回報感受。
         # metadata 內帶上 receiver_directive，使收件端從歷史訊息也能依指令渲染。
-        notice_metadata = {"event_type": "blocked_notice", "risk": dict(risk_projection)}
+        notice_metadata = {"event_type": "blocked_notice", "risk": dict(risk_projection),
+                           "sender_owner_id": req.user_id}
         if risk_projection.get("receiver_directive"):
             notice_metadata["receiver_directive"] = dict(risk_projection["receiver_directive"])
         save_system_message_once(
@@ -853,6 +875,7 @@ def direct_chat(
             "reply": "",
             "is_blocked": True,
             "risk_assessment": risk_projection,
+            **({'cooldown': read_cooldown(req.user_id, room_id)} if voice_attempt else {}),
             "ui_priority": risk_projection["ui_priority"],
         }
 
@@ -895,5 +918,6 @@ def direct_chat(
         "opening_assist": False,
         "feedback_scheduled": True,
         "risk_assessment": risk_projection,
+        **({'cooldown': read_cooldown(req.user_id, room_id)} if voice_attempt else {}),
         "ui_priority": risk_projection["ui_priority"],
     }

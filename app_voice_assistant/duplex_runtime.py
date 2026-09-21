@@ -29,7 +29,11 @@ from .capability_proxy import (
 )
 from .experience import expand_catalog_operations
 from .task_service import VoiceTaskService
+from .drafts import (DRAFT_FIELDS, draft_editable, draft_question, draft_summary,
+                     spoken_draft_patch)
 from .telemetry import record_voice_metric
+from .voice_experience import app_help
+from .spoken_commands import cancellation_focus
 from .template_dispatcher import (
     authoritative_template_proposal,
     template_proposal_from_function,
@@ -54,6 +58,7 @@ from .contracts import (
 SendEvent = Callable[[dict[str, Any]], Awaitable[None]]
 SCREEN_CONTEXT_TIMEOUT_SECONDS = 0.75
 SCREEN_CONTEXT_COALESCE_SECONDS = 0.1
+BACKGROUND_RESULT_IDLE_SECONDS = 8.0
 
 
 def session_started_prompt(context: dict[str, Any]) -> str:
@@ -118,6 +123,11 @@ def _proposal_from_function(call: Any, *, revision: int) -> VoiceProposal | None
     arguments: dict[str, Any] = {}
     if name == "select_screen_target":
         intent = "ui.target.select"
+    elif name == 'read_agent_quota':
+        intent = 'quota.query'
+    elif name == 'read_chat_status':
+        intent = 'chat.status.query'
+        arguments = {'contact_name': raw.get('contact_name', '')}
     elif name in {"read_shared_dates", "respond_date_invitation", "update_shared_date", "confirm_shared_date"}:
         intent = {"read_shared_dates": "date.query", "respond_date_invitation": "date.respond", "update_shared_date": "date.update", "confirm_shared_date": "date.confirm"}[name]
         arguments = {"contact_name": raw.get("contact_name", "")}
@@ -283,10 +293,25 @@ async def run_duplex_session(
     capability_secret: bytes = b"",
     routing_mode: str = "legacy",
     task_service: VoiceTaskService | None = None,
+    quota_reader: Any | None = None,
+    quota_poll_seconds: float = 30,
 ) -> None:
     """Bridge one app WebSocket to one persistent, full-duplex Gemini session."""
 
     context = safe_context(initial_context)
+    initial_quota = None
+    if quota_reader is not None:
+        from .status_contract import public_quota
+        try:
+            initial_quota = public_quota(await quota_reader())
+        except Exception:
+            initial_quota = public_quota(None)
+        if initial_quota.get('exhausted') or initial_quota.get('state') == 'unknown':
+            await send_event({'type': 'quota_status', 'quota': initial_quota})
+            await send_event({'type': 'error', 'code': 'agent_quota_exhausted'
+                              if initial_quota.get('exhausted') else 'agent_quota_unavailable'})
+            await websocket.close(code=1000)
+            return
     recent_public_places: list[dict[str, str]] = []
     provider_routing_mode = (
         routing_mode if routing_mode in {"proxy", "template"} else "legacy"
@@ -342,6 +367,10 @@ async def run_duplex_session(
 
         screen_sync_task = asyncio.create_task(flush())
     pending: DuplexConfirmation | None = None
+    active_draft_ref = ""
+    draft_handled_text = ""
+    draft_confirmation_needs_input = False
+    client_metric_count = 0
     awaiting_results: dict[str, PendingToolResult] = {}
     state_lock = asyncio.Lock()
     task_schedule_lock = asyncio.Lock()
@@ -351,6 +380,8 @@ async def run_duplex_session(
     current_transcript = ""
     current_audio_allowed: bool | None = None
     live_turn_active = False
+    last_live_activity = time.monotonic()
+    user_speaking = False
     last_user_transcript = ""
     input_transcript_finished = False
     next_reply_code = "conversation"
@@ -373,6 +404,8 @@ async def run_duplex_session(
     background_flush_task: asyncio.Task[None] | None = None
     confirmation_timeout_task: asyncio.Task[None] | None = None
     task_watcher_task: asyncio.Task[None] | None = None
+    quota_watcher_task: asyncio.Task[None] | None = None
+    quota_stopped = False
     task_revision_cache: dict[str, int] = {}
     private_read_authorized = False
     last_delegated_proposal: VoiceProposal | None = None
@@ -394,6 +427,41 @@ async def run_duplex_session(
         "session_started", routing_mode=active_routing_mode,
         result_code="started",
     )
+
+    async def read_quota():
+        from .status_contract import public_quota
+        try:
+            return public_quota(await quota_reader()) if quota_reader else public_quota(None)
+        except Exception:
+            return public_quota(None)
+
+    async def stop_for_quota(quota):
+        nonlocal quota_stopped
+        if quota_stopped:
+            return
+        quota_stopped = True
+        if task_service is not None:
+            for row in task_service.pause_for_quota(owner_id):
+                await emit_task_update(row)
+        await send_event({'type': 'quota_status', 'quota': quota})
+        await send_event({'type': 'error', 'code': 'agent_quota_exhausted'
+                          if quota.get('exhausted') else 'agent_quota_unavailable'})
+        await live.close()
+        # New clients keep only the result/control channel while already-issued
+        # operations finish. No microphone or model input is accepted below.
+        if not context.get('feature_status', {}).get('operational_status'):
+            await websocket.close(code=1000)
+
+    async def watch_quota():
+        first = True
+        while not stopped and not quota_stopped:
+            quota = initial_quota if first and initial_quota is not None else await read_quota()
+            first = False
+            await send_event({'type': 'quota_status', 'quota': quota})
+            if quota.get('exhausted') or quota.get('state') == 'unknown':
+                await stop_for_quota(quota)
+                return
+            await asyncio.sleep(quota_poll_seconds)
 
     def remember(role: str, value: Any) -> None:
         nonlocal last_remembered_user
@@ -491,6 +559,10 @@ async def run_duplex_session(
         return prompts[kind].get(language, prompts[kind]["zh-TW"])
 
     def action_confirmation_prompt(proposal: VoiceProposal) -> str:
+        if proposal.intent == 'memory.disable':
+            return f"停止使用長期偏好「{proposal.arguments.get('label', '')}」。要繼續請說「確認」。"
+        if proposal.intent in DRAFT_FIELDS and context.get("feature_status", {}).get("conversation_drafts"):
+            return f"{draft_summary(proposal.intent, proposal.arguments)}。要繼續請說「確認」，也可以直接修改。"
         kind = (
             "match_start_confirm"
             if confirmation_phrase(proposal) == "確認開始配對"
@@ -546,6 +618,7 @@ async def run_duplex_session(
                     stage="confirmation_expired", error_code="confirmation_expired",
                     result_summary="確認已逾時，請重新說明是否繼續。",
                     expected_statuses={"waiting_confirmation"},
+                    expected_action_id=expired.confirmation_id,
                 )
                 await emit_task_update(updated)
                 await schedule_ready_tasks(expired.batch_id)
@@ -571,7 +644,30 @@ async def run_duplex_session(
 
     async def dispatch_task_row(row: dict[str, Any]) -> None:
         nonlocal pending, progress_turn_pending, next_reply_code
+        nonlocal draft_confirmation_needs_input
         if task_service is None or row.get("status") != "queued":
+            return
+        if quota_stopped:
+            return
+        if row.get('capability_id') == 'app.help':
+            result = app_help(context, str((row.get('arguments') or {}).get('query') or ''))
+            await emit_task_update(task_service.update(str(row['task_id']), status='completed', stage='completed',
+                                                       result_summary='已整理 App 功能說明。', expected_statuses={'queued'}))
+            await queue_background_result(result, 'task')
+            return
+        if row.get('capability_id') in {'date.plan','memory.disable'} and (
+            not context.get('feature_status', {}).get('voice_experience')
+            or not action_permissions_allowed(row['capability_id'], context)
+        ):
+            await emit_task_update(task_service.update(str(row['task_id']), status='failed', stage='permission_denied',
+                result_summary='請確認 App 版本與所需的語音權限。', error_code='permission_denied', expected_statuses={'queued'}))
+            return
+        if row.get("draft") and draft_question(str(row.get("capability_id")), row.get("arguments") or {}):
+            await emit_task_update(task_service.update(
+                str(row["task_id"]), status="waiting_input", stage="draft_collecting",
+                result_summary=draft_question(row["capability_id"], row.get("arguments") or {}),
+                expected_statuses={"queued"},
+            ))
             return
         proposal = proposal_from_capability(
             str(row.get("capability_id") or ""),
@@ -585,6 +681,10 @@ async def run_duplex_session(
                 expected_statuses={"queued"},
             ))
             return
+        if proposal.intent in {"weather.query", "calendar.query", "quota.query", "chat.status.query", "contacts.query", "match.query", "date.query"}:
+            draft = current_draft()
+            if draft:
+                await manage_draft({"action": "pause", "task_ref": draft["task_ref"]})
         bound, target_error = bind_target(proposal.intent, proposal.arguments, context)
         if target_error:
             await emit_task_update(task_service.update(
@@ -606,6 +706,14 @@ async def run_duplex_session(
                 str(row.get("task_id") or ""), status="waiting_input", stage="not_ready",
                 error_code="not_ready", result_summary="還沒有選擇可發布的圖片。",
                 expected_statuses={"queued"},
+            ))
+            return
+        if proposal.intent == 'quota.query':
+            from .status_contract import status_result
+            result = status_result(quota=await read_quota())
+            await emit_task_update(task_service.update(
+                str(row['task_id']), status='completed' if result['success'] else 'failed',
+                stage='completed', result_summary=result['message'], expected_statuses={'queued'},
             ))
             return
         if proposal.intent == "weather.query":
@@ -736,8 +844,23 @@ async def run_duplex_session(
             if updated is None:
                 pending = None
                 return
+            if drafts_enabled() and proposal.intent in DRAFT_FIELDS and not updated.get("draft"):
+                updated = task_service.save_draft(
+                    owner_id, session_id=session_id, intent=proposal.intent,
+                    values={}, task_ref=updated["task_ref"], expected_revision=updated["revision"],
+                )
+                updated = task_service.set_action(
+                    pending.task_id, action_id=pending.confirmation_id,
+                    status="waiting_confirmation", stage="waiting_confirmation",
+                    expected_statuses={"waiting_input"},
+                )
+                if updated is None:
+                    pending = None
+                    return
             await emit_task_update(updated)
             arm_confirmation_timeout(pending)
+            if updated.get("draft"):
+                draft_confirmation_needs_input = True
             await send_event({
                 "type": "confirmation_required",
                 "confirmation_id": pending.confirmation_id,
@@ -854,6 +977,121 @@ async def run_duplex_session(
                 if not changed:
                     break
 
+    def drafts_enabled() -> bool:
+        return bool(task_service is not None and task_tools_enabled
+                    and context.get("feature_status", {}).get("conversation_drafts"))
+
+    async def clear_draft_confirmation(task_ref: str) -> None:
+        nonlocal pending
+        if pending is not None and task_ref == f"task_{pending.task_id}":
+            old = pending
+            pending = None
+            cancel_confirmation_timeout()
+            await send_event({"type": "confirmation_expired", "confirmation_id": old.confirmation_id})
+
+    def current_draft() -> dict[str, Any] | None:
+        if not drafts_enabled():
+            return None
+        ref = f"task_{pending.task_id}" if pending and pending.task_id else active_draft_ref
+        row = task_service.get_by_ref(owner_id, ref) if ref else None
+        return row if row and row.get("draft") and draft_editable(row) else None
+
+    async def manage_draft(args: dict[str, Any]) -> dict[str, Any]:
+        nonlocal active_draft_ref
+        if not drafts_enabled():
+            return {"status": "failed", "error_code": "draft_unsupported", "message": "目前版本請使用原有操作與確認流程。"}
+        action = args.get("action")
+        if action not in {"start", "update", "resume", "pause", "cancel", "list"}:
+            return {"status": "failed", "error_code": "draft_action_invalid"}
+        try:
+            rows = [item for item in task_service.list_drafts(owner_id)
+                    if item.get("draft", {}).get("editable")
+                    and action_permissions_allowed(str(item.get("capability_id")), context)]
+            ref = str(args.get("task_ref") or "")
+            if action == "list":
+                return {"status": "ok", "drafts": rows, "message": "請選擇要繼續的草稿。"}
+            row = task_service.get_by_ref(owner_id, ref) if ref else current_draft()
+            if pending is not None and current_draft() is None:
+                return {"status": "needs_input", "message": "請先完成或取消目前待確認的操作，再處理草稿。"}
+            if action != "start" and row is None and not ref:
+                if len(rows) == 1:
+                    row = task_service.get_by_ref(owner_id, rows[0]["task_ref"])
+                else:
+                    return {"status": "needs_input", "drafts": rows,
+                            "message": "想繼續哪一份草稿？" if rows else "目前沒有可接續的草稿。"}
+            if ref and (row is None or not row.get("draft") or not draft_editable(row)):
+                raise ValueError("voice_draft_not_editable")
+            intent = str((row or {}).get("capability_id") or args.get("intent") or "")
+            if intent not in DRAFT_FIELDS:
+                raise ValueError("draft_intent_invalid")
+            if not action_permissions_allowed(intent, context):
+                return {"status": "permission_denied", "message": "這項功能尚未授權，可到語音設定開啟權限；既有草稿仍會保留。"}
+            if action == "start" and row is not None:
+                return {"status": "needs_input", "message": "已有草稿，修改請用 update；要另建一份請先 pause。"}
+            if action == "cancel":
+                changed = task_service.cancel(owner_id, row["task_ref"], expected_revision=row["revision"])
+                await clear_draft_confirmation(row["task_ref"])
+                for item in changed:
+                    await send_event({"type": "task_update", "task_protocol_version": 1, "task": item})
+                active_draft_ref = ""
+                return {"status": "cancelled", "message": "這份草稿已取消，沒有送出。"}
+            fields = args.get("fields") or {}
+            updated = task_service.save_draft(
+                owner_id, session_id=session_id, intent=intent, values=fields,
+                task_ref=row["task_ref"] if row else "",
+                expected_revision=row["revision"] if row else None,
+                paused=action == "pause",
+            )
+            await clear_draft_confirmation(updated["task_ref"])
+            active_draft_ref = "" if action == "pause" else updated["task_ref"]
+            await emit_task_update(updated)
+            question = draft_question(intent, updated["arguments"])
+            if not question and action != "pause":
+                updated = task_service.retry(owner_id, updated["task_ref"], expected_revision=updated["revision"])
+                await emit_task_update(updated)
+                await schedule_ready_tasks(updated["batch_id"])
+                updated = task_service.get_task(owner_id, updated["task_id"]) or updated
+            if action == "pause":
+                prompt = "草稿已保留，查完可以說『繼續剛才』。"
+            elif question:
+                prompt = question
+            elif updated["status"] == "waiting_confirmation":
+                prompt = action_confirmation_prompt(VoiceProposal(intent, updated["arguments"], "", int(context.get("revision") or 0)))
+            else:
+                prompt = str(updated.get("result_summary") or "草稿已保留，等目前的操作完成後會請你確認。")
+            await send_event({"type": "draft_prompt", "message": prompt})
+            return {"status": updated["status"], "task": task_service.project(updated),
+                    "spoken_prompt": prompt, "message": prompt}
+        except (ValueError, RuntimeError) as error:
+            return {"status": "needs_input", "error_code": str(error)[:80],
+                    "message": "草稿沒有變更，請檢查日期、時間或重新選擇尚未執行的任務。"}
+
+    async def handle_draft_utterance(text: str) -> bool:
+        nonlocal draft_handled_text
+        if not drafts_enabled() or not text:
+            return False
+        if text == draft_handled_text:
+            return True
+        normalized = normalized_phrase(text)
+        args = None
+        if normalized in {"繼續剛才", "繼續剛才的安排", "繼續剛才的任務", "繼續草稿"}:
+            args = {"action": "resume"}
+        row = current_draft()
+        if row and normalized in {"先等一下", "等一下", "先暫停", "暫停這個任務", "先給我看內容還不要傳", "先給我看內容不要傳", "先給我看不要傳", "先看內容不要送", "先給我看內容還不要送出", "不要傳先給我看", "不要送先給我看", "不要傳先給我看內容"}:
+            args = {"action": "pause", "task_ref": row["task_ref"]}
+        if row and normalized in {"取消", "取消這個任務", "取消草稿", "不要送了"}:
+            args = {"action": "cancel", "task_ref": row["task_ref"]}
+        if row and args is None:
+            patch = spoken_draft_patch(text, row["capability_id"], row["arguments"])
+            if patch:
+                args = {"action": "update", "task_ref": row["task_ref"], "fields": patch}
+        if args is None:
+            return False
+        result = await manage_draft(args)
+        draft_handled_text = text
+        await queue_background_result(result, "draft")
+        return True
+
     async def handle_function(call: Any) -> None:
         nonlocal pending, next_reply_code, close_after_turn, progress_turn_pending
         nonlocal private_read_authorized
@@ -861,6 +1099,8 @@ async def run_duplex_session(
         nonlocal recently_confirmed_id, recently_confirmed_until
         name = str(call.name or "")
         call_id = str(call.id or "")
+        if quota_stopped:
+            return
         if call_id in tool_response_cache:
             cached_name, cached_response = tool_response_cache[call_id]
             await tool_response(SimpleNamespace(
@@ -868,6 +1108,29 @@ async def run_duplex_session(
                 name=cached_name,
             ), cached_response)
             return
+        if name == "manage_voice_draft":
+            if last_user_transcript and draft_handled_text == last_user_transcript:
+                await tool_response(call, {"status": "already_dispatched", "message": "這次改口已處理，請使用最新草稿。"})
+            else:
+                await tool_response(call, await manage_draft(dict(call.args or {})))
+            return
+        if drafts_enabled():
+            raw = dict(call.args or {})
+            draft_intent = ({"chat_send": "chat.request_send", "calendar_create": "calendar.create", "calendar_update": "calendar.update"}.get(raw.get("action"))
+                            if name == "write_app_action" else None)
+            if draft_intent:
+                if last_user_transcript and draft_handled_text == last_user_transcript:
+                    await tool_response(call, {"status": "already_dispatched", "message": "這次修改已處理。"})
+                    return
+                row = current_draft()
+                fields = {key: value for key, value in raw.items() if key in {*DRAFT_FIELDS[draft_intent], "target_ref"} and value is not None}
+                await tool_response(call, await manage_draft({"action": "update" if row else "start", "intent": draft_intent, "fields": fields}))
+                return
+            if pending and pending.task_id:
+                row = current_draft()
+                read_detour = (name == "read_weather" or (name == "read_app_data" and raw.get("domain") in {"calendar", "quota", "delivery", "contacts", "matching", "dates"}))
+                if row and read_detour:
+                    await manage_draft({"action": "pause", "task_ref": row["task_ref"]})
         if template_enabled and template_fast_path_transcript and call_id not in template_fast_path_call_ids:
             direct = authoritative_template_proposal(
                 template_fast_path_transcript, context=context,
@@ -887,7 +1150,21 @@ async def run_duplex_session(
         if call_id:
             seen_tool_calls.add(call_id)
         proxy_proposal: VoiceProposal | None = None
-        if proxy_enabled and name == "find_app_capabilities":
+        experience_intent = {'plan_date': 'date.plan', 'forget_preference': 'memory.disable', 'explain_app': 'app.help'}.get(name)
+        if experience_intent:
+            proxy_proposal = validate_proposal({'intent': experience_intent, 'arguments': dict(call.args or {})},
+                                               base_revision=int(context.get('revision') or 0))
+            if proxy_proposal is None:
+                await tool_response(call, {'status': 'needs_input', 'message': '請補充有效的日期、時間或偏好內容。'})
+                return
+            if experience_intent == 'app.help':
+                await tool_response(call, app_help(context, proxy_proposal.arguments.get('query', '')))
+                return
+            if not action_permissions_allowed(experience_intent, context):
+                await tool_response(call, {'status':'permission_denied','message':'這項功能所需的資料權限尚未開啟。'})
+                return
+            name = '__proxy_run_single__'
+        if task_tools_enabled and name == "find_app_capabilities":
             args = dict(call.args or {})
             requested_query = str(args.get("query") or "")[:1200]
             search_query = requested_query
@@ -933,7 +1210,7 @@ async def run_duplex_session(
                 for action in (match.get("actions") or [])[:1]
             ][:8]
             record_voice_metric(
-                "capability_search", routing_mode="proxy",
+                "capability_search", routing_mode=active_routing_mode,
                 capability_id=ranked_ids[0] if ranked_ids else "",
                 search_ranking=",".join(ranked_ids),
                 latency_ms=(time.perf_counter() - search_started) * 1000,
@@ -955,6 +1232,7 @@ async def run_duplex_session(
             # can safely remove that unreliable hop. Writes and ambiguous or
             # multi-operation requests still require run_app_capabilities.
             auto_capabilities = {
+                "quota.query", "chat.status.query",
                 "app.digest.query", "app.navigate", "calendar.query",
                 "chat.open", "contacts.query", "date.query", "match.ayue_query",
                 "match.query", "memory.query", "self.query", "weather.query",
@@ -1298,6 +1576,7 @@ async def run_duplex_session(
                         cancelled.task_id, status="cancelled", stage="cancelled",
                         result_summary="使用者已取消待確認操作。",
                         expected_statuses={"waiting_confirmation"},
+                        expected_action_id=cancelled.confirmation_id,
                     )
                     await emit_task_update(updated)
                     await schedule_ready_tasks(cancelled.batch_id)
@@ -1342,7 +1621,7 @@ async def run_duplex_session(
                 return
             # Reuse the existing, server-owned confirmation boundary below.
             name = "confirm_pending_action"
-        if proxy_enabled and name == "run_app_capabilities":
+        if task_tools_enabled and name == "run_app_capabilities":
             raw_operations = (call.args or {}).get("operations")
             if not isinstance(raw_operations, list) or not 1 <= len(raw_operations) <= MAX_OPERATIONS:
                 await tool_response(call, {
@@ -1377,6 +1656,16 @@ async def run_duplex_session(
                         **trusted_defaults,
                         **raw_arguments,
                     }
+                    if action_id == 'calendar.cancel':
+                        focus = cancellation_focus(last_user_transcript)
+                        if focus.get('question'):
+                            raise ValueError('ambiguous_target')
+                        if focus.get('date'):
+                            selected = next((item for item in (context.get('screen') or {}).get('items', [])
+                                if item.get('ref') == canonical_arguments.get('target_ref')), {})
+                            if selected and (selected.get('attributes') or {}).get('date') != focus['date']:
+                                raise ValueError('ambiguous_target')
+                            canonical_arguments['date'] = focus['date']
                     proposal = proposal_from_capability(
                         action_id, canonical_arguments,
                         revision=int(context.get("revision") or 0),
@@ -1433,7 +1722,7 @@ async def run_duplex_session(
                 for item in operations
             )
             record_voice_metric(
-                "capability_run", routing_mode="proxy",
+                "capability_run", routing_mode=active_routing_mode,
                 capability_id=",".join(
                     str(item.get("action_id") or "")
                     for item in verified_operations
@@ -1595,6 +1884,7 @@ async def run_duplex_session(
                 "permissions": permissions,
                 "catalog_version": CATALOG["version"],
                 "available_actions": available_actions(ACTIONS, permissions),
+                "app_guide": app_help(context),
                 "feature_status": (
                     dict(context.get("feature_status") or {})
                     if can_read_status
@@ -1677,12 +1967,22 @@ async def run_duplex_session(
             "activate_visible_choice",
             "list_contacts",
             "read_self_profile",
+            "read_agent_quota", "read_chat_status",
             "read_memories",
             "add_memory",
             "open_chat",
             "send_chat_message",
         }:
-            if pending is not None:
+            if pending is not None and drafts_enabled() and proxy_proposal is not None and proxy_proposal.intent in {
+                "quota.query", "chat.status.query", "calendar.query", "contacts.query", "weather.query", "match.query", "date.query",
+            }:
+                row = current_draft()
+                if row:
+                    await manage_draft({"action": "pause", "task_ref": row["task_ref"]})
+            if pending is not None and not (
+                (name == 'read_app_data' and (call.args or {}).get('domain') in {'quota', 'delivery'})
+                or (proxy_proposal is not None and proxy_proposal.intent in {'quota.query', 'chat.status.query'})
+            ):
                 await tool_response(call, {
                     "status": "awaiting_confirmation",
                     "phrase": pending.phrase,
@@ -1745,6 +2045,13 @@ async def run_duplex_session(
                     "message": "這個操作不在 App 安全白名單內。",
                 })
                 return
+            if drafts_enabled() and proposal.intent in DRAFT_FIELDS:
+                row = current_draft()
+                await tool_response(call, await manage_draft({
+                    "action": "update" if row else "start", "intent": proposal.intent,
+                    "fields": proposal.arguments,
+                }))
+                return
             if context.get('permissions', {}).get('public_ayue') is True:
                 screen_places = ((context.get('screen') or {}).get('content') or {}).get('recommendations') or []
                 proposal, place_question = resolve_calendar_recommendation(
@@ -1754,6 +2061,17 @@ async def run_duplex_session(
                     await tool_response(call, {'status': 'needs_input', 'message': place_question})
                     return
             bound, target_error = bind_target(proposal.intent, proposal.arguments, context)
+            if proposal.intent == 'calendar.cancel':
+                focus = cancellation_focus(last_user_transcript)
+                if focus.get('question'):
+                    await tool_response(call, {'status':'needs_input','message':focus['question']})
+                    return
+                if focus.get('date'):
+                    selected = next((item for item in (context.get('screen') or {}).get('items', []) if item.get('ref') == bound.get('target_ref')), {})
+                    if selected and (selected.get('attributes') or {}).get('date') != focus['date']:
+                        await tool_response(call, {'status':'needs_input','message':'目前選到的行程日期不同，請選擇真正要取消的那一筆；其他行程會保留。'})
+                        return
+                    bound['date'] = focus['date']
             if target_error:
                 await tool_response(call, {"status": "needs_input", "error_code": target_error,
                                            "message": "請重新讀取目前畫面，選擇已授權且仍有效的項目。"})
@@ -1764,6 +2082,23 @@ async def run_duplex_session(
                     "status": "permission_denied",
                     "message": "這項功能沒有被使用者授權，請不要執行或宣稱完成。",
                 })
+                return
+            if proposal.intent == 'quota.query':
+                from .status_contract import status_result
+                quota = await read_quota()
+                if quota_reader is not None and (quota.get('exhausted') or quota.get('state') == 'unknown'):
+                    await stop_for_quota(quota)
+                    return
+                await tool_response(call, status_result(quota=quota))
+                return
+            if proposal.intent in {'date.plan','memory.disable'} and not context.get('feature_status', {}).get('voice_experience'):
+                await tool_response(call, {'status':'failed','message':'目前 App 版本尚未支援這項語音功能，請更新 App。'})
+                return
+            if proposal.intent == 'app.help':
+                await tool_response(call, app_help(context, proposal.arguments.get('query', '')))
+                return
+            if proposal.intent == 'chat.status.query' and not context.get('feature_status', {}).get('operational_status'):
+                await tool_response(call, {'status': 'failed', 'message': '目前 App 版本尚未支援語音狀態查詢，請在聊天室查看冷卻提示。'})
                 return
             if proposal.intent == "calendar.query":
                 start_date = proposal.arguments.get("start_date")
@@ -1882,9 +2217,12 @@ async def run_duplex_session(
         if name == "confirm_pending_action":
             spoken = str(
                 last_user_transcript
-                if proxy_enabled and last_user_transcript
+                if drafts_enabled() or (proxy_enabled and last_user_transcript)
                 else (call.args or {}).get("spoken_phrase") or ""
             )[:200]
+            if current_draft() and draft_confirmation_needs_input:
+                await tool_response(call, {"status": "confirmation_mismatch", "message": "草稿已更新，請等待使用者確認最新內容。"})
+                return
             if pending is None:
                 if recently_confirmed_until >= time.time():
                     await tool_response(call, {
@@ -1949,6 +2287,7 @@ async def run_duplex_session(
                         error_code="confirmation_expired",
                         result_summary="確認已逾時，請重新說明是否繼續。",
                         expected_statuses={"waiting_confirmation"},
+                        expected_action_id=expired.confirmation_id,
                     ))
                     await schedule_ready_tasks(expired.batch_id)
                 await tool_response(call, {
@@ -1969,6 +2308,7 @@ async def run_duplex_session(
                         error_code="stale_target",
                         result_summary="畫面或資料已改變，請重新選擇。",
                         expected_statuses={"waiting_confirmation"},
+                        expected_action_id=stale.confirmation_id,
                     ))
                     await schedule_ready_tasks(stale.batch_id)
                 await tool_response(call, {
@@ -1984,6 +2324,23 @@ async def run_duplex_session(
                     "message": action_confirmation_prompt(pending.proposal),
                 })
                 return
+            if not context_allows_proposal(context, pending.proposal):
+                denied = pending
+                pending = None
+                cancel_confirmation_timeout()
+                if denied.task_id and task_service is not None:
+                    await emit_task_update(task_service.update(
+                        denied.task_id, status="waiting_input", stage="permission_denied",
+                        error_code="permission_denied", result_summary="這項權限已關閉，草稿已保留；授權後需重新確認。",
+                        expected_statuses={"waiting_confirmation"},
+                        expected_action_id=denied.confirmation_id,
+                    ))
+                await send_event({"type": "confirmation_expired", "confirmation_id": denied.confirmation_id})
+                await tool_response(call, {
+                    "status": "permission_denied", "error_code": "permission_denied",
+                    "message": "這項權限已關閉，沒有執行變更；重新授權後需再次確認。",
+                })
+                return
             confirmed = pending
             pending = None
             cancel_confirmation_timeout()
@@ -1996,6 +2353,7 @@ async def run_duplex_session(
                 updated = task_service.set_action(
                     confirmed.task_id, action_id=action_id,
                     status="waiting_device", stage="waiting_device",
+                    expected_action_id=confirmed.confirmation_id,
                     cancellable=action_metadata(confirmed.proposal.intent)["risk"] == "read",
                     expected_statuses={"waiting_confirmation"},
                 )
@@ -2186,6 +2544,8 @@ async def run_duplex_session(
             )
 
     async def deliver_background_result(message: str | dict[str, Any], source: str) -> None:
+        if quota_stopped:
+            return
         rendered = json.dumps(message, ensure_ascii=False) if isinstance(message, dict) else str(message)[:12000]
         marker = (
             "[APP_VOICE_TASK_RESULT]" if source == "task"
@@ -2204,10 +2564,45 @@ async def run_duplex_session(
 
     async def flush_background_results(*, delay: float = 0.0) -> None:
         nonlocal progress_turn_pending, background_flush_task
+        nonlocal live_turn_active, current_response_id, current_sequence
+        nonlocal current_transcript, current_audio_allowed, first_chunk, suppress_current_turn
+        nonlocal last_live_activity
         try:
             if delay > 0:
                 await asyncio.sleep(delay)
-            if stopped or live_turn_active or current_response_id is not None or not queued_background_results:
+            # A missing turn_complete used to leave a finished App result
+            # queued forever. Keep watching; recover only an idle model turn,
+            # never active speech or a device operation still in flight.
+            while (
+                not stopped and not quota_stopped and queued_background_results
+                and (user_speaking or live_turn_active or current_response_id is not None)
+            ):
+                if (
+                    not user_speaking and not awaiting_results
+                    and not background_actions and not non_blocking_tool_tasks
+                    and time.monotonic() - last_live_activity >= BACKGROUND_RESULT_IDLE_SECONDS
+                ):
+                    stale_id = current_response_id
+                    current_response_id = None
+                    current_sequence = 0
+                    current_transcript = ""
+                    current_audio_allowed = None
+                    first_chunk = None
+                    suppress_current_turn = False
+                    live_turn_active = False
+                    if stale_id:
+                        await send_event({"type": "audio_interrupted", "response_id": stale_id})
+                    await send_event({
+                        "type": "operation_status", "stage": "reply_recovering",
+                        "message": "資料已取得，正在恢復語音回覆。",
+                    })
+                    record_voice_metric(
+                        "background_reply_recovered", routing_mode=active_routing_mode,
+                        result_code="idle_turn",
+                    )
+                    break
+                await asyncio.sleep(min(0.25, BACKGROUND_RESULT_IDLE_SECONDS))
+            if stopped or quota_stopped or not queued_background_results:
                 return
             queued = list(queued_background_results)
             queued_background_results.clear()
@@ -2222,6 +2617,8 @@ async def run_duplex_session(
                 ) else queued[0][1]
             # Keep later completions queued until this generated voice turn ends.
             progress_turn_pending = True
+            live_turn_active = True
+            last_live_activity = time.monotonic()
             await deliver_background_result(queued_message, queued_source)
         except asyncio.CancelledError:
             return
@@ -2233,7 +2630,7 @@ async def run_duplex_session(
         message: str | dict[str, Any], source: str,
     ) -> None:
         nonlocal progress_turn_pending, background_flush_task
-        if stopped:
+        if stopped or quota_stopped:
             return
         queued_background_results.append((message, source))
         if current_response_id is not None or live_turn_active or source == "direct":
@@ -2329,14 +2726,21 @@ async def run_duplex_session(
         """Dispatch an unambiguous final utterance if Live omitted a tool call."""
 
         nonlocal template_fast_path_transcript, suppress_current_turn, next_reply_code
-        if not template_enabled or pending is not None or not last_user_transcript:
+        if await handle_draft_utterance(last_user_transcript):
+            return
+        if not template_enabled or not last_user_transcript:
             return
         if template_fast_path_transcript == last_user_transcript:
             return
         proposal = authoritative_template_proposal(
             last_user_transcript, context=context,
         )
+        if pending is not None and not (drafts_enabled() and current_draft() and proposal and proposal.intent in {
+            "quota.query", "chat.status.query", "calendar.query", "contacts.query", "weather.query", "match.query", "date.query",
+        }):
+            return
         if proposal is None or proposal.intent not in {
+            "quota.query", "chat.status.query",
             "app.navigate", "chat.open", "ayue.private_open",
             "calendar.query", "match.query",
             "date.query", "contacts.query", "memory.query", "self.query",
@@ -2367,6 +2771,7 @@ async def run_duplex_session(
         ))
 
     async def handle_live_message(response: Any) -> bool:
+        nonlocal last_live_activity, user_speaking
         nonlocal current_response_id, current_sequence
         nonlocal current_transcript, current_audio_allowed
         nonlocal last_user_transcript, input_transcript_finished
@@ -2374,7 +2779,7 @@ async def run_duplex_session(
         nonlocal first_chunk, last_completed_first_chunk
         nonlocal checking_replayed_turn, suppress_current_turn
         nonlocal progress_turn_pending
-        nonlocal template_fast_path_transcript
+        nonlocal template_fast_path_transcript, draft_handled_text, draft_confirmation_needs_input
         nonlocal live_turn_active
 
         if response.go_away:
@@ -2390,8 +2795,12 @@ async def run_duplex_session(
             if vad_signal:
                 activity = str(vad_signal.vad_signal_type or "")
         if activity:
+            last_live_activity = time.monotonic()
             if activity.endswith(("ACTIVITY_START", "SOS")):
+                user_speaking = True
                 last_user_transcript = ""
+                draft_handled_text = ""
+                draft_confirmation_needs_input = False
                 input_transcript_finished = False
                 template_fast_path_transcript = ""
                 template_fast_path_call_ids.clear()
@@ -2400,6 +2809,7 @@ async def run_duplex_session(
                     "state": "speech_started",
                 })
             elif activity.endswith(("ACTIVITY_END", "EOS")):
+                user_speaking = False
                 await send_event({
                     "type": "microphone_state",
                     "state": "speech_ended",
@@ -2408,6 +2818,7 @@ async def run_duplex_session(
         content = response.server_content
         if content:
             if content.model_turn or content.output_transcription or content.input_transcription:
+                last_live_activity = time.monotonic()
                 live_turn_active = True
             if checking_replayed_turn and content.turn_complete and not content.model_turn:
                 checking_replayed_turn = False
@@ -2416,6 +2827,8 @@ async def run_duplex_session(
                 # segment before processing any transcript delivered with the
                 # interruption event itself.
                 last_user_transcript = ""
+                draft_handled_text = ""
+                draft_confirmation_needs_input = False
                 input_transcript_finished = False
                 await reset_output(interrupted=True)
             interim = content.interim_input_transcription
@@ -2433,6 +2846,8 @@ async def run_duplex_session(
                 if input_transcript_finished:
                     last_user_transcript = ""
                     input_transcript_finished = False
+                    draft_handled_text = ""
+                    draft_confirmation_needs_input = False
                 last_user_transcript = _append_transcript(
                     last_user_transcript,
                     str(incoming.text),
@@ -2443,6 +2858,7 @@ async def run_duplex_session(
                     "final": incoming.finished is True,
                 })
                 if incoming.finished is True:
+                    user_speaking = False
                     remember("user", last_user_transcript)
                     await dispatch_template_fast_path()
                     input_transcript_finished = True
@@ -2499,6 +2915,8 @@ async def run_duplex_session(
                         })
                         current_sequence += 1
             if content.turn_complete:
+                user_speaking = False
+                last_live_activity = time.monotonic()
                 # Some Live responses do not set input_transcription.finished.
                 # Model turn completion is the fallback boundary for the next
                 # user segment when VAD and transcription arrive out of order.
@@ -2577,6 +2995,7 @@ async def run_duplex_session(
                             error_code="confirmation_context_lost",
                             result_summary="語音模型連線已重建，請重新確認。",
                             expected_statuses={"waiting_confirmation"},
+                            expected_action_id=lost_confirmation.confirmation_id,
                         ))
                     await send_task_snapshot(reset_baseline=False)
                     await schedule_ready_tasks(
@@ -2594,19 +3013,26 @@ async def run_duplex_session(
 
     async def receive_live() -> None:
         reconnect_attempts = 0
-        while not stopped:
+        while not stopped and not quota_stopped:
             try:
                 should_reconnect = False
                 async for response in live.receive_turn():
                     should_reconnect = await handle_live_message(response)
                     if should_reconnect:
                         break
-                if should_reconnect:
+                if should_reconnect and not quota_stopped:
                     await reconnect_live()
                 reconnect_attempts = 0
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
+                if quota_stopped:
+                    return
+                from .status_contract import provider_error_code
+                if provider_error_code(error) == 'provider_rate_limited':
+                    await send_event({'type': 'error', 'code': 'provider_rate_limited'})
+                    await websocket.close(code=1013)
+                    return
                 reconnect_attempts += 1
                 if reconnect_attempts > 2 or stopped:
                     await send_event({
@@ -2620,6 +3046,8 @@ async def run_duplex_session(
                     return
                 await send_event({"type": "state", "state": "reconnecting"})
                 await asyncio.sleep(0.25 * reconnect_attempts)
+                if quota_stopped:
+                    return
                 try:
                     await reconnect_live()
                 except Exception:
@@ -2636,6 +3064,8 @@ async def run_duplex_session(
             await send_event({"type": "error", "code": "voice_task_storage_unavailable"})
 
     receiver = asyncio.create_task(receive_live())
+    if quota_reader is not None:
+        quota_watcher_task = asyncio.create_task(watch_quota())
     try:
         await sync_screen_context()
         await live.send_text(session_started_prompt(context))
@@ -2655,6 +3085,8 @@ async def run_duplex_session(
             if message.get("type") == "websocket.disconnect":
                 break
             binary = message.get("bytes")
+            if quota_stopped and binary is not None:
+                continue
             if binary is not None:
                 if binary and len(binary) <= 4096:
                     try:
@@ -2673,6 +3105,25 @@ async def run_duplex_session(
             except (TypeError, ValueError):
                 continue
             kind = control.get("type")
+            if kind == 'voice_metric':
+                if client_metric_count >= 240:
+                    continue
+                metric = str(control.get('metric') or '')
+                if metric in {'speech_to_audio', 'speech_to_result', 'action_duration', 'interrupt_stop', 'feedback_misheard', 'feedback_slow', 'feedback_wrong_action'}:
+                    value = control.get('latency_ms')
+                    if value is not None and (type(value) is not int or not 0 <= value <= 600000):
+                        continue
+                    client_metric_count += 1
+                    record_voice_metric('client_' + metric, routing_mode=active_routing_mode,
+                                        latency_ms=control.get('latency_ms'), result_code='observed')
+                continue
+            if quota_stopped and kind not in {'action_result', 'task_cancel', 'task_dismiss', 'stop'}:
+                continue
+            if kind == 'plan_selection':
+                async with state_lock:
+                    await handle_function(SimpleNamespace(id='', name='plan_date',
+                        args={'operation': 'select', 'plan_ref': str(control.get('plan_ref') or '')}))
+                continue
             if kind == "context_changed":
                 next_context = safe_context(control.get("context"))
                 if next_context.get('permissions', {}).get('public_ayue') is not True:
@@ -2701,6 +3152,7 @@ async def run_duplex_session(
                                 stage="context_stale", error_code="stale_target",
                                 result_summary="畫面或資料已改變，請重新選擇。",
                                 expected_statuses={"waiting_confirmation"},
+                                expected_action_id=stale.confirmation_id,
                             ))
                             await schedule_ready_tasks(stale.batch_id)
                     context = next_context
@@ -2712,13 +3164,17 @@ async def run_duplex_session(
                 if not text:
                     continue
                 last_user_transcript = text
+                draft_handled_text = ""
+                draft_confirmation_needs_input = False
                 remember("user", text)
                 await send_event({
                     "type": "user_transcript",
                     "text": display_transcript(text),
                     "final": True,
                 })
-                if pending is not None:
+                if await handle_draft_utterance(text):
+                    continue
+                if pending is not None and confirmation_matches(text, pending.proposal):
                     await handle_function(SimpleNamespace(
                         id="",
                         name="confirm_pending_action",
@@ -2744,6 +3200,7 @@ async def run_duplex_session(
                     ):
                         continue
                     last_user_transcript = spoken_phrase
+                    draft_confirmation_needs_input = False
                     await handle_function(SimpleNamespace(
                         id="",
                         name="resolve_pending_interaction",
@@ -2820,12 +3277,13 @@ async def run_duplex_session(
                             continue
                         if updated and updated.get("result_summary"):
                             result_item = {
+                                **result_response,
                                 "task_ref": updated.get("task_ref"),
                                 "status": updated.get("status"),
                                 "message": updated.get("result_summary"),
                             }
                             await queue_background_result(result_item, "task")
-                    if target.call_id:
+                    if target.call_id and not quota_stopped:
                         tool_response_cache[target.call_id] = (
                             target.name,
                             dict(result_response),
@@ -2883,7 +3341,7 @@ async def run_duplex_session(
                         "tasks": rows, "error_code": str(error)[:80],
                     })
             elif kind in {
-                "task_retry", "task_input", "task_dismiss", "task_undo",
+                "task_retry", "task_input", "task_dismiss", "task_undo", "task_pause",
             } and task_service is not None:
                 task_ref = str(control.get("task_ref") or "")
                 try:
@@ -2891,7 +3349,15 @@ async def run_duplex_session(
                         int(control["expected_revision"])
                         if control.get("expected_revision") is not None else None
                     )
-                    if kind == "task_retry":
+                    if kind == "task_pause" and drafts_enabled():
+                        row = task_service.get_by_ref(owner_id, task_ref)
+                        if row is None or row.get("revision") != expected_revision:
+                            raise ValueError("voice_task_revision_stale")
+                        result = await manage_draft({"action": "pause", "task_ref": task_ref})
+                        await queue_background_result(result, "draft")
+                    elif kind == "task_pause":
+                        raise ValueError("draft_unsupported")
+                    elif kind == "task_retry":
                         updated = task_service.retry(
                             owner_id, task_ref,
                             expected_revision=expected_revision,
@@ -2905,6 +3371,7 @@ async def run_duplex_session(
                             values if isinstance(values, dict) else {},
                             expected_revision=expected_revision,
                         )
+                        await clear_draft_confirmation(task_ref)
                         await emit_task_update(updated)
                         await schedule_ready_tasks(str(updated.get("batch_id") or ""))
                     elif kind == "task_dismiss":
@@ -2940,6 +3407,9 @@ async def run_duplex_session(
             elif kind == "stop":
                 break
     finally:
+        if quota_watcher_task is not None:
+            quota_watcher_task.cancel()
+            await asyncio.gather(quota_watcher_task, return_exceptions=True)
         if screen_sync_task is not None:
             screen_sync_task.cancel()
             await asyncio.gather(screen_sync_task, return_exceptions=True)
@@ -2951,6 +3421,7 @@ async def run_duplex_session(
                 error_code="voice_session_closed",
                 result_summary="語音模式已關閉，請下次開啟後再確認。",
                 expected_statuses={"waiting_confirmation"},
+                expected_action_id=pending.confirmation_id,
             )
         cancel_confirmation_timeout()
         if background_flush_task is not None:

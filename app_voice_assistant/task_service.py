@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .capabilities import ACTIONS, ARGUMENT_SCHEMAS
+from .drafts import (DRAFT_FIELDS, LABELS, SAFE_DRAFT_STAGES, clean_draft, draft_editable,
+                     draft_projection, draft_question, validate_complete_draft)
 
 
 ACTIVE_STATUSES = frozenset({
@@ -59,6 +61,9 @@ def _expiry(instant: float) -> datetime:
 
 
 def _retryable(row: dict[str, Any]) -> bool:
+    if row.get("draft"):
+        return (row.get("status") == "waiting_input" and draft_editable(row)
+                and not draft_question(row["capability_id"], row.get("arguments") or {}))
     if row.get("status") not in {"failed", "waiting_input", "expired"}:
         return False
     if row.get("risk") != "write":
@@ -109,6 +114,16 @@ def _editable_fields(row: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _interaction(row: dict[str, Any]) -> dict[str, Any]:
+    if row.get("draft") and draft_editable(row):
+        values = row.get("arguments") or {}
+        return {
+            "kind": "form",
+            "prompt": draft_question(row["capability_id"], values) or row.get("result_summary") or "可以直接改口；繼續前會確認最新內容。",
+            "fields": [{"key": key, "label": LABELS[key], "type": "string",
+                        "value": values.get(key, "")}
+                       for key in DRAFT_FIELDS[row["capability_id"]]],
+            "options": [{"action": "edit", "label": "修改草稿"}],
+        }
     if row.get("status") not in {"waiting_input", "failed", "expired"}:
         return {}
     stage = str(row.get("stage") or "")
@@ -291,6 +306,11 @@ class VoiceTaskService:
             }
             rows.append(row)
         for row in rows:
+            if operations[row["position"]].get("draft") is True:
+                intent = row["capability_id"]
+                row["arguments"] = clean_draft(intent, row["arguments"])
+                row.update(draft=True, draft_changed_fields=[], status="waiting_input",
+                           stage="draft_collecting" if draft_question(intent, row["arguments"]) else "draft_ready")
             unknown = set(row["depends_on"]) - keys
             if unknown or row["operation_key"] in row["depends_on"]:
                 raise ValueError("voice_task_dependency_invalid")
@@ -329,6 +349,23 @@ class VoiceTaskService:
         except Exception as exc:
             raise RuntimeError("voice_task_storage_unavailable") from exc
 
+    def pause_for_quota(self, user_id: str) -> list[dict[str, Any]]:
+        """Pause only unissued work; never replay or cancel an in-flight write."""
+        if not self.enabled:
+            return []
+        rows = self._rows({'user_id': user_id, 'status': {'$in': ['queued', 'waiting_confirmation']}}, limit=1000)
+        updated = []
+        for row in rows:
+            result = self.update(
+                str(row['task_id']), status='waiting_input', stage='quota_paused',
+                error_code='agent_quota_exhausted',
+                result_summary='額度不足，尚未開始的步驟已暫停；先前完成的操作保留，不會重做。',
+                expected_statuses={'queued', 'waiting_confirmation'},
+            )
+            if result:
+                updated.append(result)
+        return updated
+
     def list_tasks(
         self, user_id: str, task_filter: str = "active", *, limit: int = 20,
         include_edit_values: bool = True,
@@ -345,6 +382,18 @@ class VoiceTaskService:
             self.project(row, include_edit_values=include_edit_values)
             for row in self._rows(query, limit=max(1, min(limit, 20)))
         ]
+
+    def list_drafts(self, user_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Find saved work before limiting; recent completed jobs cannot hide it."""
+        if not self.enabled:
+            return []
+        query = {
+            "user_id": _text(user_id, 128), "draft": True,
+            "capability_id": {"$in": list(DRAFT_FIELDS)},
+            "status": {"$in": ["waiting_input", "waiting_confirmation", "failed"]},
+            "stage": {"$in": list(SAFE_DRAFT_STAGES)},
+        }
+        return [self.project(row) for row in self._rows(query, limit=max(1, min(limit, 20)))]
 
     def project(
         self, row: dict[str, Any], *, include_edit_values: bool = True,
@@ -380,6 +429,8 @@ class VoiceTaskService:
             "error_code": _text(row.get("error_code"), 80),
             "updated_at": float(row.get("updated_at", 0) or 0),
         }
+        if row.get("draft") and row.get("capability_id") in DRAFT_FIELDS:
+            projected["draft"] = draft_projection(row, include_values=include_edit_values)
         interaction = row.get("interaction")
         if not isinstance(interaction, dict) or not interaction:
             interaction = _interaction(row)
@@ -609,11 +660,13 @@ class VoiceTaskService:
         self, task_id: str, *, action_id: str, status: str = "waiting_device",
         stage: str = "waiting_device", cancellable: bool | None = None,
         expected_statuses: set[str] | frozenset[str] | None = None,
+        expected_action_id: str | None = None,
         now: float | None = None,
     ) -> dict[str, Any] | None:
         return self.update(
             task_id, status=status, stage=stage, action_id=_text(action_id, 128),
-            cancellable=cancellable, expected_statuses=expected_statuses, now=now,
+            cancellable=cancellable, expected_statuses=expected_statuses,
+            expected_action_id=expected_action_id, now=now,
         )
 
     def update(
@@ -622,6 +675,7 @@ class VoiceTaskService:
         error_code: str | None = None, action_id: str | None = None,
         cancellable: bool | None = None,
         expected_statuses: set[str] | frozenset[str] | None = None,
+        expected_action_id: str | None = None,
         now: float | None = None,
     ) -> dict[str, Any] | None:
         instant = _now(now)
@@ -631,6 +685,8 @@ class VoiceTaskService:
                 if not row:
                     return None
                 if expected_statuses is not None and row.get("status") not in expected_statuses:
+                    return None
+                if expected_action_id is not None and row.get("action_id") != expected_action_id:
                     return None
                 updates: dict[str, Any] = {
                     "revision": int(row.get("revision", 0) or 0) + 1,
@@ -672,6 +728,8 @@ class VoiceTaskService:
                 }
                 if expected_statuses is not None:
                     update_query["status"] = {"$in": list(expected_statuses)}
+                if expected_action_id is not None:
+                    update_query["action_id"] = expected_action_id
                 result = self.tasks.update_one(
                     update_query,
                     {"$set": updates},
@@ -813,7 +871,49 @@ class VoiceTaskService:
             row = self._owned_task(user_id, task_ref, expected_revision)
             if not _retryable(row):
                 raise ValueError("voice_task_not_retryable")
+            if row.get("draft"):
+                validate_complete_draft(row["capability_id"], row.get("arguments") or {})
             return self._reset_to_queued(row, now=now)
+
+    def save_draft(
+        self, user_id: str, *, session_id: str, intent: str,
+        values: dict[str, Any], task_ref: str = "", expected_revision: int | None = None,
+        paused: bool = False,
+    ) -> dict[str, Any]:
+        """CAS a pre-dispatch draft; submitted/unknown writes are never editable."""
+        patch = clean_draft(intent, values)
+        if not task_ref:
+            action = dict(ACTIONS[intent])
+            action["capability_id"] = intent
+            return self.create_batch(user_id=user_id, session_id=session_id, operations=[{
+                "operation_key": "draft", "arguments": patch, "action": action, "draft": True,
+            }]).tasks[0]
+        with self._lock:
+            row = self._owned_task(user_id, task_ref, expected_revision)
+            if row.get("capability_id") != intent or not draft_editable(row):
+                raise ValueError("voice_draft_not_editable")
+            values = {**row.get("arguments", {}), **patch}
+            if "contact_name" in patch or "target" in patch:
+                values.pop("target_ref", None)
+            values = clean_draft(intent, values)
+            stage = "draft_paused" if paused else "draft_collecting" if draft_question(intent, values) else "draft_ready"
+            changed = [key for key in DRAFT_FIELDS[intent] if key in patch and patch[key] != row.get("arguments", {}).get(key)]
+            updates = {"draft": True, "arguments": values, "draft_changed_fields": changed,
+                       "status": "waiting_input", "stage": stage, "action_id": "",
+                       "interaction": {}, "error_code": "", "result_summary": "",
+                       "updated_at": _now(), "revision": int(row["revision"]) + 1, "cancellable": True}
+            try:
+                result = self.tasks.update_one(
+                    {"_id": row["_id"], "user_id": _text(user_id, 128), "revision": row["revision"], "status": row["status"]},
+                    {"$set": updates, "$unset": {"expires_at": "", "completed_at": ""}},
+                )
+                if not result.modified_count:
+                    raise ValueError("voice_task_revision_stale")
+            except ValueError:
+                raise
+            except Exception as exc:
+                raise RuntimeError("voice_task_storage_unavailable") from exc
+            return {**row, **updates}
 
     def provide_input(
         self, user_id: str, task_ref: str, values: dict[str, Any], *,
@@ -823,6 +923,16 @@ class VoiceTaskService:
             raise RuntimeError("voice_tasks_disabled")
         if not isinstance(values, dict) or not values or len(values) > 8:
             raise ValueError("voice_task_input_invalid")
+        row = self._owned_task(user_id, task_ref, expected_revision)
+        if row.get("draft"):
+            updated = self.save_draft(
+                user_id, session_id=str(row.get("origin_session_id") or ""),
+                intent=row["capability_id"], values=values, task_ref=task_ref,
+                expected_revision=int(row["revision"]),
+            )
+            if not draft_question(updated["capability_id"], updated["arguments"]):
+                return self.retry(user_id, task_ref, expected_revision=updated["revision"], now=now)
+            return updated
         with self._lock:
             row = self._owned_task(user_id, task_ref, expected_revision)
             if not _retryable(row):

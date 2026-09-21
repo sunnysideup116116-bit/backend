@@ -7,7 +7,7 @@ from typing import Any, Callable
 from bson import ObjectId
 
 from database import matches_coll
-from services.match_state_service import derive_match_stage
+from services.match_state_service import derive_match_stage, has_verified_acceptance
 
 PROPOSAL_CARD_EVENTS = {"match_proposal", "incoming_match_interest"}
 NicknameLookup = Callable[[str], str]
@@ -67,7 +67,7 @@ def proposal_counterparty_nickname(
     first, second = document.get("from_user"), document.get("to_user")
     if user_id not in {first, second}:
         return ""
-    if document.get("status") == "draft" and user_id != first:
+    if document.get("status") != "accepted" or not has_verified_acceptance(document):
         return ""
     other = second if user_id == first else first
     if not isinstance(other, str) or not other or other == user_id:
@@ -113,7 +113,7 @@ def project_match_card_history(
     documents = {str(doc["_id"]): doc for doc in collection.find({
         "_id": {"$in": ids}, "$or": [{"from_user": user_id}, {"to_user": user_id}],
     }, {"status": 1, "from_user": 1, "to_user": 1, "proposal_revision": 1,
-        "last_decision.action": 1, "match_basis": 1, "source_room_id": 1,
+        "last_decision": 1, "state_history": 1, "match_basis": 1, "source_room_id": 1,
         "source_room_title": 1, "source_summary": 1, "match_source_kind": 1,
         "search_context.invitation_topic": 1, "proposal_namespace": 1})} if ids else {}
     projected = deepcopy(messages)
@@ -131,6 +131,9 @@ def project_match_card_history(
         metadata = projected[index]["metadata"]
         document = documents.get(match_id, {})
         state = proposal_card_state(document, user_id)
+        if document.get("status") != "accepted" or not has_verified_acceptance(document):
+            projected[index] = anonymous_proposal_message(projected[index])
+            metadata = projected[index]["metadata"]
         if not state:
             metadata.update(canonical_status="unavailable", stage="unavailable", actions=[])
             metadata["counterparty_nickname"] = ""
@@ -166,4 +169,53 @@ def project_match_card_history(
                 candidate.update(state)
                 if nickname_lookup is not None:
                     candidate["counterparty_nickname"] = metadata["counterparty_nickname"]
+        if document.get("status") != "accepted" or not has_verified_acceptance(document):
+            # Canonical source/basis hydration above can reintroduce a saved
+            # name. Redact it using the original aliases before returning.
+            other_id = document.get("to_user") if document.get("from_user") == user_id else document.get("from_user")
+            current_name = lookup_once(other_id) if other_id and nickname_lookup else ""
+            projected[index] = anonymous_proposal_message(projected[index], aliases=[
+                messages[index].get("metadata"), {"counterparty_nickname": current_name},
+            ])
     return projected
+
+
+def anonymous_proposal_message(message: dict, *, aliases: Any = None) -> dict:
+    """Redact saved UI-only aliases before history can enter an AI context."""
+    identity_fields = {
+        "counterparty_nickname", "counterparty_name", "matched_user_name",
+        "other_name", "nickname", "display_name",
+    }
+    names: set[str] = set()
+
+    def collect(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in identity_fields and isinstance(item, str) and item.strip():
+                    names.add(item.strip())
+                elif isinstance(item, (dict, list)):
+                    collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+    collect(message.get("metadata") or {})
+    collect(aliases)
+
+    def clean(value, key=""):
+        if key in identity_fields:
+            return ""
+        if isinstance(value, dict):
+            return {field: clean(item, field) for field, item in value.items()}
+        if isinstance(value, list):
+            return [clean(item, key) for item in value]
+        if isinstance(value, str) and not (
+            key.endswith("_id") or key.endswith("_ids") or key in {"id", "ref"}
+        ):
+            for name in sorted(names, key=len, reverse=True):
+                pattern = re.escape(name)
+                if re.fullmatch(r"[A-Za-z0-9]+", name):
+                    pattern = rf"(?<![A-Za-z0-9]){pattern}(?![A-Za-z0-9])"
+                value = re.sub(pattern, "對方", value)
+        return value
+
+    return clean(message)

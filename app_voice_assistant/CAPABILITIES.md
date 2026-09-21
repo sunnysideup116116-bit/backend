@@ -1,5 +1,13 @@
 # Voice Assistant 能力與限制
 
+## 2026-09-21：後端接通 template 能力清單與可設定斷句
+
+- Template 模式保留 15 個直接工具，增加與 proxy 共用的 `find_app_capabilities`、`run_app_capabilities` 、`manage_voice_draft`、`plan_date`、`forget_preference`、`explain_app`，共 21 個模型工具。單一讀取、導覽與寫入維持直接路徑；統一待辦摘要、已授權 App 搜尋、個人捷徑及固定／多步驟工作流可透過已簽署能力清單執行。
+- 沿用原本 Flutter protocol v4 的 action、task、guide、permission 與 confirmation 事件，沒有新增前端欄位要求或修改 capability catalog；多步驟及背景任務仍要求 Server 啟用 task service。
+- 所有能力仍驗證 owner、session、期限、權限與 context revision，workflow 的寫入仍需確認。執行相同工具 call ID 不重複建立任務；搜尋已回傳執行結果時不再要求模型重做。
+- 新增 `VOICE_APP_VAD_SILENCE_MS`，預設 700 毫秒、範圍 200–2000 毫秒，無效值使用預設；設為 450 可還原先前門檻。增加 250 毫秒的設定等待窗口是為容納自然停頓，實際接話與誤斷句效果仍需 Android 實機量測。
+- 環境設定修改後需透過 `Server/start_all.sh` 重新啟動；新建或重連的 Gemini Live session 套用新值。錄音格式、插話、端上 STT 備援與 Flutter 設定頁均未修改。
+
 ## 2026-09-15：Gemini Live template routing
 
 - App Voice protocol v4 現在可使用 `VOICE_APP_TOOL_ROUTING_MODE=template`。它沿用 Gemini Live 原生雙向 WebSocket、Server VAD、PCM16 與 barge-in，但把模型可見工具收斂為 15 個 domain-level tools，不再要求每個簡單請求先執行 capability search。
@@ -338,7 +346,7 @@ AI 指示不得自行虛構同行者、精確地點或沒有被使用者說出�
 
 ### `GET /api/app-voice/capability`
 
-提供 protocol v4、full-duplex、持久 Live session、Server VAD、session resumption、function calling、demo-only 狀態、session 時限與同意版本。v4 另回報 capability proxy v2、task protocol v1、guide protocol v1、task interaction 與 personal routine 支援、7 個最大模型工具與每次最多 8 項操作。
+提供 protocol v4、full-duplex、持久 Live session、Server VAD、session resumption、function calling、demo-only 狀態、session 時限與同意版本。v4 另回報 capability proxy v2、task protocol v1、guide protocol v1、task interaction 與 personal routine 支援、proxy 11 個／template 21 個最大模型工具與每次最多 8 項操作。
 
 ### `POST /api/app-voice/session`
 
@@ -395,7 +403,7 @@ Server 可回傳：
 - Proxy 模式只暴露 `find_app_capabilities`、`run_app_capabilities`、`describe_current_screen`、`read_tasks`、`cancel_task`、`resolve_pending_interaction`、`close_voice_mode` 七個固定工具。
 - 執行前必須先搜尋能力；`capability_ref` 綁定 owner、session、catalog、權限、scope/revision 並於 120 秒過期。
 - `capabilities.json` v5 同時提供結構化的操作步驟、前置條件、限制與固定 workflow；說明模式不會發出可執行 ref。
-- action 標題、別名、完整 argument JSON Schema、風險、執行位置、可取消性與 Flutter metadata 都來自同一份 catalog；新增 action 不會改變模型看到的 7 個工具。
+- action 標題、別名、完整 argument JSON Schema、風險、執行位置、可取消性與 Flutter metadata 都來自同一份 catalog；新增 action 不會改變proxy 模型看到的 11 個工具。
 - perform 搜尋只在用戶意圖夠明確且功能目前可用時發出 ref；模糊領域詞只回傳說明並要求追問。
 
 ### Durable task 行為
@@ -415,7 +423,7 @@ Server 可回傳：
 
 ## Catalog v5 體驗層
 
-- Gemini 仍只看到 protocol v4 的 7 個固定工具；新增能力是 catalog action、固定 workflow 或 task interaction，不增加模型 function 數。
+- Gemini 仍只看到 protocol v4 的 11 個固定工具（含草稿、規劃、偏好與功能說明）；新增能力是 catalog action、固定 workflow 或 task interaction，不增加模型 function 數。
 - `find_app_capabilities(mode=explain)` 可回傳導覽教練步驟，Flutter 會顯示可切換步驟的教學卡；有缺少權限時另顯示權限修復卡，只會帶使用者前往原本設定頁，不會自動授權。
 - `app.digest.query` 可並行整理已授權的配對、共同約會、今日行程與聯絡人狀態。`app.search` 只查詢請求中列出且當下已授權的 contacts、calendar、shared_dates、memory 或 matching 領域。
 - 固定 workflow 包含每日狀態檢查、貼文準備與發布、共同約會安排、個資更新。Server 先展開成既有 action，每個寫入仍經過原本權限、scope、revision、confirmation 與 idempotency 邊界。

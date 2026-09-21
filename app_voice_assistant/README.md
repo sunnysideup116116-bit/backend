@@ -23,6 +23,15 @@ Calendar reads accept both the existing presets and any inclusive
 
 完整的目前能力、限制與啟用條件請見 [CAPABILITIES.md](CAPABILITIES.md)。
 
+自然改口、部分草稿、插話後接續與跨連線確認保護，請見
+[CONVERSATIONAL_DRAFTS.md](CONVERSATIONAL_DRAFTS.md)。
+
+約會方案比較、長期／本次偏好、App 功能說明與純語音狀態查詢，請見
+[VOICE_EXPERIENCE.md](VOICE_EXPERIENCE.md)。
+
+額度感知、狀態模式、Risk 冷卻與傳送回執的 API、行為及部署方式見
+[OPERATIONAL_STATUS.md](OPERATIONAL_STATUS.md)。
+
 Public routes:
 
 - `GET /api/app-voice/capability`
@@ -43,6 +52,23 @@ navigation on one tool round-trip while complex writes still use the existing
 confirmation and task boundaries. Protocol-v4 sessions always verify a fresh
 Appwrite JWT; task state is stored in the existing Social Mongo database and
 never contains raw audio or full transcripts.
+
+Template mode exposes 15 direct tools plus the two shared signed-catalog tools.
+Simple reads, navigation and writes keep their direct route. Unified digests,
+authorized App search, personal routines and fixed/multi-step workflows use
+`find_app_capabilities` and `run_app_capabilities`, with the same owner/session,
+permission, revision, confirmation and task checks as proxy mode. They emit
+the existing protocol-v4 Flutter events; no Flutter update or catalog migration
+is required. Background/multi-step work still requires `VOICE_APP_TASKS_ENABLED`.
+
+`VOICE_APP_VAD_SILENCE_MS` controls how long Gemini Live waits for a speech pause
+before ending the user's turn. The default is 700 ms (previously fixed at 450 ms),
+bounded to 200–2000 ms; invalid values use the default. This adds up to 250 ms to
+the configured silence window to accommodate natural pauses, but is not a
+measured device-latency or recognition improvement. Set 450 to restore the old
+timing. Restart the Server through `start_all.sh` to load environment changes;
+new Live connections and reconnects use the setting. PCM, microphone capture,
+barge-in, and the device STT fallback remain unchanged.
 
 Catalog v5 keeps the same seven model-visible tools while adding guided App
 coaching, permission repair, an authorized-data search, a unified digest, four

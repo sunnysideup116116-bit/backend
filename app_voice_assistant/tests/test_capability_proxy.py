@@ -47,6 +47,7 @@ def context(**changes):
 def test_proxy_exposes_exactly_seven_stable_tools_and_compact_prompt():
     declarations = _live_tools(Types, "proxy")[0].function_declarations
     assert [item.name for item in declarations] == [
+        "manage_voice_draft", "plan_date", "forget_preference", "explain_app",
         "find_app_capabilities",
         "run_app_capabilities",
         "describe_current_screen",

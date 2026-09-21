@@ -61,7 +61,7 @@ class MemoryHttp:
             "older_summary": "舊名字以前在聊旅行",
             "recent_summary": "最近想約小安喝咖啡",
             "revision": 2,
-            "last_session_id": "old-session",
+            "last_session_id": "anon2:old-session",
         }
 
     def request(self, method, url, **kwargs):
@@ -308,7 +308,7 @@ def test_voice_close_turns_are_never_written_to_memory():
     )
 
     assert unchanged.revision == 2
-    assert unchanged.last_session_id == "old-session"
+    assert unchanged.last_session_id == "anon2:old-session"
     assert ollama.calls == []
 
 
@@ -332,7 +332,7 @@ def test_deepseek_failure_uses_bounded_fallback_and_still_writes_appwrite():
 
     combined = saved.older_summary + saved.recent_summary
     assert saved.revision == 3
-    assert saved.last_session_id == "fallback-session"
+    assert saved.last_session_id == "anon2:fallback-session"
     assert ollama.calls == 2
     assert "咖啡店" in combined
     assert "語音模式" not in combined

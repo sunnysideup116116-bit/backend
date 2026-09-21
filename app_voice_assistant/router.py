@@ -55,6 +55,8 @@ from .task_service import (
     stop_voice_task_worker,
 )
 from .template_dispatcher import TEMPLATE_TOOL_COUNT
+from .status_service import VoiceStatusService
+from .status_contract import status_result
 
 
 LOGGER = logging.getLogger("app_voice.runtime")
@@ -138,8 +140,10 @@ class AppVoiceRuntime:
         task_service: VoiceTaskService | None = None,
         defer_task_service: bool = False,
         identity_authenticator: Any | None = None,
+        status_service: Any | None = None,
     ):
         self.settings = settings or AppVoiceSettings.from_env()
+        self.status_service = status_service or VoiceStatusService()
         resolved_keys = collect_google_api_keys() if keys is None else keys
         self.provider = provider or AppVoiceProvider(self.settings, list(resolved_keys))
         self.tickets = AppVoiceTicketStore(self.settings.ticket_ttl_seconds)
@@ -333,9 +337,9 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
         max_model_tools = (
             TEMPLATE_TOOL_COUNT
             if configured_routing_mode == "template"
-            else 7
+            else 11
             if configured_routing_mode == "proxy"
-            else 36
+            else 39
         )
         return {
             "enabled": runtime.settings.enabled,
@@ -343,6 +347,12 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
             "action_catalog_version": CATALOG["version"],
             "screen_context_version": 1,
             "structured_action_results": True,
+            "operational_status_version": 1,
+            "conversation_drafts_version": 1,
+            "voice_experience_version": 1,
+            "quota_status": True,
+            "chat_delivery_status": True,
+            "unmetered_status_reads": True,
             "tool_routing_version": 2,
             "task_protocol_version": 1,
             "task_interactions": True,
@@ -515,6 +525,20 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
         if not owner:
             raise HTTPException(status_code=401, detail="voice_identity_invalid")
         return owner
+
+    @app_router.get("/status/quota")
+    async def quota_status(request: Request) -> dict[str, Any]:
+        owner = await authenticated_task_owner(request)
+        runtime.status_service.allow_read(owner)
+        return status_result(quota=await runtime.status_service.quota(owner))
+
+    @app_router.get("/status/chat")
+    async def chat_status(request: Request, contact_id: str, client_message_id: str = "") -> dict[str, Any]:
+        owner = await authenticated_task_owner(request)
+        runtime.status_service.allow_read(owner)
+        if not contact_id or len(contact_id) > 128 or len(client_message_id) > 200:
+            raise HTTPException(400, detail="voice_status_target_invalid")
+        return await runtime.status_service.chat(owner, contact_id, client_message_id)
 
     @app_router.get("/tasks")
     async def list_voice_tasks(
@@ -770,6 +794,7 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                         voice_session_id=ticket.session_id,
                         capability_secret=runtime.secret,
                         routing_mode=ticket.routing_mode,
+                        quota_reader=lambda: runtime.status_service.quota(ticket.user_id),
                         task_service=(
                             runtime.tasks if ticket.protocol_version >= 4 else None
                         ),
@@ -784,9 +809,10 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                         type(error).__name__,
                     )
                     try:
+                        from .status_contract import provider_error_code
                         await send_event({
                             "type": "error",
-                            "code": "gemini_live_connect_failed",
+                            "code": provider_error_code(error),
                         })
                         await websocket.close(code=1011)
                     except Exception:

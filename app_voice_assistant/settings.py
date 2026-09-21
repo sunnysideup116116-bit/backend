@@ -45,6 +45,7 @@ class AppVoiceSettings:
     tasks_enabled: bool
     task_workers: int
     task_per_user_concurrency: int
+    vad_silence_duration_ms: int = 700
 
     @classmethod
     def from_env(
@@ -139,6 +140,9 @@ class AppVoiceSettings:
             task_workers=bounded("VOICE_APP_TASK_WORKERS", 4, 1, 16),
             task_per_user_concurrency=bounded(
                 "VOICE_APP_TASK_PER_USER_CONCURRENCY", 3, 1, 8,
+            ),
+            vad_silence_duration_ms=bounded(
+                "VOICE_APP_VAD_SILENCE_MS", 700, 200, 2000,
             ),
         )
 

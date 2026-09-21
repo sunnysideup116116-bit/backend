@@ -18,9 +18,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .contracts import VoiceProposal, deterministic_proposal, validate_proposal
+from .catalog_tools import catalog_function_declarations
 
 
-TEMPLATE_TOOL_COUNT = 15
+TEMPLATE_TOOL_COUNT = 21
 
 _SPOKEN_NUMBERS = {
     "一": 1, "二": 2, "兩": 2, "两": 2, "三": 3, "四": 4,
@@ -243,6 +244,10 @@ def template_proposal_from_function(
 
     if name == "read_app_data":
         domain = str(raw.get("domain") or "")
+        if domain == "quota":
+            return _proposal("quota.query", {}, revision=revision)
+        if domain == "delivery":
+            return _proposal("chat.status.query", _with_target(raw, {"contact_name": raw.get("contact_name", "")}), revision=revision)
         if domain == "calendar":
             arguments = {
                 key: raw[key]
@@ -463,6 +468,10 @@ def template_tool_call_for_proposal(
         return "open_chat", {"mode": "private_ayue", **arguments}
     if intent == "calendar.query":
         return "read_app_data", {"domain": "calendar", **arguments}
+    if intent == "quota.query":
+        return "read_app_data", {"domain": "quota"}
+    if intent == "chat.status.query":
+        return "read_app_data", {"domain": "delivery", **arguments}
     if intent == "match.query":
         return "read_app_data", {"domain": "matching", **arguments}
     if intent == "date.query":
@@ -534,7 +543,7 @@ def template_live_tools(types: Any) -> list[Any]:
                     "type": "string",
                     "enum": [
                         "calendar", "matching", "dates", "contacts", "memory",
-                        "profile", "posts", "chat_content", "blocked_users", "help",
+                        "profile", "posts", "chat_content", "blocked_users", "help", "quota", "delivery",
                     ],
                 },
                 "query": {"type": "string", "maxLength": 1000},
@@ -717,5 +726,6 @@ def template_live_tools(types: Any) -> list[Any]:
             description="Close voice mode only when the user explicitly asks to stop listening.",
             parameters_json_schema=empty,
         ),
+        *catalog_function_declarations(types, direct_tools_available=True),
     ]
     return [types.Tool(function_declarations=declarations)]

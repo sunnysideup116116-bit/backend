@@ -54,7 +54,7 @@ def test_state_returns_only_the_actual_counterparty_nickname(monkeypatch, viewer
     monkeypatch.setattr(routes, "public_display_name", lambda uid: NAMES[uid])
     before = deepcopy(matches.rows)
     result = routes.get_single_match_state(viewer, str(MATCH_ID))
-    assert result["counterparty_nickname"] == expected
+    assert result["counterparty_nickname"] == (expected if status == "accepted" else "")
     if status != "accepted":
         assert "other_id" not in result
     assert "other_name" not in result
@@ -68,7 +68,7 @@ def test_unsent_draft_does_not_disclose_an_initiator_name_to_the_receiver(monkey
     monkeypatch.setattr(routes, "public_display_name", lookup)
     assert routes.get_single_match_state("bob", str(MATCH_ID))["counterparty_nickname"] == ""
     lookup.assert_not_called()
-    assert routes.get_single_match_state("alice", str(MATCH_ID))["counterparty_nickname"] == "小晴"
+    assert routes.get_single_match_state("alice", str(MATCH_ID))["counterparty_nickname"] == ""
 
 
 def test_name_lookup_failure_preserves_terminal_state_without_an_id_fallback(monkeypatch):
@@ -80,9 +80,11 @@ def test_name_lookup_failure_preserves_terminal_state_without_an_id_fallback(mon
     assert "other_id" not in result
 
 
+@pytest.mark.parametrize("status", ["accepted", "declined", "pending", "expired"])
 @pytest.mark.parametrize("viewer,expected", [("alice", "小晴"), ("bob", "小葵")])
-def test_history_names_are_canonical_cached_per_peer_and_do_not_revive_actions(viewer, expected):
-    current = document("declined")
+def test_history_names_are_canonical_cached_per_peer_and_do_not_revive_actions(viewer, expected, status):
+    current = document(status)
+    expected = expected if status == "accepted" else ""
     rows = [{"content": "原本的匿名理由", "metadata": {
         "event_type": "match_proposal", "match_id": str(MATCH_ID),
         "proposal_role": "not-trusted", "counterparty_nickname": "不可信的舊稱呼",
@@ -97,9 +99,11 @@ def test_history_names_are_canonical_cached_per_peer_and_do_not_revive_actions(v
         metadata = row["metadata"]
         assert metadata["counterparty_nickname"] == expected
         assert metadata["matches"][0]["counterparty_nickname"] == expected
-        assert metadata["canonical_status"] == "declined"
-        assert metadata["actions"] == []
+        assert metadata["canonical_status"] == status
+        if status != "pending":
+            assert metadata["actions"] == []
         assert row["content"] == "原本的匿名理由"
+    # Before acceptance the canonical name is used only for redaction.
     lookup.assert_called_once_with("bob" if viewer == "alice" else "alice")
     assert rows == before
     assert collection.writes == 0
@@ -136,6 +140,47 @@ def test_history_http_route_includes_nickname_without_persisting_it(monkeypatch)
     response = chat_messages.get_messages(
         "ai_assistant", user_id="alice", ai_room_id=room,
     )
-    assert response["messages"][0]["metadata"]["counterparty_nickname"] == "小晴"
+    assert response["messages"][0]["metadata"]["counterparty_nickname"] == ""
     assert "counterparty_nickname" not in messages.rows[0]["metadata"]
     assert messages.writes == matches.writes == 0
+
+
+def test_saved_aliases_are_removed_again_after_canonical_source_hydration():
+    current = document("pending")
+    current.update(source_summary="小晴也想拍照", match_basis={
+        "level": "direct", "counterparty_evidence": ["小晴想散步"],
+    })
+    row = {"content": "小晴的牽線邀請", "metadata": {
+        "event_type": "match_proposal", "match_id": str(MATCH_ID),
+        "counterparty_nickname": "小晴", "source_room_id": "room-小晴",
+        "matches": [{"match_id": str(MATCH_ID), "matched_user_name": "舊名字",
+                     "receiver_reason": "舊名字喜歡街拍"}],
+    }}
+    before = deepcopy(row)
+    result = cards.project_match_card_history([row], "alice", collection=Collection([current]))[0]
+    assert result["metadata"].pop("source_room_id") == "room-小晴"
+    assert "小晴" not in str(result)
+    assert "舊名字" not in str(result)
+    assert result["metadata"]["match_id"] == str(MATCH_ID)
+    assert row == before
+
+
+def test_unverified_accepted_document_cannot_disclose_name():
+    row = document("accepted")
+    row.pop("last_decision")
+    lookup = MagicMock(return_value="不可公開")
+    assert cards.proposal_counterparty_nickname(row, "alice", lookup) == ""
+    lookup.assert_not_called()
+
+
+def test_active_card_anonymizes_all_text_including_topic_source_and_evidence(monkeypatch):
+    current = document("pending")
+    current.update(search_context={"invitation_topic": "和小晴散步"},
+                   match_basis={"level": "direct", "counterparty_evidence": ["小晴想拍照"]})
+    monkeypatch.setattr(routes, "public_display_name", lambda _: "小晴")
+    monkeypatch.setattr(routes, "_proposal_source_projection", lambda *_: {
+        "source_summary": "幫你認識小晴", "source_room_id": "room-小晴",
+    })
+    result = routes.build_active_proposal_card(current, "alice")
+    assert result.pop("source_room_id") == "room-小晴"
+    assert "小晴" not in str(result)

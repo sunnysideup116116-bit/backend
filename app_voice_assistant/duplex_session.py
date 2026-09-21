@@ -12,6 +12,7 @@ from registration_voice.key_pool import GoogleApiKeyPool
 
 from .settings import AppVoiceSettings
 from .capabilities import ACTIONS
+from .catalog_tools import catalog_function_declarations
 from .language import input_language_codes
 from .template_dispatcher import template_live_tools
 
@@ -539,6 +540,15 @@ def _legacy_live_tools(types: Any) -> list[Any]:
             parameters_json_schema=empty,
         ),
     ]
+    declarations.extend([
+        types.FunctionDeclaration(name='read_agent_quota',
+            description='Read the signed-in owner shared Agent quota, exhaustion and next refill.',
+            parameters_json_schema=empty),
+        types.FunctionDeclaration(name='read_chat_status',
+            description='Read delivery and cooldown for an authorized contact; never resend.',
+            parameters_json_schema={'type': 'object', 'additionalProperties': False,
+                'properties': {'contact_name': {'type': 'string', 'maxLength': 40}}}),
+    ])
     declarations.append(types.FunctionDeclaration(
         name="select_screen_target",
         description="Select one current screen item without modifying its data. Use a ref from describe_current_screen for second/this item.",
@@ -561,56 +571,7 @@ def _proxy_live_tools(types: Any) -> list[Any]:
     """Seven stable protocol-v4 tools; app capabilities stay in the catalog."""
     empty = {"type": "object", "additionalProperties": False, "properties": {}}
     declarations = [
-        types.FunctionDeclaration(
-            name="find_app_capabilities",
-            description=(
-                "Use for every Folks App feature or live domain-data request, including "
-                "weather, match status/progress, calendar, dates, contacts, memory, search, "
-                "navigation, and writes. Always call before run_app_capabilities; use explain "
-                "only for how-to questions and perform for reading data or taking action. "
-                "A single verified read or navigation may execute directly and return its result. "
-                "When recommended_operations is returned, immediately call run_app_capabilities "
-                "and copy that array exactly."
-            ),
-            parameters_json_schema={
-                "type": "object", "additionalProperties": False,
-                "properties": {
-                    "query": {"type": "string", "maxLength": 1200},
-                    "mode": {"type": "string", "enum": ["explain", "perform"]},
-                },
-                "required": ["query", "mode"],
-            },
-        ),
-        types.FunctionDeclaration(
-            name="run_app_capabilities",
-            description=(
-                "Run one to eight capabilities returned by find_app_capabilities. "
-                "Copy capability_ref and suggested_arguments exactly when provided. "
-                "Never invent authority fields."
-            ),
-            parameters_json_schema={
-                "type": "object", "additionalProperties": False,
-                "properties": {
-                    "operations": {
-                        "type": "array", "minItems": 1, "maxItems": 8,
-                        "items": {
-                            "type": "object", "additionalProperties": False,
-                            "properties": {
-                                "operation_key": {"type": "string", "maxLength": 40},
-                                "capability_ref": {"type": "string", "maxLength": 1200},
-                                "arguments": {"type": "object"},
-                                "depends_on": {
-                                    "type": "array", "maxItems": 8,
-                                    "items": {"type": "string", "maxLength": 40},
-                                },
-                            },
-                            "required": ["operation_key", "capability_ref", "arguments"],
-                        },
-                    },
-                },
-                "required": ["operations"],
-            },
-        ),
+        *catalog_function_declarations(types),
         types.FunctionDeclaration(
             name="describe_current_screen",
             description=(
@@ -740,8 +701,15 @@ def _system_instruction(
             else "目前沒有安全的使用者顯示名稱；需要名稱時呼叫 read_self_profile，不可猜測。"
         )
     )
+    draft_note = (
+        "\nApp功能先 explain_app；約會比較用 plan_date。"
+        "長期偏好需明確要求；本次例外用 ignore_preferences/ignore_budget。"
+        "傳訊、行程用 manage_voice_draft：缺什麼問什麼，update 只改指定欄位；"
+        "resume 接續、pause 保留。更新後仍需確認。\n"
+        if routing_mode in {"proxy", "template"} else ""
+    )
     memory = str(conversation_memory or "").strip()[:600]
-    memory_note = (
+    memory_note = draft_note + (
         "\n[SERVER_VOICE_CONVERSATION_MEMORY]\n"
         f"{memory}\n"
         "[/SERVER_VOICE_CONVERSATION_MEMORY]\n"
@@ -799,13 +767,17 @@ def _system_instruction(
 {screen_note}
 
 一般問候、閒聊與「你是誰」直接回答，不呼叫工具。
-這個版本使用直接的 App domain 工具，不要呼叫能力搜尋，也不要自行猜測資料。
+單一領域的讀取、導航與寫入優先使用直接 App domain 工具，不增加能力搜尋步驟，也不要自行猜測資料。
+統一待辦摘要、跨領域 App 搜尋、儲存／執行／刪除個人捷徑、固定工作流與多步驟需求，使用 find_app_capabilities(mode=perform)，保留使用者完整需求。詢問這些功能怎麼用或需要哪些權限時使用 explain，只說明不執行。
+搜尋回覆若已開始執行（queued、working、awaiting_confirmation）或已回傳結果，不可再重複執行；若有 recommended_operations，原樣交給 run_app_capabilities。其他情況只使用回傳的 capability_ref、參數 schema 與 suggested_arguments，缺少必要資料先追問，不猜測 ref、ID、捷徑名稱或未說出的條件。
+固定 workflow 由 Server 展開；不要額外用直接工具重做其中步驟。多項操作保留 operation_key 與 depends_on，等待既有任務及確認事件。needs_clarification、needs_input、permission_denied、stale 或 failed 必須說明或追問，不可宣稱完成。
 查某日某地的外部活動、展覽、演唱會、市集等，一律 ask_app_ayue(domain=web)，由配對阿月上網查；即使目前在行事曆頁也能使用，不能聲稱只能讀日曆或天氣。只查個人已安排的行程才 read_app_data(domain=calendar)。使用者說當天／那天，沿用最近明確提到或查詢的日期，將日期、地區與需求完整寫入 question；日期仍不明才追問，不可猜測或把空檔當成活動結果。
 使用者說「我希望可以更認識我」「我希望可以開始性格探索」「你可以再更認識我嗎」「我想讓你更了解我」等，是請配對阿月開始性格探索，不是一般閒聊；不可自己編問題或只開頁面。呼叫 ask_app_ayue(domain=personality, question="我想開始性格探索。"加上使用者原句)。配對阿月回覆問題後，每句答案都使用相同 personality domain 原樣送回同一對話，直到完成或使用者明確停止。使用者停止時不可再開始探索；「你對我了解多少」使用 read_app_data(domain=profile)，不要開始探索。
 頁面跳轉使用 navigate_app；「幫我開聊天室／打開聊天室」要直接使用 navigate_app(destination=chat)，只有指定某個人的聊天室才使用 open_chat；要打開某人的阿月悄悄話時使用 open_chat(mode=private_ayue)，這只開頁，不得改成 ask_app_ayue 或自行補問題；目前畫面、這個或第幾個優先使用最新快照的 target_ref，資料不足才 describe_current_screen。
 describe_current_screen 會在相關權限開啟時附上有限的頁面文字投影；讀聊天或頁面內容時只依回傳資料回答，不猜測被省略的文字，也不透露原始 ID。
 在個人頁面要求查看、打開最新或第幾篇已發布貼文時，先看最新快照，資料不足才 describe_current_screen；貼文依最新到最舊排列，再以 read_app_data(domain=posts, target_ref=...) 開啟，不要把已發布貼文誤當成草稿。
 目前天氣與空氣品質使用 read_weather。日曆、配對進度、共同約會、聯絡人、記憶與本人資料使用 read_app_data，domain 分別使用 calendar、matching、dates、contacts、memory、profile；查聊天內容使用 chat_content，需保留對象與完整問題。查「這個月／月底／下個月」時要依台灣日期換算明確的 start_date 與 end_date，不要改成 upcoming。
+本人 Agent 共用額度、是否用完及何時補額使用 read_app_data(domain=quota)；配對、悄悄話與語音共用一份額度，不估算還能聊幾次。訊息是否送出、冷卻還有多久或幾點能再傳使用 read_app_data(domain=delivery)，保留對象名稱或目前畫面參照。delivery 與 cooldown 是兩件事：已送出仍可能正在冷卻，unknown 不代表未送出；只根據工具的結構化狀態回答，不自動重送、不承諾冷卻結束就一定能送。額度或 Risk 資料查不到時明說未知，不猜成零或已解除。
 高雄哪裡好玩、找新的配對、公開資訊與其他需要推理的要求一定使用 ask_app_ayue，不要自己回答地點推薦或配對建議；matching 代表找新配對或配對建議，places 代表地點推薦，private 代表已接受對象的私人聊天。places 在手機定位關閉時仍使用 App 設定中儲存的「所在地」，只有工具明確回覆沒有儲存地點才追問。不要把新的配對誤當成配對進度。
 新增、修改、取消、傳訊息、發布、個資與共同約會變更使用 write_app_action。說「選最近 N 張」時傳 count；說「選第 N 張」時傳 positions=[N]，不得把第三張改成最近三張。查封鎖名單使用 read_app_data(domain=blocked_users)；封鎖或解除封鎖使用 write_app_action(action=block_user/unblock_user)，並必須等待口頭確認。只能傳使用者明確說出的資料；Server 會驗證權限、目前畫面、revision 與確認。
 簡單讀取或導航要直接執行，不要先說「我搜尋功能」。工具回覆 status=ok 或 success 才能說完成；queued、working、waiting_confirmation、needs_input 或 failed 都不能說完成。收到 queued 或 working 時只逐字說出工具回覆的 spoken_prompt，配合目前語言後等待結果。
@@ -925,7 +897,7 @@ class AppVoiceDuplexSession:
                         start_of_speech_sensitivity="START_SENSITIVITY_LOW",
                         end_of_speech_sensitivity="END_SENSITIVITY_HIGH",
                         prefix_padding_ms=120,
-                        silence_duration_ms=450,
+                        silence_duration_ms=self.settings.vad_silence_duration_ms,
                     ),
                     activity_handling="START_OF_ACTIVITY_INTERRUPTS",
                     turn_coverage="TURN_INCLUDES_ONLY_ACTIVITY",

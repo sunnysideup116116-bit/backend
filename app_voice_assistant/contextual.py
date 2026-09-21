@@ -207,6 +207,7 @@ def bind_target(intent, arguments, context):
 
 
 def safe_result(value):
+    from .status_contract import STATUS_ERRORS, public_quota, public_cooldown, public_delivery
     if not isinstance(value, dict):
         value = {}
     success = value.get('success') is True
@@ -217,6 +218,7 @@ def safe_result(value):
         status = 'failed'
     errors = {'permission_denied', 'stale_target', 'ambiguous_target', 'not_found',
               'not_ready', 'unauthenticated', 'network_error', 'validation_failed', 'unsupported', 'operation_failed'}
+    errors |= STATUS_ERRORS
     def item(raw):
         if not isinstance(raw, dict):
             return {}
@@ -238,6 +240,9 @@ def safe_result(value):
             result['selected'] = item(raw['selected'])
         if 'recommendations' in raw:
             result['recommendations'] = safe_recommendations(raw['recommendations'])
+        for key, project in (('quota', public_quota), ('cooldown', public_cooldown), ('delivery', public_delivery)):
+            if key in raw:
+                result[key] = project(raw[key])
         return result
     result = {'status': status,
               'message': str(value.get('message') or '')[:12000] or ('操作已完成。' if success else '操作沒有完成。')}
@@ -247,4 +252,6 @@ def safe_result(value):
         result['error_code'] = value['error_code']
     if isinstance(value.get('data'), dict):
         result['data'] = clean(value['data'])
+        from .voice_experience import safe_experience_data
+        result['data'].update(safe_experience_data(value['data']))
     return result

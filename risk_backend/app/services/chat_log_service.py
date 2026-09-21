@@ -338,6 +338,39 @@ class ChatLogService:
             print(f"log_intervention failed: {e}")
             return False
 
+    async def get_cooldown_status(self, conversation_id: str, user_id: str) -> dict:
+        """Authoritative UI status; unavailable storage must never mean clear."""
+        from datetime import timedelta
+        import math
+        now = datetime.now(timezone.utc)
+        unknown = {"state": "unknown", "server_time": now.isoformat(),
+                   "remaining_seconds": None, "until": None}
+        try:
+            response = await run_blocking(lambda: self.db.list_documents(
+                self.db_id, "intervention_logs", queries=[
+                    Query.equal("conversation_id", conversation_id),
+                    Query.equal("user_id", user_id), Query.order_desc("timestamp"),
+                    Query.limit(1),
+                ],
+            ))
+            until = None
+            if response.documents:
+                doc = response.documents[0]
+                data = doc.data if hasattr(doc, 'data') else doc
+                seconds = int(data.get("cooldown_seconds") or 0)
+                if seconds > 0:
+                    started = datetime.fromisoformat(str(data["timestamp"]).replace("Z", "+00:00"))
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=timezone.utc)
+                    until = started + timedelta(seconds=seconds)
+            now = datetime.now(timezone.utc)
+            remaining = max(0, math.ceil((until - now).total_seconds())) if until else 0
+            return {"state": "active" if remaining else "clear",
+                    "server_time": now.isoformat(), "remaining_seconds": remaining,
+                    "until": until.isoformat() if until else None}
+        except Exception:
+            return unknown
+
     async def get_remaining_cooldown(self, conversation_id: str, user_id: str) -> int:
         """依最近一筆介入記錄計算寄件方剩餘的冷卻秒數；無紀錄或已過期回 0。
 

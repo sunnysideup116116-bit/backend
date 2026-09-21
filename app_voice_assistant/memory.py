@@ -516,7 +516,15 @@ class AppwriteVoiceMemoryService:
             payload = self._request(
                 "PATCH", path, data={"data": updates},
             ) or payload
-        return self._record(payload)
+        record = self._record(payload)
+        # Older summaries may contain a nickname exposed by the previous
+        # proposal UI adapter. Keep the stored record, but never feed that
+        # legacy context back into either the voice model or summarizer.
+        if not record.last_session_id.startswith("anon2:"):
+            return VoiceMemoryRecord(
+                revision=record.revision, last_session_id=record.last_session_id,
+            )
+        return record
 
     def authenticate_and_load(
         self, jwt: str, claimed_user_id: str,
@@ -628,6 +636,7 @@ class AppwriteVoiceMemoryService:
         session_id: str,
         turns: list[dict[str, Any]],
     ) -> VoiceMemoryRecord:
+        session_id = "anon2:" + clean_memory_text(session_id, 58)
         transcript = bounded_transcript(turns)
         if not has_meaningful_user_turn(transcript):
             return self.load_or_create(owner)

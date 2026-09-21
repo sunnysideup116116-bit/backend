@@ -83,7 +83,7 @@ from services.match_quota_service import (
     reserve_daily_quota,
 )
 from services.match_card_projection import (
-    proposal_card_state, proposal_counterparty_nickname,
+    anonymous_proposal_message, proposal_card_state, proposal_counterparty_nickname,
 )
 from services.public_nickname_service import proposal_display_name
 from services.ai_room_service import (
@@ -408,8 +408,7 @@ def build_active_proposal_card(match_doc: dict, user_id: str):
     )
     card = {
         "match_id": str(match_doc["_id"]),
-        # Keep shared/model-facing projections anonymous. The HTTP adapter
-        # adds a public nickname separately for the proposal UI only.
+        # Shared and HTTP projections remain anonymous until mutual acceptance.
         "other_label": "對方",
         "stage": stage,
         "event_type": "match_proposal" if is_initiator else "incoming_match_interest",
@@ -488,7 +487,9 @@ def build_active_proposal_card(match_doc: dict, user_id: str):
                 reason_for_viewer(match_doc, receiver_id), other_id, 180, counterparty_name=other_name,
             ),
         })
-    return card
+    return anonymous_proposal_message({
+        "metadata": {"counterparty_nickname": other_name}, "card": card,
+    })["card"]
 
 
 def build_status_proposal_card(match_doc: dict, user_id: str):

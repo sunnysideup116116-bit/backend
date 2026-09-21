@@ -1,5 +1,5 @@
 {
-  "version": 14,
+  "version": 16,
   "target_permissions": {
     "contact": "chat_list",
     "calendar_event": "calendar_read",
@@ -366,6 +366,109 @@
         }
       },
       "required": ["changes"]
+    },
+    "quota.query": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "chat.status.query": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contact_name": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "target_ref": {
+          "type": "string",
+          "pattern": "^surface-[0-9]{1,12}-[0-9]{1,12}-[0-9]{1,2}$"
+        }
+      }
+    },
+    "date.plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "type": "string",
+          "enum": [
+            "prepare",
+            "select"
+          ]
+        },
+        "plan_ref": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "contact_name": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "city": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "date": {
+          "type": "string",
+          "maxLength": 10
+        },
+        "start_time": {
+          "type": "string",
+          "maxLength": 5
+        },
+        "duration_minutes": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 480
+        },
+        "budget": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        },
+        "ignore_preferences": {
+          "type": "boolean"
+        },
+        "use_preferences": {
+          "type": "boolean"
+        },
+        "reset": {
+          "type": "boolean"
+        },
+        "requirements": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "ignore_budget": {
+          "type": "boolean"
+        }
+      },
+      "required": []
+    },
+    "memory.disable": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "type": "string",
+          "maxLength": 40
+        }
+      },
+      "required": [
+        "label"
+      ]
+    },
+    "app.help": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "type": "string",
+          "maxLength": 300
+        }
+      },
+      "required": []
     }
   },
   "guides": {
@@ -522,6 +625,84 @@
       "limitations": ["不儲存 user ID、資料庫 ID 或 capability ref", "不允許把傳訊息或發布等高風險寫入存成快捷"],
       "destination": "voice_settings",
       "action_ids": ["routine.save", "routine.run", "routine.delete"]
+    },
+    "status": {
+      "title": "額度與傳送狀態",
+      "summary": "查詢本人共用額度、補額時間、訊息送達與冷卻。",
+      "keywords": [
+        "額度",
+        "冷卻",
+        "送出",
+        "多久",
+        "恢復"
+      ],
+      "steps": [
+        "指定要查額度或聊天對象",
+        "依目前權威結果回答"
+      ],
+      "requirements": [
+        "只能讀取本人及已授權對话狀態"
+      ],
+      "limitations": [
+        "狀態查詢不會重送訊息",
+        "冷卻結束不會自動發送"
+      ],
+      "action_ids": [
+        "quota.query",
+        "chat.status.query"
+      ]
+    },
+    "voice_date_plan": {
+      "title": "比較約會方案",
+      "summary": "依地點、行程與這次需求比較約會方案；選好後再準備邀請或行程，不會自動傳送。",
+      "aliases": [
+        "安排約會",
+        "約會方案",
+        "約會預算",
+        "出去玩"
+      ],
+      "action_ids": [
+        "date.plan"
+      ],
+      "steps": [
+        "說明你的需求",
+        "查看阿月提供的資訊",
+        "寫入操作確認後才執行"
+      ]
+    },
+    "voice_memory_disable": {
+      "title": "停用一項長期偏好",
+      "summary": "查看、記住或停用長期偏好；本次例外不改動長期記憶。",
+      "aliases": [
+        "不要再用這個偏好",
+        "忘記偏好",
+        "停用記憶"
+      ],
+      "action_ids": [
+        "memory.disable"
+      ],
+      "steps": [
+        "說明你的需求",
+        "查看阿月提供的資訊",
+        "寫入操作確認後才執行"
+      ]
+    },
+    "voice_app_help": {
+      "title": "說明 App 功能與操作",
+      "summary": "介紹 App 的實際能力、需要的權限及操作步驟。",
+      "aliases": [
+        "這個App可以做什麼",
+        "你可以幫我什麼",
+        "怎麼使用"
+      ],
+      "action_ids": [
+        "app.help"
+      ],
+      "steps": [
+        "說明你的需求",
+        "查看阿月提供的資訊",
+        "寫入操作確認後才執行"
+      ]
     }
   },
   "actions": {
@@ -1361,6 +1542,122 @@
         {"key": "patch", "action_id": "profile.patch", "argument_map": {"changes": "changes"}},
         {"key": "save", "action_id": "profile.request_commit", "depends_on": ["patch"]}
       ]
+    },
+    "quota.query": {
+      "title": "查看 Agent 共用額度",
+      "domain": "status",
+      "aliases": [
+        "剩餘額度",
+        "我還剩多少額度",
+        "語音和配對共用嗎",
+        "額度什麼時候恢復",
+        "查看我的額度"
+      ],
+      "risk": "read",
+      "execution_kind": "inline_server",
+      "cancellable": true,
+      "permission": "status_read",
+      "confirmation": false,
+      "parameters": [],
+      "target_kinds": []
+    },
+    "chat.status.query": {
+      "title": "查詢傳送與冷卻狀態",
+      "domain": "status",
+      "aliases": [
+        "冷卻還有多久",
+        "還要等多久",
+        "幾點可以再傳",
+        "剛剛那則有送出嗎",
+        "查詢傳送狀態"
+      ],
+      "risk": "read",
+      "execution_kind": "inline_device",
+      "cancellable": true,
+      "permission": "chat_list",
+      "confirmation": false,
+      "parameters": [
+        "contact_name",
+        "target_ref"
+      ],
+      "target_kinds": [
+        "contact"
+      ],
+      "tool": "read_chat_status"
+    },
+    "date.plan": {
+      "title": "比較約會方案",
+      "domain": "dates",
+      "aliases": [
+        "安排約會",
+        "約會方案",
+        "約會預算",
+        "出去玩"
+      ],
+      "permission": "places",
+      "risk": "read",
+      "confirmation": false,
+      "execution_kind": "inline_device",
+      "cancellable": true,
+      "parameters": [
+        "operation",
+        "plan_ref",
+        "contact_name",
+        "city",
+        "date",
+        "start_time",
+        "duration_minutes",
+        "budget",
+        "ignore_preferences",
+        "use_preferences",
+        "reset",
+        "requirements",
+        "ignore_budget"
+      ],
+      "target_kinds": [],
+      "discovery_permissions": [
+        "calendar_read",
+        "public_ayue"
+      ]
+    },
+    "memory.disable": {
+      "title": "停用一項長期偏好",
+      "domain": "memory",
+      "aliases": [
+        "不要再用這個偏好",
+        "忘記偏好",
+        "停用記憶"
+      ],
+      "permission": "memory_write",
+      "risk": "write",
+      "confirmation": true,
+      "execution_kind": "inline_device",
+      "cancellable": true,
+      "parameters": [
+        "label"
+      ],
+      "target_kinds": [],
+      "discovery_permissions": [
+        "memory_read"
+      ]
+    },
+    "app.help": {
+      "title": "說明 App 功能與操作",
+      "domain": "navigation",
+      "aliases": [
+        "這個App可以做什麼",
+        "你可以幫我什麼",
+        "怎麼使用"
+      ],
+      "permission": null,
+      "risk": "read",
+      "confirmation": false,
+      "execution_kind": "inline_server",
+      "cancellable": true,
+      "parameters": [
+        "query"
+      ],
+      "target_kinds": []
     }
   }
 }

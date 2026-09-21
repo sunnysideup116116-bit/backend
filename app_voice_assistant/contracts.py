@@ -69,6 +69,9 @@ ROUTINE_TEMPLATES = frozenset({
     "search_app", "search_memory",
 })
 FEATURE_STATUS_KEYS = frozenset({
+    "voice_experience",
+    "conversation_drafts",
+    "operational_status",
     "assistant_enabled", "wake_word_enabled", "location_enabled",
     "notifications_enabled", "proactive_care_enabled", "liquid_glass_enabled",
     "dark_mode_enabled", "visible_choice_pending",
@@ -898,6 +901,8 @@ def confirmation_phrase(proposal: VoiceProposal) -> str:
         return "確認傳送訊息"
     if proposal.intent == "memory.add":
         return "確認新增阿月記憶"
+    if proposal.intent == "memory.disable":
+        return "確認停用偏好"
     if proposal.intent == "post.request_publish":
         return "確認發布"
     if proposal.intent == "profile.request_commit":
@@ -986,6 +991,10 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
     if intent not in ALLOWED_INTENTS:
         return None
     raw_args = value.get("arguments") if isinstance(value.get("arguments"), dict) else {}
+    from .voice_experience import EXPERIENCE_INTENTS, experience_arguments
+    if intent in EXPERIENCE_INTENTS:
+        args = experience_arguments(intent, raw_args)
+        return None if args is None else VoiceProposal(intent, args, safe_reply(value.get('reply')), base_revision)
     args: dict[str, Any] = {}
     target_ref = raw_args.get("target_ref")
     if target_ref is not None and (not isinstance(target_ref, str) or not REF.fullmatch(target_ref)
@@ -997,8 +1006,11 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
     elif intent == "post.open":
         if not target_ref:
             return None
-    elif intent == "app.digest.query" or intent == "workflow.daily_briefing":
+    elif intent in {"app.digest.query", "workflow.daily_briefing", "quota.query"}:
         args = {}
+    elif intent == "chat.status.query":
+        name = re.sub(r"\s+", " ", str(raw_args.get("contact_name") or "")).strip()[:40]
+        args = {"contact_name": name}
     elif intent == "app.search":
         query = re.sub(r"\s+", " ", str(raw_args.get("query") or "")).strip()[:120]
         domains = raw_args.get("domains")
@@ -1405,6 +1417,10 @@ def deterministic_proposal(
     }.get(response_language, "我找一下，稍等一下。")
     if not raw:
         return None
+    if any(phrase in compact for phrase in ('剩多少額度', '剩餘額度', '額度還有', '額度用完', '額度恢復', '什麼時候恢復', '語音和配對共用', 'remainingquota', 'quotabalance')):
+        return VoiceProposal('quota.query', {}, '', revision)
+    if any(phrase in compact for phrase in ('冷卻還', '還要等多久', '幾點可以再傳', '可以傳了嗎', '剛剛那則有送出', '剛才有送出', '查詢傳送狀態', 'cooldown', 'diditsend')):
+        return VoiceProposal('chat.status.query', {'contact_name': ''}, '', revision)
     if compact in {
         "關閉語音模式", "关闭语音模式", "關閉語音助理", "关闭语音助理",
         "停止語音模式", "停止语音模式", "結束語音模式", "结束语音模式",
