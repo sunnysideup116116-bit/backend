@@ -44,6 +44,7 @@ from services.relationship_engagement_service import generate_mediator_private_r
 from services.match_state_service import verified_accepted_match_query
 from services.match_card_projection import project_match_card_history
 from services.public_nickname_service import proposal_display_name, warm_public_nicknames
+from services.profile_projection import active_recent_context
 from services.risk_block_service import (
     RiskBlockServiceUnavailable,
     risk_block_service,
@@ -372,6 +373,7 @@ def get_contacts(user_id: str, unread_for: str | None = None):
         for profile in profiles_coll.find(
             {"user_id": {"$in": other_ids}},
             {"_id": 0, "user_id": 1, "current_context": 1,
+             "recent_context_expires_at": 1,
              "display_name": 1, "nickname": 1, "name": 1},
         )
     } if other_ids else {}
@@ -396,7 +398,7 @@ def get_contacts(user_id: str, unread_for: str | None = None):
             "name": label if name_available else "暱稱暫無法取得",
             "name_available": name_available,
             "role": "user",
-            "context": other_doc.get("current_context", "尚無近期情境") if other_doc else "尚無近期情境",
+            "context": active_recent_context(other_doc, "尚無近期情境"),
             "latest_message": latest_by_room.get(room_id, ""),
             "unread": pair_unread_count > 0,
             "unread_count": pair_unread_count,

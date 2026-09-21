@@ -70,6 +70,20 @@ def test_contacts_return_only_one_preview_per_room_and_batch_profiles(mongo):
     assert routes.profiles_coll.find_one_calls == 1
 
 
+def test_contact_projection_does_not_show_expired_recent_activity(mongo):
+    accepted(mongo, "alice")
+    mongo.profiles.insert_one({
+        "user_id": "alice", "name": "Alice",
+        "current_context": "上個月想去看展",
+        "recent_context_expires_at": 1,
+    })
+    contact = next(
+        item for item in routes.get_contacts("owner")["contacts"]
+        if item["id"] == "alice"
+    )
+    assert contact["context"] == "尚無近期情境"
+
+
 def test_contact_previews_render_latest_image_and_preserve_text_blocked_and_empty(mongo):
     for other in ("text", "image", "blocked", "empty"):
         accepted(mongo, other)

@@ -4,6 +4,7 @@ import json
 import re
 import os
 import uuid
+from collections import Counter
 from typing import Callable
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
 from agent_quota.api import budgeted
@@ -64,7 +65,11 @@ from services.proposal_namespace import (
     namespace_for_document,
     participant_pair_key,
 )
-from services.profile_projection import safe_recent_context
+from services.profile_projection import (
+    recent_context_is_active,
+    safe_recent_context,
+    without_expired_recent_context,
+)
 from services.match_search_context import (
     context_embedding_source_hash,
     provider_search_context,
@@ -92,6 +97,10 @@ from services.risk_block_service import (
     RiskBlockServiceUnavailable,
     risk_block_service,
 )
+from services.preference_candidate_service import (
+    PreferenceCandidateLookupError,
+    retrieve_preference_candidate_ids,
+)
 from services.ayue_agent.public_relationship_projection import (
     anonymize_counterparty_text,
     display_name as public_display_name,
@@ -111,6 +120,42 @@ MATCH_VECTOR_RETRIEVAL_LIMIT = 100
 MATCH_MAX_CANDIDATE_BATCHES = 3
 MATCH_SELECTION_TIMEOUT_SECONDS = 120.0
 MATCH_TEST_ID_PATTERN = r"^(?:seed_user_|match_test_)"
+
+
+def _search_intent(search_context: dict | None) -> str:
+    context = safe_search_context(search_context)
+    intent = str(context.get("search_intent") or "")
+    if intent in {"activity", "recent_context", "preference", "generic"}:
+        return intent
+    return "activity" if context.get("invitation_topic") else "recent_context"
+
+
+def _candidate_profile_filter(
+    user_doc: dict,
+    excluded_users: set[str],
+    *,
+    candidate_ids: list[str] | None = None,
+    require_active_context: bool,
+) -> dict:
+    user_filter: dict = {"$nin": list(excluded_users)}
+    if candidate_ids is not None:
+        user_filter["$in"] = list(candidate_ids)[:MATCH_VECTOR_RETRIEVAL_LIMIT]
+    query: dict = {"user_id": user_filter}
+    clauses: list[dict] = []
+    test_cohort = str(user_doc.get("test_match_cohort") or "").strip()
+    if test_cohort:
+        query["test_match_cohort"] = test_cohort
+    else:
+        query["test_match_cohort"] = {"$exists": False}
+        clauses.append({"user_id": {"$not": {"$regex": MATCH_TEST_ID_PATTERN}}})
+    if require_active_context:
+        clauses.append({"$or": [
+            {"recent_context_expires_at": {"$gt": time.time()}},
+            {"recent_context_expires_at": {"$exists": False}},
+        ]})
+    if clauses:
+        query["$and"] = clauses
+    return query
 
 
 def _usable_live_pair_index(indexes: dict) -> bool:
@@ -644,6 +689,16 @@ def candidate_qualification(
         strong_reason_codes.append("shared_persistent_preference")
     if shared_values:
         strong_reason_codes.append("shared_value")
+    search_intent = _search_intent(search_context)
+    preference_key = str(search_context.get("canonical_preference_key") or "").strip()
+    preference_topic = str(search_context.get("normalized_topic") or "").strip()
+    candidate_has_requested_preference = bool(
+        search_intent == "preference"
+        and preference_key
+        and {"like", "require"} & candidate_stances.get(preference_key, set())
+    )
+    if candidate_has_requested_preference:
+        strong_reason_codes.append("requested_preference")
     invitation_topic = str(search_context.get("invitation_topic") or "").strip()
     if invitation_topic and float(vector_score or 0) >= vector_qualification_minimum():
         strong_reason_codes.append("requested_topic")
@@ -667,6 +722,7 @@ def candidate_qualification(
         strong_reason_codes.append("semantic_context_similarity")
     direct_codes = {
         "shared_activity", "shared_persistent_preference", "shared_value",
+        "requested_preference",
     }
     level = (
         "direct"
@@ -679,6 +735,7 @@ def candidate_qualification(
         [
             f"指定活動主題：{invitation_topic}" if invitation_topic else "",
             target.get("current_context"), target_activity,
+            f"指定偏好：{preference_topic}" if candidate_has_requested_preference else "",
         ], item_limit=3, char_limit=90,
     )
     candidate_evidence = _short_list(
@@ -689,6 +746,7 @@ def candidate_qualification(
             *(f"近期活動：{target_activity}" for _ in [0] if same_activity),
             *(f"共同偏好：{item}" for item in shared_persistent_preferences),
             *(f"共同價值：{item}" for item in shared_values),
+            f"對方有明確偏好：{preference_topic}" if candidate_has_requested_preference else "",
             f"本次指定主題：{invitation_topic}" if "requested_topic" in strong_reason_codes else "",
             "近期情境相近" if "semantic_context_similarity" in strong_reason_codes else "",
         ],
@@ -698,6 +756,8 @@ def candidate_qualification(
     return {
         "eligible": not hard_conflicts and bool(strong_reason_codes),
         "hard_conflict_keys": sorted(set(hard_conflicts)),
+        "shared_preference_keys": shared_persistent_preferences[:8],
+        "requested_preference_matched": candidate_has_requested_preference,
         "strong_reason_codes": strong_reason_codes,
         # This is the shared candidate/write contract.  It deliberately
         # contains owner-provided evidence only; vector recall alone yields
@@ -748,6 +808,9 @@ def build_validated_match_explanation(
     """Build user-visible scores and reasons only from owner-bound facts."""
     search_context = safe_search_context(search_context)
     invitation_topic = str(search_context.get("invitation_topic") or "").strip()
+    preference_topic = str(search_context.get("normalized_topic") or "").strip() \
+        if _search_intent(search_context) == "preference" else ""
+    preference_key = str(search_context.get("canonical_preference_key") or "").strip()
     target_id, candidate_id = target.get("user_id"), candidate.get("user_id")
     target_graph = get_user_graph_memories(target_id, 20)
     candidate_graph = get_user_graph_memories(candidate_id, 20)
@@ -799,6 +862,10 @@ def build_validated_match_explanation(
     context_score = round(max(0, min(1, float(vector_score or 0))) * 30)
     graph_score = min(25, len(shared_traits) * 6)
     graph_score = max(0, graph_score - len(conflicts) * 8)
+    requested_preference = candidate_traits.get((preference_key, "like")) \
+        or candidate_traits.get((preference_key, "require"))
+    if preference_topic and requested_preference:
+        graph_score = max(graph_score, 6)
     values_score = round(20 * len(shared_values) / len(union_values)) if union_values else 0
     score_breakdown = {
         "context": context_score,
@@ -831,6 +898,15 @@ def build_validated_match_explanation(
             "target_evidence_ids": [f"profile:{target_id}:deep_profile"],
             "candidate_evidence_ids": [f"profile:{candidate_id}:deep_profile"],
         })
+    if preference_topic and requested_preference:
+        reason_items.append({
+            "kind": "requested_preference",
+            "text": f"對方明確提過喜歡{preference_topic}",
+            "target_evidence_ids": ["search_context:preference_topic"],
+            "candidate_evidence_ids": [
+                f"graph:{candidate_id}:{preference_key}",
+            ],
+        })
     if invitation_topic:
         reason_items.append({
             "kind": "requested_topic",
@@ -838,7 +914,9 @@ def build_validated_match_explanation(
             "target_evidence_ids": ["search_context:invitation_topic"],
             "candidate_evidence_ids": [],
         })
-    shared_kinds = {"shared_graph", "shared_context", "shared_value"}
+    shared_kinds = {
+        "shared_graph", "shared_context", "shared_value", "requested_preference",
+    }
     shared_reasons = [item["text"] for item in reason_items if item.get("kind") in shared_kinds]
     candidate_context = str(candidate.get("current_context") or "").strip()
     if shared_reasons:
@@ -1234,8 +1312,29 @@ def _friend_intro_entry(
     style_id = match_reason_style_id(viewer, other, context_revision=context_revision)
     search_context = safe_search_context(search_context)
     invitation_topic = str(search_context.get("invitation_topic") or "").strip()
+    preference_topic = str(search_context.get("normalized_topic") or "").strip() \
+        if _search_intent(search_context) == "preference" else ""
     fallback = friend_intro_fallback(viewer, other, tier, style_id=style_id)
-    if invitation_topic:
+    if preference_topic:
+        is_requester = viewer_id == str(requester_id or "")
+        text = (
+            f"我找到一位明確提過喜歡「{preference_topic}」的人，"
+            "你願意先認識對方嗎？"
+            if is_requester else
+            f"有位朋友因為你明確提過喜歡「{preference_topic}」，想先認識你；"
+            "你願意先認識對方嗎？"
+        )
+        fallback = {
+            **fallback,
+            "viewer_text": text,
+            "conversation_starter": f"可以先聊聊最近聽到的{preference_topic}。",
+            "accepted_opening": (
+                f"你們都同意先認識彼此了。{{{{counterparty}}}}，"
+                f"可以先從{preference_topic}聊起。"
+            ),
+        }
+        reason = fallback
+    elif invitation_topic:
         # A topic request is a requester's need, not evidence that the
         # counterparty has the skill or will attend.  Keep this branch
         # deterministic so a provider cannot strengthen that claim.
@@ -1262,6 +1361,7 @@ def _friend_intro_entry(
         reason = _refine_directional_reason(viewer, other, tier, fallback) if refine else fallback
     text = _short_text(reason.get("viewer_text"), 220)
     required_context = (
+        preference_topic if preference_topic else
         "" if invitation_topic else reason_public_text(other.get("current_context"), 56)
     )
     required_other_personality = _public_personality_phrase(other)
@@ -1275,8 +1375,8 @@ def _friend_intro_entry(
     valid_text = valid_friend_intro_text(
         validation_text,
         required_context=required_context,
-        introduced_personality="" if invitation_topic else required_other_personality,
-        viewer_personality="" if invitation_topic else required_viewer_personality,
+        introduced_personality="" if invitation_topic or preference_topic else required_other_personality,
+        viewer_personality="" if invitation_topic or preference_topic else required_viewer_personality,
         role_bound=True,
     )
     if not valid_text:
@@ -1288,8 +1388,8 @@ def _friend_intro_entry(
         valid_text = valid_friend_intro_text(
             validation_text,
             required_context=required_context,
-            introduced_personality="" if invitation_topic else required_other_personality,
-            viewer_personality="" if invitation_topic else required_viewer_personality,
+            introduced_personality="" if invitation_topic or preference_topic else required_other_personality,
+            viewer_personality="" if invitation_topic or preference_topic else required_viewer_personality,
             role_bound=True,
         )
     if not valid_text:
@@ -1311,7 +1411,8 @@ def _friend_intro_entry(
         "viewer_id": viewer_id,
         "counterparty_id": other_id,
         "counterparty_context_snapshot": (
-            "" if invitation_topic else reason_public_text(other.get("current_context"), 56)
+            "" if invitation_topic or preference_topic
+            else reason_public_text(other.get("current_context"), 56)
         ),
         "counterparty_public_personality": _public_personality_phrase(other),
         "viewer_public_personality": _public_personality_phrase(viewer),
@@ -1379,9 +1480,13 @@ def _existing_job_match_result(match_doc: dict, user_id: str, user_doc: dict) ->
         match_doc.get("to_user")
         if match_doc.get("from_user") == user_id else match_doc.get("from_user")
     )
-    candidate = profiles_coll.find_one(
-        {"user_id": matched_id}, {"_id": 0, "big_five": 1, "current_context": 1},
-    ) or {}
+    candidate = without_expired_recent_context(profiles_coll.find_one(
+        {"user_id": matched_id}, {
+            "_id": 0, "big_five": 1, "current_context": 1,
+            "recent_context_expires_at": 1,
+        },
+    ) or {})
+    safe_user = without_expired_recent_context(user_doc)
     return {
         "status": "success",
         "matches": [{
@@ -1397,7 +1502,7 @@ def _existing_job_match_result(match_doc: dict, user_id: str, user_doc: dict) ->
             "reason_version": match_doc.get("reason_version", "v3"),
             "big_five": candidate.get("big_five", {}),
             "current_context": candidate.get("current_context", ""),
-            "target_context": user_doc.get("current_context", ""),
+            "target_context": safe_user.get("current_context", ""),
         }],
         "debug_info": [],
     }
@@ -1460,6 +1565,20 @@ def generate_matches_for_user(
 ):
     """Run the existing matching pipeline for either a manual or proactive request."""
     bound_search_context = search_context_for_turn(search_context)
+    search_intent = _search_intent(bound_search_context)
+    diagnostics = {
+        "search_intent": search_intent,
+        "normalized_topic": str(bound_search_context.get("normalized_topic") or "")[:80],
+        "canonical_preference_key": str(
+            bound_search_context.get("canonical_preference_key") or ""
+        )[:52],
+        "retrieval_source": "graph_exact" if search_intent == "preference" else "vector",
+        "candidate_count_before_filter": 0,
+        "candidate_count_after_filter": 0,
+        "shared_preferences": [],
+        "hard_conflicts": [],
+        "qualification_reason_codes": {},
+    }
     bound_delivery_mode = (
         INVITE_ON_MATCH
         if str(delivery_mode or "").strip() == INVITE_ON_MATCH
@@ -1498,11 +1617,18 @@ def generate_matches_for_user(
             return _existing_job_match_result(existing_job_match, req.user_id, user_doc)
          
     stored_context_value = user_doc.get("current_context")
-    stored_context = str(stored_context_value or "")
+    stored_context_active = recent_context_is_active(user_doc)
+    user_doc = without_expired_recent_context(user_doc)
+    stored_context = str(user_doc.get("current_context") or "")
     normalized_context = safe_recent_context(stored_context, "交朋友")
     user_doc["current_context"] = normalized_context
     query_text = str((req.search_context or {}).get("query_text") or "").strip()
-    if query_text:
+    user_embedding: list[float] = []
+    if search_intent == "preference":
+        # Exact durable preference retrieval must not call or overwrite the
+        # recent-context embedding path.
+        pass
+    elif query_text:
         # A topic-specific search is an ephemeral query.  Keep the profile's
         # durable context embedding untouched so this request cannot leak into
         # the next ordinary search.
@@ -1533,13 +1659,14 @@ def generate_matches_for_user(
                 ) from exc
             # Embedding refresh is derived from the profile version loaded above.
             # Never let a slow search overwrite a newer profile/context update.
-            profiles_coll.update_one(
-                {"user_id": req.user_id, "current_context": stored_context_value},
-                {"$set": {
-                    "context_embedding": user_embedding,
-                    "context_embedding_source_hash": expected_source_hash,
-                }},
-            )
+            if stored_context_active:
+                profiles_coll.update_one(
+                    {"user_id": req.user_id, "current_context": stored_context_value},
+                    {"$set": {
+                        "context_embedding": user_embedding,
+                        "context_embedding_source_hash": expected_source_hash,
+                    }},
+                )
             print(f"[TIMING][V1 /api/match] create missing embedding: {time.perf_counter() - step_start:.3f}s")
     
     step_start = time.perf_counter()
@@ -1574,80 +1701,115 @@ def generate_matches_for_user(
                 excluded_users.add(other)
     print(f"[TIMING][V1 /api/match] load existing matches: {time.perf_counter() - step_start:.3f}s count={len(existing_matches)}")
     
-    test_cohort = str(user_doc.get("test_match_cohort") or "").strip()
-    candidate_match = {"user_id": {"$nin": list(excluded_users)}}
-    if test_cohort:
-        candidate_match["test_match_cohort"] = test_cohort
-    else:
-        candidate_match["test_match_cohort"] = {"$exists": False}
-        candidate_match["$and"] = [
-            {"user_id": {"$not": {"$regex": MATCH_TEST_ID_PATTERN}}},
-        ]
-    pipeline = [
-        {
-            "$vectorSearch": {
-                "index": "vector_index",
-                "path": "context_embedding",
-                "queryVector": user_embedding,
-                # Post-filtering excludes blocked/history/test accounts. Fetch
-                # a wider bounded window before that filter; only the existing
-                # 20-person pool proceeds to qualification and model ranking.
-                "numCandidates": MATCH_VECTOR_RETRIEVAL_LIMIT * 5,
-                "limit": MATCH_VECTOR_RETRIEVAL_LIMIT
-            }
-        },
-        {
-            "$match": candidate_match
-        },
-        {
-            "$addFields": {
-                "score": { "$meta": "vectorSearchScore" }
-            }
-        },
-        {
-            "$project": {
-                "_id": 0
-            }
-        }
-    ]
-    
-    try:
-        if not report("vector_search"):
-            return {"status": "stale", "matches": [], "debug_info": []}
-        step_start = time.perf_counter()
-        raw_candidates = list(profiles_coll.aggregate(pipeline))
-        print(f"[TIMING][V1 /api/match] Mongo vector search: {time.perf_counter() - step_start:.3f}s raw_candidates={len(raw_candidates)}")
-    except Exception:
-        print(f"[TIMING][V1 /api/match] Mongo vector search failed after {time.perf_counter() - step_start:.3f}s")
-        raise MatchSearchPipelineError("vector_search_unavailable", "vector_search")
-
     top_5_candidates = []
     seen_candidates = set(excluded_users)
-    for c in raw_candidates:
-        candidate_id = c.get("user_id")
-        if (
-            not candidate_id
-            or candidate_id in seen_candidates
-            or participant_pair_key(req.user_id, candidate_id) in excluded_pair_keys
-        ):
-            continue
-        seen_candidates.add(candidate_id)
-        score = c.get("score", 0.0)
-        top_5_candidates.append((score, c))
-        if len(top_5_candidates) >= MATCH_CANDIDATE_POOL_SIZE:
-            break
-    
+    if search_intent == "preference":
+        if not report("preference_graph_search"):
+            return {"status": "stale", "matches": [], "debug_info": [],
+                    "diagnostics": diagnostics}
+        preference_topic = str(bound_search_context.get("normalized_topic") or "")
+        try:
+            lookup = retrieve_preference_candidate_ids(
+                req.user_id,
+                preference_topic,
+                excluded_user_ids=excluded_users,
+                limit=MATCH_VECTOR_RETRIEVAL_LIMIT,
+            )
+        except PreferenceCandidateLookupError as exc:
+            raise MatchSearchPipelineError(
+                "preference_graph_unavailable", "preference_graph_search",
+            ) from exc
+        if lookup.get("canonical_key") != bound_search_context.get("canonical_preference_key"):
+            raise MatchSearchPipelineError(
+                "preference_graph_invalid_response", "preference_graph_search",
+            )
+        candidate_ids = list(lookup.get("candidate_ids") or [])[:MATCH_VECTOR_RETRIEVAL_LIMIT]
+        diagnostics["candidate_count_before_filter"] = int(
+            lookup.get("candidate_count_before_filter", len(candidate_ids)) or 0
+        )
+        diagnostics["candidate_count_after_retrieval_filter"] = int(
+            lookup.get("candidate_count_after_filter", len(candidate_ids)) or 0
+        )
+        candidate_match = _candidate_profile_filter(
+            user_doc, excluded_users, candidate_ids=candidate_ids,
+            require_active_context=False,
+        )
+        try:
+            rows = list(profiles_coll.find(candidate_match, {"_id": 0}))
+        except Exception as exc:
+            raise MatchSearchPipelineError(
+                "candidate_profile_unavailable", "preference_graph_search",
+            ) from exc
+        by_id = {str(row.get("user_id") or ""): row for row in rows}
+        raw_candidates = [by_id[value] for value in candidate_ids if value in by_id]
+        for candidate in raw_candidates:
+            candidate_id = candidate.get("user_id")
+            if (
+                not candidate_id or candidate_id in seen_candidates
+                or participant_pair_key(req.user_id, candidate_id) in excluded_pair_keys
+            ):
+                continue
+            seen_candidates.add(candidate_id)
+            top_5_candidates.append((0.0, candidate))
+            if len(top_5_candidates) >= MATCH_CANDIDATE_POOL_SIZE:
+                break
+    else:
+        candidate_match = _candidate_profile_filter(
+            user_doc, excluded_users, require_active_context=True,
+        )
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "index": "vector_index",
+                    "path": "context_embedding",
+                    "queryVector": user_embedding,
+                    # Fetch a wider bounded window; only the existing 20-person
+                    # pool proceeds to qualification and model ranking.
+                    "numCandidates": MATCH_VECTOR_RETRIEVAL_LIMIT * 5,
+                    "limit": MATCH_VECTOR_RETRIEVAL_LIMIT,
+                }
+            },
+            {"$match": candidate_match},
+            {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+            {"$project": {"_id": 0}},
+        ]
+        try:
+            if not report("vector_search"):
+                return {"status": "stale", "matches": [], "debug_info": [],
+                        "diagnostics": diagnostics}
+            step_start = time.perf_counter()
+            raw_candidates = list(profiles_coll.aggregate(pipeline))
+            print(f"[TIMING][V1 /api/match] Mongo vector search: {time.perf_counter() - step_start:.3f}s raw_candidates={len(raw_candidates)}")
+        except Exception:
+            print(f"[TIMING][V1 /api/match] Mongo vector search failed after {time.perf_counter() - step_start:.3f}s")
+            raise MatchSearchPipelineError("vector_search_unavailable", "vector_search")
+        diagnostics["candidate_count_before_filter"] = len(raw_candidates)
+        for c in raw_candidates:
+            candidate_id = c.get("user_id")
+            if (
+                not candidate_id
+                or candidate_id in seen_candidates
+                or participant_pair_key(req.user_id, candidate_id) in excluded_pair_keys
+            ):
+                continue
+            seen_candidates.add(candidate_id)
+            score = c.get("score", 0.0)
+            top_5_candidates.append((score, c))
+            if len(top_5_candidates) >= MATCH_CANDIDATE_POOL_SIZE:
+                break
+
+    diagnostics["candidate_pool_count"] = len(top_5_candidates)
     if not top_5_candidates:
-        return {"status": "no_suitable_candidate", "matches": [], "debug_info": []}
+        return {"status": "no_suitable_candidate", "matches": [], "debug_info": [],
+                "diagnostics": diagnostics}
 
     # Only candidates with a reciprocal safety check and a strong owner-grounded
     # link are eligible for the LLM ranking step.  The model never receives weak
     # or conflicting candidates and therefore cannot "pick the least bad" one.
-    clean_candidates = [c[1] if isinstance(c, tuple) else c for c in top_5_candidates]
-    for candidate in clean_candidates:
-        candidate["current_context"] = safe_recent_context(
-            candidate.get("current_context"), ""
-        )
+    clean_candidates = [
+        without_expired_recent_context(c[1] if isinstance(c, tuple) else c)
+        for c in top_5_candidates
+    ]
     
     # 取得 target_user 的 deep_profile
     target_deep_profile = user_doc.get("deep_profile", {})
@@ -1663,30 +1825,55 @@ def generate_matches_for_user(
     vector_scores = {candidate.get("user_id"): score for score, candidate in top_5_candidates}
     target_stances = _trait_stances(user_doc.get("user_id"))
     if not report("candidate_qualification", candidate_count=len(clean_candidates)):
-        return {"status": "stale", "matches": [], "debug_info": []}
+        return {"status": "stale", "matches": [], "debug_info": [],
+                "diagnostics": diagnostics}
     qualification_by_id = {}
     for candidate in clean_candidates:
         candidate_id = candidate.get("user_id")
         if not candidate_id:
             continue
+        candidate_stances = _trait_stances(candidate_id)
         qualification_by_id[candidate_id] = candidate_qualification(
             user_doc,
             candidate,
             target_stances=target_stances,
-            candidate_stances=_trait_stances(candidate_id),
+            candidate_stances=candidate_stances,
             vector_score=vector_scores.get(candidate_id, 0),
             search_context=req.search_context,
         )
+    reason_counts = Counter(
+        reason
+        for item in qualification_by_id.values()
+        for reason in item.get("strong_reason_codes", [])
+    )
+    diagnostics["qualification_reason_codes"] = dict(reason_counts.most_common(12))
+    diagnostics["qualification_reason_codes"]["hard_conflict"] = sum(
+        1 for item in qualification_by_id.values() if item.get("hard_conflict_keys")
+    )
+    diagnostics["qualification_reason_codes"]["insufficient_common_ground"] = sum(
+        1 for item in qualification_by_id.values()
+        if not item.get("hard_conflict_keys") and not item.get("strong_reason_codes")
+    )
+    diagnostics["shared_preferences"] = sorted({
+        key for item in qualification_by_id.values()
+        for key in item.get("shared_preference_keys", [])
+    })[:8]
+    diagnostics["hard_conflicts"] = sorted({
+        key for item in qualification_by_id.values()
+        for key in item.get("hard_conflict_keys", [])
+    })[:8]
     qualified_candidates = [
         candidate for candidate in clean_candidates
         if qualification_by_id.get(candidate.get("user_id"), {}).get("eligible")
         and participant_pair_key(req.user_id, candidate["user_id"]) not in excluded_pair_keys
     ]
+    diagnostics["candidate_count_after_filter"] = len(qualified_candidates)
     if not qualified_candidates:
         return {
             "status": "no_suitable_candidate", "matches": [],
             "reason_code": "insufficient_common_ground",
             "search_context": dict(req.search_context or {}),
+            "diagnostics": diagnostics,
             "debug_info": [{
                 "user_id": candidate.get("user_id"),
                 "score": round(float(vector_scores.get(candidate.get("user_id"), 0) or 0) * 100, 2),
@@ -1704,7 +1891,8 @@ def generate_matches_for_user(
         if not batch:
             break
         if not report("matchmaker_request", candidate_count=len(batch), batch=batch_index + 1):
-            return {"status": "stale", "matches": [], "debug_info": []}
+            return {"status": "stale", "matches": [], "debug_info": [],
+                    "diagnostics": diagnostics}
         remaining = selection_deadline - time.monotonic()
         if remaining <= 0:
             raise MatchSearchPipelineError("matchmaker_timeout", "matchmaker_request")
@@ -1723,9 +1911,12 @@ def generate_matches_for_user(
         if agent_matches:
             break
     if not report("matchmaker_response"):
-        return {"status": "stale", "matches": [], "debug_info": []}
+        return {"status": "stale", "matches": [], "debug_info": [],
+                "diagnostics": diagnostics}
     if not agent_matches:
-        return {"status": "no_suitable_candidate", "matches": [], "debug_info": []}
+        diagnostics["qualification_reason_codes"]["matchmaker_rejected"] = 1
+        return {"status": "no_suitable_candidate", "matches": [], "debug_info": [],
+                "diagnostics": diagnostics}
     
     # 阿月一次只牽一條線，避免同時丟出候選人清單。
     if not report("proposal_write"):
@@ -1847,7 +2038,8 @@ def generate_matches_for_user(
             "delivery_channel": "mediator_chat",
             "proposal_source": str(source or "manual")[:40],
             "match_source_kind": (
-                "requested_topic" if str((req.search_context or {}).get("invitation_topic") or "").strip()
+                "preference" if _search_intent(req.search_context) == "preference"
+                else "requested_topic" if str((req.search_context or {}).get("invitation_topic") or "").strip()
                 else "recent_context"
             ),
             "participant_pair_key": participant_pair_key(req.user_id, matched_id),
@@ -1901,7 +2093,9 @@ def generate_matches_for_user(
             raise
         
         # 查詢候選人的 profile 供前端渲染
-        to_doc = profiles_coll.find_one({"user_id": matched_id}, {"_id": 0})
+        to_doc = without_expired_recent_context(
+            profiles_coll.find_one({"user_id": matched_id}, {"_id": 0}) or {},
+        )
         
         result_matches.append({
             "match_id": str(insert_result.inserted_id),
@@ -1915,7 +2109,7 @@ def generate_matches_for_user(
             "viewer_reason": ai_recommendation_reason,
             "reason_version": V4_REASON_VERSION,
             "big_five": to_doc.get("big_five", {}) if to_doc else {},
-            "current_context": to_doc.get("current_context", "") if to_doc else "",
+            "current_context": to_doc.get("current_context", ""),
             "target_context": user_doc.get("current_context", ""),
             "match_basis": qualification_by_id.get(matched_id, {}).get("match_basis", {}),
             "search_context": dict(req.search_context or {}),
@@ -1941,7 +2135,8 @@ def generate_matches_for_user(
     return {
         "status": "success" if result_matches else "no_suitable_candidate",
         "matches": result_matches,
-        "debug_info": debug_candidates
+        "debug_info": debug_candidates,
+        "diagnostics": diagnostics,
     }
 
 def _queue_match_event(user_id: str, event_type: str, message: str, **extra):

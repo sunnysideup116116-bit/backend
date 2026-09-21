@@ -39,6 +39,8 @@ Public HTTP / App voice delegation
 沿用既有 Profile typed extractor、memory facade 與 outbox worker，不新增 Pi 工具或另一個聊天 runtime。
 User 保留穩定 ID、同步公開 name；初始 PREFERS 不覆寫既有或停用記憶。
 
+Durable preference 由 server-owned atomic/canonical boundary 寫入。Public Pi 的 `match.start_search` 明確區分 activity／recent context／preference：前兩者保留 bounded vector retrieval，explicit preference 先走 canonical Graph exact lookup，再進同一套 safety、history、quota、qualification、Matchmaker 與 consent lifecycle。Recent context 過期後不再進 matching 或 Agent context；它不會被當成 durable preference。
+
 - 主動關心維持 Profile extraction → follow-up candidate → proactive scheduler → grounded message；它不使用公開 Agent 的推理 loop。
 - App voice 與 registration voice 維持 Gemini runtime。App voice 轉交公開阿月時呼叫同一個 Pi HTTP contract；直接行事曆操作維持既有 typed API。
 - Private Ayue 維持 `private_v2.py`，使用 private context 與搬至 shared 的 confirmation manager；不改成 Pi。

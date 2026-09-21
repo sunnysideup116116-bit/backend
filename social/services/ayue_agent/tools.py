@@ -32,7 +32,11 @@ from services.match_state_service import (
     verified_accepted_match_query,
 )
 from services.match_quota_service import daily_quota_status
-from services.profile_projection import clean_profile_text, contains_internal_identifier, safe_recent_context
+from services.profile_projection import (
+    active_recent_context,
+    clean_profile_text,
+    contains_internal_identifier,
+)
 from services.profile_location import safe_profile_location
 
 from .contracts import AgentTurnContext, ToolCall, ToolResult, TurnClockV1
@@ -536,13 +540,16 @@ def _counterparty_summary(ctx: AgentTurnContext) -> ToolResult:
 def _recent_context(ctx: AgentTurnContext) -> ToolResult:
     try:
         profile = profiles_coll.find_one(
-            {"user_id": ctx.user_id}, {"_id": 0, "current_context": 1, "current_context_revision": 1},
+            {"user_id": ctx.user_id}, {
+                "_id": 0, "current_context": 1, "recent_context_expires_at": 1,
+                "current_context_revision": 1,
+            },
         ) or {}
     except Exception:
         # The per-turn owner snapshot is privacy-safe but may be stale, so it is
         # used only when the canonical read itself is unavailable.
         profile = ctx.user_profile or {}
-    current_context = safe_recent_context(profile.get("current_context"), "")
+    current_context = active_recent_context(profile, "")
     try:
         revision = max(0, int(profile.get("current_context_revision", 0) or 0))
     except (TypeError, ValueError):
@@ -770,7 +777,7 @@ def _memory_profile(ctx: AgentTurnContext, arguments: dict | None = None) -> Too
     result = search_owner_memory(ctx.user_id, str((arguments or {}).get("query") or ""), profile)
     return ToolResult(ok=True, data={
         **result,
-        "current_context": safe_recent_context(profile.get("current_context"), ""),
+        "current_context": active_recent_context(profile, ""),
     })
 
 
@@ -840,7 +847,7 @@ def _self_profile(ctx: AgentTurnContext) -> ToolResult:
         "stress_coping": _owner_profile_text(deep.get("stress_coping"), 100),
         "ideal_future": _owner_profile_text(deep.get("ideal_future"), 120),
         "deep_profile_summary": _owner_profile_text(deep.get("summary"), 140),
-        "recent_context": safe_recent_context(profile.get("current_context"), ""),
+        "recent_context": active_recent_context(profile, ""),
         "location": safe_profile_location(profile).get("display_name", ""),
         "preferences": _owner_memory_preferences(profile.get("profile_memory_preview"), limit=8),
         "missing_sections": [],

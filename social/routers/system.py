@@ -20,7 +20,7 @@ from models import (
 )
 from database import db, profiles_coll, matches_coll, messages_coll
 from services.ai_service import get_embedding
-from services.profile_projection import safe_recent_context
+from services.profile_projection import active_recent_context
 from services.language_service import normalize_model_text, normalize_zh_tw
 from services.ayue_agent.proactive_care import normalize_proactive_frequency, schedule_proactive_care
 from services.proactive_followup_service import (
@@ -62,9 +62,7 @@ def _match_test_account(profile: dict) -> dict:
             profile.get("display_name") or profile.get("nickname") or user_id
         )[:40],
         "topic": str(profile.get("test_match_topic") or "既有測試帳號")[:40],
-        "current_context": safe_recent_context(
-            profile.get("current_context"), "尚無近期情境",
-        ),
+        "current_context": active_recent_context(profile, "尚無近期情境"),
     }
 
 
@@ -127,7 +125,10 @@ def client_config():
 
 @router.get("/init")
 def init_system(user_id: str):
-    profiles = list(profiles_coll.find({}, {"user_id": 1, "big_five": 1, "current_context": 1, "_id": 0}))
+    profiles = list(profiles_coll.find({}, {
+        "user_id": 1, "big_five": 1, "current_context": 1,
+        "recent_context_expires_at": 1, "_id": 0,
+    }))
     users = ["demo_user"]
     
     is_complete = False
@@ -154,7 +155,7 @@ def init_system(user_id: str):
         
         if uid == user_id:
             bf = p.get("big_five", {})
-            my_context = safe_recent_context(p.get("current_context", ""), "交朋友")
+            my_context = active_recent_context(p, "交朋友")
             if bf and len(bf) >= 5:
                 is_complete = True
                 my_bf_summary = normalize_zh_tw(bf.get("summary", "已完成性格分析，具備基本資料。"))
@@ -278,7 +279,7 @@ def get_demo_status(user_id: str):
             {"user_id": user_id},
             {
                 "_id": 0,
-                "current_context": 1,
+                "current_context": 1, "recent_context_expires_at": 1,
                 "profile_location": 1,
                 "match_search.status": 1,
             },
@@ -294,7 +295,7 @@ def get_demo_status(user_id: str):
         "agent_version": "pi",
         "web_search_ready": web_enabled(),
         "location": safe_profile_location(profile),
-        "recent_context": safe_recent_context(profile.get("current_context", ""), "尚無近期情境"),
+        "recent_context": active_recent_context(profile, "尚無近期情境"),
         "match_search_status": search_status,
         "has_pending_confirmation": has_active_public_confirmation(user_id),
         "graph_status": graph_health()["status"],
@@ -322,7 +323,8 @@ def get_match_test_overview(user_id: str):
         ]},
         {
             "_id": 0, "user_id": 1, "display_name": 1, "nickname": 1,
-            "current_context": 1, "test_login_email": 1,
+            "current_context": 1, "recent_context_expires_at": 1,
+            "test_login_email": 1,
             "test_match_topic": 1,
         },
     ))
@@ -352,7 +354,8 @@ def get_match_test_overview(user_id: str):
         {"user_id": {"$in": sorted(counterpart_ids - set(account_by_id))}},
         {
             "_id": 0, "user_id": 1, "display_name": 1, "nickname": 1,
-            "current_context": 1, "test_login_email": 1,
+            "current_context": 1, "recent_context_expires_at": 1,
+            "test_login_email": 1,
             "test_match_topic": 1,
         },
     ):
@@ -418,7 +421,8 @@ def get_recent_context_status(user_id: str, run_key: str | None = None):
     profile = profiles_coll.find_one(
         {"user_id": user_id},
         {
-            "_id": 0, "current_context": 1, "current_context_revision": 1,
+            "_id": 0, "current_context": 1, "recent_context_expires_at": 1,
+            "current_context_revision": 1,
             "recent_context_updated_at": 1, "agentic_profile_process": 1,
         },
     ) or {}
@@ -431,7 +435,7 @@ def get_recent_context_status(user_id: str, run_key: str | None = None):
     except (TypeError, ValueError):
         updated_at = 0.0
     response = {
-        "current_context": safe_recent_context(profile.get("current_context"), ""),
+        "current_context": active_recent_context(profile, ""),
         "revision": revision,
         "updated_at": updated_at,
     }
@@ -502,7 +506,7 @@ def get_notifications(user_id: str):
             from_doc.get("big_five", {}), p["from_user"], counterparty_name=from_name,
         ) if from_doc else {}
         from_context = anonymize_counterparty_payload(
-            from_doc.get("current_context", ""), p["from_user"], counterparty_name=from_name,
+            active_recent_context(from_doc, ""), p["from_user"], counterparty_name=from_name,
         ) if from_doc else ""
         from_distinctive_tags = anonymize_counterparty_payload(
             from_doc.get("distinctive_tags", []), p["from_user"], counterparty_name=from_name,

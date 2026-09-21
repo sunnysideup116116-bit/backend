@@ -13,7 +13,7 @@ from bson.objectid import ObjectId
 from database import matches_coll, profiles_coll
 from services.conversation_compaction_service import load_validated_conversation_continuity
 from services.conversation_message_ids import message_id_order_key
-from services.profile_projection import safe_recent_context
+from services.profile_projection import active_recent_context
 from services.owner_memory_projection import preference_wording
 from services.profile_location import safe_profile_location
 from services.match_state_service import load_match_state
@@ -330,7 +330,7 @@ def build_public_context(ctx: AgentTurnContext) -> dict[str, Any]:
     return {
         "recent_messages": history,
         "previous_assistant_message": previous_assistant,
-        "current_context": safe_recent_context(profile.get("current_context"), ""),
+        "current_context": active_recent_context(profile, ""),
         "relevant_preferences": preferences,
         "active_match": active_prompt,
         "latest_match_outcome": outcome_prompt,
@@ -455,7 +455,7 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
             "recent_only_budget_limited" if history_budget_limited else "complete"
         ),
         conversation_continuity=continuity["summary"] if continuity else None,
-        recent_context=safe_recent_context(profile.get("current_context"), ""),
+        recent_context=active_recent_context(profile, ""),
         user_location=(
             request_location_label
             or safe_profile_location(profile).get("display_name", "")

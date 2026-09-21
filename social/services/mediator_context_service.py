@@ -7,7 +7,7 @@ import re
 from database import messages_coll, profiles_coll
 from services.chat_service import generate_room_id
 from services.memory_service import get_user_graph_memories
-from services.profile_projection import safe_recent_context
+from services.profile_projection import active_recent_context
 from services.ayue_agent.product_identity import LEGACY_AYUE_PERSONA
 
 
@@ -61,12 +61,13 @@ def relevant_graph_memories(user_id: str, message: str, limit: int = 9) -> list[
 def mediator_profile_context(user_id: str, message: str) -> dict:
     doc = profiles_coll.find_one({"user_id": user_id}, {
         "_id": 0, "user_id": 1, "initial_interest": 1, "current_context": 1,
+        "recent_context_expires_at": 1,
         "big_five": 1, "deep_profile": 1,
     }) or {}
     return {
         "owner_user_id": user_id,
         "initial_interest": doc.get("initial_interest"),
-        "current_context": doc.get("current_context"),
+        "current_context": active_recent_context(doc, ""),
         "big_five": doc.get("big_five", {}),
         "deep_profile": doc.get("deep_profile", {}),
         "graph_memories": relevant_graph_memories(user_id, message),
@@ -86,7 +87,7 @@ def private_viewer_profile_context(user_id: str) -> dict:
     """Return the bounded owner projection used by active Private V2."""
     doc = profiles_coll.find_one(
         {"user_id": user_id},
-        {"_id": 0, "current_context": 1, "initial_interest": 1,
+        {"_id": 0, "current_context": 1, "recent_context_expires_at": 1, "initial_interest": 1,
          "big_five.summary": 1, "profile_memory_preview": 1},
     ) or {}
     memories = [
@@ -95,7 +96,7 @@ def private_viewer_profile_context(user_id: str) -> dict:
         if isinstance(item, dict) and item.get("label")
     ][:8]
     return {
-        "recent_context": safe_recent_context(doc.get("current_context"), ""),
+        "recent_context": active_recent_context(doc, ""),
         "initial_interest": str(doc.get("initial_interest") or "")[:120],
         "personality_summary": str((doc.get("big_five") or {}).get("summary") or "")[:180],
         "memories": memories,
@@ -115,7 +116,7 @@ def private_counterparty_strategy_context(other_id: str) -> dict:
             "deep_profile.stress_coping": 1,
             "deep_profile.ideal_future": 1,
             "deep_profile.summary": 1,
-            "current_context": 1,
+            "current_context": 1, "recent_context_expires_at": 1,
             "profile_memory_preview": 1,
         },
     ) or {}
@@ -139,7 +140,7 @@ def private_counterparty_strategy_context(other_id: str) -> dict:
     return {
         "big_five_summary": str((doc.get("big_five") or {}).get("summary") or "")[:180],
         "deep_profile": deep_projection,
-        "current_context": safe_recent_context(doc.get("current_context"), ""),
+        "current_context": active_recent_context(doc, ""),
         "memories": memories,
     }
 

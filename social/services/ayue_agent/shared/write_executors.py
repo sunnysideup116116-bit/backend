@@ -35,6 +35,10 @@ from .date_coordination_state import (
     CANCELLABLE_STATUSES as DATE_COORDINATION_CANCELLABLE_STATUSES,
 )
 from services.match_search_context import safe_search_context, search_context_for_turn
+from matchmaker_agent.concept_identity import (
+    canonical_evidence_span,
+    canonicalize_concept,
+)
 TOOL_CALLS = db["agent_tool_calls"]
 
 _DATE_CARD_CAPABILITY_QUESTION_RE = re.compile(
@@ -1015,21 +1019,43 @@ def prepare_write_confirmation(
             from services.match_search_context import bounded_search_text
             message = bounded_search_text(getattr(ctx, "message", ""), 600)
             topic_span = bounded_search_text(semantic_request.get("topic"), 80)
-            if semantic_request.get("kind") == "activity":
+            request_kind = str(semantic_request.get("kind") or "recent_context")
+            if request_kind == "activity":
                 if not topic_span or topic_span not in message:
                     return None, "你這次想找人一起做什麼活動？確認活動後，我會先找人選給你看。"
                 search_context = safe_search_context({
+                    "search_intent": "activity",
                     "invitation_topic": topic_span, "query_text": message,
                     "source_message_id": getattr(ctx, "message_id", ""),
                 })
                 span = bounded_search_text(semantic_request.get("invitation_evidence"), 120)
                 if span and span in message:
                     invitation_evidence = span
+            elif request_kind == "preference":
+                identity = canonicalize_concept(topic_span)
+                evidence = canonical_evidence_span(message, identity) if identity else ""
+                if not identity or not evidence:
+                    return None, "你希望對方明確喜歡哪一項興趣或偏好？"
+                search_context = safe_search_context({
+                    "search_intent": "preference",
+                    "normalized_topic": identity.label,
+                    "canonical_preference_key": identity.key,
+                    "query_text": message,
+                    "source_message_id": getattr(ctx, "message_id", ""),
+                })
             else:
-                search_context = {}
+                search_context = {"search_intent": "recent_context"}
         data = {"search_context": search_context} if search_context else {}
         topic = str(search_context.get("invitation_topic") or "").strip()
-        if topic:
+        preference_topic = str(search_context.get("normalized_topic") or "").strip() \
+            if search_context.get("search_intent") == "preference" else ""
+        if preference_topic:
+            preview = (
+                f"我會優先從明確保存『喜歡 {preference_topic}』的人選中搜尋，"
+                "再套用封鎖、過往配對、安全與名額檢查；不會用近期活動猜測偏好。"
+                "找到後先給你看提案，你再決定是否送出邀請。要開始嗎？"
+            )
+        elif topic:
             # This flag is created only inside the preview-bound confirmation
             # record.  The worker accepts it only alongside this same topic,
             # so an old proposal or a client supplied boolean cannot authorize

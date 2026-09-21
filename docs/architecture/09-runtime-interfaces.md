@@ -30,6 +30,8 @@ Pi 每回合只看 `pi/registry.py` 的明確 allowlist。Python 保有 provider
 
 Calendar command/preflight、contact selection、operation batch、write executor、public reply validation、debug trace 與短期狀態皆位於 `services/ayue_agent/shared/`。Pi 與 Private 不得匯入已退役的 runtime package。
 
+`match.start_search` 的正式 intent 為 `activity`、`recent_context` 或 `preference`。明確「找喜歡／偏好 X 的人」由 server 再驗證 owner 可見原句並建立正向 `preference` confirmation；確認後走 canonical Graph exact retrieval。負向 preference query 在 P0 fail closed。活動與近期情境維持 bounded vector retrieval，generic request 暫時沿用既有流程。模型不能用 recent context 推測 durable preference，也不能提供 canonical key 或候選 ID。
+
 ## Background and voice boundaries
 
 Registration Graph `registration-bootstrap-v1`：Social profiling 初始化／profile 更新只 enqueue，
@@ -37,6 +39,8 @@ Registration Graph `registration-bootstrap-v1`：Social profiling 初始化／pr
 同步 User.id/name。`POST /api/memory/apply` 的 `surface=registration_interest` 採 insert-only 初始
 偏好，不覆蓋既有／停用記憶。`GET /api/registration-graph/status` 只提供版本與 worker 活性，
 不回帳號資料；供補資料 CLI 防止對舊 worker 投遞新 job。詳見 [bootstrap contract](../REGISTRATION_GRAPH_BOOTSTRAP.md)。
+
+註冊興趣與一般 owner message 共用 atomic/canonical memory boundary：明確列舉拆成獨立 Concept，K-pop aliases 收斂到 `k_pop`，單訊息數量受同一 configurable limit 約束。
 
 - Profile extraction 與 proactive care 是 owner-message 背景流程，不由 Pi 工具啟動。
 - App voice 的 `ayue.public_query` 使用公開 Pi HTTP API；private query 繼續使用 Private V2。

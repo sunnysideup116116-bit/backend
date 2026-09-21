@@ -6,12 +6,15 @@ import os
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 with patch.dict(os.environ, {"LLM_API_KEY": "stub", "LLM_BASE_URL": "http://provider.invalid/v1",
                              "LLM_MODEL_ID": "stub", "OLLAMA_HOST": "http://127.0.0.1:9"}), \
         patch("dotenv.load_dotenv", return_value=False):
     import agent_api
+
+from concept_identity import canonicalize_concept
 
 
 def feedback(reasons, action="decline"):
@@ -61,8 +64,51 @@ class DeclineFeedbackTests(unittest.TestCase):
         with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
             result = asyncio.run(agent_api.apply_memory(request))
         self.assertEqual(result["status"], "duplicate")
-        self.assertEqual(result["memories"][0]["key"], "quiet_cafe")
+        self.assertEqual(
+            result["memories"][0]["key"], canonicalize_concept("安靜咖啡廳").key,
+        )
         self.assertEqual(transaction.run.call_count, 1)
+
+    def test_writer_splits_a_clear_compound_label_before_graph_merge(self):
+        driver, session, transaction = MagicMock(), MagicMock(), MagicMock()
+        driver.__enter__.return_value = driver
+        driver.session.return_value.__enter__.return_value = session
+        transaction.run.return_value.single.return_value = {"created": True}
+        session.execute_write.side_effect = lambda callback: callback(transaction)
+        request = agent_api.MemoryApplyRequest(
+            user_id="owner", message_id="message-compound", surface="profile",
+            memories=[{
+                "key": "model_bundle", "label": "K-pop、J-pop、西洋音樂",
+                "stance": "like", "category": "activity", "confidence": 0.95,
+            }],
+        )
+        with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
+            result = asyncio.run(agent_api.apply_memory(request))
+        self.assertEqual(
+            [(item["key"], item["label"]) for item in result["memories"]],
+            [
+                ("k_pop", "K-pop"), ("j_pop", "J-pop"),
+                (canonicalize_concept("西洋音樂").key, "西洋音樂"),
+            ],
+        )
+        graph_write = next(
+            call for call in transaction.run.call_args_list
+            if "UNWIND $memories" in call.args[0]
+        )
+        self.assertEqual(len(graph_write.kwargs["memories"]), 3)
+
+    def test_writer_rejects_one_candidate_with_mixed_polarity(self):
+        request = agent_api.MemoryApplyRequest(
+            user_id="owner", surface="profile",
+            memories=[{
+                "key": "mixed", "label": "我喜歡 K-pop，但不喜歡吵鬧的音樂",
+                "stance": "like", "category": "activity", "confidence": 0.95,
+            }],
+        )
+        with patch.object(agent_api.GraphDatabase, "driver") as driver:
+            result = asyncio.run(agent_api.apply_memory(request))
+        self.assertEqual(result, {"memories": [], "status": "skipped"})
+        driver.assert_not_called()
 
     def test_bare_decline_never_calls_provider_or_graph(self):
         for reasons in ([], ["", "  "]):
@@ -87,10 +133,24 @@ class DeclineFeedbackTests(unittest.TestCase):
         self.assertEqual(normalize.call_args.kwargs["explicit_reasons"], reasons)
         self.assertEqual(json.loads(normalize.call_args.args[0]), {"action": "decline", "explicit_reasons": reasons})
         batches = [call.args[0] for call in write.call_args_list]
-        self.assertEqual([len(batch.memories) for batch in batches], [3, 1])
+        self.assertEqual([len(batch.memories) for batch in batches], [4])
         self.assertTrue(all(batch.user_id == "owner" and batch.surface == "match_feedback" for batch in batches))
         self.assertEqual([item["label"] for item in result["memories"]], labels)
         self.assertTrue(all(item["stance"] == "avoid" for item in result["memories"]))
+
+    def test_feedback_over_runtime_memory_limit_fails_without_partial_write(self):
+        labels = [f"理由{i}" for i in range(7)]
+        with patch.object(
+            agent_api.agent, "generate_graph_reflection",
+            return_value=reflection(labels),
+        ), patch.object(agent_api, "apply_memory", new_callable=AsyncMock) as write, \
+                self.assertRaises(HTTPException) as raised:
+            asyncio.run(agent_api.receive_feedback(feedback(labels)))
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertEqual(
+            raised.exception.detail["code"], "feedback_memory_limit_exceeded",
+        )
+        write.assert_not_called()
 
     def test_actual_canonical_writer_uses_avoids_concepts_for_all_selected_reasons(self):
         labels = ["夜生活", "音樂祭", "自由", "爬山"]
@@ -103,7 +163,7 @@ class DeclineFeedbackTests(unittest.TestCase):
                 patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
             result = asyncio.run(agent_api.receive_feedback(feedback(labels)))
         writes = [call for call in session.run.call_args_list if "UNWIND $memories" in call.args[0]]
-        self.assertEqual(len(writes), 2)
+        self.assertEqual(len(writes), 1)
         self.assertEqual(
             [item["label"] for call in writes for item in call.kwargs["memories"]],
             labels,

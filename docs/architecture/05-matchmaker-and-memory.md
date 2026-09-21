@@ -19,12 +19,15 @@
 | `/api/memory/apply` | POST | 寫入已驗證的 memory proposals（不重新萃取），message_id 冪等 |
 | `/api/memory/{user_id}` | GET | 讀某使用者 active 偏好（owner-scoped） |
 | `/api/memory/action` | POST | disable／restore／correct 一筆偏好 |
+| `/api/preferences/candidates` | POST | 內部 exact preference retrieval；以 canonical `Concept.key` 回傳最多 100 個候選 ID，不回 raw memory |
 | `/api/chat_triples` | POST/GET | 雙人聊天室的三元組（session-scoped，**不**自動成為任一方 durable preference） |
 | `/api/clear_graph` | POST | Demo 專用：清空 Neo4j |
 
 ### 排序決策（`matchmaker.py:MatchmakerAgent`）
 
 權重：近期情境 context 30% + 雙方 graph memory 25% + deep_profile/價值觀 20% + Big Five 15% + 立即可聊話題 10%。硬性規則：任一方的 `AVOIDS` Concept 明確命中對方公開特質時，原則上不得推薦；沒有值得誠實推薦的人時回 `no_suitable_candidate`，不得硬選。
+
+Preference exact search 是例外語意：候選集合已由 Social 以 canonical Graph evidence 驗證；9001 只收到 `search_intent=preference`、`normalized_topic` 與本輪 query，不收到 canonical key、來源訊息 ID 或 raw memory。Matchmaker 不得因候選人的近期活動不同而否定已驗證偏好，也不得把它擴張成發起者也喜歡或「雙方共同偏好」。
 
 `/api/match` 的處理流程（`agent_api.py:match_endpoint`）：
 
@@ -45,6 +48,8 @@
 ```
 
 - 偏好必須 **owner-scoped**：`MemoryObservation.message_id` 唯一約束保證同一訊息不會重複套用。
+- `Concept.key` 使用既有 unique constraint／RANGE index；正式環境已驗證為 ONLINE。新 writer 不信任 provider key，而由 `concept_identity.py` 在 server boundary 決定 identity。
+- 已知小型 alias 表先處理高信心 variant：`Kpop`、`K-pop`、`K pop`、`k-pop` 都是 `key=k_pop, label=K-pop`。其他概念用保守、穩定的 label-derived identity；不維護大型手寫 ontology。
 - `stance=like|require` 投影為 `PREFERS`；`stance=dislike|avoid` 投影為 `AVOIDS`；短期活動意圖另由 recent-context projection 產生 `CURRENTLY_WANTS`。
 - `LIKES_TRAIT`／`DISLIKES_TRAIT` 目前只是 Matchmaker LLM／文字投影的 compatibility label；寫入 Neo4j 前必須分別轉成 `PREFERS`／`AVOIDS`，不得建立同名 Graph relationship。
 - 敏感內容（種族、宗教、性傾向、疾病等）在寫入前被正則擋掉（`agent_api.py` 的 `protected`）。
@@ -59,6 +64,10 @@
 - 禁止使用 assistant reply、conversation history、tool result、match state 或對方資料作為寫入來源。
 - LLM 只提出 typed `ProfileExtractionDecision`（`profile_contracts.py`）＋原句 `evidence_span`；evidence 必須是 owner message 的連續原文子字串（`_valid_evidence_span`），否則拒絕該欄位。
 - 近期情境只保存本人現實活動；找人、配對、提案、等待回覆不得成為近期情境。長期記憶只保存明確且可持續的本人偏好（confidence ≥0.90，`subject=owner`）。
+- 每個 durable candidate 只能代表一個 atomic concept。只有明確、短而獨立的列舉才由 deterministic boundary 拆開；例如 `K-pop、J-pop、西洋音樂` 拆三筆，但 `適合讀書的安靜咖啡廳` 保持一筆。9001 writer 再做相同的保守防線，不能繞過 extractor 寫入清楚的複合列舉。
+- 同一 candidate／evidence 同時含明確正負 polarity 時 fail closed；只有模型提供 item-level evidence 的獨立 candidates 才分別保留 like／avoid，不能把混合句壓成單一 stance。
+- 本階段不是 semantic ontology：`韓國流行音樂` 與 `韓流音樂` 仍是不同 identity。它們的 synonym／semantic 對齊留給 P1，不能在 P0 暗中推測。
+- 每訊息可建立的 durable candidates 由兩個服務共用 `DURABLE_MEMORY_MAX_CANDIDATES_PER_MESSAGE`（預設 6、程式硬上限 8）；extraction、retry/outbox、registration 與 writer 都用同一界線。
 - 使用者可描述近期想做的事而沒有時間單位；不得把「缺時間詞」當作拒絕理由。
 - 顯示摘要由程式投影組合，不直接儲存模型自由文字摘要。
 
@@ -77,6 +86,20 @@
 ### 3.3 Context Engine 邊界（現況）
 
 `context.py:build_public_agent_turn_context` 每回合組 bounded context：HTTP adapter 先抓最多 32 筆作 sentinel，最終 projection 最多保留 12 則／6,000 字元，帶方向 `relevant_memories` ≤8 筆。`memory.search_my_profile(query)` 可向 Graph 補查 preview 以外的本人 durable 偏好；先 query 匹配再限 8 筆，回傳 unavailable/truncated，未命中不代表從未提過。新 Context Engine 若建置，只能輸出 bounded、versioned typed bundle；Public／Private runtime 各自套用 privacy adapter。Retrieval 必須先做 owner／room／accepted-relation 硬隔離，再做相關度排序、budget、dedup；失敗時回 bounded empty projection 與 error code，不得改抓 raw data。
+
+### 3.4 Intent-aware candidate retrieval（P0）
+
+- `activity`／`recent_context`：維持 Mongo bounded vector retrieval；candidate pool 仍限制為既有 20 人，再依既有小批次送 Matchmaker。
+- `preference`：Pi 只在 owner 可見原句明確表示「找喜歡／偏好某主題的人」時建立確認卡。確認後以 canonical key 做 `Concept <-[:PREFERS]- User` exact lookup（最多 100 ID），再套 block、pair history、test cohort、Mongo profile hydration、hard conflict、quota、proposal dedupe 與 consent lifecycle。不得先拿 query embedding 比 candidate recent-context embedding。負向 preference search 尚未有 typed stance，P0 會要求改述／澄清，不得錯送正向 `PREFERS` branch。
+- `generic`：暫時沿用既有 bounded vector pipeline；本階段沒有 hybrid full scan。
+- 所有分支在 qualification／LLM 前都收斂到既有 `MATCH_CANDIDATE_POOL_SIZE=20`，Matchmaker 最多處理既有三個小 batch。Graph miss 不以 fuzzy inference 宣稱某人有未保存的偏好。
+- internal job diagnostics 只保存 bounded intent/topic/key、retrieval source、各階段 count、shared key、hard-conflict key 與 reason-code count；不保存 candidate IDs、raw messages 或 Graph payload。
+
+### 3.5 Recent Activity Context expiry
+
+`recent_context_state`、`current_context`、typed `context_signals` 與 embedding 都是短期活動 projection，不是 durable preference。具有 `recent_context_expires_at` 且已過期（或格式無效）時，read-only projection 會清空 context/signals/embedding；matching、Public／Private context、proactive care、contacts、Event proposal snapshot、Graph projection 與 Event relevance queries 都不得再把它當 active evidence。只含 `recent` evidence 的衍生 Event link 必須仍能對回同一個未過期 `CURRENTLY_WANTS`。缺少 expiry 的舊資料暫時維持相容讀取；TTL 數值仍是既有設定，本階段沒有猜測或調整天數。
+
+舊 Concept 只提供唯讀稽核：`python scripts/audit_canonical_preferences.py --limit 100`。工具沒有 apply mode，只輸出 old concept、明確可拆 atoms、alias normalization、受影響 user／edge counts；模糊自然語言只列 ambiguous，不自動拆，也不顯示 user ID。
 
 ## 4. 配對狀態真相（canonical lifecycle）
 

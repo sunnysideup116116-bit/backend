@@ -137,6 +137,12 @@ class ContextProjectionEndpointTests(unittest.TestCase):
         self.assertIn("user_concept.kind = 'activity'", avoidance_query)
         self.assertIn("type(signal_relation) = 'HAS_TAG'", avoidance_query)
         self.assertNotIn("OR user_concept.kind = 'interest'", avoidance_query)
+        relevance_query = next(
+            call.args[0]
+            for call in session.run.call_args_list
+            if "MATCH (user:User)-[preference:PREFERS|CURRENTLY_WANTS]" in call.args[0]
+        )
+        self.assertIn("coalesce(preference.expires_at, 0) > $now", relevance_query)
 
     def test_concept_embedding_projection_stores_versioned_vector(self):
         driver, session = self._graph()

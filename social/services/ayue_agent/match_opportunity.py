@@ -10,6 +10,7 @@ from typing import Any
 
 from database import matches_coll, profiles_coll
 from services.match_state_service import load_match_state
+from services.profile_projection import active_recent_context
 
 
 GUIDANCE_COOLDOWN_SECONDS = 7 * 86400
@@ -36,7 +37,7 @@ def _text(value: Any) -> str:
 
 
 def _has_non_placeholder_context(profile: dict[str, Any]) -> bool:
-    return _text(profile.get("current_context")) not in {"", "交朋友", "尚無近期情境"}
+    return active_recent_context(profile, "") not in {"", "交朋友", "尚無近期情境"}
 
 
 def _has_preferences(profile: dict[str, Any]) -> bool:
@@ -80,7 +81,7 @@ def opportunity_fingerprint(profile: dict[str, Any]) -> str:
     deep = profile.get("deep_profile") or {}
     projection = {
         "context_revision": int(profile.get("current_context_revision", 0) or 0),
-        "current_context": _text(profile.get("current_context")),
+        "current_context": active_recent_context(profile, ""),
         "basis": basis,
         "preferences": preferences,
         "deep_profile": {

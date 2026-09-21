@@ -31,6 +31,7 @@ JOB_TERMINAL_STATUSES = frozenset({
 JOB_STEPS = {
     "loading_profile": 15,
     "vector_search": 40,
+    "preference_graph_search": 40,
     "candidate_qualification": 55,
     "matchmaker_request": 65,
     "matchmaker_response": 75,
@@ -72,6 +73,9 @@ _FAILURE_MESSAGES = {
     "quota_unavailable": "目前無法確認今天還能找幾位，這次搜尋沒有啟動，請稍後再試。",
     "pipeline_unavailable": "配對服務目前還沒準備好，請稍後再試。",
     "vector_search_unavailable": "我目前無法讀取候選資料，請稍後再試。",
+    "preference_graph_unavailable": "我目前無法讀取偏好候選資料，請稍後再試。",
+    "preference_graph_invalid_response": "偏好候選資料不完整，這次搜尋沒有完成。",
+    "candidate_profile_unavailable": "我目前無法確認候選人的資料，請稍後再試。",
     "matchmaker_unavailable": "配對服務暫時連不上，請稍後再試。",
     "matchmaker_http_error": "配對服務回應失敗，請稍後再試。",
     "matchmaker_invalid_response": "配對服務回傳的結果不完整，請稍後再試。",
@@ -383,8 +387,40 @@ def _report_progress(job: dict[str, Any], step: str) -> bool:
     return _job_is_current(job)
 
 
+def _bounded_diagnostics(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in (
+        "search_intent", "normalized_topic", "canonical_preference_key",
+        "retrieval_source",
+    ):
+        text = str(value.get(key) or "").strip()
+        if text:
+            result[key] = text[:80]
+    for key in (
+        "candidate_count_before_filter", "candidate_pool_count",
+        "candidate_count_after_retrieval_filter", "candidate_count_after_filter",
+    ):
+        try:
+            result[key] = max(0, min(int(value.get(key, 0) or 0), 100))
+        except (TypeError, ValueError):
+            result[key] = 0
+    for key in ("shared_preferences", "hard_conflicts"):
+        values = value.get(key) if isinstance(value.get(key), list) else []
+        result[key] = [str(item)[:52] for item in values[:8] if str(item).strip()]
+    reasons = value.get("qualification_reason_codes")
+    if isinstance(reasons, dict):
+        result["qualification_reason_codes"] = {
+            str(key)[:60]: max(0, min(int(count or 0), 100))
+            for key, count in list(reasons.items())[:12]
+        }
+    return result
+
+
 def _finish_job(
     job: dict[str, Any], status: str, *, error_code: str = "", failure_stage: str = "",
+    diagnostics: dict[str, Any] | None = None,
 ) -> bool:
     if status not in JOB_TERMINAL_STATUSES:
         status = "failed"
@@ -397,6 +433,7 @@ def _finish_job(
             "completed_at": now,
             "error_code": error_code[:80],
             "failure_stage": failure_stage[:40],
+            "retrieval_diagnostics": _bounded_diagnostics(diagnostics),
         }, "$unset": {"active_user_id": "", "lease_id": "", "lease_until": ""}},
     )
     if not getattr(result, "modified_count", 0):
@@ -729,7 +766,13 @@ def run_one_match_search_job() -> bool:
         finish_kwargs = {}
         if result_reason:
             finish_kwargs["error_code"] = result_reason
-        if _finish_job(job, terminal_status, **finish_kwargs):
+        diagnostics = (result or {}).get("diagnostics")
+        if isinstance(diagnostics, dict) and diagnostics:
+            finish_kwargs["diagnostics"] = diagnostics
+        if _finish_job(
+            job, terminal_status,
+            **finish_kwargs,
+        ):
             empty_reply = _FAILURE_MESSAGES.get(
                 result_reason, "這輪暫時沒有合適的新對象；你可以補充想認識的對象或想一起做的事，再決定是否搜尋。",
             )
@@ -757,7 +800,9 @@ def run_one_match_search_job() -> bool:
                 origin_room_id=str(job.get("origin_room_id") or ""),
             )
         return True
-    if _finish_job(job, "completed"):
+    if _finish_job(
+        job, "completed", diagnostics=(result or {}).get("diagnostics"),
+    ):
         _queue_completed_match_event(job, matches[0])
     return True
 

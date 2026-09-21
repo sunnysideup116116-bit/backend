@@ -13,6 +13,7 @@ from bson.objectid import ObjectId
 
 from database import db, messages_coll
 from services.message_use_service import is_reusable_for_profile
+from matchmaker_agent.concept_identity import durable_memory_limit
 
 
 MEMORY_OUTBOX = db["profile_memory_outbox"]
@@ -162,7 +163,7 @@ def process_memory_outbox_once(limit: int = 3) -> dict[str, int]:
             else:
                 apply_profile_memory_proposals(
                     str(record.get("user_id") or ""),
-                    list(record.get("memories") or [])[:3],
+                    list(record.get("memories") or [])[:durable_memory_limit()],
                     str(record.get("surface") or "outbox_retry")[:40],
                     str(record.get("message_id")) if record.get("message_id") else None,
                     str(record.get("match_id")) if record.get("match_id") else None,

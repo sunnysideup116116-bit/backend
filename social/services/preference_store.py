@@ -12,6 +12,12 @@ from typing import Any
 from pymongo import ASCENDING
 
 from database import db
+from matchmaker_agent.concept_identity import (
+    canonicalize_concept,
+    has_mixed_preference_polarity,
+    split_compound_concept_label,
+    split_explicit_preference_enumeration,
+)
 
 
 PREFERENCE_FACTS = db["preference_facts"]
@@ -31,14 +37,22 @@ def ensure_preference_indexes() -> None:
 
 
 def _clean_item(item: dict[str, Any]) -> dict[str, Any] | None:
-    key = str(item.get("key") or item.get("concept_key") or "").strip().lower()
     label = str(item.get("label") or "").strip()[:40]
     stance = str(item.get("stance") or "").strip().lower()
-    if not key or not label or stance not in VALID_STANCES:
+    if (
+        has_mixed_preference_polarity(label)
+        or split_explicit_preference_enumeration(label)
+        or split_compound_concept_label(label)
+    ):
+        return None
+    identity = canonicalize_concept(
+        label, item.get("key") or item.get("concept_key"),
+    )
+    if not identity or stance not in VALID_STANCES:
         return None
     return {
-        "concept_key": key,
-        "label": label,
+        "concept_key": identity.key,
+        "label": identity.label,
         "stance": stance,
         "category": str(item.get("category") or "lifestyle")[:30],
         "confidence": max(0.0, min(float(item.get("confidence", 0.7)), 1.0)),

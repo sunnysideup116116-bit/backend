@@ -24,6 +24,14 @@ if hasattr(sys.stderr, "reconfigure"):
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from registration_graph import RegistrationProjection, project_identity, seed_registration
+from concept_identity import (
+    HARD_DURABLE_MEMORY_LIMIT,
+    canonicalize_concept,
+    durable_memory_limit,
+    has_mixed_preference_polarity,
+    split_compound_concept_label,
+    split_explicit_preference_enumeration,
+)
 from matchmaker import (
     MatchmakerAgent,
     MatchEvaluationError,
@@ -810,6 +818,8 @@ def _refresh_semantic_event_links(session) -> dict[str, int]:
         MATCH (event:Event)-[signal_relation:HAS_TAG|HAS_VIBE]->(event_concept:Concept)
         WHERE event.status = 'active' AND event.expires_at > $now
           AND NOT (user)-[:EVENT_AVOIDANCE]->(event)
+          AND (type(preference) <> 'CURRENTLY_WANTS'
+               OR coalesce(preference.expires_at, 0) > $now)
           AND user_concept.embedding IS NOT NULL
           AND event_concept.embedding IS NOT NULL
           AND ((user_concept.kind = 'activity' AND type(signal_relation) = 'HAS_TAG')
@@ -942,7 +952,9 @@ class FeedbackRequest(BaseModel):
     target_id: str # noqa
     action: str # "accept" ??"decline"
     target_traits: dict # 撠?扳
-    explicit_reasons: list[str] = []  # 雿輻??蝣箏?貊?憍??寡釭
+    explicit_reasons: list[str] = Field(
+        default_factory=list, max_length=HARD_DURABLE_MEMORY_LIMIT,
+    )  # 雿輻??蝣箏?貊?憍??寡釭
 
 # ???豢?靘芋??Agent ???嗅澈 (撖行銝剜?摮??鞈?摨急?撖怠? MongoDB)
 agent_memory_db = {} 
@@ -988,12 +1000,17 @@ async def receive_feedback(req: FeedbackRequest):
         raise HTTPException(status_code=502, detail={"code": "feedback_normalization_failed"}) from None
 
     # The canonical memory writer owns validation and PREFERS/AVOIDS writes.
-    # It accepts three proposals per call; batch without dropping a fourth
-    # (or later) user-selected reason.
+    # Batch without dropping a later user-selected reason.
     saved = []
-    for offset in range(0, len(memories), 3):
+    batch_limit = durable_memory_limit()
+    if len(memories) > batch_limit:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "feedback_memory_limit_exceeded"},
+        )
+    for offset in range(0, len(memories), batch_limit):
         outcome = await apply_memory(MemoryApplyRequest(
-            user_id=req.user_id, memories=memories[offset:offset + 3],
+            user_id=req.user_id, memories=memories[offset:offset + batch_limit],
             surface="match_feedback",
         ))
         if outcome.get("status") != "success":
@@ -1097,10 +1114,19 @@ async def global_reflection_endpoint(req: GlobalReflectionRequest):
 
 class MemoryApplyRequest(BaseModel):
     user_id: str
-    memories: list[dict] = []
+    memories: list[dict] = Field(
+        default_factory=list, max_length=HARD_DURABLE_MEMORY_LIMIT,
+    )
     surface: str = "global"
     match_id: str | None = None
     message_id: str | None = None
+
+
+class PreferenceCandidateRequest(BaseModel):
+    requester_user_id: str = Field(min_length=1, max_length=128)
+    topic: str = Field(min_length=1, max_length=80)
+    excluded_user_ids: list[str] = Field(default_factory=list, max_length=200)
+    limit: int = Field(default=20, ge=1, le=100)
 
 class MemoryActionRequest(BaseModel):
     user_id: str
@@ -1237,15 +1263,67 @@ def registration_projection(req: RegistrationProjection):
         raise HTTPException(status_code=503, detail="registration_projection_unavailable") from exc
 
 
+@app.post("/api/preferences/candidates")
+def preference_candidates(req: PreferenceCandidateRequest):
+    """Return bounded internal IDs with explicit positive durable evidence."""
+    identity = canonicalize_concept(req.topic)
+    if not identity:
+        return {"status": "skipped", "canonical_key": "", "candidate_ids": []}
+    excluded = list(dict.fromkeys(
+        str(value).strip()[:128]
+        for value in req.excluded_user_ids
+        if str(value or "").strip()
+    ))[:200]
+    URI, AUTH, DATABASE = _neo4j_config()
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH) as driver:
+            with driver.session(database=DATABASE) as session:
+                rows = session.run("""
+                    MATCH (concept:Concept {key:$key})<-[:PREFERS]-(candidate:User)
+                    WHERE candidate.id <> $requester_user_id
+                    WITH candidate
+                    LIMIT $limit
+                    RETURN candidate.id AS candidate_id
+                """, key=identity.key, requester_user_id=req.requester_user_id,
+                     limit=req.limit)
+                raw_candidate_ids = list(dict.fromkeys(
+                    str(row["candidate_id"])
+                    for row in rows if str(row.get("candidate_id") or "").strip()
+                ))
+                candidate_ids = [
+                    candidate_id for candidate_id in raw_candidate_ids
+                    if candidate_id not in excluded
+                ]
+        return {
+            "status": "success",
+            "canonical_key": identity.key,
+            "normalized_topic": identity.label,
+            "candidate_ids": candidate_ids[:req.limit],
+            "candidate_count_before_filter": len(raw_candidate_ids),
+            "candidate_count_after_filter": len(candidate_ids),
+        }
+    except Exception as exc:
+        print(f"[PREFERENCE_MATCH] graph_lookup_failed error={type(exc).__name__}")
+        return {
+            "status": "error", "error_code": "preference_graph_unavailable",
+            "canonical_key": identity.key, "candidate_ids": [],
+        }
+
+
 @app.post("/api/memory/apply")
 async def apply_memory(req: MemoryApplyRequest):
     """Atomically write validated proposals and their idempotency marker."""
     allowed_stances = {"like", "dislike", "require", "avoid"}
     protected = re.compile(r"(?:黑人|白人|黃種人|種族|族裔|宗教|信仰|穆斯林|基督教|同性戀|性傾向|性別認同|跨性別|殘障|身心障礙|疾病|政治立場|國籍|公民身分)", re.I)
     key_re = re.compile(r"^[a-z][a-z0-9_]{1,50}$")
-    now, clean = time.time(), []
-    for item in req.memories[:3]:
-        key = str(item.get("key", "")).strip().lower().replace(" ", "_")
+    now, clean_by_key = time.time(), {}
+    memory_limit = durable_memory_limit()
+    if len(req.memories) > memory_limit:
+        return {
+            "memories": [], "status": "error",
+            "error_code": "memory_limit_exceeded",
+        }
+    for item in req.memories[:memory_limit]:
         label = re.sub(
             r"^(?:喜歡|討厭|不喜歡|偏好|近期情境)\s*[:：,，]?\s*", "",
             str(item.get("label") or item.get("label_zh_tw") or "").strip(),
@@ -1255,16 +1333,30 @@ async def apply_memory(req: MemoryApplyRequest):
             confidence = float(item.get("confidence", 0))
         except (TypeError, ValueError):
             continue
-        if (
-            not key_re.match(key) or not label or protected.search(label)
-            or stance not in allowed_stances or confidence < 0.75
-        ):
+        if has_mixed_preference_polarity(label):
             continue
-        clean.append({
-            "key": key, "label": label, "stance": stance,
-            "category": "preference", "confidence": confidence,
-            "last_seen_at": now,
-        })
+        labels = (
+            split_explicit_preference_enumeration(label, limit=memory_limit)
+            or split_compound_concept_label(label, limit=memory_limit)
+            or [label]
+        )
+        for atomic_label in labels:
+            identity = canonicalize_concept(atomic_label, item.get("key"))
+            if (
+                not identity or not key_re.match(identity.key) or protected.search(identity.label)
+                or stance not in allowed_stances or confidence < 0.75
+            ):
+                continue
+            clean_by_key.setdefault(identity.key, {
+                "key": identity.key, "label": identity.label, "stance": stance,
+                "category": "preference",
+                "confidence": confidence, "last_seen_at": now,
+            })
+            if len(clean_by_key) >= memory_limit:
+                break
+        if len(clean_by_key) >= memory_limit:
+            break
+    clean = list(clean_by_key.values())
     if not clean:
         return {"memories": [], "status": "skipped"}
     URI, AUTH, DATABASE = _neo4j_config()
@@ -1424,11 +1516,17 @@ async def memory_action(req: MemoryActionRequest):
                     r"(?:黑人|白人|黃種人|種族|族裔|宗教|信仰|穆斯林|基督教|同性戀|性傾向|性別認同|跨性別|殘障|身心障礙|疾病|政治立場|國籍|公民身分)",
                     re.I,
                 )
-                if not label or protected.search(label):
+                if (
+                    not label or protected.search(label)
+                    or has_mixed_preference_polarity(label)
+                    or split_explicit_preference_enumeration(label)
+                    or split_compound_concept_label(label)
+                ):
                     return {"status": "error", "error_code": "invalid_correction"}
-                corrected_key = "owner_correction_" + hashlib.sha256(
-                    label.casefold().encode("utf-8")
-                ).hexdigest()[:24]
+                identity = canonicalize_concept(label)
+                if not identity:
+                    return {"status": "error", "error_code": "invalid_correction"}
+                corrected_key, label = identity.key, identity.label
 
                 def correct(tx):
                     row = tx.run("""

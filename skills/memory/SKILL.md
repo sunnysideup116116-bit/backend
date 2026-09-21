@@ -1,7 +1,7 @@
 ---
 name: memory
 description: Extract an owner's durable, non-sensitive social preferences.
-version: 2
+version: 3
 ---
 
 # Memory
@@ -15,3 +15,11 @@ skill is invoked. Return key, label_zh_tw,
 stance, category, confidence, evidence_span, subject, and reason_code. The
 subject must be `owner`; the evidence span must be an exact substring of the
 owner's message. Use Traditional Chinese labels.
+
+Each durable memory candidate represents exactly one atomic concept. When the
+owner explicitly lists independent preferences, return one candidate per item
+with item-level evidence spans. For example, `我喜歡 K-pop、J-pop、西洋音樂`
+becomes three candidates. Do not split descriptive noun phrases: `適合讀書的安靜咖啡廳`
+is one concept. Keys are proposals only; the server canonicalizes identity.
+Respect the per-message candidate limit supplied in the extraction prompt; the
+server also enforces its configurable limit and a hard resource ceiling.

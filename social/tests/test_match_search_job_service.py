@@ -531,3 +531,22 @@ class MatchSearchJobServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+def test_retrieval_diagnostics_are_bounded_and_drop_private_fields():
+    result = jobs._bounded_diagnostics({
+        "search_intent": "preference",
+        "normalized_topic": "K-pop",
+        "canonical_preference_key": "k_pop",
+        "retrieval_source": "graph_exact",
+        "candidate_count_before_filter": 12,
+        "candidate_count_after_filter": 3,
+        "shared_preferences": ["k_pop"],
+        "hard_conflicts": ["smoking"],
+        "qualification_reason_codes": {"requested_preference": 3},
+        "candidate_ids": ["private-user-id"],
+        "raw_memory": "private memory",
+    })
+    assert result["search_intent"] == "preference"
+    assert result["canonical_preference_key"] == "k_pop"
+    assert result["candidate_count_after_filter"] == 3
+    assert "candidate_ids" not in result
+    assert "raw_memory" not in result
