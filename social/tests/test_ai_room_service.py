@@ -107,7 +107,7 @@ class AiRoomServiceTests(unittest.TestCase):
         rooms_p, messages_p, rooms, _ = self._patch_colls()
         with rooms_p, messages_p:
             rooms.find_one.return_value = {"needs_title": True}
-            with patch("services.ai_service.generate_chat_completion", side_effect=RuntimeError("no key")):
+            with patch("services.ai_service.generate_chat_completion_with_tools", side_effect=RuntimeError("no key")):
                 ai_room_service.ensure_room_title("ai_room::owner::x", "owner", "我想聊聊")
         # Two update_one calls: one for the failure path marking needs_title True.
         self.assertGreaterEqual(rooms.update_one.call_count, 1)
@@ -119,7 +119,7 @@ class AiRoomServiceTests(unittest.TestCase):
         with rooms_p, messages_p:
             rooms.find_one.return_value = {"needs_title": True}
             fake = MagicMock(content="關於旅行的事")
-            with patch("services.ai_service.generate_chat_completion", return_value=fake):
+            with patch("services.ai_service.generate_chat_completion_with_tools", return_value=fake):
                 ai_room_service.ensure_room_title("ai_room::owner::x", "owner", "我想聊聊旅行")
         rooms.update_one.assert_called_once()
         self.assertEqual(rooms.update_one.call_args.args[1]["$set"]["title"], "關於旅行的事")

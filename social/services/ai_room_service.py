@@ -14,8 +14,10 @@ clients working, and it always appears in the room list.
 from __future__ import annotations
 
 import time
+import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+from pymongo import ReturnDocument
 
 from database import ai_rooms_coll, messages_coll
 from services.chat_service import (
@@ -37,11 +39,12 @@ MATCH_HUB_ROOM_TITLE = "阿月牽線"
 MATCH_HUB_ROOM_SUBTITLE = "近期、指定主題與活動邀請都在這裡"
 MATCH_HUB_ROOM_KIND = "match_hub"
 
-# Title generation budget: each LLM call may take at most TITLE_CALL_TIMEOUT
-# seconds; we retry up to TITLE_MAX_ATTEMPTS times so a transient empty reply
-# (observed with the cloud model) does not leave the room untitled.
-TITLE_CALL_TIMEOUT_SECONDS = 5
+# All attempts share one provider-enforced deadline. A completed slow request
+# must not be discarded merely because an outer Future stopped waiting.
+TITLE_CALL_TIMEOUT_SECONDS = 60
 TITLE_MAX_ATTEMPTS = 3
+TITLE_RETRY_COOLDOWN_SECONDS = 120
+TITLE_LEASE_MARGIN_SECONDS = 15
 
 
 def match_hub_v1_enabled() -> bool:
@@ -379,27 +382,91 @@ def most_recent_ai_room(user_id: str, *, include_proposal_rooms: bool = True) ->
 
 
 def ensure_room_title(room_id: str, user_id: str, first_message: str) -> None:
-    """Generate a title from the first user message via one extra LLM call.
-
-    Called synchronously after the first message in a new room is persisted.
-    Each LLM attempt is bounded by :data:`TITLE_CALL_TIMEOUT_SECONDS` and the
-    call retries up to :data:`TITLE_MAX_ATTEMPTS` times. On any failure the
-    room stays ``needs_title=True`` so the next time the user opens the room
-    :func:`maybe_backfill_title` can retry.
-    """
-    if room_id == legacy_ai_room_id(user_id):
-        return
-    if ai_room_owner(room_id) != user_id:
-        return
-    doc = ai_rooms_coll.find_one({"room_id": room_id}, {"_id": 0, "needs_title": 1})
-    if not doc or doc.get("needs_title") is False:
-        return
+    """Synchronously generate one leased title job (primarily a worker entry)."""
     text = (first_message or "").strip()
     if not text:
         return
-    try:
-        from services.ai_service import generate_chat_completion
+    token = _claim_title_job(room_id, user_id)
+    if token is not None:
+        _run_title_job(room_id, user_id, text, token)
 
+
+def _claim_title_job(room_id: str, user_id: str) -> str | None:
+    """Atomically deduplicate jobs across threads and server processes.
+
+    The expiring lease also lets a later room open recover after a process
+    restart. These fields are internal; the public room contract is unchanged.
+    """
+    if room_id == legacy_ai_room_id(user_id) or ai_room_owner(room_id) != user_id:
+        return None
+    now = time.time()
+    token = uuid.uuid4().hex
+    try:
+        claimed = ai_rooms_coll.find_one_and_update(
+            {
+                "room_id": room_id,
+                "user_id": user_id,
+                "needs_title": True,
+                "$and": [
+                    {"$or": [
+                        {"title_lease_until": {"$exists": False}},
+                        {"title_lease_until": {"$lte": now}},
+                    ]},
+                    {"$or": [
+                        {"title_retry_after": {"$exists": False}},
+                        {"title_retry_after": {"$lte": now}},
+                    ]},
+                ],
+            },
+            {"$set": {
+                "title_job_token": token,
+                "title_lease_until": now + TITLE_CALL_TIMEOUT_SECONDS + TITLE_LEASE_MARGIN_SECONDS,
+            }},
+            return_document=ReturnDocument.AFTER,
+        )
+        return token if claimed is not None else None
+    except Exception as exc:
+        print(f"[ai_room_service] title scheduling unavailable: {type(exc).__name__}")
+        return None
+
+
+def _release_failed_title_job(room_id: str, user_id: str, token: str) -> None:
+    try:
+        ai_rooms_coll.update_one(
+            {"room_id": room_id, "user_id": user_id, "title_job_token": token, "needs_title": True},
+            {
+                "$set": {"needs_title": True, "title_retry_after": time.time() + TITLE_RETRY_COOLDOWN_SECONDS},
+                "$unset": {"title_job_token": "", "title_lease_until": ""},
+            },
+        )
+    except Exception as exc:
+        # If storage is unavailable, the bounded lease will eventually expire.
+        print(f"[ai_room_service] title lease release unavailable: {type(exc).__name__}")
+
+
+def queue_room_title(room_id: str, user_id: str, first_message: str) -> bool:
+    """Schedule a pending title without blocking a chat/history response."""
+    text = (first_message or "").strip()
+    if not text:
+        return False
+    token = _claim_title_job(room_id, user_id)
+    if token is None:
+        return False
+    try:
+        threading.Thread(
+            target=_run_title_job,
+            args=(room_id, user_id, text, token),
+            name="ayue-room-title",
+            daemon=True,
+        ).start()
+        return True
+    except Exception:
+        _release_failed_title_job(room_id, user_id, token)
+        return False
+
+
+def _run_title_job(room_id: str, user_id: str, text: str, token: str) -> None:
+    try:
         prompt = (
             "請從下面這句使用者開場白，提煉一個 4 到 8 個字的中文聊天標題。"
             "規則：必須客觀描述話題本身，禁止使用「你、我、他、她、它、妳」等代名詞，"
@@ -409,50 +476,41 @@ def ensure_room_title(room_id: str, user_id: str, first_message: str) -> None:
         title = _generate_title_with_retry(prompt)
         if title:
             ai_rooms_coll.update_one(
-                {"room_id": room_id},
-                {"$set": {"title": title, "needs_title": False, "updated_at": time.time()}},
+                {"room_id": room_id, "user_id": user_id, "title_job_token": token, "needs_title": True},
+                {
+                    "$set": {"title": title, "needs_title": False, "updated_at": time.time()},
+                    "$unset": {"title_job_token": "", "title_lease_until": "", "title_retry_after": ""},
+                },
             )
             return
     except Exception as exc:  # noqa: BLE001 - best-effort title
         print(f"[ai_room_service] title generation failed: {type(exc).__name__}: {exc}")
-    # Mark as still needing a title so the next room open can retry.
-    ai_rooms_coll.update_one(
-        {"room_id": room_id},
-        {"$set": {"needs_title": True, "updated_at": time.time()}},
-    )
+    # Keep needs_title true; only release this job's lease, after a cooldown.
+    # A user's rename sets needs_title false, so a late worker cannot undo it.
+    _release_failed_title_job(room_id, user_id, token)
 
 
 def _generate_title_with_retry(prompt: str) -> str:
-    """Run the title LLM call with a per-attempt timeout and retries.
+    """Wait for real completion, with serial retries inside one deadline."""
+    from services.ai_service import generate_chat_completion_with_tools
 
-    The cloud model occasionally returns an empty completion; a short timeout
-    plus a few retries makes title generation reliable without blocking the
-    chat turn for long.
-    """
-    executor = ThreadPoolExecutor(max_workers=1)
-
-    def _attempt() -> str:
-        from services.ai_service import generate_chat_completion
-
-        result = generate_chat_completion(prompt, temperature=0.3, max_tokens=120)
-        return (result.content or "").strip().splitlines()[0].strip()[:60]
-
-    try:
-        for _attempt_index in range(TITLE_MAX_ATTEMPTS):
-            try:
-                future = executor.submit(_attempt)
-                title = future.result(timeout=TITLE_CALL_TIMEOUT_SECONDS)
-            except TimeoutError:
-                print("[ai_room_service] title call timed out; retrying")
-                continue
-            except Exception as exc:  # noqa: BLE001
-                print(f"[ai_room_service] title call error: {type(exc).__name__}: {exc}")
-                continue
+    deadline = time.monotonic() + TITLE_CALL_TIMEOUT_SECONDS
+    for _attempt_index in range(TITLE_MAX_ATTEMPTS):
+        if time.monotonic() >= deadline:
+            break
+        try:
+            # This existing provider entry supports an actual transport/RPC
+            # deadline. Empty tools still request plain text, with no actions.
+            result = generate_chat_completion_with_tools(
+                prompt, tools=[], temperature=0.3, max_tokens=120,
+                prefer_fast_model=True, deadline_monotonic=deadline,
+            )
+            lines = (result.content or "").strip().splitlines()
+            title = lines[0].strip()[:60] if lines else ""
             if title:
                 return title
-            print("[ai_room_service] title call returned empty; retrying")
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ai_room_service] title call error: {type(exc).__name__}: {exc}")
     return ""
 
 
@@ -463,16 +521,26 @@ def maybe_backfill_title(room_id: str, user_id: str) -> None:
     if ai_room_owner(room_id) != user_id:
         return
     doc = ai_rooms_coll.find_one({"room_id": room_id}, {"_id": 0})
-    if not doc or not doc.get("needs_title"):
+    if not doc:
+        return
+    if not doc.get("needs_title") and str(doc.get("title") or "").strip():
         return
     first_user_msg = messages_coll.find_one(
         {"room_id": room_id, "sender_id": user_id},
         {"_id": 0, "content": 1},
         sort=[("timestamp", 1)],
     )
-    first_message = str((first_user_msg or {}).get("content") or "")
+    first_message = str((first_user_msg or {}).get("content") or "").strip()
     if first_message:
-        ensure_room_title(room_id, user_id, first_message)
+        if not doc.get("needs_title"):
+            # Older rooms may have missed the first-message flag. Empty rooms
+            # stay idle; repair only once actual user content exists, and use
+            # the original blank value so a concurrent rename wins.
+            ai_rooms_coll.update_one(
+                {"room_id": room_id, "user_id": user_id, "title": doc.get("title")},
+                {"$set": {"needs_title": True}},
+            )
+        queue_room_title(room_id, user_id, first_message)
 
 
 def mark_first_message_for_title(room_id: str, user_id: str) -> bool:
@@ -486,12 +554,20 @@ def mark_first_message_for_title(room_id: str, user_id: str) -> bool:
     existing = messages_coll.count_documents({"room_id": room_id, "sender_id": user_id})
     if existing > 1:
         return False
-    ai_rooms_coll.update_one(
-        {"room_id": room_id},
+    result = ai_rooms_coll.update_one(
+        {
+            "room_id": room_id,
+            "user_id": user_id,
+            "$or": [
+                {"needs_title": True},
+                {"title": None},
+                {"title": {"$regex": r"^\s*$"}},
+            ],
+        },
         {"$set": {"needs_title": True, "updated_at": time.time()}},
         upsert=False,
     )
-    return True
+    return bool(getattr(result, "matched_count", 0))
 
 
 # --- helpers ---

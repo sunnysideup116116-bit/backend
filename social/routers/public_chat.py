@@ -49,7 +49,7 @@ from services.chat_service import (
     save_system_message_once,
 )
 from services.ai_room_service import (
-    ensure_room_title,
+    queue_room_title,
     get_room as get_ai_room,
     mark_first_message_for_title,
 )
@@ -527,12 +527,7 @@ def _run_public_stream_turn(
         and req.ai_room_id
         and mark_first_message_for_title(room_id, req.user_id)
     ):
-        threading.Thread(
-            target=ensure_room_title,
-            args=(room_id, req.user_id, request_message),
-            name="ayue-room-title",
-            daemon=True,
-        ).start()
+        queue_room_title(room_id, req.user_id, request_message)
     profiles_coll.update_one(
         {"user_id": req.user_id}, {"$set": {"last_user_activity_at": time.time()}}, upsert=True,
     )
@@ -753,12 +748,7 @@ def direct_chat(
             and req.ai_room_id
             and mark_first_message_for_title(room_id, req.user_id)
         ):
-            threading.Thread(
-                target=ensure_room_title,
-                args=(room_id, req.user_id, request_message),
-                name="ayue-room-title",
-                daemon=True,
-            ).start()
+            queue_room_title(room_id, req.user_id, request_message)
         # Owner activity is tracked independently from the legacy fixed
         # frequency scheduler. Follow-up candidates are proposed by the
         # background Profile task from this persisted source message.
