@@ -11,7 +11,9 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-from matchmaker_agent.concept_identity import HARD_DURABLE_MEMORY_LIMIT
+from matchmaker_agent.concept_identity import (
+    HARD_DURABLE_MEMORY_LIMIT, MAX_PREFERENCE_TEXT_CHARS, MAX_PREFERENCE_EVIDENCE_CHARS,
+)
 
 
 RecentContextAction = Literal["update", "clear", "none"]
@@ -52,11 +54,13 @@ class DurableMemoryCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     key: str
-    label_zh_tw: str
+    # This is the full semantic proposal, not a UI label. Identity and display
+    # metadata are server-owned and cannot be supplied by the extractor.
+    label_zh_tw: str = Field(min_length=1, max_length=MAX_PREFERENCE_TEXT_CHARS)
     stance: Literal["like", "dislike", "require", "avoid"]
     category: Literal["lifestyle", "habit", "personality", "relationship", "activity"]
     confidence: float = Field(ge=0.0, le=1.0)
-    evidence_span: str
+    evidence_span: str = Field(min_length=1, max_length=MAX_PREFERENCE_EVIDENCE_CHARS)
     subject: Literal["owner"]
     reason_code: str = ""
 

@@ -1,19 +1,29 @@
-"""Synthetic evidence for current truncation; NOT the desired future contract.
+"""Frozen synthetic evidence for historical v1 truncation, not the v2 contract.
 
-These tests intentionally pin the existing loss/collision behavior. A future,
-separately reviewed identity migration must replace these evidence assertions
-with its new contract, rather than treating truncation as a feature to retain.
+Keep the original assertions/labels against the frozen P0 implementation. The
+new v2 contract has separate collision/fidelity tests; do not require current
+runtime code to reproduce historical loss just to preserve this evidence.
 No service imports, dotenv, provider calls or database access are needed.
 """
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import sys
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run_readiness import canonical_module
+def canonical_module():
+    """Test-only snapshot from main@62da19c, never a runtime fallback."""
+    path = Path(__file__).resolve().parents[2] / "fixtures" / "concept_identity_p0.py"
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == (
+        "9a7616ea55fdc523274d730a417b905e88ad851b29ac0c689727974eebe279d7"
+    )
+    spec = importlib.util.spec_from_file_location("frozen_r32c_v1_identity", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.mark.parametrize("text, lost", [

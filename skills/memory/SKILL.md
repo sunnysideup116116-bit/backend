@@ -1,7 +1,7 @@
 ---
 name: memory
 description: Extract an owner's durable, non-sensitive social preferences.
-version: 3
+version: 4
 ---
 
 # Memory
@@ -23,3 +23,11 @@ becomes three candidates. Do not split descriptive noun phrases: `適合讀書�
 is one concept. Keys are proposals only; the server canonicalizes identity.
 Respect the per-message candidate limit supplied in the extraction prompt; the
 server also enforces its configurable limit and a hard resource ceiling.
+
+`label_zh_tw` is a full bounded semantic source, not a display summary. Preserve
+qualifiers, exclusions, role, accessibility, and broad/narrow distinctions. The
+server rejects text above its authoritative semantic bound instead of storing a
+prefix. Evidence spans must be complete owner substrings within 160 characters;
+do not truncate a longer proposed span. The server creates `semantic_text`, a
+separate shortened `display_label`, the versioned canonical key, and integrity
+metadata. Never generate identity from a shortened display label or a prior key.

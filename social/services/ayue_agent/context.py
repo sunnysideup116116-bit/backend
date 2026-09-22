@@ -324,9 +324,11 @@ def build_public_context(ctx: AgentTurnContext) -> dict[str, Any]:
             "declined_by_other": bool(decision.get("actor") and decision.get("actor") != ctx.user_id),
             "reason_available": False,
         }
-    preferences = [_clean_text(text, 80) for text in preference_wording(
+    # The owner projection already validates complete bounded semantic text
+    # and limits the item count; a display prefix would lose constraints.
+    preferences = preference_wording(
         profile.get("profile_memory_preview"), owner_id=ctx.user_id,
-    )]
+    )
     return {
         "recent_messages": history,
         "previous_assistant_message": previous_assistant,
@@ -428,9 +430,9 @@ def build_public_agent_turn_context(ctx: AgentTurnContext, *, clock: TurnClockV1
     if recent_context_draft and now - float(recent_context_draft.get("created_at", 0) or 0) > RECENT_CONTEXT_DRAFT_TTL_SECONDS:
         # Context assembly is read-only, including expired auxiliary drafts.
         recent_context_draft = None
-    memories = [_clean_text(text, 80) for text in preference_wording(
+    memories = preference_wording(
         profile.get("profile_memory_preview"), owner_id=ctx.user_id,
-    )]
+    )
     mentioned_ids, validation_overflow = validated_mentioned_contact_ids(ctx.user_id, ctx.mentioned_ids)
     owner_relationship_memories: list[dict[str, Any]] = []
     focused_match, focused_authority = _focused_match_projection(ctx)

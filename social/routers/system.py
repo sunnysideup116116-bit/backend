@@ -691,7 +691,7 @@ def profile_memory_action(req: ProfileMemoryActionRequest):
     try:
         return apply_memory_action(req.user_id, req.key, req.action, req.value)
     except MemoryWriteError as exc:
-        raise HTTPException(status_code=503, detail={
+        raise HTTPException(status_code=503 if exc.retryable else 422, detail={
             "code": exc.error_code,
             "message": "記憶設定暫時無法更新，請稍後再試。",
         }) from exc
@@ -702,26 +702,28 @@ def add_profile_memory(req: ProfileMemoryAddRequest):
     from services.memory_service import (
         MemoryWriteError,
         apply_profile_memory_proposals,
-        normalize_memory_item,
     )
+    from matchmaker_agent.concept_identity import PreferenceTextError, canonicalize_fresh_concept
 
-    normalized = normalize_memory_item({
-        "label": normalize_zh_tw(req.label, max_length=40),
-    }).get("label", "")
-    if not normalized:
+    # Preserve the existing manual-input Traditional Chinese contract without
+    # the old 40-character semantic truncation.
+    try:
+        identity = canonicalize_fresh_concept(req.label)
+    except PreferenceTextError as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": exc.code,
+            "message": "這則記憶內容無法完整保存，請縮短後再試。",
+        }) from None
+    if not identity:
         raise HTTPException(status_code=422, detail={
             "code": "memory_label_invalid",
             "message": "這則記憶內容無法保存。",
         })
-    key = "voice_" + hashlib.sha256(
-        f"{req.stance}:{normalized.lower()}".encode("utf-8"),
-    ).hexdigest()[:16]
     try:
         learned = apply_profile_memory_proposals(
             req.user_id,
             [{
-                "key": key,
-                "label": normalized,
+                **identity.as_dict(),
                 "stance": req.stance,
                 "category": "preference",
                 "confidence": 1.0,
@@ -730,7 +732,7 @@ def add_profile_memory(req: ProfileMemoryAddRequest):
             f"voice-memory:{req.user_id}:{req.request_id}",
         )
     except MemoryWriteError as exc:
-        raise HTTPException(status_code=503, detail={
+        raise HTTPException(status_code=503 if exc.retryable else 422, detail={
             "code": exc.error_code,
             "message": "阿月記憶暫時無法新增，請稍後再試。",
         }) from exc

@@ -19,7 +19,8 @@ from pymongo.errors import DuplicateKeyError
 from database import db, matches_coll, profiles_coll
 from services.mediator_event_service import queue_mediator_event
 from services.proposal_namespace import RELATIONSHIP_MATCH_NAMESPACE
-from services.match_search_context import safe_search_context
+from services.match_search_context import safe_search_context, validate_persisted_search_context
+from matchmaker_agent.concept_identity import PreferenceTextError
 
 
 MATCH_SEARCH_JOBS = db["match_search_jobs"]
@@ -78,6 +79,7 @@ _FAILURE_MESSAGES = {
     "vector_search_unavailable": "我目前無法讀取候選資料，請稍後再試。",
     "preference_graph_unavailable": "我目前無法讀取偏好候選資料，請稍後再試。",
     "preference_graph_invalid_response": "偏好候選資料不完整，這次搜尋沒有完成。",
+    "preference_search_reconfirmation_required": "這次偏好搜尋的完整條件無法驗證，請重新提供偏好並確認搜尋。",
     "semantic_readiness_unconfirmed": "語意偏好搜尋尚未通過向量相容性檢查，這次搜尋沒有完成。",
     "semantic_index_unavailable": "語意偏好索引目前尚未就緒，請稍後再試。",
     "semantic_graph_unavailable": "目前無法讀取語意偏好候選資料，請稍後再試。",
@@ -754,11 +756,18 @@ def run_one_match_search_job() -> bool:
         # candidate pipeline, quota reservation and duplicate insert.
         return True
     try:
+        # A committed checkpoint above only reconciles an existing proposal.
+        # Before any NEW selection/quota work, require intact persisted v2
+        # preference source. Never feed a legacy prefix to the fresh sanitizer.
+        try:
+            replay_context = validate_persisted_search_context(job.get("search_context"))
+        except PreferenceTextError as exc:
+            raise MatchSearchPipelineError(exc.code, "preference_input") from None
         pipeline_kwargs = {
             "report_progress": lambda step: _report_progress(job, step),
             "can_commit": lambda: _job_is_current(job),
             "search_job_id": str(job.get("job_id") or ""),
-            "search_context": dict(job.get("search_context") or {}),
+            "search_context": replay_context,
         }
         if str(job.get("origin_room_id") or "").strip():
             pipeline_kwargs["origin_room_id"] = str(job.get("origin_room_id") or "")[:240]

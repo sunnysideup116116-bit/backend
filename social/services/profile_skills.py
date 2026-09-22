@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from bson.objectid import ObjectId
 from pymongo.errors import DuplicateKeyError
+from pydantic import ValidationError
 
 from database import db, profiles_coll, messages_coll
 from services.ai_service import generate_chat_completion, get_embedding
@@ -35,9 +36,16 @@ from services.proactive_followup_service import (
 )
 from services.skill_loader import load_profile_skill
 from matchmaker_agent.concept_identity import (
+    MAX_PREFERENCE_TEXT_CHARS,
+    MAX_PROFILE_SOURCE_CHARS,
+    MAX_PREFERENCE_EVIDENCE_CHARS,
+    PreferenceTextError,
     canonicalize_concept,
     durable_memory_limit,
     has_mixed_preference_polarity,
+    normalize_preference_text,
+    normalize_fresh_preference_text,
+    canonicalize_fresh_concept,
     split_explicit_preference_enumeration,
 )
 
@@ -354,12 +362,19 @@ def _confidence(value: Any) -> float:
 
 
 def _valid_evidence_span(value: Any, owner_message: str) -> str:
-    span = _clean(value, 160)
+    # A prefix is not the evidence the extractor actually proposed.
+    try:
+        span = normalize_fresh_preference_text(value, max_length=MAX_PREFERENCE_EVIDENCE_CHARS)
+    except PreferenceTextError:
+        return ""
     return span if span and span in owner_message else ""
 
 
 def _validate_memory(item: dict[str, Any], owner_message: str) -> tuple[dict[str, Any] | None, str]:
-    label = _clean(item.get("label_zh_tw") or item.get("label"), 40)
+    try:
+        label = normalize_fresh_preference_text(item.get("semantic_text") or item.get("label_zh_tw") or item.get("label"))
+    except PreferenceTextError as exc:
+        return None, exc.code
     stance = str(item.get("stance", "")).strip()
     category = str(item.get("category", "lifestyle")).strip()[:30]
     confidence = _confidence(item.get("confidence"))
@@ -383,7 +398,7 @@ def _validate_memory(item: dict[str, Any], owner_message: str) -> tuple[dict[str
         return None, "invalid_evidence_span"
     if item.get("subject") != "owner":
         return None, "not_owner_attribution"
-    return {"key": identity.key, "label": identity.label, "stance": stance, "category": category,
+    return {**identity.as_dict(), "stance": stance, "category": category,
             "confidence": confidence, "evidence_span": evidence_span,
             "reason_code": str(item.get("reason_code") or "accepted")[:60]}, "accepted"
 
@@ -401,22 +416,23 @@ def _atomic_memory_candidates(
         )
         if atoms:
             for atom in atoms:
-                identity = canonicalize_concept(atom)
+                identity = canonicalize_fresh_concept(atom)
                 if not identity or atom not in owner_message:
                     continue
                 output.setdefault(identity.key, {
                     **candidate,
-                    "key": identity.key,
-                    "label": identity.label,
+                    **identity.as_dict(),
                     "evidence_span": atom,
                 })
             continue
         identity = canonicalize_concept(candidate.get("label"), candidate.get("key"))
         if identity:
             output.setdefault(identity.key, {
-                **candidate, "key": identity.key, "label": identity.label,
+                **candidate, **identity.as_dict(),
             })
-    return list(output.values())[:durable_memory_limit()]
+    if len(output) > durable_memory_limit():
+        raise PreferenceTextError("memory_limit_exceeded")
+    return list(output.values())
 
 
 def _validated_recent_proposal(raw_recent: Any, message: str, plan_id: str | None) -> tuple[dict[str, Any], bool]:
@@ -525,12 +541,24 @@ def analyze_profile_message(
     Continuity may use a bounded typed episode, never raw conversation text.
     """
     del previous_context
-    message = _clean(message, 800)
+    # Check the complete owner message, including a possible late opt-out or
+    # protected attribute. Reject an oversized operation instead of extracting
+    # a seemingly safe prefix and silently losing its qualifiers.
+    message = str(message or "")
     blank = {"should_update": False, "confidence": 0.0, "activity": None, "destination": None,
              "timing": None, "companion_intent": None, "temporal_status": None, "fields": {}, "message_kind": "other",
              "summary_zh_tw": "", "reason_code": "skipped", "plan_id": plan_id or "",
              "episode_relation": "unrelated", "active_episode_id": ""}
     if not message or NO_STORE_RE.search(message) or contains_internal_identifier(message):
+        return {"recent_context": {**blank, "reason_code": "blocked_input"}, "memories": [], "follow_up": None, "memory_codes": ["blocked_input"], "policy_versions": {}, "contract": {}}
+    if contains_protected_content(message):
+        return {"recent_context": {**blank, "reason_code": "protected_attribute"}, "memories": [], "follow_up": None, "memory_codes": ["protected_attribute"], "policy_versions": {}, "contract": {}}
+    try:
+        message = normalize_fresh_preference_text(message, max_length=MAX_PROFILE_SOURCE_CHARS)
+    except PreferenceTextError as exc:
+        code = "owner_message_too_long" if exc.code == "preference_text_too_long" else exc.code
+        return {"recent_context": {**blank, "reason_code": code}, "memories": [], "follow_up": None, "memory_codes": [code], "policy_versions": {}, "contract": {}}
+    if NO_STORE_RE.search(message) or contains_internal_identifier(message):
         return {"recent_context": {**blank, "reason_code": "blocked_input"}, "memories": [], "follow_up": None, "memory_codes": ["blocked_input"], "policy_versions": {}, "contract": {}}
     if contains_protected_content(message):
         return {"recent_context": {**blank, "reason_code": "protected_attribute"}, "memories": [], "follow_up": None, "memory_codes": ["protected_attribute"], "policy_versions": {}, "contract": {}}
@@ -579,7 +607,7 @@ def analyze_profile_message(
 {memory_skill['instructions']}
 
 請輸出 ProfileExtractionDecision JSON。recent_context.action 必須為 update、clear 或 none。episode_relation 必須為 continue、new 或 unrelated：本句是在補充／修正 active episode 時用 continue，開始不同活動時用 new，無關時用 unrelated。短句沒有時間詞也能延續；不確定時用 unrelated，禁止硬合併。每個欄位都要有 value、evidence_span、confidence、subject；subject 只能是 owner。只有確實描述本人現實活動時才 update；訊息可同時包含找人要求，但只擷取本人活動，絕不把找人、配對、提案或等待回覆寫入欄位。時間詞（例如今天、下週）是活動的時間欄位，不是拒絕理由。若提到他人，但同時清楚表達「我喜歡／不喜歡這種類型」，只能提出本人偏好記憶，不能儲存他人的特徵。每個 memories item 只能表示一個 atomic concept；本人明確列舉數個獨立偏好時要拆成多個 items，描述性名詞片語仍保持一個。memories 最多 {durable_memory_limit()} 筆。
-不得自行杜撰摘要。欄位與記憶標籤使用繁體中文；每個 evidence_span 必須是原訊息的連續子字串。
+不得自行杜撰摘要。欄位與記憶標籤使用繁體中文；每個 evidence_span 必須是原訊息的連續子字串。label_zh_tw 是完整偏好語意而非顯示摘要，最多 {MAX_PREFERENCE_TEXT_CHARS} 字；不得省略限制、角色、否定或活動方式。evidence_span 最多 160 字，超限不可截取前綴冒充完整 evidence。
 
 待追問只針對本人有明確後續的生活活動或計畫。已有候選使用 existing_slot=1..3 做 update 或 close，不要重複建立；建立時必須有 topic、question_goal、evidence_span、confidence>=0.90、subject=owner。question_goal 只描述中性的後續確認，不得預設活動成功。行事曆、日曆、測驗、配對、他人資料與單純偏好不建立候選；沒有合適候選時 action=none。
 現有待追問候選（只有安全摘要，不含 ID）：{json.dumps(safe_follow_up_candidates, ensure_ascii=False)}
@@ -592,6 +620,20 @@ follow_up 欄位：{{"action":"create|update|close|none","existing_slot":null,"t
     try:
         data = json.loads(generate_chat_completion(prompt, temperature=0, json_output=True).content)
         contract = ProfileExtractionDecision.model_validate(data)
+        # NFKC can expand a raw string. Validate every semantic source before
+        # any accepted siblings or recent-context effects can escape.
+        for item in contract.memories:
+            normalize_fresh_preference_text(item.label_zh_tw)
+    except PreferenceTextError as exc:
+        return {"recent_context": {**blank, "reason_code": exc.code}, "memories": [], "follow_up": None, "memory_codes": [exc.code], "policy_versions": {"recent-context": recent_skill["version"], "memory": memory_skill["version"]}, "contract": {}}
+    except ValidationError as exc:
+        permanent_limit = any(
+            error.get("loc", (None,))[0] == "memories"
+            and error.get("type") in {"string_too_long", "too_long"}
+            for error in exc.errors(include_input=False)
+        )
+        code = "memory_contract_limit_rejected" if permanent_limit else "model_ValidationError"
+        return {"recent_context": {**blank, "reason_code": code}, "memories": [], "follow_up": None, "memory_codes": [code], "policy_versions": {"recent-context": recent_skill["version"], "memory": memory_skill["version"]}, "contract": {}}
     except Exception as exc:
         return {"recent_context": {**blank, "reason_code": f"model_{type(exc).__name__}"}, "memories": [], "follow_up": None, "memory_codes": [f"model_{type(exc).__name__}"], "policy_versions": {"recent-context": recent_skill["version"], "memory": memory_skill["version"]}, "contract": {}}
 
@@ -606,12 +648,16 @@ follow_up 欄位：{{"action":"create|update|close|none","existing_slot":null,"t
                 retry_result["active_episode_id"] = str((safe_episode or {}).get("episode_id") or "")
                 recent = retry_result
     memories, codes = [], []
-    for item in contract.memories[:durable_memory_limit()]:
+    for item in contract.memories:
         candidate, code = _validate_memory(item.model_dump(), message)
         codes.append(code)
         if candidate:
             memories.append(candidate)
-    memories = _atomic_memory_candidates(memories, message)
+    try:
+        memories = _atomic_memory_candidates(memories, message)
+    except PreferenceTextError as exc:
+        # Never retain the valid prefix of an expanded/over-limit operation.
+        memories, codes = [], [exc.code]
     follow_up = validate_followup_proposal(contract.follow_up, message, recent)
     contract_payload = contract.model_dump()
     # Keep traces/provider output bounded to the deterministic, evidence-checked

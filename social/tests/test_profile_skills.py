@@ -260,7 +260,7 @@ class ProfileSkillsTests(unittest.TestCase):
             {(item["key"], item["label"]) for item in separate},
         )
         self.assertEqual({item["key"] for item in compound}, {
-            "k_pop", "j_pop", profile_skills.canonicalize_concept("西洋音樂").key,
+            *(profile_skills.canonicalize_concept(label).key for label in ("K-pop", "J-pop", "西洋音樂")),
         })
 
     def test_memory_alias_is_canonicalized_and_quiet_cafe_stays_atomic(self):
@@ -273,7 +273,7 @@ class ProfileSkillsTests(unittest.TestCase):
         ], recent=False, confidence=0.0)
         with patch("services.profile_skills.generate_chat_completion", return_value=payload):
             memories = analyze_profile_message("我喜歡 Kpop，也喜歡適合讀書的安靜咖啡廳")["memories"]
-        self.assertEqual(memories[0]["key"], "k_pop")
+        self.assertEqual(memories[0]["key"], profile_skills.canonicalize_concept("K-pop").key)
         self.assertEqual(memories[0]["label"], "K-pop")
         self.assertEqual(len(memories), 2)
         self.assertEqual(memories[1]["label"], "適合讀書的安靜咖啡廳")
@@ -593,7 +593,7 @@ class ProfileSkillsTests(unittest.TestCase):
     def test_language_normalization_and_skill_packs(self):
         self.assertEqual(normalize_zh_tw("用户想去日本，等待回复约会"), "使用者想去日本,等待回覆約會")
         self.assertEqual(memory_summary([{"stance": "like", "label": "户外活动"}]), "喜歡戶外活動")
-        self.assertEqual(load_profile_skill("memory")["version"], "3")
+        self.assertEqual(load_profile_skill("memory")["version"], "4")
         self.assertEqual(load_profile_skill("recent-context")["name"], "recent-context")
 
     def test_profile_skill_rollout_and_registry(self):

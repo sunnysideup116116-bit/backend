@@ -11,7 +11,7 @@ truth for profiles, recent context, workflow state, and preference evidence. Act
 | Node | Properties | Purpose |
 | --- | --- | --- |
 | `User` | `id` | Stable identity used to connect graph relations. |
-| `Concept` | `key`, `label`, `kind`, `embedding`, `embedded_at` | Reusable semantic concept. The 768-dimensional vector is computed once and reused. |
+| `Concept` | `key`, `label`, `kind`, `semantic_text`, `display_label`, `canonicalization_version`, `semantic_input_hash`, `fidelity_status`, `embedding`, `embedded_at` | New durable preferences use [Identity v2](PREFERENCE_IDENTITY_V2.md): complete semantic source, separate display, 51-character digest key. Legacy/Event nodes retain their existing identity; absent version is unknown. Vectors have 768 dimensions. |
 | `Event` | `id`, `dedupe_key`, `schema_version`, `status`, `title`, `summary`, `category`, `region`, `venue`, `starts_at`, `ends_at`, `time_precision`, `session_starts`, `session_ends`, `session_precisions`, `session_count`, `expires_at`, `source_url`, `source_name`, `source_tier`, `first_seen_at`, `last_seen_at` | Time-limited, verified public activity. Multi-session times use parallel primitive arrays rather than extra nodes. |
 
 `MemoryObservation {message_id, owner_user_id, created_at}` is the transactional idempotency marker for memory writes; it is committed together with Concept relations. `Concept.kind` classifies activity/interest/partner_trait etc.; PREFERS/AVOIDS encode direction. The App displays prefer/avoid, not kind.
@@ -48,7 +48,7 @@ not user profile storage.
 ## Rules
 
 1. Active PREFERS/AVOIDS edges do not duplicate preference evidence metadata. MEMORY_DISABLED stores only the restore metadata listed above; CURRENTLY_WANTS and Event cache edges retain their documented bounded properties.
-2. Disabling removes the active edge, records an owner-scoped MEMORY_DISABLED marker and updates Mongo lifecycle metadata. Restore recreates the original relation (CURRENTLY_WANTS only if unexpired); correction moves only this owner's edge, never edits another owner's shared Concept.
+2. Disabling removes the active edge, records an owner-scoped MEMORY_DISABLED marker and updates Mongo lifecycle metadata. Restore recreates the original relation (CURRENTLY_WANTS only if unexpired); verified v2 correction moves only this owner's edge, never edits another owner's shared Concept. Unverified legacy correction requires reconfirmation; no implicit re-key or ownership transfer.
 3. Raw conversation text and the full recent-context document never enter
    Neo4j. A `CURRENTLY_WANTS` edge contains only `expires_at`.
 4. Event signals reuse `Concept`; separate `Tag`, `Vibe`, and `Category` node
@@ -59,10 +59,12 @@ not user profile storage.
    preserved nodes. A blanket `MATCH (n) DETACH DELETE n` is forbidden.
 7. A match decline creates `AVOIDS` only when the owner explicitly selects
    `decline_reason_options` and confirms that the reasons may be recorded. The
-   successful match CAS happens first; the bounded `/api/feedback` normalizer
-   then reuses `/api/memory/apply`. Decline without recording, cancellation,
+   successful match CAS happens first; the bounded `/api/v2/feedback` normalizer
+   then reuses `/api/v2/memory/apply`. Decline without recording, cancellation,
    empty reasons, stale decisions, and inferred counterparty traits never write
    preference edges.
+
+Complete v2 source and hashes are verified at write/read/vector projection boundaries; an old worker cannot overwrite source from a shortened label. `profile_memory_preview` is a cache, not proof of an original legacy owner assertion. Normal extracted memory is Graph-owned; explicit feedback additionally writes verified Mongo `preference_facts`. The optional legacy exact bridge only reads independently verified owner-assertion fields and does not populate them. See [read policy and rollout risks](PREFERENCE_IDENTITY_V2.md#exact-read-and-legacy-policy).
 
 ## Event Ingestion V1
 

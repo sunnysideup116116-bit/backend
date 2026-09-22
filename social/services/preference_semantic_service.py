@@ -236,6 +236,9 @@ def retrieve_semantic_preference_candidates(
     payload = {
         "requester_user_id": str(requester_user_id)[:128],
         "topic": identity.label,
+        **{field: identity.as_dict()[field] for field in (
+            "canonical_key", "canonicalization_version", "semantic_text", "semantic_input_hash",
+        )},
         "embedding_model": GOOGLE_EMBEDDING_MODEL,
         "excluded_user_ids": excluded,
         "neighbor_limit": config["neighbor_limit"],

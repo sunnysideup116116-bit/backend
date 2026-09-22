@@ -13,7 +13,7 @@ from bson.objectid import ObjectId
 
 from database import db, messages_coll
 from services.message_use_service import is_reusable_for_profile
-from matchmaker_agent.concept_identity import durable_memory_limit
+from matchmaker_agent.concept_identity import stored_concept_identity
 
 
 MEMORY_OUTBOX = db["profile_memory_outbox"]
@@ -73,9 +73,9 @@ def _claim_one(*, now: float | None = None) -> dict[str, Any] | None:
     )
 
 
-def _finish_failure(record: dict[str, Any], error_code: str, *, now: float) -> None:
+def _finish_failure(record: dict[str, Any], error_code: str, *, now: float, retryable: bool = True) -> None:
     attempts = max(1, int(record.get("attempt_count", 1) or 1))
-    terminal = attempts >= MAX_ATTEMPTS
+    terminal = not retryable or attempts >= MAX_ATTEMPTS
     delay = min(3600.0, 30.0 * (2 ** min(attempts - 1, 7)))
     update: dict[str, Any] = {"$set": {
         "status": "failed" if terminal else "pending",
@@ -161,15 +161,18 @@ def process_memory_outbox_once(limit: int = 3) -> dict[str, int]:
                 from services.registration_graph_service import process_registration_job
                 process_registration_job(record)
             else:
+                memories = list(record.get("memories") or [])
+                if any(not stored_concept_identity(item) for item in memories):
+                    raise MemoryWriteError("legacy_unverified_memory_proposal", retryable=False)
                 apply_profile_memory_proposals(
                     str(record.get("user_id") or ""),
-                    list(record.get("memories") or [])[:durable_memory_limit()],
+                    memories,
                     str(record.get("surface") or "outbox_retry")[:40],
                     str(record.get("message_id")) if record.get("message_id") else None,
                     str(record.get("match_id")) if record.get("match_id") else None,
                 )
         except MemoryWriteError as exc:
-            _finish_failure(record, exc.error_code, now=time.time())
+            _finish_failure(record, exc.error_code, now=time.time(), retryable=exc.retryable)
             failed += 1
             continue
         except Exception as exc:

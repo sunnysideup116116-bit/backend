@@ -21,7 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "matchmaker_agent"))
 
 from concept_identity import (  # noqa: E402
-    canonicalize_concept,
+    canonicalize_concept_v1 as canonicalize_concept,
+    PreferenceTextError,
     split_compound_concept_label,
 )
 
@@ -29,7 +30,11 @@ from concept_identity import (  # noqa: E402
 def proposal_for_row(row: dict) -> dict:
     old_key = str(row.get("key") or "")
     old_label = str(row.get("label") or old_key)[:80]
-    atoms = split_compound_concept_label(old_label)
+    try:
+        atoms = split_compound_concept_label(old_label)
+    except PreferenceTextError:
+        # This historical audit remains v1/read-only, never a v2 migration.
+        atoms = []
     proposed = []
     for atom in atoms:
         identity = canonicalize_concept(atom)

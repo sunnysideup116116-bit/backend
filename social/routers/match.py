@@ -632,13 +632,25 @@ def _deep_profile_values(profile):
     return values
 
 
+class PreferenceStances(dict):
+    """Bounded comparison view; unknown legacy keys are not positive evidence."""
+
+    def __init__(self):
+        super().__init__()
+        self.unverified_legacy: dict[str, set[str]] = {}
+
+
 def _trait_stances(user_id: str) -> dict[str, set[str]]:
-    stances: dict[str, set[str]] = {}
+    from matchmaker_agent.concept_identity import stored_concept_identity, verified_legacy_identity
+    stances = PreferenceStances()
     for item in get_user_graph_memories(user_id, 20):
-        key = str(item.get("key") or "").strip()
+        identity = stored_concept_identity(item) or verified_legacy_identity(item)
+        key = identity.key if identity else str(item.get("key") or "").strip()
         stance = str(item.get("stance") or "").strip()
         if key and stance:
             stances.setdefault(key, set()).add(stance)
+            if identity is None:
+                stances.unverified_legacy.setdefault(key, set()).add(stance)
     return stances
 
 
@@ -675,6 +687,18 @@ def candidate_qualification(
     search_context = safe_search_context(search_context)
     target_stances = target_stances if target_stances is not None else _trait_stances(target.get("user_id"))
     candidate_stances = candidate_stances if candidate_stances is not None else _trait_stances(candidate.get("user_id"))
+    target_unknown = getattr(target_stances, "unverified_legacy", {})
+    candidate_unknown = getattr(candidate_stances, "unverified_legacy", {})
+    # Retain all old same-key negative exclusions. For a mixed-version stance
+    # comparison, missing owner proof is not evidence of "no conflict".
+    legacy_conflict_indeterminate = False
+    for unknown, opposite in ((target_unknown, candidate_stances), (candidate_unknown, target_stances)):
+        known_opposite = [v for k, v in opposite.items() if k not in getattr(opposite, "unverified_legacy", {})]
+        if (any({"avoid", "dislike"} & v for v in unknown.values())
+                and any({"like", "require"} & v for v in known_opposite)) or (
+                any({"like", "require"} & v for v in unknown.values())
+                and any({"avoid", "dislike"} & v for v in known_opposite)):
+            legacy_conflict_indeterminate = True
     hard_conflicts = []
     for left, right in ((target_stances, candidate_stances), (candidate_stances, target_stances)):
         for key, stances in left.items():
@@ -684,6 +708,7 @@ def candidate_qualification(
         key for key in target_stances.keys() & candidate_stances.keys()
         if ({"like", "require"} & target_stances[key])
         and ({"like", "require"} & candidate_stances[key])
+        and key not in target_unknown and key not in candidate_unknown
     )
     target_values = _deep_profile_values(target.get("deep_profile", {}))
     candidate_values = _deep_profile_values(candidate.get("deep_profile", {}))
@@ -712,6 +737,7 @@ def candidate_qualification(
         search_intent == "preference"
         and preference_key
         and {"like", "require"} & candidate_stances.get(preference_key, set())
+        and preference_key not in candidate_unknown
     )
     if candidate_has_requested_preference:
         strong_reason_codes.append("requested_preference")
@@ -730,6 +756,7 @@ def candidate_qualification(
             and concept_key != preference_key
             and math.isfinite(similarity) and minimum_similarity <= similarity <= 1.0
             and {"like", "require"} & candidate_stances.get(concept_key, set())
+            and concept_key not in candidate_unknown
         ):
             semantic_preference_evidence.append({
                 "kind": "semantic_related",
@@ -808,8 +835,9 @@ def candidate_qualification(
         char_limit=90,
     )
     return {
-        "eligible": not hard_conflicts and bool(strong_reason_codes),
+        "eligible": not hard_conflicts and not legacy_conflict_indeterminate and bool(strong_reason_codes),
         "hard_conflict_keys": sorted(set(hard_conflicts)),
+        **({"legacy_identity_status": "indeterminate_legacy_conflict"} if legacy_conflict_indeterminate else {}),
         "shared_preference_keys": shared_persistent_preferences[:8],
         "requested_preference_matched": candidate_has_requested_preference,
         "semantic_related_preference_matched": bool(semantic_preference_evidence),
@@ -853,6 +881,12 @@ def _apply_qualification_diagnostics(
     diagnostics["qualification_reason_codes"]["hard_conflict"] = sum(
         1 for item in qualification_by_id.values() if item.get("hard_conflict_keys")
     )
+    legacy_rejections = sum(
+        item.get("legacy_identity_status") == "indeterminate_legacy_conflict"
+        for item in qualification_by_id.values()
+    )
+    if legacy_rejections:
+        diagnostics["qualification_reason_codes"]["indeterminate_legacy_conflict"] = legacy_rejections
     diagnostics["qualification_reason_codes"]["insufficient_common_ground"] = sum(
         1 for item in qualification_by_id.values()
         if not item.get("hard_conflict_keys") and not item.get("strong_reason_codes")
@@ -909,6 +943,8 @@ def build_validated_match_explanation(
     search_context: dict | None = None,
 ):
     """Build user-visible scores and reasons only from owner-bound facts."""
+    from matchmaker_agent.concept_identity import stored_concept_identity, verified_legacy_identity
+
     search_context = safe_search_context(search_context)
     invitation_topic = str(search_context.get("invitation_topic") or "").strip()
     preference_topic = str(search_context.get("normalized_topic") or "").strip() \
@@ -917,12 +953,17 @@ def build_validated_match_explanation(
     target_id, candidate_id = target.get("user_id"), candidate.get("user_id")
     target_graph = get_user_graph_memories(target_id, 20)
     candidate_graph = get_user_graph_memories(candidate_id, 20)
-    target_traits = {
-        (item.get("key"), item.get("stance")): item for item in target_graph if item.get("key")
-    }
-    candidate_traits = {
-        (item.get("key"), item.get("stance")): item for item in candidate_graph if item.get("key")
-    }
+    # Qualification and user-facing reasons must share the identity-proof
+    # boundary. Equal legacy prefixes are not confirmed common preferences.
+    # This is comparison-only: it neither re-keys nor mutates stored rows.
+    target_traits, candidate_traits = {}, {}
+    for rows, traits in ((target_graph, target_traits), (candidate_graph, candidate_traits)):
+        for item in rows:
+            identity = stored_concept_identity(item) or verified_legacy_identity(item)
+            if identity:
+                traits[(identity.key, item.get("stance"))] = {
+                    **item, "key": identity.key, "label": identity.display_label,
+                }
     shared_traits = [
         (target_traits[key], candidate_traits[key])
         for key in target_traits.keys() & candidate_traits.keys()
@@ -1395,6 +1436,7 @@ def _friend_intro_entry(
     search_context: dict | None = None,
     requester_id: str = "",
     auto_invite: bool = False,
+    requested_preference_verified: bool = False,
 ) -> dict:
     """Create one V4 projection from one recipient's point of view.
 
@@ -1416,7 +1458,7 @@ def _friend_intro_entry(
     search_context = safe_search_context(search_context)
     invitation_topic = str(search_context.get("invitation_topic") or "").strip()
     preference_topic = str(search_context.get("normalized_topic") or "").strip() \
-        if _search_intent(search_context) == "preference" else ""
+        if _search_intent(search_context) == "preference" and requested_preference_verified else ""
     fallback = friend_intro_fallback(viewer, other, tier, style_id=style_id)
     if preference_topic:
         is_requester = viewer_id == str(requester_id or "")
@@ -1542,18 +1584,21 @@ def build_friend_intro_v4(
     tier = next((item.get("text") for item in items if item.get("kind") == "recommendation_tier"), "exploratory")
     if tier not in {"grounded", "exploratory"}:
         tier = "exploratory"
+    requested_preference_verified = any(item.get("kind") == "requested_preference" for item in items)
     projection = {
         "initiator_preview": _friend_intro_entry(
             initiator, receiver, tier, refine=refine,
             search_context=search_context,
             requester_id=str(initiator.get("user_id") or ""),
             auto_invite=auto_invite,
+            requested_preference_verified=requested_preference_verified,
         ),
         "receiver_invitation": _friend_intro_entry(
             receiver, initiator, tier, refine=refine,
             search_context=search_context,
             requester_id=str(initiator.get("user_id") or ""),
             auto_invite=auto_invite,
+            requested_preference_verified=requested_preference_verified,
         ),
     }
     # Sparse snapshots can legitimately produce the same generic sentence for

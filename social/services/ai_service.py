@@ -241,7 +241,15 @@ def get_embeddings(
     request_timeout_seconds: float | None = None,
 ) -> list[list[float]]:
     """Return one bounded provider batch for graph projection workers."""
-    safe_texts = [str(text or "")[:500] for text in list(texts or [])[:20]]
+    from matchmaker_agent.concept_identity import PreferenceTextError, normalize_preference_text
+
+    # Validate the whole batch before key selection/provider calls. A clipped
+    # prefix is not a semantic substitute for an over-limit preference.
+    if not isinstance(texts, list) or len(texts) > 20:
+        raise PreferenceTextError("invalid_embedding_batch")
+    safe_texts = [normalize_preference_text(text) for text in texts]
+    if any(not text for text in safe_texts):
+        raise PreferenceTextError("invalid_embedding_text")
     if not safe_texts:
         return []
     deadline = None

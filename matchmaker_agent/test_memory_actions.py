@@ -53,9 +53,10 @@ class MemoryActionTests(unittest.TestCase):
         self.assertIn("MERGE (u)-[:AVOIDS]->(concept)", query)
 
     def test_correct_moves_only_the_owner_relation_to_a_new_concept(self):
-        driver, _session, transaction = graph({"relation": "PREFERS"})
+        original = canonicalize_concept("Coffee")
+        driver, _session, transaction = graph({**original.as_dict(), "relation": "PREFERS"})
         request = agent_api.MemoryActionRequest(
-            user_id="owner", key="coffee", action="correct", value="安靜咖啡廳",
+            user_id="owner", key=original.key, action="correct", value="安靜咖啡廳",
         )
         with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
             result = asyncio.run(agent_api.memory_action(request))

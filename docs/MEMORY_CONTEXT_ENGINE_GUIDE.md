@@ -100,18 +100,19 @@ Saved owner message
 → profile_skills.py ProfileExtractionDecision.memories
 → typed validation
 → memory_service.apply_profile_memory_proposals
-→ port 9001 /api/memory/apply
+→ port 9001 /api/v2/memory/apply
 → Neo4j (:User)-[:PREFERS|AVOIDS|CURRENTLY_WANTS]->(:Concept)
 → Mongo profile_memory_preview read projection & realtime sync
 → context_slicer.py (user_preferences) → Synthesizer prompt
 ```
 
-- 正式 Graph 節點型別為 `Concept`（屬性 `{key, label, kind}`），關係只使用 `PREFERS`、`AVOIDS` 與 `CURRENTLY_WANTS`。`Trait`／`HAS_PREFERENCE` 只是 migration compatibility，新程式不得再產生。
+- 正式 Graph 節點型別為 `Concept`；新偏好包含完整 `semantic_text`、獨立 `display_label`、`canonicalization_version=v2` 與 source hash，`key/label/kind` 保留相容。關係只使用 `PREFERS`、`AVOIDS` 與 `CURRENTLY_WANTS`。`Trait`／`HAS_PREFERENCE` 只是 migration compatibility，新程式不得再產生。
 - 正向偏好使用 `PREFERS`；負向地雷使用 `AVOIDS`；短期意圖使用帶 `expires_at` 的 `CURRENTLY_WANTS`。
 - 每個 durable memory candidate 只表示一個 atomic concept。明確列舉可拆多筆；描述性名詞片語不可用標點或斷詞粗暴拆分。
 - 含明確正負 polarity 的單一複合 candidate fail closed；模型必須用 item-level evidence 分成獨立 candidates，避免把其中一邊的 stance 丟掉。
-- `concept_identity.py` 是 server-owned identity boundary：已知 K-pop variants 收斂成 `k_pop`／`K-pop`，未知概念使用穩定 label-derived identity；provider 提議的 key 不能直接成為 Graph identity。
-- `韓國流行音樂`／`韓流音樂` 等 semantic synonym 不在 P0 alias 表內，仍是不同 identity；semantic Concept retrieval／合併留給 P1。
+- `concept_identity.py` 是 server-owned identity boundary：[Identity v2](PREFERENCE_IDENTITY_V2.md) 以完整 bounded semantic normal form 產生 51 字元 versioned digest。K-pop deterministic aliases 收斂到相同 v2 key；`k_pop` 是舊 v1 key，不自動重寫。Provider key 與縮短 display label 都不能成為 identity source。
+- Semantic source 上限 500，超限整次拒絕、不裁切；它沿用既有 embedding resource bound，而不是宣稱 DB 最大長度。完整文字保留到 owner context／embedding。`韓國流行音樂`／`韓流音樂` 等 semantic synonym 仍是不同 identity；P1-A retrieval 仍 OFF，也永遠不因此自動合併 Concept 或建立 alias。
+- Fresh preference 共用固定 OpenCC 1.4.1／`s2twp` boundary，缺套件／版本不符 fail closed，不用 UI fallback。Stored v2 source／key／hash 只驗證、不重轉。500 是 raw Unicode codepoints 上限（正規化後也需符合），Dart voice 使用 `runes`；registration 保持獨立 120。
 - 每訊息 limit 由 `DURABLE_MEMORY_MAX_CANDIDATES_PER_MESSAGE` 統一管理（預設 6、硬上限 8），套用於 extraction、outbox、registration 與 9001 writer。
 - Mongo `profile_memory_preview`／`profile_memory_summary` 是 bounded read projection；Graph metadata 與 evidence／lifecycle 不得藉由舊 `HAS_PREFERENCE` properties 重複儲存。
 - `message_id` 是 observation idempotency key；同一 owner message 不得增加兩次 evidence count。
@@ -119,10 +120,10 @@ Saved owner message
 - Profile extraction 的 `profile_skill_runs` 以 message-id 唯一去重，保留 processing lease 與 bounded attempt state；provider 暫時失敗由 Social `profile-retry-worker` 依 30／120 秒退避最多重試三次，政策排除與未標記 source 不重試。
 - `memory_outbox_service.py` 以 Mongo lease 領取失敗寫入、指數退避並最多嘗試八次；舊資料的 `next_attempt_at=null` 與欄位不存在都視為立即可重試。成功、重複 delivery 與 terminal failed 都有明確狀態，不會重新萃取 raw chat。
 - 9001 將 `MemoryObservation` marker 與該訊息的全部 Concept edges 放在同一 Neo4j transaction；marker 不得早於 edge 單獨 commit。
-- 使用者 disable 時以 owner-scoped `MEMORY_DISABLED` 保存原 relation；restore 依原 `PREFERS`／`AVOIDS`／未過期 `CURRENTLY_WANTS` 恢復，correct 將該 owner edge 搬到新的 canonical Concept，不修改其他 owner 共用的 Concept 關係。完成後同步 Mongo projection。
+- 使用者 disable 時以 owner-scoped `MEMORY_DISABLED` 保存原 relation；restore 依原 `PREFERS`／`AVOIDS`／未過期 `CURRENTLY_WANTS` 恢復。Verified v2 correct 只修正該 owner edge；unknown legacy correction 必須重新確認，不自動搬移。完成後同步 Mongo projection；不修改其他 owner 共用的 Concept 關係。
 - 設定頁每次讀取都嘗試用 status-aware Graph snapshot 刷新 bounded Mongo projection；Graph 明確為空可清除 stale cache，Graph unavailable 才沿用 cache。
 
-舊版 `/api/memory/observe`、主服務直接 Neo4j fallback 與自由文字 extractor 已移除；`profile_skills.py → /api/memory/apply` 是唯一 owner-memory extraction/write flow。不要再新增另一個自由文字 extractor。
+舊版 `/api/memory/observe`、主服務直接 Neo4j fallback 與自由文字 extractor 已移除；`profile_skills.py → /api/v2/memory/apply` 是唯一 owner-memory extraction/write flow。不要再新增另一個自由文字 extractor。V2 mutation paths 避免新版 Social 誤寫舊 9001；舊 prepared payload 缺完整 source/version/hash 時 fail closed，不升級 legacy cache 為證據。
 
 ### 2.2.1 使用者勾選的婉拒回饋
 
@@ -137,16 +138,16 @@ Saved owner message
 使用者選擇「記錄原因並婉拒」
 → /api/match/decision 的既有 CAS 成功
 → match_action_service 的 optional feedback effect
-→ 9001 /api/feedback 的既有 normalizer（只正規化這次勾選清單）
-→ 共用 /api/memory/apply → User-[:AVOIDS]->Concept
+→ 9001 /api/v2/feedback 的既有 normalizer（只正規化這次勾選清單）
+→ 共用 /api/v2/memory/apply → User-[:AVOIDS]->Concept
 → Social upsert_preference_facts（match_feedback source + match/message evidence）
 ```
 
 - 「只婉拒，不記錄」、空清單或撤回邀請不啟動此流程；不能用對方 Big Five 或舊的 process-local feedback history 補出未勾選的偏好。
 - Client 不自行按「近期情境／興趣／個性」分類刪除選項。Normalizer 的舊 `DISLIKES_TRAIT` output 只作為相容輸入，轉成 typed `stance=avoid`；Graph 不產生 Trait／DISLIKES_TRAIT 舊模型。
 - 寫入沿用既有 memory validation，不另維護 feedback Cypher writer；單次 feedback 超過共用 runtime limit 時整次 fail closed，不分批繞過上限，也不靜默截掉後續本人已勾選原因。Request 本身另有 hard max 8。
-- `/api/feedback` 沒有勾選時回 `skipped`，有效但空的正規化結果回 `no_preferences`；正規化失敗回 502，Graph 不可用回 503，不假裝寫入成功。Feedback 失敗不撤銷已提交的 decline，也不能重送 decision 作為偏好重試。
-- API 回傳 `memories` 供 Social 寫入既有偏好 facts。畫面上的「已送出」不是 Graph 成功收據；此 optional effect 尚非 durable retry queue。
+- `/api/v2/feedback` 沒有勾選時回 `skipped`，有效但空的正規化結果回 `no_preferences`；正規化失敗回 502，Graph 不可用回 503，不假裝寫入成功。Feedback 失敗不撤銷已提交的 decline，也不能重送 decision 作為偏好重試。
+- API 回傳成功且完整 v2 metadata 驗證通過的 `memories` 才供 Social 寫入既有偏好 facts。畫面上的「已送出」不是 Graph 成功收據；此 optional effect 尚非 durable retry queue。
 
 ### 2.3 對話壓縮與延續性（Compaction 機制）
 
@@ -232,7 +233,7 @@ Context Builder 只組合安全 projection，不負責重新萃取、修正或�
 ### 2.6 已知技術債（不要沿用成新架構）
 
 - Port 8000 `memory_service.py` 不再直接連 Neo4j；owner-memory 寫入、讀取與 action 都經由 port 9001 的 canonical API。
-- 舊版 `/api/memory/observe` 與 `memory_service.py` 的 direct fallback 已刪除；新版 owner-message pipeline 只接受 `profile_skills.py` 產生的 validated proposals，再交給 `/api/memory/apply`。
+- 舊版 `/api/memory/observe` 與 `memory_service.py` 的 direct fallback 已刪除；新版 owner-message pipeline 只接受 `profile_skills.py` 產生的 validated proposals，再交給 `/api/v2/memory/apply`。
 - port 9001 memory API unavailable 時只回 bounded error／retry outbox，不得改抓主服務的 Graph credentials 或重新啟動另一條 writer。
 - `/api/clear_graph` 是 destructive demo endpoint。正式環境必須停用或加上管理者授權與明確環境 guard；任何測試或 migration 不得呼叫它清正式 Graph。
 - `/api/chat_triples` 目前可把 bounded evidence message content 寫入 Neo4j。正式化 relationship graph 前，應改成 message reference／hash 與受控 evidence projection，並提供舊資料 migration。
@@ -330,15 +331,14 @@ Context Engine 的輸出應是 provider-neutral typed bundle，而不是 prompt 
 ```
 
 正式 Graph 不再建立 `Trait` 節點或 `HAS_PREFERENCE` 關係；兩者只能存在於 migration／compatibility 邊界。
-Evidence、confidence、active state、provenance 與 lifecycle metadata 保留在 Mongo canonical records，
-Neo4j 只保留配對與 Event traversal 需要的最小 relation projection。
+Mongo 保存 profile、明確 feedback 的 `preference_facts`、workflow 與 preview；一般抽取 memory 的 active relation 由 Neo4j 擁有，不可假設每筆都有可恢復原文的 Mongo fact。新 v2 Concept 保存完整 semantic source、版本與 hash；這不是 raw chat。其他 evidence／lifecycle 仍按既有 owning service 分工保存，不建立第二個 active relation authority。
 
 可以新增 evidence reference、conflict、superseded 或 decay metadata，但：
 
 - 不保存完整 owner message；最多保存不可逆 hash、message ID 或 bounded evidence span。
 - 所有 relation 必須 owner-scoped，禁止只靠 Concept key 反查後把 A 的偏好給 B。
 - Protected／敏感屬性不可成為交友篩選記憶。
-- 使用者修正或停用記憶時，先更新 Mongo canonical state，再刪除或重建該 owner 的 Concept relation projection；不要因單一使用者操作刪除共用 Concept 節點。
+- 使用者修正或停用記憶透過 owner-scoped 9001 transaction，成功後同步 Mongo lifecycle／preview；不要因單一使用者操作刪除共用 Concept 節點，也不從舊短 label 猜原始偏好。
 - Schema migration 預設 dry-run，顯示數量與去識別化範例；review 後才 `--apply`。
 
 ### 4.2 Matchmaker 使用方式
@@ -349,6 +349,7 @@ Neo4j 只保留配對與 Event traversal 需要的最小 relation projection。
 - Hard conflict 必須在 LLM ranking 前做 deterministic qualification。
 - Generic／activity search 沒有 Graph evidence 時可維持既有 bounded ranking；explicit preference search 則以 exact canonical Graph evidence 為 retrieval 前提，Graph unavailable 明確失敗，Graph miss 回沒有候選，不得改用 recent context 猜偏好。
 - Explicit preference flow 是 `canonical Concept → bounded PREFERS user IDs → block/history/profile filters → deterministic qualification → existing small Matchmaker batches`。Graph 分支不得 full scan，也不得繞過 quota、confirmation、mutual consent 或 proposal lifecycle。
+- V2 exact 優先；legacy 僅能在獨立 owner assertion 的完整 source/hash 證據通過時 comparison-only dual-read。缺 version／prefix collision 視為 unknown，不當成 confirmed shared preference；可能跨版本矛盾採 `indeterminate_legacy_conflict` fail closed。此 patch 不建立 legacy proof、不 re-key、不搬 ownership。
 - P0 explicit preference 只支援正向 `PREFERS` exact evidence；「找不喜歡／避免 X 的人」沒有 typed search stance，必須 fail closed 而不是改走正向 Graph 或 activity branch。
 - 對外 proposal reason 只能使用已允許的安全 projection，不引用 key、ID、confidence 或 Graph 技術詞彙。
 

@@ -23,12 +23,27 @@ if hasattr(sys.stderr, "reconfigure"):
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
-from registration_graph import RegistrationProjection, project_identity, seed_registration
+from registration_graph import (
+    RegistrationProjection, project_identity, seed_registration,
+    assert_existing_preference_identities,
+)
 from concept_identity import (
     HARD_DURABLE_MEMORY_LIMIT,
+    MAX_PREFERENCE_TEXT_CHARS,
+    MAX_OWNER_MEMORY_QUERY_CHARS,
+    MAX_PREFERENCE_KEY_CHARS,
+    MAX_PREFERENCE_EVIDENCE_CHARS,
+    PreferenceTextError,
     canonicalize_concept,
+    canonicalize_fresh_concept,
+    canonicalize_concept_v1,
+    is_v2_preference_key,
     durable_memory_limit,
     has_mixed_preference_polarity,
+    normalize_preference_text,
+    normalize_fresh_preference_text,
+    stored_concept_identity,
+    verified_legacy_identity,
     split_compound_concept_label,
     split_explicit_preference_enumeration,
 )
@@ -877,55 +892,130 @@ def list_missing_concept_embeddings(limit: int = 20):
                       WHEN EXISTS { MATCH (:User)-[:CURRENTLY_WANTS]->(concept) } THEN 'activity'
                       ELSE coalesce(concept.kind, 'unknown') END AS suggested_kind
                     WHERE concept.embedding IS NULL OR size(concept.embedding) <> 768
-                    RETURN concept.key AS key, concept.label AS label, suggested_kind
+                    RETURN concept.key AS key, concept.label AS label, suggested_kind,
+                           concept.semantic_text AS semantic_text,
+                           concept.display_label AS display_label,
+                           coalesce(concept.canonicalization_version, 'legacy_unknown') AS canonicalization_version,
+                           concept.semantic_input_hash AS semantic_input_hash,
+                           concept.fidelity_status AS fidelity_status
                     ORDER BY concept.label LIMIT $limit
                 """, limit=safe_limit)
                 concepts = [dict(row) for row in rows]
+                for concept in concepts:
+                    identity = stored_concept_identity(concept)
+                    if identity:
+                        concept.update(identity.as_dict())
+                    elif concept.get("canonicalization_version") == "v2":
+                        concept["fidelity_status"] = "invalid"
         return {"status": "success", "concepts": concepts, "count": len(concepts)}
     except Exception as exc:
         print(f"[CONCEPT_EMBEDDING] pending read failed error={type(exc).__name__}")
         return {"status": "error", "concepts": [], "count": 0}
 
 
+def _validate_embedding_targets(tx, concepts):
+    """Indexed, bounded proof check before any schema/vector mutation."""
+    expected = {item["key"]: item for item in concepts}
+    if len(expected) != len(concepts):
+        raise ValueError("embedding_duplicate_key")
+    rows = list(tx.run("""
+        UNWIND $keys AS key
+        MATCH (concept:Concept {key:key})
+        RETURN concept.key AS key,concept.label AS label,
+               concept.semantic_text AS semantic_text,
+               concept.canonicalization_version AS canonicalization_version,
+               concept.semantic_input_hash AS semantic_input_hash,
+               concept.fidelity_status AS fidelity_status
+    """, keys=sorted(expected)))
+    if len(rows) != len(expected):
+        raise ValueError("embedding_identity_mismatch")
+    for row in rows:
+        item = expected.get(row.get("key"))
+        if item is None:
+            raise ValueError("embedding_identity_mismatch")
+        if item["canonicalization_version"] == "v2":
+            identity = stored_concept_identity(dict(row))
+            if (not identity or identity.semantic_text != item["label"]
+                    or identity.semantic_input_hash != item["semantic_input_hash"]):
+                raise ValueError("embedding_identity_mismatch")
+        elif row.get("canonicalization_version") == "v2" or row.get("label") != item["label"]:
+            raise ValueError("embedding_identity_mismatch")
+
+
+def _write_concept_embedding_batch(tx, concepts, now):
+    _validate_embedding_targets(tx, concepts)
+    written = tx.run("""
+        UNWIND $concepts AS item
+        MATCH (concept:Concept {key:item.key})
+        WHERE (item.canonicalization_version='v2'
+               AND concept.canonicalization_version='v2'
+               AND concept.semantic_input_hash=item.semantic_input_hash
+               AND concept.semantic_text=item.label)
+           OR (item.canonicalization_version='legacy_unknown'
+               AND coalesce(concept.canonicalization_version, '') <> 'v2'
+               AND concept.label=item.label)
+        SET concept.kind=CASE WHEN item.kind <> 'unknown' THEN item.kind
+                ELSE coalesce(concept.kind, 'unknown') END,
+            concept.embedding=item.embedding,
+            concept.embedding_source_hash=item.semantic_input_hash,
+            concept.embedding_model=item.embedding_model,
+            concept.embedding_task=item.embedding_task,
+            concept.embedded_at=$now
+        RETURN count(concept) AS written
+    """, concepts=concepts, now=now).single()
+    if not written or int(written["written"]) != len(concepts):
+        # An intervening mutation must roll back every vector in this batch.
+        raise ValueError("embedding_identity_mismatch")
+    return len(concepts)
+
+
+@app.post("/api/v2/concepts/embeddings/project")
 @app.post("/api/concepts/embeddings/project")
 def project_concept_embeddings(req: ConceptEmbeddingProjectionRequest):
     valid_kinds = {"activity", "interest", "vibe", "partner_trait", "value", "unknown"}
     clean = []
-    for item in req.concepts[:50]:
+    if len(req.concepts) > 50:
+        return {"status": "error", "embedded_count": 0, "error_code": "embedding_batch_limit_exceeded", "retryable": False}
+    for item in req.concepts:
         if not isinstance(item, dict):
-            continue
-        key = str(item.get("key") or "").strip()[:100]
-        label = re.sub(r"\s+", " ", str(item.get("label") or "").strip())[:60]
+            return {"status": "error", "embedded_count": 0, "error_code": "invalid_embedding_projection", "retryable": False}
+        key = str(item.get("key") or "").strip()
+        try:
+            label = normalize_preference_text(item.get("semantic_text") or item.get("label") or "")
+        except PreferenceTextError as exc:
+            return {"status": "error", "embedded_count": 0, "error_code": exc.code}
+        identity = stored_concept_identity(item)
+        if (is_v2_preference_key(key) or item.get("canonicalization_version") == "v2") and not identity:
+            return {"status": "error", "embedded_count": 0, "error_code": "embedding_identity_unverified"}
         kind = str(item.get("kind") or "unknown")
         vector = item.get("embedding")
-        if not key or not label or kind not in valid_kinds or not isinstance(vector, list) or len(vector) != 768:
-            continue
+        if (not key or len(key) > 100 or not label or kind not in valid_kinds
+                or not isinstance(vector, list) or len(vector) != 768):
+            return {"status": "error", "embedded_count": 0, "error_code": "invalid_embedding_projection", "retryable": False}
         try:
             embedding = [float(value) for value in vector]
         except (TypeError, ValueError):
-            continue
-        if all(math.isfinite(value) for value in embedding):
-            clean.append({"key": key, "label": label, "kind": kind, "embedding": embedding})
+            return {"status": "error", "embedded_count": 0, "error_code": "invalid_embedding_projection", "retryable": False}
+        if not all(math.isfinite(value) for value in embedding) or not any(embedding):
+            return {"status": "error", "embedded_count": 0, "error_code": "invalid_embedding_projection", "retryable": False}
+        clean.append({"key": key, "label": label, "kind": kind, "embedding": embedding,
+                          "canonicalization_version": "v2" if identity else "legacy_unknown",
+                          "semantic_input_hash": identity.semantic_input_hash if identity else "",
+                          "embedding_model": str(item.get("embedding_model") or ""),
+                          "embedding_task": str(item.get("embedding_task") or "")})
 
     URI, AUTH, DATABASE = _neo4j_config()
     try:
         with GraphDatabase.driver(URI, auth=AUTH) as driver:
             with driver.session(database=DATABASE) as session:
+                session.execute_write(_validate_embedding_targets, clean)
                 session.run("""
                     CREATE VECTOR INDEX concept_embedding_index IF NOT EXISTS
                     FOR (concept:Concept) ON (concept.embedding)
                     OPTIONS {indexConfig: {`vector.dimensions`: 768,
                         `vector.similarity_function`: 'cosine'}}
                 """).consume()
-                session.run("""
-                    UNWIND $concepts AS item
-                    MATCH (concept:Concept {key:item.key})
-                    SET concept.label=item.label,
-                        concept.kind=CASE WHEN item.kind <> 'unknown' THEN item.kind
-                            ELSE coalesce(concept.kind, 'unknown') END,
-                        concept.embedding=item.embedding,
-                        concept.embedded_at=$now
-                """, concepts=clean, now=time.time()).consume()
+                written = session.execute_write(_write_concept_embedding_batch, clean, time.time())
                 relation_counts = _refresh_semantic_event_links(session)
                 pending = session.run("""
                     MATCH (concept:Concept)
@@ -934,10 +1024,12 @@ def project_concept_embeddings(req: ConceptEmbeddingProjectionRequest):
                       AND (concept.embedding IS NULL OR size(concept.embedding) <> 768)
                     RETURN count(DISTINCT concept) AS count
                 """).single()
-        return {"status": "success", "embedded_count": len(clean),
+        return {"status": "success", "embedded_count": written,
             "pending_count": int(pending["count"] if pending else 0), **relation_counts}
     except Exception as exc:
-        print(f"[CONCEPT_EMBEDDING] projection failed error={type(exc).__name__}: {exc}")
+        if str(exc) in {"embedding_identity_mismatch", "embedding_duplicate_key"}:
+            return {"status": "error", "embedded_count": 0, "error_code": str(exc), "retryable": False}
+        print(f"[CONCEPT_EMBEDDING] projection failed error={type(exc).__name__}")
         return {"status": "error", "embedded_count": 0, "error_code": type(exc).__name__}
 
 
@@ -962,6 +1054,28 @@ class FeedbackRequest(BaseModel):
 # ???豢?靘芋??Agent ???嗅澈 (撖行銝剜?摮??鞈?摨急?撖怠? MongoDB)
 agent_memory_db = {} 
 
+
+def _grounded_feedback_identities(reasons):
+    """Ground only exact normalized selections/closed atomic enumerations."""
+    identities = {}
+    for reason in reasons:
+        source = normalize_fresh_preference_text(reason)
+        # These are UI category headers, not semantic role/action words.
+        source = re.sub(r"^(?:個性|近期情境|價值觀|興趣)\s*[:：]\s*", "", source)
+        if has_mixed_preference_polarity(source):
+            raise PreferenceTextError("feedback_mixed_polarity")
+        labels = (split_explicit_preference_enumeration(source, limit=HARD_DURABLE_MEMORY_LIMIT)
+                  or split_compound_concept_label(source, limit=HARD_DURABLE_MEMORY_LIMIT)
+                  or [source])
+        for label in labels:
+            identity = canonicalize_concept(label)
+            if identity:
+                identities[identity.key] = identity
+    if len(identities) > durable_memory_limit():
+        raise PreferenceTextError("feedback_memory_limit_exceeded")
+    return identities
+
+@app.post("/api/v2/feedback")
 @app.post("/api/feedback")
 async def receive_feedback(req: FeedbackRequest):
     """Normalize this explicit selection, then use the existing Concept writer.
@@ -973,6 +1087,12 @@ async def receive_feedback(req: FeedbackRequest):
         raise HTTPException(status_code=400, detail={"code": "invalid_feedback_action"})
     if not any(reason.strip() for reason in req.explicit_reasons):
         return {"status": "skipped", "memories": [], "message": "No reasons selected"}
+    if len(req.explicit_reasons) > durable_memory_limit():
+        raise HTTPException(status_code=422, detail={"code": "feedback_memory_limit_exceeded"})
+    try:
+        grounded = _grounded_feedback_identities(req.explicit_reasons)
+    except PreferenceTextError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code}) from None
     history_text = json.dumps({
         "action": req.action, "explicit_reasons": req.explicit_reasons,
     }, ensure_ascii=False)
@@ -993,13 +1113,22 @@ async def receive_feedback(req: FeedbackRequest):
             if not isinstance(label, str) or not label.strip():
                 raise ValueError("Missing feedback concept")
             label = label.strip()
+            identity = canonicalize_fresh_concept(label)
+            if not identity:
+                raise ValueError("Missing feedback concept")
+            if identity.key not in grounded:
+                raise PreferenceTextError("feedback_ungrounded_concept")
+            # Preserve the owner's complete normalized text, not model spelling.
+            identity = grounded[identity.key]
             memories.append({
-                "key": _concept_key(label), "label": label,
+                **identity.as_dict(),
                 "stance": "avoid" if req.action == "decline" else "like",
                 "confidence": 1.0,
             })
     except Exception as exc:
         print(f"[FEEDBACK] normalization failed: {type(exc).__name__}")
+        if isinstance(exc, PreferenceTextError) and exc.code == "feedback_ungrounded_concept":
+            raise HTTPException(status_code=502, detail={"code": exc.code}) from None
         raise HTTPException(status_code=502, detail={"code": "feedback_normalization_failed"}) from None
 
     # The canonical memory writer owns validation and PREFERS/AVOIDS writes.
@@ -1127,14 +1256,22 @@ class MemoryApplyRequest(BaseModel):
 
 class PreferenceCandidateRequest(BaseModel):
     requester_user_id: str = Field(min_length=1, max_length=128)
-    topic: str = Field(min_length=1, max_length=80)
+    topic: str = Field(min_length=1, max_length=MAX_PREFERENCE_TEXT_CHARS)
+    canonical_key: str | None = Field(default=None, max_length=MAX_PREFERENCE_KEY_CHARS)
+    canonicalization_version: str | None = Field(default=None, max_length=16)
+    semantic_text: str | None = Field(default=None, max_length=MAX_PREFERENCE_TEXT_CHARS)
+    semantic_input_hash: str | None = Field(default=None, max_length=64)
     excluded_user_ids: list[str] = Field(default_factory=list, max_length=200)
     limit: int = Field(default=20, ge=1, le=100)
 
 
 class PreferenceSemanticCandidateRequest(BaseModel):
     requester_user_id: str = Field(min_length=1, max_length=128)
-    topic: str = Field(min_length=1, max_length=80)
+    topic: str = Field(min_length=1, max_length=MAX_PREFERENCE_TEXT_CHARS)
+    canonical_key: str | None = Field(default=None, max_length=MAX_PREFERENCE_KEY_CHARS)
+    canonicalization_version: str | None = Field(default=None, max_length=16)
+    semantic_text: str | None = Field(default=None, max_length=MAX_PREFERENCE_TEXT_CHARS)
+    semantic_input_hash: str | None = Field(default=None, max_length=64)
     query_embedding: list[float] | None = Field(default=None, max_length=768)
     embedding_model: str = Field(default="", max_length=100)
     excluded_user_ids: list[str] = Field(default_factory=list, max_length=200)
@@ -1147,7 +1284,7 @@ class PreferenceSemanticCandidateRequest(BaseModel):
 
 class MemoryActionRequest(BaseModel):
     user_id: str
-    key: str
+    key: str = Field(min_length=2, max_length=MAX_PREFERENCE_KEY_CHARS)
     action: str
     value: str | None = None
 
@@ -1190,7 +1327,7 @@ async def project_current_context(req: ContextProjectionRequest):
             continue
         seen.add(normalized)
         key = str(item.get("key") or "").strip().lower()
-        if not re.fullmatch(r"[a-z][a-z0-9_]{1,50}", key):
+        if is_v2_preference_key(key) or not re.fullmatch(r"[a-z][a-z0-9_]{1,50}", key):
             key = _concept_key(label)
         clean.append({"key": key, "label": label})
 
@@ -1213,12 +1350,18 @@ async def project_current_context(req: ContextProjectionRequest):
                     existing = session.run("""
                         MATCH (c:Concept)
                         WHERE toLower(c.label)=toLower($label)
+                          AND coalesce(c.canonicalization_version, '') <> 'v2'
+                          AND NOT (c.key =~ 'v2_[0-9a-f]{48}')
                         RETURN c.key AS key LIMIT 1
                     """, label=item["label"]).single()
                     key = str(existing["key"] if existing else item["key"])
+                    if is_v2_preference_key(key):
+                        key = _concept_key(item["label"])
                     session.run("""
                         MATCH (u:User {id:$user_id})
                         MERGE (c:Concept {key:$key})
+                        WITH u,c
+                        WHERE coalesce(c.canonicalization_version, '') <> 'v2'
                         SET c.label=$label, c.kind='activity'
                         MERGE (u)-[r:CURRENTLY_WANTS]->(c)
                         SET r.expires_at=$expires_at
@@ -1280,10 +1423,24 @@ def registration_projection(req: RegistrationProjection):
         raise HTTPException(status_code=503, detail="registration_projection_unavailable") from exc
 
 
+def _preference_request_identity(req):
+    """Raw topics are fresh input; internal packets are verified without conversion."""
+    fields = ("canonical_key", "canonicalization_version", "semantic_text", "semantic_input_hash")
+    if any(getattr(req, name) is not None for name in fields):
+        identity = stored_concept_identity({name: getattr(req, name) for name in fields})
+        if not identity or req.topic != identity.semantic_text:
+            raise PreferenceTextError("preference_search_identity_mismatch")
+        return identity
+    return canonicalize_fresh_concept(req.topic)
+
+
 @app.post("/api/preferences/candidates")
 def preference_candidates(req: PreferenceCandidateRequest):
     """Return bounded internal IDs with explicit positive durable evidence."""
-    identity = canonicalize_concept(req.topic)
+    try:
+        identity = _preference_request_identity(req)
+    except PreferenceTextError as exc:
+        return {"status": "error", "error_code": exc.code, "candidate_ids": [], "retryable": False}
     if not identity:
         return {"status": "skipped", "canonical_key": "", "candidate_ids": []}
     excluded = list(dict.fromkeys(
@@ -1295,18 +1452,52 @@ def preference_candidates(req: PreferenceCandidateRequest):
     try:
         with GraphDatabase.driver(URI, auth=AUTH) as driver:
             with driver.session(database=DATABASE) as session:
-                rows = session.run("""
+                concept = session.run("""
+                    MATCH (concept:Concept {key:$key})
+                    RETURN concept.key AS key,concept.semantic_text AS semantic_text,
+                           concept.canonicalization_version AS canonicalization_version,
+                           concept.semantic_input_hash AS semantic_input_hash,
+                           concept.fidelity_status AS fidelity_status
+                """, key=identity.key).single()
+                verified = stored_concept_identity(dict(concept)) if concept else None
+                rows = []
+                if verified and verified.key == identity.key:
+                    rows = session.run("""
                     MATCH (concept:Concept {key:$key})<-[:PREFERS]-(candidate:User)
                     WHERE candidate.id <> $requester_user_id
+                      AND concept.canonicalization_version = 'v2'
+                      AND concept.semantic_input_hash = $semantic_input_hash
                     WITH candidate
                     LIMIT $limit
                     RETURN candidate.id AS candidate_id
                 """, key=identity.key, requester_user_id=req.requester_user_id,
-                     limit=req.limit)
+                     semantic_input_hash=verified.semantic_input_hash, limit=req.limit)
                 raw_candidate_ids = list(dict.fromkeys(
                     str(row["candidate_id"])
                     for row in rows if str(row.get("candidate_id") or "").strip()
                 ))
+                # Optional compatibility is owner-edge proof, never a short
+                # global label. Both branches share one hard ID budget.
+                remaining = max(0, req.limit - len(raw_candidate_ids))
+                legacy = canonicalize_concept_v1(identity.semantic_text)
+                if remaining and legacy:
+                    legacy_rows = session.run("""
+                        MATCH (concept:Concept {key:$legacy_key})<-[edge:PREFERS]-(candidate:User)
+                        WHERE candidate.id <> $requester_user_id
+                          AND coalesce(concept.canonicalization_version,'legacy_unknown') <> 'v2'
+                        WITH concept,edge,candidate LIMIT $limit
+                        RETURN candidate.id AS candidate_id,concept.key AS key,
+                               coalesce(concept.canonicalization_version,'legacy_unknown') AS canonicalization_version,
+                               edge.legacy_evidence_scope AS legacy_evidence_scope,
+                               edge.legacy_fidelity_status AS legacy_fidelity_status,
+                               edge.legacy_semantic_text AS legacy_semantic_text,
+                               edge.legacy_semantic_input_hash AS legacy_semantic_input_hash
+                    """, legacy_key=legacy.key, requester_user_id=req.requester_user_id, limit=remaining)
+                    for row in legacy_rows:
+                        proof = verified_legacy_identity(dict(row))
+                        candidate_id = str(row.get("candidate_id") or "").strip()
+                        if proof and proof.key == identity.key and candidate_id and candidate_id not in raw_candidate_ids:
+                            raw_candidate_ids.append(candidate_id)
                 candidate_ids = [
                     candidate_id for candidate_id in raw_candidate_ids
                     if candidate_id not in excluded
@@ -1427,7 +1618,10 @@ def preference_semantic_readiness():
 @app.post("/api/preferences/semantic-candidates")
 def preference_semantic_candidates(req: PreferenceSemanticCandidateRequest):
     """Read bounded semantic Concept neighbours and their explicit PREFERS owners."""
-    identity = canonicalize_concept(req.topic)
+    try:
+        identity = _preference_request_identity(req)
+    except PreferenceTextError as exc:
+        return {"status": "error", "error_code": exc.code, "candidates": [], "retryable": False}
     if not identity:
         return {"status": "skipped", "canonical_key": "", "candidates": []}
     excluded = sorted({
@@ -1457,12 +1651,19 @@ def preference_semantic_candidates(req: PreferenceSemanticCandidateRequest):
                         MATCH (concept:Concept {key:$key})
                         RETURN concept.embedding AS embedding,
                                concept.embedding_model AS model,
-                               concept.embedding_task AS task
+                               concept.embedding_task AS task,
+                               concept.key AS key,concept.semantic_text AS semantic_text,
+                               concept.canonicalization_version AS canonicalization_version,
+                               concept.semantic_input_hash AS semantic_input_hash,
+                               concept.embedding_source_hash AS embedding_source_hash,
+                               concept.fidelity_status AS fidelity_status
                     """, timeout=PREFERENCE_SEMANTIC_GRAPH_TIMEOUT_SECONDS),
                         key=identity.key).single()
-                    if (row and req.embedding_model
+                    source_identity = stored_concept_identity(dict(row)) if row else None
+                    if (source_identity and req.embedding_model
                             and row.get("model") == req.embedding_model
-                            and row.get("task") == "semantic_similarity"):
+                            and row.get("task") == "semantic_similarity"
+                            and row.get("embedding_source_hash") == source_identity.semantic_input_hash):
                         query_embedding = _valid_semantic_embedding(row.get("embedding"))
                     embedding_source = "concept"
                 if query_embedding is None:
@@ -1483,12 +1684,18 @@ def preference_semantic_candidates(req: PreferenceSemanticCandidateRequest):
                     ) YIELD node AS concept, score
                     WHERE score >= $min_similarity
                       AND concept.key <> $canonical_key
+                      AND concept.canonicalization_version = 'v2'
                       AND EXISTS { MATCH (concept)<-[:PREFERS]-(:User) }
                     WITH concept, score
                     ORDER BY score DESC, concept.key ASC
                     LIMIT $concept_limit
                     RETURN concept.key AS concept_key, score AS similarity,
-                           concept.embedding_model AS model, concept.embedding_task AS task
+                           concept.embedding_model AS model, concept.embedding_task AS task,
+                           concept.key AS key,concept.semantic_text AS semantic_text,
+                           concept.canonicalization_version AS canonicalization_version,
+                           concept.semantic_input_hash AS semantic_input_hash,
+                           concept.embedding_source_hash AS embedding_source_hash,
+                           concept.fidelity_status AS fidelity_status
                 """, timeout=PREFERENCE_SEMANTIC_GRAPH_TIMEOUT_SECONDS),
                     index_name=PREFERENCE_SEMANTIC_INDEX_NAME,
                     neighbor_limit=req.neighbor_limit,
@@ -1505,11 +1712,19 @@ def preference_semantic_candidates(req: PreferenceSemanticCandidateRequest):
                         "status": "error", "error_code": "semantic_readiness_unconfirmed",
                         "canonical_key": identity.key, "candidates": [],
                     }
+                if any(not stored_concept_identity(dict(row))
+                       or row.get("embedding_source_hash") != row.get("semantic_input_hash")
+                       for row in neighbours):
+                    return {"status": "error", "error_code": "semantic_identity_unverified",
+                            "canonical_key": identity.key, "candidates": []}
                 concepts = [{"concept_key": row["concept_key"],
+                             "semantic_input_hash": row["semantic_input_hash"],
                              "similarity": float(row["similarity"])} for row in neighbours]
                 rows = session.run(Query("""
                     UNWIND $concepts AS hit
                     MATCH (concept:Concept {key:hit.concept_key})
+                    WHERE concept.canonicalization_version='v2'
+                      AND concept.semantic_input_hash=hit.semantic_input_hash
                     WITH concept, hit.similarity AS score
                     CALL {
                         WITH concept
@@ -1548,7 +1763,7 @@ def preference_semantic_candidates(req: PreferenceSemanticCandidateRequest):
                         continue
                     evidence = []
                     for item in list(row.get("evidence") or [])[:req.evidence_limit]:
-                        key = str(item.get("concept_key") or "").strip()[:100]
+                        key = str(item.get("concept_key") or "").strip()
                         try:
                             similarity = float(item.get("similarity", 0.0))
                         except (TypeError, ValueError):
@@ -1593,6 +1808,7 @@ def preference_semantic_candidates(req: PreferenceSemanticCandidateRequest):
         }
 
 
+@app.post("/api/v2/memory/apply")
 @app.post("/api/memory/apply")
 async def apply_memory(req: MemoryApplyRequest):
     """Atomically write validated proposals and their idempotency marker."""
@@ -1604,13 +1820,26 @@ async def apply_memory(req: MemoryApplyRequest):
     if len(req.memories) > memory_limit:
         return {
             "memories": [], "status": "error",
-            "error_code": "memory_limit_exceeded",
+            "error_code": "memory_limit_exceeded", "retryable": False,
         }
-    for item in req.memories[:memory_limit]:
+    try:
+        sources = [normalize_preference_text(
+            item.get("semantic_text") or item.get("label") or item.get("label_zh_tw") or ""
+        ) for item in req.memories]
+        if req.surface == "registration_interest":
+            for item in req.memories:
+                normalize_preference_text(item.get("evidence_span") or "", max_length=MAX_PREFERENCE_EVIDENCE_CHARS)
+    except PreferenceTextError as exc:
+        return {"memories": [], "status": "error", "error_code": exc.code, "retryable": False}
+    if any(not stored_concept_identity(item) for item in req.memories):
+        return {"memories": [], "status": "error", "error_code": "preference_identity_unverified", "retryable": False}
+    for item, source in zip(req.memories, sources):
+        if has_mixed_preference_polarity(source):
+            continue
         label = re.sub(
             r"^(?:喜歡|討厭|不喜歡|偏好|近期情境)\s*[:：,，]?\s*", "",
-            str(item.get("label") or item.get("label_zh_tw") or "").strip(),
-        )[:40]
+            source,
+        )
         stance = str(item.get("stance", ""))
         try:
             confidence = float(item.get("confidence", 0))
@@ -1618,27 +1847,28 @@ async def apply_memory(req: MemoryApplyRequest):
             continue
         if has_mixed_preference_polarity(label):
             continue
-        labels = (
-            split_explicit_preference_enumeration(label, limit=memory_limit)
-            or split_compound_concept_label(label, limit=memory_limit)
-            or [label]
-        )
+        try:
+            labels = (
+                split_explicit_preference_enumeration(label, limit=HARD_DURABLE_MEMORY_LIMIT)
+                or split_compound_concept_label(label, limit=HARD_DURABLE_MEMORY_LIMIT)
+                or [label]
+            )
+        except PreferenceTextError as exc:
+            return {"memories": [], "status": "error", "error_code": exc.code, "retryable": False}
         for atomic_label in labels:
             identity = canonicalize_concept(atomic_label, item.get("key"))
             if (
                 not identity or not key_re.match(identity.key) or protected.search(identity.label)
-                or stance not in allowed_stances or confidence < 0.75
+                or stance not in allowed_stances or not math.isfinite(confidence) or confidence < 0.75
             ):
                 continue
             clean_by_key.setdefault(identity.key, {
-                "key": identity.key, "label": identity.label, "stance": stance,
+                **identity.as_dict(), "stance": stance,
                 "category": "preference",
                 "confidence": confidence, "last_seen_at": now,
             })
-            if len(clean_by_key) >= memory_limit:
-                break
-        if len(clean_by_key) >= memory_limit:
-            break
+    if len(clean_by_key) > memory_limit:
+        return {"memories": [], "status": "error", "error_code": "memory_limit_exceeded", "retryable": False}
     clean = list(clean_by_key.values())
     if not clean:
         return {"memories": [], "status": "skipped"}
@@ -1653,6 +1883,7 @@ async def apply_memory(req: MemoryApplyRequest):
                     return {"memories": seeded, "status": "success" if seeded else "skipped"}
 
                 def write_memory(tx):
+                    assert_existing_preference_identities(tx, clean)
                     if req.message_id:
                         observed = tx.run("""
                             MERGE (u:User {id:$user_id})
@@ -1669,8 +1900,12 @@ async def apply_memory(req: MemoryApplyRequest):
                         MERGE (u:User {id:$user_id})
                         SET u.registration_projection_lock=coalesce(u.registration_projection_lock,0)+1
                         MERGE (c:Concept {key:item.key})
-                        ON CREATE SET c.label=item.label, c.kind='preference'
-                        ON MATCH SET c.label=coalesce(c.label,item.label)
+                        ON CREATE SET c.label=item.semantic_text, c.kind='preference',
+                                      c.semantic_text=item.semantic_text,
+                                      c.display_label=item.display_label,
+                                      c.canonicalization_version=item.canonicalization_version,
+                                      c.semantic_input_hash=item.semantic_input_hash,
+                                      c.fidelity_status='complete'
                         WITH u,c,item
                         OPTIONAL MATCH (u)-[old:PREFERS|AVOIDS|CURRENTLY_WANTS]->(c)
                         DELETE old
@@ -1690,12 +1925,20 @@ async def apply_memory(req: MemoryApplyRequest):
             "status": "success" if created else "duplicate",
         }
     except Exception as exc:
-        print(f"[MEMORY][9001 apply] graph_write_failed user={req.user_id} error={exc}")
+        if isinstance(exc, PreferenceTextError):
+            return {"memories": [], "status": "error", "error_code": exc.code, "retryable": False}
+        if str(exc) == "preference_identity_conflict":
+            return {"memories": [], "status": "error", "error_code": "preference_identity_conflict", "retryable": False}
+        print(f"[MEMORY][9001 apply] graph_write_failed error={type(exc).__name__}")
         return {"memories": [], "status": "error", "error_code": type(exc).__name__}
 @app.get("/api/memory/{user_id}")
 async def list_memories(user_id: str, limit: int = 12, durable_only: bool = False, query: str = ""):
     try:
-        words = re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9_]+", str(query or "").lower()[:120])
+        query = normalize_preference_text(query, max_length=MAX_OWNER_MEMORY_QUERY_CHARS)
+    except PreferenceTextError:
+        return {"status": "invalid_query", "error_code": "query_text_too_long", "memories": [], "truncated": False}
+    try:
+        words = re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9_]+", query.lower())
         terms = list(dict.fromkeys(term for word in words for term in
                      ([word[i:i + 2] for i in range(len(word) - 1)] if re.fullmatch(r"[\u4e00-\u9fff]+", word) else [word])))[:24]
         safe_limit = max(1, min(limit, 30))
@@ -1707,12 +1950,21 @@ async def list_memories(user_id: str, limit: int = 12, durable_only: bool = Fals
                     WHERE type(r) <> 'CURRENTLY_WANTS'
                        OR (NOT $durable_only AND coalesce(r.expires_at, 0) > $now)
                     WITH c, r, reduce(score=0, term IN $terms |
-                        score + CASE WHEN toLower(coalesce(c.label, c.key, '')) CONTAINS term
+                        score + CASE WHEN toLower(coalesce(c.semantic_text, c.label, c.key, '')) CONTAINS term
                                           OR toLower(coalesce(c.key, '')) CONTAINS term
                                      THEN 1 ELSE 0 END) AS relevance
                     WHERE size($terms)=0 OR relevance > 0
                     RETURN c.key AS key,
                            coalesce(c.label, c.key) AS label,
+                           c.semantic_text AS semantic_text,
+                           c.display_label AS display_label,
+                           coalesce(c.canonicalization_version, 'legacy_unknown') AS canonicalization_version,
+                           c.semantic_input_hash AS semantic_input_hash,
+                           c.fidelity_status AS fidelity_status,
+                           r.legacy_evidence_scope AS legacy_evidence_scope,
+                           r.legacy_fidelity_status AS legacy_fidelity_status,
+                           r.legacy_semantic_text AS legacy_semantic_text,
+                           r.legacy_semantic_input_hash AS legacy_semantic_input_hash,
                            CASE type(r)
                                WHEN 'AVOIDS' THEN 'dislike'
                                WHEN 'PREFERS' THEN 'like'
@@ -1727,19 +1979,51 @@ async def list_memories(user_id: str, limit: int = 12, durable_only: bool = Fals
                     LIMIT $limit
                 """, user_id=user_id, limit=safe_limit + 1, durable_only=durable_only, now=time.time(), terms=terms)
                 items = [dict(row) for row in rows]
+                for item in items:
+                    identity = stored_concept_identity(item)
+                    if identity:
+                        item.update(identity.as_dict())
+                    else:
+                        item["fidelity_status"] = "legacy_unknown"
                 return {"status": "success", "memories": items[:safe_limit], "truncated": len(items) > safe_limit}
     except Exception as exc:
-        print(f"[MEMORY][9001] graph_read_failed user={user_id} error={exc}")
+        print(f"[MEMORY][9001] graph_read_failed error={type(exc).__name__}")
         return {"status": "error", "error_code": "graph_read_failed", "memories": []}
 
+@app.post("/api/v2/memory/action")
 @app.post("/api/memory/action")
 async def memory_action(req: MemoryActionRequest):
     if req.action not in {"disable", "restore", "correct"}:
         return {"status": "error", "error_code": "unsupported_action"}
     user_id = re.sub(r"\s+", "", str(req.user_id or ""))[:80]
-    key = str(req.key or "").strip().lower()[:100]
+    key = str(req.key or "").strip().lower()
     if not user_id or not key:
         return {"status": "error", "error_code": "invalid_memory_reference"}
+    identity = None
+    if req.action == "correct":
+        # Correction is an explicit owner action, not an implicit legacy re-key.
+        if not is_v2_preference_key(key):
+            return {"status": "error", "error_code": "legacy_identity_unverified",
+                    "reconfirmation_required": True, "retryable": False}
+        try:
+            label = normalize_fresh_preference_text(req.value or "")
+        except PreferenceTextError as exc:
+            return {"status": "error", "error_code": exc.code, "retryable": False}
+        protected = re.compile(
+            r"(?:黑人|白人|黃種人|種族|族裔|宗教|信仰|穆斯林|基督教|同性戀|性傾向|性別認同|跨性別|殘障|身心障礙|疾病|政治立場|國籍|公民身分)",
+            re.I,
+        )
+        try:
+            invalid = (not label or protected.search(label) or has_mixed_preference_polarity(label)
+                       or split_explicit_preference_enumeration(label)
+                       or split_compound_concept_label(label))
+        except PreferenceTextError as exc:
+            return {"status": "error", "error_code": exc.code, "retryable": False}
+        if invalid:
+            return {"status": "error", "error_code": "invalid_correction"}
+        identity = canonicalize_concept(label)
+        if not identity:
+            return {"status": "error", "error_code": "invalid_correction"}
     now = time.time()
     URI, AUTH, DATABASE = _neo4j_config()
     try:
@@ -1794,24 +2078,27 @@ async def memory_action(req: MemoryActionRequest):
                         return {"status": "expired"}
                     return {"status": "success"}
 
-                label = re.sub(r"\s+", " ", str(req.value or "").strip())[:40]
-                protected = re.compile(
-                    r"(?:黑人|白人|黃種人|種族|族裔|宗教|信仰|穆斯林|基督教|同性戀|性傾向|性別認同|跨性別|殘障|身心障礙|疾病|政治立場|國籍|公民身分)",
-                    re.I,
-                )
-                if (
-                    not label or protected.search(label)
-                    or has_mixed_preference_polarity(label)
-                    or split_explicit_preference_enumeration(label)
-                    or split_compound_concept_label(label)
-                ):
-                    return {"status": "error", "error_code": "invalid_correction"}
-                identity = canonicalize_concept(label)
-                if not identity:
-                    return {"status": "error", "error_code": "invalid_correction"}
                 corrected_key, label = identity.key, identity.label
 
                 def correct(tx):
+                    original = tx.run("""
+                        MATCH (:User {id:$user_id})-[:PREFERS|AVOIDS|CURRENTLY_WANTS|MEMORY_DISABLED]->
+                              (old:Concept {key:$key})
+                        RETURN old.key AS key,old.semantic_text AS semantic_text,
+                               old.canonicalization_version AS canonicalization_version,
+                               old.semantic_input_hash AS semantic_input_hash,
+                               old.fidelity_status AS fidelity_status
+                        LIMIT 1
+                    """, user_id=user_id, key=key).single()
+                    if not original:
+                        return None
+                    if not stored_concept_identity(dict(original)):
+                        raise ValueError("legacy_identity_unverified")
+                    if corrected_key == key:
+                        # An alias/case-only correction must not MERGE then
+                        # DELETE the very same owner's relationship.
+                        return {"relation": "unchanged"}
+                    assert_existing_preference_identities(tx, [identity.as_dict()])
                     row = tx.run("""
                         MATCH (u:User {id:$user_id})-[existing:PREFERS|AVOIDS|CURRENTLY_WANTS|MEMORY_DISABLED]->
                               (old:Concept {key:$key})
@@ -1820,7 +2107,11 @@ async def memory_action(req: MemoryActionRequest):
                              existing.original_relation AS original_relation,
                              existing.original_expires_at AS original_expires_at
                         MERGE (corrected:Concept {key:$corrected_key})
-                        SET corrected.label=$label,
+                        ON CREATE SET corrected.label=$label,
+                            corrected.semantic_text=$label,corrected.display_label=$display_label,
+                            corrected.canonicalization_version='v2',
+                            corrected.semantic_input_hash=$semantic_input_hash,
+                            corrected.fidelity_status='complete',
                             corrected.kind=coalesce(old.kind,'preference')
                         FOREACH (_ IN CASE WHEN relation='PREFERS' THEN [1] ELSE [] END |
                             MERGE (u)-[:PREFERS]->(corrected))
@@ -1837,7 +2128,8 @@ async def memory_action(req: MemoryActionRequest):
                         DELETE existing
                         RETURN relation
                     """, user_id=user_id, key=key, corrected_key=corrected_key,
-                         label=label, now=now).single()
+                         label=label, display_label=identity.display_label,
+                         semantic_input_hash=identity.semantic_input_hash, now=now).single()
                     return dict(row) if row else None
                 corrected = session.execute_write(correct)
                 return {
@@ -1846,7 +2138,8 @@ async def memory_action(req: MemoryActionRequest):
                 }
     except Exception as exc:
         print(f"[MEMORY][9001 action] failed error={type(exc).__name__}")
-        return {"status": "error", "error_code": "memory_action_failed"}
+        code = "legacy_identity_unverified" if str(exc) == "legacy_identity_unverified" else "memory_action_failed"
+        return {"status": "error", "error_code": code}
 @app.post("/api/chat_triples")
 async def receive_chat_triples(req: ChatTripleRequest):
     allowed = {

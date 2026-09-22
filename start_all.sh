@@ -34,6 +34,18 @@ case "$AYUE_LLM_PROVIDER" in
     *) echo "Usage: ./start_all.sh [ollama|gpt]" >&2; exit 2 ;;
 esac
 
+# Fresh preference identity must not vary with optional converter availability.
+# Fail before logs, port cleanup or any service starts; install each service's
+# pinned requirements before deployment. This preflight reads no secrets/DBs.
+for preference_service in social matchmaker; do
+    preference_python="$SERVER_ROOT/.local-venv/$preference_service/bin/python"
+    if [[ ! -x "$preference_python" ]] || ! "$preference_python" -c \
+        'from matchmaker_agent.concept_identity import check_fresh_preference_normalizer; check_fresh_preference_normalizer()'; then
+        printf 'Pinned preference normalizer unavailable for %s; install the service requirements.\n' "$preference_service" >&2
+        exit 1
+    fi
+done
+
 LOG_DIR="${AYUE_LOG_DIR:-$SERVER_ROOT/.runtime-logs}"
 # Public Ayue requires the pinned local Pi bridge. Validate it before touching
 # logs or service ports so a broken installation cannot start a partial stack.
