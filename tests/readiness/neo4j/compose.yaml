@@ -1,0 +1,52 @@
+name: ${READINESS_PROJECT:-ayue-r1l}
+services:
+  graph:
+    image: ${READINESS_NEO4J_IMAGE:-neo4j:2026.08.1}
+    container_name: ${READINESS_PROJECT:-ayue-r1l}-neo4j
+    restart: "no"
+    ports:
+      - "127.0.0.1:${READINESS_BOLT_PORT:-17687}:7687"
+      - "127.0.0.1:${READINESS_HTTP_PORT:-17474}:7474"
+    environment:
+      NEO4J_AUTH: neo4j/${READINESS_PASSWORD:?Use run_readiness.py up}
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 128m
+      NEO4J_server_default__advertised__address: localhost
+      NEO4J_server_bolt_advertised__address: localhost:${READINESS_BOLT_PORT:-17687}
+      NEO4J_dbms_usage__report_enabled: "false"
+      NEO4J_server_fleet__discovery_enabled: "false"
+      NEO4J_dbms_fleet__manager_enabled: "false"
+    mem_limit: 1536m
+    cpus: 2
+    volumes:
+      - data:/data
+      - logs:/logs
+    networks: [readiness]
+    labels:
+      io.ayue.readiness: disposable-synthetic-only
+      io.ayue.checkout: ${READINESS_CHECKOUT_ID:?Use run_readiness.py up}
+    healthcheck:
+      test: [CMD-SHELL, 'cypher-shell -a bolt://localhost:7687 -u neo4j -p "$${NEO4J_AUTH#*/}" "RETURN 1" >/dev/null 2>&1']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+networks:
+  readiness:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"
+      com.docker.network.bridge.enable_icc: "false"
+    labels:
+      io.ayue.readiness: disposable-synthetic-only
+      io.ayue.checkout: ${READINESS_CHECKOUT_ID:?Use run_readiness.py up}
+volumes:
+  data:
+    labels:
+      io.ayue.readiness: disposable-synthetic-only
+      io.ayue.checkout: ${READINESS_CHECKOUT_ID:?Use run_readiness.py up}
+  logs:
+    labels:
+      io.ayue.readiness: disposable-synthetic-only
+      io.ayue.checkout: ${READINESS_CHECKOUT_ID:?Use run_readiness.py up}
