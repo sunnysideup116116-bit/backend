@@ -1,5 +1,9 @@
 # R1-L disposable local functional readiness
 
+The R1 instructions below are provider-free. Separately authorized R2.5/R3 offline
+experiments have explicit CLI gates and selectively parse allowlisted credentials;
+they never load a whole service/production environment. See the final sections.
+
 - **Local baseline = Neo4j 2026.08.1 Community Edition**, `neo4j:2026.08.1`.
 - This is **not** the production version. **Production compatibility remains unknown.**
 - **Production fingerprint remains unknown.** A local PASS never authorizes activation.
@@ -161,18 +165,22 @@ dedicated loopback-only bridge above and verifies actual, not just requested,
 published bindings before any Graph operation. Only the test container/network
 were recreated; no shared resources or volumes were modified.
 
-## R2 preparation: labeled synthetic dataset, not calibration results
+## R2 / R2.5 synthetic calibration dataset
 
-`fixtures.json` version 2 contains 25 **unscored** semantic pairs, with stable IDs,
-language, and a manual reason for each label:
+`fixtures.json` version 3 contains 100 labeled synthetic semantic pairs, with stable
+IDs, language, and a manual reason for each label. The original version-2 25 pairs
+and all alias fixtures are unchanged. Labels were frozen before R2.5 provider calls;
+scores are stored separately in ignored artifacts, never in the fixture labels.
+The original `score_status` field describes the label-only fixture, not whether a
+separate calibration run has taken place. See [R2.5 results and design](R25_SEMANTIC_QUALITY_GATE.md).
 
 | Category | Count | Meaning |
 | --- | ---: | --- |
-| Clear semantic positive | 5 | Close paraphrases suitable for semantic retrieval, not canonical merging |
-| Cross-language positive | 5 | EN/ZH descriptions, still separate Concept identities |
-| Borderline related | 5 | Related but weaker/different scope; report separately, do not force into positive |
-| Hard negative | 5 | Misleading lexical overlap / different word senses |
-| Topic-adjacent incorrect negative | 5 | Related topic but incompatible qualifier or unsupported role inference |
+| Clear semantic positive | 20 | Paraphrases and directed compatible broad/narrow preferences, not canonical merging |
+| Cross-language positive | 20 | EN/ZH descriptions, still separate Concept identities |
+| Borderline related | 20 | Related but weaker/different scope; report separately, do not force into positive |
+| Hard negative | 15 | Misleading lexical overlap / different word senses |
+| Topic-adjacent incorrect negative | 25 | Related topic but incompatible qualifier or unsupported role inference |
 | Deterministic alias/normalization | 4 groups / 13 forms | Separate exact-identity tests, **excluded** from semantic calibration |
 
 Pairs are directed: `left` is the requested preference and `right` is candidate-saved
@@ -182,7 +190,7 @@ shared preference. Negative labels do not become AVOIDS edges or production rule
 No semantic label changes deterministic identity. The existing geometry coefficients
 under `concepts` are R1 infrastructure inputs, **not** measured scores for these pairs.
 
-An eventual independently approved dev-only run must record:
+Any independently approved synthetic-only provider run must record:
 
 1. Dataset version/SHA, source commit, run ID/time, pair IDs/labels/languages/reasons.
 2. Requested model, provider-resolved model revision if exposed (otherwise `unknown`),
@@ -207,12 +215,20 @@ An eventual independently approved dev-only run must record:
    contract](https://neo4j.com/docs/cypher-manual/current/indexes/semantic-indexes/vector-indexes/)
    reports ANN scores in [0,1]; raw cosine and ANN distributions must not be merged.
 
-No explicitly dev/testing-authorized Gemini credential or approved dev project/config
-is currently available in this checkout. Generic key-pool credentials are **not** a
-substitute. The current R1 runner blocks provider networking and rejects a supplied
-`READINESS_DEV_GEMINI_API_KEY`; it does not silently start calibration. A future
-separate dev-only scoring path needs explicit authorization/model/quota boundaries.
-All score distributions remain **unmeasured** and 0.82 remains unchanged.
+The original R1 run had no authorized credential and did not perform real scoring.
+Subsequently the operator explicitly authorized synthetic-only R2/R2.5 use of an
+existing credential pool, with only allowlisted credential fields read into process
+memory. No credential or generated vector is stored in these tracked files.
+The current R1 runner still blocks provider networking; it does not silently start
+calibration. R2/R2.5 used separate ignored, secret-safe experiment scripts. Running
+the commands above remains an R1 geometry test, NOT a reproduction of real scoring.
+Generated reports and one-off analysis scripts under `artifacts/` stay ignored.
+The reusable R2.5 calibration and downstream-preparation scripts have now been
+promoted to explicit readiness CLIs (below); none is production functionality.
+Real R2/R2.5 distributions are now measured; **0.82 is unchanged and activation is
+not recommended**. Both semantic flags remain OFF. Further provider calls require
+an approved synthetic-only scope and request budget; do not load the full production
+environment or reuse credential-fragment logging paths.
 
 ## Historical production provenance: offline evidence inventory
 
@@ -244,3 +260,78 @@ vectors/index alongside old data, verify coverage/integrity/calibration, and ret
 rollback. Do not overwrite the shared Event embedding, merge Concepts, create aliases
 or modify PREFERS. Production mutation, reader switching and activation require
 separate approval; nothing in this review performs them. Both activation flags stay OFF.
+
+## Frozen R2.5 evidence and reusable tooling
+
+The quality-gate branch starts from main `88bde51b4c9c06f325f6d733e8cc2a6f8117f93c`.
+The additional main commit changes room-title jobs, not the matching/embedding
+functions exercised by R2.5. Original experiment source commit/hash records remain
+unchanged; they are not relabeled as a new run on main.
+
+`calibrate_r25.py` and `prepare_r25_downstream.py` are reusable, explicit CLIs.
+Import and `--help` do not read secrets, call providers, or connect to Graph.
+Calibration requires an explicit credential path and permission flag, validates
+the frozen 100-pair fixture SHA, limits requests, and uses only the owned disposable
+Graph. It replaces prior **synthetic** readiness data; no production endpoints.
+Preparation requires a reset confirmation and does not call a real LLM.
+
+Use an isolated Python environment with the pinned R1 dependencies plus
+`google-generativeai==0.8.3`, `google-genai==2.11.0`, `python-dotenv==1.0.1`,
+`fastapi`, `openai`, and `httpx` compatible with this checkout. Provider versions
+are recorded in reports. Installing dependencies and making provider calls are
+separate operator-authorized actions, not implicit during import/tests.
+
+```bash
+# Use a local secret FILE PATH variable, not a secret value on the command line.
+# Start the owned Graph using the R1 up command first.
+python tests/readiness/neo4j/calibrate_r25.py \
+  --credential-file "$GOOGLE_POOL_ENV_FILE" --confirm-synthetic-provider-use
+python tests/readiness/neo4j/prepare_r25_downstream.py \
+  --calibration-report tests/readiness/neo4j/artifacts/r25-replay-report.json \
+  --confirm-synthetic-reset
+```
+
+Only `GOOGLE_API_KEYS1` through `GOOGLE_API_KEYS6` and the nonsecret embedding model
+identifier are parsed for calibration; no `load_dotenv`. Keys stay in process memory
+and errors are classified without key identifiers/fragments. Reports contain no raw
+vectors and stay under ignored `artifacts/`. Replay output names differ from the
+original frozen reports. The one-off real-Matchmaker replay and statistical helper
+scripts remain ignored; do not force-add provider outputs or local config.
+
+## R3 offline directional validator experiment
+
+Read [the fixed contract](R3_DIRECTIONAL_CONTRACT.md) first. `r3_holdout.json` expands
+48 groups into 96 separately labeled directed cases. `r3_prompt.txt` is a fixed
+offline experiment prompt, not imported by any production service.
+
+```bash
+python tests/readiness/neo4j/run_r3_offline.py prepare
+python tests/readiness/neo4j/run_r3_offline.py embed \
+  --google-config "$GOOGLE_POOL_ENV_FILE" --confirm-synthetic-provider-use
+python tests/readiness/neo4j/run_r3_offline.py validate \
+  --google-config "$GOOGLE_POOL_ENV_FILE" \
+  --matchmaker-config "$MATCHMAKER_SECRET_FILE" --confirm-synthetic-provider-use
+python tests/readiness/neo4j/run_r3_offline.py summarize
+python -m pytest -q tests/readiness/neo4j/test_r3_offline.py
+```
+
+The supplied Google config also supplies only the nonsecret `LLM_MODEL_ID` for the
+validator; the Matchmaker file supplies only `LLM_API_KEY` and `LLM_BASE_URL`.
+Current approved endpoints/models are checked explicitly. No DB or other service
+configuration is loaded. Validation receives only opaque case ID/Q/C, not human
+labels, category, ANN score, profiles or user IDs. The heldout labels/prompt/contract
+are hashed before calls; an existing different manifest fails closed.
+
+The manifest also binds the original source commit. After committing this tooling,
+the old local manifest intentionally does not match a new run's HEAD. Do not rewrite
+or delete frozen evidence merely to make `prepare` pass. Analyze the saved reports
+under their original provenance; a subsequent experiment such as R3.1 must use its
+own artifact namespace/manifest. This is a fail-closed replay limitation, not an
+instruction to re-score or relabel the frozen holdout.
+
+Provider actions write classified progress/results only to ignored artifacts. A
+completed report may contain explicit provider/schema errors; metrics include these
+as ERROR, not invented NO/ABSTAIN answers. No prompt repair or label adjustment is
+performed. The experiment does not authorize a production classifier or activation.
+Stop the disposable Graph afterwards using the R1 stop command. Volume deletion
+remains a separate explicit disposable destroy action.
