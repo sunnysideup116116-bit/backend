@@ -1,0 +1,54 @@
+{
+  "experiment": "R3.4-final",
+  "selected_arm": "b2_t4096",
+  "matrix_commit": "b82dc708c536a69c7cfa94d1f19b127fa7e2d03f",
+  "selection_summary_sha256": "a21348bd8392f8988b70e6e177229fa366909c0e5ba90ed400154ac591cb0c3f",
+  "selection_rule": "R34_PROTOCOL.md fixed order among gates+semantic-non-regression eligible arms",
+  "improvement_proven": false,
+  "sdk_versions": {"openai": "1.30.1", "httpx": "0.28.1", "OpenCC": "1.4.1"},
+  "frozen_sources": {
+    "r32c_prompt_v3.txt": "cad492b848cc1bab957be56f6accefdadffdee9db0961ec96b4571f5d0483911",
+    "r32c_relation.py": "e0bc2b43876aac9252b472bb4b25b2c42580b7322bc5e834a3135f033229d720",
+    "run_r32c_offline.py": "b349f2db72b0eb0a705cd86c61aa7d0527f7d8c6e82a8f56bc9487570ef7ff38",
+    "r31_diagnostics.py": "91ae45842b3e6b90cf2c905b4fe3880f94015cd9d76a77f2c498412fa911190f"
+  },
+  "configuration": {
+    "model": "deepseek-v4.1-flash:cloud",
+    "reasoning": "omitted/default",
+    "temperature": 0,
+    "batch_size": 2,
+    "max_tokens": 4096,
+    "timeout_seconds": 60,
+    "max_attempts_per_batch": 2,
+    "sdk_retries": 0,
+    "workers": 3,
+    "rounds": 3,
+    "seeds": [
+      345101,
+      345102,
+      345103
+    ],
+    "schedule_seed": 345100,
+    "case_count": 160,
+    "first_requests": 240,
+    "hard_attempt_limit": 480,
+    "semantic_limit": 500
+  },
+  "thresholds": {
+    "precision": 99,
+    "recall": 95,
+    "consistency": 99,
+    "first_valid": 99,
+    "eventual_valid": 99,
+    "broad_false_accept": 0,
+    "role_false_accept": 0,
+    "constraint_false_accept": 0,
+    "error_fail_open": 0
+  },
+  "label_provenance": "Agent-authored before scoring under explicit user authorization; not independently human reviewed.",
+  "runtime_flags": {
+    "MATCH_PREFERENCE_SEMANTIC_MODE": "off",
+    "MATCH_PREFERENCE_SEMANTIC_EMBEDDING_SPACE_CONFIRMED": "off"
+  },
+  "production_ready": false
+}
