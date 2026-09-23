@@ -4,6 +4,9 @@ import pytest
 import requests
 
 from services import preference_semantic_service as service
+from matchmaker_agent.concept_identity import canonicalize_concept
+
+K_POP = canonicalize_concept("K-pop").key
 
 
 def _response(payload):
@@ -18,13 +21,13 @@ def test_fallback_embeds_only_canonical_label_and_dedupes_candidates(monkeypatch
     post = Mock(side_effect=[
         _response({
             "status": "query_embedding_required",
-            "canonical_key": "k_pop",
+            "canonical_key": K_POP,
             "normalized_topic": "K-pop",
             "candidates": [],
         }),
         _response({
             "status": "success",
-            "canonical_key": "k_pop",
+            "canonical_key": K_POP,
             "normalized_topic": "K-pop",
             "embedding_source": "request",
             "semantic_concepts_considered": [
@@ -73,7 +76,7 @@ def test_fallback_embeds_only_canonical_label_and_dedupes_candidates(monkeypatch
 
 def test_below_threshold_evidence_is_insufficient_ground(monkeypatch):
     monkeypatch.setattr(service.requests, "post", Mock(return_value=_response({
-        "status": "success", "canonical_key": "k_pop",
+        "status": "success", "canonical_key": K_POP,
         "candidates": [{"candidate_id": "candidate", "evidence": [
             {"concept_key": "j_pop", "similarity": 0.81},
         ]}],
@@ -87,7 +90,7 @@ def test_below_threshold_evidence_is_insufficient_ground(monkeypatch):
 
 def test_equal_semantic_scores_use_candidate_id_tie_break(monkeypatch):
     monkeypatch.setattr(service.requests, "post", Mock(return_value=_response({
-        "status": "success", "canonical_key": "k_pop",
+        "status": "success", "canonical_key": K_POP,
         "candidates": [
             {"candidate_id": "candidate-b", "evidence": [
                 {"concept_key": "korean_pop", "similarity": 0.9},
@@ -116,7 +119,7 @@ def test_graph_timeout_is_a_typed_transient_failure(monkeypatch):
 
 def test_embedding_failure_is_a_typed_transient_failure(monkeypatch):
     monkeypatch.setattr(service.requests, "post", Mock(return_value=_response({
-        "status": "query_embedding_required", "canonical_key": "k_pop",
+        "status": "query_embedding_required", "canonical_key": K_POP,
         "candidates": [],
     })))
     monkeypatch.setattr(
@@ -183,7 +186,7 @@ def test_readiness_keeps_active_disabled_when_fingerprint_is_unknown(monkeypatch
 def test_shadow_summary_never_returns_candidate_ids(monkeypatch):
     monkeypatch.setattr(service, "retrieve_semantic_preference_candidates", Mock(
         return_value={
-            "canonical_key": "k_pop", "candidate_ids": ["private-id"],
+            "canonical_key": K_POP, "candidate_ids": ["private-id"],
             "candidate_count": 1, "retrieval_source": "graph_semantic",
             "embedding_source": "concept",
             "semantic_concepts_considered": [
@@ -199,7 +202,7 @@ def test_shadow_summary_never_returns_candidate_ids(monkeypatch):
 @pytest.mark.parametrize("score", [0.81999, float("nan"), float("inf"), 1.01])
 def test_invalid_or_rounded_up_score_cannot_create_evidence(monkeypatch, score):
     monkeypatch.setattr(service.requests, "post", Mock(return_value=_response({
-        "status": "success", "canonical_key": "k_pop",
+        "status": "success", "canonical_key": K_POP,
         "candidates": [{"candidate_id": "candidate", "evidence": [{"concept_key": "korean_pop", "similarity": score}]}],
     })))
     result = service.retrieve_semantic_preference_candidates("owner", "K-pop", excluded_user_ids=set())
@@ -207,10 +210,10 @@ def test_invalid_or_rounded_up_score_cannot_create_evidence(monkeypatch, score):
 
 
 @pytest.mark.parametrize("payload", [
-    {"status": "success", "canonical_key": "k_pop"},
-    {"status": "success", "canonical_key": "k_pop", "candidates": {}},
+    {"status": "success", "canonical_key": K_POP},
+    {"status": "success", "canonical_key": K_POP, "candidates": {}},
     {"status": "query_embedding_required", "canonical_key": "wrong"},
-    {"status": "error", "canonical_key": "k_pop", "error_code": "raw message and private candidate ID"},
+    {"status": "error", "canonical_key": K_POP, "error_code": "raw message and private candidate ID"},
 ])
 def test_malformed_semantic_response_is_typed_and_not_empty_ground(monkeypatch, payload):
     monkeypatch.setattr(service.requests, "post", Mock(return_value=_response(payload)))

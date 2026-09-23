@@ -39,16 +39,17 @@ class DeclineFeedbackTests(unittest.TestCase):
         session.execute_write.side_effect = lambda callback: callback(transaction)
         request = agent_api.MemoryApplyRequest(
             user_id="owner", message_id="message-atomic", surface="profile",
-            memories=[{"key": "quiet_cafe", "label": "安靜咖啡廳",
+            memories=[{**canonicalize_concept("安靜咖啡廳").as_dict(),
                        "stance": "like", "confidence": 0.95}],
         )
         with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
             result = asyncio.run(agent_api.apply_memory(request))
         self.assertEqual(result["status"], "success")
         session.execute_write.assert_called_once()
-        self.assertEqual(transaction.run.call_count, 2)
-        self.assertIn("MemoryObservation", transaction.run.call_args_list[0].args[0])
-        self.assertIn("UNWIND $memories", transaction.run.call_args_list[1].args[0])
+        self.assertEqual(transaction.run.call_count, 3)
+        self.assertIn("UNWIND $keys", transaction.run.call_args_list[0].args[0])
+        self.assertIn("MemoryObservation", transaction.run.call_args_list[1].args[0])
+        self.assertIn("UNWIND $memories", transaction.run.call_args_list[2].args[0])
 
     def test_duplicate_marker_reports_prior_atomic_memory_as_applied(self):
         driver, session, transaction = MagicMock(), MagicMock(), MagicMock()
@@ -58,7 +59,7 @@ class DeclineFeedbackTests(unittest.TestCase):
         session.execute_write.side_effect = lambda callback: callback(transaction)
         request = agent_api.MemoryApplyRequest(
             user_id="owner", message_id="message-duplicate", surface="profile",
-            memories=[{"key": "quiet_cafe", "label": "安靜咖啡廳",
+            memories=[{**canonicalize_concept("安靜咖啡廳").as_dict(),
                        "stance": "like", "confidence": 0.95}],
         )
         with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
@@ -67,7 +68,7 @@ class DeclineFeedbackTests(unittest.TestCase):
         self.assertEqual(
             result["memories"][0]["key"], canonicalize_concept("安靜咖啡廳").key,
         )
-        self.assertEqual(transaction.run.call_count, 1)
+        self.assertEqual(transaction.run.call_count, 2)
 
     def test_writer_splits_a_clear_compound_label_before_graph_merge(self):
         driver, session, transaction = MagicMock(), MagicMock(), MagicMock()
@@ -78,7 +79,7 @@ class DeclineFeedbackTests(unittest.TestCase):
         request = agent_api.MemoryApplyRequest(
             user_id="owner", message_id="message-compound", surface="profile",
             memories=[{
-                "key": "model_bundle", "label": "K-pop、J-pop、西洋音樂",
+                **canonicalize_concept("K-pop、J-pop、西洋音樂").as_dict(),
                 "stance": "like", "category": "activity", "confidence": 0.95,
             }],
         )
@@ -87,7 +88,8 @@ class DeclineFeedbackTests(unittest.TestCase):
         self.assertEqual(
             [(item["key"], item["label"]) for item in result["memories"]],
             [
-                ("k_pop", "K-pop"), ("j_pop", "J-pop"),
+                (canonicalize_concept("K-pop").key, "K-pop"),
+                (canonicalize_concept("J-pop").key, "J-pop"),
                 (canonicalize_concept("西洋音樂").key, "西洋音樂"),
             ],
         )
@@ -107,7 +109,8 @@ class DeclineFeedbackTests(unittest.TestCase):
         )
         with patch.object(agent_api.GraphDatabase, "driver") as driver:
             result = asyncio.run(agent_api.apply_memory(request))
-        self.assertEqual(result, {"memories": [], "status": "skipped"})
+        self.assertEqual(result["memories"], [])
+        self.assertEqual(result["error_code"], "preference_identity_unverified")
         driver.assert_not_called()
 
     def test_bare_decline_never_calls_provider_or_graph(self):
@@ -123,7 +126,7 @@ class DeclineFeedbackTests(unittest.TestCase):
 
     def test_selected_list_is_passed_intact_without_unselected_traits_or_old_history(self):
         reasons = ["個性：夜生活", "近期情境：看音樂祭", "價值觀：自由", "興趣：爬山"]
-        labels = ["夜生活", "音樂祭", "自由", "爬山"]
+        labels = ["夜生活", "看音樂祭", "自由", "爬山"]
         async def saved(request):
             return {"status": "success", "memories": request.memories}
         with patch.dict(agent_api.agent_memory_db, {"owner": {"history": [{"target_traits": "old-private-trait"}]}}), \

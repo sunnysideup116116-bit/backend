@@ -13,8 +13,9 @@ def tx(allowed=True):
 
 
 def memory(**overrides):
-    return {"key": "reading", "label": "閱讀", "stance": "like", "category": "activity",
+    item = {"label": "閱讀", "stance": "like", "category": "activity",
             "confidence": .99, "evidence_span": "閱讀", **overrides}
+    return {**item, **canonicalize_concept(item["label"]).as_dict()}
 
 
 def test_identity_keeps_account_id_and_uses_revisioned_name():
@@ -52,8 +53,8 @@ def test_registration_seed_splits_clear_interests_into_atomic_concepts():
         [memory(label="K-pop、J-pop、西洋音樂", evidence_span="K-pop、J-pop、西洋音樂")],
     )
     assert [(item["key"], item["label"]) for item in result] == [
-        ("k_pop", "K-pop"),
-        ("j_pop", "J-pop"),
+        (canonicalize_concept("K-pop").key, "K-pop"),
+        (canonicalize_concept("J-pop").key, "J-pop"),
         (canonicalize_concept("西洋音樂").key, "西洋音樂"),
     ]
     assert len({item["key"] for item in result}) == 3
@@ -77,4 +78,4 @@ def test_wrong_owner_observation_is_rejected_before_write():
 def test_invalid_registration_preferences_never_write(overrides):
     transaction = tx()
     assert seed_registration(transaction, "account1", registration_message_id("account1"), [memory(**overrides)]) == []
-    transaction.run.assert_called_once()
+    transaction.run.assert_not_called()

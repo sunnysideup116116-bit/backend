@@ -9,6 +9,7 @@ import pytest
 import requests
 from bson import ObjectId
 from fastapi import BackgroundTasks, HTTPException
+from matchmaker_agent.concept_identity import canonicalize_concept
 
 from models import ChatRequest, MatchDecisionRequest
 from routers import chat_onboarding, match as routes
@@ -76,8 +77,9 @@ def http_flow(monkeypatch):
     queue = MagicMock()
     monkeypatch.setattr(actions, "queue_mediator_event", queue)
     post = MagicMock()
+    from matchmaker_agent.concept_identity import canonicalize_concept
     post.return_value.json.return_value = {"status": "success", "memories": [{
-        "key": "concept_nightlife", "label": "夜生活", "stance": "avoid", "confidence": 1.0,
+        **canonicalize_concept("夜生活").as_dict(), "stance": "avoid", "confidence": 1.0,
     }]}
     monkeypatch.setattr(actions.requests, "post", post)
     save = MagicMock()
@@ -104,7 +106,7 @@ def test_selected_reasons_survive_http_cas_and_feedback_with_owner_evidence(http
     assert response.status_code == 200
     assert response.json()["new_status"] == "declined"
     actor, other = ("alice", "bob") if status == "draft" else ("bob", "alice")
-    post.assert_called_once_with("http://127.0.0.1:9001/api/feedback", json={
+    post.assert_called_once_with("http://127.0.0.1:9001/api/v2/feedback", json={
         "user_id": actor, "target_id": other, "action": "decline",
         "target_traits": {}, "explicit_reasons": reasons,
     }, timeout=15)
@@ -145,6 +147,43 @@ def test_feedback_outage_does_not_undo_or_repeat_a_successful_decline(http_flow)
     response = client.post("/api/match/decision", json=decision_body(reasons=["夜生活"]))
     assert response.status_code == 200
     assert response.json()["new_status"] == matches.rows[0]["status"] == "declined"
+    save.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["draft", "pending"])
+@pytest.mark.parametrize("invalid_kind", ["legacy", "forged_hash", "partial_batch", "non_list", "error_status"])
+def test_invalid_feedback_projection_never_creates_mongo_facts_or_undoes_decline(
+    http_flow, status, invalid_kind, capsys,
+):
+    client, matches, post, save, queue = http_flow
+    matches.rows[:] = [proposal(status)]
+    valid = {**canonicalize_concept("夜生活").as_dict(), "stance": "avoid", "confidence": 1.0}
+    legacy = {"key": "legacy_prefix", "label": "SYNTHETIC_UNVERIFIED_PRIVATE_LABEL", "stance": "avoid"}
+    malformed = {
+        "legacy": [legacy],
+        "forged_hash": [{**valid, "semantic_input_hash": "incorrect"}],
+        "partial_batch": [valid, legacy],
+        "non_list": {"unexpected": legacy},
+        "error_status": [valid],
+    }[invalid_kind]
+    post.return_value.json.return_value = {
+        "status": "error" if invalid_kind == "error_status" else "success", "memories": malformed,
+    }
+
+    response = client.post("/api/match/decision", json=decision_body(reasons=["夜生活"], status=status))
+    assert response.status_code == 200
+    assert response.json()["new_status"] == matches.rows[0]["status"] == "declined"
+    post.assert_called_once()
+    assert post.call_args.args[0] == "http://127.0.0.1:9001/api/v2/feedback"
+    save.assert_not_called()
+    assert "SYNTHETIC_UNVERIFIED_PRIVATE_LABEL" not in capsys.readouterr().out
+    if status == "pending":
+        assert queue.call_args.args[2] == "match_declined"
+
+    # Optional enrichment failure cannot replay the committed lifecycle CAS.
+    retry = client.post("/api/match/decision", json=decision_body(reasons=["夜生活"], status=status))
+    assert retry.status_code == 409
+    assert post.call_count == 1
     save.assert_not_called()
 
 

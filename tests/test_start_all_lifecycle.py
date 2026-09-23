@@ -22,6 +22,12 @@ class StartAllLifecycleTests(unittest.TestCase):
         (self.root / "start_all.sh").write_bytes((ROOT / "start_all.sh").read_bytes())
         (self.root / "bin").mkdir()
         (self.root / "scripts").mkdir()
+        # Satisfy the new pre-port dependency preflight without importing any
+        # real runtime. This test still exercises only isolated fake services.
+        for service_name in ("social", "matchmaker"):
+            fake_python = self.root / f".local-venv/{service_name}/bin/python"
+            fake_python.parent.mkdir(parents=True)
+            self._executable(fake_python, "#!/bin/sh\nexit 0\n")
         pi_package = self.root / "pi_agent/node_modules/@earendil-works/pi-agent-core/package.json"
         pi_package.parent.mkdir(parents=True)
         pi_package.write_text('{}')

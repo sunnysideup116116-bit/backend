@@ -13,7 +13,13 @@ import hashlib
 from typing import Any
 
 from services.language_service import normalize_zh_tw
-from matchmaker_agent.concept_identity import canonicalize_concept
+from matchmaker_agent.concept_identity import (
+    PreferenceTextError,
+    canonicalize_concept,
+    canonicalize_fresh_concept,
+    normalize_preference_text,
+    stored_concept_identity,
+)
 
 
 MAX_INVITATION_TOPIC_CHARS = 80
@@ -63,6 +69,49 @@ def safe_search_context(value: Any) -> dict[str, str]:
     """
     if not isinstance(value, dict):
         return {}
+    # Preference is semantic input, not a presentation hint. Validate before
+    # any legacy display/context shortening and never downgrade an invalid
+    # explicit preference request into a generic search.
+    if str(value.get("search_intent") or "").strip() == "preference":
+        if value.get("canonicalization_version") == "v2":
+            # Already-bound requests may predate the fresh-input script policy.
+            # Verify and preserve their source; never re-normalize a stored ID.
+            record = dict(value)
+            record.setdefault("canonical_key", value.get("canonical_preference_key"))
+            identity = stored_concept_identity(record)
+            if not identity or value.get("canonical_preference_key") != identity.key:
+                raise PreferenceTextError("preference_search_identity_invalid")
+        else:
+            identity = canonicalize_fresh_concept(
+                value.get("semantic_text") or value.get("normalized_topic")
+                or value.get("invitation_topic"),
+            )
+        if not identity:
+            raise PreferenceTextError("preference_search_invalid")
+        if value.get("semantic_text") and value.get("normalized_topic"):
+            repeated_identity = (canonicalize_concept if value.get("canonicalization_version") == "v2"
+                                 else canonicalize_fresh_concept)(value["normalized_topic"])
+            if not repeated_identity or repeated_identity.key != identity.key:
+                raise PreferenceTextError("preference_search_topic_mismatch")
+        result = {
+            "search_intent": "preference",
+            "normalized_topic": identity.semantic_text,
+            "semantic_text": identity.semantic_text,
+            "display_label": identity.display_label,
+            "canonical_preference_key": identity.key,
+            "canonicalization_version": identity.canonicalization_version,
+            "semantic_input_hash": identity.semantic_input_hash,
+        }
+        if value.get("query_text"):
+            result["query_text"] = normalize_preference_text(
+                value["query_text"], max_length=MAX_QUERY_TEXT_CHARS,
+            )
+        source_id = bounded_search_text(
+            value.get("source_message_id"), MAX_SOURCE_MESSAGE_ID_CHARS,
+        )
+        if source_id:
+            result["source_message_id"] = source_id
+        return result
     limits = {
         "invitation_topic": MAX_INVITATION_TOPIC_CHARS,
         "query_text": MAX_QUERY_TEXT_CHARS,
@@ -80,23 +129,34 @@ def safe_search_context(value: Any) -> dict[str, str]:
     if intent not in _SEARCH_INTENTS:
         result.pop("search_intent", None)
         intent = ""
-    if intent == "preference":
-        identity = canonicalize_concept(
-            result.get("normalized_topic") or result.get("invitation_topic"),
-            result.get("canonical_preference_key"),
-        )
-        if not identity:
-            return {}
-        result["normalized_topic"] = identity.label
-        result["canonical_preference_key"] = identity.key
-        result.pop("invitation_topic", None)
-    else:
-        result.pop("canonical_preference_key", None)
-        if intent != "activity":
-            result.pop("normalized_topic", None)
-        elif result.get("invitation_topic"):
-            result["normalized_topic"] = result["invitation_topic"]
+    result.pop("canonical_preference_key", None)
+    if intent != "activity":
+        result.pop("normalized_topic", None)
+    elif result.get("invitation_topic"):
+        result["normalized_topic"] = result["invitation_topic"]
     return result
+
+
+def validate_persisted_search_context(value: Any) -> dict[str, str]:
+    """Validate replay evidence, never upgrade a legacy/display-only request.
+
+    Fresh entry points use safe_search_context to create server-owned metadata.
+    Durable job and confirmation executors must use this stricter boundary:
+    equality of a preview/request fingerprint does not prove semantic fidelity.
+    """
+    if not isinstance(value, dict) or str(value.get("search_intent") or "").strip() != "preference":
+        return safe_search_context(value)
+    try:
+        record = dict(value)
+        record.setdefault("canonical_key", value.get("canonical_preference_key"))
+        identity = stored_concept_identity(record)
+        if (not identity
+                or value.get("canonical_preference_key") != identity.key
+                or value.get("normalized_topic") != identity.semantic_text):
+            raise PreferenceTextError("preference_search_reconfirmation_required")
+        return safe_search_context(value)
+    except PreferenceTextError:
+        raise PreferenceTextError("preference_search_reconfirmation_required") from None
 
 
 def _topic_is_negated(text: str, topic: str) -> bool:

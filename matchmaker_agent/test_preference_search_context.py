@@ -7,6 +7,7 @@ import pytest
 import matchmaker
 
 from matchmaker import MatchmakerAgent, provider_search_context, safe_search_context
+from concept_identity import PreferenceTextError, canonicalize_concept
 
 
 def test_preference_context_survives_the_matchmaker_boundary_without_internal_key():
@@ -20,7 +21,10 @@ def test_preference_context_survives_the_matchmaker_boundary_without_internal_ke
     safe = safe_search_context(raw)
     assert safe["search_intent"] == "preference"
     assert safe["normalized_topic"] == "K-pop"
-    assert "canonical_preference_key" not in safe
+    assert safe["canonical_preference_key"] == canonicalize_concept("K-pop").key
+    assert safe["canonicalization_version"] == "v2"
+    assert safe["semantic_text"] == "K-pop"
+    assert "canonical_preference_key" not in provider_search_context(raw)
     assert provider_search_context(raw) == {
         "search_intent": "preference",
         "normalized_topic": "K-pop",
@@ -29,11 +33,12 @@ def test_preference_context_survives_the_matchmaker_boundary_without_internal_ke
 
 
 def test_preference_context_without_canonical_topic_fails_closed():
-    assert safe_search_context({
-        "search_intent": "preference",
-        "query_text": "幫我找人",
-        "private_field": "must-not-survive",
-    }) == {}
+    with pytest.raises(ValueError, match="preference_search_invalid"):
+        safe_search_context({
+            "search_intent": "preference",
+            "query_text": "幫我找人",
+            "private_field": "must-not-survive",
+        })
 
 
 def test_preference_match_prompt_receives_only_verified_semantics():

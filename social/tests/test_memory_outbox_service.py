@@ -5,12 +5,13 @@ from bson.objectid import ObjectId
 from services import memory_outbox_service as outbox
 from services.memory_service import MemoryWriteError
 from services.message_use_service import metadata_for_use
+from matchmaker_agent.concept_identity import canonicalize_concept
 
 
 def record(*, attempts=1):
     return {
         "_id": "outbox-1", "lease_token": "lease-1", "attempt_count": attempts,
-        "user_id": "owner", "memories": [{"key": "coffee", "label": "咖啡"}],
+        "user_id": "owner", "memories": [{**canonicalize_concept("咖啡").as_dict(), "stance": "like"}],
         "surface": "profile", "message_id": str(ObjectId("64b64c8f0000000000000101")), "match_id": None,
     }
 

@@ -1,13 +1,16 @@
 from unittest.mock import Mock
 
 from services import preference_candidate_service as service
+from matchmaker_agent.concept_identity import canonicalize_concept
+
+K_POP = canonicalize_concept("K-pop").key
 
 
 def test_internal_preference_adapter_revalidates_and_filters_ids(monkeypatch):
     response = Mock()
     response.raise_for_status.return_value = None
     response.json.return_value = {
-        "status": "success", "canonical_key": "k_pop",
+        "status": "success", "canonical_key": K_POP,
         "candidate_ids": ["owner", "blocked", "candidate", "candidate"],
         "candidate_count_before_filter": 4,
         "candidate_count_after_filter": 3,
@@ -20,7 +23,7 @@ def test_internal_preference_adapter_revalidates_and_filters_ids(monkeypatch):
     )
 
     assert result["candidate_ids"] == ["candidate"]
-    assert result["canonical_key"] == "k_pop"
+    assert result["canonical_key"] == K_POP
     assert result["query_provenance"] == "deterministic_alias"
     assert result["candidate_count_before_filter"] == 4
     assert result["candidate_count_after_filter"] == 3

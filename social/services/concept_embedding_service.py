@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import hashlib
 import os
 import re
 import threading
@@ -14,7 +15,14 @@ import requests
 from fastapi import HTTPException
 
 from services.ai_service import get_embeddings
+from services import ai_service
 from services.event_opportunity_service import run_requested_event_opportunity_scan
+from matchmaker_agent.concept_identity import (
+    PreferenceTextError,
+    normalize_preference_text,
+    stored_concept_identity,
+    is_v2_preference_key,
+)
 
 
 AGENT_PENDING_CONCEPTS_URL = "http://127.0.0.1:9001/api/concepts/missing-embeddings"
@@ -122,32 +130,65 @@ def process_pending_concept_embeddings(batch_size: int = DEFAULT_BATCH_SIZE) -> 
         payload = response.json()
         if payload.get("status") != "success":
             return {"status": "agent_unavailable", "retry_after": 20.0}
-        concepts = [item for item in payload.get("concepts", []) if isinstance(item, dict)]
+        concepts = payload.get("concepts", [])
+        if not isinstance(concepts, list) or len(concepts) > safe_batch:
+            raise PreferenceTextError("invalid_concept_batch")
         if not concepts:
             return {"status": "idle", "embedded_count": 0, "pending_count": 0}
 
-        mongo_kinds = _mongo_kind_overrides([
-            str(item.get("key") or "") for item in concepts if item.get("key")
-        ])
-        prepared = []
+        # Preflight the entire response before Mongo enrichment, provider work,
+        # or a projection write. One malformed item rejects the whole batch.
+        validated = []
         for item in concepts:
-            key = str(item.get("key") or "").strip()[:100]
-            label = " ".join(str(item.get("label") or "").split())[:60]
+            if not isinstance(item, dict):
+                raise PreferenceTextError("invalid_concept_batch")
+            raw_key = item.get("key")
+            if not isinstance(raw_key, str) or not raw_key.strip() or len(raw_key) > 100:
+                # Retain the historical key transport envelope, never a prefix.
+                raise PreferenceTextError("invalid_concept_key")
+            key = raw_key.strip()
+            identity = stored_concept_identity(item)
+            if item.get("canonicalization_version") == "v2" or is_v2_preference_key(key):
+                if not identity:
+                    raise PreferenceTextError("embedding_identity_unverified")
+                validated.append({**item, **identity.as_dict()})
+            else:
+                label = normalize_preference_text(item.get("label"))
+                if not label:
+                    raise PreferenceTextError("invalid_concept_text")
+                # Legacy/Event source stays legacy: embedding a known label
+                # does not establish that historical preference text was whole.
+                validated.append({
+                    **item, "key": key, "label": label,
+                    "semantic_text": label,
+                    "canonicalization_version": "legacy_unknown",
+                    "semantic_input_hash": hashlib.sha256(label.encode("utf-8")).hexdigest(),
+                })
+        mongo_kinds = _mongo_kind_overrides([item["key"] for item in validated])
+        prepared = []
+        embedding_model = ai_service.GOOGLE_EMBEDDING_MODEL
+        for item in validated:
             kind = _resolved_kind(item, mongo_kinds)
-            if key and label and kind in _VALID_KINDS:
-                prepared.append({"key": key, "label": label, "kind": kind})
-        if not prepared:
-            return {
-                "status": "stalled", "error_code": "invalid_concept_batch",
-                "embedded_count": 0, "pending_count": len(concepts),
-                "retry_after": _NO_PROGRESS_RETRY_SECONDS,
-            }
+            # Explicit allowlist avoids copying a pending API's unexpected
+            # fields into the write payload.
+            prepared.append({
+                **{key: item[key] for key in (
+                    "key", "label", "semantic_text", "canonicalization_version", "semantic_input_hash",
+                    "canonical_key", "display_label", "fidelity_status",
+                ) if key in item},
+                "kind": kind,
+                "embedding_model": embedding_model,
+                "embedding_task": "semantic_similarity",
+            })
 
-        signature = tuple((item["key"], item["label"], item["kind"]) for item in prepared)
+        signature = tuple((
+            item["key"], item["semantic_input_hash"], item["kind"],
+            item["canonicalization_version"], item["embedding_model"], item["embedding_task"],
+        ) for item in prepared)
         if _projection_cache.get("signature") == signature:
             projected = list(_projection_cache.get("projected") or [])
         else:
-            labels = [item["label"] for item in prepared]
+            labels = [item["semantic_text"] for item in prepared]
             vectors = get_embeddings(
                 labels,
                 task_type="semantic_similarity",
@@ -155,6 +196,10 @@ def process_pending_concept_embeddings(batch_size: int = DEFAULT_BATCH_SIZE) -> 
             )
             if len(vectors) != len(prepared):
                 raise ValueError("embedding_count_mismatch")
+            if any(not isinstance(vector, list) or len(vector) != CONCEPT_EMBEDDING_DIMENSIONS
+                   or not all(isinstance(value, (int, float)) and math.isfinite(value) for value in vector)
+                   for vector in vectors):
+                raise ValueError("embedding_vector_invalid")
             projected = [
                 {**item, "embedding": _unit_vector(vector)}
                 for item, vector in zip(prepared, vectors)
@@ -186,6 +231,11 @@ def process_pending_concept_embeddings(batch_size: int = DEFAULT_BATCH_SIZE) -> 
             }
         _projection_cache.clear()
         return result
+    except PreferenceTextError as exc:
+        return {
+            "status": "stalled", "error_code": exc.code, "embedded_count": 0,
+            "retryable": False, "retry_after": _NO_PROGRESS_RETRY_SECONDS,
+        }
     except HTTPException as exc:
         detail = " ".join(str(exc.detail or "embedding_failed").split())[:500]
         return {

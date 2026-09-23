@@ -1,0 +1,31 @@
+{
+  "version": "p01-v1-input-fidelity-evidence",
+  "synthetic_only": true,
+  "purpose": "Pin current v1 loss/collision defects, not a desired identity-v2 contract.",
+  "pairs": [
+    {"id": "accessible", "category": "accessibility", "kind": "prefix_collision", "left": "Exploring Historic Garden Paths on Weekends with Accessible Routes", "right": "Exploring Historic Garden Paths on Weekends with Stair-Only Routes"},
+    {"id": "wheelchair", "category": "accessibility", "kind": "prefix_collision", "left": "Visiting Historic Castles and Gardens using Wheelchair Accessible Paths", "right": "Visiting Historic Castles and Gardens using Narrow Staircases Only"},
+    {"id": "step_free", "category": "accessibility", "kind": "prefix_collision", "left": "Walking through Historic City Centres using Step-Free Routes", "right": "Walking through Historic City Centres using Steep Steps"},
+    {"id": "quiet_noisy", "category": "atmosphere", "kind": "prefix_collision", "left": "Spending Weekend Evenings in Neighbourhood Cafes with Quiet Rooms", "right": "Spending Weekend Evenings in Neighbourhood Cafes with Noisy Live Bands"},
+    {"id": "guided_tours", "category": "constraint", "kind": "prefix_collision", "left": "Visiting Historic Palaces and Castle Grounds with Guided Tours", "right": "Visiting Historic Palaces and Castle Grounds with No Guided Tours"},
+    {"id": "vegetarian_meat", "category": "diet", "kind": "prefix_collision", "left": "Attending Community Dinner Parties with Meals that Are Vegetarian Only", "right": "Attending Community Dinner Parties with Meals that Include Meat"},
+    {"id": "alcohol_free_whisky", "category": "drink", "kind": "prefix_collision", "left": "Attending Community Dinner Parties with Drinks that Are Alcohol-Free", "right": "Attending Community Dinner Parties with Drinks that Include Whisky"},
+    {"id": "watching_playing", "category": "role", "kind": "prefix_collision", "left": "Enjoying Weekend Football Matches through Watching", "right": "Enjoying Weekend Football Matches through Playing"},
+    {"id": "reading_writing", "category": "role", "kind": "prefix_collision", "left": "Exploring Historical Mystery Novels through Reading", "right": "Exploring Historical Mystery Novels through Writing"},
+    {"id": "broad_narrow_birdwatching", "category": "broad_narrow", "kind": "prefix_collision", "left": "Watching Local Wildlife in Nature Reserves", "right": "Watching Local Wildlife in Nature Reserves Focusing Only on Shorebirds"},
+    {"id": "broad_narrow_hiking", "category": "broad_narrow", "kind": "prefix_collision", "left": "Exploring Scenic Walking Trails on Weekends", "right": "Exploring Scenic Walking Trails on Weekends Only on Short Step-Free Routes"},
+    {"id": "broad_narrow_reading", "category": "broad_narrow", "kind": "prefix_collision", "left": "Exploring Historical Mystery Novels through Reading", "right": "Exploring Historical Mystery Novels through Reading Only Cozy Nonviolent Stories"},
+    {"id": "short_accessible", "category": "accessibility", "kind": "distinct_control", "left": "Accessible Routes", "right": "Stair-Only Routes"},
+    {"id": "short_wheelchair", "category": "accessibility", "kind": "distinct_control", "left": "Wheelchair Accessible Paths", "right": "Narrow Staircases"},
+    {"id": "short_step_free", "category": "accessibility", "kind": "distinct_control", "left": "Step-Free Walking Routes", "right": "Steep Steps"},
+    {"id": "short_quiet_noisy", "category": "atmosphere", "kind": "distinct_control", "left": "Quiet Cafes", "right": "Noisy Cafes"},
+    {"id": "short_guided_tours", "category": "constraint", "kind": "distinct_control", "left": "Castle Visits with Guided Tours", "right": "Castle Visits with No Guided Tours"},
+    {"id": "short_vegetarian_meat", "category": "diet", "kind": "distinct_control", "left": "Vegetarian Meals", "right": "Meat Meals"},
+    {"id": "short_alcohol_free_whisky", "category": "drink", "kind": "distinct_control", "left": "Alcohol-Free Drinks", "right": "Whisky Tasting"},
+    {"id": "short_watching_playing", "category": "role", "kind": "distinct_control", "left": "Watching Football", "right": "Playing Football"},
+    {"id": "short_reading_writing", "category": "role", "kind": "distinct_control", "left": "Reading Mystery Novels", "right": "Writing Mystery Novels"},
+    {"id": "short_broad_narrow", "category": "broad_narrow", "kind": "distinct_control", "left": "Reading Fiction", "right": "Reading Cozy Historical Fiction"},
+    {"id": "alias_kpop", "category": "alias", "kind": "deterministic_alias", "left": "Kpop", "right": "K-pop", "expected_key": "k_pop"},
+    {"id": "alias_jpop", "category": "alias", "kind": "deterministic_alias", "left": "J pop", "right": "J-pop", "expected_key": "j_pop"}
+  ]
+}

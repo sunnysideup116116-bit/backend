@@ -34,10 +34,17 @@ from services.ayue_agent.public_relationship_projection import (
 from .date_coordination_state import (
     CANCELLABLE_STATUSES as DATE_COORDINATION_CANCELLABLE_STATUSES,
 )
-from services.match_search_context import safe_search_context, search_context_for_turn
+from services.match_search_context import (
+    safe_search_context, search_context_for_turn, validate_persisted_search_context,
+)
 from matchmaker_agent.concept_identity import (
     canonical_evidence_span,
     canonicalize_concept,
+    canonicalize_fresh_concept,
+    PreferenceTextError,
+    normalize_preference_text,
+    normalize_fresh_preference_text,
+    display_preference_label,
 )
 TOOL_CALLS = db["agent_tool_calls"]
 
@@ -81,11 +88,14 @@ def _start_search(
     ctx: Any, run_id: str, index: int, *, confirmation_id: str | None,
     payload: dict[str, Any] | None = None,
 ) -> tuple[bool, str, str | None]:
+    try:
+        search_context = validate_persisted_search_context((payload or {}).get("search_context"))
+    except PreferenceTextError as exc:
+        return False, "這次偏好搜尋條件無效，請重新提供完整條件。", exc.code
     key = _idempotency_key(confirmation_id, run_id, index)
     if not _claim_once(key):
         return True, "我已經處理過這次搜尋。", None
     try:
-        search_context = safe_search_context((payload or {}).get("search_context"))
         search_kwargs: dict[str, Any] = {}
         if search_context:
             search_kwargs["search_context"] = search_context
@@ -1005,21 +1015,31 @@ def prepare_write_confirmation(
             return None, "我想先多了解你的方向，才能幫你找得更準。" + missing_basis_question(assessment)
         if assessment.state == "active_match_blocked":
             return None, "你目前還有一段配對正在進行，我先不重複開新搜尋。"
-        search_context = search_context_for_turn(
-            (arguments or {}).get("search_context"),
-            message=getattr(ctx, "message", ""),
-            message_id=getattr(ctx, "message_id", None),
-            history=getattr(ctx, "recent_history", None),
-        )
+        try:
+            search_context = search_context_for_turn(
+                (arguments or {}).get("search_context"),
+                message=getattr(ctx, "message", ""),
+                message_id=getattr(ctx, "message_id", None),
+                history=getattr(ctx, "recent_history", None),
+            )
+        except PreferenceTextError:
+            return None, "這次偏好搜尋條件無效或過長，請提供完整且較短的條件；我沒有開始搜尋。"
         semantic_request = (arguments or {}).get("search_request")
         invitation_evidence = ""
         if isinstance(semantic_request, dict):
             # Classifications are not write authority. Ground the requested
             # activity in this turn, then persist the user's visible preview.
             from services.match_search_context import bounded_search_text
-            message = bounded_search_text(getattr(ctx, "message", ""), 600)
-            topic_span = bounded_search_text(semantic_request.get("topic"), 80)
             request_kind = str(semantic_request.get("kind") or "recent_context")
+            if request_kind == "preference":
+                try:
+                    message = normalize_fresh_preference_text(getattr(ctx, "message", ""), max_length=600)
+                    topic_span = normalize_fresh_preference_text(semantic_request.get("topic"))
+                except PreferenceTextError:
+                    return None, "這次偏好搜尋條件無效或過長，請提供完整且較短的條件；我沒有開始搜尋。"
+            else:
+                message = bounded_search_text(getattr(ctx, "message", ""), 600)
+                topic_span = bounded_search_text(semantic_request.get("topic"), 80)
             if request_kind == "activity":
                 if not topic_span or topic_span not in message:
                     return None, "你這次想找人一起做什麼活動？確認活動後，我會先找人選給你看。"
@@ -1032,7 +1052,7 @@ def prepare_write_confirmation(
                 if span and span in message:
                     invitation_evidence = span
             elif request_kind == "preference":
-                identity = canonicalize_concept(topic_span)
+                identity = canonicalize_fresh_concept(topic_span)
                 evidence = canonical_evidence_span(message, identity) if identity else ""
                 if not identity or not evidence:
                     return None, "你希望對方明確喜歡哪一項興趣或偏好？"
@@ -1057,7 +1077,7 @@ def prepare_write_confirmation(
                 if preference_semantic_mode() == "active" else ""
             )
             preview = (
-                f"我會優先從明確保存『喜歡 {preference_topic}』的人選中搜尋，"
+                f"我會優先從明確保存『喜歡 {display_preference_label(preference_topic)}』的人選中搜尋，"
                 "再套用封鎖、過往配對、安全與名額檢查；不會用近期活動猜測偏好。"
                 f"{semantic_notice}"
                 "找到後先給你看提案，你再決定是否送出邀請。要開始嗎？"

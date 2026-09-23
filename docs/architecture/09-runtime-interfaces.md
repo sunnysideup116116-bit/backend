@@ -32,15 +32,23 @@ Calendar command/preflight、contact selection、operation batch、write executo
 
 `match.start_search` 的正式 intent 為 `activity`、`recent_context` 或 `preference`。明確「找喜歡／偏好 X 的人」由 server 再驗證 owner 可見原句並建立正向 `preference` confirmation；確認後走 canonical Graph exact retrieval。負向 preference query 在 P0 fail closed。活動與近期情境維持 bounded vector retrieval，generic request 暫時沿用既有流程。模型不能用 recent context 推測 durable preference，也不能提供 canonical key 或候選 ID。
 
+[Identity v2](../PREFERENCE_IDENTITY_V2.md) 的 preference topic 是完整 bounded semantic text（500），另有 display label；key/version/hash 由 server 產生並驗證。已持久化 confirmation/job 缺可信 v2 metadata 時要求重新確認，不從舊縮短 topic 推回原意。Matchmaker provider projection 仍只接受既有允許欄位，不公開 internal proof。
+
+Fresh preference 輸入一律經固定 OpenCC 1.4.1／`s2twp` boundary，再進既有 deterministic alias／identity stage；缺套件或版本不符 fail closed。Stored v2 不做 fresh conversion。Social → 9001 exact／semantic request 攜帶完整 `canonical_key`／`canonicalization_version`／`semantic_text`／`semantic_input_hash` packet，驗證而不重轉；raw topic-only API 才作 fresh conversion，partial packet 不降級為 raw。
+
+Durable memory 的 500 上限以 raw Unicode codepoints 計算，正規化後也需符合上限；Dart voice executor 使用 `runes`、保留完整原文，並由 generated catalog 取得上限。Supplementary emoji 算 1，combining marks 分別計數；不是 UTF-16 `String.length`。Registration form 維持獨立 120 上限。
+
 ## Background and voice boundaries
 
 Registration Graph `registration-bootstrap-v1`：Social profiling 初始化／profile 更新只 enqueue，
 既有 memory outbox worker 重新驗證 Appwrite，透過 9001 `POST /api/users/registration-projection`
-同步 User.id/name。`POST /api/memory/apply` 的 `surface=registration_interest` 採 insert-only 初始
+同步 User.id/name。`POST /api/v2/memory/apply` 的 `surface=registration_interest` 採 insert-only 初始
 偏好，不覆蓋既有／停用記憶。`GET /api/registration-graph/status` 只提供版本與 worker 活性，
 不回帳號資料；供補資料 CLI 防止對舊 worker 投遞新 job。詳見 [bootstrap contract](../REGISTRATION_GRAPH_BOOTSTRAP.md)。
 
-註冊興趣與一般 owner message 共用 atomic/canonical memory boundary：明確列舉拆成獨立 Concept，K-pop aliases 收斂到 `k_pop`，單訊息數量受同一 configurable limit 約束。
+註冊興趣與一般 owner message 共用 atomic/canonical memory boundary：明確列舉拆成獨立 Concept，K-pop deterministic aliases 收斂到相同 v2 digest identity；`k_pop` 僅為歷史 v1 key，舊節點不重寫。單訊息數量受同一 configurable limit 約束。
+
+新 Social 的 memory apply/action、feedback、Concept vector projection 使用 `/api/v2/` mutation 路徑，避免對舊 9001 寫入被截短的資料。新 9001 的舊路徑 alias 也執行相同嚴格驗證。部署需一致升級，不能把 404 fallback 成舊 writer。
 
 - Profile extraction 與 proactive care 是 owner-message 背景流程，不由 Pi 工具啟動。
 - App voice 的 `ayue.public_query` 使用公開 Pi HTTP API；private query 繼續使用 Private V2。

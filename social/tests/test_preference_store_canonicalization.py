@@ -1,4 +1,5 @@
 from services.preference_store import _clean_item
+from matchmaker_agent.concept_identity import canonicalize_concept
 
 
 def test_mongo_preference_fact_uses_the_same_server_canonical_identity():
@@ -6,7 +7,7 @@ def test_mongo_preference_fact_uses_the_same_server_canonical_identity():
         "key": "model_specific_key", "label": "Kpop",
         "stance": "like", "category": "activity", "confidence": .95,
     })
-    assert item["concept_key"] == "k_pop"
+    assert item["concept_key"] == canonicalize_concept("K-pop").key
     assert item["label"] == "K-pop"
 
 

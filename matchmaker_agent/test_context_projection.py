@@ -146,6 +146,19 @@ class ContextProjectionEndpointTests(unittest.TestCase):
 
     def test_concept_embedding_projection_stores_versioned_vector(self):
         driver, session = self._graph()
+        original_run = session.run.side_effect
+
+        def run(query, **kwargs):
+            if "UNWIND $keys" in query:
+                return [{"key": "hiking", "label": "爬山"}]
+            if "RETURN count(concept) AS written" in query:
+                result = MagicMock()
+                result.single.return_value = {"written": 1}
+                return result
+            return original_run(query, **kwargs)
+
+        session.run.side_effect = run
+        session.execute_write.side_effect = lambda callback, *args: callback(session, *args)
         request = agent_api.ConceptEmbeddingProjectionRequest(
             concepts=[{
                 "key": "hiking", "label": "爬山", "kind": "activity",

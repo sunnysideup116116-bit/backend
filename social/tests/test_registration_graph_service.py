@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import mongomock
 import pytest
+from matchmaker_agent.concept_identity import canonicalize_concept
 
 from services import registration_graph_service as service
 from services import memory_outbox_service as worker
@@ -49,7 +50,7 @@ def test_worker_dispatches_registration_and_persists_prepared_memories(queue):
          patch.object(service, "registration_memories", return_value=[memory]), \
          patch("services.memory_service.apply_profile_memory_proposals") as apply:
         assert worker.process_memory_outbox_once(1) == {"processed": 1, "applied": 1, "failed": 0}
-    assert queue.find_one()["prepared_memories"] == [memory]
+    assert queue.find_one()["prepared_memories"] == [{**memory, **canonicalize_concept("閱讀").as_dict()}]
     assert post.call_args.kwargs["json"]["name"] == "小宇"
     assert apply.call_args.args[2] == "registration_interest"
 

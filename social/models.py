@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from services.match_search_context import safe_search_context
+from matchmaker_agent.concept_identity import MAX_PREFERENCE_TEXT_CHARS, normalize_fresh_preference_text
 
 class ChatType(str, Enum):
     big_five = "big_five"
@@ -231,9 +232,14 @@ class ProfileMemoryActionRequest(BaseModel):
 
 class ProfileMemoryAddRequest(BaseModel):
     user_id: str = Field(min_length=1, max_length=128)
-    label: str = Field(min_length=1, max_length=40)
+    label: str = Field(min_length=1, max_length=MAX_PREFERENCE_TEXT_CHARS)
     stance: Literal["like", "dislike", "require", "avoid"] = "like"
     request_id: str = Field(min_length=8, max_length=120)
+
+    @field_validator("label")
+    @classmethod
+    def _validate_semantic_text(cls, value: str) -> str:
+        return normalize_fresh_preference_text(value)
 
 class ProfileLocationRequest(BaseModel):
     user_id: str

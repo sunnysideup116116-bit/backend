@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisco
 from pydantic import BaseModel, Field
 
 from registration_voice.settings import collect_google_api_keys
+from matchmaker_agent.concept_identity import display_preference_label
 
 from .contracts import (
     VoiceProposal,
@@ -313,8 +314,8 @@ def _confirmation_preview(proposal: VoiceProposal, context: dict[str, Any]) -> s
         contact = str(proposal.arguments.get("contact_name") or "對方")[:40]
         return f"要把目前訊息傳給{contact}，請說「確認傳送訊息」。"
     if proposal.intent == "memory.add":
-        label = str(proposal.arguments.get("label") or "這件事")[:40]
-        return f"要把「{label}」加入阿月記憶，請說「確認新增阿月記憶」。"
+        display_label = display_preference_label(proposal.arguments.get("label") or "這件事")
+        return f"要把「{display_label}」加入阿月記憶，請說「確認新增阿月記憶」。"
     return f"{_setting_reply(proposal)}請說「{confirmation_phrase(proposal)}」確認。"
 
 

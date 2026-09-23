@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import agent_api
+from concept_identity import canonicalize_concept
 
 
 class _Result(list):
@@ -37,18 +38,25 @@ def _online_index():
 def test_semantic_lookup_is_bounded_prefers_only_and_read_only():
     vector = [1.0] + [0.0] * 767
     seen = {}
+    query_identity = canonicalize_concept("K-pop")
+    korean = canonicalize_concept("Korean Pop")
+    asian = canonicalize_concept("Asian Pop")
 
     def run(query, **params):
         text = str(query)
         if "SHOW VECTOR INDEXES" in text:
             return _Result(single=_online_index())
         if "RETURN concept.embedding AS embedding" in text:
-            return _Result(single={"embedding": vector, "model": "test-space", "task": "semantic_similarity"})
+            return _Result(single={**query_identity.as_dict(), "embedding": vector,
+                "model": "test-space", "task": "semantic_similarity",
+                "embedding_source_hash": query_identity.semantic_input_hash})
         if "db.index.vector.queryNodes" in text:
             seen.update(ann=text, ann_params=params)
             return _Result(rows=[
-                {"concept_key": "korean_pop", "similarity": .91, "model": "test-space", "task": "semantic_similarity"},
-                {"concept_key": "asian_pop", "similarity": .87, "model": "test-space", "task": "semantic_similarity"},
+                {**korean.as_dict(), "concept_key": korean.key, "similarity": .91,
+                 "model": "test-space", "task": "semantic_similarity", "embedding_source_hash": korean.semantic_input_hash},
+                {**asian.as_dict(), "concept_key": asian.key, "similarity": .87,
+                 "model": "test-space", "task": "semantic_similarity", "embedding_source_hash": asian.semantic_input_hash},
             ])
         if "UNWIND $concepts" in text:
             seen.update(query=text, params=params)
@@ -56,8 +64,8 @@ def test_semantic_lookup_is_bounded_prefers_only_and_read_only():
                 "candidate_id": "candidate-a",
                 "best_score": 0.91,
                 "evidence": [
-                    {"concept_key": "korean_pop", "similarity": 0.91},
-                    {"concept_key": "asian_pop", "similarity": 0.87},
+                    {"concept_key": korean.key, "similarity": 0.91},
+                    {"concept_key": asian.key, "similarity": 0.87},
                 ],
             }])
         raise AssertionError(text)
@@ -75,9 +83,9 @@ def test_semantic_lookup_is_bounded_prefers_only_and_read_only():
         "candidate_id": "candidate-a",
         "best_similarity": 0.91,
         "evidence": [
-            {"concept_key": "korean_pop", "similarity": 0.91,
+            {"concept_key": korean.key, "similarity": 0.91,
              "kind": "semantic_related"},
-            {"concept_key": "asian_pop", "similarity": 0.87,
+            {"concept_key": asian.key, "similarity": 0.87,
              "kind": "semantic_related"},
         ],
     }]
