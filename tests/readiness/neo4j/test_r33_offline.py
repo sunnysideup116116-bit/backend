@@ -12,11 +12,15 @@ import r33_data as data
 import r33_metrics as metrics
 import run_r33_offline as runner
 import run_r32c_offline as frozen
+from readiness_frozen_git import FrozenTestGit
 
 
 class R33Tests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        git_patch = patch.object(data, "subprocess", FrozenTestGit(data.ROOT))
+        git_patch.start()
+        cls.addClassCleanup(git_patch.stop)
         cls.cases,cls.audit=data.r33_inputs()
         cls.plan=data.r33_schedule(cls.cases)
         cls.by_id={c["id"]:c for c in cls.cases}

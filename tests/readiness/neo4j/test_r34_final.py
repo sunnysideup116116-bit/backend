@@ -1,14 +1,20 @@
 """Hermetic tests for the selected-config fresh final experiment."""
 import json,sys,unittest
 from pathlib import Path
+from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from r34_final_contract import r34_final_plan,r34_final_metrics
+import r34_final_contract as contract
 import run_r32c_offline as frozen
+from readiness_frozen_git import FrozenTestGit
 
 
 class R34FinalTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        git_patch = patch.object(contract, "subprocess", FrozenTestGit(contract.ROOT))
+        git_patch.start()
+        cls.addClassCleanup(git_patch.stop)
         cls.config,cls.cases,cls.plan,cls.audit=r34_final_plan()
 
     def jobs(self):
