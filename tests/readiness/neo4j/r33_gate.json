@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "experiment": "R3.3",
+  "status": "prospective_gate_frozen_before_holdout_creation",
+  "production_ready": false,
+  "configuration": {
+    "provider": "Ollama Cloud",
+    "model": "deepseek-v4.1-flash:cloud",
+    "reasoning_effort": "omitted/default",
+    "temperature": 0,
+    "max_tokens": 4096,
+    "batch_size": 2,
+    "rounds": 3,
+    "seeds": [
+      330301,
+      330302,
+      330303
+    ],
+    "schedule_seed": 330300,
+    "workers": 3,
+    "timeout_seconds": 60,
+    "sdk_retries": 0,
+    "max_attempts_per_batch": 2,
+    "case_count": 192,
+    "first_request_count": 288,
+    "hard_http_attempt_limit": 576,
+    "semantic_text_codepoint_limit": 500,
+    "sdk_versions": {
+      "openai": "1.30.1",
+      "httpx": "0.28.1",
+      "OpenCC": "1.4.1"
+    },
+    "normalization": "canonicalize_fresh_concept; OpenCC 1.4.1 s2twp; complete semantic_text; never display_label"
+  },
+  "blocking_gates": {
+    "acceptance_precision": {
+      "numerator": 99,
+      "denominator": 100
+    },
+    "acceptance_recall": {
+      "numerator": 95,
+      "denominator": 100
+    },
+    "acceptance_consistency": {
+      "numerator": 99,
+      "denominator": 100
+    },
+    "broad_to_specific_false_accept": 0,
+    "role_false_accept": 0,
+    "constraint_false_accept": 0,
+    "first_pass_validity": {
+      "numerator": 99,
+      "denominator": 100
+    },
+    "eventual_validity": {
+      "numerator": 99,
+      "denominator": 100
+    },
+    "error_fail_open": 0
+  },
+  "relation_to_primary": {
+    "equivalent": "YES",
+    "candidate_more_specific": "YES",
+    "candidate_more_broad": "NO",
+    "sibling_related": "NO",
+    "role_mismatch": "NO",
+    "constraint_conflict": "NO",
+    "lexical_ambiguity": "ABSTAIN",
+    "unrelated": "NO",
+    "unknown": "ABSTAIN"
+  },
+  "acceptance": {
+    "YES": true,
+    "NO": false,
+    "ABSTAIN": false,
+    "ERROR": false
+  },
+  "diagnostics_only": [
+    "relation_accuracy",
+    "relation_consistency",
+    "primary_NO_ABSTAIN_disagreement",
+    "primary_three_way_accuracy",
+    "secondary_relation_accuracy",
+    "per_language_metrics",
+    "per_category_metrics",
+    "per_round_metrics",
+    "latency",
+    "token_usage"
+  ],
+  "frozen_sources": {
+    "matchmaker_agent/concept_identity.py": "938fb8fc597acca6a0dfe1f32b53bb4dfc55df0d5c07a5f8c1f13db7e76af438",
+    "tests/readiness/neo4j/r32c_prompt_v3.txt": "cad492b848cc1bab957be56f6accefdadffdee9db0961ec96b4571f5d0483911",
+    "tests/readiness/neo4j/r32c_relation.py": "e0bc2b43876aac9252b472bb4b25b2c42580b7322bc5e834a3135f033229d720",
+    "tests/readiness/neo4j/run_r32c_offline.py": "b349f2db72b0eb0a705cd86c61aa7d0527f7d8c6e82a8f56bc9487570ef7ff38",
+    "tests/readiness/neo4j/r31_diagnostics.py": "91ae45842b3e6b90cf2c905b4fe3880f94015cd9d76a77f2c498412fa911190f",
+    "tests/readiness/neo4j/run_r31_reliability.py": "334eda00e79f37ee5cfadd92c19cd8791947cd9cbb070d76848dd5bba8ca4a90",
+    "tests/readiness/neo4j/run_r3_offline.py": "7192e239cc81d2f8216120f30dab81b64c354a49d34029ccb62187cc2279f265"
+  },
+  "runtime_flags": {
+    "MATCH_PREFERENCE_SEMANTIC_MODE": "off",
+    "MATCH_PREFERENCE_SEMANTIC_EMBEDDING_SPACE_CONFIRMED": "off"
+  },
+  "label_provenance": "Agent-authored before scoring under explicit user authorization; not independently human reviewed. Evaluated provider must not author or alter gold labels."
+}
