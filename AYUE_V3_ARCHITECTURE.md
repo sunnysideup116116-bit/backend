@@ -43,6 +43,8 @@ Durable preference 由 server-owned atomic/canonical boundary 寫入。Public Pi
 
 [Preference Identity v2](docs/PREFERENCE_IDENTITY_V2.md) 將完整 semantic source 與 display label 分離；超限拒絕而非裁切，exact identity 使用 bounded versioned digest。Legacy unknown 不自動轉換／回填，持久搜尋需可信 v2 metadata 或重新確認；P1 semantic feature 仍 OFF。
 
+[Related-Interest Matching v1](docs/RELATED_INTEREST_PILOT_V1.md) 是新的 internal app-wide pilot contract，預設仍 OFF，並非把舊 strict validator NO-GO 改判。只有 qualified exact=0 時才走專用 versioned ANN → DeepSeek relation validation → accepted Concepts → PREFERS owners；query embedding 仍為 Gemini。理由區分搜尋意圖、本人已保存偏好與相關但不同的候選興趣，不能把 semantic evidence 宣稱為共同偏好。既有 Pi confirmation、quota、block/history 與 mutual-consent lifecycle 不變；pilot metrics 不進 durable memory。
+
 - 主動關心維持 Profile extraction → follow-up candidate → proactive scheduler → grounded message；它不使用公開 Agent 的推理 loop。
 - App voice 與 registration voice 維持 Gemini runtime。App voice 轉交公開阿月時呼叫同一個 Pi HTTP contract；直接行事曆操作維持既有 typed API。
 - Private Ayue 維持 `private_v2.py`，使用 private context 與搬至 shared 的 confirmation manager；不改成 Pi。

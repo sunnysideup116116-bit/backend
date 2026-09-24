@@ -37,3 +37,4 @@ dist/
 
 # Durable AI quota delivery queue (contains account identifiers)
 .runtime/
+.related-interest-disabled

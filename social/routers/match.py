@@ -14,6 +14,10 @@ from models import (
     EventDiscoveryRequest, EventOpportunityScanRequest,
 )
 from database import profiles_coll, matches_coll
+from matchmaker_agent.related_interest_contract import (
+    POLICY as RELATED_INTEREST_POLICY, enabled as related_interest_enabled,
+    validated_evidence as validated_related_evidence, bounded_counts as related_validator_counts,
+)
 from services.ai_service import get_embedding, generate_chat_completion
 from services.memory_service import get_user_graph_memories
 from services.mediator_event_service import queue_mediator_event
@@ -746,6 +750,11 @@ def candidate_qualification(
     for item in list(preference_evidence or [])[:5] if search_intent == "preference" else []:
         if not isinstance(item, dict) or item.get("kind") != "semantic_related":
             continue
+        related_packet = None
+        if related_interest_enabled():
+            related_packet = validated_related_evidence(item, query_key=preference_key)
+            if not related_packet:
+                continue
         concept_key = str(item.get("concept_key") or "").strip()[:100]
         try:
             similarity = float(item.get("similarity", 0.0))
@@ -758,7 +767,7 @@ def candidate_qualification(
             and {"like", "require"} & candidate_stances.get(concept_key, set())
             and concept_key not in candidate_unknown
         ):
-            semantic_preference_evidence.append({
+            semantic_preference_evidence.append(related_packet or {
                 "kind": "semantic_related",
                 "concept_key": concept_key,
                 "similarity": round(similarity, 4),
@@ -1657,6 +1666,12 @@ def _existing_job_match_result(match_doc: dict, user_id: str, user_doc: dict) ->
 
 def _request_matchmaker_selection(payload: dict, *, timeout: float) -> list[dict]:
     """Evaluate one qualified batch. An empty result must be explicit, never a failure."""
+    if any(e.get("policy_version") == RELATED_INTEREST_POLICY
+           for c in payload.get("candidates", []) for e in c.get("preference_retrieval_evidence", [])
+           if isinstance(e, dict)):
+        if timeout <= 0.1:
+            raise MatchSearchPipelineError("matchmaker_timeout", "matchmaker_request")
+        payload = {**payload, "request_budget_seconds": min(120.0, timeout - 0.1)}
     try:
         from agent_quota.internal import signed_headers
         response = requests.post("http://127.0.0.1:9001/api/match", json=payload, timeout=timeout, headers=signed_headers())
@@ -1975,8 +1990,12 @@ def generate_matches_for_user(
         diagnostics["semantic_fallback_eligible"] = bool(
             len(qualified_exact) < trigger_threshold
         )
-        if len(qualified_exact) < trigger_threshold and semantic_mode == "active":
+        if len(qualified_exact) == 0 and semantic_mode == "active":
             diagnostics["semantic_fallback_triggered"] = True
+            if not related_interest_enabled():
+                raise MatchSearchPipelineError("semantic_policy_disabled", "preference_semantic_search")
+            from services.related_interest_telemetry import record_search as record_related_search
+            record_related_search(search_job_id, req.user_id)
             semantic_lookup = None
             if not semantic_embedding_space_confirmed():
                 if qualified_exact:
@@ -1999,8 +2018,13 @@ def generate_matches_for_user(
                         req.user_id,
                         preference_topic,
                         excluded_user_ids={*excluded_users, *candidate_ids},
+                        related_policy_required=True,
                     )
                 except PreferenceSemanticRetrievalError as exc:
+                    diagnostics["related_interest_validator"] = related_validator_counts(
+                        getattr(exc, "validator_counts", {}))
+                    record_related_search(search_job_id, req.user_id,
+                        counts=diagnostics["related_interest_validator"])
                     if qualified_exact:
                         diagnostics["semantic_fallback_error"] = exc.code
                     else:
@@ -2023,6 +2047,10 @@ def generate_matches_for_user(
                         )
             if semantic_lookup is not None:
                 semantic_search_completed = True
+                diagnostics["related_interest_validator"] = related_validator_counts(
+                    semantic_lookup.get("validator_counts"))
+                record_related_search(search_job_id, req.user_id,
+                    counts=diagnostics["related_interest_validator"])
                 diagnostics["retrieval_source"] = "graph_exact_then_semantic"
                 diagnostics["semantic_concepts_considered"] = list(
                     semantic_lookup.get("semantic_concepts_considered") or []
@@ -2220,6 +2248,10 @@ def generate_matches_for_user(
         }
     
     agent_user_doc = strip_agent_payload(user_doc)
+    if any(qualification_by_id.get(c.get("user_id"), {}).get("semantic_related_preference_matched")
+           for c in qualified_candidates) and (
+            not related_interest_enabled() or preference_semantic_mode() != "active"):
+        raise MatchSearchPipelineError("semantic_policy_disabled", "matchmaker_request")
     selection_deadline = time.monotonic() + MATCH_SELECTION_TIMEOUT_SECONDS
     agent_matches = []
     for batch_index in range(MATCH_MAX_CANDIDATE_BATCHES):
@@ -2311,10 +2343,18 @@ def generate_matches_for_user(
             for item in matched_preference_evidence
             if isinstance(item, dict)
         )
+        if semantic_preference_selected and (
+            not related_interest_enabled() or preference_semantic_mode() != "active"
+        ):
+            if quota_reserved:
+                release_daily_quota(req.user_id, bucket="active", operation_key=quota_operation_key)
+            raise MatchSearchPipelineError("semantic_policy_disabled", "proposal_write")
         if semantic_preference_selected:
             matched_preference_evidence = list(qualification_by_id.get(matched_id, {}).get(
                 "preference_retrieval_evidence"
             ) or [])[:3]
+            if related_interest_enabled() and not matched_preference_evidence:
+                continue
         # Existing rationale code treats a preference topic as exact evidence.
         # Semantic candidates therefore use the established generic rationale
         # surface; the related durable preference remains internal and cannot
@@ -2336,17 +2376,35 @@ def generate_matches_for_user(
         # V4 persists two role-bound friend introductions.  They are created
         # with two separate model calls and never exposed as a two-way public
         # payload, so a role swap cannot leak into the recipient's card.
-        friend_intro_v4 = build_friend_intro_v4(
-            user_doc, candidate_doc, vector_scores.get(matched_id, 0), refine=True,
-            search_context=rationale_search_context,
-            auto_invite=bound_delivery_mode == INVITE_ON_MATCH,
-        )
+        if semantic_preference_selected and related_interest_enabled():
+            from services.related_interest_reason_service import related_friend_intro
+            friend_intro_v4 = related_friend_intro(
+                {}, user_doc, candidate_doc, matched_preference_evidence,
+                requester_prefers_query=bool(
+                    {"like", "require"} & (target_stances or {}).get(
+                        str(bound_search_context.get("canonical_preference_key") or ""), set())
+                    and str(bound_search_context.get("canonical_preference_key") or "")
+                    not in getattr(target_stances, "unverified_legacy", {})),
+            )
+        else:
+            friend_intro_v4 = build_friend_intro_v4(
+                user_doc, candidate_doc, vector_scores.get(matched_id, 0), refine=True,
+                search_context=rationale_search_context,
+                auto_invite=bound_delivery_mode == INVITE_ON_MATCH,
+            )
         ai_recommendation_reason = str(
             (friend_intro_v4.get("initiator_preview") or {}).get("viewer_text") or reason
         )
         ai_receiver_reason = str(
             (friend_intro_v4.get("receiver_invitation") or {}).get("viewer_text") or receiver_reason
         )
+        if semantic_preference_selected and related_interest_enabled():
+            # Secondary card surfaces must not retain a generic/LLM reason
+            # that accidentally upgrades the related hit into an exact one.
+            reason_items = [{"kind": "recommendation_tier", "text": "exploratory"},
+                            {"kind": "related_interest", "text": "興趣方向相關，不代表相同或共同偏好。"}]
+            receiver_items = [dict(item) for item in reason_items]
+            top_reasons = ["興趣方向相關，不代表相同或共同偏好。"]
         recommendation_tier = next(
             (item.get("text") for item in reason_items if item.get("kind") == "recommendation_tier"),
             "exploratory",
@@ -2418,6 +2476,11 @@ def generate_matches_for_user(
         if search_intent == "preference":
             # Never put private Concept identifiers into the public match_basis.
             match_doc["preference_retrieval_evidence"] = matched_preference_evidence
+            if semantic_preference_selected and related_interest_enabled():
+                match_doc["related_interest_pilot"] = {
+                    "policy_version": RELATED_INTEREST_POLICY, "basis_type": "related_interest",
+                    "relations": sorted({e["relation"] for e in matched_preference_evidence}),
+                }
         match_doc["delivery_mode"] = bound_delivery_mode
         if str(origin_room_id or "").strip():
             match_doc["origin_room_id"] = str(origin_room_id).strip()[:240]
@@ -2429,6 +2492,12 @@ def generate_matches_for_user(
                     req.user_id, bucket="active", operation_key=quota_operation_key,
                 )
             return {"status": "stale", "matches": [], "debug_info": []}
+        if semantic_preference_selected and (
+            not related_interest_enabled() or preference_semantic_mode() != "active"
+        ):
+            if quota_reserved:
+                release_daily_quota(req.user_id, bucket="active", operation_key=quota_operation_key)
+            raise MatchSearchPipelineError("semantic_policy_disabled", "proposal_write")
         try:
             insert_result = matches_coll.insert_one(match_doc)
         except DuplicateKeyError as exc:

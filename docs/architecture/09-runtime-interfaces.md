@@ -62,3 +62,20 @@ Registration Graph `registration-bootstrap-v1`：Social profiling 初始化／pr
 - `GET :9001/api/preferences/semantic-readiness`：獨立 read-only operational audit；回報 index schema/state/dimension、PREFERS-connected Concept coverage，以及 historical fingerprint=`unknown`。不建立 index、不投影 embedding；unknown 不可用 env confirmation 覆寫為 ready。
 - Social 預設 off；`shadow` 使用獨立 CLI，不進 live request。只有 `active` 加上確認且相容的 embedding evidence 才允許同步 fallback。`0.82` 是 provisional synthetic-fixture threshold。
 - 9001 Matchmaker 僅對確實帶有 validated semantic evidence 的 batch 使用 semantic prompt；exact-only prompt 與 P0 相同。Internal evidence 是獨立欄位，公開 `match_basis`、state、history、delivery、opening 不回 matched Concept key／label。
+
+## Related-interest v1 pilot (default OFF, not deployed)
+
+本節是新的 [internal app-wide policy](../RELATED_INTEREST_PILOT_V1.md)，不改寫舊研究結論。
+Social active fallback 必須另有 `MATCH_RELATED_INTEREST_ENABLED=on`，且只在 qualified exact=0 呼叫
+`POST :9001/api/preferences/related-interest-candidates`。新 endpoint 只查 `embedding_v2` 專用 index，
+驗證完整 source/fingerprint 後先判 relation，再展開有界 PREFERS owners；拒絕／ERROR 不展開。
+`GET :9001/api/preferences/related-interest-readiness` 唯讀 index/provenance/coverage metadata，不寫入或啟用。
+
+新 internal packet 保留 basis_type、query_preference、candidate_preference、relation、semantic_score、
+validator_status 與 policy；Matchmaker sanitizer 不降級不完整的新 packet 為舊 semantic evidence。
+V1 Ayue理由是 owner-role-bound evidence rendering：經安全檢查的兩項興趣可以分開描述，
+但不公開 keys、validator diagnostics 或 raw memory，也不能把 query intent 說成 requester PREFERS。
+長／敏感片語不截成較弱條件，而改成中性介紹；exact/public existing projection 保持原行為。
+本節對 related-interest 理由的受控 label 描述，是新產品明確允許的界面，並非公開 raw Graph evidence。
+Search jobs 只新增 count-only pilot telemetry，invitation outcomes 沿用 canonical state history，
+不新增 confirmation/consent bypass，也不將 pilot rating 送往拒絕原因的 AVOIDS pipeline。
