@@ -64,6 +64,8 @@ class MatchSearchPipelineError(RuntimeError):
 
 
 _FAILURE_MESSAGES = {
+    "semantic_policy_disabled": "相關興趣配對目前未啟用，這次搜尋沒有送出邀請。",
+    "semantic_validator_unavailable": "相關興趣驗證暫時無法完成，這次沒有送出邀請。請稍後再試。",
     "ownership_or_context_changed": "你的近況或配對狀態剛更新，這次搜尋已停止。請再開始一次配對。",
     "matchmaker_timeout": "這次媒人評估逾時，搜尋已停止。可以稍後重新搜尋。",
     "matchmaker_graph_timeout": "讀取配對依據逾時，這次搜尋沒有完成。可以稍後再試。",
@@ -404,6 +406,9 @@ def _bounded_diagnostics(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     result: dict[str, Any] = {}
+    if isinstance(value.get("related_interest_validator"), dict):
+        from matchmaker_agent.related_interest_contract import bounded_counts
+        result["related_interest_validator"] = bounded_counts(value["related_interest_validator"])
     for key in (
         "search_intent", "normalized_topic", "canonical_preference_key",
         "retrieval_source",

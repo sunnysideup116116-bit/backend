@@ -165,6 +165,7 @@ class MatchRequest(BaseModel):
     candidates: list
     target_deep_profile: dict = {}
     search_context: dict | None = None
+    request_budget_seconds: float | None = Field(default=None, gt=0, le=120, allow_inf_nan=False)
 
     @field_validator("search_context", mode="before")
     @classmethod
@@ -312,7 +313,8 @@ def get_global_rules(*, strict: bool = False) -> str:
 @app.post("/api/match")
 async def match_endpoint(req: MatchRequest):
     try:
-        async with asyncio.timeout(MATCH_REQUEST_TIMEOUT_SECONDS):
+        budget = min(MATCH_REQUEST_TIMEOUT_SECONDS, req.request_budget_seconds) if req.request_budget_seconds is not None else MATCH_REQUEST_TIMEOUT_SECONDS
+        async with asyncio.timeout(budget):
             return await _evaluate_match_request(req)
     except TimeoutError:
         raise HTTPException(status_code=504, detail={"code": "matchmaker_timeout"}) from None
@@ -1281,6 +1283,54 @@ class PreferenceSemanticCandidateRequest(BaseModel):
     candidate_limit: int = Field(default=40, ge=1, le=50)
     evidence_limit: int = Field(default=3, ge=1, le=5)
     min_similarity: float = Field(default=0.82, ge=0.75, le=1.0, allow_inf_nan=False)
+
+
+class RelatedInterestCandidateRequest(PreferenceSemanticCandidateRequest):
+    embedding_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    request_budget_seconds: float = Field(default=27.0, gt=0, le=27.0, allow_inf_nan=False)
+
+
+@app.post("/api/preferences/related-interest-candidates")
+def related_interest_candidates(req: RelatedInterestCandidateRequest):
+    from related_interest_contract import enabled
+    from related_interest_retrieval import retrieve
+    deadline = time.monotonic() + req.request_budget_seconds
+    if not enabled():
+        return {"status": "error", "error_code": "semantic_policy_disabled", "candidates": [],
+                "canonical_key": req.canonical_key or ""}
+    try:
+        identity = _preference_request_identity(req)
+        if not identity:
+            raise PreferenceTextError("preference_search_invalid")
+        uri, auth, database = _neo4j_config()
+        with GraphDatabase.driver(uri, auth=auth, connection_timeout=3.0,
+                connection_acquisition_timeout=3.0, max_transaction_retry_time=0.0) as driver:
+            with driver.session(database=database, default_access_mode="READ") as session:
+                return retrieve(session, req, identity, agent.client, agent.model,
+                    os.getenv("GOOGLE_EMBEDDING_MODEL", "models/gemini-embedding-2"), deadline=deadline)
+    except PreferenceTextError as exc:
+        return {"status": "error", "error_code": exc.code, "candidates": [], "retryable": False,
+                "canonical_key": req.canonical_key or ""}
+    except TimeoutError:
+        return {"status": "error", "error_code": "semantic_retrieval_timeout", "candidates": [],
+                "canonical_key": req.canonical_key or ""}
+    except Exception:
+        return {"status": "error", "error_code": "semantic_graph_unavailable", "candidates": [],
+                "canonical_key": req.canonical_key or ""}
+
+
+@app.get("/api/preferences/related-interest-readiness")
+def related_interest_readiness():
+    from related_interest_retrieval import readiness
+    try:
+        uri, auth, database = _neo4j_config()
+        with GraphDatabase.driver(uri, auth=auth, connection_timeout=3.0,
+                connection_acquisition_timeout=3.0, max_transaction_retry_time=0.0) as driver:
+            with driver.session(database=database, default_access_mode="READ") as session:
+                return {"status": "success", **readiness(session,
+                    os.getenv("GOOGLE_EMBEDDING_MODEL", "models/gemini-embedding-2"))}
+    except Exception:
+        return {"status": "error", "error_code": "semantic_readiness_unconfirmed", "activation_approved": False}
 
 class MemoryActionRequest(BaseModel):
     user_id: str

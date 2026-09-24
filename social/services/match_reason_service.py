@@ -487,6 +487,11 @@ def _safe_bound_v4_entry(
         return ""
     if str(entry.get("counterparty_id") or "") != other_id:
         return ""
+    if entry.get("style_id") == "related_interest_v1":
+        # Re-render only the validated, role-bound evidence. Never trust model
+        # prose or a generic "shared" interpretation of semantic similarity.
+        from services.related_interest_reason_service import related_entry_text
+        return related_entry_text(entry)
     if str(entry.get("style_id") or "") == "topic_request":
         # A confirmed topic search may already have sent the invitation. Its
         # requester copy is then a short introduction, not another consent

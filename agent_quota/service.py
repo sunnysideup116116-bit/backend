@@ -291,9 +291,9 @@ class QuotaService:
         return row
 
     @contextmanager
-    def _db(self):
+    def _db(self, *, timeout_seconds=15):
         Path(self.outbox).parent.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(self.outbox, timeout=15)
+        db = sqlite3.connect(self.outbox, timeout=max(0.0, min(float(timeout_seconds), 15.0)))
         db.execute('CREATE TABLE IF NOT EXISTS pending (id TEXT PRIMARY KEY, owner TEXT NOT NULL, payload TEXT NOT NULL)')
         try:
             with db:
@@ -301,7 +301,7 @@ class QuotaService:
         finally:
             db.close()
 
-    def record(self, owner, feature, task, call, inputs, outputs):
+    def record(self, owner, feature, task, call, inputs, outputs, *, defer_delivery=False):
         if feature not in FEATURES:
             raise ValueError('invalid quota feature')
         event = {'user_id': owner, 'feature': feature, 'task_id': task,
@@ -310,7 +310,8 @@ class QuotaService:
             return
         ident = key(owner + ':' + call)
         # Commit locally before any remote work. Never silently drop an event.
-        with self._db() as db:
+        outbox = self._db(timeout_seconds=0.5) if defer_delivery else self._db()
+        with outbox as db:
             db.execute('BEGIN IMMEDIATE')
             prior = db.execute('SELECT payload FROM pending WHERE id=?', (ident,)).fetchone()
             if prior:
@@ -319,6 +320,11 @@ class QuotaService:
                     event[field] = max(event[field], old[field])
             db.execute('INSERT OR REPLACE INTO pending VALUES (?, ?, ?)',
                        (ident, owner, json.dumps(event)))
+        if defer_delivery:
+            # Durable first; the existing settlement worker owns remote retry.
+            # Only optional bounded model paths opt in. All old callers retain
+            # their immediate delivery and default SQLite timeout behavior.
+            return
         try:
             self.replay(owner=owner)
         except Exception:
@@ -436,6 +442,13 @@ def record_usage(call, inputs, outputs):
     scope = SCOPE.get()
     if scope:
         service.record(*scope, call, inputs, outputs)
+
+
+def record_usage_deferred(call, inputs, outputs):
+    """Bounded local persistence; raises rather than silently dropping usage."""
+    scope = SCOPE.get()
+    if scope:
+        service.record(*scope, call, inputs, outputs, defer_delivery=True)
 
 
 def record_gemini(response, call=None):
