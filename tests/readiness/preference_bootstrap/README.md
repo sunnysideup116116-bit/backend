@@ -89,3 +89,17 @@ Base: clean backend `99098067f7d462e3f641bbdbc5d31b3436858975`.
 
 No production service start, production Graph connection, bootstrap, migration,
 embedding_v2, semantic enablement or deployment was performed.
+
+## Complete-set capacity regression
+
+`test_complete_set_capacity.py` checks combined totals at both HTTP schemas and
+the shared normalizer: 5, 7, 8 and 10 accepted for complete-set; 11 (including
+split-polarity totals) rejected before normalization. Add-only and ordinary
+memory limits remain unchanged under configured limits 1/3/5/6/8.
+
+The disposable runtime rehearsal additionally commits 5/7/8/10-item full sets
+with real Graph/Mongo transactions, including single-polarity 10-item sets. Each
+preview inventories all 12 synthetic legacy associations, retires exactly those
+associations, preserves the second owner, and projects every new item. Overflow
+and add-only-overflow requests prove zero mutation; the ordinary 7-item write is
+still rejected under the unchanged default cap of 6. No real account text is used.

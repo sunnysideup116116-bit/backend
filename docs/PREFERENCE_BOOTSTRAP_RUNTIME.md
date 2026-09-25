@@ -23,8 +23,13 @@ Owner comes only from the verified identity, never a body user_id or model tool.
 retire_legacy must **each** be true. An omitted AVOIDS panel is not consent.
 No default checked controls or LLM/admin substitute for owner consent.
 
-One operation admits 1–min(5, durable_memory_limit()) atomic items, whole-request
-validation, Unicode code-point ≤500 before and after normal conversion. No prefix
+`complete_set` admits 1–10 atomic items per owner, counted as PREFERS + AVOIDS
+**combined**, in one preview/commit; 11 rejects the whole request. It is not split
+into partial commits. `add_only` retains 1–min(5, durable_memory_limit()). The
+shared bootstrap count validator runs at both HTTP boundaries and Graph admission;
+only complete-set capacity is independent of the ordinary memory limit. Normal
+extraction/write/registration/feedback caps and all other quotas are unchanged.
+Both modes use whole-request validation, Unicode code-point ≤500 before and after normal conversion. No prefix
 truncation, inferred polarity, duplicate alias rows, or mixed-polarity compound.
 Fresh text uses the existing fixed OpenCC normalization then deterministic v2
 identity. Stored v2 identity is independently verified, never converted again.
@@ -38,7 +43,10 @@ Neither secret nor bearer token is in a journal/log. Owner preference before-ima
 are private owner data in receipt/audit, never public telemetry/model input.
 
 Inventory is bounded at 100 owner edges and 100 Mongo facts, with overflow rejection;
-it is not a paginated partial inventory. Unsupported non-JSON Graph properties
+it is not a paginated partial inventory. The 10-item input limit does not truncate
+retirement inventory: every approved legacy owner association appears in the same
+preview, even if there are more legacy associations than submitted items.
+Unsupported non-JSON Graph properties
 (including temporal objects) fail closed rather than lossy conversion. Existing
 v2 items must all remain in complete_set with their original polarity. Explicit
 edit/disable then repreview handles removing v2 items; this operation retires only

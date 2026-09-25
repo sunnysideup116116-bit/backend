@@ -4,10 +4,13 @@ import os
 from fastapi import APIRouter, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 from neo4j import GraphDatabase
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from .preference_bootstrap import BootstrapGraph
-from .preference_bootstrap_contract import BootstrapError, operation_id, owner_id, verify_internal
+from .preference_bootstrap_contract import (
+    BootstrapError, operation_id, owner_id, verify_internal,
+    COMPLETE_SET_MAX_ITEMS, validate_bootstrap_item_count,
+)
 from .preference_write_fence import PreferenceFenceError
 from .concept_identity import PreferenceTextError
 
@@ -21,9 +24,14 @@ class InternalRequest(BaseModel):
 
 class PreviewRequest(InternalRequest):
     mode: str
-    prefers: list[str] = Field(max_length=5)
-    avoids: list[str] = Field(max_length=5)
+    prefers: list[str] = Field(max_length=COMPLETE_SET_MAX_ITEMS)
+    avoids: list[str] = Field(max_length=COMPLETE_SET_MAX_ITEMS)
     mongo_snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_item_count(self):
+        validate_bootstrap_item_count(self.prefers, self.avoids, mode=self.mode)
+        return self
 
 
 class TokenRequest(InternalRequest):

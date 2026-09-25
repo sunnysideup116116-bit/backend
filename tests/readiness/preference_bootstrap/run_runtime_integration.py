@@ -346,6 +346,62 @@ def main():
                 assert session.run("MATCH (:User {id:'synthetic_b'})-[:PREFERS]->(:Concept {key:$key}) RETURN count(*) AS n", key=new_key).single()["n"] == 1
             mark("rollback_never_deletes_other_owner_reference")
 
+            # One complete receipt/transaction, never a truncated legacy inventory.
+            for positive_count, negative_count in ((5, 0), (5, 3), (6, 1), (7, 3), (10, 0), (0, 10)):
+                reset()
+                with driver.session() as session:
+                    session.run("""UNWIND range(0,9) AS i
+                        CREATE (c:Concept {key:'capacity_legacy_'+toString(i),label:'Synthetic legacy '+toString(i)})
+                        WITH c MATCH (u:User {id:'synthetic_a'}) CREATE (u)-[:PREFERS]->(c)""").consume()
+                before = current()
+                before_profile = db.profiles.find_one({"user_id": "synthetic_a"})
+                positive = [f"Synthetic paper craft {i}" for i in range(positive_count)]
+                negative = [f"Synthetic loud venue {i}" for i in range(negative_count)]
+                response = client.post(path + "/preview", json={"mode": "complete_set",
+                    "prefers": positive, "avoids": negative}, headers=headers)
+                assert response.status_code == 200, response.json()
+                p = response.json()
+                assert current() == before and db.profiles.find_one({"user_id": "synthetic_a"}) == before_profile
+                assert {r["id"] for r in p["retire_edges"]} == {r["id"] for r in before["rows"]}
+                assert len(p["retire_edges"]) == 12
+                response = submit(p)
+                assert response.status_code == 200 and response.json()["status"] == "committed", response.json()
+                after = current()
+                assert after["revision"] == 1 and len(after["rows"]) == positive_count + negative_count
+                assert sum(r["relation"] == "PREFERS" for r in after["rows"]) == positive_count
+                assert sum(r["relation"] == "AVOIDS" for r in after["rows"]) == negative_count
+                assert {r["concept"]["semantic_text"] for r in after["rows"]} == set(positive + negative)
+                projected = db.profiles.find_one({"user_id": "synthetic_a"})
+                assert len(projected["profile_memory_preview"]) == positive_count + negative_count
+                assert projected["preference_projection_revision"] == 1 and not projected.get("preference_bootstrap_pending")
+                assert db.preference_bootstrap_operations.count_documents({"owner": "synthetic_a", "status": "complete"}) == 1
+                assert len(graph.status("synthetic_a", p["preview_id"])["retired_edges"]) == 12
+                assert len(graph.read(core.snapshot, "synthetic_b")[0]["rows"]) == 1
+                mark(f"complete_set_capacity_{positive_count}_prefers_{negative_count}_avoids", retired_legacy=12)
+
+            for mode, positive_count, negative_count in (("complete_set", 11, 0), ("complete_set", 6, 5),
+                    ("complete_set", 0, 11), ("add_only", 6, 0), ("add_only", 5, 1), ("add_only", 0, 6)):
+                reset(); before = current(); before_profile = db.profiles.find_one({"user_id": "synthetic_a"})
+                response = client.post(path + "/preview", json={"mode": mode,
+                    "prefers": [f"Synthetic paper craft {i}" for i in range(positive_count)],
+                    "avoids": [f"Synthetic loud venue {i}" for i in range(negative_count)]}, headers=headers)
+                assert response.status_code == 422
+                assert current() == before and db.profiles.find_one({"user_id": "synthetic_a"}) == before_profile
+                assert db.preference_bootstrap_operations.count_documents({}) == 0
+                with driver.session() as session:
+                    assert session.run("MATCH (c:Concept) RETURN count(c) AS n").single()["n"] == 2
+                mark(f"{mode}_capacity_reject_{positive_count}_plus_{negative_count}_zero_mutation")
+
+            reset(); before = current()
+            from matchmaker_agent.concept_identity import durable_memory_limit
+            assert durable_memory_limit() == 6
+            outcome = asyncio.run(agent_api.apply_memory(agent_api.MemoryApplyRequest(
+                user_id="synthetic_a", message_id="synthetic-normal-cap", source_created_at=time.time(),
+                memories=[{"label": f"Synthetic ordinary preference {i}", "stance": "like"} for i in range(7)])))
+            assert outcome["status"] == "error" and outcome["error_code"] == "memory_limit_exceeded"
+            assert current() == before
+            mark("ordinary_memory_runtime_cap_unchanged")
+
         report = {"status": "PASS", "synthetic_only": True, "production_ready": False,
                   "graph": topology, "mongo": mongo, "scenarios": results,
                   "authentication": "synthetic principal override; real HMAC internal boundary",

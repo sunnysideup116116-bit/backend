@@ -2,11 +2,13 @@
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from services.appwrite_identity_service import authenticate_owner, AppwriteIdentityError
 from services import preference_bootstrap_service as service
-from matchmaker_agent.preference_bootstrap_contract import BootstrapError
+from matchmaker_agent.preference_bootstrap_contract import (
+    BootstrapError, COMPLETE_SET_MAX_ITEMS, validate_bootstrap_item_count,
+)
 from matchmaker_agent.preference_bootstrap_api import Consent
 
 router = APIRouter(prefix="/api/profile/preferences/bootstrap", tags=["Preference bootstrap"])
@@ -25,8 +27,13 @@ class Input(BaseModel):
 
 class PreviewInput(Input):
     mode: Literal["add_only", "complete_set"]
-    prefers: list[str] = Field(max_length=5)
-    avoids: list[str] = Field(max_length=5)  # Required even when explicitly empty.
+    prefers: list[str] = Field(max_length=COMPLETE_SET_MAX_ITEMS)
+    avoids: list[str] = Field(max_length=COMPLETE_SET_MAX_ITEMS)  # Required even when explicitly empty.
+
+    @model_validator(mode="after")
+    def validate_item_count(self):
+        validate_bootstrap_item_count(self.prefers, self.avoids, mode=self.mode)
+        return self
 
 
 class CommitInput(Input):
