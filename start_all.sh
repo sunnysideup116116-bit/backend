@@ -46,6 +46,15 @@ for preference_service in social matchmaker; do
     fi
 done
 
+# Fail before port cleanup or worker startup. Each service uses this same
+# local-only contract; the key never travels through shell stdout/arguments.
+for quota_service in social matchmaker; do
+    if ! "$SERVER_ROOT/.local-venv/$quota_service/bin/python" -m agent_quota.signing_config; then
+        printf 'Shared quota signing configuration unavailable for %s.\n' "$quota_service" >&2
+        exit 1
+    fi
+done
+
 LOG_DIR="${AYUE_LOG_DIR:-$SERVER_ROOT/.runtime-logs}"
 # Public Ayue requires the pinned local Pi bridge. Validate it before touching
 # logs or service ports so a broken installation cannot start a partial stack.

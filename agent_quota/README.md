@@ -46,6 +46,32 @@ PYTHONPATH="$PWD:$PWD/social" .local-venv/social/bin/python -m agent_quota.migra
 
 正式啟動仍使用 `./start_all.sh`，port 和公開網址不變。Social 與 Matchmaker 隨既有服務啟動待結算重試工作，不需新增服務或 port。前端需重建後才會顯示「Agent額度」。
 
+### Social → Matchmaker 共用簽章設定
+
+兩邊在讀取各自 service env **之前**，使用 `agent_quota.signing_config`
+解析同一個 `APPWRITE_API_KEY`：啟動程序注入的環境變數優先，其次為
+backend 根目錄 `.env`；只有前兩者未定義時才相容原本的 `social/.env`。
+目前正式環境的權威來源是根目錄 `.env`，不需複製到 Matchmaker env。
+明確設定空值不會自動改用另一把 key，而是 fail closed。
+兩個服務必須使用相同 checkout/root 與共同的啟動環境；不要分別注入不同 key。
+
+Loader 只將這一個欄位載入程序記憶體，不匯入其他 DB/provider 設定；不輸出
+key、片段、hash 或 provider 回覆。`AYUE_SKIP_DOTENV`／`DOTENV_DISABLED`
+仍可供無 env 檔的隔離測試使用；正常啟動仍需注入有效的共用 key。
+`start_all.sh` 在清理 ports 前執行兩個 Python 環境的本機 preflight。
+Social／Matchmaker 的 ASGI startup 也在啟動 quota worker 之前驗證設定，
+缺 key 不會進入可服務／看似 healthy 的狀態。不連 Appwrite 或 Graph 做此檢查。
+
+2026-09-25 fresh production smoke 曾因 Matchmaker 冷啟動未讀根目錄設定，
+回傳 `403 invalid_quota_context`；Social 正常簽章，而原 Matchmaker verifier
+只讀 `social/.env`。其他 quota 操作可能較早初始化 `AppwriteStore`，偶然補載
+根目錄 key，因此 warm process 或不同 shell 啟動可能掩蓋問題；不能視為可靠契約。
+此修正不改 HMAC、180 秒有效期、403 行為、background accounting、配額或配對資格。
+
+部署／rollback：兩個服務的 entrypoint 與共用 loader 一起更新，再由正式
+`start_all.sh` 重啟。沒有 env/schema/migration；rollback 到舊版可能重現冷啟動
+403，不可用移除簽章或改為 unsigned request 作為 workaround。
+
 ## 結算與故障恢復
 
 模型回報的輸入加輸出計入所屬功能；risk_backend、embedding 與系統背景任務不建立計費 scope。使用者提出的配對工作即使排入工作佇列，仍保存計費身分。語音衍生的公開／私聊操作經原本 HTTP 入口重新檢查，錯誤訊息會透過 action result 告知語音阿月。

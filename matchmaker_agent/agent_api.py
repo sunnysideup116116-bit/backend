@@ -12,6 +12,12 @@ from neo4j import GraphDatabase, Query
 from pathlib import Path
 from dotenv import load_dotenv
 
+# Resolve shared signing configuration before any service-specific dotenv or
+# lazy quota-store initialization can change the credential lookup order.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from agent_quota.signing_config import load_signing_config, validate_signing_config
+load_signing_config()
+
 # 撘瑕?? agent_api.py ??函????.env 瑼?
 env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
@@ -61,6 +67,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'social'))
 from agent_quota.internal import MatchmakerQuotaMiddleware, start_worker, stop_worker
 app = FastAPI()
 app.add_middleware(MatchmakerQuotaMiddleware)
+app.router.add_event_handler('startup', validate_signing_config)
 app.router.add_event_handler('startup', start_worker)
 app.router.add_event_handler('shutdown', stop_worker)
 
