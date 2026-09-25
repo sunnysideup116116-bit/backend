@@ -1,5 +1,8 @@
 import os
 import sys
+from agent_quota.signing_config import load_signing_config, validate_signing_config
+load_signing_config()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from services.codex_chat_provider import shutdown as shutdown_codex_provider
@@ -88,6 +91,7 @@ app.add_middleware(
 from agent_quota.api import router as agent_quota_router
 from agent_quota.service import start_worker as start_quota_worker, stop_worker as stop_quota_worker
 app.include_router(agent_quota_router)
+app.router.add_event_handler("startup", validate_signing_config)
 app.router.add_event_handler("startup", start_quota_worker)
 app.router.add_event_handler("shutdown", stop_quota_worker)
 

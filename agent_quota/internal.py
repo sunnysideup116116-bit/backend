@@ -10,14 +10,11 @@ import json
 import os
 import time
 from .service import SCOPE, task_scope, start_worker, stop_worker
+from .signing_config import quota_signing_key
 
 
 def secret():
-    from dotenv import load_dotenv
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[1]
-    load_dotenv(root / 'social' / '.env', override=False)
-    return os.getenv('APPWRITE_API_KEY', '').encode()
+    return quota_signing_key()
 
 
 def signed_headers():
