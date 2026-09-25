@@ -6,6 +6,7 @@ import pytest
 from concept_identity import (
     canonical_query_provenance,
     canonicalize_concept,
+    canonicalize_concept_v1,
     durable_memory_limit,
     has_mixed_preference_polarity,
     split_compound_concept_label,
@@ -16,13 +17,16 @@ from concept_identity import (
 @pytest.mark.parametrize("value", ["Kpop", "K-pop", "K pop", "k-pop"])
 def test_kpop_aliases_share_one_canonical_identity(value):
     concept = canonicalize_concept(value, suggested_key="model_can_be_wrong")
-    assert (concept.key, concept.label) == ("k_pop", "K-pop")
+    assert (concept.key, concept.label) == (canonicalize_concept("K-pop").key, "K-pop")
+    assert concept.canonicalization_version == "v2"
+    assert canonicalize_concept_v1(value).key == "k_pop"
 
 
 def test_alias_is_query_provenance_not_a_different_identity():
     canonical = canonicalize_concept("K-pop")
     alias = canonicalize_concept("Kpop")
-    assert canonical.key == alias.key == "k_pop"
+    assert canonical.key == alias.key
+    assert canonical.key.startswith("v2_") and len(canonical.key) == 51
     assert canonical_query_provenance("K-pop", canonical) == "exact_canonical"
     assert canonical_query_provenance("k-pop", canonical) == "exact_canonical"
     assert canonical_query_provenance("Kpop", alias) == "deterministic_alias"

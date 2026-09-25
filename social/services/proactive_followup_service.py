@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from bson.objectid import ObjectId
 from pymongo.errors import DuplicateKeyError
 
+from services.profile_writer import update_profile as write_profile
 from database import calendar_events_coll, db, messages_coll, profiles_coll
 from services.agent_calendar_bridge import google_busy_until
 from services.ayue_agent.time_context import resolve_temporal_references
@@ -1244,7 +1245,7 @@ def defer_followup_candidate(candidate: dict[str, Any], *, until: float, now: fl
 def record_owner_activity(user_id: str, *, now: float | None = None) -> float:
     current = time.time() if now is None else float(now)
     try:
-        profiles_coll.update_one(
+        write_profile(profiles_coll,
             {"user_id": user_id},
             {"$set": {"last_user_activity_at": current}},
             upsert=True,

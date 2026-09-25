@@ -17,11 +17,15 @@ from urllib3.util import Timeout
 
 from config import GOOGLE_EMBEDDING_MODEL
 from matchmaker_agent.concept_identity import canonicalize_concept
+from matchmaker_agent.related_interest_contract import (
+    enabled as related_interest_enabled, embedding_fingerprint, validated_evidence, bounded_counts,
+)
 from services.ai_service import get_embeddings
 
 
 AGENT_SEMANTIC_URL = "http://127.0.0.1:9001/api/preferences/semantic-candidates"
 AGENT_READINESS_URL = "http://127.0.0.1:9001/api/preferences/semantic-readiness"
+AGENT_RELATED_URL = "http://127.0.0.1:9001/api/preferences/related-interest-candidates"
 SEMANTIC_DIMENSIONS = 768
 
 _HARD_NEIGHBOR_LIMIT = 32
@@ -37,12 +41,14 @@ SEMANTIC_ERROR_CODES = frozenset({
     "semantic_readiness_unconfirmed", "semantic_index_unavailable",
     "semantic_query_embedding_unavailable", "semantic_query_embedding_invalid",
     "semantic_retrieval_timeout",
+    "semantic_policy_disabled", "semantic_validator_unavailable",
 })
 
 
 class PreferenceSemanticRetrievalError(RuntimeError):
-    def __init__(self, code: str):
+    def __init__(self, code: str, validator_counts=None):
         self.code = code if isinstance(code, str) and code in SEMANTIC_ERROR_CODES else "semantic_graph_invalid_response"
+        self.validator_counts = bounded_counts(validator_counts)
         super().__init__(self.code)
 
 
@@ -77,6 +83,8 @@ def semantic_embedding_space_confirmed() -> bool:
 
 def qualified_exact_trigger_threshold() -> int:
     """Canary default: semantic fallback only when qualified exact count is zero."""
+    if related_interest_enabled():
+        return 1
     return _bounded_int(
         "MATCH_PREFERENCE_SEMANTIC_QUALIFIED_EXACT_THRESHOLD", 1,
         _HARD_TRIGGER_THRESHOLD,
@@ -84,7 +92,7 @@ def qualified_exact_trigger_threshold() -> int:
 
 
 def semantic_config() -> dict[str, Any]:
-    return {
+    config = {
         "mode": preference_semantic_mode(),
         "embedding_space_confirmed": semantic_embedding_space_confirmed(),
         "qualified_exact_threshold": qualified_exact_trigger_threshold(),
@@ -117,6 +125,11 @@ def semantic_config() -> dict[str, Any]:
             _HARD_TOTAL_TIMEOUT_SECONDS,
         ),
     }
+    if related_interest_enabled():
+        # Explicitly budget validation separately from the retired ANN-only
+        # 6s path: <=18s validator + bounded Graph I/O and query embedding.
+        config.update(timeout_seconds=27.0, total_timeout_seconds=38.0)
+    return config
 
 
 def _unit_embedding(value: Any) -> list[float] | None:
@@ -188,11 +201,22 @@ def preference_semantic_readiness() -> dict[str, Any]:
 
 
 def _post_semantic(payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
+    related = "embedding_fingerprint" in payload
+    if related and not related_interest_enabled():
+        raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
+    extra = {}
+    if related:
+        from agent_quota.internal import signed_headers
+        extra["headers"] = signed_headers()
+        # Carry the caller's remaining budget, never a fresh server budget.
+        # Leave a small response/transport margin within this HTTP attempt.
+        payload = {**payload, "request_budget_seconds": max(0.01, min(27.0, timeout_seconds - 0.1))}
     try:
         response = requests.post(
-            AGENT_SEMANTIC_URL,
+            AGENT_RELATED_URL if related else AGENT_SEMANTIC_URL,
             json=payload,
             timeout=Timeout(total=timeout_seconds, connect=min(1.0, timeout_seconds), read=timeout_seconds),
+            **extra,
         )
         response.raise_for_status()
         result = response.json()
@@ -210,8 +234,15 @@ def retrieve_semantic_preference_candidates(
     topic: str,
     *,
     excluded_user_ids: set[str] | list[str] | tuple[str, ...],
+    related_policy_required: bool = False,
 ) -> dict[str, Any]:
     """Return deterministic, deduplicated candidates from bounded Concept ANN."""
+    # Bind policy to the caller, not a mutable flag sampled between HTTP calls.
+    # The live pipeline always requires v1; only explicit legacy observation
+    # callers retain the original read-only API when mode is not active.
+    related = related_policy_required or related_interest_enabled() or preference_semantic_mode() == "active"
+    if related and not related_interest_enabled():
+        raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
     identity = canonicalize_concept(topic)
     if not identity:
         return {
@@ -236,6 +267,9 @@ def retrieve_semantic_preference_candidates(
     payload = {
         "requester_user_id": str(requester_user_id)[:128],
         "topic": identity.label,
+        **{field: identity.as_dict()[field] for field in (
+            "canonical_key", "canonicalization_version", "semantic_text", "semantic_input_hash",
+        )},
         "embedding_model": GOOGLE_EMBEDDING_MODEL,
         "excluded_user_ids": excluded,
         "neighbor_limit": config["neighbor_limit"],
@@ -245,8 +279,12 @@ def retrieve_semantic_preference_candidates(
         "evidence_limit": config["evidence_limit"],
         "min_similarity": config["min_similarity"],
     }
+    if related:
+        payload["embedding_fingerprint"] = embedding_fingerprint(GOOGLE_EMBEDDING_MODEL)
     result = _post_semantic(payload, remaining_timeout())
     remaining_timeout()
+    if related and not related_interest_enabled():
+        raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
     if result.get("canonical_key") != identity.key:
         raise PreferenceSemanticRetrievalError("semantic_graph_invalid_response")
     if result.get("status") == "query_embedding_required":
@@ -276,7 +314,7 @@ def retrieve_semantic_preference_candidates(
     if result.get("status") != "success":
         raise PreferenceSemanticRetrievalError(str(
             result.get("error_code") or "semantic_graph_invalid_response"
-        ))
+        ), result.get("validator_counts"))
     if result.get("canonical_key") != identity.key:
         raise PreferenceSemanticRetrievalError("semantic_graph_invalid_response")
     if not isinstance(result.get("candidates"), list):
@@ -307,11 +345,16 @@ def retrieve_semantic_preference_candidates(
                 and math.isfinite(similarity)
                 and config["min_similarity"] <= similarity <= 1.0
             ):
-                evidence.append({
-                    "kind": "semantic_related",
-                    "concept_key": concept_key,
-                    "similarity": round(similarity, 4),
-                })
+                if related:
+                    packet = validated_evidence(item, query_key=identity.key)
+                    if packet:
+                        evidence.append(packet)
+                else:
+                    evidence.append({
+                        "kind": "semantic_related",
+                        "concept_key": concept_key,
+                        "similarity": round(similarity, 4),
+                    })
 
     best_by_candidate: dict[str, list[dict[str, Any]]] = {}
     for candidate_id, items in by_candidate.items():
@@ -370,6 +413,8 @@ def retrieve_semantic_preference_candidates(
         "candidate_count": len(candidate_ids),
         "retrieval_source": "graph_semantic",
         "embedding_source": str(result.get("embedding_source") or "")[:24],
+        **({"validator_counts": bounded_counts(result.get("validator_counts"))}
+           if related else {}),
     }
 
 

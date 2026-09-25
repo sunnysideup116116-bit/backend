@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any
+from matchmaker_agent.concept_identity import PreferenceTextError, normalize_preference_text
 
 from .capabilities import ACTIONS
 from .contextual import safe_screen, REF
@@ -1473,9 +1474,10 @@ def validate_proposal(value: Any, *, base_revision: int) -> VoiceProposal | None
             r"\s+", " ", str(raw_args.get("query") or ""),
         ).strip()[:120]
     elif intent == "memory.add":
-        label = re.sub(
-            r"\s+", " ", str(raw_args.get("label") or ""),
-        ).strip()[:40]
+        try:
+            label = normalize_preference_text(raw_args.get("label"))
+        except PreferenceTextError:
+            return None
         stance = str(raw_args.get("stance") or "like").strip()
         if not label or stance not in {"like", "dislike", "require", "avoid"}:
             return None
@@ -2072,10 +2074,13 @@ def deterministic_proposal(
             if stance_text == "需要"
             else "like"
         )
-        label = memory_add.group(2).strip(" ，,。")
+        try:
+            label = normalize_preference_text(memory_add.group(2).strip(" ，,。"))
+        except PreferenceTextError:
+            return None
         if label:
             return VoiceProposal(
-                "memory.add", {"label": label[:40], "stance": stance},
+                "memory.add", {"label": label, "stance": stance},
                 "我可以把這件事存進阿月記憶。", revision,
             )
     external_event = (

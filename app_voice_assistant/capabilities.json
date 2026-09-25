@@ -182,7 +182,7 @@
     "memory.add": {
       "type": "object", "additionalProperties": false,
       "properties": {
-        "label": {"type": "string", "minLength": 1, "maxLength": 40},
+        "label": {"type": "string", "minLength": 1, "maxLength": 500},
         "stance": {"type": "string", "enum": ["like", "dislike", "require", "avoid"]}
       },
       "required": ["label", "stance"]

@@ -1,0 +1,1687 @@
+{
+  "data_classification": "synthetic_non_user_data",
+  "candidate_freeze_commit": "132cba404b4ac8294308f22e93aa5573d54de23c",
+  "label_provenance": "Pre-authored under user authorization; not independently human reviewed; no provider output used for labels.",
+  "groups": [
+    {
+      "id": "v001",
+      "category": "equivalent",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Making Balloon Animals",
+      "b": "Twisting Balloons into Animal Shapes",
+      "prefix40": false,
+      "f": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      },
+      "r": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      }
+    },
+    {
+      "id": "v002",
+      "category": "equivalent",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Learning Morse Code",
+      "b": "Studying Morse Code",
+      "prefix40": false,
+      "f": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      },
+      "r": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      }
+    },
+    {
+      "id": "v003",
+      "category": "equivalent",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "製作剪影肖像",
+      "b": "用剪影方式做人物肖像",
+      "prefix40": false,
+      "f": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      },
+      "r": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      }
+    },
+    {
+      "id": "v004",
+      "category": "equivalent",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "研究海洋潮汐",
+      "b": "研究海水的漲潮與退潮",
+      "prefix40": false,
+      "f": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      },
+      "r": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      }
+    },
+    {
+      "id": "v005",
+      "category": "equivalent",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Practicing Ventriloquism",
+      "b": "練習腹語術",
+      "prefix40": false,
+      "f": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      },
+      "r": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      }
+    },
+    {
+      "id": "v006",
+      "category": "equivalent",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Collecting Vintage Telephones",
+      "b": "蒐集老式電話機",
+      "prefix40": false,
+      "f": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      },
+      "r": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      }
+    },
+    {
+      "id": "v007",
+      "category": "equivalent",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "烘烤馬卡龍",
+      "b": "Baking Macarons",
+      "prefix40": false,
+      "f": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      },
+      "r": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      }
+    },
+    {
+      "id": "v008",
+      "category": "equivalent",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "饲养蚕宝宝",
+      "b": "Raising Silkworms",
+      "prefix40": false,
+      "f": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      },
+      "r": {
+        "relation": "equivalent",
+        "primary": "YES",
+        "rationale": "Ordinary paraphrase/translation of the same named activity with no material added condition."
+      }
+    },
+    {
+      "id": "v009",
+      "category": "broad_narrow",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Making Handcrafted Soap",
+      "b": "Making Olive-Oil Soap by Hand",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v010",
+      "category": "broad_narrow",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Studying Spaceflight",
+      "b": "Studying Lunar Missions",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v011",
+      "category": "broad_narrow",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "練習搏擊運動",
+      "b": "練習拳擊",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v012",
+      "category": "broad_narrow",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "蒐集樂器",
+      "b": "蒐集傳統竹製樂器",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v013",
+      "category": "broad_narrow",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Learning European Languages",
+      "b": "學習葡萄牙語",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v014",
+      "category": "broad_narrow",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Collecting Historical Documents",
+      "b": "蒐集十九世紀手寫信件",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v015",
+      "category": "broad_narrow",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "製作甜點",
+      "b": "Making Lemon Tarts",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v016",
+      "category": "broad_narrow",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "研究動物行為",
+      "b": "Studying Dolphin Behavior",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v017",
+      "category": "sibling",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Practicing Archery",
+      "b": "Practicing Javelin Throwing",
+      "prefix40": false,
+      "f": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      },
+      "r": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      }
+    },
+    {
+      "id": "v018",
+      "category": "sibling",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Making Mosaic Art",
+      "b": "Making Sand Art",
+      "prefix40": false,
+      "f": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      },
+      "r": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      }
+    },
+    {
+      "id": "v019",
+      "category": "sibling",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "吹口琴",
+      "b": "吹直笛",
+      "prefix40": false,
+      "f": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      },
+      "r": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      }
+    },
+    {
+      "id": "v020",
+      "category": "sibling",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "製作花圈",
+      "b": "製作盆景",
+      "prefix40": false,
+      "f": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      },
+      "r": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      }
+    },
+    {
+      "id": "v021",
+      "category": "sibling",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Reading Sea-Adventure Novels",
+      "b": "閱讀宮廷愛情小說",
+      "prefix40": false,
+      "f": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      },
+      "r": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      }
+    },
+    {
+      "id": "v022",
+      "category": "sibling",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Learning Turkish",
+      "b": "學習希臘語",
+      "prefix40": false,
+      "f": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      },
+      "r": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      }
+    },
+    {
+      "id": "v023",
+      "category": "sibling",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "飼養天竺鼠",
+      "b": "Keeping Pet Rabbits",
+      "prefix40": false,
+      "f": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      },
+      "r": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      }
+    },
+    {
+      "id": "v024",
+      "category": "sibling",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "製作風箏",
+      "b": "Making Paper Lanterns",
+      "prefix40": false,
+      "f": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      },
+      "r": {
+        "relation": "sibling_related",
+        "primary": "NO",
+        "rationale": "Related but distinct; neither is evidence of the other."
+      }
+    },
+    {
+      "id": "v025",
+      "category": "role",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Watching Juggling Shows",
+      "b": "Performing Juggling Shows",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v026",
+      "category": "role",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Attending Rowing Regattas as a Spectator",
+      "b": "Racing in Rowing Regattas",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v027",
+      "category": "role",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "觀看馬戲表演",
+      "b": "演出馬戲節目",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v028",
+      "category": "role",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "收看攀樹比賽",
+      "b": "參加攀樹比賽",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v029",
+      "category": "role",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Listening to Audiobooks",
+      "b": "錄製有聲書旁白",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v030",
+      "category": "role",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Visiting Art Installations",
+      "b": "設計藝術裝置",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v031",
+      "category": "role",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "欣賞歌仔戲",
+      "b": "Performing Taiwanese Opera",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v032",
+      "category": "role",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "旁觀機械模型展示",
+      "b": "Demonstrating Mechanical Models",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v033",
+      "category": "action_consumption",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Eating Sourdough Pancakes",
+      "b": "Cooking Sourdough Pancakes",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v034",
+      "category": "action_consumption",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Reading Historical Comics",
+      "b": "Writing Historical Comics",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v035",
+      "category": "action_consumption",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "品嘗酸黃瓜",
+      "b": "醃製酸黃瓜",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v036",
+      "category": "action_consumption",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "試飲水果汽水",
+      "b": "製作水果汽水",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v037",
+      "category": "action_consumption",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Listening to Sea Shanties",
+      "b": "演唱船員工作歌",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v038",
+      "category": "action_consumption",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Watching Stop-Motion Films",
+      "b": "製作定格動畫",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v039",
+      "category": "action_consumption",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "閱讀旅遊指南",
+      "b": "Writing Travel Guidebooks",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v040",
+      "category": "action_consumption",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "品嘗橄欖油",
+      "b": "Producing Olive Oil",
+      "prefix40": false,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v041",
+      "category": "constraint",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Only Caffeine-Free Tea Drinks",
+      "b": "Tea Drinks Containing Caffeine",
+      "prefix40": false,
+      "f": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      },
+      "r": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      }
+    },
+    {
+      "id": "v042",
+      "category": "constraint",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Excursions Exclusively on Weekdays",
+      "b": "Excursions Exclusively on Weekends",
+      "prefix40": false,
+      "f": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      },
+      "r": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      }
+    },
+    {
+      "id": "v043",
+      "category": "constraint",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "只參加室內的手作課",
+      "b": "只參加戶外的手作課",
+      "prefix40": false,
+      "f": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      },
+      "r": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      }
+    },
+    {
+      "id": "v044",
+      "category": "constraint",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "仅接受不含海鲜的料理",
+      "b": "只選以海鮮為主的料理",
+      "prefix40": false,
+      "f": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      },
+      "r": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      }
+    },
+    {
+      "id": "v045",
+      "category": "constraint",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Only Pet-Free Accommodation",
+      "b": "只住允許寵物入住的住宿",
+      "prefix40": false,
+      "f": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      },
+      "r": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      }
+    },
+    {
+      "id": "v046",
+      "category": "constraint",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Only Solitary Silent Retreats",
+      "b": "只參加必須多人交談的靜修活動",
+      "prefix40": false,
+      "f": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      },
+      "r": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      }
+    },
+    {
+      "id": "v047",
+      "category": "constraint",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "僅接受提供電梯的樓上展場",
+      "b": "Upper-Floor Exhibition Spaces Accessible Only by Stairs",
+      "prefix40": false,
+      "f": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      },
+      "r": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      }
+    },
+    {
+      "id": "v048",
+      "category": "constraint",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "只吃不含蛋的糕點",
+      "b": "Pastries Made with Eggs",
+      "prefix40": false,
+      "f": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      },
+      "r": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      }
+    },
+    {
+      "id": "v049",
+      "category": "ambiguity",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Java",
+      "b": "Studying Programming Languages",
+      "prefix40": false,
+      "f": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      },
+      "r": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      }
+    },
+    {
+      "id": "v050",
+      "category": "ambiguity",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Delta",
+      "b": "Studying River Landforms",
+      "prefix40": false,
+      "f": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      },
+      "r": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      }
+    },
+    {
+      "id": "v051",
+      "category": "ambiguity",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "金星",
+      "b": "研究行星",
+      "prefix40": false,
+      "f": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      },
+      "r": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      }
+    },
+    {
+      "id": "v052",
+      "category": "ambiguity",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "牛",
+      "b": "研究證券市場",
+      "prefix40": false,
+      "f": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      },
+      "r": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      }
+    },
+    {
+      "id": "v053",
+      "category": "ambiguity",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Spring",
+      "b": "研究季節",
+      "prefix40": false,
+      "f": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      },
+      "r": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      }
+    },
+    {
+      "id": "v054",
+      "category": "ambiguity",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Date",
+      "b": "品嘗水果",
+      "prefix40": false,
+      "f": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      },
+      "r": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      }
+    },
+    {
+      "id": "v055",
+      "category": "ambiguity",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "梅",
+      "b": "Studying Chinese Surnames",
+      "prefix40": false,
+      "f": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      },
+      "r": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      }
+    },
+    {
+      "id": "v056",
+      "category": "ambiguity",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "冠",
+      "b": "Studying Royal Ceremonies",
+      "prefix40": false,
+      "f": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      },
+      "r": {
+        "relation": "lexical_ambiguity",
+        "primary": "ABSTAIN",
+        "rationale": "Isolated term has unresolved senses; context must not choose its meaning."
+      }
+    },
+    {
+      "id": "v057",
+      "category": "unrelated",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Designing Board-Game Boxes",
+      "b": "觀察冰河地形",
+      "prefix40": false,
+      "f": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      },
+      "r": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      }
+    },
+    {
+      "id": "v058",
+      "category": "unrelated",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Repairing Musical Metronomes",
+      "b": "醃製梅子",
+      "prefix40": false,
+      "f": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      },
+      "r": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      }
+    },
+    {
+      "id": "v059",
+      "category": "unrelated",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Cataloging Meteorites",
+      "b": "編寫食譜",
+      "prefix40": false,
+      "f": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      },
+      "r": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      }
+    },
+    {
+      "id": "v060",
+      "category": "unrelated",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Making Leather Belts",
+      "b": "研究魚群遷徙",
+      "prefix40": false,
+      "f": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      },
+      "r": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      }
+    },
+    {
+      "id": "v061",
+      "category": "unrelated",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "製作旋轉木馬模型",
+      "b": "Learning Legal Translation",
+      "prefix40": false,
+      "f": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      },
+      "r": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      }
+    },
+    {
+      "id": "v062",
+      "category": "unrelated",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "研究燈塔建築",
+      "b": "Practicing Table Tennis",
+      "prefix40": false,
+      "f": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      },
+      "r": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      }
+    },
+    {
+      "id": "v063",
+      "category": "unrelated",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "照顧多肉植物",
+      "b": "Editing Amateur Radio Manuals",
+      "prefix40": false,
+      "f": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      },
+      "r": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      }
+    },
+    {
+      "id": "v064",
+      "category": "unrelated",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "編織漁夫帽",
+      "b": "Learning Underwater Navigation",
+      "prefix40": false,
+      "f": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      },
+      "r": {
+        "relation": "unrelated",
+        "primary": "NO",
+        "rationale": "Clear distinct domains without entailment."
+      }
+    },
+    {
+      "id": "v065",
+      "category": "composite",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Visiting Mountain Heritage Villages",
+      "b": "Visiting Mountain Heritage Villages via Wheelchair-Accessible Roads without Stairs",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v066",
+      "category": "composite",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Joining Community Baking Sessions",
+      "b": "Joining Community Baking Sessions Using Egg-Free Ingredients and No Alcohol",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v067",
+      "category": "composite",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "參加週末文物導覽",
+      "b": "參加全程無階梯且不超過五人的週末文物導覽",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v068",
+      "category": "composite",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "參觀地方科學館",
+      "b": "只在安靜時段參觀有字幕影片的地方科學館",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v069",
+      "category": "composite",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Touring Coastal Lighthouses",
+      "b": "只在白天走無階梯步道參觀海岸燈塔",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v070",
+      "category": "composite",
+      "languages": [
+        "en",
+        "zh"
+      ],
+      "a": "Reading Nature Essays",
+      "b": "閱讀附有植物索引且以中文撰寫的自然散文",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v071",
+      "category": "composite",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "製作親子野餐料理",
+      "b": "Preparing Nut-Free Vegetarian Family Picnic Food",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v072",
+      "category": "composite",
+      "languages": [
+        "zh",
+        "en"
+      ],
+      "a": "參加社區歌唱課",
+      "b": "Attending Beginner Community Singing Classes without Amplified Sound",
+      "prefix40": false,
+      "f": {
+        "relation": "candidate_more_specific",
+        "primary": "YES",
+        "rationale": "Candidate B includes query A and adds a subtype or compatible condition."
+      },
+      "r": {
+        "relation": "candidate_more_broad",
+        "primary": "NO",
+        "rationale": "Candidate A omits a required condition/subtype of query B."
+      }
+    },
+    {
+      "id": "v073",
+      "category": "long_prefix",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Planning Leisure Visits to Restored Industrial Heritage Buildings with completely step-free wheelchair routes",
+      "b": "Planning Leisure Visits to Restored Industrial Heritage Buildings with steep stair-only routes and no wheelchair access",
+      "prefix40": true,
+      "f": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      },
+      "r": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      }
+    },
+    {
+      "id": "v074",
+      "category": "long_prefix",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Preparing Refreshments for Small Neighborhood Storytelling Evenings with alcohol-free drinks only",
+      "b": "Preparing Refreshments for Small Neighborhood Storytelling Evenings with mandatory alcoholic liqueur drinks",
+      "prefix40": true,
+      "f": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      },
+      "r": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      }
+    },
+    {
+      "id": "v075",
+      "category": "long_prefix",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Following Traditional Maritime Folk Songs During Local Cultural Festivals by listening to live performers",
+      "b": "Following Traditional Maritime Folk Songs During Local Cultural Festivals by singing on stage for an audience",
+      "prefix40": true,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v076",
+      "category": "long_prefix",
+      "languages": [
+        "en",
+        "en"
+      ],
+      "a": "Exploring Detailed Accounts of Remote Desert Expeditions During Free Evenings by reading published diaries",
+      "b": "Exploring Detailed Accounts of Remote Desert Expeditions During Free Evenings by writing expedition diaries for readers",
+      "prefix40": true,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v077",
+      "category": "long_prefix",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "在週末安排參觀地方歷史文化中心的收藏展示與周邊散步路線並停留欣賞傳統技藝時要求整個參觀過程完全沒有導覽員講解",
+      "b": "在週末安排參觀地方歷史文化中心的收藏展示與周邊散步路線並停留欣賞傳統技藝時要求整個參觀過程必須由導覽員全程講解",
+      "prefix40": true,
+      "f": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      },
+      "r": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      }
+    },
+    {
+      "id": "v078",
+      "category": "long_prefix",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "為鄰里朋友規劃週末下午的小型閱讀聚會並一起欣賞大家分享的作品與旅行記錄時準備的所有餐點必須完全不含肉類",
+      "b": "為鄰里朋友規劃週末下午的小型閱讀聚會並一起欣賞大家分享的作品與旅行記錄時準備的所有餐點必須使用羊肉作為主要食材",
+      "prefix40": true,
+      "f": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      },
+      "r": {
+        "relation": "constraint_conflict",
+        "primary": "NO",
+        "rationale": "Explicit incompatible conditions or requirements."
+      }
+    },
+    {
+      "id": "v079",
+      "category": "long_prefix",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "在休假時接觸地方音樂團體所準備的節奏演出活動並把晚上空閒時間留給這項興趣時自己的參與方式是坐在台下欣賞鼓樂演奏",
+      "b": "在休假時接觸地方音樂團體所準備的節奏演出活動並把晚上空閒時間留給這項興趣時自己的參與方式是登上舞臺為觀眾演奏鼓樂",
+      "prefix40": true,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    },
+    {
+      "id": "v080",
+      "category": "long_prefix",
+      "languages": [
+        "zh",
+        "zh"
+      ],
+      "a": "在下班後接觸有關古老工藝與地方生活的文字故事並持續安排時間投入這個休閒主題時自己主要從事的事情是閱讀別人完成的報導",
+      "b": "在下班後接觸有關古老工藝與地方生活的文字故事並持續安排時間投入這個休閒主題時自己主要從事的事情是撰寫報導供別人閱讀",
+      "prefix40": true,
+      "f": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      },
+      "r": {
+        "relation": "role_mismatch",
+        "primary": "NO",
+        "rationale": "Different participation or creation/consumption role; no inferred shared role."
+      }
+    }
+  ]
+}

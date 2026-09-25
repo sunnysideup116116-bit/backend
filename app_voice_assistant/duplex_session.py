@@ -1,4 +1,5 @@
 from __future__ import annotations
+from matchmaker_agent.concept_identity import MAX_PREFERENCE_TEXT_CHARS
 
 from agent_quota.service import record_gemini
 
@@ -419,7 +420,7 @@ def _legacy_live_tools(types: Any) -> list[Any]:
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "label": {"type": "string", "maxLength": 40},
+                    "label": {"type": "string", "maxLength": MAX_PREFERENCE_TEXT_CHARS},
                     "stance": {
                         "type": "string",
                         "enum": ["like", "dislike", "require", "avoid"],

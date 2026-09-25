@@ -12,11 +12,18 @@ from typing import Any
 from pymongo import ASCENDING
 
 from database import db
+from services.preference_projection_fence import projection_write
 from matchmaker_agent.concept_identity import (
     canonicalize_concept,
+    display_preference_label,
     has_mixed_preference_polarity,
+    normalize_preference_text,
+    PreferenceTextError,
+    durable_memory_limit,
     split_compound_concept_label,
     split_explicit_preference_enumeration,
+    normalize_fresh_preference_text,
+    stored_concept_identity,
 )
 
 
@@ -37,7 +44,11 @@ def ensure_preference_indexes() -> None:
 
 
 def _clean_item(item: dict[str, Any]) -> dict[str, Any] | None:
-    label = str(item.get("label") or "").strip()[:40]
+    identity = stored_concept_identity(item) if item.get("canonicalization_version") == "v2" else None
+    if item.get("canonicalization_version") == "v2" and not identity:
+        raise PreferenceTextError("invalid_preference_identity")
+    label = identity.semantic_text if identity else normalize_fresh_preference_text(
+        item.get("semantic_text") or item.get("label"))
     stance = str(item.get("stance") or "").strip().lower()
     if (
         has_mixed_preference_polarity(label)
@@ -45,14 +56,14 @@ def _clean_item(item: dict[str, Any]) -> dict[str, Any] | None:
         or split_compound_concept_label(label)
     ):
         return None
-    identity = canonicalize_concept(
+    identity = identity or canonicalize_concept(
         label, item.get("key") or item.get("concept_key"),
     )
     if not identity or stance not in VALID_STANCES:
         return None
     return {
+        **identity.as_dict(),
         "concept_key": identity.key,
-        "label": identity.label,
         "stance": stance,
         "category": str(item.get("category") or "lifestyle")[:30],
         "confidence": max(0.0, min(float(item.get("confidence", 0.7)), 1.0)),
@@ -67,67 +78,92 @@ def upsert_preference_facts(
     source: str,
     message_id: str | None = None,
     match_id: str | None = None,
+    source_created_at: float | None = None,
 ) -> list[dict[str, Any]]:
+    # Validate every item before the first index/write. A later oversized item
+    # must not leave the accepted prefix of a batch in Mongo.
+    if len(items) > durable_memory_limit():
+        raise PreferenceTextError("too_many_preferences")
+    cleaned = [_clean_item(item) for item in items]
+    if any(item is None for item in cleaned):
+        raise PreferenceTextError("invalid_atomic_preference")
     ensure_preference_indexes()
     now = time.time()
     saved: list[dict[str, Any]] = []
-    for raw_item in items:
-        item = _clean_item(raw_item)
-        if not item:
-            continue
-        identity = {"user_id": user_id, "concept_key": item["concept_key"]}
-        PREFERENCE_FACTS.update_one(
-            identity,
-            {
-                "$setOnInsert": {
-                    "user_id": user_id,
-                    "concept_key": item["concept_key"],
-                    "first_seen_at": now,
-                    "evidence_count": 0,
-                    "evidence_ids": [],
+    with projection_write(user_id, source_created_at=source_created_at) as session:
+        for item in cleaned:
+            identity = {"user_id": user_id, "concept_key": item["concept_key"]}
+            PREFERENCE_FACTS.update_one(
+                identity,
+                {
+                    "$setOnInsert": {
+                        "user_id": user_id,
+                        "concept_key": item["concept_key"],
+                        "first_seen_at": now,
+                        "evidence_count": 0,
+                        "evidence_ids": [],
+                    },
+                    "$set": {
+                        "label": item["label"],
+                        "semantic_text": item["semantic_text"],
+                        "display_label": item["display_label"],
+                        "canonical_key": item["canonical_key"],
+                        "canonicalization_version": item["canonicalization_version"],
+                        "semantic_input_hash": item["semantic_input_hash"],
+                        "fidelity_status": item["fidelity_status"],
+                        "stance": item["stance"],
+                        "category": item["category"],
+                        "active": True,
+                        "last_seen_at": now,
+                        "last_source": source,
+                        "last_match_id": match_id,
+                        "last_reason": item["reason"],
+                    },
+                    "$max": {"confidence": item["confidence"]},
                 },
-                "$set": {
+                upsert=True, session=session,
+            )
+            evidence_id = str(message_id or f"{source}:{match_id or '-'}:{now}")
+            PREFERENCE_FACTS.update_one(
+                {**identity, "evidence_ids": {"$ne": evidence_id}},
+                {
+                    "$inc": {"evidence_count": 1},
+                    "$addToSet": {"evidence_ids": evidence_id},
+                },
+                session=session,
+            )
+            saved.append(
+                {
+                    **{name: item[name] for name in (
+                        "semantic_text", "display_label", "canonical_key",
+                        "canonicalization_version", "semantic_input_hash", "fidelity_status",
+                    )},
+                    "key": item["concept_key"],
                     "label": item["label"],
                     "stance": item["stance"],
                     "category": item["category"],
-                    "active": True,
+                    "confidence": item["confidence"],
                     "last_seen_at": now,
-                    "last_source": source,
-                    "last_match_id": match_id,
-                    "last_reason": item["reason"],
-                },
-                "$max": {"confidence": item["confidence"]},
-            },
-            upsert=True,
-        )
-        evidence_id = str(message_id or f"{source}:{match_id or '-'}:{now}")
-        PREFERENCE_FACTS.update_one(
-            {**identity, "evidence_ids": {"$ne": evidence_id}},
-            {
-                "$inc": {"evidence_count": 1},
-                "$addToSet": {"evidence_ids": evidence_id},
-            },
-        )
-        saved.append(
-            {
-                "key": item["concept_key"],
-                "label": item["label"],
-                "stance": item["stance"],
-                "category": item["category"],
-                "confidence": item["confidence"],
-                "last_seen_at": now,
-            }
-        )
+                }
+            )
     return saved
 
 
 def list_preference_facts(user_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    if db["profiles"].find_one({"user_id": user_id, "preference_bootstrap_pending": {"$exists": True}}, {"_id": 1}):
+        return []
     rows = PREFERENCE_FACTS.find(
         {"user_id": user_id, "active": True},
         {
             "_id": 0,
             "concept_key": 1,
             "label": 1,
+            "semantic_text": 1,
+            "display_label": 1,
+            "canonical_key": 1,
+            "canonicalization_version": 1,
+            "semantic_input_hash": 1,
+            "fidelity_status": 1,
             "stance": 1,
             "category": 1,
             "confidence": 1,
@@ -138,6 +174,12 @@ def list_preference_facts(user_id: str, limit: int = 20) -> list[dict[str, Any]]
         {
             "key": row.get("concept_key"),
             "label": row.get("label"),
+            "semantic_text": row.get("semantic_text"),
+            "display_label": row.get("display_label") or display_preference_label(row.get("label")),
+            "canonical_key": row.get("canonical_key") or row.get("concept_key"),
+            "canonicalization_version": row.get("canonicalization_version") or "legacy_unknown",
+            "semantic_input_hash": row.get("semantic_input_hash"),
+            "fidelity_status": row.get("fidelity_status") or "legacy_unknown",
             "stance": row.get("stance"),
             "category": row.get("category"),
             "confidence": row.get("confidence", 0.7),
@@ -159,8 +201,14 @@ def set_preference_fact_state(
 ) -> dict[str, Any] | None:
     updates: dict[str, Any] = {"active": active, "last_seen_at": time.time()}
     if label:
-        updates["label"] = label[:40]
-    PREFERENCE_FACTS.update_one(
-        {"user_id": user_id, "concept_key": concept_key}, {"$set": updates}
-    )
+        # State changes are not identity rewrites. A caller requesting different
+        # semantic content must use the explicit correction/create path.
+        normalized = normalize_preference_text(label)
+        existing = get_preference_fact(user_id, concept_key)
+        if not existing or normalized != (existing.get("semantic_text") or existing.get("label")):
+            raise PreferenceTextError("identity_change_requires_correction")
+    with projection_write(user_id, source_created_at=updates["last_seen_at"]) as session:
+        PREFERENCE_FACTS.update_one(
+            {"user_id": user_id, "concept_key": concept_key}, {"$set": updates}, session=session
+        )
     return get_preference_fact(user_id, concept_key)

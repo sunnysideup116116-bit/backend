@@ -4,11 +4,16 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from services.ayue_agent.shared.write_actions import prepare_write_confirmation
 from matchmaker_agent.concept_identity import (
     canonical_evidence_span,
     canonicalize_concept,
+    canonicalize_fresh_concept,
+    MAX_PREFERENCE_TEXT_CHARS,
+    PreferenceTextError,
+    normalize_preference_text,
+    normalize_fresh_preference_text,
 )
 
 from .domain_support import dispatch_registered
@@ -37,8 +42,21 @@ PROMPT = """【配對】
 class MatchSearchInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     kind: Literal["activity", "recent_context", "preference"] = "recent_context"
-    topic: str | None = Field(default=None, min_length=1, max_length=80)
+    topic: str | None = Field(default=None, min_length=1, max_length=MAX_PREFERENCE_TEXT_CHARS)
     source_text: str | None = Field(default=None, min_length=1, max_length=600)
+
+    @model_validator(mode="after")
+    def _validate_topic_contract(self):
+        if self.topic is not None:
+            if self.kind == "preference":
+                self.topic = normalize_fresh_preference_text(self.topic)
+            elif len(self.topic) > 80:
+                raise ValueError("activity topic exceeds 80 characters")
+        if self.kind == "preference" and self.source_text is not None:
+            # Ground against the original visible owner text. Normalization
+            # is validated here and performed only after that grounding.
+            normalize_fresh_preference_text(self.source_text, max_length=600)
+        return self
 
 
 SCHEMAS = ({
@@ -49,14 +67,14 @@ SCHEMAS = ({
 
 _EXPLICIT_PREFERENCE_SEARCH_RE = re.compile(
     r"(?:找|介紹|認識)[^。！？]{0,24}"
-    r"(?:(?<!不)(?<!不太)(?<!不很)(?<!不怎麼)喜歡|偏好|愛聽|常聽)"
-    r"[^。！？]{0,80}"
-    r"(?:的人|的對象|的朋友)"
+    r"(?:(?<!不)(?<!不太)(?<!不很)(?<!不怎麼)喜歡|偏好|愛聽|常聽)\s*"
+    rf"[^。！？]{{0,{MAX_PREFERENCE_TEXT_CHARS}}}"
+    r"\s*(?:的人|的對象|的朋友)"
 )
 _NEGATIVE_PREFERENCE_SEARCH_RE = re.compile(
     r"(?:找|介紹|認識)[^。！？]{0,24}"
-    r"(?:不\s*(?:太|很|怎麼)?\s*(?:喜歡|愛)|討厭|避免)"
-    r"[^。！？]{0,80}(?:的人|的對象|的朋友)"
+    r"(?:不\s*(?:太|很|怎麼)?\s*(?:喜歡|愛)|討厭|避免)\s*"
+    rf"[^。！？]{{0,{MAX_PREFERENCE_TEXT_CHARS}}}\s*(?:的人|的對象|的朋友)"
 )
 
 
@@ -76,28 +94,54 @@ def _prepare_search(runtime: Any, request: MatchSearchInput):
         if isinstance(item, dict) and item.get("role") == "user"
     ]
     source = str(request.source_text or "").strip()
-    identity = canonicalize_concept(topic)
+    try:
+        identity = (canonicalize_fresh_concept if request.kind == "preference" else canonicalize_concept)(topic)
+    except PreferenceTextError:
+        return None, "這次偏好搜尋條件無法完整驗證，請稍後再試；我沒有開始搜尋。"
+    # Keep raw owner strings for authority, but compare preference grounding
+    # through the same fixed fresh-input script contract used by the writer.
+    # Normalized text is never allowed to invent a new owner source.
+    source_views = []
+    for raw_source in sources:
+        try:
+            view = (normalize_fresh_preference_text(raw_source, max_length=600)
+                    if request.kind == "preference" else raw_source)
+        except PreferenceTextError:
+            view = ""  # Reject this whole source; never inspect a prefix.
+        source_views.append((raw_source, view))
     if not source:
         source = next((
-            text for text in sources
+            raw_source for raw_source, text in source_views
             if topic and (
                 topic in text
                 or bool(identity and canonical_evidence_span(text, identity))
             )
         ), "")
+    try:
+        source_view = (normalize_fresh_preference_text(source, max_length=600)
+                       if request.kind == "preference" else source)
+    except PreferenceTextError:
+        return None, "這段偏好搜尋內容無法完整驗證，請縮短完整條件後再試；我沒有開始搜尋。"
     grounded = bool(
         topic and source and any(source in text for text in sources)
         and (
-            topic in source
-            or bool(identity and canonical_evidence_span(source, identity))
+            topic in source_view
+            or bool(identity and canonical_evidence_span(source_view, identity))
         )
     )
     explicit_preference = bool(
-        identity and grounded and _EXPLICIT_PREFERENCE_SEARCH_RE.search(source)
+        identity and grounded and _EXPLICIT_PREFERENCE_SEARCH_RE.search(source_view)
     )
-    if grounded and _NEGATIVE_PREFERENCE_SEARCH_RE.search(source):
+    if grounded and _NEGATIVE_PREFERENCE_SEARCH_RE.search(source_view):
         return None, "目前先支援找明確喜歡某項偏好的人；負向條件請換成你希望對方喜歡的主題。"
     resolved_kind = "preference" if explicit_preference else request.kind
+    if resolved_kind == "preference":
+        try:
+            # Reject an oversized grounded source as a whole. Truncating a
+            # suffix here could silently discard an exclusion/constraint.
+            normalize_fresh_preference_text(source, max_length=600)
+        except PreferenceTextError:
+            return None, "這段偏好搜尋內容過長，請縮短完整條件後再試；我沒有開始搜尋。"
     if request.kind == "preference" and not explicit_preference:
         return None, "你希望找明確喜歡這項偏好的人，還是想找人一起做這件事？"
     if not grounded:

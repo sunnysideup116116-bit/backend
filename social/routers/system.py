@@ -18,6 +18,7 @@ from models import (
     ProfileUpdateRequest,
     ModelSettingsRequest,
 )
+from services.profile_writer import update_profile as write_profile
 from database import db, profiles_coll, matches_coll, messages_coll
 from services.ai_service import get_embedding
 from services.profile_projection import active_recent_context
@@ -548,7 +549,7 @@ def update_settings(req: SettingsRequest):
     else:
         enabled = is_proactive_care_enabled(existing)
         compatibility_frequency = normalize_proactive_frequency(existing.get("proactive_frequency", "3600"))
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": req.user_id},
         {"$set": {
             "proactive_care_enabled": enabled,
@@ -568,7 +569,7 @@ def update_settings(req: SettingsRequest):
 @router.patch("/profile/location")
 def update_profile_location(req: ProfileLocationRequest):
     location = normalize_profile_location(req.city, req.district)
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": req.user_id},
         {"$set": {"profile_location": location}},
         upsert=True,
@@ -597,7 +598,7 @@ def update_profile(req: ProfileUpdateRequest):
     if not fields:
         raise HTTPException(status_code=422, detail="profile update is empty")
 
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": req.user_id},
         {"$set": fields},
         upsert=True,
@@ -627,7 +628,7 @@ def update_mediator_tone(req: MediatorToneRequest):
     update = {"mediator_tone": tone, "mediator_tone_selected": True}
     if req.probe_mode in {"balanced", "active", "manual"}:
         update["probe_mode"] = req.probe_mode
-    profiles_coll.update_one({"user_id": req.user_id}, {"$set": update}, upsert=True)
+    write_profile(profiles_coll, {"user_id": req.user_id}, {"$set": update}, upsert=True)
     return {"status": "success", "mediator_tone": tone, "probe_mode": update.get("probe_mode")}
 
 @router.post("/settings/model")
@@ -658,7 +659,7 @@ def get_model_settings():
 
 @router.post("/onboarding/complete")
 def complete_onboarding(req: ClearRequest):
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": req.user_id},
         {"$set": {"onboarding_completed": True}},
         upsert=True
@@ -691,7 +692,7 @@ def profile_memory_action(req: ProfileMemoryActionRequest):
     try:
         return apply_memory_action(req.user_id, req.key, req.action, req.value)
     except MemoryWriteError as exc:
-        raise HTTPException(status_code=503, detail={
+        raise HTTPException(status_code=503 if exc.retryable else 422, detail={
             "code": exc.error_code,
             "message": "記憶設定暫時無法更新，請稍後再試。",
         }) from exc
@@ -702,26 +703,28 @@ def add_profile_memory(req: ProfileMemoryAddRequest):
     from services.memory_service import (
         MemoryWriteError,
         apply_profile_memory_proposals,
-        normalize_memory_item,
     )
+    from matchmaker_agent.concept_identity import PreferenceTextError, canonicalize_fresh_concept
 
-    normalized = normalize_memory_item({
-        "label": normalize_zh_tw(req.label, max_length=40),
-    }).get("label", "")
-    if not normalized:
+    # Preserve the existing manual-input Traditional Chinese contract without
+    # the old 40-character semantic truncation.
+    try:
+        identity = canonicalize_fresh_concept(req.label)
+    except PreferenceTextError as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": exc.code,
+            "message": "這則記憶內容無法完整保存，請縮短後再試。",
+        }) from None
+    if not identity:
         raise HTTPException(status_code=422, detail={
             "code": "memory_label_invalid",
             "message": "這則記憶內容無法保存。",
         })
-    key = "voice_" + hashlib.sha256(
-        f"{req.stance}:{normalized.lower()}".encode("utf-8"),
-    ).hexdigest()[:16]
     try:
         learned = apply_profile_memory_proposals(
             req.user_id,
             [{
-                "key": key,
-                "label": normalized,
+                **identity.as_dict(),
                 "stance": req.stance,
                 "category": "preference",
                 "confidence": 1.0,
@@ -730,7 +733,7 @@ def add_profile_memory(req: ProfileMemoryAddRequest):
             f"voice-memory:{req.user_id}:{req.request_id}",
         )
     except MemoryWriteError as exc:
-        raise HTTPException(status_code=503, detail={
+        raise HTTPException(status_code=503 if exc.retryable else 422, detail={
             "code": exc.error_code,
             "message": "阿月記憶暫時無法新增，請稍後再試。",
         }) from exc

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import mongomock
 import pytest
+from matchmaker_agent.concept_identity import canonicalize_concept
 from fastapi import BackgroundTasks
 
 from models import DirectChatRequest
@@ -164,7 +165,8 @@ def test_pi_preference_search_is_canonical_and_confirmation_bound(monkeypatch, m
     context = record["payload"]["search_context"]
     assert context["search_intent"] == "preference"
     assert context["normalized_topic"] == "K-pop"
-    assert context["canonical_preference_key"] == "k_pop"
+    assert context["canonical_preference_key"] == canonicalize_concept("K-pop").key
+    assert context["canonicalization_version"] == "v2"
     assert "明確保存" in record["preview_text"]
     assert "不會用近期活動猜測偏好" in record["preview_text"]
     assert "delivery_mode" not in record["payload"]
@@ -212,7 +214,7 @@ def test_explicit_preference_wording_overrides_a_misclassified_activity_kind(mon
     assert result["result"]["pending_confirmation"]
     context = store.c.find_one({})["payload"]["search_context"]
     assert context["search_intent"] == "preference"
-    assert context["canonical_preference_key"] == "k_pop"
+    assert context["canonical_preference_key"] == canonicalize_concept("K-pop").key
 
 
 @pytest.mark.parametrize("kind", ["preference", "activity"])

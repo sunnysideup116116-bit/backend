@@ -41,6 +41,10 @@ User 保留穩定 ID、同步公開 name；初始 PREFERS 不覆寫既有或停�
 
 Durable preference 由 server-owned atomic/canonical boundary 寫入。Public Pi 的 `match.start_search` 明確區分 activity／recent context／preference：前兩者保留 bounded vector retrieval，explicit preference 先走 canonical Graph exact lookup，再進同一套 safety、history、quota、qualification、Matchmaker 與 consent lifecycle。Recent context 過期後不再進 matching 或 Agent context；它不會被當成 durable preference。
 
+[Preference Identity v2](docs/PREFERENCE_IDENTITY_V2.md) 將完整 semantic source 與 display label 分離；超限拒絕而非裁切，exact identity 使用 bounded versioned digest。Legacy unknown 不自動轉換／回填，持久搜尋需可信 v2 metadata 或重新確認；P1 semantic feature 仍 OFF。
+
+[Related-Interest Matching v1](docs/RELATED_INTEREST_PILOT_V1.md) 是新的 internal app-wide pilot contract，預設仍 OFF，並非把舊 strict validator NO-GO 改判。只有 qualified exact=0 時才走專用 versioned ANN → DeepSeek relation validation → accepted Concepts → PREFERS owners；query embedding 仍為 Gemini。理由區分搜尋意圖、本人已保存偏好與相關但不同的候選興趣，不能把 semantic evidence 宣稱為共同偏好。既有 Pi confirmation、quota、block/history 與 mutual-consent lifecycle 不變；pilot metrics 不進 durable memory。
+
 - 主動關心維持 Profile extraction → follow-up candidate → proactive scheduler → grounded message；它不使用公開 Agent 的推理 loop。
 - App voice 與 registration voice 維持 Gemini runtime。App voice 轉交公開阿月時呼叫同一個 Pi HTTP contract；直接行事曆操作維持既有 typed API。
 - Private Ayue 維持 `private_v2.py`，使用 private context 與搬至 shared 的 confirmation manager；不改成 Pi。
@@ -69,6 +73,16 @@ python scripts/retire_public_dag_state.py --verify
 工具只失效 `surface=public_ayue` 且非 Pi 的未完成確認、人選卡與操作佇列。Private、Pi、完成紀錄及 executing 寫入不修改；存在來源不明或 executing 紀錄時 apply 會 fail closed。
 
 ## 啟動與驗證
+
+Mongo profile 建檔由 [Profile writer boundary](docs/PROFILE_WRITER_HARDENING.md)
+統一處理 owner-only upsert／insert-only defaults，以及已確認相同 owner unique-key
+競爭的有界 update-only recovery。Conditional/CAS miss 不得建檔。資料庫唯一性仍需
+另行批准的 user_id UNIQUE index；本實作不修正式 duplicate、不建立 schema。
+
+偏好重新確認的 [bootstrap domain API](docs/PREFERENCE_BOOTSTRAP_RUNTIME.md) 預設關閉，
+不屬於 Pi 工具。Owner JWT preview/commit 採 Graph owner revision/fence 與可恢復 Mongo
+projection；完整集合必須分別確認 PREFERS/AVOIDS，才退休 owner-scoped legacy 關係。
+一般記憶、註冊、回饋、修正與 context writer 共用 fence；不新增 semantic/embedding 流程。
 
 正式啟動入口只有 `start_all.sh`。它在清 ports 與建立 logs 前檢查 Node 版本、Pi dependency 與 bridge self-check，再啟動固定的 Social `8000`、Risk `8001`、Matchmaker `9001`、Guardrail `8081`。
 

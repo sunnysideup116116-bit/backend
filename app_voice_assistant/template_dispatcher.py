@@ -11,6 +11,7 @@ the existing runtime and Flutter executor.
 """
 
 from __future__ import annotations
+from matchmaker_agent.concept_identity import MAX_PREFERENCE_TEXT_CHARS
 
 import re
 from datetime import date, datetime, timedelta
@@ -644,7 +645,7 @@ def template_live_tools(types: Any) -> list[Any]:
                 "target": {"type": "string", "maxLength": 80},
                 "contact_name": {"type": "string", "maxLength": 80},
                 "accepted": {"type": "boolean"},
-                "label": {"type": "string", "maxLength": 40},
+                "label": {"type": "string", "maxLength": MAX_PREFERENCE_TEXT_CHARS},
                 "stance": {"type": "string", "enum": ["like", "dislike", "require", "avoid"]},
                 "message": {"type": "string", "maxLength": 500},
                 "question": {"type": "string", "maxLength": 1000},

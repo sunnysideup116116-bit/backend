@@ -52,10 +52,11 @@ class ContextProjectionEndpointTests(unittest.TestCase):
         session = MagicMock()
         driver.__enter__.return_value = driver
         driver.session.return_value.__enter__.return_value = session
+        session.execute_write.side_effect = lambda callback: callback(session)
 
         def run(query, **_kwargs):
             result = MagicMock()
-            result.single.return_value = None
+            result.single.return_value = {"revision": 0, "epoch": 0, "epoch_at": 0, "pending": None} if "AS revision" in query else None
             return result
 
         session.run.side_effect = run
@@ -74,7 +75,9 @@ class ContextProjectionEndpointTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["concept_count"], 1)
         queries = [call.args[0] for call in session.run.call_args_list]
-        self.assertTrue(any("DELETE expired" in query for query in queries))
+        self.assertFalse(any("MATCH ()-[expired" in query for query in queries))
+        self.assertIn("preference_revision", queries[0])
+        session.execute_write.assert_called_once()
         self.assertTrue(any("DELETE old" in query for query in queries))
         edge_call = next(call for call in session.run.call_args_list if "CURRENTLY_WANTS" in call.args[0] and "MERGE (u)-[r" in call.args[0])
         self.assertEqual(set(edge_call.kwargs), {"user_id", "key", "label", "expires_at"})
@@ -146,6 +149,19 @@ class ContextProjectionEndpointTests(unittest.TestCase):
 
     def test_concept_embedding_projection_stores_versioned_vector(self):
         driver, session = self._graph()
+        original_run = session.run.side_effect
+
+        def run(query, **kwargs):
+            if "UNWIND $keys" in query:
+                return [{"key": "hiking", "label": "爬山"}]
+            if "RETURN count(concept) AS written" in query:
+                result = MagicMock()
+                result.single.return_value = {"written": 1}
+                return result
+            return original_run(query, **kwargs)
+
+        session.run.side_effect = run
+        session.execute_write.side_effect = lambda callback, *args: callback(session, *args)
         request = agent_api.ConceptEmbeddingProjectionRequest(
             concepts=[{
                 "key": "hiking", "label": "爬山", "kind": "activity",

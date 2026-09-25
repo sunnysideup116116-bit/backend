@@ -8,6 +8,7 @@ from database import messages_coll, profiles_coll
 from services.chat_service import generate_room_id
 from services.memory_service import get_user_graph_memories
 from services.profile_projection import active_recent_context
+from services.owner_memory_projection import preference_wording
 from services.ayue_agent.product_identity import LEGACY_AYUE_PERSONA
 
 
@@ -90,11 +91,7 @@ def private_viewer_profile_context(user_id: str) -> dict:
         {"_id": 0, "current_context": 1, "recent_context_expires_at": 1, "initial_interest": 1,
          "big_five.summary": 1, "profile_memory_preview": 1},
     ) or {}
-    memories = [
-        str(item.get("label") or "")[:50]
-        for item in (doc.get("profile_memory_preview") or [])
-        if isinstance(item, dict) and item.get("label")
-    ][:8]
+    memories = preference_wording(doc.get("profile_memory_preview"), owner_id=user_id)
     return {
         "recent_context": active_recent_context(doc, ""),
         "initial_interest": str(doc.get("initial_interest") or "")[:120],

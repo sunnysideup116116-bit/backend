@@ -16,6 +16,19 @@ from openai import OpenAI, AsyncOpenAI, APIError, APITimeoutError
 from neo4j import GraphDatabase
 from pathlib import Path
 from dotenv import dotenv_values, load_dotenv
+if __package__:
+    from .concept_identity import (
+        PreferenceTextError, canonicalize_concept, canonicalize_fresh_concept,
+        normalize_preference_text, normalize_fresh_preference_text,
+        stored_concept_identity, is_v2_preference_key,
+    )
+else:
+    # start_all.sh launches agent_api from the service directory, not repo root.
+    from concept_identity import (
+        PreferenceTextError, canonicalize_concept, canonicalize_fresh_concept,
+        normalize_preference_text, normalize_fresh_preference_text,
+        stored_concept_identity, is_v2_preference_key,
+    )
 
 _ROOT_MODEL_ENV_KEYS = frozenset({
     "LLM_MODEL_ID",
@@ -65,6 +78,41 @@ def safe_search_context(value) -> dict[str, str]:
     """Keep only bounded search meaning at the Matchmaker boundary."""
     if not isinstance(value, dict):
         return {}
+    if str(value.get("search_intent") or "").strip() == "preference":
+        source = value.get("semantic_text") or value.get("normalized_topic") or value.get("invitation_topic")
+        packet = (value.get("canonicalization_version") is not None
+                  or value.get("semantic_input_hash") is not None
+                  or is_v2_preference_key(value.get("canonical_preference_key")))
+        if packet:
+            identity = stored_concept_identity({
+                "canonical_key": value.get("canonical_preference_key"),
+                "canonicalization_version": value.get("canonicalization_version"),
+                "semantic_text": value.get("semantic_text"),
+                "semantic_input_hash": value.get("semantic_input_hash"),
+                "fidelity_status": value.get("fidelity_status", "complete"),
+            })
+            if not identity:
+                raise PreferenceTextError("preference_search_identity_mismatch")
+        else:
+            identity = canonicalize_fresh_concept(source)
+        if not identity:
+            raise PreferenceTextError("preference_search_invalid")
+        for field in ("semantic_text", "normalized_topic"):
+            field_identity = (canonicalize_concept if packet else canonicalize_fresh_concept)(value[field]) if value.get(field) else None
+            if field_identity and field_identity.key != identity.key:
+                raise PreferenceTextError("preference_search_identity_mismatch")
+        result = {"search_intent": "preference", "normalized_topic": identity.semantic_text,
+                  "semantic_text": identity.semantic_text, "display_label": identity.display_label,
+                  "canonical_preference_key": identity.key, "canonicalization_version": "v2",
+                  "semantic_input_hash": identity.semantic_input_hash}
+        query = (normalize_preference_text if packet else normalize_fresh_preference_text)(
+            value.get("query_text") or "", max_length=MAX_QUERY_TEXT_CHARS)
+        if query:
+            result["query_text"] = query
+        source_id = str(value.get("source_message_id") or "").strip()
+        if source_id:
+            result["source_message_id"] = source_id[:MAX_SOURCE_MESSAGE_ID_CHARS]
+        return result
     limits = {
         "invitation_topic": MAX_INVITATION_TOPIC_CHARS,
         "query_text": MAX_QUERY_TEXT_CHARS,
@@ -188,6 +236,15 @@ class MatchmakerAgent:
             for item in evidence[:3]:
                 if not isinstance(item, dict) or item.get("kind") != "semantic_related":
                     continue
+                if "policy_version" in item:
+                    if __package__:
+                        from .related_interest_contract import validated_evidence
+                    else:
+                        from related_interest_contract import validated_evidence
+                    packet = validated_evidence(item, query_key=context.get("canonical_preference_key"))
+                    if packet:
+                        clean.append(packet)
+                    continue
                 key, score = item.get("concept_key"), item.get("similarity")
                 if (isinstance(key, str) and re.fullmatch(r"[a-z][a-z0-9_]{1,50}", key)
                         and isinstance(score, (int, float)) and not isinstance(score, bool)
@@ -214,6 +271,15 @@ class MatchmakerAgent:
                 "或宣稱任何未保存的興趣；也不得因 candidate 的 current_context 是其他活動而否定"
                 "已由 server 驗證的 durable evidence。"
             )
+            if any(item.get("policy_version") == "related_interest_v1"
+                   for candidate in payload["candidates"] if isinstance(candidate, dict)
+                   for item in candidate.get("preference_retrieval_evidence", []) if isinstance(item, dict)):
+                system_content += (
+                    "\n本輪產品目標是 related-interest conversation discovery，不要求完全相同的興趣。"
+                    "relation=role_mismatch 可作為相關話題依據，但不代表適合做同一活動；"
+                    "query_preference 只是搜尋條件，candidate_preference 才是候選人已保存的偏好。"
+                    "不得把相關 evidence 說成你們都喜歡同一件事；不要推測未保存的偏好或願意同行。"
+                )
         elif context.get("search_intent") == "preference":
             # Keep the exact-only P0 prompt byte-for-byte, including mode OFF.
             system_content += (
@@ -287,7 +353,13 @@ class MatchmakerAgent:
                         import uuid
                         usage = getattr(response, 'usage', None)
                         if usage:
-                            record_usage(uuid.uuid4().hex, usage.prompt_tokens, usage.completion_tokens)
+                            if any(e.get("policy_version") == "related_interest_v1"
+                                   for c in candidates if isinstance(c, dict)
+                                   for e in c.get("preference_retrieval_evidence", []) if isinstance(e, dict)):
+                                from agent_quota.service import record_usage_deferred
+                                record_usage_deferred(uuid.uuid4().hex, usage.prompt_tokens, usage.completion_tokens)
+                            else:
+                                record_usage(uuid.uuid4().hex, usage.prompt_tokens, usage.completion_tokens)
                         try:
                             return _match_content(response)
                         except MatchEvaluationError as exc:
@@ -1468,7 +1540,7 @@ class MatchmakerAgent:
 規則：
 - 只有使用者明確同意記錄的 explicit_reasons 才能產生偏好；單純拒絕不代表不喜歡對方的任何特質。
 - 接受或正向回饋可產生 LIKES_TRAIT。
-- trait 要短、具體、可重複使用，例如：效率至上、愛打籃球、年長成熟、共同學習。
+- trait 必須完整保留本人勾選理由中的角色、限定詞與限制，不得為了縮短而省略語意；只能使用勾選理由明確支持的概念，最多 500 字，不可猜測或新增偏好。
 - 不要輸出候選人 ID 當 trait。
 - 沒有明確偏好時輸出空 relationships。
 
@@ -1482,7 +1554,7 @@ class MatchmakerAgent:
     {{
       "user_id": "使用者 ID",
       "relation_type": "LIKES_TRAIT|DISLIKES_TRAIT",
-      "trait": "短 trait",
+      "trait": "完整的 atomic preference（保留角色與限定詞）",
       "reason": "一句理由"
     }}
   ]

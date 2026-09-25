@@ -19,7 +19,11 @@ def graph(result):
     driver, session, transaction = MagicMock(), MagicMock(), MagicMock()
     driver.__enter__.return_value = driver
     driver.session.return_value.__enter__.return_value = session
-    transaction.run.return_value.single.return_value = result
+    def run(query, **_kwargs):
+        response = MagicMock()
+        response.single.return_value = {"revision": 0, "epoch": 0, "epoch_at": 0, "pending": None} if "AS revision" in query else result
+        return response
+    transaction.run.side_effect = run
     session.execute_write.side_effect = lambda callback: callback(transaction)
     return driver, session, transaction
 
@@ -33,7 +37,7 @@ class MemoryActionTests(unittest.TestCase):
         with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
             result = asyncio.run(agent_api.memory_action(request))
         self.assertEqual(result["status"], "success")
-        query = transaction.run.call_args.args[0]
+        query = next(c.args[0] for c in transaction.run.call_args_list if "DELETE active" in c.args[0])
         self.assertIn("MEMORY_DISABLED", query)
         self.assertIn("original_relation", query)
         session.execute_write.assert_called_once()
@@ -48,20 +52,21 @@ class MemoryActionTests(unittest.TestCase):
         with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
             result = asyncio.run(agent_api.memory_action(request))
         self.assertEqual(result["status"], "success")
-        query = transaction.run.call_args.args[0]
+        query = next(c.args[0] for c in transaction.run.call_args_list if "DELETE disabled" in c.args[0])
         self.assertIn("original_relation='AVOIDS'", query)
         self.assertIn("MERGE (u)-[:AVOIDS]->(concept)", query)
 
     def test_correct_moves_only_the_owner_relation_to_a_new_concept(self):
-        driver, _session, transaction = graph({"relation": "PREFERS"})
+        original = canonicalize_concept("Coffee")
+        driver, _session, transaction = graph({**original.as_dict(), "relation": "PREFERS"})
         request = agent_api.MemoryActionRequest(
-            user_id="owner", key="coffee", action="correct", value="安靜咖啡廳",
+            user_id="owner", key=original.key, action="correct", value="安靜咖啡廳",
         )
         with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
             result = asyncio.run(agent_api.memory_action(request))
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["key"], canonicalize_concept("安靜咖啡廳").key)
-        query = transaction.run.call_args.args[0]
+        query = next(c.args[0] for c in transaction.run.call_args_list if "DELETE existing" in c.args[0])
         self.assertIn("(old:Concept {key:$key})", query)
         self.assertIn("DELETE existing", query)
 

@@ -16,10 +16,12 @@ from typing import Any, Callable
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from services.profile_writer import update_profile as write_profile
 from database import db, matches_coll, profiles_coll
 from services.mediator_event_service import queue_mediator_event
 from services.proposal_namespace import RELATIONSHIP_MATCH_NAMESPACE
-from services.match_search_context import safe_search_context
+from services.match_search_context import safe_search_context, validate_persisted_search_context
+from matchmaker_agent.concept_identity import PreferenceTextError
 
 
 MATCH_SEARCH_JOBS = db["match_search_jobs"]
@@ -63,6 +65,8 @@ class MatchSearchPipelineError(RuntimeError):
 
 
 _FAILURE_MESSAGES = {
+    "semantic_policy_disabled": "相關興趣配對目前未啟用，這次搜尋沒有送出邀請。",
+    "semantic_validator_unavailable": "相關興趣驗證暫時無法完成，這次沒有送出邀請。請稍後再試。",
     "ownership_or_context_changed": "你的近況或配對狀態剛更新，這次搜尋已停止。請再開始一次配對。",
     "matchmaker_timeout": "這次媒人評估逾時，搜尋已停止。可以稍後重新搜尋。",
     "matchmaker_graph_timeout": "讀取配對依據逾時，這次搜尋沒有完成。可以稍後再試。",
@@ -78,6 +82,7 @@ _FAILURE_MESSAGES = {
     "vector_search_unavailable": "我目前無法讀取候選資料，請稍後再試。",
     "preference_graph_unavailable": "我目前無法讀取偏好候選資料，請稍後再試。",
     "preference_graph_invalid_response": "偏好候選資料不完整，這次搜尋沒有完成。",
+    "preference_search_reconfirmation_required": "這次偏好搜尋的完整條件無法驗證，請重新提供偏好並確認搜尋。",
     "semantic_readiness_unconfirmed": "語意偏好搜尋尚未通過向量相容性檢查，這次搜尋沒有完成。",
     "semantic_index_unavailable": "語意偏好索引目前尚未就緒，請稍後再試。",
     "semantic_graph_unavailable": "目前無法讀取語意偏好候選資料，請稍後再試。",
@@ -253,7 +258,7 @@ def enqueue_match_search(
             {"_id": 0, "status": 1, "idempotency_key": 1},
         ) or {}
         return {"status": "already_searching" if existing else "failed"}
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": user_id},
         {"$set": {
             "matchmaking_in_progress": True,
@@ -402,6 +407,9 @@ def _bounded_diagnostics(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     result: dict[str, Any] = {}
+    if isinstance(value.get("related_interest_validator"), dict):
+        from matchmaker_agent.related_interest_contract import bounded_counts
+        result["related_interest_validator"] = bounded_counts(value["related_interest_validator"])
     for key in (
         "search_intent", "normalized_topic", "canonical_preference_key",
         "retrieval_source",
@@ -754,11 +762,18 @@ def run_one_match_search_job() -> bool:
         # candidate pipeline, quota reservation and duplicate insert.
         return True
     try:
+        # A committed checkpoint above only reconciles an existing proposal.
+        # Before any NEW selection/quota work, require intact persisted v2
+        # preference source. Never feed a legacy prefix to the fresh sanitizer.
+        try:
+            replay_context = validate_persisted_search_context(job.get("search_context"))
+        except PreferenceTextError as exc:
+            raise MatchSearchPipelineError(exc.code, "preference_input") from None
         pipeline_kwargs = {
             "report_progress": lambda step: _report_progress(job, step),
             "can_commit": lambda: _job_is_current(job),
             "search_job_id": str(job.get("job_id") or ""),
-            "search_context": dict(job.get("search_context") or {}),
+            "search_context": replay_context,
         }
         if str(job.get("origin_room_id") or "").strip():
             pipeline_kwargs["origin_room_id"] = str(job.get("origin_room_id") or "")[:240]

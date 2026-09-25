@@ -16,6 +16,7 @@ from contextvars import ContextVar
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from services.profile_writer import update_profile as write_profile
 from database import matches_coll, messages_coll, profiles_coll
 from models import MediatorPrivateRequest
 from services.appwrite_identity_service import authenticated_owner_matches
@@ -273,7 +274,7 @@ def mediator_private_chat(
         saved = save_message(room_id, req.user_id, req.message)
         source_message_id = str((saved or {}).get("message_id") or (saved or {}).get("_id") or "")
 
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
 
         {"user_id": req.user_id},
 

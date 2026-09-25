@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import time
 
+from services.profile_writer import update_profile as write_profile
 from database import ai_rooms_coll, messages_coll, profiles_coll
 from services.chat_service import generate_room_id
 from services.appwrite_mirror import mirror_message_to_appwrite_async
@@ -158,7 +159,7 @@ def ensure_public_ayue_onboarding(
         # that room. Return no message here so a client cannot accidentally
         # merge it into the currently opened room.
         if str(existing_greeting.get("room_id") or "") != room:
-            profiles_coll.update_one(
+            write_profile(profiles_coll,
                 {"user_id": owner},
                 {"$max": {"public_ayue_onboarding_version": PUBLIC_AYUE_ONBOARDING_MESSAGE_VERSION}},
                 upsert=True,
@@ -169,7 +170,7 @@ def ensure_public_ayue_onboarding(
                 "message": None,
             }
         message = _public_message_projection(existing_greeting)
-        profiles_coll.update_one(
+        write_profile(profiles_coll,
             {"user_id": owner},
             {"$max": {"public_ayue_onboarding_version": PUBLIC_AYUE_ONBOARDING_MESSAGE_VERSION}},
             upsert=True,
@@ -228,7 +229,7 @@ def ensure_public_ayue_onboarding(
             for item in normal_room_ids
         )
     if existing_history:
-        profiles_coll.update_one(
+        write_profile(profiles_coll,
             {"user_id": owner},
             {"$max": {"public_ayue_onboarding_version": PUBLIC_AYUE_ONBOARDING_MESSAGE_VERSION}},
             upsert=True,
@@ -262,7 +263,7 @@ def ensure_public_ayue_onboarding(
         mirror_message_to_appwrite_async({**record, "message_id": message_id})
     stored = messages_coll.find_one({"_id": message_id})
     if not stored or str(stored.get("room_id") or "") != room:
-        profiles_coll.update_one(
+        write_profile(profiles_coll,
             {"user_id": owner},
             {"$max": {"public_ayue_onboarding_version": PUBLIC_AYUE_ONBOARDING_MESSAGE_VERSION}},
             upsert=True,
@@ -273,7 +274,7 @@ def ensure_public_ayue_onboarding(
             "message": None,
         }
     message = _public_message_projection(stored)
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": owner},
         {"$max": {"public_ayue_onboarding_version": PUBLIC_AYUE_ONBOARDING_MESSAGE_VERSION}},
         upsert=True,
@@ -303,7 +304,7 @@ def public_ayue_onboarding_state(user_id: str) -> dict | None:
 
 def complete_public_ayue_onboarding(user_id: str) -> None:
     """Idempotently mark the additive onboarding version complete."""
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": user_id},
         {"$max": {"public_ayue_onboarding_version": PUBLIC_AYUE_ONBOARDING_VERSION}},
         upsert=True,

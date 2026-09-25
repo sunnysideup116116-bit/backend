@@ -10,7 +10,12 @@ import time
 from urllib.parse import urlparse
 
 import requests
-from matchmaker_agent.concept_identity import durable_memory_limit
+from matchmaker_agent.concept_identity import (
+    PreferenceTextError, durable_memory_limit, normalize_preference_text,
+    stored_concept_identity,
+    MAX_PREFERENCE_EVIDENCE_CHARS, MAX_REGISTRATION_INTEREST_CHARS,
+    MAX_PROFILE_SOURCE_CHARS, normalize_fresh_preference_text,
+)
 
 from database import db
 
@@ -70,19 +75,25 @@ def read_registration_profile(user_id):
     profile = response.json()
     if not isinstance(profile, dict) or not isinstance(profile.get("interest", ""), str):
         raise RuntimeError("registration_profile_invalid")
+    interest = str(profile.get("interest") or "").strip()
+    if interest:
+        normalize_fresh_preference_text(interest, max_length=MAX_REGISTRATION_INTEREST_CHARS)
     return {"name": names.safe_proposal_nickname(profile.get("name"), user_id),
-            "interest": str(profile.get("interest") or "").strip()[:120]}
+            "interest": interest}
 
 
 def registration_evidence(evidence, interest):
     """Map validated framed evidence back to the original form field only."""
-    from services.language_service import normalize_zh_tw
     raw = str(evidence or "").strip()
+    if len(raw) > MAX_PREFERENCE_EVIDENCE_CHARS or len(str(interest or "")) > MAX_REGISTRATION_INTEREST_CHARS:
+        return ""
     if raw and raw in interest:
         return raw
-    span = normalize_zh_tw(raw, max_length=160)
-    source = normalize_zh_tw(interest, max_length=120)
-    framed = normalize_zh_tw(INTEREST_FRAME + interest, max_length=800)
+    span = normalize_fresh_preference_text(raw, max_length=MAX_PREFERENCE_EVIDENCE_CHARS)
+    source = normalize_fresh_preference_text(interest, max_length=MAX_REGISTRATION_INTEREST_CHARS)
+    framed = normalize_fresh_preference_text(INTEREST_FRAME + interest, max_length=MAX_PROFILE_SOURCE_CHARS)
+    if len(span) > MAX_PREFERENCE_EVIDENCE_CHARS or len(source) > MAX_REGISTRATION_INTEREST_CHARS:
+        return ""
     if not span or not source or not framed.endswith(source):
         return ""
     start = framed.find(span)
@@ -100,9 +111,14 @@ def registration_evidence(evidence, interest):
 
 def registration_memories(interest):
     from services.profile_skills import analyze_profile_message
+    from services.memory_service import MemoryWriteError
     if not interest or interest in {"無特別興趣", "沒有特別興趣"}:
         return []
+    normalize_fresh_preference_text(interest, max_length=MAX_REGISTRATION_INTEREST_CHARS)
     decision = analyze_profile_message(INTEREST_FRAME + interest)
+    for code in decision.get("memory_codes", []):
+        if code in {"memory_limit_exceeded", "memory_contract_limit_rejected", "preference_text_too_long"}:
+            raise MemoryWriteError(code, retryable=False)
     reason = (decision.get("recent_context") or {}).get("reason_code", "")
     if not decision.get("contract") and reason not in {"blocked_input", "protected_attribute"}:
         raise RuntimeError("registration_extraction_unavailable")
@@ -117,12 +133,25 @@ def registration_memories(interest):
 
 
 def process_registration_job(record):
-    from services.memory_service import AGENT_URL, apply_profile_memory_proposals
+    from services.memory_service import (
+        AGENT_URL, MemoryWriteError, apply_profile_memory_proposals,
+        validate_memory_proposals,
+    )
     observed_at = time.time()
-    profile = read_registration_profile(record["user_id"])
+    try:
+        profile = read_registration_profile(record["user_id"])
+        if profile and profile.get("interest"):
+            normalize_fresh_preference_text(profile["interest"], max_length=MAX_REGISTRATION_INTEREST_CHARS)
+    except PreferenceTextError as exc:
+        raise MemoryWriteError(exc.code, retryable=False) from None
     if profile is None:
         # Appwrite creation can be briefly delayed; bounded worker retries.
         raise RuntimeError("registration_profile_missing")
+    memories = record.get("prepared_memories")
+    if memories is not None:
+        if any(not stored_concept_identity(item) for item in memories):
+            raise MemoryWriteError("legacy_unverified_memory_proposal", retryable=False)
+        memories = validate_memory_proposals(memories)
     response = requests.post(AGENT_URL + "/api/users/registration-projection", json={
         "user_id": record["user_id"], "name": profile["name"], "observed_at": observed_at,
     }, timeout=(2, 15))
@@ -135,12 +164,12 @@ def process_registration_job(record):
     source_hash = _digest(profile["interest"])
     if record.get("source_hash") and record["source_hash"] != source_hash:
         raise RuntimeError("registration_source_changed")
-    memories = record.get("prepared_memories")
     if memories is None:
-        memories = registration_memories(profile["interest"])
+        memories = validate_memory_proposals(registration_memories(profile["interest"]))
         result = OUTBOX.update_one({"_id": record["_id"], "lease_token": record["lease_token"]},
                                   {"$set": {"prepared_memories": memories, "source_hash": source_hash}})
         if not result.matched_count:
             raise RuntimeError("registration_lease_lost")
     if memories:
-        apply_profile_memory_proposals(record["user_id"], memories, "registration_interest", record["message_id"])
+        apply_profile_memory_proposals(record["user_id"], memories, "registration_interest", record["message_id"],
+                                       source_created_at=float(record.get("created_at") or 0))

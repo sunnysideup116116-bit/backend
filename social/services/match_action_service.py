@@ -226,20 +226,30 @@ def apply_transition_effects(
 
     def notify_decline_feedback() -> None:
         try:
-            response = requests.post("http://127.0.0.1:9001/api/feedback", json={
+            from matchmaker_agent.concept_identity import stored_concept_identity, PreferenceTextError
+            response = requests.post("http://127.0.0.1:9001/api/v2/feedback", json={
                 "user_id": actor, "target_id": other_id, "action": "decline",
                 # Only the user's selected reasons authorize a preference write.
                 # Keep the compatibility field without sending unselected traits.
                 "target_traits": {},
                 "explicit_reasons": explicit_reasons,
+                "source_created_at": float(match_doc.get("updated_at") or 0),
             }, timeout=15)
             response.raise_for_status()
-            memories = response.json().get("memories", [])
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise PreferenceTextError("feedback_projection_invalid")
+            memories = payload.get("memories", [])
             if memories:
+                if payload.get("status") != "success":
+                    raise PreferenceTextError("feedback_projection_unsuccessful")
+                if not isinstance(memories, list) or any(not stored_concept_identity(item) for item in memories):
+                    raise PreferenceTextError("preference_identity_unverified")
                 upsert_preference_facts(
                     actor,
                     memories,
                     source="match_feedback",
+                    source_created_at=float(match_doc.get("updated_at") or 0),
                     message_id=f"feedback:{match_id}:{actor}",
                     match_id=match_id,
                 )

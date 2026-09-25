@@ -15,9 +15,9 @@
 4. 只有完全沒有 `PREFERS / AVOIDS / CURRENTLY_WANTS / MEMORY_DISABLED` 且未完成初始 seed
    的帳號才補偏好。已有記憶的帳號只同步 User／暱稱，不逐項補舊興趣，以免復活已修正的內容。
 5. 興趣由既有 `profile_skills.analyze_profile_message` 做 typed extraction；只接收原興趣內的
-   evidence span、`like`、confidence ≥ 0.9、activity/habit/lifestyle，最多三筆。
+   evidence span、`like`、confidence ≥ 0.9、activity/habit/lifestyle，套用共用 durable limit（預設 6、hard max 8）。
    不寫近期情境、不推論人格／partner trait、不把「不喜歡」轉成 PREFERS。
-6. 使用既有 `memory_service.apply_profile_memory_proposals` → `/api/memory/apply`，
+6. 使用既有 `memory_service.apply_profile_memory_proposals` → `/api/v2/memory/apply`，
    `surface=registration_interest` 走 insert-only transaction：`PREFERS -> Concept(kind=interest)`，
    記錄 source、bounded evidence、confidence、時間；marker 與關係同時提交。
    同一帳號固定 observation ID，User node lock 防止重複 seed；一般 memory write 保持優先覆寫能力。
@@ -29,6 +29,7 @@
 - Worker 沿用最多八次指數退避；模型／Appwrite／Graph 失敗不影響已完成的註冊。
 - Outbox 不保存 raw chat；registration job 保存穩定 identity、interest hash 及通過驗證的 bounded proposals。
 - 抽取結果第一次成功後保存 prepared memories，重試不重新產生不同 concepts。
+- [Identity v2](PREFERENCE_IDENTITY_V2.md) 保存完整 semantic text，display label 不參與 identity；興趣 120／evidence 160／concept 500 字元上限改為超限拒絕，不能裁切後 seed。舊 prepared memories 缺 v2 source/hash 證據時 terminal fail closed，不猜 suffix、不自動回填。
 - 原興趣在重試期間改變時拒絕套用舊 prepared memories，以 `registration_source_changed` 留待人工審查。
 - 無興趣或無有效正向偏好只建立 User。完成的 bootstrap 不因反覆開啟測驗而重新執行；日後新增偏好走既有聊天流程。
 - 這是明確註冊表單來源的例外入口，不放寬聊天 memory 的 saved owner message／message-use 要求。

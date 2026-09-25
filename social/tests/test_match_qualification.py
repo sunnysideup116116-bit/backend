@@ -1,6 +1,9 @@
 import json
 import unittest
 from unittest.mock import patch
+from matchmaker_agent.concept_identity import canonicalize_concept
+
+K_POP = canonicalize_concept("K-pop").key
 
 from routers.match import (
     build_active_proposal_card,
@@ -547,11 +550,11 @@ class MatchQualificationTests(unittest.TestCase):
         qualification = candidate_qualification(
             {"user_id": "owner", "current_context": "最近在游泳"},
             {"user_id": "candidate", "current_context": "最近在爬山"},
-            target_stances={}, candidate_stances={"k_pop": {"like"}},
+            target_stances={}, candidate_stances={K_POP: {"like"}},
             vector_score=0,
             search_context={
                 "search_intent": "preference", "normalized_topic": "K-pop",
-                "canonical_preference_key": "k_pop",
+                "canonical_preference_key": K_POP,
             },
         )
         self.assertTrue(qualification["eligible"])
@@ -562,20 +565,20 @@ class MatchQualificationTests(unittest.TestCase):
     def test_requested_preference_never_bypasses_hard_conflict(self, _graph_memories):
         qualification = candidate_qualification(
             {"user_id": "owner"}, {"user_id": "candidate"},
-            target_stances={"k_pop": {"avoid"}},
-            candidate_stances={"k_pop": {"like"}},
+            target_stances={K_POP: {"avoid"}},
+            candidate_stances={K_POP: {"like"}},
             search_context={
                 "search_intent": "preference", "normalized_topic": "K-pop",
-                "canonical_preference_key": "k_pop",
+                "canonical_preference_key": K_POP,
             },
         )
         self.assertFalse(qualification["eligible"])
-        self.assertEqual(qualification["hard_conflict_keys"], ["k_pop"])
+        self.assertEqual(qualification["hard_conflict_keys"], [K_POP])
 
     @patch("routers.match.get_user_graph_memories")
     def test_preference_intro_uses_exact_topic_without_recent_context_claims(self, memories):
         memories.side_effect = lambda user_id, _limit: (
-            [{"key": "k_pop", "label": "K-pop", "stance": "like"}]
+            [{**canonicalize_concept("K-pop").as_dict(), "stance": "like"}]
             if user_id == "candidate" else []
         )
         projection = build_friend_intro_v4(
@@ -584,7 +587,7 @@ class MatchQualificationTests(unittest.TestCase):
             0,
             search_context={
                 "search_intent": "preference", "normalized_topic": "K-pop",
-                "canonical_preference_key": "k_pop",
+                "canonical_preference_key": K_POP,
             },
         )
         initiator = projection["initiator_preview"]["viewer_text"]
@@ -652,7 +655,7 @@ class MatchQualificationTests(unittest.TestCase):
             candidate_stances={"korean_pop": {"like"}},
             search_context={
                 "search_intent": "preference", "normalized_topic": "K-pop",
-                "canonical_preference_key": "k_pop",
+                "canonical_preference_key": K_POP,
             },
             preference_evidence=[{
                 "kind": "semantic_related", "concept_key": "korean_pop",
@@ -681,7 +684,7 @@ class MatchQualificationTests(unittest.TestCase):
             },
             search_context={
                 "search_intent": "preference", "normalized_topic": "K-pop",
-                "canonical_preference_key": "k_pop",
+                "canonical_preference_key": K_POP,
             },
             preference_evidence=[{
                 "kind": "semantic_related", "concept_key": "korean_pop",

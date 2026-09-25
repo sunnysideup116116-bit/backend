@@ -13,7 +13,12 @@ from models import (
     MatchRequest, AcceptRequest, MatchDecisionRequest, ProactiveEventRequest,
     EventDiscoveryRequest, EventOpportunityScanRequest,
 )
+from services.profile_writer import update_profile as write_profile
 from database import profiles_coll, matches_coll
+from matchmaker_agent.related_interest_contract import (
+    POLICY as RELATED_INTEREST_POLICY, enabled as related_interest_enabled,
+    validated_evidence as validated_related_evidence, bounded_counts as related_validator_counts,
+)
 from services.ai_service import get_embedding, generate_chat_completion
 from services.memory_service import get_user_graph_memories
 from services.mediator_event_service import queue_mediator_event
@@ -235,7 +240,7 @@ def vector_qualification_minimum() -> float:
 
 def _set_match_search(user_id: str, status: str, source: str, **extra):
     payload = {"status": status, "source": source, "updated_at": time.time(), **extra}
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": user_id},
         {"$set": {"match_search": payload}},
         upsert=True,
@@ -632,13 +637,25 @@ def _deep_profile_values(profile):
     return values
 
 
+class PreferenceStances(dict):
+    """Bounded comparison view; unknown legacy keys are not positive evidence."""
+
+    def __init__(self):
+        super().__init__()
+        self.unverified_legacy: dict[str, set[str]] = {}
+
+
 def _trait_stances(user_id: str) -> dict[str, set[str]]:
-    stances: dict[str, set[str]] = {}
+    from matchmaker_agent.concept_identity import stored_concept_identity, verified_legacy_identity
+    stances = PreferenceStances()
     for item in get_user_graph_memories(user_id, 20):
-        key = str(item.get("key") or "").strip()
+        identity = stored_concept_identity(item) or verified_legacy_identity(item)
+        key = identity.key if identity else str(item.get("key") or "").strip()
         stance = str(item.get("stance") or "").strip()
         if key and stance:
             stances.setdefault(key, set()).add(stance)
+            if identity is None:
+                stances.unverified_legacy.setdefault(key, set()).add(stance)
     return stances
 
 
@@ -675,6 +692,18 @@ def candidate_qualification(
     search_context = safe_search_context(search_context)
     target_stances = target_stances if target_stances is not None else _trait_stances(target.get("user_id"))
     candidate_stances = candidate_stances if candidate_stances is not None else _trait_stances(candidate.get("user_id"))
+    target_unknown = getattr(target_stances, "unverified_legacy", {})
+    candidate_unknown = getattr(candidate_stances, "unverified_legacy", {})
+    # Retain all old same-key negative exclusions. For a mixed-version stance
+    # comparison, missing owner proof is not evidence of "no conflict".
+    legacy_conflict_indeterminate = False
+    for unknown, opposite in ((target_unknown, candidate_stances), (candidate_unknown, target_stances)):
+        known_opposite = [v for k, v in opposite.items() if k not in getattr(opposite, "unverified_legacy", {})]
+        if (any({"avoid", "dislike"} & v for v in unknown.values())
+                and any({"like", "require"} & v for v in known_opposite)) or (
+                any({"like", "require"} & v for v in unknown.values())
+                and any({"avoid", "dislike"} & v for v in known_opposite)):
+            legacy_conflict_indeterminate = True
     hard_conflicts = []
     for left, right in ((target_stances, candidate_stances), (candidate_stances, target_stances)):
         for key, stances in left.items():
@@ -684,6 +713,7 @@ def candidate_qualification(
         key for key in target_stances.keys() & candidate_stances.keys()
         if ({"like", "require"} & target_stances[key])
         and ({"like", "require"} & candidate_stances[key])
+        and key not in target_unknown and key not in candidate_unknown
     )
     target_values = _deep_profile_values(target.get("deep_profile", {}))
     candidate_values = _deep_profile_values(candidate.get("deep_profile", {}))
@@ -712,6 +742,7 @@ def candidate_qualification(
         search_intent == "preference"
         and preference_key
         and {"like", "require"} & candidate_stances.get(preference_key, set())
+        and preference_key not in candidate_unknown
     )
     if candidate_has_requested_preference:
         strong_reason_codes.append("requested_preference")
@@ -720,6 +751,11 @@ def candidate_qualification(
     for item in list(preference_evidence or [])[:5] if search_intent == "preference" else []:
         if not isinstance(item, dict) or item.get("kind") != "semantic_related":
             continue
+        related_packet = None
+        if related_interest_enabled():
+            related_packet = validated_related_evidence(item, query_key=preference_key)
+            if not related_packet:
+                continue
         concept_key = str(item.get("concept_key") or "").strip()[:100]
         try:
             similarity = float(item.get("similarity", 0.0))
@@ -730,8 +766,9 @@ def candidate_qualification(
             and concept_key != preference_key
             and math.isfinite(similarity) and minimum_similarity <= similarity <= 1.0
             and {"like", "require"} & candidate_stances.get(concept_key, set())
+            and concept_key not in candidate_unknown
         ):
-            semantic_preference_evidence.append({
+            semantic_preference_evidence.append(related_packet or {
                 "kind": "semantic_related",
                 "concept_key": concept_key,
                 "similarity": round(similarity, 4),
@@ -808,8 +845,9 @@ def candidate_qualification(
         char_limit=90,
     )
     return {
-        "eligible": not hard_conflicts and bool(strong_reason_codes),
+        "eligible": not hard_conflicts and not legacy_conflict_indeterminate and bool(strong_reason_codes),
         "hard_conflict_keys": sorted(set(hard_conflicts)),
+        **({"legacy_identity_status": "indeterminate_legacy_conflict"} if legacy_conflict_indeterminate else {}),
         "shared_preference_keys": shared_persistent_preferences[:8],
         "requested_preference_matched": candidate_has_requested_preference,
         "semantic_related_preference_matched": bool(semantic_preference_evidence),
@@ -853,6 +891,12 @@ def _apply_qualification_diagnostics(
     diagnostics["qualification_reason_codes"]["hard_conflict"] = sum(
         1 for item in qualification_by_id.values() if item.get("hard_conflict_keys")
     )
+    legacy_rejections = sum(
+        item.get("legacy_identity_status") == "indeterminate_legacy_conflict"
+        for item in qualification_by_id.values()
+    )
+    if legacy_rejections:
+        diagnostics["qualification_reason_codes"]["indeterminate_legacy_conflict"] = legacy_rejections
     diagnostics["qualification_reason_codes"]["insufficient_common_ground"] = sum(
         1 for item in qualification_by_id.values()
         if not item.get("hard_conflict_keys") and not item.get("strong_reason_codes")
@@ -909,6 +953,8 @@ def build_validated_match_explanation(
     search_context: dict | None = None,
 ):
     """Build user-visible scores and reasons only from owner-bound facts."""
+    from matchmaker_agent.concept_identity import stored_concept_identity, verified_legacy_identity
+
     search_context = safe_search_context(search_context)
     invitation_topic = str(search_context.get("invitation_topic") or "").strip()
     preference_topic = str(search_context.get("normalized_topic") or "").strip() \
@@ -917,12 +963,17 @@ def build_validated_match_explanation(
     target_id, candidate_id = target.get("user_id"), candidate.get("user_id")
     target_graph = get_user_graph_memories(target_id, 20)
     candidate_graph = get_user_graph_memories(candidate_id, 20)
-    target_traits = {
-        (item.get("key"), item.get("stance")): item for item in target_graph if item.get("key")
-    }
-    candidate_traits = {
-        (item.get("key"), item.get("stance")): item for item in candidate_graph if item.get("key")
-    }
+    # Qualification and user-facing reasons must share the identity-proof
+    # boundary. Equal legacy prefixes are not confirmed common preferences.
+    # This is comparison-only: it neither re-keys nor mutates stored rows.
+    target_traits, candidate_traits = {}, {}
+    for rows, traits in ((target_graph, target_traits), (candidate_graph, candidate_traits)):
+        for item in rows:
+            identity = stored_concept_identity(item) or verified_legacy_identity(item)
+            if identity:
+                traits[(identity.key, item.get("stance"))] = {
+                    **item, "key": identity.key, "label": identity.display_label,
+                }
     shared_traits = [
         (target_traits[key], candidate_traits[key])
         for key in target_traits.keys() & candidate_traits.keys()
@@ -1395,6 +1446,7 @@ def _friend_intro_entry(
     search_context: dict | None = None,
     requester_id: str = "",
     auto_invite: bool = False,
+    requested_preference_verified: bool = False,
 ) -> dict:
     """Create one V4 projection from one recipient's point of view.
 
@@ -1416,7 +1468,7 @@ def _friend_intro_entry(
     search_context = safe_search_context(search_context)
     invitation_topic = str(search_context.get("invitation_topic") or "").strip()
     preference_topic = str(search_context.get("normalized_topic") or "").strip() \
-        if _search_intent(search_context) == "preference" else ""
+        if _search_intent(search_context) == "preference" and requested_preference_verified else ""
     fallback = friend_intro_fallback(viewer, other, tier, style_id=style_id)
     if preference_topic:
         is_requester = viewer_id == str(requester_id or "")
@@ -1542,18 +1594,21 @@ def build_friend_intro_v4(
     tier = next((item.get("text") for item in items if item.get("kind") == "recommendation_tier"), "exploratory")
     if tier not in {"grounded", "exploratory"}:
         tier = "exploratory"
+    requested_preference_verified = any(item.get("kind") == "requested_preference" for item in items)
     projection = {
         "initiator_preview": _friend_intro_entry(
             initiator, receiver, tier, refine=refine,
             search_context=search_context,
             requester_id=str(initiator.get("user_id") or ""),
             auto_invite=auto_invite,
+            requested_preference_verified=requested_preference_verified,
         ),
         "receiver_invitation": _friend_intro_entry(
             receiver, initiator, tier, refine=refine,
             search_context=search_context,
             requester_id=str(initiator.get("user_id") or ""),
             auto_invite=auto_invite,
+            requested_preference_verified=requested_preference_verified,
         ),
     }
     # Sparse snapshots can legitimately produce the same generic sentence for
@@ -1612,6 +1667,12 @@ def _existing_job_match_result(match_doc: dict, user_id: str, user_doc: dict) ->
 
 def _request_matchmaker_selection(payload: dict, *, timeout: float) -> list[dict]:
     """Evaluate one qualified batch. An empty result must be explicit, never a failure."""
+    if any(e.get("policy_version") == RELATED_INTEREST_POLICY
+           for c in payload.get("candidates", []) for e in c.get("preference_retrieval_evidence", [])
+           if isinstance(e, dict)):
+        if timeout <= 0.1:
+            raise MatchSearchPipelineError("matchmaker_timeout", "matchmaker_request")
+        payload = {**payload, "request_budget_seconds": min(120.0, timeout - 0.1)}
     try:
         from agent_quota.internal import signed_headers
         response = requests.post("http://127.0.0.1:9001/api/match", json=payload, timeout=timeout, headers=signed_headers())
@@ -1930,8 +1991,12 @@ def generate_matches_for_user(
         diagnostics["semantic_fallback_eligible"] = bool(
             len(qualified_exact) < trigger_threshold
         )
-        if len(qualified_exact) < trigger_threshold and semantic_mode == "active":
+        if len(qualified_exact) == 0 and semantic_mode == "active":
             diagnostics["semantic_fallback_triggered"] = True
+            if not related_interest_enabled():
+                raise MatchSearchPipelineError("semantic_policy_disabled", "preference_semantic_search")
+            from services.related_interest_telemetry import record_search as record_related_search
+            record_related_search(search_job_id, req.user_id)
             semantic_lookup = None
             if not semantic_embedding_space_confirmed():
                 if qualified_exact:
@@ -1954,8 +2019,13 @@ def generate_matches_for_user(
                         req.user_id,
                         preference_topic,
                         excluded_user_ids={*excluded_users, *candidate_ids},
+                        related_policy_required=True,
                     )
                 except PreferenceSemanticRetrievalError as exc:
+                    diagnostics["related_interest_validator"] = related_validator_counts(
+                        getattr(exc, "validator_counts", {}))
+                    record_related_search(search_job_id, req.user_id,
+                        counts=diagnostics["related_interest_validator"])
                     if qualified_exact:
                         diagnostics["semantic_fallback_error"] = exc.code
                     else:
@@ -1978,6 +2048,10 @@ def generate_matches_for_user(
                         )
             if semantic_lookup is not None:
                 semantic_search_completed = True
+                diagnostics["related_interest_validator"] = related_validator_counts(
+                    semantic_lookup.get("validator_counts"))
+                record_related_search(search_job_id, req.user_id,
+                    counts=diagnostics["related_interest_validator"])
                 diagnostics["retrieval_source"] = "graph_exact_then_semantic"
                 diagnostics["semantic_concepts_considered"] = list(
                     semantic_lookup.get("semantic_concepts_considered") or []
@@ -2175,6 +2249,10 @@ def generate_matches_for_user(
         }
     
     agent_user_doc = strip_agent_payload(user_doc)
+    if any(qualification_by_id.get(c.get("user_id"), {}).get("semantic_related_preference_matched")
+           for c in qualified_candidates) and (
+            not related_interest_enabled() or preference_semantic_mode() != "active"):
+        raise MatchSearchPipelineError("semantic_policy_disabled", "matchmaker_request")
     selection_deadline = time.monotonic() + MATCH_SELECTION_TIMEOUT_SECONDS
     agent_matches = []
     for batch_index in range(MATCH_MAX_CANDIDATE_BATCHES):
@@ -2266,10 +2344,18 @@ def generate_matches_for_user(
             for item in matched_preference_evidence
             if isinstance(item, dict)
         )
+        if semantic_preference_selected and (
+            not related_interest_enabled() or preference_semantic_mode() != "active"
+        ):
+            if quota_reserved:
+                release_daily_quota(req.user_id, bucket="active", operation_key=quota_operation_key)
+            raise MatchSearchPipelineError("semantic_policy_disabled", "proposal_write")
         if semantic_preference_selected:
             matched_preference_evidence = list(qualification_by_id.get(matched_id, {}).get(
                 "preference_retrieval_evidence"
             ) or [])[:3]
+            if related_interest_enabled() and not matched_preference_evidence:
+                continue
         # Existing rationale code treats a preference topic as exact evidence.
         # Semantic candidates therefore use the established generic rationale
         # surface; the related durable preference remains internal and cannot
@@ -2291,17 +2377,35 @@ def generate_matches_for_user(
         # V4 persists two role-bound friend introductions.  They are created
         # with two separate model calls and never exposed as a two-way public
         # payload, so a role swap cannot leak into the recipient's card.
-        friend_intro_v4 = build_friend_intro_v4(
-            user_doc, candidate_doc, vector_scores.get(matched_id, 0), refine=True,
-            search_context=rationale_search_context,
-            auto_invite=bound_delivery_mode == INVITE_ON_MATCH,
-        )
+        if semantic_preference_selected and related_interest_enabled():
+            from services.related_interest_reason_service import related_friend_intro
+            friend_intro_v4 = related_friend_intro(
+                {}, user_doc, candidate_doc, matched_preference_evidence,
+                requester_prefers_query=bool(
+                    {"like", "require"} & (target_stances or {}).get(
+                        str(bound_search_context.get("canonical_preference_key") or ""), set())
+                    and str(bound_search_context.get("canonical_preference_key") or "")
+                    not in getattr(target_stances, "unverified_legacy", {})),
+            )
+        else:
+            friend_intro_v4 = build_friend_intro_v4(
+                user_doc, candidate_doc, vector_scores.get(matched_id, 0), refine=True,
+                search_context=rationale_search_context,
+                auto_invite=bound_delivery_mode == INVITE_ON_MATCH,
+            )
         ai_recommendation_reason = str(
             (friend_intro_v4.get("initiator_preview") or {}).get("viewer_text") or reason
         )
         ai_receiver_reason = str(
             (friend_intro_v4.get("receiver_invitation") or {}).get("viewer_text") or receiver_reason
         )
+        if semantic_preference_selected and related_interest_enabled():
+            # Secondary card surfaces must not retain a generic/LLM reason
+            # that accidentally upgrades the related hit into an exact one.
+            reason_items = [{"kind": "recommendation_tier", "text": "exploratory"},
+                            {"kind": "related_interest", "text": "興趣方向相關，不代表相同或共同偏好。"}]
+            receiver_items = [dict(item) for item in reason_items]
+            top_reasons = ["興趣方向相關，不代表相同或共同偏好。"]
         recommendation_tier = next(
             (item.get("text") for item in reason_items if item.get("kind") == "recommendation_tier"),
             "exploratory",
@@ -2373,6 +2477,11 @@ def generate_matches_for_user(
         if search_intent == "preference":
             # Never put private Concept identifiers into the public match_basis.
             match_doc["preference_retrieval_evidence"] = matched_preference_evidence
+            if semantic_preference_selected and related_interest_enabled():
+                match_doc["related_interest_pilot"] = {
+                    "policy_version": RELATED_INTEREST_POLICY, "basis_type": "related_interest",
+                    "relations": sorted({e["relation"] for e in matched_preference_evidence}),
+                }
         match_doc["delivery_mode"] = bound_delivery_mode
         if str(origin_room_id or "").strip():
             match_doc["origin_room_id"] = str(origin_room_id).strip()[:240]
@@ -2384,6 +2493,12 @@ def generate_matches_for_user(
                     req.user_id, bucket="active", operation_key=quota_operation_key,
                 )
             return {"status": "stale", "matches": [], "debug_info": []}
+        if semantic_preference_selected and (
+            not related_interest_enabled() or preference_semantic_mode() != "active"
+        ):
+            if quota_reserved:
+                release_daily_quota(req.user_id, bucket="active", operation_key=quota_operation_key)
+            raise MatchSearchPipelineError("semantic_policy_disabled", "proposal_write")
         try:
             insert_result = matches_coll.insert_one(match_doc)
         except DuplicateKeyError as exc:

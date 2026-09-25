@@ -50,6 +50,10 @@ def public_opening_evidence(match_doc: dict) -> dict[str, str]:
 
 def compose_pair_opening(match_doc: dict, first_label: str, second_label: str) -> tuple[str, str]:
     """One bounded model attempt; consent/delivery must survive provider failure."""
+    from services.related_interest_reason_service import related_pair_opening
+    related = related_pair_opening(match_doc, first_label, second_label)
+    if related is not None:
+        return related, "related_interest_fact_bound"
     evidence = public_opening_evidence(match_doc)
     grounding_keys = [key for key in evidence if not key.startswith("cannot_infer_")]
     if not grounding_keys:

@@ -51,6 +51,9 @@ def retrieve_preference_candidate_ids(
             json={
                 "requester_user_id": requester_user_id,
                 "topic": identity.label,
+                **{field: identity.as_dict()[field] for field in (
+                    "canonical_key", "canonicalization_version", "semantic_text", "semantic_input_hash",
+                )},
                 "excluded_user_ids": excluded,
                 "limit": safe_limit,
             },
