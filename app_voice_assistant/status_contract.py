@@ -124,6 +124,11 @@ def status_result(*, quota=None, cooldown=None, delivery=None):
         elif cooldown['state'] == 'active':
             seconds = cooldown['remaining_seconds']
             messages.append(f'目前冷卻還剩 {seconds // 60} 分 {seconds % 60} 秒，結束後仍需確認才能再次傳送。')
+            messages.append(
+                '冷卻是聊天安全機制安排的暫停，讓雙方有緩衝時間，'
+                '避免不舒服的互動持續，也保護你和對方。'
+                '單靠冷卻倒數，無法判斷這次是哪句話觸發。'
+            )
             error = error or 'risk_cooldown'
         else:
             messages.append('目前沒有生效中的冷卻；再次傳送仍需通過安全檢查。')

@@ -530,6 +530,88 @@ def test_calendar_cancel_keeps_an_explicit_date_as_a_disambiguation_hint():
     }, base_revision=0) is None
 
 
+def test_google_calendar_write_is_explained_before_confirmation():
+    from app_voice_assistant.contracts import calendar_write_preflight
+    import time
+
+    base = safe_context({"scope": "global", "revision": 0})
+    for question in (
+        "把 Google 日曆的會議改到下午三點",
+        "取消 Google 行事曆的會議",
+        "新增會議到 Google Calendar",
+    ):
+        blocked = calendar_write_preflight(question, base)
+        proposal = deterministic_proposal(question, context=base)
+        assert blocked is not None and blocked[0] == "not_supported"
+        assert proposal is not None and proposal.intent == "assistant.reply"
+        assert "只能查詢" in proposal.reply
+        assert "Google 日曆" in proposal.reply
+
+    calendar = safe_context({
+        "scope": "calendar", "revision": 4,
+        "permissions": {"screen_read": True, "calendar_read": True,
+                        "calendar_write": True},
+        "screen": {
+            "ready": True,
+            "content": {
+                "kind": "calendar_events", "content_permission": "calendar_read",
+                "item_count": 1,
+                "items": [{"title": "團隊會議", "source_type": "google"}],
+            },
+        },
+    })
+    for question in ("把團隊會議改到三點", "修改這個行程"):
+        blocked = calendar_write_preflight(question, calendar)
+        assert blocked is not None and blocked[0] == "not_supported"
+        proposal = deterministic_proposal(question, context=calendar)
+        assert proposal is not None and proposal.intent == "assistant.reply"
+
+    mixed = {
+        **calendar,
+        "screen": {
+            **calendar["screen"],
+            "content": {
+                **calendar["screen"]["content"],
+                "item_count": 2,
+                "items": [
+                    {"title": "團隊會議", "source_type": "google"},
+                    {"title": "團隊會議", "source_type": "personal"},
+                ],
+            },
+        },
+    }
+    ambiguous = calendar_write_preflight("把團隊會議改到三點", mixed)
+    assert ambiguous is not None and ambiguous[0] == "needs_input"
+    personal = {
+        **mixed,
+        "screen": {
+            **mixed["screen"],
+            "content": {
+                **mixed["screen"]["content"],
+                "item_count": 1,
+                "items": [{"title": "團隊會議", "source_type": "personal"}],
+            },
+        },
+    }
+    assert calendar_write_preflight("把團隊會議改到三點", personal) is None
+
+    recent = {
+        **base,
+        "permissions": {"calendar_read": True},
+        "_calendar_recent_events": [
+            {"title": "團隊會議", "source_type": "google"},
+        ],
+        "_calendar_recent_count": 1,
+        "_calendar_recent_at": time.time(),
+    }
+    assert calendar_write_preflight("修改剛剛那個會議", recent)[0] == "not_supported"
+    recent["_calendar_recent_at"] -= 121
+    assert calendar_write_preflight("修改剛剛那個會議", recent) is None
+
+    assert calendar_write_preflight("查 Google 日曆的會議", base) is None
+    assert calendar_write_preflight("查 Google 日曆新增的會議", base) is None
+
+
 def test_match_progress_and_hub_actions_stay_in_the_matching_domain():
     context = safe_context({"scope": "global", "revision": 0})
     progress = deterministic_proposal("我的配對進度如何？", context=context)
@@ -550,6 +632,34 @@ def test_match_progress_and_hub_actions_stay_in_the_matching_domain():
         assert proposal is not None
         assert proposal.intent == "ayue.public_query"
         assert proposal.arguments["domain"] == "matching"
+
+
+def test_place_advice_without_companion_request_stays_in_places():
+    context = safe_context({"scope": "global", "revision": 0})
+    for question in (
+        "台南有什麼好玩的？",
+        "和小美一起去台南有什麼好玩的？",
+        "推薦我一個人去台南好玩的地方",
+    ):
+        proposal = deterministic_proposal(question, context=context)
+        assert proposal is not None
+        assert proposal.intent == "ayue.public_query"
+        assert proposal.arguments["domain"] == "places"
+
+
+def test_companion_place_lookup_requires_voice_places_permission():
+    question = "台南有什麼好玩，並且推薦我應該和誰一起去？"
+    context = safe_context({"scope": "global", "revision": 0})
+    proposal = deterministic_proposal(question, context=context)
+    assert proposal is not None and proposal.intent == "match.ayue_query"
+    denied = safe_context({"permissions": {
+        "match_ayue": True, "match_read": True, "places": False,
+    }})
+    allowed = safe_context({"permissions": {
+        "match_ayue": True, "match_read": True, "places": True,
+    }})
+    assert not context_allows_proposal(denied, proposal)
+    assert context_allows_proposal(allowed, proposal)
 
 
 def test_direct_match_reads_do_not_require_public_ayue_but_writes_still_gate():
@@ -794,6 +904,12 @@ def test_chat_places_matching_and_calendar_sources_are_deterministic():
             global_context,
             "ayue.public_query",
             {"domain": "places", "question": "高雄哪裡有好玩的"},
+        ),
+        (
+            "台南有什麼好玩，並且推薦我應該和誰一起去？",
+            global_context,
+            "match.ayue_query",
+            {"question": "台南有什麼好玩，並且推薦我應該和誰一起去？"},
         ),
         (
             "幫我找配對",

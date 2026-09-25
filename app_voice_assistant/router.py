@@ -23,6 +23,7 @@ from registration_voice.settings import collect_google_api_keys
 
 from .contracts import (
     VoiceProposal,
+    calendar_write_preflight,
     confirmation_matches,
     confirmation_phrase,
     context_allows_proposal,
@@ -904,6 +905,16 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                 if proposal.intent == "assistant.reply":
                     await reply(proposal.reply, code="conversation")
                     return
+                if proposal.intent in {"calendar.update", "calendar.cancel"}:
+                    target = str(proposal.arguments.get("target") or "")
+                    calendar_block = calendar_write_preflight(
+                        f"修改 {target}" if proposal.intent == "calendar.update"
+                        else f"取消 {target}",
+                        context,
+                    )
+                    if calendar_block is not None:
+                        await reply(calendar_block[1], code=calendar_block[0])
+                        return
                 bound, target_error = bind_target(proposal.intent, proposal.arguments, context)
                 if target_error:
                     await reply("請重新讀取目前畫面並指定項目。", code=target_error)

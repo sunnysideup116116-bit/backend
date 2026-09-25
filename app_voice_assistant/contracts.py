@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -9,6 +10,7 @@ from typing import Any
 
 from .capabilities import ACTIONS
 from .contextual import safe_screen, REF
+from .next_step import place_next_step_action, select_place_next_step
 
 
 ALLOWED_INTENTS = frozenset(ACTIONS)
@@ -205,6 +207,111 @@ def _calendar_source(value: str) -> str:
     return "all"
 
 
+GOOGLE_CALENDAR_READ_ONLY_MESSAGE = (
+    "Google 日曆目前採只讀授權，只能查詢行程；阿月無法修改、新增或取消 Google 行程。"
+    "這次沒有更動任何行程，請到 Google 日曆修改。App 個人行事曆的行程仍可請我協助。"
+)
+
+
+def calendar_write_preflight(
+    text: str, context: dict[str, Any],
+) -> tuple[str, str] | None:
+    """Reject Google writes before asking for a voice confirmation."""
+    compact = normalized_phrase(text)
+    chinese_write = any(word in compact for word in (
+        "新增", "建立", "加入", "添加", "修改", "編輯", "编辑", "更改",
+        "變更", "变更", "調整", "调整", "改到", "改成", "換成", "换成",
+        "幫我改", "帮我改", "取消", "刪除", "删除", "移除", "刪掉",
+    ))
+    english_write = re.search(
+        r"\b(?:create|add|edit|update|change|reschedule|move|cancel|delete|remove)\b",
+        str(text or "").lower(),
+    ) is not None
+    if not chinese_write and not english_write:
+        return None
+    if any(word in compact for word in (
+        "新增的", "建立的", "添加的",
+    )) and not english_write and not any(word in compact for word in (
+        "修改", "編輯", "编辑", "更改", "變更", "变更", "調整", "调整",
+        "改到", "改成", "取消", "刪除", "删除", "移除", "刪掉",
+    )):
+        return None
+    source = _calendar_source(text)
+    if any(term in compact for term in (
+        "連線", "連接", "授權", "同步", "connection", "authorization",
+    )) and not any(term in compact for term in (
+        "行程", "日程", "會議", "会议", "活動", "活动", "事件", "event",
+    )):
+        return None
+    if source == "google":
+        return "not_supported", GOOGLE_CALENDAR_READ_ONLY_MESSAGE
+    if source == "personal":
+        return None
+    permissions = context.get("permissions") or {}
+    if permissions.get("calendar_read") is not True:
+        return None
+    screen = context.get("screen") if isinstance(context.get("screen"), dict) else {}
+    content = screen.get("content") if isinstance(screen.get("content"), dict) else {}
+    deictic = any(word in compact for word in (
+        "這個", "这个", "那個", "那个", "這筆", "这笔", "那筆", "那笔",
+        "這項", "这项", "剛才那個", "剛剛那個", "剛才的", "剛剛的",
+        "thisevent",
+    ))
+
+    def named_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            event for event in events
+            if len(normalized_phrase(event.get("title"))) >= 2
+            and normalized_phrase(event.get("title")) in compact
+        ]
+
+    mentioned: list[dict[str, Any]] = []
+    if (
+        str(context.get("scope") or "") == "calendar"
+        and screen.get("ready") is True
+        and content.get("kind") == "calendar_events"
+        and content.get("redacted") is not True
+    ):
+        visible = [
+            event for event in content.get("items") or []
+            if isinstance(event, dict) and str(event.get("title") or "").strip()
+        ]
+        mentioned = named_events(visible)
+        if (
+            not mentioned and deictic and not screen.get("selected_ref")
+            and content.get("truncated") is not True
+            and content.get("item_count") == 1
+        ):
+            mentioned = visible
+    if not mentioned:
+        try:
+            recent_age = time.time() - float(context.get("_calendar_recent_at") or 0)
+        except (TypeError, ValueError):
+            recent_age = 999
+        if 0 <= recent_age <= 120:
+            recent = [
+                event for event in context.get("_calendar_recent_events") or []
+                if isinstance(event, dict) and str(event.get("title") or "").strip()
+            ]
+            mentioned = named_events(recent)
+            if (
+                not mentioned and deictic
+                and context.get("_calendar_recent_count") == 1
+                and len(recent) == 1
+            ):
+                mentioned = recent
+    has_google = any(event.get("source_type") == "google" for event in mentioned)
+    has_personal = any(event.get("source_type") == "personal" for event in mentioned)
+    if has_google and has_personal:
+        return (
+            "needs_input",
+            "畫面上有同名的 Google 與 App 個人行程，請說明來源。Google 行程目前只能讀取，不能由阿月修改。",
+        )
+    if has_google:
+        return "not_supported", GOOGLE_CALENDAR_READ_ONLY_MESSAGE
+    return None
+
+
 def _is_match_start_request(value: str) -> bool:
     compact = normalized_phrase(value)
     if re.search(r'(?:不要|不用|不想)(?:再|幫我|替我)?(?:找|配對)', compact):
@@ -236,6 +343,73 @@ def _is_match_start_request(value: str) -> bool:
         "startanewmatch", "startnewmatchsearch", "startanewmatchsearch",
         "findmatchingpartner", "findnewpartner", "findmeanewpartner",
         "matchmewithsomeone",
+    ))
+
+
+def is_companion_matching_request(value: str) -> bool:
+    """Recognize a request to recommend a person to go somewhere with."""
+    compact = normalized_phrase(value)
+    if "一個人" in compact or "一个人" in compact:
+        return False
+    shared_trip = any(term in compact for term in (
+        "一起去", "一起玩", "一起逛", "陪我去", "陪我玩", "跟我去", "和我去", "同行",
+    )) or bool(re.search(
+        r"(?:和|跟|與|与)(?:誰|谁|哪位|哪個人|哪个人)(?:一起)?去", compact,
+    ))
+    asks_who = any(term in compact for term in (
+        "和誰", "跟誰", "與誰", "找誰", "誰一起", "誰陪我", "誰跟我", "誰和我",
+        "和谁", "跟谁", "与谁", "找谁", "谁一起", "哪位", "哪個人", "哪个人",
+        "誰有興趣", "谁有兴趣", "誰想去", "谁想去", "誰願意去", "谁愿意去",
+        "誰會和我去", "谁会和我去", "誰會跟我去", "谁会跟我去",
+        "有人想和我去", "有人想跟我去", "有誰想去", "有谁想去",
+    ))
+    asks_for_person = (
+        any(term in compact for term in ("推薦", "介紹", "幫我找"))
+        and any(term in compact for term in ("人選", "對象", "朋友", "旅伴", "的人"))
+    )
+    event_interest = (
+        any(term in compact for term in ("誰", "谁", "有人"))
+        and any(term in compact for term in (
+            "有興趣", "有兴趣", "感興趣", "感兴趣",
+            "想參加", "想参加", "想去", "願意去", "愿意去",
+        ))
+        and any(term in compact for term in (
+            "活動", "活动", "展覽", "展览", "動漫展", "展會", "展会",
+            "演唱會", "演唱会",
+            "市集", "電影", "电影", "表演", "講座", "讲座",
+        ))
+    )
+    return (shared_trip and (asks_who or asks_for_person)) or event_interest
+
+
+def is_chat_cooldown_reason_request(value: str, *, scope: str = "") -> bool:
+    """Identify a why-can't-I-send question without guessing a Risk cause."""
+    compact = normalized_phrase(value)
+    asks_why = any(term in compact for term in (
+        "為什麼", "为什么", "為何", "为何", "怎麼", "怎么", "原因", "why",
+    ))
+    if not asks_why:
+        return False
+    if any(term in compact for term in ("冷卻", "冷却", "cooldown")):
+        return True
+    cannot_send = any(term in compact for term in (
+        "不能傳", "不能发", "不能發", "不能送", "無法傳", "无法传",
+        "無法發", "无法发", "無法送", "无法送", "傳不出去", "发不出去",
+        "送不出去", "被擋", "被挡", "cantsend", "can'tsend",
+        "cannotsend", "unabletosend",
+    )) or bool(re.search(r"(?:can't|cannot|unableto)i?send", compact))
+    return cannot_send and (
+        scope == "chat"
+        or any(term in compact for term in (
+            "聊天室", "訊息", "消息", "信息", "message", "chat",
+        ))
+    )
+
+
+def companion_place_lookup_requested(value: str) -> bool:
+    compact = normalized_phrase(value)
+    return is_companion_matching_request(value) and any(term in compact for term in (
+        "好玩", "景點", "景点", "去處", "去处", "餐廳", "餐厅", "咖啡", "地方",
     ))
 
 
@@ -813,6 +987,11 @@ def context_allows_proposal(context: dict[str, Any], proposal: VoiceProposal) ->
         return permissions.get("memory_read") is True
     if proposal.intent == "match.ayue_query":
         question = str(proposal.arguments.get("question") or "")
+        if (
+            companion_place_lookup_requested(question)
+            and permissions.get("places") is not True
+        ):
+            return False
         if (
             _is_match_start_request(question)
             or any(word in question for word in (
@@ -1417,9 +1596,28 @@ def deterministic_proposal(
     }.get(response_language, "我找一下，稍等一下。")
     if not raw:
         return None
+    calendar_block = calendar_write_preflight(raw, context)
+    if calendar_block is not None:
+        return VoiceProposal("assistant.reply", {}, calendar_block[1], revision)
+    offer = context.get("_next_step_offer")
+    choice = (
+        select_place_next_step(raw, offer)
+        if not isinstance(offer, dict)
+        or normalized_phrase(raw) != normalized_phrase(offer.get("source_transcript"))
+        else None
+    )
+    if choice in {"calendar", "companion"}:
+        selected = place_next_step_action(choice, offer, selected_text=raw)
+        if selected is not None:
+            return VoiceProposal(selected[0], selected[1], working_reply, revision)
     if any(phrase in compact for phrase in ('剩多少額度', '剩餘額度', '額度還有', '額度用完', '額度恢復', '什麼時候恢復', '語音和配對共用', 'remainingquota', 'quotabalance')):
         return VoiceProposal('quota.query', {}, '', revision)
-    if any(phrase in compact for phrase in ('冷卻還', '還要等多久', '幾點可以再傳', '可以傳了嗎', '剛剛那則有送出', '剛才有送出', '查詢傳送狀態', 'cooldown', 'diditsend')):
+    if is_chat_cooldown_reason_request(raw, scope=str(context.get("scope") or "")) or any(
+        phrase in compact for phrase in (
+            '冷卻還', '還要等多久', '幾點可以再傳', '可以傳了嗎',
+            '剛剛那則有送出', '剛才有送出', '查詢傳送狀態', 'cooldown', 'diditsend',
+        )
+    ):
         return VoiceProposal('chat.status.query', {'contact_name': ''}, '', revision)
     if compact in {
         "關閉語音模式", "关闭语音模式", "關閉語音助理", "关闭语音助理",
@@ -1542,7 +1740,7 @@ def deterministic_proposal(
             "match.query", {"view": "status"},
             "我直接查看目前配對狀態。", revision,
         )
-    if _is_match_start_request(raw):
+    if _is_match_start_request(raw) or is_companion_matching_request(raw):
         return VoiceProposal(
             "match.ayue_query", {"question": raw}, working_reply, revision,
         )

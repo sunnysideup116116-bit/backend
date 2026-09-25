@@ -16,6 +16,11 @@ from .capabilities import CATALOG, ACTIONS, available_actions
 from .contextual import bind_target, safe_result
 from .screen_context import screen_context_payload
 from .recommendations import resolve_calendar_recommendation
+from .next_step import (
+    build_place_next_step_offer,
+    place_next_step_action,
+    select_place_next_step,
+)
 from .weather import resolve_weather_location
 from .capability_proxy import (
     CapabilityRefError,
@@ -42,6 +47,7 @@ from .template_dispatcher import (
 
 from .contracts import (
     VoiceProposal,
+    calendar_write_preflight,
     confirmation_matches,
     confirmation_phrase,
     context_allows_proposal,
@@ -52,6 +58,8 @@ from .contracts import (
     validate_proposal,
     visible_choice_action,
     deterministic_proposal,
+    is_chat_cooldown_reason_request,
+    is_companion_matching_request,
 )
 
 
@@ -392,12 +400,15 @@ async def run_duplex_session(
     suppress_current_turn = False
     seen_tool_calls: set[str] = set()
     template_fast_path_transcript = ""
+    next_step_dispatched_intent = ""
+    next_step_selected_proposal: VoiceProposal | None = None
     template_fast_path_call_ids: set[str] = set()
     tool_response_cache: dict[str, tuple[str, dict[str, Any]]] = {}
     non_blocking_tool_tasks: dict[str, asyncio.Task[None]] = {}
     non_blocking_tool_started_at: dict[str, float] = {}
     capability_argument_defaults: dict[str, dict[str, Any]] = {}
     background_actions: dict[str, VoiceProposal] = {}
+    background_action_transcripts: dict[str, str] = {}
     task_actions: dict[str, tuple[str, str]] = {}
     queued_background_results: list[tuple[str | dict[str, Any], str]] = []
     progress_turn_pending = False
@@ -531,6 +542,26 @@ async def run_duplex_session(
             name=name,
             response=response,
         )
+
+    async def reject_google_calendar_write(
+        call: Any, proposal: VoiceProposal,
+    ) -> bool:
+        if proposal.intent not in {"calendar.update", "calendar.cancel"}:
+            return False
+        target = str(proposal.arguments.get("target") or "")
+        calendar_block = calendar_write_preflight(
+            f"修改 {target}" if proposal.intent == "calendar.update"
+            else f"取消 {target}",
+            context,
+        )
+        if calendar_block is None:
+            return False
+        await tool_response(call, {
+            "status": calendar_block[0],
+            "message": calendar_block[1],
+            "spoken_prompt": calendar_block[1],
+        })
+        return True
 
     def localized_prompt(kind: str) -> str:
         language = str((context.get("voice_config") or {}).get("response_language") or "zh-TW")
@@ -893,6 +924,7 @@ async def run_duplex_session(
             "personality.explore",
         }:
             background_actions[action_id] = proposal
+            background_action_transcripts[action_id] = last_user_transcript
             progress_turn_pending = True
             next_reply_code = "ayue_delegated"
         else:
@@ -1097,6 +1129,7 @@ async def run_duplex_session(
         nonlocal private_read_authorized
         nonlocal last_delegated_proposal, last_delegated_expires_at
         nonlocal recently_confirmed_id, recently_confirmed_until
+        nonlocal next_step_dispatched_intent
         name = str(call.name or "")
         call_id = str(call.id or "")
         if quota_stopped:
@@ -1108,6 +1141,44 @@ async def run_duplex_session(
                 name=cached_name,
             ), cached_response)
             return
+        calendar_block = calendar_write_preflight(last_user_transcript, context)
+        if calendar_block is not None:
+            already_sent = template_fast_path_transcript == last_user_transcript
+            await tool_response(call, {
+                "status": "already_dispatched" if already_sent else calendar_block[0],
+                "message": (
+                    "這項 Google 日曆限制已回覆，請勿再次要求確認。"
+                    if already_sent else calendar_block[1]
+                ),
+                **({"spoken_prompt": calendar_block[1]} if not already_sent else {}),
+            })
+            return
+        if (
+            next_step_dispatched_intent
+            and template_fast_path_transcript == last_user_transcript
+            and call_id not in template_fast_path_call_ids
+        ):
+            await tool_response(call, {
+                "status": "already_dispatched",
+                "message": "使用者選擇的下一步已送出，請等待已驗證的結果。",
+            })
+            return
+        offer = context.get("_next_step_offer")
+        if isinstance(offer, dict) and name in {
+            "read_calendar", "read_app_data", "ask_matching_ayue", "ask_app_ayue",
+            "find_app_capabilities", "run_app_capabilities",
+        }:
+            choice = select_place_next_step(last_user_transcript, offer)
+            if choice in {"calendar", "companion", "clarify", "dismiss"} or (
+                last_user_transcript == offer.get("source_transcript")
+            ):
+                # The offer is a question, never authorization for a model
+                # call. The final transcript dispatches the selected read.
+                await tool_response(call, {
+                    "status": "needs_input",
+                    "message": "請先等使用者明確選擇下一步；Server 會依完整語音內容執行。",
+                })
+                return
         if name == "manage_voice_draft":
             if last_user_transcript and draft_handled_text == last_user_transcript:
                 await tool_response(call, {"status": "already_dispatched", "message": "這次改口已處理，請使用最新草稿。"})
@@ -1131,7 +1202,11 @@ async def run_duplex_session(
                 read_detour = (name == "read_weather" or (name == "read_app_data" and raw.get("domain") in {"calendar", "quota", "delivery", "contacts", "matching", "dates"}))
                 if row and read_detour:
                     await manage_draft({"action": "pause", "task_ref": row["task_ref"]})
-        if template_enabled and template_fast_path_transcript and call_id not in template_fast_path_call_ids:
+        if (
+            template_fast_path_transcript
+            and template_fast_path_transcript == last_user_transcript
+            and call_id not in template_fast_path_call_ids
+        ):
             direct = authoritative_template_proposal(
                 template_fast_path_transcript, context=context,
             )
@@ -1139,7 +1214,36 @@ async def run_duplex_session(
                 template_tool_call_for_proposal(direct)
                 if direct is not None else None
             )
-            if expected is not None and name == expected[0]:
+            matching_duplicate = (
+                direct is not None
+                and (
+                    direct.intent == "match.query"
+                    or (
+                        direct.intent == "match.ayue_query"
+                        and is_companion_matching_request(template_fast_path_transcript)
+                    )
+                )
+                and name in {
+                    "navigate_app", "read_match_status", "read_match_hub", "read_app_data",
+                    "ask_matching_ayue", "ask_public_ayue", "ask_app_ayue",
+                    "find_app_capabilities", "run_app_capabilities",
+                }
+            )
+            cooldown_reason_duplicate = (
+                direct is not None
+                and direct.intent == "chat.status.query"
+                and is_chat_cooldown_reason_request(
+                    template_fast_path_transcript,
+                    scope=str(context.get("scope") or ""),
+                )
+                and name in {
+                    "read_chat_status", "read_app_data",
+                    "find_app_capabilities", "run_app_capabilities",
+                }
+            )
+            if matching_duplicate or cooldown_reason_duplicate or (
+                template_enabled and expected is not None and name == expected[0]
+            ):
                 await tool_response(call, {
                     "status": "already_dispatched",
                     "message": "這個明確操作已由 Server 送出，不能重複執行。",
@@ -1678,6 +1782,8 @@ async def run_duplex_session(
                         )
                     if proposal is None:
                         raise ValueError("operation_arguments_invalid")
+                    if await reject_google_calendar_write(call, proposal):
+                        return
                     verified_operations.append({
                         "operation_key": key,
                         "depends_on": [str(item)[:40] for item in raw_operation.get("depends_on") or []],
@@ -1695,6 +1801,8 @@ async def run_duplex_session(
                     )
                     if proposal is None or not context_allows_proposal(context, proposal):
                         raise ValueError("operation_arguments_invalid")
+                    if await reject_google_calendar_write(call, proposal):
+                        return
                     proposals.append(proposal)
                     operations.append({
                         "operation_key": str(expanded_operation["operation_key"])[:40],
@@ -1793,7 +1901,7 @@ async def run_duplex_session(
                 await tool_response(call, result)
                 return
             name = "__proxy_run_single__"
-        if proxy_enabled and name not in {
+        if proxy_enabled and call_id not in template_fast_path_call_ids and name not in {
             "__proxy_run_single__", "describe_current_screen",
             "confirm_pending_action", "close_voice_mode",
         }:
@@ -1981,6 +2089,7 @@ async def run_duplex_session(
                     await manage_draft({"action": "pause", "task_ref": row["task_ref"]})
             if pending is not None and not (
                 (name == 'read_app_data' and (call.args or {}).get('domain') in {'quota', 'delivery'})
+                or name == 'read_chat_status'
                 or (proxy_proposal is not None and proxy_proposal.intent in {'quota.query', 'chat.status.query'})
             ):
                 await tool_response(call, {
@@ -2008,6 +2117,29 @@ async def run_duplex_session(
                     )
                 )
             )
+            if last_user_transcript and name in {
+                "navigate_app", "read_match_status", "read_match_hub", "read_app_data",
+                "ask_matching_ayue", "ask_public_ayue", "ask_app_ayue",
+            }:
+                direct_match = deterministic_proposal(
+                    last_user_transcript, context=context,
+                )
+                if (
+                    direct_match is not None
+                    and direct_match.intent == "match.query"
+                ):
+                    # A status question reads canonical App state; the device
+                    # opens Match Hub while presenting that verified result.
+                    proposal = direct_match
+                elif (
+                    direct_match is not None
+                    and direct_match.intent == "match.ayue_query"
+                    and is_companion_matching_request(last_user_transcript)
+                    and name in {"ask_matching_ayue", "ask_public_ayue", "ask_app_ayue"}
+                ):
+                    # Keep the destination and companion request in one turn
+                    # when Live incorrectly picked the places domain.
+                    proposal = direct_match
             if template_enabled and last_user_transcript and name in {
                 "navigate_app", "open_chat", "read_app_data",
                 "ask_app_ayue", "write_app_action", "cancel_calendar_event",
@@ -2033,6 +2165,11 @@ async def run_duplex_session(
                 "ask_public_ayue", "ask_matching_ayue", "read_self_profile", "read_memories",
             }:
                 proposal = direct
+            if (
+                call_id in template_fast_path_call_ids
+                and next_step_selected_proposal is not None
+            ):
+                proposal = next_step_selected_proposal
             if _identity_question(last_user_transcript):
                 await tool_response(call, {
                     "status": "conversation_only",
@@ -2044,6 +2181,8 @@ async def run_duplex_session(
                     "status": "rejected",
                     "message": "這個操作不在 App 安全白名單內。",
                 })
+                return
+            if await reject_google_calendar_write(call, proposal):
                 return
             if drafts_enabled() and proposal.intent in DRAFT_FIELDS:
                 row = current_draft()
@@ -2148,6 +2287,7 @@ async def run_duplex_session(
             } and not requires_confirmation(proposal):
                 action_id = str(call.id or uuid.uuid4().hex)
                 background_actions[action_id] = proposal
+                background_action_transcripts[action_id] = last_user_transcript
                 progress_turn_pending = True
                 next_reply_code = "ayue_delegated"
                 await send_event({
@@ -2255,6 +2395,7 @@ async def run_duplex_session(
                         return
                     action_id = str(call.id or uuid.uuid4().hex)
                     background_actions[action_id] = follow_up
+                    background_action_transcripts[action_id] = last_user_transcript
                     progress_turn_pending = True
                     next_reply_code = "ayue_delegated"
                     await send_event({
@@ -2367,6 +2508,7 @@ async def run_duplex_session(
                 task_actions[action_id] = (confirmed.task_id, confirmed.batch_id)
             if confirmed.proposal.intent == "ayue.private_query":
                 background_actions[action_id] = confirmed.proposal
+                background_action_transcripts[action_id] = last_user_transcript
                 progress_turn_pending = True
                 next_reply_code = "ayue_delegated"
             else:
@@ -2552,14 +2694,35 @@ async def run_duplex_session(
             else "[APP_VOICE_DIRECT_RESULT]" if source == "direct"
             else "[DELEGATED_AYUE_RESULT]"
         )
+        next_step_prompt = ""
+        results = [message]
+        if isinstance(message, dict) and isinstance(message.get("completed_results"), list):
+            results.extend(message["completed_results"])
+        for item in results:
+            if not isinstance(item, dict) or not isinstance(item.get("next_step_offer"), dict):
+                continue
+            offered_prompt = str(item["next_step_offer"].get("prompt") or "")
+            current_offer = context.get("_next_step_offer") or {}
+            if offered_prompt and offered_prompt == current_offer.get("prompt"):
+                next_step_prompt = (
+                    f" 先摘要景點，再於回答最後只問一次：{offered_prompt} "
+                    "這是可選的提議；使用者明確選擇前，不得查行事曆或詢問配對阿月。"
+                )
+                break
+        persona_instruction = (
+            "可在最後的提議中說配對阿月會協助，其他內容仍由阿月第一人稱回答，"
+            if next_step_prompt else "不要提到有多個阿月，"
+        )
         await live.send_text(
             f"{marker}\n"
             f"source={source}\n"
             f"{rendered}\n"
             "這是已完成的工具結果。請理解重點後，直接以阿月第一人稱自然回答使用者，"
-            "不要逐字照念、不要說你在轉述、不要提到有多個阿月，"
+            "不要逐字照念、不要說你在轉述、"
+            f"{persona_instruction}"
             "也不要增加結果沒有的事實或承諾。完整結果及 recommendations 是本次對話的參考資料；"
-            "口頭可以摘要，但之後仍須記得未唸出的店名、地址與推薦，不能把摘要當成完整清單。",
+            "口頭可以摘要，但之後仍須記得未唸出的店名、地址與推薦，不能把摘要當成完整清單。"
+            f"{next_step_prompt}",
         )
 
     async def flush_background_results(*, delay: float = 0.0) -> None:
@@ -2723,19 +2886,132 @@ async def run_duplex_session(
                 continue
 
     async def dispatch_template_fast_path() -> None:
-        """Dispatch an unambiguous final utterance if Live omitted a tool call."""
+        """Dispatch explicit actions even when Live omits a tool call."""
 
         nonlocal template_fast_path_transcript, suppress_current_turn, next_reply_code
-        if await handle_draft_utterance(last_user_transcript):
-            return
-        if not template_enabled or not last_user_transcript:
+        nonlocal next_step_dispatched_intent, next_step_selected_proposal
+        if not last_user_transcript:
             return
         if template_fast_path_transcript == last_user_transcript:
             return
-        proposal = authoritative_template_proposal(
-            last_user_transcript, context=context,
+        offer = context.get("_next_step_offer")
+        if (
+            isinstance(offer, dict)
+            and last_user_transcript != offer.get("source_transcript")
+            and select_place_next_step(last_user_transcript, offer) is None
+        ):
+            context.pop("_next_step_offer", None)
+        calendar_block = calendar_write_preflight(last_user_transcript, context)
+        if calendar_block is not None:
+            template_fast_path_transcript = last_user_transcript
+            suppress_current_turn = True
+            next_reply_code = "app_action"
+            await queue_background_result({
+                "status": calendar_block[0],
+                "message": calendar_block[1],
+            }, "direct")
+            return
+        if await handle_draft_utterance(last_user_transcript):
+            return
+        offer = context.get("_next_step_offer")
+        if isinstance(offer, dict):
+            source_utterance = last_user_transcript == offer.get("source_transcript")
+            choice = (
+                None if source_utterance else
+                select_place_next_step(last_user_transcript, offer)
+            )
+            if choice in {"calendar", "companion", "clarify", "dismiss"}:
+                if pending is not None:
+                    return
+                template_fast_path_transcript = last_user_transcript
+                suppress_current_turn = True
+                next_reply_code = "app_action"
+                if choice in {"clarify", "dismiss"}:
+                    if choice == "dismiss":
+                        context.pop("_next_step_offer", None)
+                    language = str(offer.get("response_language") or "zh-TW")
+                    prompt = {
+                        "zh-TW": (
+                            "要先查行事曆，還是請配對阿月推薦同行人？",
+                            "好，有需要再跟我說。",
+                        ),
+                        "zh-CN": (
+                            "要先查日历，还是请配对阿月推荐同行的人？",
+                            "好，有需要再告诉我。",
+                        ),
+                        "en-US": (
+                            "Should I check your calendar or ask Matching Ayue about a companion?",
+                            "Okay. Let me know if you need anything else.",
+                        ),
+                    }.get(language, ("要先查行事曆，還是請配對阿月推薦同行人？", "好，有需要再跟我說。"))[
+                        0 if choice == "clarify" else 1
+                    ]
+                    next_step_dispatched_intent = "assistant.reply"
+                    await queue_background_result({
+                        "status": "needs_input" if choice == "clarify" else "success",
+                        "message": prompt,
+                    }, "direct")
+                    return
+                context.pop("_next_step_offer", None)
+                selected = place_next_step_action(
+                    choice, offer, selected_text=last_user_transcript,
+                )
+                if selected is None:
+                    return
+                proposal = VoiceProposal(
+                    selected[0], selected[1], "", int(context.get("revision") or 0),
+                )
+                if not context_allows_proposal(context, proposal):
+                    await queue_background_result({
+                        "status": "permission_denied",
+                        "message": "這項資料權限目前未開啟，無法執行。",
+                    }, "direct")
+                    return
+                tool_shape = (
+                    template_tool_call_for_proposal(proposal)
+                    if template_enabled else
+                    ("read_calendar", dict(proposal.arguments))
+                    if choice == "calendar" else
+                    ("ask_matching_ayue", dict(proposal.arguments))
+                )
+                if tool_shape is None:
+                    return
+                next_step_dispatched_intent = proposal.intent
+                next_step_selected_proposal = proposal
+                call_id = uuid.uuid4().hex
+                template_fast_path_call_ids.add(call_id)
+                await invoke_tool_call(SimpleNamespace(
+                    id=call_id, name=tool_shape[0], args=tool_shape[1],
+                ))
+                return
+            if choice is None and not source_utterance:
+                context.pop("_next_step_offer", None)
+        cooldown_reason = is_chat_cooldown_reason_request(
+            last_user_transcript, scope=str(context.get("scope") or ""),
         )
-        if pending is not None and not (drafts_enabled() and current_draft() and proposal and proposal.intent in {
+        companion_request = is_companion_matching_request(last_user_transcript)
+        if proxy_enabled and not (cooldown_reason or companion_request):
+            return
+        proposal = (
+            authoritative_template_proposal(last_user_transcript, context=context)
+            if template_enabled else
+            deterministic_proposal(last_user_transcript, context=context)
+        )
+        if not template_enabled and not (
+            proposal is not None
+            and (
+                proposal.intent == "match.query"
+                or (
+                    proposal.intent == "match.ayue_query"
+                    and companion_request
+                )
+                or (proposal.intent == "chat.status.query" and cooldown_reason)
+            )
+        ):
+            return
+        if pending is not None and not (
+            proposal is not None and proposal.intent == "chat.status.query"
+        ) and not (drafts_enabled() and current_draft() and proposal and proposal.intent in {
             "quota.query", "chat.status.query", "calendar.query", "contacts.query", "weather.query", "match.query", "date.query",
         }):
             return
@@ -2752,7 +3028,19 @@ async def run_duplex_session(
             "ui.choice.activate",
         }:
             return
-        tool_shape = template_tool_call_for_proposal(proposal)
+        if template_enabled:
+            tool_shape = template_tool_call_for_proposal(proposal)
+        elif proposal.intent == "chat.status.query":
+            tool_shape = ("read_chat_status", dict(proposal.arguments))
+        elif proposal.intent == "match.query":
+            tool_name = (
+                "read_match_status"
+                if proposal.arguments.get("view") == "status"
+                else "read_match_hub"
+            )
+            tool_shape = (tool_name, {})
+        else:
+            tool_shape = ("ask_matching_ayue", dict(proposal.arguments))
         if tool_shape is None:
             return
         tool_name, tool_args = tool_shape
@@ -2780,6 +3068,7 @@ async def run_duplex_session(
         nonlocal checking_replayed_turn, suppress_current_turn
         nonlocal progress_turn_pending
         nonlocal template_fast_path_transcript, draft_handled_text, draft_confirmation_needs_input
+        nonlocal next_step_dispatched_intent, next_step_selected_proposal
         nonlocal live_turn_active
 
         if response.go_away:
@@ -2803,6 +3092,8 @@ async def run_duplex_session(
                 draft_confirmation_needs_input = False
                 input_transcript_finished = False
                 template_fast_path_transcript = ""
+                next_step_dispatched_intent = ""
+                next_step_selected_proposal = None
                 template_fast_path_call_ids.clear()
                 await send_event({
                     "type": "microphone_state",
@@ -2922,6 +3213,12 @@ async def run_duplex_session(
                 # user segment when VAD and transcription arrive out of order.
                 if last_user_transcript:
                     input_transcript_finished = True
+                    offer = context.get("_next_step_offer")
+                    if (
+                        isinstance(offer, dict)
+                        and last_user_transcript != offer.get("source_transcript")
+                    ):
+                        await dispatch_template_fast_path()
                 live_turn_active = False
                 if not suppress_current_turn and last_user_transcript:
                     remember("user", last_user_transcript)
@@ -3134,6 +3431,32 @@ async def run_duplex_session(
                         recent_public_places = screen_places
                 if context.get("_calendar_reference"):
                     next_context["_calendar_reference"] = context["_calendar_reference"]
+                if (
+                    next_context.get("permissions", {}).get("calendar_read") is True
+                    and context.get("_calendar_recent_at")
+                ):
+                    for key in (
+                        "_calendar_recent_events", "_calendar_recent_count",
+                        "_calendar_recent_at",
+                    ):
+                        next_context[key] = context.get(key)
+                offer = context.get("_next_step_offer")
+                next_permissions = next_context.get("permissions") or {}
+                if (
+                    isinstance(offer, dict)
+                    and select_place_next_step("好", offer) is not None
+                    and next_permissions.get("public_ayue") is True
+                    and next_permissions.get("places") is True
+                    and (
+                        not offer.get("calendar_enabled")
+                        or next_permissions.get("calendar_read") is True
+                    )
+                    and (
+                        not offer.get("companion_enabled")
+                        or next_permissions.get("match_ayue") is True
+                    )
+                ):
+                    next_context["_next_step_offer"] = offer
                 async with state_lock:
                     if pending and (
                         next_context["scope"] != pending.scope
@@ -3216,6 +3539,9 @@ async def run_duplex_session(
                 action_id = str(control.get("action_id") or "")
                 if action_id in background_actions:
                     proposal = background_actions.pop(action_id)
+                    source_transcript = background_action_transcripts.pop(
+                        action_id, last_user_transcript,
+                    )
                     task_info = task_actions.pop(action_id, None)
                     source = (
                         "task" if task_info
@@ -3234,6 +3560,16 @@ async def run_duplex_session(
                         if (control.get('success') is True and proposal.intent in {'ayue.public_query', 'match.ayue_query'}
                                 and places):
                             recent_public_places = places
+                        offer = build_place_next_step_offer(
+                            proposal, result_text, context.get("permissions") or {},
+                            response_language=str(
+                                (context.get("voice_config") or {}).get("response_language") or "zh-TW"
+                            ),
+                        )
+                        if offer is not None:
+                            offer["source_transcript"] = source_transcript
+                            context["_next_step_offer"] = offer
+                            result_text["next_step_offer"] = {"prompt": offer["prompt"]}
                     if task_info and task_service is not None:
                         task_id, batch_id = task_info
                         updated = task_service.complete_action(
@@ -3259,6 +3595,19 @@ async def run_duplex_session(
                     success = control.get("success") is True
                     next_reply_code = "action_completed" if success else "action_failed"
                     result_response = safe_result(control)
+                    calendar_data = result_response.get("data") or {}
+                    if (
+                        success
+                        and context.get("permissions", {}).get("calendar_read") is True
+                        and isinstance(calendar_data.get("events"), list)
+                    ):
+                        events = [
+                            event for event in calendar_data["events"]
+                            if event.get("source_type") in {"google", "personal", "date"}
+                        ][:20]
+                        context["_calendar_recent_events"] = events
+                        context["_calendar_recent_count"] = calendar_data.get("count", len(events))
+                        context["_calendar_recent_at"] = time.time()
                     if target.task_id and task_service is not None:
                         task_actions.pop(action_id, None)
                         updated = task_service.complete_action(

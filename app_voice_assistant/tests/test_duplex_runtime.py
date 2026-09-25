@@ -2103,6 +2103,391 @@ def test_private_ayue_requires_one_confirmation_per_voice_session():
     asyncio.run(scenario())
 
 
+def test_google_calendar_write_is_rejected_before_voice_confirmation():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="test",
+            initial_context={
+                "scope": "global", "revision": 0,
+                "permissions": {"calendar_read": True, "calendar_write": True},
+            },
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(
+            content=SimpleNamespace(
+                interim_input_transcription=None,
+                input_transcription=SimpleNamespace(
+                    text="把 Google 日曆的會議改到下午三點", finished=False,
+                ),
+                output_transcription=None,
+                interrupted=False,
+                model_turn=None,
+                turn_complete=False,
+            ),
+            tool_calls=[SimpleNamespace(
+                id="google-update", name="update_calendar_event",
+                args={"target": "會議", "start_time": "15:00"},
+            )],
+        ))
+        await wait_until(lambda: any(
+            call_id == "google-update" for call_id, _, _ in live.tool_responses
+        ))
+        response = next(
+            result for call_id, _, result in live.tool_responses
+            if call_id == "google-update"
+        )
+        assert response["status"] == "not_supported"
+        assert "只能查詢" in response["message"]
+        assert not any(event.get("type") in {
+            "confirmation_required", "action_proposal",
+        } for event in events)
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_calendar_tool_target_identifies_google_without_a_transcript():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="test",
+            initial_context={
+                "scope": "global", "revision": 0,
+                "permissions": {"calendar_read": True, "calendar_write": True},
+            },
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="google-target", name="update_calendar_event",
+            args={
+                "target": "Google 日曆的團隊會議",
+                "start_time": "15:00",
+            },
+        )]))
+        await wait_until(lambda: any(
+            call_id == "google-target" for call_id, _, _ in live.tool_responses
+        ))
+        result = next(
+            response for call_id, _, response in live.tool_responses
+            if call_id == "google-target"
+        )
+        assert result["status"] == "not_supported"
+        assert "只讀授權" in result["message"]
+        assert not any(event.get("type") in {
+            "confirmation_required", "action_proposal",
+        } for event in events)
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_google_calendar_write_without_tool_gets_a_direct_read_only_reply():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="test",
+            initial_context={"scope": "global", "revision": 0},
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(content=SimpleNamespace(
+            interim_input_transcription=None,
+            input_transcription=SimpleNamespace(
+                text="取消 Google 日曆的會議", finished=True,
+            ),
+            output_transcription=None,
+            interrupted=False,
+            model_turn=None,
+            turn_complete=False,
+        )))
+        await live.incoming.put(message(content=SimpleNamespace(
+            interim_input_transcription=None,
+            input_transcription=None,
+            output_transcription=None,
+            interrupted=False,
+            model_turn=None,
+            turn_complete=True,
+        )))
+        await wait_until(lambda: any(
+            "APP_VOICE_DIRECT_RESULT" in text and "只能查詢" in text
+            for text in live.text
+        ))
+        assert not any(event.get("type") in {
+            "confirmation_required", "action_proposal",
+        } for event in events)
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_recent_google_calendar_read_blocks_a_follow_up_edit():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket, provider=FakeProvider(live), limiter=FakeLimiter(),
+            identity="test",
+            initial_context={
+                "scope": "global", "revision": 0,
+                "permissions": {"calendar_read": True, "calendar_write": True},
+            },
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(tool_calls=[SimpleNamespace(
+            id="read-google", name="read_calendar", args={"range": "upcoming"},
+        )]))
+        await wait_until(lambda: any(
+            event.get("type") == "action_proposal" for event in events
+        ))
+        read = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        await socket.incoming.put({
+            "type": "websocket.receive",
+            "text": json.dumps({
+                "type": "action_result", "action_id": read["action_id"],
+                "result_version": 1, "success": True,
+                "message": "Google 日曆有一個團隊會議。",
+                "data": {
+                    "count": 1,
+                    "events": [{
+                        "title": "團隊會議", "source_type": "google",
+                        "date": "2026-09-27", "start_time": "14:00",
+                    }],
+                },
+            }),
+        })
+        await wait_until(lambda: any(
+            call_id == "read-google" for call_id, _, _ in live.tool_responses
+        ))
+        await live.incoming.put(message(
+            voice_activity=SimpleNamespace(
+                voice_activity_type="VOICE_ACTIVITY_TYPE_ACTIVITY_START",
+            ),
+            content=SimpleNamespace(
+                interim_input_transcription=None,
+                input_transcription=SimpleNamespace(
+                    text="把團隊會議改到三點", finished=False,
+                ),
+                output_transcription=None,
+                interrupted=False,
+                model_turn=None,
+                turn_complete=False,
+            ),
+            tool_calls=[SimpleNamespace(
+                id="edit-recent", name="update_calendar_event",
+                args={"target": "團隊會議", "start_time": "15:00"},
+            )],
+        ))
+        await wait_until(lambda: any(
+            call_id == "edit-recent" for call_id, _, _ in live.tool_responses
+        ))
+        response = next(
+            result for call_id, _, result in live.tool_responses
+            if call_id == "edit-recent"
+        )
+        assert response["status"] == "not_supported"
+        assert "Google 日曆" in response["message"]
+        assert not any(event.get("type") == "confirmation_required" for event in events)
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_legacy_place_tool_keeps_companion_request_with_matching_ayue():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        question = "台南有什麼好玩，並且推薦我應該和誰一起去？"
+        task = asyncio.create_task(run_duplex_session(
+            socket,
+            provider=FakeProvider(live),
+            limiter=FakeLimiter(),
+            identity="test",
+            initial_context={
+                "scope": "global",
+                "permissions": {
+                    "public_ayue": True, "places": True,
+                    "match_ayue": True, "match_read": True,
+                },
+            },
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(
+            content=SimpleNamespace(
+                interim_input_transcription=None,
+                input_transcription=SimpleNamespace(text=question, finished=True),
+                output_transcription=None,
+                interrupted=False,
+                model_turn=None,
+                turn_complete=False,
+            ),
+            tool_calls=[SimpleNamespace(
+                id="companion-places",
+                name="ask_public_ayue",
+                args={"domain": "places", "question": "台南有什麼好玩"},
+            )],
+        ))
+        await wait_until(lambda: any(
+            event.get("type") == "action_proposal" for event in events
+        ))
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == "match.ayue_query"
+        assert proposal["arguments"] == {"question": question}
+        assert sum(event.get("type") == "action_proposal" for event in events) == 1
+        assert any(
+            call_id == "companion-places" and result.get("status") == "already_dispatched"
+            for call_id, _, result in live.tool_responses
+        )
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_legacy_navigation_tool_reads_match_status_instead():
+    async def scenario():
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket,
+            provider=FakeProvider(live),
+            limiter=FakeLimiter(),
+            identity="test",
+            initial_context={
+                "scope": "global",
+                "permissions": {"navigation": True, "match_read": True},
+            },
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(
+            content=SimpleNamespace(
+                interim_input_transcription=None,
+                input_transcription=SimpleNamespace(
+                    text="我現在的配對狀態？", finished=True,
+                ),
+                output_transcription=None,
+                interrupted=False,
+                model_turn=None,
+                turn_complete=False,
+            ),
+            tool_calls=[SimpleNamespace(
+                id="status-navigation",
+                name="navigate_app",
+                args={"destination": "matching"},
+            )],
+        ))
+        await wait_until(lambda: any(
+            event.get("type") == "action_proposal" for event in events
+        ))
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == "match.query"
+        assert proposal["arguments"] == {"view": "status"}
+        assert sum(event.get("type") == "action_proposal" for event in events) == 1
+        assert any(
+            call_id == "status-navigation" and result.get("status") == "already_dispatched"
+            for call_id, _, result in live.tool_responses
+        )
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_legacy_match_requests_dispatch_without_a_model_tool_call():
+    async def scenario(question, expected_intent, expected_arguments):
+        live = FakeLive()
+        socket = FakeWebSocket()
+        events = []
+        task = asyncio.create_task(run_duplex_session(
+            socket,
+            provider=FakeProvider(live),
+            limiter=FakeLimiter(),
+            identity="test",
+            initial_context={
+                "scope": "global",
+                "permissions": {
+                    "match_read": True, "match_ayue": True, "places": True,
+                },
+            },
+            max_session_seconds=30,
+            send_event=lambda event: _append(events, event),
+        ))
+        await live.incoming.put(message(content=SimpleNamespace(
+            interim_input_transcription=None,
+            input_transcription=SimpleNamespace(text=question, finished=True),
+            output_transcription=None,
+            interrupted=False,
+            model_turn=None,
+            turn_complete=False,
+        )))
+        await wait_until(lambda: any(
+            event.get("type") == "action_proposal" for event in events
+        ))
+        proposal = next(
+            event for event in events if event.get("type") == "action_proposal"
+        )
+        assert proposal["intent"] == expected_intent
+        assert proposal["arguments"] == expected_arguments
+        await socket.incoming.put({
+            "type": "websocket.receive",
+            "text": json.dumps({
+                "type": "action_result",
+                "action_id": proposal["action_id"],
+                "success": True,
+                "message": "已取得這次查詢的真實結果。",
+            }),
+        })
+        await live.incoming.put(message(content=SimpleNamespace(
+            interim_input_transcription=None,
+            input_transcription=None,
+            output_transcription=None,
+            interrupted=False,
+            model_turn=None,
+            turn_complete=True,
+        )))
+        await wait_until(lambda: any(
+            "已取得這次查詢的真實結果" in text for text in live.text
+        ))
+        await socket.incoming.put({"type": "websocket.disconnect"})
+        await task
+
+    asyncio.run(scenario(
+        "台南有什麼好玩，並且推薦我應該和誰一起去？",
+        "match.ayue_query",
+        {"question": "台南有什麼好玩，並且推薦我應該和誰一起去？"},
+    ))
+    asyncio.run(scenario(
+        "我現在的配對狀態？", "match.query", {"view": "status"},
+    ))
+
+
 def test_duplex_permission_denies_matching_and_reports_its_own_access():
     async def scenario():
         live = FakeLive()

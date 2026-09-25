@@ -339,6 +339,12 @@ def test_chat_places_and_calendar_source_queries_return_one_exact_operation():
             "ayue.public_query",
             {"domain": "places", "question": "高雄哪裡有好玩的"},
         ),
+        (
+            "台南有什麼好玩，並且推薦我應該和誰一起去？",
+            base,
+            "match.ayue_query",
+            {"question": "台南有什麼好玩，並且推薦我應該和誰一起去？"},
+        ),
         ("幫我找配對", base, "match.ayue_query", {"question": "幫我找配對"}),
         ("新的配對", base, "match.ayue_query", {"question": "新的配對"}),
         (
@@ -410,6 +416,45 @@ def test_google_calendar_writes_never_fall_through_to_personal_calendar():
     assert "Google 日曆" in result["message"]
     assert "只能查詢" in result["message"]
     assert "recommended_operations" not in result
+    explanation = find_capabilities(
+        "如何修改 Google 日曆的會議",
+        "explain",
+        context=context(permissions={"calendar_read": True}),
+        signer=CapabilityRefSigner(b"secret"),
+        user_id="u1",
+        session_id="s1",
+    )
+    assert explanation["status"] == "not_supported"
+    assert "只讀授權" in explanation["message"]
+
+
+def test_visible_google_event_cannot_receive_a_voice_write_ref():
+    signer = CapabilityRefSigner(b"secret")
+    calendar = context(
+        scope="calendar",
+        permissions={
+            "screen_read": True, "calendar_read": True, "calendar_write": True,
+        },
+        screen={
+            "ready": True,
+            "content": {
+                "kind": "calendar_events", "content_permission": "calendar_read",
+                "item_count": 1,
+                "items": [{"title": "團隊會議", "source_type": "google"}],
+            },
+        },
+    )
+    result = find_capabilities(
+        "把團隊會議改到下午三點", "perform", context=calendar,
+        signer=signer, user_id="u1", session_id="s1",
+    )
+    assert result["status"] == "not_supported"
+    assert "Google 日曆" in result["message"]
+    assert "recommended_operations" not in result
+    assert not any(
+        "capability_ref" in action
+        for match in result["matches"] for action in match["actions"]
+    )
 
 
 def test_catalog_is_the_authority_for_proxy_execution_metadata():

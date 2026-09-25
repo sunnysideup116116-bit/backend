@@ -16,8 +16,10 @@ from typing import Any
 from .capabilities import ACTIONS, ARGUMENT_SCHEMAS, CATALOG
 from .contracts import (
     VoiceProposal,
+    calendar_write_preflight,
     context_allows_proposal,
     deterministic_proposal,
+    is_companion_matching_request,
     requires_confirmation,
     validate_proposal,
 )
@@ -289,16 +291,7 @@ def find_capabilities(
     selected_mode = mode if mode in {"explain", "perform"} else "explain"
     query_text = str(query or "")
     deterministic = deterministic_proposal(query_text, context=context)
-    normalized_query_text = _normalize(query_text)
-    google_calendar_write = (
-        any(marker in normalized_query_text for marker in (
-            "google日曆", "google行事曆", "googlecalendar",
-        ))
-        and any(marker in normalized_query_text for marker in (
-            "新增", "建立", "加入", "修改", "改成", "改到", "取消", "刪除",
-            "create", "add", "update", "change", "cancel", "delete",
-        ))
-    )
+    calendar_write_block = calendar_write_preflight(query_text, context)
     longest_explicit = max(
         (_explicit_match_length(query, action_id) for action_id in ACTIONS),
         default=0,
@@ -338,7 +331,7 @@ def find_capabilities(
             metadata = action_metadata(action_id)
             available = action_allowed(action_id, context)
             blocked_google_action = (
-                google_calendar_write
+                calendar_write_block is not None
                 and action_id in {
                     "calendar.create", "calendar.update", "calendar.cancel",
                 }
@@ -472,9 +465,14 @@ def find_capabilities(
             if current is None or int(row["_match_score"]) > int(current["_match_score"]):
                 candidates_by_id[action_id] = row
         candidates = list(candidates_by_id.values())
-        multi_intent = any(marker in query_text.lower() for marker in (
-            "然後", "並且", "同時", "再查", "再打開", " and ", " then ",
+        lowered_query = query_text.lower()
+        sequential_intent = any(marker in lowered_query for marker in (
+            "然後", "再查", "再打開", " then ",
         ))
+        parallel_intent = any(marker in lowered_query for marker in (
+            "並且", "同時", " and ",
+        )) and not is_companion_matching_request(query_text)
+        multi_intent = sequential_intent or parallel_intent
         if deterministic_authoritative and deterministic is not None and not multi_intent:
             executable_ids = {
                 deterministic.intent
@@ -612,16 +610,16 @@ def find_capabilities(
             if isinstance(item, dict)
         ][:8]
     result.update(discovery_experience(projected, mode=selected_mode))
-    if selected_mode == "perform" and google_calendar_write:
-        result["status"] = "not_supported"
-        result["message"] = (
-            "Google 日曆目前在語音助理中只能查詢，"
-            "不會改寫 App 個人行事曆或共同約會。"
-        )
+    if calendar_write_block is not None:
+        result["status"], result["message"] = calendar_write_block
         result.pop("recommended_operations", None)
         result.pop("next_step", None)
+        for match in result["matches"]:
+            for action in match["actions"]:
+                action.pop("capability_ref", None)
     if (
         selected_mode == "perform"
+        and calendar_write_block is None
         and not has_executable_ref
         and semantic_permission_denied
         and isinstance(result.get("permission_repair"), dict)

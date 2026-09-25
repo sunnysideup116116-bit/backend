@@ -23,7 +23,6 @@ from services.ayue_agent.contracts import ToolResult
 from services.ayue_agent.pi.registry import tool_schemas
 from services.ayue_agent.shared.confirmation import ConfirmationManager, project_match_choice_history
 from services.ayue_agent.shared.contact_selections import ContactSelectionManager
-from services.ayue_agent.shared.operation_batches import OperationBatchManager
 from tests.test_stream_delivery_guarantees import _request
 
 
@@ -71,7 +70,7 @@ def test_final_language_normalization_keeps_person_wording():
     result = public_turn._bind_interactions(
         AgentResult(handled=True, reply="我會幫你找合適的對象。", messages=["我會幫你找合適的對象。"]),
         ctx=request, run_id="run", confirmations=ConfirmationManager(store.c),
-        selections=ContactSelectionManager(store.s), batches=OperationBatchManager(store.b),
+        selections=ContactSelectionManager(store.s),
     )
     assert result.reply == "我會幫你找合適的對象。"
     assert "物件" not in result.reply
@@ -106,7 +105,7 @@ def test_pi_activity_search_schema_and_preparation_preserve_surfing(monkeypatch)
     monkeypatch.setattr(write_executors, "assess_match_opportunity", lambda *_a, **_k: SimpleNamespace(state="ready"))
     store = mongomock.MongoClient().test
     _, turn = make_turn("好幫我找一起衝浪的人")
-    runtime = tool_runtime.PiToolRuntime(turn, run_id="surfing-run", trace={}, confirmation_collection=store.c, contact_selection_collection=store.s, operation_batch_collection=store.b)
+    runtime = tool_runtime.PiToolRuntime(turn, run_id="surfing-run", trace={}, confirmation_collection=store.c, contact_selection_collection=store.s)
     schema = next(item for item in tool_schemas() if item["name"] == "match.start_search")
     assert "topic" in schema["parameters"]["properties"]
     result = runtime.dispatch("match.start_search", {"kind": "activity", "topic": "衝浪"})
@@ -116,6 +115,29 @@ def test_pi_activity_search_schema_and_preparation_preserve_surfing(monkeypatch)
     assert record["status"] == "prepared"
     assert "delivery_mode" not in record["payload"]
     assert "衝浪" in record["preview_text"]
+
+
+def test_pi_event_interest_request_prepares_real_activity_search(monkeypatch):
+    from services.ayue_agent.shared import write_executors
+    monkeypatch.setattr(
+        write_executors, "assess_match_opportunity",
+        lambda *_a, **_k: SimpleNamespace(state="ready"),
+    )
+    store = mongomock.MongoClient().test
+    _, turn = make_turn("台北動漫展誰有興趣會和我去？")
+    runtime = tool_runtime.PiToolRuntime(
+        turn, run_id="event-interest-run", trace={},
+        confirmation_collection=store.c,
+        contact_selection_collection=store.s,
+    )
+    result = runtime.dispatch("match.start_search", {
+        "kind": "activity", "topic": "台北動漫展",
+    })
+    assert result["result"]["pending_confirmation"]
+    record = store.c.find_one({})
+    assert record["status"] == "prepared"
+    assert record["payload"]["search_context"]["invitation_topic"] == "臺北動漫展"
+    assert "臺北動漫展" in record["preview_text"]
 
 
 @pytest.mark.parametrize("message,topic", [
@@ -132,7 +154,7 @@ def test_pi_preference_search_is_canonical_and_confirmation_bound(monkeypatch, m
     _, turn = make_turn(message)
     runtime = tool_runtime.PiToolRuntime(
         turn, run_id="preference-run", trace={}, confirmation_collection=store.c,
-        contact_selection_collection=store.s, operation_batch_collection=store.b,
+        contact_selection_collection=store.s,
     )
     result = runtime.dispatch("match.start_search", {
         "kind": "preference", "topic": topic,
@@ -161,7 +183,6 @@ def test_active_semantic_fallback_is_disclosed_without_claiming_common_preferenc
         turn, run_id="preference-semantic-preview", trace={},
         confirmation_collection=store.c,
         contact_selection_collection=store.s,
-        operation_batch_collection=store.b,
     )
     result = runtime.dispatch("match.start_search", {
         "kind": "preference", "topic": "K-pop",
@@ -184,7 +205,6 @@ def test_explicit_preference_wording_overrides_a_misclassified_activity_kind(mon
         turn, run_id="preference-intent-guard", trace={},
         confirmation_collection=store.c,
         contact_selection_collection=store.s,
-        operation_batch_collection=store.b,
     )
     result = runtime.dispatch(
         "match.start_search", {"kind": "activity", "topic": "K-pop"},
@@ -205,7 +225,6 @@ def test_negative_preference_request_never_becomes_positive_graph_search(
         turn, run_id="negative-preference-guard", trace={},
         confirmation_collection=store.c,
         contact_selection_collection=store.s,
-        operation_batch_collection=store.b,
     )
     result = runtime.dispatch(
         "match.start_search", {"kind": kind, "topic": "K-pop"},
@@ -223,7 +242,7 @@ def test_match_followup_uses_visible_context_and_explicit_recent_mode(monkeypatc
     monkeypatch.setattr(write_executors, "assess_match_opportunity", lambda *_a, **_k: SimpleNamespace(state="ready"))
     store = mongomock.MongoClient().test
     _, turn = make_turn(message, history)
-    runtime = tool_runtime.PiToolRuntime(turn, run_id="followup", trace={}, confirmation_collection=store.c, contact_selection_collection=store.s, operation_batch_collection=store.b)
+    runtime = tool_runtime.PiToolRuntime(turn, run_id="followup", trace={}, confirmation_collection=store.c, contact_selection_collection=store.s)
     result = runtime.dispatch("match.start_search", arguments)
     assert result["result"]["pending_confirmation"]
     payload = store.c.find_one({})["payload"]
@@ -234,7 +253,7 @@ def test_match_followup_uses_visible_context_and_explicit_recent_mode(monkeypatc
 def test_match_unseen_topic_or_forged_authority_never_prepares(monkeypatch):
     store = mongomock.MongoClient().test
     _, turn = make_turn("找人")
-    runtime = tool_runtime.PiToolRuntime(turn, run_id="no-authority", trace={}, confirmation_collection=store.c, contact_selection_collection=store.s, operation_batch_collection=store.b)
+    runtime = tool_runtime.PiToolRuntime(turn, run_id="no-authority", trace={}, confirmation_collection=store.c, contact_selection_collection=store.s)
     result = runtime.dispatch("match.start_search", {"kind": "activity", "topic": "衝浪"})
     assert result["error_code"] == "preflight_rejected"
     with pytest.raises(ValueError):
@@ -253,7 +272,7 @@ def test_confirmed_surfing_search_reaches_executor_once(monkeypatch):
         return {"status": "queued"}
     monkeypatch.setattr(write_executors, "start_match_search", start_search)
     request, turn = make_turn("幫我找一起衝浪的人")
-    runtime = tool_runtime.PiToolRuntime(turn, run_id="surfing", trace={}, confirmation_collection=store.c, contact_selection_collection=store.s, operation_batch_collection=store.b)
+    runtime = tool_runtime.PiToolRuntime(turn, run_id="surfing", trace={}, confirmation_collection=store.c, contact_selection_collection=store.s)
     runtime.dispatch("match.start_search", {"kind": "activity", "topic": "衝浪"})
     manager = ConfirmationManager(store.c)
     record = store.c.find_one({})
@@ -272,7 +291,7 @@ def test_same_turn_place_result_reuses_private_coordinates_without_prompt_leak(m
     _, turn = make_turn("找嘉義餐廳，再找那間附近的飲料店")
     runtime = tool_runtime.PiToolRuntime(
         turn, run_id="places-chain", trace={}, confirmation_collection=store.c,
-        contact_selection_collection=store.s, operation_batch_collection=store.b,
+        contact_selection_collection=store.s,
     )
     calls = []
 
@@ -320,7 +339,7 @@ def test_invalid_private_place_coordinates_are_ignored(monkeypatch):
     _, turn = make_turn("找店")
     runtime = tool_runtime.PiToolRuntime(
         turn, run_id="invalid-place-anchor", trace={}, confirmation_collection=store.c,
-        contact_selection_collection=store.s, operation_batch_collection=store.b,
+        contact_selection_collection=store.s,
     )
     runtime.results.append({"private_data": {"place_anchor_candidates": [{
         "name": "同名店", "provider": "google", "place_id": "bad",
@@ -343,7 +362,7 @@ def test_ambiguous_same_name_place_candidates_never_reuse_coordinates(monkeypatc
     _, turn = make_turn("找同名店附近")
     runtime = tool_runtime.PiToolRuntime(
         turn, run_id="ambiguous-place-anchor", trace={}, confirmation_collection=store.c,
-        contact_selection_collection=store.s, operation_batch_collection=store.b,
+        contact_selection_collection=store.s,
     )
     runtime.results.append({"private_data": {"place_anchor_candidates": [
         {"name": "同名店", "address_summary": "嘉義市一號", "provider": "google",
@@ -375,7 +394,7 @@ def test_unsafe_provider_stream_is_held_before_public_tokens(monkeypatch):
     tokens = []
     result = public_turn.run_pi_public_turn(request, on_token=tokens.append,
         confirmation_collection=store.c, contact_selection_collection=store.s,
-        operation_batch_collection=store.b, runs_collection=store.r)
+        runs_collection=store.r)
     assert result.reply == "你好，我是阿月。"
     assert "".join(tokens) == result.reply
     assert "RAW_UNVALIDATED" not in str(tokens)
@@ -408,7 +427,6 @@ def test_safe_provider_sentence_is_published_before_completion(monkeypatch):
             on_token=collect,
             confirmation_collection=store.c,
             contact_selection_collection=store.s,
-            operation_batch_collection=store.b,
             runs_collection=store.r,
         )
 
@@ -425,3 +443,70 @@ def test_safe_provider_sentence_is_published_before_completion(monkeypatch):
     assert not worker.is_alive()
     assert result["value"].reply == "你好，我先看懂你的問題。答案馬上來。"
     assert "".join(tokens) == result["value"].reply
+
+
+def test_public_pi_completes_route_and_contact_evidence_in_one_turn(monkeypatch):
+    store = mongomock.MongoClient().test
+    request, turn = make_turn("幫我規劃週末一天的行程，然後根據這個行程告訴我適合找誰去")
+    monkeypatch.setattr(public_turn, "build_public_agent_turn_context", lambda *_a, **_k: turn)
+    monkeypatch.setattr(public_turn, "validated_mentioned_contact_ids", lambda *_a: ([], False))
+    executed = []
+    model_calls = 0
+
+    def provider(_prompt, tools, **kwargs):
+        nonlocal model_calls
+        model_calls += 1
+        names = {item["function"]["name"] for item in tools}
+        assert "workflow.queue_operations" not in names
+        assert "relationship.list_accepted_contacts" in names
+        evidence_schema = next(item["function"]["parameters"] for item in tools
+                               if item["function"]["name"] == "relationship.get_contact_evidence")
+        assert "contact_refs" in evidence_schema["required"]
+        if model_calls == 1:
+            return ToolCallResult(content="", tool_calls=[{
+                "name": "places.search_nearby",
+                "arguments": {"anchor": "高雄", "categories": ["park"], "limit": 3},
+            }])
+        if model_calls == 2:
+            assert "中央公園" in str(kwargs["conversation_messages"])
+            return ToolCallResult(content="", tool_calls=[{
+                "name": "relationship.list_accepted_contacts", "arguments": {},
+            }])
+        assert "小安" in str(kwargs["conversation_messages"])
+        if model_calls == 3:
+            return ToolCallResult(content="", tool_calls=[{
+                "name": "relationship.get_contact_evidence",
+                "arguments": {"contact_refs": ["contact_1"]},
+            }])
+        assert "散步" in str(kwargs["conversation_messages"])
+        return ToolCallResult(content="週末可以去中央公園走走；已接受聯絡人中，小安的公開興趣與這條動線較合。", tool_calls=[])
+
+    def read(call, _ctx, **_kwargs):
+        executed.append(call.name)
+        if call.name == "places.search_nearby":
+            return ToolResult(ok=True, data={"places": [{"name": "中央公園"}]})
+        if call.name == "relationship.list_accepted_contacts":
+            return ToolResult(ok=True, data={
+                "contacts": [{"contact_ref": "contact_1", "display_name": "小安"}],
+                "truncated": False, "total_count": 1, "names_complete": True,
+            })
+        assert call.name == "relationship.get_contact_evidence"
+        assert call.arguments == {"contact_refs": ["contact_1"]}
+        return ToolResult(ok=True, data={
+            "contacts": [{"contact_ref": "contact_1", "display_name": "小安", "initial_interest": "散步"}],
+            "unavailable_refs": [],
+        })
+
+    monkeypatch.setattr(pi_runtime, "generate_chat_completion_with_tools", provider)
+    monkeypatch.setattr(tool_runtime, "execute_tool", read)
+    result = public_turn.run_pi_public_turn(
+        request, confirmation_collection=store.c,
+        contact_selection_collection=store.s, runs_collection=store.r,
+    )
+    assert executed == [
+        "places.search_nearby", "relationship.list_accepted_contacts",
+        "relationship.get_contact_evidence",
+    ]
+    assert model_calls == 4
+    assert "小安" in result.reply
+    assert result.choice_prompt is None
