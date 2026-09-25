@@ -9,6 +9,10 @@ preview/commit/status/reconcile/rollback, default OFF. The private 9001 counterp
 uses a distinct path/body/time-bound HMAC scope, not a model/user-supplied owner.
 See [transaction/fence/recovery contract](../PREFERENCE_BOOTSTRAP_RUNTIME.md).
 No new Pi tool or matching confirmation bypass is introduced.
+Bootstrap `complete_set` accepts at most 10 items **combined** across PREFERS and
+AVOIDS, with whole-request rejection above that bound. `add_only` stays at
+min(5, ordinary memory limit); extraction/write caps are unchanged. Social and
+the signed 9001 boundary use the same count validator; no chunked complete-set.
 
 `GET /api/conversation/summary-status?room_id=...` 與 `POST /api/conversation/summary-rebuild` 使用Appwrite Bearer JWT解析owner。GET只回有界狀態／數量，POST body僅接受room_id；不回摘要原文、其他房間或rollout authority。全域試行批准只由本機operator CLI寫入獨立rollout record；Public Context gate保持read-only。正常turn的compaction改為持久job，由Social lifecycle worker執行既有profile coverage與摘要管線。詳細契約見 [Summary operations](../SUMMARY_ROLLOUT_OPERATIONS.md)。
 

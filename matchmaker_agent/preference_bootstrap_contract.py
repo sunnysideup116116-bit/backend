@@ -19,6 +19,8 @@ POLICY = "preference-bootstrap-v1"
 MAX_SNAPSHOT = 100
 MAX_BYTES = 262144
 PREVIEW_TTL = 600
+COMPLETE_SET_MAX_ITEMS = 10
+ADD_ONLY_MAX_ITEMS = 5
 PROTECTED = r"(?:黑人|白人|黃種人|種族|族裔|宗教|信仰|穆斯林|基督教|同性戀|性傾向|性別認同|跨性別|殘障|身心障礙|疾病|政治立場|國籍|公民身分)"
 
 
@@ -63,10 +65,17 @@ def operation_id(value):
     return value
 
 
-def normalize_items(prefers, avoids):
-    import re
+def validate_bootstrap_item_count(prefers, avoids, *, mode):
+    """One request total, never a larger ordinary memory/extraction quota."""
+    require(mode in {"add_only", "complete_set"}, "invalid_bootstrap_mode", 422)
     require(isinstance(prefers, list) and isinstance(avoids, list), "both_polarities_required", 422)
-    require(1 <= len(prefers) + len(avoids) <= min(5, durable_memory_limit()), "bootstrap_item_limit", 422)
+    limit = COMPLETE_SET_MAX_ITEMS if mode == "complete_set" else min(ADD_ONLY_MAX_ITEMS, durable_memory_limit())
+    require(1 <= len(prefers) + len(avoids) <= limit, "bootstrap_item_limit", 422)
+
+
+def normalize_items(prefers, avoids, *, mode="add_only"):
+    import re
+    validate_bootstrap_item_count(prefers, avoids, mode=mode)
     items = {}
     for relation, values in (("PREFERS", prefers), ("AVOIDS", avoids)):
         for raw in values:

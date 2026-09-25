@@ -83,6 +83,8 @@ Mongo profile 建檔由 [Profile writer boundary](docs/PROFILE_WRITER_HARDENING.
 不屬於 Pi 工具。Owner JWT preview/commit 採 Graph owner revision/fence 與可恢復 Mongo
 projection；完整集合必須分別確認 PREFERS/AVOIDS，才退休 owner-scoped legacy 關係。
 一般記憶、註冊、回饋、修正與 context writer 共用 fence；不新增 semantic/embedding 流程。
+Bootstrap `complete_set` 單次 PREFERS＋AVOIDS 合計最多 10 筆，超額整次拒絕，
+不拆成多次完整集合提交；`add_only` 與一般 memory extraction/write cap 不變。
 
 正式啟動入口只有 `start_all.sh`。它在清 ports 與建立 logs 前檢查 Node 版本、Pi dependency 與 bridge self-check，再啟動固定的 Social `8000`、Risk `8001`、Matchmaker `9001`、Guardrail `8081`。
 

@@ -156,7 +156,7 @@ class BootstrapGraph:
     def preview(self, owner, mode, prefers, avoids, mongo_snapshot_hash=None):
         require(enabled(), "preference_bootstrap_disabled", 503)
         self.read(require_schema)
-        items = normalize_items(prefers, avoids)
+        items = normalize_items(prefers, avoids, mode=mode)
         plan, before = self.read(build_plan, owner, mode, items)
         payload = {"policy": POLICY, "normalization_policy": FRESH_PREFERENCE_NORMALIZATION_POLICY,
                    "owner": owner, "mode": mode, "preview_id": str(uuid.uuid4()),
