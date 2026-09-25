@@ -74,6 +74,11 @@ python scripts/retire_public_dag_state.py --verify
 
 ## 啟動與驗證
 
+偏好重新確認的 [bootstrap domain API](docs/PREFERENCE_BOOTSTRAP_RUNTIME.md) 預設關閉，
+不屬於 Pi 工具。Owner JWT preview/commit 採 Graph owner revision/fence 與可恢復 Mongo
+projection；完整集合必須分別確認 PREFERS/AVOIDS，才退休 owner-scoped legacy 關係。
+一般記憶、註冊、回饋、修正與 context writer 共用 fence；不新增 semantic/embedding 流程。
+
 正式啟動入口只有 `start_all.sh`。它在清 ports 與建立 logs 前檢查 Node 版本、Pi dependency 與 bridge self-check，再啟動固定的 Social `8000`、Risk `8001`、Matchmaker `9001`、Guardrail `8081`。
 
 主要驗證包括 Social 離線 suite、shared confirmation/write/Calendar 測試、Pi bridge 測試、registration/app voice、啟動 lifecycle、Flutter analyze/widget tests，以及 `scripts/build_web.sh`。提交前必須執行 GitNexus `detect-changes --scope all`。

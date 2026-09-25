@@ -1,6 +1,7 @@
 """Synthetic-only durable input fidelity tests; all storage/provider I/O mocked."""
 
 import json
+from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
 import mongomock
@@ -121,7 +122,7 @@ class TestInputFidelityMemory:
     def test_mongo_full_source_and_metadata_round_trip(self):
         collection = mongomock.MongoClient().db.facts
         label = "A preference for quiet castle visits without guided tours and crowds"
-        with patch.object(store, "PREFERENCE_FACTS", collection):
+        with patch.object(store, "PREFERENCE_FACTS", collection), patch.object(store, "db", collection.database), patch.object(store, "projection_write", return_value=nullcontext(None)):
             saved = store.upsert_preference_facts("owner", [self.proposal(label)], source="test")
             actual = store.list_preference_facts("owner")[0]
         assert saved[0]["semantic_text"] == actual["semantic_text"] == label
@@ -162,7 +163,7 @@ class TestInputFidelityMemory:
     def test_legacy_mongo_read_keeps_original_identity_and_unknown_fidelity(self):
         collection = mongomock.MongoClient().db.facts
         collection.insert_one({"user_id": "owner", "concept_key": "legacy_coffee", "label": "Coffee", "active": True})
-        with patch.object(store, "PREFERENCE_FACTS", collection):
+        with patch.object(store, "PREFERENCE_FACTS", collection), patch.object(store, "db", collection.database):
             actual = store.list_preference_facts("owner")[0]
         assert actual["key"] == "legacy_coffee"
         assert actual["canonicalization_version"] == "legacy_unknown"

@@ -154,7 +154,12 @@ def test_recent_context_projection_cannot_overwrite_v2_identity():
     driver, session = MagicMock(), MagicMock()
     driver.__enter__.return_value = driver
     driver.session.return_value.__enter__.return_value = session
-    session.run.return_value.single.return_value = None
+    session.execute_write.side_effect = lambda callback: callback(session)
+    def run(query, **_kwargs):
+        row = MagicMock()
+        row.single.return_value = {"revision": 0, "epoch_at": 0} if "AS revision" in query else None
+        return row
+    session.run.side_effect = run
     with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
         result = asyncio.run(agent_api.project_current_context(agent_api.ContextProjectionRequest(
             user_id="owner", concepts=[{"label": "Hiking", "key": canonicalize_concept("Hiking").key}],
@@ -216,7 +221,8 @@ def test_correction_of_same_v2_identity_is_read_only():
         result = asyncio.run(agent_api.memory_action(agent_api.MemoryActionRequest(
             user_id="owner", key=identity.key, action="correct", value="K-pop")))
     assert result["status"] == "success"
-    assert tx.run.call_count == 1
+    assert tx.run.call_count == 2  # serialization guard + read; no memory mutation/bump
+    assert "AS revision" in tx.run.call_args_list[0].args[0]
     assert "DELETE" not in tx.run.call_args.args[0]
 
 
@@ -337,7 +343,12 @@ def test_context_projection_never_creates_reserved_v2_identity(existing_poison):
     driver, session = MagicMock(), MagicMock()
     driver.__enter__.return_value = driver
     driver.session.return_value.__enter__.return_value = session
-    session.run.return_value.single.return_value = {"key": key} if existing_poison else None
+    session.execute_write.side_effect = lambda callback: callback(session)
+    def run(query, **_kwargs):
+        row = MagicMock()
+        row.single.return_value = {"revision": 0, "epoch_at": 0} if "AS revision" in query else ({"key": key} if existing_poison else None)
+        return row
+    session.run.side_effect = run
     with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
         asyncio.run(agent_api.project_current_context(agent_api.ContextProjectionRequest(
             user_id="owner", concepts=[{"label": "Hiking", "key": key}], expires_at=time.time() + 1000)))
@@ -569,8 +580,9 @@ def test_fresh_correction_and_feedback_apply_one_language_contract():
         corrected = asyncio.run(agent_api.memory_action(agent_api.MemoryActionRequest(
             user_id="owner", key=old.key, action="correct", value="阅读科幻小说")))
     assert corrected["key"] == fresh.key
-    assert tx.run.call_args.kwargs["label"] == "閱讀科幻小說"
-    assert tx.run.call_args.kwargs["semantic_input_hash"] == fresh.semantic_input_hash
+    correction = next(call for call in tx.run.call_args_list if "DELETE existing" in call.args[0])
+    assert correction.kwargs["label"] == "閱讀科幻小說"
+    assert correction.kwargs["semantic_input_hash"] == fresh.semantic_input_hash
     with patch.object(agent_api.agent, "generate_graph_reflection", return_value=json.dumps({
         "relationships": [{"relation_type": "DISLIKES_TRAIT", "trait": "阅读科幻小说"}]})), \
             patch.object(agent_api, "apply_memory", new_callable=AsyncMock,

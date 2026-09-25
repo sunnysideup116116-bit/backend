@@ -932,7 +932,8 @@ def process_profile_message(user_id: str, message: str, message_id: str | None, 
             return {"status": "skipped", "reason": "stale_claim"}
         try:
             from services.memory_service import MemoryWriteError, apply_profile_memory_proposals
-            saved_memories = apply_profile_memory_proposals(user_id, decision["memories"], surface, message_id, match_id)
+            saved_memories = apply_profile_memory_proposals(user_id, decision["memories"], surface, message_id, match_id,
+                                                          source_created_at=_timestamp(source.get("timestamp")))
         except MemoryWriteError as exc:
             memory_error = exc.error_code
         except Exception as exc:

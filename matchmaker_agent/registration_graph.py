@@ -3,6 +3,7 @@ import hashlib
 import math
 import re
 import time
+from matchmaker_agent.preference_write_fence import lock_preferences, bump_preferences
 
 from pydantic import BaseModel, Field
 from concept_identity import (
@@ -112,6 +113,9 @@ def seed_registration(tx, user_id, message_id, memories):
     clean = list(clean_by_key.values())
     if not clean:
         return []
+    # A historical registration job cannot resurrect preferences after an
+    # owner-confirmed set; missing source time is rejected once an epoch exists.
+    lock_preferences(tx, user_id)
     row = tx.run("""
         MERGE (u:User {id:$user_id})
         SET u.registration_projection_lock=coalesce(u.registration_projection_lock,0)+1
@@ -139,4 +143,5 @@ def seed_registration(tx, user_id, message_id, memories):
         ON CREATE SET r.source='registration_interest',r.evidence_span=item.evidence_span,
                       r.confidence=item.confidence,r.last_seen_at=$now
     """, user_id=user_id, message_id=message_id, memories=clean, now=now).consume()
+    bump_preferences(tx, user_id)
     return clean

@@ -31,7 +31,7 @@ def test_identity_keeps_account_id_and_uses_revisioned_name():
 def test_seed_has_atomic_marker_provenance_and_event_eligible_kind():
     transaction = tx()
     result = seed_registration(transaction, "account1", registration_message_id("account1"), [memory()])
-    query = transaction.run.call_args.args[0]
+    query = next(c.args[0] for c in transaction.run.call_args_list if "MemoryObservation" in c.args[0])
     assert result[0]["category"] == "interest"
     assert "registration_seed_finished_at" in query and "MemoryObservation" in query
     assert "r.source='registration_interest'" in query
@@ -63,7 +63,8 @@ def test_registration_seed_splits_clear_interests_into_atomic_concepts():
 def test_existing_or_disabled_memory_blocks_all_bootstrap_edges():
     transaction = tx(False)
     assert seed_registration(transaction, "account1", registration_message_id("account1"), [memory()]) == []
-    transaction.run.assert_called_once()
+    assert transaction.run.call_count == 2  # owner fence, then insert-only eligibility
+    assert all("MERGE (u)-[r:PREFERS]" not in call.args[0] for call in transaction.run.call_args_list)
 
 
 def test_wrong_owner_observation_is_rejected_before_write():

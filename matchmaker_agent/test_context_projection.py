@@ -52,10 +52,11 @@ class ContextProjectionEndpointTests(unittest.TestCase):
         session = MagicMock()
         driver.__enter__.return_value = driver
         driver.session.return_value.__enter__.return_value = session
+        session.execute_write.side_effect = lambda callback: callback(session)
 
         def run(query, **_kwargs):
             result = MagicMock()
-            result.single.return_value = None
+            result.single.return_value = {"revision": 0, "epoch": 0, "epoch_at": 0, "pending": None} if "AS revision" in query else None
             return result
 
         session.run.side_effect = run
@@ -74,7 +75,9 @@ class ContextProjectionEndpointTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["concept_count"], 1)
         queries = [call.args[0] for call in session.run.call_args_list]
-        self.assertTrue(any("DELETE expired" in query for query in queries))
+        self.assertFalse(any("MATCH ()-[expired" in query for query in queries))
+        self.assertIn("preference_revision", queries[0])
+        session.execute_write.assert_called_once()
         self.assertTrue(any("DELETE old" in query for query in queries))
         edge_call = next(call for call in session.run.call_args_list if "CURRENTLY_WANTS" in call.args[0] and "MERGE (u)-[r" in call.args[0])
         self.assertEqual(set(edge_call.kwargs), {"user_id", "key", "label", "expires_at"})

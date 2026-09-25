@@ -170,6 +170,7 @@ def process_memory_outbox_once(limit: int = 3) -> dict[str, int]:
                     str(record.get("surface") or "outbox_retry")[:40],
                     str(record.get("message_id")) if record.get("message_id") else None,
                     str(record.get("match_id")) if record.get("match_id") else None,
+                    source_created_at=float(record.get("source_created_at") or 0),
                 )
         except MemoryWriteError as exc:
             _finish_failure(record, exc.error_code, now=time.time(), retryable=exc.retryable)
