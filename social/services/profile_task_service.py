@@ -9,6 +9,7 @@ import time
 
 from bson.objectid import ObjectId
 
+from services.profile_writer import update_profile as write_profile
 from database import messages_coll, profiles_coll
 from services.profile_skills import PROFILE_RUNS, process_profile_message, profile_skills_mode_for_user
 from services.message_use_service import is_reusable_for_profile
@@ -304,7 +305,7 @@ def queue_profile_skills(
     if safe_token and profile_mode != "off":
         now = time.time()
         try:
-            profiles_coll.update_one(
+            write_profile(profiles_coll,
                 {"user_id": user_id},
                 {"$set": {"agentic_profile_process": {
                     "version": "v1", "kind": "recent_context", "run_key": safe_token,

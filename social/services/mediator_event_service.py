@@ -1,6 +1,7 @@
 import time
 import uuid
 
+from services.profile_writer import update_profile as write_profile
 from database import profiles_coll
 
 
@@ -55,7 +56,7 @@ def queue_mediator_event(user_id: str, message: str, event_type: str, **extra):
     if event_key:
         # A retried transition must not enqueue a second card for the same state change.
         query["mediator_inbox.event_key"] = {"$ne": event_key}
-    result = profiles_coll.update_one(
+    result = write_profile(profiles_coll,
         query,
         {"$push": {"mediator_inbox": {"$each": [event], "$sort": {"priority": -1, "created_at": 1}}}},
         upsert=not bool(event_key),

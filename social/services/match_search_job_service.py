@@ -16,6 +16,7 @@ from typing import Any, Callable
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from services.profile_writer import update_profile as write_profile
 from database import db, matches_coll, profiles_coll
 from services.mediator_event_service import queue_mediator_event
 from services.proposal_namespace import RELATIONSHIP_MATCH_NAMESPACE
@@ -257,7 +258,7 @@ def enqueue_match_search(
             {"_id": 0, "status": 1, "idempotency_key": 1},
         ) or {}
         return {"status": "already_searching" if existing else "failed"}
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": user_id},
         {"$set": {
             "matchmaking_in_progress": True,

@@ -21,6 +21,7 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from services.profile_writer import update_profile as write_profile
 from database import matches_coll, messages_coll, profiles_coll
 from models import DirectChatRequest
 from services.ai_service import generate_chat_completion
@@ -528,7 +529,7 @@ def _run_public_stream_turn(
         and mark_first_message_for_title(room_id, req.user_id)
     ):
         queue_room_title(room_id, req.user_id, request_message)
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": req.user_id}, {"$set": {"last_user_activity_at": time.time()}}, upsert=True,
     )
     return _complete_public_turn(
@@ -828,7 +829,7 @@ def direct_chat(
                 "risk_assessment": risk_projection,
                 "ui_priority": risk_projection["ui_priority"],
             }
-        profiles_coll.update_one(
+        write_profile(profiles_coll,
             {"user_id": req.user_id}, {"$set": {"last_user_activity_at": time.time()}}, upsert=True,
         )
         return {
@@ -884,7 +885,7 @@ def direct_chat(
             "ui_priority": risk_projection["ui_priority"],
         }
 
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": req.user_id}, {"$set": {"last_user_activity_at": time.time()}}, upsert=True,
     )
     background_tasks.add_task(

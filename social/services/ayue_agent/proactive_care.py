@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 from bson.objectid import ObjectId
 from pydantic import BaseModel, ConfigDict, Field
 
+from services.profile_writer import update_profile as write_profile
 from database import messages_coll, profiles_coll
 from services.ai_service import generate_chat_completion
 from services.chat_service import generate_room_id
@@ -101,7 +102,7 @@ def schedule_proactive_care(user_id: str, frequency: object, *, last_activity: f
         unset["next_proactive_care_at"] = ""
     else:
         update["next_proactive_care_at"] = max(now, last_activity + seconds)
-    profiles_coll.update_one({"user_id": user_id}, {"$set": update, "$unset": unset}, upsert=True)
+    write_profile(profiles_coll, {"user_id": user_id}, {"$set": update, "$unset": unset}, upsert=True)
 
 
 def record_proactive_activity(user_id: str, *, now: float | None = None) -> float:
