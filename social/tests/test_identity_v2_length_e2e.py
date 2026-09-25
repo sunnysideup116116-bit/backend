@@ -7,6 +7,7 @@ contract is 120 characters; the full durable-memory contract is independently
 
 import hashlib
 import json
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -71,7 +72,7 @@ class TestPreferenceLengthBoundary:
     def test_mongo_projection_preserves_the_boundary_or_writes_nothing(self, semantic_text):
         collection = mongomock.MongoClient().db.preferences
         items = [{"label": "Coffee Shop", "stance": "like"}, {"label": semantic_text, "stance": "like"}]
-        with patch.object(facts, "PREFERENCE_FACTS", collection):
+        with patch.object(facts, "PREFERENCE_FACTS", collection), patch.object(facts, "projection_write", return_value=nullcontext(None)):
             if len(semantic_text) == 501:
                 with pytest.raises(PreferenceTextError) as raised:
                     facts.upsert_preference_facts("synthetic-owner", items, source="synthetic")

@@ -308,6 +308,12 @@ Context Engine 的輸出應是 provider-neutral typed bundle，而不是 prompt 
 
 ## 4. Graph Memory 改善邊界
 
+Owner-confirmed Identity-v2 bootstrap 的現行實作規格見
+[PREFERENCE_BOOTSTRAP_RUNTIME.md](PREFERENCE_BOOTSTRAP_RUNTIME.md)。它預設 OFF，
+以 shared owner fence/revision 保護正常 writers，只有 explicit complete_set 同意才
+退休 legacy PREFERS/AVOIDS；Graph 原子提交與 Mongo projection 明確分開並可恢復。
+不是自動 legacy migration，也不改 semantic flags、embedding 或既有 qualification。
+
 ### 4.1 現行最小 schema
 
 ```text

@@ -46,10 +46,12 @@ class DeclineFeedbackTests(unittest.TestCase):
             result = asyncio.run(agent_api.apply_memory(request))
         self.assertEqual(result["status"], "success")
         session.execute_write.assert_called_once()
-        self.assertEqual(transaction.run.call_count, 3)
-        self.assertIn("UNWIND $keys", transaction.run.call_args_list[0].args[0])
-        self.assertIn("MemoryObservation", transaction.run.call_args_list[1].args[0])
-        self.assertIn("UNWIND $memories", transaction.run.call_args_list[2].args[0])
+        self.assertEqual(transaction.run.call_count, 5)
+        self.assertIn("AS revision", transaction.run.call_args_list[0].args[0])
+        self.assertIn("UNWIND $keys", transaction.run.call_args_list[1].args[0])
+        self.assertIn("MemoryObservation", transaction.run.call_args_list[2].args[0])
+        self.assertIn("UNWIND $memories", transaction.run.call_args_list[3].args[0])
+        self.assertIn("preference_revision,0)+1", transaction.run.call_args_list[4].args[0])
 
     def test_duplicate_marker_reports_prior_atomic_memory_as_applied(self):
         driver, session, transaction = MagicMock(), MagicMock(), MagicMock()
@@ -68,7 +70,7 @@ class DeclineFeedbackTests(unittest.TestCase):
         self.assertEqual(
             result["memories"][0]["key"], canonicalize_concept("安靜咖啡廳").key,
         )
-        self.assertEqual(transaction.run.call_count, 2)
+        self.assertEqual(transaction.run.call_count, 3)
 
     def test_writer_splits_a_clear_compound_label_before_graph_merge(self):
         driver, session, transaction = MagicMock(), MagicMock(), MagicMock()

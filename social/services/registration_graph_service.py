@@ -171,4 +171,5 @@ def process_registration_job(record):
         if not result.matched_count:
             raise RuntimeError("registration_lease_lost")
     if memories:
-        apply_profile_memory_proposals(record["user_id"], memories, "registration_interest", record["message_id"])
+        apply_profile_memory_proposals(record["user_id"], memories, "registration_interest", record["message_id"],
+                                       source_created_at=float(record.get("created_at") or 0))

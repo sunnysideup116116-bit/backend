@@ -56,12 +56,13 @@ def validate_memory_proposals(proposals: list[dict]) -> list[dict]:
 
 
 def _queue_memory_retry(user_id: str, proposals: list[dict], surface: str, message_id: str | None,
-                        match_id: str | None, error_code: str) -> None:
+                        match_id: str | None, error_code: str, *, source_created_at=None) -> None:
     """Keep validated proposals for retry without storing raw chat text."""
     proposals = validate_memory_proposals(proposals)
     document = {
         "user_id": user_id, "memories": proposals, "surface": surface, "match_id": match_id,
         "message_id": message_id, "status": "pending", "last_error_code": error_code,
+        "source_created_at": source_created_at,
         "updated_at": time.time(), "next_attempt_at": time.time() + 30,
     }
     try:
@@ -150,13 +151,16 @@ def refresh_owner_memory_profile(user_id: str, profile: dict, *, force=False) ->
     """
     if not isinstance(profile, dict) or profile.get("user_id") != user_id:
         return profile
+    if profile.get("preference_bootstrap_pending"):
+        return {**profile, "profile_memory_preview": [], "profile_memory_summary": ""}
     now = time.time()
     synced = float(profile.get("profile_memory_synced_at") or 0)
     retry_at = float(profile.get("profile_memory_retry_at") or 0)
     if not force and (now - synced < 300 or retry_at > now):
         return profile
     revision = profile.get("profile_memory_revision")
-    guard = {"user_id": user_id, "profile_memory_revision": revision}
+    guard = {"user_id": user_id, "profile_memory_revision": revision,
+             "preference_bootstrap_pending": {"$exists": False}}
     try:
         snapshot = get_graph_memory_snapshot(user_id, limit=12)
         if not snapshot["available"]:
@@ -212,6 +216,8 @@ def search_owner_memory(user_id: str, query: str, profile: dict) -> dict:
 
 def _sync_memory_projection(user_id: str, learned: list[dict]) -> list[dict]:
     base = profiles_coll.find_one({"user_id": user_id}) or {}
+    if base.get("preference_bootstrap_pending"):
+        return []
     snapshot = get_graph_memory_snapshot(user_id, limit=12)
     if snapshot["available"]:
         source = snapshot["items"]
@@ -224,7 +230,8 @@ def _sync_memory_projection(user_id: str, learned: list[dict]) -> list[dict]:
         source = list(merged.values())
     compact = sorted(source,
                      key=lambda x: x.get("last_seen_at", 0), reverse=True)[:12]
-    updated = profiles_coll.update_one({"user_id": user_id, "profile_memory_revision": base.get("profile_memory_revision")}, {"$set": {
+    updated = profiles_coll.update_one({"user_id": user_id, "profile_memory_revision": base.get("profile_memory_revision"),
+                                       "preference_bootstrap_pending": {"$exists": False}}, {"$set": {
         "profile_memory_preview": compact,
         "profile_memory_summary": memory_summary(compact),
         "profile_memory_synced_at": time.time() if snapshot["available"] else 0,
@@ -235,26 +242,31 @@ def _sync_memory_projection(user_id: str, learned: list[dict]) -> list[dict]:
         return list(latest.get("profile_memory_preview") or [])[:12]
     return compact
 
-def apply_profile_memory_proposals(user_id: str, proposals: list[dict], surface: str, message_id: str | None, match_id: str | None = None) -> list[dict]:
+def apply_profile_memory_proposals(user_id: str, proposals: list[dict], surface: str, message_id: str | None, match_id: str | None = None, *, source_created_at=None) -> list[dict]:
     """Write validated profile-memory proposals and surface graph failures explicitly."""
     if not proposals:
         return []
     proposals = validate_memory_proposals(proposals)
+    if source_created_at is None:
+        # Explicit/manual fresh operations use entry time. Async callers pass
+        # original saved source time and outbox retries retain it unchanged.
+        source_created_at = time.time()
     try:
         # Old Matchmaker servers do not expose this route: rolling-version
         # mismatch fails before an old writer can truncate and persist v2 input.
         response = requests.post(f"{AGENT_URL}/api/v2/memory/apply", json={
             "user_id": user_id, "memories": proposals, "surface": surface,
             "match_id": match_id, "message_id": message_id,
+            "source_created_at": source_created_at,
         }, timeout=30)
     except requests.RequestException:
         error_code = "memory_agent_unavailable"
-        _queue_memory_retry(user_id, proposals, surface, message_id, match_id, error_code)
+        _queue_memory_retry(user_id, proposals, surface, message_id, match_id, error_code, source_created_at=source_created_at)
         raise MemoryWriteError(error_code)
 
     if response.status_code == 404:
         error_code = "memory_apply_endpoint_not_found"
-        _queue_memory_retry(user_id, proposals, surface, message_id, match_id, error_code)
+        _queue_memory_retry(user_id, proposals, surface, message_id, match_id, error_code, source_created_at=source_created_at)
         raise MemoryWriteError(error_code)
     if response.status_code in {400, 409, 413, 422}:
         raise MemoryWriteError("memory_validation_rejected", retryable=False)
@@ -263,7 +275,7 @@ def apply_profile_memory_proposals(user_id: str, proposals: list[dict], surface:
         payload = response.json()
     except (requests.RequestException, ValueError) as exc:
         error_code = "memory_agent_invalid_response"
-        _queue_memory_retry(user_id, proposals, surface, message_id, match_id, error_code)
+        _queue_memory_retry(user_id, proposals, surface, message_id, match_id, error_code, source_created_at=source_created_at)
         raise MemoryWriteError(error_code) from exc
     if payload.get("status") == "error":
         error_code = str(payload.get("error_code") or "graph_write_failed")[:80]
@@ -272,7 +284,7 @@ def apply_profile_memory_proposals(user_id: str, proposals: list[dict], surface:
             "too_many_preferences", "evidence_too_long", "legacy_unverified_memory_proposal",
         }:
             raise MemoryWriteError(error_code, retryable=False)
-        _queue_memory_retry(user_id, proposals, surface, message_id, match_id, error_code)
+        _queue_memory_retry(user_id, proposals, surface, message_id, match_id, error_code, source_created_at=source_created_at)
         raise MemoryWriteError(error_code)
     learned = payload.get("memories", [])
 
@@ -288,6 +300,7 @@ def apply_profile_memory_proposals(user_id: str, proposals: list[dict], surface:
     profiles_coll.update_one({"user_id": user_id}, {"$push": {"memory_notices": {"$each": notices}}}, upsert=True)
     return learned
 def apply_memory_action(user_id: str, key: str, action: str, value: str | None = None):
+    source_created_at = time.time()
     if action == "correct":
         try:
             value = normalize_fresh_preference_text(value)
@@ -296,6 +309,7 @@ def apply_memory_action(user_id: str, key: str, action: str, value: str | None =
     try:
         response = requests.post(f"{AGENT_URL}/api/v2/memory/action", json={
             "user_id": user_id, "key": key, "action": action, "value": value,
+            "source_created_at": source_created_at,
         }, timeout=30)
         response.raise_for_status()
         result = response.json()

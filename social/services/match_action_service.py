@@ -233,6 +233,7 @@ def apply_transition_effects(
                 # Keep the compatibility field without sending unselected traits.
                 "target_traits": {},
                 "explicit_reasons": explicit_reasons,
+                "source_created_at": float(match_doc.get("updated_at") or 0),
             }, timeout=15)
             response.raise_for_status()
             payload = response.json()
@@ -248,6 +249,7 @@ def apply_transition_effects(
                     actor,
                     memories,
                     source="match_feedback",
+                    source_created_at=float(match_doc.get("updated_at") or 0),
                     message_id=f"feedback:{match_id}:{actor}",
                     match_id=match_id,
                 )

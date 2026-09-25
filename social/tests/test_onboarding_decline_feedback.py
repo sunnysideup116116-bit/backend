@@ -109,9 +109,11 @@ def test_selected_reasons_survive_http_cas_and_feedback_with_owner_evidence(http
     post.assert_called_once_with("http://127.0.0.1:9001/api/v2/feedback", json={
         "user_id": actor, "target_id": other, "action": "decline",
         "target_traits": {}, "explicit_reasons": reasons,
+        "source_created_at": matches.rows[0]["updated_at"],
     }, timeout=15)
     save.assert_called_once_with(
         actor, post.return_value.json.return_value["memories"], source="match_feedback",
+        source_created_at=matches.rows[0]["updated_at"],
         message_id=f"feedback:{MATCH_ID}:{actor}", match_id=MATCH_ID,
     )
     assert matches.rows[0]["status"] == "declined"

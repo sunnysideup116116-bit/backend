@@ -1,6 +1,7 @@
 """Fresh-input script parity and immutable stored-v2 evidence, entirely offline."""
 
 import json
+from contextlib import nullcontext
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -75,6 +76,7 @@ class TestFreshNormalizationContract:
                                      "candidate_ids": [], "candidates": []}
         with patch.object(identity, "_fresh_preference_converter", side_effect=identity.PreferenceTextError("preference_normalizer_unavailable")), \
                 patch.object(facts, "PREFERENCE_FACTS", collection), \
+                patch.object(facts, "projection_write", return_value=nullcontext(None)), \
                 patch.object(exact.requests, "post", return_value=response) as post:
             assert memory.validate_memory_proposals([stored])[0]["key"] == stored["key"]
             assert memory.normalize_memory_item(stored)["semantic_text"] == "安静的咖啡厅"

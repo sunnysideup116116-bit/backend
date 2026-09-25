@@ -4,6 +4,12 @@
 
 ## Public HTTP boundary
 
+Preference bootstrap adds owner-authenticated `/api/profile/preferences/bootstrap`
+preview/commit/status/reconcile/rollback, default OFF. The private 9001 counterpart
+uses a distinct path/body/time-bound HMAC scope, not a model/user-supplied owner.
+See [transaction/fence/recovery contract](../PREFERENCE_BOOTSTRAP_RUNTIME.md).
+No new Pi tool or matching confirmation bypass is introduced.
+
 `GET /api/conversation/summary-status?room_id=...` 與 `POST /api/conversation/summary-rebuild` 使用Appwrite Bearer JWT解析owner。GET只回有界狀態／數量，POST body僅接受room_id；不回摘要原文、其他房間或rollout authority。全域試行批准只由本機operator CLI寫入獨立rollout record；Public Context gate保持read-only。正常turn的compaction改為持久job，由Social lifecycle worker執行既有profile coverage與摘要管線。詳細契約見 [Summary operations](../SUMMARY_ROLLOUT_OPERATIONS.md)。
 
 `routers/public_chat.py` 驗證 owner 後建立 `PublicAgentRequestContext`，呼叫 `run_public_agent_turn()`。公開聊天的 JSON 與 NDJSON URL、choice fields、interaction blocks、sources 與主要 response shape 保持相容；新回覆的 `agent_mode`、`agent_version` 固定為 `pi`。

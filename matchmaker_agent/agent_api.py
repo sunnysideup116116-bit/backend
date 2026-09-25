@@ -65,7 +65,11 @@ from matchmaker import (
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'social'))
 from agent_quota.internal import MatchmakerQuotaMiddleware, start_worker, stop_worker
+from matchmaker_agent.preference_write_fence import lock_preferences, bump_preferences, PreferenceFenceError, fence_error_result
+from matchmaker_agent.preference_mutations import write_preference_edges
 app = FastAPI()
+from matchmaker_agent.preference_bootstrap_api import router as preference_bootstrap_router
+app.include_router(preference_bootstrap_router)
 app.add_middleware(MatchmakerQuotaMiddleware)
 app.router.add_event_handler('startup', validate_signing_config)
 app.router.add_event_handler('startup', start_worker)
@@ -1053,6 +1057,7 @@ def deprecated_trigger_daily_search():
 
 class FeedbackRequest(BaseModel):
     user_id: str
+    source_created_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     target_id: str # noqa
     action: str # "accept" ??"decline"
     target_traits: dict # 撠?扳
@@ -1092,6 +1097,7 @@ async def receive_feedback(req: FeedbackRequest):
     A bare decision is not preference consent. Neither unselected target traits
     nor a previous request's in-memory history may supply additional dislikes.
     """
+    source_created_at = req.source_created_at
     if req.action not in {"accept", "decline"}:
         raise HTTPException(status_code=400, detail={"code": "invalid_feedback_action"})
     if not any(reason.strip() for reason in req.explicit_reasons):
@@ -1153,6 +1159,7 @@ async def receive_feedback(req: FeedbackRequest):
         outcome = await apply_memory(MemoryApplyRequest(
             user_id=req.user_id, memories=memories[offset:offset + batch_limit],
             surface="match_feedback",
+            source_created_at=source_created_at,
         ))
         if outcome.get("status") != "success":
             raise HTTPException(status_code=503, detail={"code": "feedback_graph_unavailable"})
@@ -1261,6 +1268,7 @@ class MemoryApplyRequest(BaseModel):
     surface: str = "global"
     match_id: str | None = None
     message_id: str | None = None
+    source_created_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
 
 class PreferenceCandidateRequest(BaseModel):
@@ -1344,6 +1352,7 @@ class MemoryActionRequest(BaseModel):
     key: str = Field(min_length=2, max_length=MAX_PREFERENCE_KEY_CHARS)
     action: str
     value: str | None = None
+    source_created_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
 class ContextProjectionRequest(BaseModel):
     user_id: str
@@ -1392,38 +1401,36 @@ async def project_current_context(req: ContextProjectionRequest):
     try:
         with GraphDatabase.driver(URI, auth=AUTH) as driver:
             with driver.session(database=DATABASE) as session:
-                session.run("""
-                    MATCH ()-[expired:CURRENTLY_WANTS]->()
-                    WHERE expired.expires_at < $now
-                    DELETE expired
-                """, now=now).consume()
-                session.run("""
-                    MERGE (u:User {id:$user_id})
-                    WITH u
-                    OPTIONAL MATCH (u)-[old:CURRENTLY_WANTS]->()
-                    DELETE old
-                """, user_id=req.user_id).consume()
-                for item in clean:
-                    existing = session.run("""
-                        MATCH (c:Concept)
-                        WHERE toLower(c.label)=toLower($label)
-                          AND coalesce(c.canonicalization_version, '') <> 'v2'
-                          AND NOT (c.key =~ 'v2_[0-9a-f]{48}')
-                        RETURN c.key AS key LIMIT 1
-                    """, label=item["label"]).single()
-                    key = str(existing["key"] if existing else item["key"])
-                    if is_v2_preference_key(key):
-                        key = _concept_key(item["label"])
-                    session.run("""
-                        MATCH (u:User {id:$user_id})
-                        MERGE (c:Concept {key:$key})
-                        WITH u,c
-                        WHERE coalesce(c.canonicalization_version, '') <> 'v2'
-                        SET c.label=$label, c.kind='activity'
-                        MERGE (u)-[r:CURRENTLY_WANTS]->(c)
-                        SET r.expires_at=$expires_at
-                    """, user_id=req.user_id, key=key, label=item["label"],
-                         expires_at=expires_at).consume()
+                def write_context(tx):
+                    lock_preferences(tx, req.user_id, source_created_at=now)
+                    # Do not delete other owners' relations without their fence.
+                    # Expired-context readers already enforce canonical expiry.
+                    tx.run("""MATCH (u:User {id:$user_id})
+                        OPTIONAL MATCH (u)-[old:CURRENTLY_WANTS]->()
+                        DELETE old""", user_id=req.user_id).consume()
+                    for item in clean:
+                        existing = tx.run("""
+                            MATCH (c:Concept)
+                            WHERE toLower(c.label)=toLower($label)
+                              AND coalesce(c.canonicalization_version, '') <> 'v2'
+                              AND NOT (c.key =~ 'v2_[0-9a-f]{48}')
+                            RETURN c.key AS key LIMIT 1
+                        """, label=item["label"]).single()
+                        key = str(existing["key"] if existing else item["key"])
+                        if is_v2_preference_key(key):
+                            key = _concept_key(item["label"])
+                        tx.run("""
+                            MATCH (u:User {id:$user_id})
+                            MERGE (c:Concept {key:$key})
+                            ON CREATE SET c.label=$label, c.kind='activity'
+                            WITH u,c
+                            WHERE coalesce(c.canonicalization_version, '') <> 'v2'
+                            MERGE (u)-[r:CURRENTLY_WANTS]->(c)
+                            SET r.expires_at=$expires_at
+                        """, user_id=req.user_id, key=key, label=item["label"],
+                             expires_at=expires_at).consume()
+                    bump_preferences(tx, req.user_id)
+                session.execute_write(write_context)
         return {
             "status": "success",
             "user_id": req.user_id,
@@ -1432,7 +1439,9 @@ async def project_current_context(req: ContextProjectionRequest):
             "revision": req.revision,
         }
     except Exception as exc:
-        print(f"[CONTEXT_GRAPH][9001] projection failed user={req.user_id} error={exc}")
+        if isinstance(exc, PreferenceFenceError):
+            return fence_error_result(exc)
+        print(f"[CONTEXT_GRAPH][9001] projection failed error={type(exc).__name__}")
         return {"status": "error", "message": type(exc).__name__}
 
 
@@ -1940,6 +1949,7 @@ async def apply_memory(req: MemoryApplyRequest):
                     return {"memories": seeded, "status": "success" if seeded else "skipped"}
 
                 def write_memory(tx):
+                    lock_preferences(tx, req.user_id, source_created_at=req.source_created_at)
                     assert_existing_preference_identities(tx, clean)
                     if req.message_id:
                         observed = tx.run("""
@@ -1952,28 +1962,8 @@ async def apply_memory(req: MemoryApplyRequest):
                         """, message_id=req.message_id, user_id=req.user_id, now=now).single()
                         if not observed or not observed["created"]:
                             return False
-                    tx.run("""
-                        UNWIND $memories AS item
-                        MERGE (u:User {id:$user_id})
-                        SET u.registration_projection_lock=coalesce(u.registration_projection_lock,0)+1
-                        MERGE (c:Concept {key:item.key})
-                        ON CREATE SET c.label=item.semantic_text, c.kind='preference',
-                                      c.semantic_text=item.semantic_text,
-                                      c.display_label=item.display_label,
-                                      c.canonicalization_version=item.canonicalization_version,
-                                      c.semantic_input_hash=item.semantic_input_hash,
-                                      c.fidelity_status='complete'
-                        WITH u,c,item
-                        OPTIONAL MATCH (u)-[old:PREFERS|AVOIDS|CURRENTLY_WANTS]->(c)
-                        DELETE old
-                        WITH u,c,item
-                        FOREACH (_ IN CASE WHEN item.stance IN ['dislike','avoid'] THEN [1] ELSE [] END |
-                            MERGE (u)-[:AVOIDS]->(c)
-                        )
-                        FOREACH (_ IN CASE WHEN item.stance IN ['like','require'] THEN [1] ELSE [] END |
-                            MERGE (u)-[:PREFERS]->(c)
-                        )
-                    """, user_id=req.user_id, memories=clean).consume()
+                    write_preference_edges(tx, req.user_id, clean)
+                    bump_preferences(tx, req.user_id)
                     return True
 
                 created = session.execute_write(write_memory)
@@ -1982,6 +1972,8 @@ async def apply_memory(req: MemoryApplyRequest):
             "status": "success" if created else "duplicate",
         }
     except Exception as exc:
+        if isinstance(exc, PreferenceFenceError):
+            return {"memories": [], **fence_error_result(exc)}
         if isinstance(exc, PreferenceTextError):
             return {"memories": [], "status": "error", "error_code": exc.code, "retryable": False}
         if str(exc) == "preference_identity_conflict":
@@ -2088,6 +2080,7 @@ async def memory_action(req: MemoryActionRequest):
             with driver.session(database=DATABASE) as session:
                 if req.action == "disable":
                     def disable(tx):
+                        lock_preferences(tx, user_id, source_created_at=req.source_created_at, require_existing=True)
                         row = tx.run("""
                             MATCH (u:User {id:$user_id})-[active:PREFERS|AVOIDS|CURRENTLY_WANTS]->
                                   (concept:Concept {key:$key})
@@ -2100,12 +2093,15 @@ async def memory_action(req: MemoryActionRequest):
                             DELETE active
                             RETURN original_relation
                         """, user_id=user_id, key=key, now=now).single()
+                        if row:
+                            bump_preferences(tx, user_id)
                         return dict(row) if row else None
                     changed = session.execute_write(disable)
                     return {"status": "success" if changed else "not_found"}
 
                 if req.action == "restore":
                     def restore(tx):
+                        lock_preferences(tx, user_id, source_created_at=req.source_created_at, require_existing=True)
                         row = tx.run("""
                             MATCH (u:User {id:$user_id})-[disabled:MEMORY_DISABLED]->
                                   (concept:Concept {key:$key})
@@ -2124,6 +2120,8 @@ async def memory_action(req: MemoryActionRequest):
                                 SET intent.expires_at=original_expires_at)
                             RETURN original_relation,original_expires_at
                         """, user_id=user_id, key=key, now=now).single()
+                        if row:
+                            bump_preferences(tx, user_id)
                         return dict(row) if row else None
                     restored = session.execute_write(restore)
                     if not restored:
@@ -2138,6 +2136,7 @@ async def memory_action(req: MemoryActionRequest):
                 corrected_key, label = identity.key, identity.label
 
                 def correct(tx):
+                    lock_preferences(tx, user_id, source_created_at=req.source_created_at, require_existing=True)
                     original = tx.run("""
                         MATCH (:User {id:$user_id})-[:PREFERS|AVOIDS|CURRENTLY_WANTS|MEMORY_DISABLED]->
                               (old:Concept {key:$key})
@@ -2187,6 +2186,8 @@ async def memory_action(req: MemoryActionRequest):
                     """, user_id=user_id, key=key, corrected_key=corrected_key,
                          label=label, display_label=identity.display_label,
                          semantic_input_hash=identity.semantic_input_hash, now=now).single()
+                    if row:
+                        bump_preferences(tx, user_id)
                     return dict(row) if row else None
                 corrected = session.execute_write(correct)
                 return {
@@ -2195,6 +2196,10 @@ async def memory_action(req: MemoryActionRequest):
                 }
     except Exception as exc:
         print(f"[MEMORY][9001 action] failed error={type(exc).__name__}")
+        if isinstance(exc, PreferenceFenceError):
+            if exc.code == "preference_owner_missing":
+                return {"status": "not_found"}
+            return fence_error_result(exc)
         code = "legacy_identity_unverified" if str(exc) == "legacy_identity_unverified" else "memory_action_failed"
         return {"status": "error", "error_code": code}
 @app.post("/api/chat_triples")
