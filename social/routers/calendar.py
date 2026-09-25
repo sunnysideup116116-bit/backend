@@ -2,6 +2,7 @@ from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query
 
+from services.profile_writer import update_profile as write_profile
 from database import calendar_events_coll, profiles_coll
 from models import (
     CalendarActionRequest, CalendarEventCreateRequest, CalendarEventUpdateRequest,
@@ -105,5 +106,5 @@ def get_settings(user_id: str):
 
 @router.patch("/settings")
 def update_settings(req: CalendarSettingsRequest):
-    profiles_coll.update_one({"user_id": req.user_id}, {"$set": {"mediator_calendar_access": req.mediator_calendar_access}}, upsert=True)
+    write_profile(profiles_coll, {"user_id": req.user_id}, {"$set": {"mediator_calendar_access": req.mediator_calendar_access}}, upsert=True)
     return {"mediator_calendar_access": req.mediator_calendar_access}

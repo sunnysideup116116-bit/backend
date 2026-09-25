@@ -119,6 +119,11 @@ a later writer. Replaying an old receipt cannot recommit a rolled-back operation
 
 ## Enablement / rollback proposal (not performed)
 
+[Profile Writer Hardening](PROFILE_WRITER_HARDENING.md) supplies the shared
+creation/recovery boundary for online profile initializers. It does **not** clean
+existing duplicate profiles or create the required user_id unique index. Quiesced
+repair/index/readiness steps below remain separate approvals and prerequisites.
+
 1. Keep semantic flags OFF and bootstrap OFF. Review/merge, then separately authorize
    deployment of **all** Graph writers + Social timestamp/projection writers via
    `start_all.sh`. No mixed-version writer overlap; drain old background jobs.

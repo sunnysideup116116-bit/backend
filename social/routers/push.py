@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, HTTPException
 
+from services.profile_writer import update_profile as write_profile
 from database import profiles_coll
 from models import (
     ClearRequest,
@@ -28,7 +29,7 @@ def report_presence(req: ClearRequest):
     New clients use ``/push/presence`` because a generic foreground signal is
     not precise enough to suppress notifications safely.
     """
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": req.user_id},
         {"$set": {"last_presence_at": time.time()}},
         upsert=True,

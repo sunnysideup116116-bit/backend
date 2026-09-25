@@ -18,6 +18,7 @@ from models import (
     ProfileUpdateRequest,
     ModelSettingsRequest,
 )
+from services.profile_writer import update_profile as write_profile
 from database import db, profiles_coll, matches_coll, messages_coll
 from services.ai_service import get_embedding
 from services.profile_projection import active_recent_context
@@ -548,7 +549,7 @@ def update_settings(req: SettingsRequest):
     else:
         enabled = is_proactive_care_enabled(existing)
         compatibility_frequency = normalize_proactive_frequency(existing.get("proactive_frequency", "3600"))
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": req.user_id},
         {"$set": {
             "proactive_care_enabled": enabled,
@@ -568,7 +569,7 @@ def update_settings(req: SettingsRequest):
 @router.patch("/profile/location")
 def update_profile_location(req: ProfileLocationRequest):
     location = normalize_profile_location(req.city, req.district)
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": req.user_id},
         {"$set": {"profile_location": location}},
         upsert=True,
@@ -597,7 +598,7 @@ def update_profile(req: ProfileUpdateRequest):
     if not fields:
         raise HTTPException(status_code=422, detail="profile update is empty")
 
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": req.user_id},
         {"$set": fields},
         upsert=True,
@@ -627,7 +628,7 @@ def update_mediator_tone(req: MediatorToneRequest):
     update = {"mediator_tone": tone, "mediator_tone_selected": True}
     if req.probe_mode in {"balanced", "active", "manual"}:
         update["probe_mode"] = req.probe_mode
-    profiles_coll.update_one({"user_id": req.user_id}, {"$set": update}, upsert=True)
+    write_profile(profiles_coll, {"user_id": req.user_id}, {"$set": update}, upsert=True)
     return {"status": "success", "mediator_tone": tone, "probe_mode": update.get("probe_mode")}
 
 @router.post("/settings/model")
@@ -658,7 +659,7 @@ def get_model_settings():
 
 @router.post("/onboarding/complete")
 def complete_onboarding(req: ClearRequest):
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": req.user_id},
         {"$set": {"onboarding_completed": True}},
         upsert=True

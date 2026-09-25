@@ -15,6 +15,7 @@ from typing import Iterable
 
 from pymongo.errors import DuplicateKeyError
 
+from services.profile_writer import update_profile as write_profile
 from database import (
     notification_presence_coll,
     notification_threads_coll,
@@ -291,7 +292,7 @@ def update_notification_preference(
         update = {"$pull": {field: target_id}} if enabled else {"$addToSet": {field: target_id}}
     else:
         raise ValueError("unsupported notification preference scope")
-    profiles_coll.update_one({"user_id": user_id}, update, upsert=True)
+    write_profile(profiles_coll, {"user_id": user_id}, update, upsert=True)
     return get_notification_preferences(user_id)
 
 

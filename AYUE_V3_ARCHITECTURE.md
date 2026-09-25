@@ -74,6 +74,11 @@ python scripts/retire_public_dag_state.py --verify
 
 ## 啟動與驗證
 
+Mongo profile 建檔由 [Profile writer boundary](docs/PROFILE_WRITER_HARDENING.md)
+統一處理 owner-only upsert／insert-only defaults，以及已確認相同 owner unique-key
+競爭的有界 update-only recovery。Conditional/CAS miss 不得建檔。資料庫唯一性仍需
+另行批准的 user_id UNIQUE index；本實作不修正式 duplicate、不建立 schema。
+
 偏好重新確認的 [bootstrap domain API](docs/PREFERENCE_BOOTSTRAP_RUNTIME.md) 預設關閉，
 不屬於 Pi 工具。Owner JWT preview/commit 採 Graph owner revision/fence 與可恢復 Mongo
 projection；完整集合必須分別確認 PREFERS/AVOIDS，才退休 owner-scoped legacy 關係。

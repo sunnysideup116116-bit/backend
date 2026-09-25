@@ -32,6 +32,12 @@ Pi 每回合只看 `pi/registry.py` 的明確 allowlist。Python 保有 provider
 
 ## Shared confirmation and writes
 
+Profile creation callers share `services/profile_writer.py` (not an Agent tool).
+Owner-only upsert can recover a verified same-owner E11000 by reading the canonical
+document and making one exact-_id update-only attempt. Conditional/CAS updates
+remain non-creating; schema, confirmation and field ownership stay with their
+existing services. See [profile contract](../PROFILE_WRITER_HARDENING.md).
+
 `shared/confirmation.py` 擁有 public/private surface、preview fingerprint、opaque choice、TTL、CAS 與 idempotent execution。新 public record 明確標記 `source_engine=pi`；private record 標記 `private_v2`。
 
 Calendar command/preflight、contact selection、operation batch、write executor、public reply validation、debug trace 與短期狀態皆位於 `services/ayue_agent/shared/`。Pi 與 Private 不得匯入已退役的 runtime package。

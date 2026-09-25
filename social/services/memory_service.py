@@ -2,6 +2,7 @@ import re
 import time
 import requests
 
+from services.profile_writer import update_profile as write_profile
 from database import db, profiles_coll
 from services.language_service import normalize_zh_tw
 from matchmaker_agent.concept_identity import (
@@ -297,7 +298,7 @@ def apply_profile_memory_proposals(user_id: str, proposals: list[dict], surface:
         MEMORY_OUTBOX.update_one({"message_id": message_id}, {"$set": {"status": "applied", "updated_at": time.time()}, "$unset": {"last_error_code": ""}})
     notices = [{"type": "memory_learned", "message": f"我記住了：{item['label']}。記錯的話可以在設定裡撤銷。",
                 "memory": item, "created_at": time.time()} for item in learned]
-    profiles_coll.update_one({"user_id": user_id}, {"$push": {"memory_notices": {"$each": notices}}}, upsert=True)
+    write_profile(profiles_coll, {"user_id": user_id}, {"$push": {"memory_notices": {"$each": notices}}}, upsert=True)
     return learned
 def apply_memory_action(user_id: str, key: str, action: str, value: str | None = None):
     source_created_at = time.time()

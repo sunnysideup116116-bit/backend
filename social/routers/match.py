@@ -13,6 +13,7 @@ from models import (
     MatchRequest, AcceptRequest, MatchDecisionRequest, ProactiveEventRequest,
     EventDiscoveryRequest, EventOpportunityScanRequest,
 )
+from services.profile_writer import update_profile as write_profile
 from database import profiles_coll, matches_coll
 from matchmaker_agent.related_interest_contract import (
     POLICY as RELATED_INTEREST_POLICY, enabled as related_interest_enabled,
@@ -239,7 +240,7 @@ def vector_qualification_minimum() -> float:
 
 def _set_match_search(user_id: str, status: str, source: str, **extra):
     payload = {"status": status, "source": source, "updated_at": time.time(), **extra}
-    profiles_coll.update_one(
+    write_profile(profiles_coll,
         {"user_id": user_id},
         {"$set": {"match_search": payload}},
         upsert=True,

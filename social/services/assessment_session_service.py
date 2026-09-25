@@ -13,6 +13,7 @@ import time
 import uuid
 from typing import Any, Literal
 
+from services.profile_writer import ensure_profile
 from database import db, profiles_coll
 from services.ai_service import analyze_big_five, analyze_deep_profile
 from services.assessment_provider import (
@@ -405,7 +406,7 @@ def start_assessment_session(
     if normalized_room_id:
         session["room_id"] = normalized_room_id
     if profile is None:
-        profiles_coll.update_one({"user_id": user_id}, {"$setOnInsert": {"user_id": user_id}}, upsert=True)
+        ensure_profile(profiles_coll, user_id)
     result = profiles_coll.update_one(
         {
             "user_id": user_id,
@@ -662,10 +663,7 @@ def handle_assessment_ui_message(
             # it to the assessment draft or overwriting a later user choice.
             # Upsert by identity only. An upsert on the conditional filter below
             # would try to create a second profile when an interest already exists.
-            profiles_coll.update_one(
-                {"user_id": user_id},
-                {"$setOnInsert": {"user_id": user_id}}, upsert=True,
-            )
+            ensure_profile(profiles_coll, user_id)
             profiles_coll.update_one(
                 {"user_id": user_id, "$or": [
                     {"initial_interest": {"$exists": False}},
