@@ -3,6 +3,7 @@ import math
 import time
 from neo4j import Query
 from matchmaker_agent.related_interest_canary import canary_cohort, canary_requester_enabled, canary_pair_enabled
+from matchmaker_agent.related_interest_contract import bounded_ann_observations
 
 try:
     from .concept_identity import stored_concept_identity
@@ -142,6 +143,7 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
         concepts.append({"concept_key": source.key, "semantic_text": source.semantic_text,
             "semantic_input_hash": source.semantic_input_hash, "similarity": float(score)})
     # The only LLM boundary occurs BEFORE any Concept -> User expansion.
+    result["ann_observations"] = bounded_ann_observations(concepts)
     if not canary_requester_enabled(req.requester_user_id):
         return {**result, "error_code": "semantic_policy_disabled"}
     accepted, counts = validate_concepts(identity.semantic_text, concepts, client, validator_model,

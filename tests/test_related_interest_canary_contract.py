@@ -20,9 +20,11 @@ def configured(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("raw", [
-    "", "not-json", "null", "true", "{}", "[]", '["a"]', '["a","b","c"]',
+    "", "not-json", "null", "true", "{}", "[]", '["a"]',
     '["a","a"]', '["a",null]', '["a",1]', '["a","*"]', '["a"," b"]',
-    '["a","b@example.com"]', '["a","中文暱稱"]', json.dumps(["a", "b"*129]), " "*301,
+    '["a","b@example.com"]', '["a","中文暱稱"]', json.dumps(["a", "b"*129]), " "*1400,
+    json.dumps([f"synthetic-{i}" for i in range(11)]),
+    json.dumps([f"synthetic-{i}" for i in range(9)]+["synthetic-1"]),
 ])
 def test_invalid_cohort_never_means_everyone(configured, monkeypatch, raw):
     monkeypatch.setenv(COHORT_ENV, raw)
@@ -34,6 +36,18 @@ def test_invalid_cohort_never_means_everyone(configured, monkeypatch, raw):
 def test_missing_cohort_fail_closed(configured, monkeypatch):
     monkeypatch.delenv(COHORT_ENV)
     assert not canary_requester_enabled("synthetic-a")
+
+
+@pytest.mark.parametrize("count", [2, 3, 5, 8, 10])
+def test_bounded_expansion_keeps_all_members_and_drops_outsiders(configured, monkeypatch, count):
+    ids = [f"synthetic-{i}" for i in range(count)]
+    monkeypatch.setenv(COHORT_ENV, json.dumps(ids))
+    assert canary_cohort() == frozenset(ids)
+    assert all(canary_pair_enabled(ids[0], other) for other in ids[1:])
+    assert not canary_pair_enabled(ids[0], "outsider")
+    assert not canary_requester_enabled("outsider")
+    configured.touch()
+    assert not canary_pair_enabled(ids[0], ids[-1])
 
 
 def test_stable_ids_only_both_directions_no_self_or_outsider(configured):

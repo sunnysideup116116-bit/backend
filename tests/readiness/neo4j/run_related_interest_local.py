@@ -3,6 +3,7 @@
 Not R3 qualification, semantic precision scoring, or a production readiness claim.
 Uses the existing ownership + local-only socket guards; never imports Server startup.
 """
+import argparse
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,10 @@ from matchmaker_agent import related_interest_retrieval as service
 from matchmaker_agent import related_interest_validator as validator
 
 
-def run():
+def run(cohort_size=2):
+    if cohort_size not in {2, 5, 10}:
+        raise ValueError("unsupported_synthetic_cohort_size")
+    cohort = ["pilot-owner", *[f"pilot-synthetic-{i}" for i in range(cohort_size-1)]]
     state = harness.read_state()
     topology = harness.verify_container(state)
     model = "models/gemini-embedding-2"
@@ -79,7 +83,7 @@ def run():
             start = time.perf_counter()
             with patch.dict(os.environ, {
                     "MATCH_RELATED_INTEREST_ENABLED": "on", "MATCH_PREFERENCE_SEMANTIC_MODE": "active",
-                    "MATCH_RELATED_INTEREST_CANARY_USER_IDS": '["pilot-owner","pilot-synthetic-0"]',
+                    "MATCH_RELATED_INTEREST_CANARY_USER_IDS": json.dumps(cohort),
                     "MATCH_RELATED_INTEREST_KILL_SWITCH_FILE": str(harness.ARTIFACTS / "local-canary-kill"),
                 }), patch.object(
                     validator, "_completion", lambda _client, **kwargs: create(**{k: v for k, v in kwargs.items() if k != "timeout"})):
@@ -89,7 +93,7 @@ def run():
             assert result["validator_counts"]["rejected"] == 1
             ids = [r["candidate_id"] for r in result["candidates"]]
             assert ids and len(ids) == len(set(ids)) <= req.candidate_limit and "pilot-avoid-only" not in ids
-            assert ids == ["pilot-synthetic-0"] and len(result["candidates"][0]["evidence"]) == 2
+            assert ids == sorted(cohort[1:]) and all(len(c["evidence"]) == 2 for c in result["candidates"])
             assert all(e["relation"] in {"role_mismatch", "sibling_related"}
                 for r in result["candidates"] for e in r["evidence"])
             plans = []
@@ -103,19 +107,22 @@ def run():
                     assert all(c["relation"] in {"role_mismatch", "sibling_related"} for c in params["concepts"])
                     assert statement.index("LIMIT $per_concept_limit") < statement.index("WHERE candidate.id")
                     assert statement.index("UNWIND $allowed_owner_ids") < statement.index("LIMIT $per_concept_limit")
-                    assert params["allowed_owner_ids"] == ["pilot-owner", "pilot-synthetic-0"]
+                    assert params["allowed_owner_ids"] == sorted(cohort)
                 plans.append({"kind": "ANN" if "queryNodes" in statement else "expansion", "operators": operators})
             index = service.index_metadata(session)
         assert before == harness.digest_graph(driver)
     report = {"status": "PASS", "synthetic_only": True, "real_semantic_precision": "not_evaluated",
         "production_ready": False, "topology": topology, "index": index, "plans": plans,
         "dedupe": True, "prefers_only": True, "validator_before_expansion": True,
-        "canary_candidate_isolation": True, "outside_owners_excluded": 24,
+        "canary_candidate_isolation": True, "cohort_size": cohort_size,
+        "outside_owners_excluded": 25-(cohort_size-1),
         "identity_edges_unchanged_by_retrieval": True, "candidate_count": len(ids),
         "validator_counts": result["validator_counts"], "fallback_ms": round(elapsed*1000, 3)}
-    harness.json_file(harness.ARTIFACTS/"related_interest_local.json", report)
+    harness.json_file(harness.ARTIFACTS/f"related_interest_local_{cohort_size}.json", report)
     print(json.dumps(report, ensure_ascii=False))
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cohort-size", type=int, choices=[2, 5, 10], default=2)
+    run(parser.parse_args().cohort_size)

@@ -42,6 +42,7 @@ def test_frozen_pilot_mapping_and_no_retry_for_valid_rejection(relation):
     assert bool(accepted) == (relation in ACCEPTED)
     assert counts[relation] == 1
     assert counts["attempts"] == 1
+    assert counts["retries"] == counts["attempt_errors"] == 0
     client.with_options.assert_called_once_with(timeout=6.0, max_retries=0)
     sent = client.chat.completions.create.call_args.kwargs
     assert "reasoning_effort" not in sent and sent["temperature"] == 0
@@ -54,6 +55,7 @@ def test_error_retries_once_then_fails_closed_without_saving_output():
     accepted, counts = validate_concepts("Q", [{"semantic_text": "C"}], client, "deepseek-test",
         deadline=100, clock=lambda: 0)
     assert not accepted and counts["error"] == 1 and counts["attempts"] == 2
+    assert counts["retries"] == 1 and counts["attempt_errors"] == 2
     assert "private-body" not in str(counts)
 
 
@@ -63,10 +65,12 @@ def test_one_retry_can_recover_and_deadline_never_starts_an_attempt():
     accepted, counts = validate_concepts("Q", [{"semantic_text": "C"}], client, "deepseek-test",
         deadline=100, clock=lambda: 0)
     assert len(accepted) == 1 and counts["attempts"] == 2
+    assert counts["retries"] == counts["attempt_errors"] == 1
     client.reset_mock()
     accepted, counts = validate_concepts("Q", [{"semantic_text": "C"}], client, "deepseek-test",
         deadline=0, clock=lambda: 0)
     assert not accepted and counts["error"] == 1 and counts["attempts"] == 0
+    assert counts["retries"] == counts["attempt_errors"] == 0
     client.with_options.assert_not_called()
 
 
@@ -76,6 +80,7 @@ def test_operator_stop_between_attempts_does_not_retry():
     accepted, counts = validate_concepts("Q", [{"semantic_text": "C"}], client, "deepseek-test",
         deadline=100, clock=lambda: 0, is_enabled=Mock(side_effect=[True, False]))
     assert not accepted and counts["error"] == 1 and counts["attempts"] == 1
+    assert counts["retries"] == 0 and counts["attempt_errors"] == 1
 
 
 @pytest.mark.parametrize("text", [
@@ -152,6 +157,21 @@ def test_rejected_relation_never_expands_owners(monkeypatch, relation):
     result = retrieve(session, req, query, client, "deepseek-test", MODEL, clock=lambda: 0)
     assert events == ["ann", "validate"]
     assert result["candidates"] == [] and result["validator_counts"]["rejected"] == 1
+    assert len(result["ann_observations"]) == 1
+    assert set(result["ann_observations"][0]) == {"concept_key", "similarity"}
+
+
+def test_failed_validator_retains_only_bounded_ann_observations(monkeypatch):
+    monkeypatch.setenv("MATCH_RELATED_INTEREST_ENABLED", "on")
+    session, req, query, candidate, client, events = setup_graph()
+    client.chat.completions.create.side_effect = RuntimeError("must-not-save-provider-body")
+    result = retrieve(session, req, query, client, "deepseek-test", MODEL, clock=lambda: 0)
+    assert result["error_code"] == "semantic_validator_unavailable"
+    assert result["ann_observations"] == [{"concept_key": candidate.key, "similarity": .91}]
+    assert result["validator_counts"]["retries"] == 1
+    assert result["validator_counts"]["attempt_errors"] == 2
+    assert result["candidates"] == [] and events == ["ann"]
+    assert "must-not-save-provider-body" not in str(result)
 
 
 def test_wrong_vector_provenance_is_not_used_and_off_does_not_read_graph(monkeypatch):

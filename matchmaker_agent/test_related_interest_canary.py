@@ -19,13 +19,16 @@ def canary_config(monkeypatch, tmp_path):
     monkeypatch.setenv("MATCH_RELATED_INTEREST_KILL_SWITCH_FILE", str(tmp_path / "kill"))
 
 
-def test_expansion_server_bound_before_limit_and_defensive_outside_drop():
+@pytest.mark.parametrize("size", [2, 5, 10])
+def test_expansion_server_bound_before_limit_and_defensive_outside_drop(monkeypatch, size):
+    cohort = ["owner", "person", *[f"synthetic-{i}" for i in range(size-2)]]
+    monkeypatch.setenv("MATCH_RELATED_INTEREST_CANARY_USER_IDS", json.dumps(cohort))
     session, req, query, candidate, client, events = setup_graph()
     original = session.run
     def execute(statement, **params):
         text = str(statement)
         if "db.index.vector.queryNodes" in text or "UNWIND $concepts" in text:
-            assert params["allowed_owner_ids"] == ["owner", "person"]
+            assert params["allowed_owner_ids"] == sorted(cohort)
         if "db.index.vector.queryNodes" in text:
             assert "owner.id IN $allowed_owner_ids" in text
         if "UNWIND $concepts" in text:

@@ -1,4 +1,4 @@
-"""Server-owned two-account isolation, independent of relation/identity policy.
+"""Server-owned bounded pilot isolation, independent of relation/identity policy.
 
 Operator injects the same JSON array into Social and 9001 via start_all.sh.
 No client flag, profile nickname, request field or implicit all-user default.
@@ -10,20 +10,26 @@ import re
 from matchmaker_agent.related_interest_contract import enabled
 
 COHORT_ENV = "MATCH_RELATED_INTEREST_CANARY_USER_IDS"
+MAX_COHORT_USERS = 10
+MAX_COHORT_JSON_CHARS = MAX_COHORT_USERS * 132 + 2
 
 
 def canary_cohort() -> frozenset[str]:
-    raw = os.getenv(COHORT_ENV, "")
-    if not raw or len(raw) > 300:
+    return parse_cohort(os.getenv(COHORT_ENV, ""))
+
+
+def parse_cohort(raw) -> frozenset[str]:
+    """Pure parser for server environment and operator-only report manifests."""
+    if not isinstance(raw, str) or not raw or len(raw) > MAX_COHORT_JSON_CHARS:
         return frozenset()
     try:
         values = json.loads(raw)
     except (ValueError, TypeError):
         return frozenset()
-    if (not isinstance(values, list) or len(values) != 2
+    if (not isinstance(values, list) or not 2 <= len(values) <= MAX_COHORT_USERS
             or any(not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", v)
                    for v in values)
-            or values[0] == values[1]):
+            or len(set(values)) != len(values)):
         return frozenset()
     return frozenset(values)
 
