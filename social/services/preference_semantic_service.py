@@ -19,7 +19,7 @@ from config import GOOGLE_EMBEDDING_MODEL
 from matchmaker_agent.concept_identity import canonicalize_concept
 from matchmaker_agent.related_interest_canary import canary_requester_enabled, canary_pair_enabled
 from matchmaker_agent.related_interest_contract import (
-    enabled as related_interest_enabled, embedding_fingerprint, validated_evidence, bounded_counts,
+    enabled as related_interest_enabled, embedding_fingerprint, validated_evidence, bounded_counts, bounded_ann_observations,
 )
 from services.ai_service import get_embeddings
 
@@ -47,9 +47,10 @@ SEMANTIC_ERROR_CODES = frozenset({
 
 
 class PreferenceSemanticRetrievalError(RuntimeError):
-    def __init__(self, code: str, validator_counts=None):
+    def __init__(self, code: str, validator_counts=None, ann_observations=None):
         self.code = code if isinstance(code, str) and code in SEMANTIC_ERROR_CODES else "semantic_graph_invalid_response"
         self.validator_counts = bounded_counts(validator_counts)
+        self.ann_observations = bounded_ann_observations(ann_observations)
         super().__init__(self.code)
 
 
@@ -317,7 +318,7 @@ def retrieve_semantic_preference_candidates(
     if result.get("status") != "success":
         raise PreferenceSemanticRetrievalError(str(
             result.get("error_code") or "semantic_graph_invalid_response"
-        ), result.get("validator_counts"))
+        ), result.get("validator_counts"), result.get("ann_observations"))
     if result.get("canonical_key") != identity.key:
         raise PreferenceSemanticRetrievalError("semantic_graph_invalid_response")
     if not isinstance(result.get("candidates"), list):
@@ -417,7 +418,8 @@ def retrieve_semantic_preference_candidates(
         "candidate_count": len(candidate_ids),
         "retrieval_source": "graph_semantic",
         "embedding_source": str(result.get("embedding_source") or "")[:24],
-        **({"validator_counts": bounded_counts(result.get("validator_counts"))}
+        **({"validator_counts": bounded_counts(result.get("validator_counts")),
+            "ann_observations": bounded_ann_observations(result.get("ann_observations"))}
            if related else {}),
     }
 

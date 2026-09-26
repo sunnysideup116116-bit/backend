@@ -59,7 +59,7 @@ def validate_concepts(query, concepts, client, model, *, deadline, clock=time.mo
     """
     if len(concepts) > 12:
         raise ValueError("concept_limit_exceeded")
-    counts = {k: 0 for k in ("accepted", "rejected", "error", "attempts", *RELATIONS)}
+    counts = {k: 0 for k in ("accepted", "rejected", "error", "attempts", "attempt_errors", "retries", *RELATIONS)}
     accepted = []
     for offset in range(0, len(concepts), 2):
         batch = concepts[offset:offset+2]
@@ -70,6 +70,7 @@ def validate_concepts(query, concepts, client, model, *, deadline, clock=time.mo
             if remaining <= 0.1 or not is_enabled():
                 break
             counts["attempts"] += 1
+            counts["retries"] += int(_attempt == 1)
             try:
                 if not str(model or "").startswith("deepseek"):
                     raise ValueError("validator_model_unavailable")
@@ -86,6 +87,7 @@ def validate_concepts(query, concepts, client, model, *, deadline, clock=time.mo
                         # Accounting failure must not trigger more paid model
                         # calls or bypass the existing billable task boundary.
                         counts["error"] += len(concepts)-offset
+                        counts["attempt_errors"] += 1
                         return [], counts
                 if clock() >= deadline:
                     raise ValueError("validator_deadline")
@@ -97,6 +99,7 @@ def validate_concepts(query, concepts, client, model, *, deadline, clock=time.mo
             except Exception:
                 # No provider exception/body/headers or input text is logged.
                 relations = None
+                counts["attempt_errors"] += 1
         if relations is None:
             counts["error"] += len(batch)
             continue

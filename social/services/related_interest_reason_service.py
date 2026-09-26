@@ -17,7 +17,9 @@ def _public_phrase(text):
     return text
 
 
-def related_entry_text(entry):
+def related_entry_text(entry, *, observation=None):
+    if observation is not None:
+        observation["mode"] = "neutral_fallback"
     basis = entry.get("related_interest_basis") if isinstance(entry, dict) else None
     if not isinstance(basis, dict):
         return ""
@@ -41,6 +43,8 @@ def related_entry_text(entry):
               if evidence["relation"] == "role_mismatch" else
               "這是相關而非已確認相同的偏好，可以從彼此的不同體驗聊起。")
     text = facts + bridge + "想先認識看看嗎？"
+    if observation is not None and len(text) <= 220:
+        observation["mode"] = "fact_bound"
     return text if len(text) <= 220 else "我找到一位興趣方向可能相關、但不代表偏好相同的人；想先認識看看嗎？"
 
 
@@ -61,12 +65,14 @@ def related_friend_intro(base, requester, candidate, evidence, *, requester_pref
                 "requester_prefers_query": requester_prefers_query is True},
             "conversation_starter": "你平常是怎麼接觸這類興趣的？",
             "accepted_opening": f"{COUNTERPARTY_PLACEHOLDER}也點頭了！可以先聊聊各自接觸這類興趣的方式。"}
-        entry["viewer_text"] = related_entry_text(entry)
+        observation = {}
+        entry["viewer_text"] = related_entry_text(entry, observation=observation)
+        entry["reason_render_mode"] = observation["mode"]
         result[role] = entry
     return result
 
 
-def related_pair_opening(match_doc, first_label, second_label):
+def related_pair_opening(match_doc, first_label, second_label, *, observation=None):
     """Post-consent copy stays fact-bound even after the pilot is switched off."""
     projection = match_doc.get("friend_intro_v4") or {}
     if not isinstance(projection, dict):
@@ -74,6 +80,8 @@ def related_pair_opening(match_doc, first_label, second_label):
     entry = projection.get("initiator_preview") or {}
     if not isinstance(entry, dict) or entry.get("style_id") != POLICY:
         return None
+    if observation is not None:
+        observation["mode"] = "neutral_fallback"
     greeting = (f"{first_label}、{second_label}，" if first_label and second_label
                 and "對方" not in (first_label, second_label) else "")
     neutral = f"阿月：{greeting}你們都願意認識彼此了！可以先交流各自的興趣，不必有相同的參與方式。\n最近哪一次接觸自己的興趣，讓你特別有印象？"
@@ -93,4 +101,6 @@ def related_pair_opening(match_doc, first_label, second_label):
              f"{first_label}這次想找對「{q}」有興趣的人")
     bridge = ("主題相關但參與方式不同，不代表適合一起做同一活動。" if packet["relation"] == "role_mismatch"
               else "這次是從相關興趣牽線，不代表你們有完全相同的偏好。")
+    if observation is not None:
+        observation["mode"] = "fact_bound"
     return f"阿月：{first}；{second_label}喜歡「{c}」。{bridge}\n最近哪一次接觸自己的興趣，讓你特別有印象？"

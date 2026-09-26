@@ -1,10 +1,11 @@
 # Semantic Related-Interest Matching v1 — internal app-wide pilot
 
 Initial implementation was based on main `64bb7e7`; the implementation-gate
-results below are historical. **Semantic remains OFF.** The current activation
-scope is a two-account canary, not app-wide activation. Only the separately
-verified Sunny/Demo stable owner IDs may be configured by the operator; see the
-isolation section below. No human preview bypass is introduced. Existing
+results below are historical. **Flags default OFF.** The accepted two-account
+canary is followed by Phase 2 preparation for 5–10 explicitly confirmed,
+v2-clean internal owners, not all-user activation. Production expansion is
+blocked until each added owner confirms the full preference set and retirement
+preview and compatible vectors are verified; see Phase 2 below. Existing
 identity/auth/safety/confirmation boundaries remain mandatory for every account.
 
 This is a new product policy for conversation/match discovery, not strict
@@ -181,16 +182,20 @@ activation authorization. The endpoint never creates an index or backfills data.
 
 ## Pilot telemetry
 
-Count-only, idempotent `$set` telemetry is attached to the existing owner-bound
-search job. It records fallback trigger and bounded accepted/rejected/error,
-attempt and relation counts. No raw query/owner message, candidate IDs, provider
-response or Graph payload is added to these counters. Writes have a 0.5s budget. Optional telemetry failure
+Bounded, idempotent `$set` telemetry is attached to the existing owner-bound
+search job. It records exact-vs-fallback observations and bounded accepted/rejected/error,
+attempt, retry, attempt-error and relation counts. Validated ANN hashes/scores
+(at most 12, including rejected/error hits) are retained internally; no labels,
+raw query/owner message, candidate IDs, provider response or Graph payload are
+added. Writes have a 0.5s budget. Optional telemetry failure
 does not roll back matching; reports may undercount during storage outages.
 
 Semantic proposal metadata carries only policy/basis/relation tags. The existing
 state history supplies sent invitation and accept/decline/expiry outcomes; a
 declined draft is not counted as a declined sent invitation. The bounded read-only
-`scripts/report_related_interest_pilot.py` reports counts and a truncation marker.
+`scripts/report_related_interest_pilot.py` reports counts, rates, latency, rendering
+outcomes and a truncation marker. It requires an explicit cohort and supports an
+activation timestamp. Read-only joins use existing IDs but never emit them.
 It is not a public analytics endpoint. No new UI reason-feedback control is added
 in this backend phase; future pilot ratings must be separate from explicit
 rejection reasons that authorize AVOIDS writes.
@@ -444,3 +449,142 @@ entries returned UNKNOWN, not proof of no callers. Manual source/transport revie
 and the same-main differential tests supplement the index. No CRITICAL warning is
 waived as a clean graph result; relation, identity, embedding, provider retry,
 quota amounts and lifecycle code remain outside this patch's changes.
+
+## Phase 2 — bounded 5–10-owner internal pilot preparation
+
+The two-account canary was accepted by the operator as PASS. Phase 2 is a product
+usage pilot, not a new semantic experiment or a reinterpretation of the frozen
+strict-validator NO-GO. No relation policy, .82 threshold, prompt, generation
+budget, embedding pipeline, quota, identity or consent rule changes in this patch.
+The historical two-ID restriction above is superseded only by the bounded parser:
+2–10 distinct server-owned IDs; two remains valid for rollback to the old cohort.
+Actual Phase 2 activation targets 5–10, and never infers membership from a nickname
+or a client flag. All existing requester/owner-expansion/qualification/proposal
+guards use that same parser. Normal exact matches are not cohort-filtered.
+
+### Activation prerequisites and ordering
+
+1. Read-only select 3–8 additional accounts; retain the original two. A Graph list
+   is evidence of past associations, **not** fresh owner consent. Record each
+   owner's full PREFERS and AVOIDS confirmation (including explicitly empty
+   AVOIDS), then generate a fresh complete-set preview and obtain approval of its
+   exact owner-scoped retirement list. Do not silently split compound concepts,
+   turn residence facts into likes, infer polarity, or repair legacy suffixes.
+2. Use the production-tested bootstrap path unchanged (combined cap 10). Verify
+   owner revision, Graph edges, Mongo projection/audit, v2-clean state and zero
+   duplicate profiles. Stale or unexpected state stops that owner; systemic
+   integrity failure stops the batch. Do not roll back valid real-owner commits.
+3. Freeze an incremental manifest only for newly verified full semantic sources.
+   Reuse existing compatible vectors; generate only missing ones. Validate all
+   vectors before source-hash/fingerprint CAS writes. No silent overwrite, legacy
+   vector reuse, old-index change or unapproved bulk preparation.
+   Frozen canary request-contract fingerprint:
+   `89cc12c59af783aa2953d856c15ba34625e2db129cf5d8bf5712e53af017b640`.
+   Frozen provenance fingerprint:
+   `53a1d22fd63bcde9be0fa632df532929a05dcb5aa60ded6879b47ad0c2c1c8af`.
+   Preserve the recorded Gemini model/version metadata, exact prefix, source hash,
+   768 dimensions and L2 normalization. Reuse `concept_embedding_v2_index`.
+4. Deploy a clean release to Social and 9001 together with flags OFF, preserve the
+   primary dirty Server checkout, verify health/index/fingerprints and all cohort
+   members, and test that both services can observe the same writable kill file.
+   Inject the approved stable-ID JSON through `start_all.sh`; it is not committed.
+5. Only then activate the approved cohort. Record activation timestamp and cohort
+   revision in a private operator manifest. Start the agreed observation period
+   from activation, not from preparatory data reads. Keep outsiders exact-only.
+
+### Observability and stop semantics
+
+Telemetry version 2 observes explicit-preference jobs only while the server pilot
+is active for that requester. Exact qualified count remains in existing bounded
+diagnostics. `exact_only_jobs` means observed jobs without fallback, **not** proof
+of successful matching. Graph errors before qualification remain errors.
+
+- ANN observations: validated v2 hash keys and rounded Neo4j scores, maximum 12.
+  These are internal search-job observations, not public cards or raw cosine.
+  Network/deadline failure can prevent receiving any observations; missing is not
+  evidence that ANN was never executed.
+- Validator: attempts, actual second attempts, per-attempt errors, per-Concept
+  final ERROR and relation distribution. A valid rejection is never retried.
+  Retry/error rates use attempts; unavailable rate uses fallback jobs. Legacy
+  telemetry without version 2 yields unknown retry rates, not invented zeros.
+- Proposals and sent-invitation outcomes use existing lifecycle state history.
+  A declined draft is not a rejected invitation. Reason counters count the two
+  viewer renderings separately; opening counters count saved shared openings.
+  Neutral privacy/length fallback is distinct from fact-bound copy; no wording
+  or extra model call is introduced. These are render outcomes, not UI impressions.
+- Latency p50/p95 uses completed minus started job timestamps; it is end-to-end,
+  not individual provider latency. Missing samples and report truncation must be
+  disclosed. Optional telemetry failure may undercount; no new public endpoint.
+
+Read-only report (credentials remain in the existing secret-loading mechanism):
+
+```bash
+python scripts/report_related_interest_pilot.py \
+  --cohort-file /absolute/private/pilot-cohort.json \
+  --since ACTIVATION_UNIX_TIMESTAMP --limit 1000
+```
+
+The report reads bounded policy-tagged rows, counts any outside-cohort semantic
+activity instead of hiding it, and emits only aggregates. Use the frozen cohort
+for that period; if membership changes, start a new period. A truncated or
+unavailable report is incomplete, never an integrity PASS.
+
+Automatic systemic-provider stop: after terminal job persistence, three consecutive
+version-2 fallback jobs in the cohort within 15 minutes with typed
+`semantic_validator_unavailable` / `semantic_retrieval_timeout` failure touch the
+existing shared kill file. A successful or normally rejected fallback breaks the
+streak. The query is limited to three jobs with a 0.5s Mongo budget, adds no model
+request/retry, and never resets the matching deadline. The original failed job
+stays fail-closed if monitoring storage/filesystem is unavailable; safe error-type
+logging reports that the operator check is required. This is a conservative
+operational STOP definition, not a new model reliability SLA.
+
+Leakage, false shared-preference claims, accepted constraint conflicts, duplicate
+or corrupt preferences, and human-reported unsafe reasoning require immediate
+operator kill/STOP and investigation. Existing guards prevent disallowed enum
+relations/cohort writes; they cannot prove a model classification semantically
+correct. Read-only integrity checks and member feedback are still required.
+Do not describe the telemetry monitor as a complete semantic safety detector.
+
+No frontend feedback widget is added in this phase. Members can report a proposal
+reference plus thumbs-up/down through the test coordinator; store this feedback
+separately from chat and explicit rejection reasons. Never write pilot ratings to
+PREFERS/AVOIDS or use an AVOIDS-generating rejection control as a rating widget.
+Schedule the product's native monitoring mechanism only after actual activation;
+remain quiet for unchanged state, stop/notify on a safety finding, and report at
+the agreed end time. No additional users, vector generation, or P1-B are implicit.
+
+Preparation status: isolated source/tests only; no production bootstrap, vector
+write, cohort expansion or activation has been performed by this patch. Owner
+confirmation and fresh retirement previews remain blocking rollout prerequisites.
+
+### Phase 2 verification (pre-activation)
+
+| Gate | Isolated Phase 2 | Clean main `b10f538` |
+| --- | --- | --- |
+| Social full offline | 1852 passed / 34 failed; 63 subtests | 1823 passed / same 34 failed; 63 subtests |
+| Same failure testcase / first-line signature | 34/34 identical; branch-only 0 | comparator |
+| Matchmaker full offline | 236 passed; 15 subtests | existing canary baseline |
+| Contracts full offline | 602 passed; 232 subtests | existing canary baseline |
+| Disposable Neo4j 2 / 5 / 10-member isolation | PASS; 1 / 4 / 9 distinct candidates | synthetic only |
+
+The initial Social comparison exposed environment differences, not changes to Pi:
+the release checkout has a deployment kill file and pinned Pi Node dependencies.
+Use a synthetic process-only kill-file path for both test runs, and install the
+unchanged Pi lockfile via `npm ci --ignore-scripts` in the isolated checkout. No
+production kill file, service environment, runtime assertion or timeout was changed.
+
+Local Neo4j uses synthetic vectors and a stub validator. Index ONLINE/768/cosine;
+cohort outsiders excluded (24/21/16 among 25 PREFERS fixture owners), multi-Concept
+candidate dedupe and graph read-only digest checks pass. PROFILE contains vector
+ProcedureCall, indexed Concept seek, early per-Concept Limit and final Top. No
+AllNodesScan or NodeByLabelScan; the local cost planner **does include NodeIndexScan**
+for indexed owner lookup, so this is not a claim of all-Seek physical plans or
+large-corpus scalability. Recheck the deployed planner before expanded activation.
+Observed stub-only fallback times: 705.272 / 17.207 / 16.573 ms for 2 / 5 / 10
+members (first-run cache effects, not provider latency or a p95 comparison).
+The disposable container is stopped; ignored synthetic volumes/reports retained.
+
+All real participant lists, confirmation worksheets, local configuration, generated
+reports and provider/Graph artifacts remain ignored and uncommitted. There are no
+production identity/edge/vector mutations, flag changes or feedback-to-memory writes.

@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -10,11 +11,13 @@ from .test_preference_match_search import (
 )
 
 
-@pytest.fixture
-def flow(monkeypatch, tmp_path):
+@pytest.fixture(params=[2, 5, 10])
+def flow(monkeypatch, tmp_path, request):
     monkeypatch.setenv("MATCH_RELATED_INTEREST_KILL_SWITCH_FILE", str(tmp_path / "kill"))
     profiles, matches = _flow(monkeypatch, candidate={"user_id": "semantic"})
     lookup = _activate_semantic(monkeypatch, _semantic_result())
+    cohort = ["owner", "semantic", *[f"synthetic-{i}" for i in range(request.param-2)]]
+    monkeypatch.setenv("MATCH_RELATED_INTEREST_CANARY_USER_IDS", json.dumps(cohort))
     monkeypatch.setattr(router, "retrieve_preference_candidate_ids", Mock(return_value={
         "canonical_key": K_POP, "candidate_ids": []}))
     monkeypatch.setattr(router, "_trait_stances", lambda uid: {KOREAN_POP: {"like"}} if uid != "owner" else {})

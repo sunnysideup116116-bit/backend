@@ -126,6 +126,8 @@ def test_telemetry_is_count_only_and_draft_decline_is_not_invitation_decline():
     assert result["fallback_trigger_jobs"] == 1 and result["semantic_proposals"] == 2
     assert result["semantic_invitations"] == 1 and result["invitation_outcomes"]["accepted"] == 1
     assert result["invitation_outcomes"]["declined"] == 0 and "SECRET" not in str(result)
+    assert result["confirmation_outcomes"]["confirmed"] == 1
+    assert result["confirmation_outcomes"]["declined_before_invitation"] == 1
     assert "SECRET" not in str(_bounded_diagnostics({"related_interest_validator": job["related_interest_pilot"]["validator_counts"]}))
 
 

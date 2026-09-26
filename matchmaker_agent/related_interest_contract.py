@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 
 try:
@@ -92,7 +93,26 @@ def validated_evidence(item, *, query_key=None):
 def bounded_counts(value):
     """Only numeric diagnostics, never messages, concept labels or identifiers."""
     result = {}
-    for key in ("accepted", "rejected", "error", "attempts", *sorted(RELATIONS)):
+    for key in ("accepted", "rejected", "error", "attempts", "attempt_errors", "retries", *sorted(RELATIONS)):
         raw = value.get(key) if isinstance(value, dict) else 0
         result[key] = min(24, max(0, raw)) if type(raw) is int else 0
+    return result
+
+
+def bounded_ann_observations(value):
+    """Internal hash keys/scores only; never labels, owner IDs or provider output."""
+    if not isinstance(value, list):
+        return []
+    result = []
+    seen = set()
+    for row in value[:12]:
+        if not isinstance(row, dict):
+            continue
+        key, score = row.get("concept_key"), row.get("similarity")
+        if (not isinstance(key, str) or not re.fullmatch(r"v2_[0-9a-f]{48}", key)
+                or key in seen or type(score) not in (int, float)
+                or not math.isfinite(score) or not 0 <= score <= 1):
+            continue
+        seen.add(key)
+        result.append({"concept_key": key, "similarity": round(score, 4)})
     return result

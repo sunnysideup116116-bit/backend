@@ -1881,6 +1881,9 @@ def generate_matches_for_user(
     target_stances: dict[str, set[str]] | None = None
     semantic_search_completed = False
     if search_intent == "preference":
+        if semantic_mode == "active":
+            from services.related_interest_telemetry import record_search as record_related_search
+            record_related_search(search_job_id, req.user_id, triggered=False)
         if not report("preference_graph_search"):
             return {"status": "stale", "matches": [], "debug_info": [],
                     "diagnostics": diagnostics}
@@ -2028,7 +2031,8 @@ def generate_matches_for_user(
                     diagnostics["related_interest_validator"] = related_validator_counts(
                         getattr(exc, "validator_counts", {}))
                     record_related_search(search_job_id, req.user_id,
-                        counts=diagnostics["related_interest_validator"])
+                        counts=diagnostics["related_interest_validator"],
+                        ann_observations=getattr(exc, "ann_observations", []))
                     if qualified_exact:
                         diagnostics["semantic_fallback_error"] = exc.code
                     else:
@@ -2054,7 +2058,8 @@ def generate_matches_for_user(
                 diagnostics["related_interest_validator"] = related_validator_counts(
                     semantic_lookup.get("validator_counts"))
                 record_related_search(search_job_id, req.user_id,
-                    counts=diagnostics["related_interest_validator"])
+                    counts=diagnostics["related_interest_validator"],
+                    ann_observations=semantic_lookup.get("ann_observations", []))
                 diagnostics["retrieval_source"] = "graph_exact_then_semantic"
                 diagnostics["semantic_concepts_considered"] = list(
                     semantic_lookup.get("semantic_concepts_considered") or []

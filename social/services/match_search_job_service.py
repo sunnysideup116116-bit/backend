@@ -504,6 +504,8 @@ def _finish_job(
             ),
         }, "$unset": {"active_match_search_job_id": ""}},
     )
+    from services.related_interest_pilot_monitor import on_job_finished
+    on_job_finished(str(job.get("user_id") or ""), status, error_code)
     return True
 
 
