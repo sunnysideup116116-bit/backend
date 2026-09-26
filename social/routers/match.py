@@ -19,6 +19,7 @@ from matchmaker_agent.related_interest_contract import (
     POLICY as RELATED_INTEREST_POLICY, enabled as related_interest_enabled,
     validated_evidence as validated_related_evidence, bounded_counts as related_validator_counts,
 )
+from matchmaker_agent.related_interest_canary import canary_requester_enabled, canary_pair_enabled
 from services.ai_service import get_embedding, generate_chat_completion
 from services.memory_service import get_user_graph_memories
 from services.mediator_event_service import queue_mediator_event
@@ -1731,6 +1732,8 @@ def generate_matches_for_user(
     bound_search_context = search_context_for_turn(search_context)
     search_intent = _search_intent(bound_search_context)
     semantic_mode = preference_semantic_mode() if search_intent == "preference" else "off"
+    if semantic_mode == "active" and not canary_requester_enabled(user_id):
+        semantic_mode = "off"  # Non-cohort/missing config/kill: P0 exact-only, never a global rollout.
     diagnostics = {
         "search_intent": search_intent,
         "normalized_topic": str(bound_search_context.get("normalized_topic") or "")[:80],
@@ -1993,7 +1996,7 @@ def generate_matches_for_user(
         )
         if len(qualified_exact) == 0 and semantic_mode == "active":
             diagnostics["semantic_fallback_triggered"] = True
-            if not related_interest_enabled():
+            if not canary_requester_enabled(req.user_id):
                 raise MatchSearchPipelineError("semantic_policy_disabled", "preference_semantic_search")
             from services.related_interest_telemetry import record_search as record_related_search
             record_related_search(search_job_id, req.user_id)
@@ -2059,6 +2062,7 @@ def generate_matches_for_user(
                 semantic_ids = list(
                     semantic_lookup.get("candidate_ids") or []
                 )[:50]
+                semantic_ids = [cid for cid in semantic_ids if canary_pair_enabled(req.user_id, cid)]
                 semantic_match = _candidate_profile_filter(
                     user_doc,
                     excluded_users,
@@ -2091,6 +2095,7 @@ def generate_matches_for_user(
                     candidate = semantic_by_id.get(candidate_id)
                     if (
                         not candidate or candidate_id in seen_candidates
+                        or not canary_pair_enabled(req.user_id, candidate_id)
                         or participant_pair_key(req.user_id, candidate_id)
                         in excluded_pair_keys
                     ):
@@ -2197,6 +2202,11 @@ def generate_matches_for_user(
         candidate_id = candidate.get("user_id")
         if not candidate_id:
             continue
+        if (any(e.get("kind") == "semantic_related"
+                for e in preference_evidence_by_id.get(candidate_id, []) if isinstance(e, dict))
+                and not canary_pair_enabled(req.user_id, candidate_id)):
+            qualification_by_id.pop(candidate_id, None)
+            continue
         if candidate_id in qualification_by_id:
             continue
         candidate_stances = candidate_stances_by_id.get(candidate_id)
@@ -2250,8 +2260,7 @@ def generate_matches_for_user(
     
     agent_user_doc = strip_agent_payload(user_doc)
     if any(qualification_by_id.get(c.get("user_id"), {}).get("semantic_related_preference_matched")
-           for c in qualified_candidates) and (
-            not related_interest_enabled() or preference_semantic_mode() != "active"):
+           and not canary_pair_enabled(req.user_id, c.get("user_id")) for c in qualified_candidates):
         raise MatchSearchPipelineError("semantic_policy_disabled", "matchmaker_request")
     selection_deadline = time.monotonic() + MATCH_SELECTION_TIMEOUT_SECONDS
     agent_matches = []
@@ -2262,6 +2271,9 @@ def generate_matches_for_user(
         if not report("matchmaker_request", candidate_count=len(batch), batch=batch_index + 1):
             return {"status": "stale", "matches": [], "debug_info": [],
                     "diagnostics": diagnostics}
+        if any(qualification_by_id.get(c.get("user_id"), {}).get("semantic_related_preference_matched")
+               and not canary_pair_enabled(req.user_id, c.get("user_id")) for c in batch):
+            raise MatchSearchPipelineError("semantic_policy_disabled", "matchmaker_request")
         remaining = selection_deadline - time.monotonic()
         if remaining <= 0:
             raise MatchSearchPipelineError("matchmaker_timeout", "matchmaker_request")
@@ -2344,9 +2356,7 @@ def generate_matches_for_user(
             for item in matched_preference_evidence
             if isinstance(item, dict)
         )
-        if semantic_preference_selected and (
-            not related_interest_enabled() or preference_semantic_mode() != "active"
-        ):
+        if semantic_preference_selected and not canary_pair_enabled(req.user_id, matched_id):
             if quota_reserved:
                 release_daily_quota(req.user_id, bucket="active", operation_key=quota_operation_key)
             raise MatchSearchPipelineError("semantic_policy_disabled", "proposal_write")
@@ -2493,9 +2503,7 @@ def generate_matches_for_user(
                     req.user_id, bucket="active", operation_key=quota_operation_key,
                 )
             return {"status": "stale", "matches": [], "debug_info": []}
-        if semantic_preference_selected and (
-            not related_interest_enabled() or preference_semantic_mode() != "active"
-        ):
+        if semantic_preference_selected and not canary_pair_enabled(req.user_id, matched_id):
             if quota_reserved:
                 release_daily_quota(req.user_id, bucket="active", operation_key=quota_operation_key)
             raise MatchSearchPipelineError("semantic_policy_disabled", "proposal_write")

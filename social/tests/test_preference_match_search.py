@@ -230,6 +230,8 @@ def test_preference_search_keeps_durable_evidence_but_strips_expired_context(mon
 
 def _activate_semantic(monkeypatch, result):
     monkeypatch.setenv("MATCH_RELATED_INTEREST_ENABLED", "on")
+    monkeypatch.setenv("MATCH_PREFERENCE_SEMANTIC_MODE", "active")
+    monkeypatch.setenv("MATCH_RELATED_INTEREST_CANARY_USER_IDS", '["owner","semantic"]')
     monkeypatch.setattr(router, "preference_semantic_mode", lambda: "active")
     monkeypatch.setattr(router, "semantic_embedding_space_confirmed", lambda: True)
     monkeypatch.setattr(router, "qualified_exact_trigger_threshold", lambda: 1)
@@ -390,6 +392,8 @@ def test_alias_exact_candidate_keeps_direct_strength_and_skips_semantic(monkeypa
 
 def test_semantic_transient_failure_is_not_reported_as_no_candidates(monkeypatch):
     monkeypatch.setenv("MATCH_RELATED_INTEREST_ENABLED", "on")
+    monkeypatch.setenv("MATCH_PREFERENCE_SEMANTIC_MODE", "active")
+    monkeypatch.setenv("MATCH_RELATED_INTEREST_CANARY_USER_IDS", '["owner","semantic"]')
     candidate = {"user_id": "unused", "current_context": ""}
     _profiles, _matches = _flow(monkeypatch, candidate=candidate)
     monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
@@ -506,6 +510,8 @@ def test_shadow_mode_does_not_run_semantic_on_live_search_path(monkeypatch):
 
 def test_active_mode_fails_closed_without_embedding_space_confirmation(monkeypatch):
     monkeypatch.setenv("MATCH_RELATED_INTEREST_ENABLED", "on")
+    monkeypatch.setenv("MATCH_PREFERENCE_SEMANTIC_MODE", "active")
+    monkeypatch.setenv("MATCH_RELATED_INTEREST_CANARY_USER_IDS", '["owner","semantic"]')
     candidate = {"user_id": "unused", "current_context": ""}
     _profiles, _matches = _flow(monkeypatch, candidate=candidate)
     monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {

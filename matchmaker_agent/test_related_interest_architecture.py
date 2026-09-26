@@ -16,6 +16,12 @@ from related_interest_contract import POLICY
 from test_related_interest import setup_graph, response, MODEL
 
 
+@pytest.fixture(autouse=True)
+def canary_runtime_config(monkeypatch):
+    monkeypatch.setenv("MATCH_PREFERENCE_SEMANTIC_MODE", "active")
+    monkeypatch.setenv("MATCH_RELATED_INTEREST_CANARY_USER_IDS", '["owner","person"]')
+
+
 def packet():
     q = "Watching football matches with friends in a quiet alcohol-free accessible venue"
     c = "Playing football matches with friends in a quiet alcohol-free accessible venue"

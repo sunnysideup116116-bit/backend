@@ -14,6 +14,12 @@ VECTOR = [1.0] + [0.0]*767
 
 
 @pytest.fixture(autouse=True)
+def canary_runtime_config(monkeypatch):
+    monkeypatch.setenv("MATCH_PREFERENCE_SEMANTIC_MODE", "active")
+    monkeypatch.setenv("MATCH_RELATED_INTEREST_CANARY_USER_IDS", '["owner","person"]')
+
+
+@pytest.fixture(autouse=True)
 def synthetic_completion_boundary(monkeypatch):
     import related_interest_validator as validator
     def complete(client, *, timeout, **request):
@@ -101,7 +107,7 @@ def setup_graph(relation="role_mismatch", *, fingerprint=None):
                 return Result([{"state": "ONLINE", "labelsOrTypes": ["Concept"], "properties": ["embedding_v2"],
                     "options": {"indexConfig": {"vector.dimensions": 768, "vector.similarity_function": "cosine"}}}])
             if "SHOW INDEXES" in text:
-                return Result([{"count": 1}])
+                return Result([{"count": 1, "user_count": 1}])
             if "db.index.vector.queryNodes" in text:
                 events.append("ann")
                 assert params["index_name"] == INDEX_NAME

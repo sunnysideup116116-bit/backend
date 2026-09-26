@@ -95,3 +95,12 @@ V1 Ayue理由是 owner-role-bound evidence rendering：經安全檢查的兩項�
 本節對 related-interest 理由的受控 label 描述，是新產品明確允許的界面，並非公開 raw Graph evidence。
 Search jobs 只新增 count-only pilot telemetry，invitation outcomes 沿用 canonical state history，
 不新增 confirmation/consent bypass，也不將 pilot rating 送往拒絕原因的 AVOIDS pipeline。
+
+當前 rollout 是 two-account canary，而非 app-wide enable。Server-only
+`MATCH_RELATED_INTEREST_CANARY_USER_IDS` 必須是恰好兩個相異 stable owner IDs 的 JSON array，
+由正式啟動環境傳入；缺少／格式不符一律關閉 semantic。Body 的 canary／cohort 欄位不提供 authority。
+Related-interest 9001 endpoint 必須有既有 HMAC 驗證過的 matching owner scope，且 owner
+與 requester 相同；缺少／不符回 403。Unsigned exact/background 舊路徑不變。
+僅 canary requester 且 qualified exact=0 可 fallback；owner expansion、pool/qualification、
+proposal write 前都再次限制 canary candidate。Exact matching 不新增 cohort filter。
+Kill switch 優先；關閉後不得開始新的 ANN、validator attempt 或 semantic proposal。
