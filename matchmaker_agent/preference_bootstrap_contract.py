@@ -13,6 +13,8 @@ from .concept_identity import (
     canonicalize_concept, durable_memory_limit, has_mixed_preference_polarity,
     normalize_fresh_preference_text, split_compound_concept_label,
     split_explicit_preference_enumeration, FRESH_PREFERENCE_NORMALIZATION_POLICY,
+    stored_concept_identity, is_v2_preference_key,
+    PreferenceTextError,
 )
 
 POLICY = "preference-bootstrap-v1"
@@ -73,7 +75,41 @@ def validate_bootstrap_item_count(prefers, avoids, *, mode):
     require(1 <= len(prefers) + len(avoids) <= limit, "bootstrap_item_limit", 422)
 
 
-def normalize_items(prefers, avoids, *, mode="add_only"):
+def is_compound_item(text):
+    try:
+        return bool(split_explicit_preference_enumeration(text) or split_compound_concept_label(text))
+    except PreferenceTextError as exc:
+        # A literal remains ONE bounded item, even if its internal enumeration
+        # would exceed the ordinary atomic extraction count. Never split it.
+        if exc.code == "memory_limit_exceeded":
+            return True
+        raise
+
+
+def legacy_compound_source(snapshot, owner, mode, text, relation):
+    """Server-read owner snapshot proof, never a client-provided exemption flag."""
+    require(mode == "complete_set" and isinstance(snapshot, dict)
+            and isinstance(owner, str) and snapshot.get("owner") == owner,
+            "atomic_item_required", 422)
+    matches = []
+    for row in snapshot.get("rows", []):
+        concept = row["concept"]
+        source = concept.get("semantic_text") or concept.get("label")
+        if (row["relation"] == relation and relation in {"PREFERS", "AVOIDS"}
+                and source == text and row.get("id")
+                and row.get("properties", {}).get("active") is not False
+                and not stored_concept_identity(concept)
+                and concept.get("canonicalization_version") != "v2"
+                and not is_v2_preference_key(concept.get("key"))):
+            matches.append(row)
+    # Ambiguous duplicate sources cannot silently select a retirement locator.
+    require(len(matches) == 1, "atomic_item_required", 422)
+    row = matches[0]
+    return {"owner": owner, "relationship_id": row["id"], "legacy_key": row["concept"]["key"],
+            "relation": relation, "association_hash": digest(row), "snapshot_hash": digest(snapshot)}
+
+
+def normalize_items(prefers, avoids, *, mode="add_only", legacy_snapshot=None, owner=None):
     import re
     validate_bootstrap_item_count(prefers, avoids, mode=mode)
     items = {}
@@ -81,12 +117,18 @@ def normalize_items(prefers, avoids, *, mode="add_only"):
         for raw in values:
             text = normalize_fresh_preference_text(raw)
             require(not has_mixed_preference_polarity(text), "mixed_polarity", 422)
-            require(not split_explicit_preference_enumeration(text)
-                    and not split_compound_concept_label(text), "atomic_item_required", 422)
-            identity = canonicalize_concept(text)
+            compound = is_compound_item(text)
+            source = legacy_compound_source(legacy_snapshot, owner, mode, raw, relation) if compound else None
+            # This narrow legacy bridge must preserve every code point. If the
+            # unchanged v2 canonicalizer would alter the source, fail closed.
+            identity = canonicalize_concept(raw if source else text)
+            if source:
+                require(identity and identity.semantic_text == raw, "legacy_compound_text_not_lossless", 422)
             require(identity and not re.search(PROTECTED, identity.semantic_text, re.I), "preference_not_admissible", 422)
             require(identity.key not in items, "duplicate_or_conflicting_identity", 422)
             items[identity.key] = {**identity.as_dict(), "relation": relation}
+            if source:
+                items[identity.key]["legacy_compound_source"] = source
     return sorted(items.values(), key=lambda item: item["key"])
 
 

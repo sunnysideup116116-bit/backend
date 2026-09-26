@@ -9,7 +9,8 @@ from neo4j.exceptions import TransientError
 from .concept_identity import stored_concept_identity, is_v2_preference_key, FRESH_PREFERENCE_NORMALIZATION_POLICY
 from .preference_bootstrap_contract import (
     BootstrapError, POLICY, MAX_SNAPSHOT, MAX_BYTES, PREVIEW_TTL, digest, encoded,
-    enabled, normalize_items, open_preview, seal_preview, require,
+    enabled, normalize_items, open_preview, seal_preview, require, legacy_compound_source,
+    is_compound_item,
 )
 from .preference_write_fence import lock_preferences, bump_preferences
 from .preference_mutations import write_preference_edges
@@ -66,6 +67,15 @@ def build_plan(tx, owner, mode, items):
     require(mode in {"add_only", "complete_set"}, "invalid_bootstrap_mode", 422)
     before, pending = snapshot(tx, owner)
     require(not pending, "preference_projection_pending")
+    compound_sources = []
+    for item in items:
+        text = item["semantic_text"]
+        compound = is_compound_item(text)
+        if compound or "legacy_compound_source" in item:
+            require(compound and stored_concept_identity(item), "legacy_compound_binding_invalid", 422)
+            expected = legacy_compound_source(before, owner, mode, text, item["relation"])
+            require(item.get("legacy_compound_source") == expected, "legacy_compound_binding_invalid", 422)
+            compound_sources.append(expected)
     current = concepts_for(tx, [item["key"] for item in items])
     proposed = {(item["key"], item["relation"]) for item in items}
     retired, keep, new_edges = [], [], []
@@ -92,12 +102,34 @@ def build_plan(tx, owner, mode, items):
         require(len(active) <= 1, "duplicate_owner_association", 422)
         if not active:
             new_edges.append({"key": item["key"], "relation": item["relation"]})
+    require(len({s["relationship_id"] for s in compound_sources}) == len(compound_sources),
+            "legacy_compound_binding_invalid", 422)
+    for source in compound_sources:
+        matches = [r for r in retired if r["id"] == source["relationship_id"]]
+        require(len(matches) == 1 and digest(matches[0]) == source["association_hash"],
+                "legacy_compound_retirement_mismatch", 422)
     plan = {"owner_revision": before["revision"], "snapshot_hash": digest(before), "items": items,
             "create_concepts": [i for i in items if i["key"] not in current],
             "reuse_concepts": list(current.values()), "create_edges": new_edges,
             "retire_edges": retired, "keep_edge_ids": keep,
             "concept_preconditions": {i["key"]: current.get(i["key"]) for i in items}}
     return plan, before
+
+
+def preview_plan(tx, owner, mode, prefers, avoids):
+    # Read and validate provenance in the same bounded preview transaction.
+    # build_plan rechecks the exact locator/snapshot; a concurrent change cannot
+    # transfer an exemption to a different relationship or preference set.
+    before, pending = snapshot(tx, owner)
+    require(not pending, "preference_projection_pending")
+    items = normalize_items(prefers, avoids, mode=mode, legacy_snapshot=before, owner=owner)
+    return build_plan(tx, owner, mode, items)
+
+
+def check_compound_retirement(payload, plan):
+    if any("legacy_compound_source" in item for item in plan["items"]):
+        require(payload.get("retire_edges") == plan["retire_edges"],
+                "legacy_compound_retirement_mismatch", 422)
 
 
 def journal(tx, owner, op_id):
@@ -156,8 +188,7 @@ class BootstrapGraph:
     def preview(self, owner, mode, prefers, avoids, mongo_snapshot_hash=None):
         require(enabled(), "preference_bootstrap_disabled", 503)
         self.read(require_schema)
-        items = normalize_items(prefers, avoids, mode=mode)
-        plan, before = self.read(build_plan, owner, mode, items)
+        plan, before = self.read(preview_plan, owner, mode, prefers, avoids)
         payload = {"policy": POLICY, "normalization_policy": FRESH_PREFERENCE_NORMALIZATION_POLICY,
                    "owner": owner, "mode": mode, "preview_id": str(uuid.uuid4()),
                    "expires_at": time.time() + PREVIEW_TTL, "plan_hash": digest(plan),
@@ -177,6 +208,7 @@ class BootstrapGraph:
                     and digest(current) == payload["snapshot_hash"], "stale_preview")
             plan, _ = build_plan(tx, owner, payload["mode"], payload["items"])
             require(digest(plan) == payload["plan_hash"], "stale_preview")
+            check_compound_retirement(payload, plan)
         self.read(check)
         return payload
 
@@ -207,6 +239,7 @@ class BootstrapGraph:
         require(state["revision"] == payload["owner_revision"], "stale_preview")
         plan, before = build_plan(tx, owner, payload["mode"], payload["items"])
         require(digest(plan) == payload["plan_hash"], "stale_preview")
+        check_compound_retirement(payload, plan)
         created = []
         for item in plan["create_concepts"]:
             props = {k: item[k] for k in CONCEPT_FIELDS if k in item}
@@ -252,6 +285,9 @@ class BootstrapGraph:
                   "revision_before": state["revision"], "revision_after": after["revision"],
                   "created_concepts": created, "reused_concepts": plan["reuse_concepts"],
                   "created_edges": created_edges, "retired_edges": retired, "created_at": time.time()}
+        sources = [item["legacy_compound_source"] for item in plan["items"] if "legacy_compound_source" in item]
+        if sources:
+            record["legacy_compound_sources"] = sources
         save_journal(tx, record)
         return record
 
