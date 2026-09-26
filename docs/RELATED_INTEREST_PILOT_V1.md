@@ -1,9 +1,11 @@
 # Semantic Related-Interest Matching v1 — internal app-wide pilot
 
-Implementation branch based on main `64bb7e7`. **Not deployed or enabled.**
-The deployment environment is the internal pilot cohort; no staff allowlist or
-human preview gate is introduced. Existing identity/auth/safety/confirmation
-boundaries remain mandatory for every account.
+Initial implementation was based on main `64bb7e7`; the implementation-gate
+results below are historical. **Semantic remains OFF.** The current activation
+scope is a two-account canary, not app-wide activation. Only the separately
+verified Sunny/Demo stable owner IDs may be configured by the operator; see the
+isolation section below. No human preview bypass is introduced. Existing
+identity/auth/safety/confirmation boundaries remain mandatory for every account.
 
 This is a new product policy for conversation/match discovery, not strict
 preference satisfaction. [Research closeout](PREFERENCE_SEMANTIC_ROLLOUT_DECISION.md)
@@ -16,12 +18,12 @@ a new model/backend sweep, holdout experiment or P1-B generic hybrid retrieval.
 Explicit preference → deterministic identity v2 → indexed exact PREFERS retrieval
 → existing block/history/cohort/profile filtering + hard-conflict qualification
 → qualified exact > 0: unchanged exact pipeline (no semantic refill)
-→ qualified exact == 0, all server flags enabled:
+→ qualified exact == 0, all server flags enabled, requester in server canary:
   Gemini query embedding / verified embedding_v2 reuse
   → concept_embedding_v2_index bounded ANN
   → full-source/fingerprint checks
   → DeepSeek relation-only validation
-  → accepted Concepts only → bounded PREFERS owner expansion + dedupe
+  → accepted Concepts only → bounded canary PREFERS owner expansion + dedupe
   → existing filters / qualification / max-20 pool / Matchmaker
   → existing quota / proposal dedupe / confirmation / invitation / mutual consent
 ```
@@ -106,9 +108,10 @@ MATCH_PREFERENCE_SEMANTIC_EMBEDDING_SPACE_CONFIRMED=off
 MATCH_RELATED_INTEREST_ENABLED=off
 ```
 
-The new flag must be enabled in both Social and 9001; Social additionally requires
-active mode and the embedding-space confirmation. Missing flags fail closed on a
-semantic miss; exact results do not require them. A legacy active flag cannot
+The flags must be enabled in both Social and 9001, including active mode;
+Social additionally requires the embedding-space confirmation. Missing/invalid
+canary configuration, non-canary requesters, or a kill switch keep live searches
+exact-only; exact results do not require these flags. A legacy active flag cannot
 route live searches to the unvalidated old ANN endpoint. Flag checks occur again
 before owner expansion and proposal commit. Already-created proposals retain the
 existing consent/lifecycle, rather than being silently cancelled by a flag change.
@@ -123,8 +126,9 @@ when services use distinct filesystem roots. Removing the file does not turn on
 any OFF environment flag. There is no client-controlled flag-changing endpoint.
 
 ANN default/hard max: 24/32 neighbors; 8/12 Concepts; 10/20 owners per Concept;
-40/50 candidate IDs; 3/5 evidence records; hydrated pool <=20. Per-Concept LIMIT
-remains before exclusion/grouping; no full graph scan or refill. Deterministic
+40/50 candidate IDs; 3/5 evidence records; hydrated pool <=20. Canary membership
+is applied before the per-Concept LIMIT, which remains before exclusions/grouping;
+only two indexed User.id lookups are eligible. No full graph scan or refill. Deterministic
 dedupe/order: score descending, Concept key and user ID ties. Exact wins first.
 Only zero qualified exacts permits fallback, regardless of an old threshold override.
 
@@ -147,9 +151,9 @@ not automatically background-shadowed; the existing separate observation policy 
 Historical `Concept.embedding` fingerprint remains unknown. New runtime only uses
 `embedding_v2`, `embedding_v2_fingerprint`, `embedding_v2_source_hash` and the
 dedicated 768-d cosine `concept_embedding_v2_index`.
-The existing ONLINE RANGE index on `Concept.key` is also required; the new read
-path fails closed without it rather than allowing owner expansion to become a
-label scan. Missing P0 key schema is not repaired automatically by this pilot.
+The existing ONLINE RANGE indexes on `Concept.key` and `User.id` are required;
+the read path fails closed without either, rather than allowing canary owner
+expansion to become a label scan. No missing schema is repaired automatically.
 
 The fingerprint covers provider, configured request model identifier, task,
 dimension, exact embedding-2 sentence-similarity prefix, full v2 semantic source
@@ -341,3 +345,102 @@ PREFERS. CAS/mutual-consent tests retain the entire packet through draft→pendi
 No new feature, semantic labels, policy, .82 threshold, frozen research result,
 or production configuration was changed by this review. The main base was checked
 against `legacy-origin/main@64bb7e7` before PR preparation.
+
+## Two-account isolation gate — 2026-09-26
+
+This patch is based on `main@87a860ad51bb87ec0dbcec33334feab049f5f107`.
+It does not activate flags, deploy, contact production Graph, change the nine
+relation outcomes, generate embeddings, bootstrap accounts or start P1-B.
+
+### Server authority and rollout
+
+- `matchmaker_agent/related_interest_canary.py` is the single cohort parser/gate.
+  `MATCH_RELATED_INTEREST_CANARY_USER_IDS` is a JSON array of **exactly two distinct
+  stable owner IDs**. Missing, malformed, duplicate, wildcard, email, whitespace
+  or over-limit entries return an empty cohort. IDs are not inferred from names.
+- Operator must inject the approved Sunny/Demo IDs into the environment of the
+  official `start_all.sh`. Actual account identifiers are not fixtures or committed
+  configuration. Startup exports the value (empty if absent) to all child
+  processes; a service-specific dotenv cannot silently populate a missing cohort.
+- Both services must have active semantic mode and related-interest enabled;
+  Social still checks embedding-space confirmation. Non-cohort and disabled
+  requests follow the existing exact-only path, even with global flags ON.
+- The related-interest endpoint additionally requires the existing verified
+  matching quota scope to name the same requester. Unsigned or mismatched body
+  claims return 403, before Graph/provider work. This reuses the existing HMAC
+  and owner/task accounting; exact/background endpoints and quota amounts are
+  unchanged. No client-provided flag/cohort list grants authority.
+- ANN Concept eligibility requires a PREFERS owner in the cohort. Accepted
+  Concepts expand only the two indexed User IDs, before the existing per-Concept
+  bound. Graph results, Social hydration, qualification and each related
+  Matchmaker batch are checked again. Immediately before `insert_one`, the
+  semantic pair is checked again; stop releases any reserved daily slot.
+- Exact candidates outside the cohort remain eligible under existing rules.
+  No profile `test_match_cohort` is changed or repurposed. Block/history/hard
+  conflicts/consent/proposal dedupe still apply normally.
+- Kill file takes precedence at work boundaries, including validator attempts.
+  An already in-flight bounded call can finish; it cannot authorize a new
+  semantic proposal after the next stop check. This is not an atomic distributed
+  cancellation guarantee for an already submitted database write.
+- Merge/deploy/activation are separate approvals. Upgrade Social/9001 together
+  with all flags OFF. For future authorized activation, inject the same two-ID
+  cohort, recheck v2 index/fingerprint and signed-owner routing, then enable only
+  that cohort. Immediate rollback: shared kill file or flags OFF; leave Graph
+  identity, vectors, account data and already-created consent lifecycle intact.
+
+### Verification evidence
+
+| Suite (same interpreter/dependencies, external I/O disabled) | Branch | Clean main |
+| --- | --- | --- |
+| Social full | 1821 passed / 36 failed | 1809 passed / same 36 failed |
+| Matchmaker full (final rerun) | 233 passed | 220 passed |
+| Contracts full | 596 passed | 572 passed |
+| Risk full | 231 passed / 5 failed | 231 passed / same 5 failed |
+| Branch-only failure set | **0** | comparator |
+
+The Social baseline contains existing Appwrite/auth/Pi fixture failures. Risk
+contains the same five `google.genai` ImportErrors. No baseline is suppressed,
+fixed, xfailed or represented as a full CI PASS by this patch.
+
+Commands: `python scripts/run_offline_tests.py social|matchmaker|contracts|risk`
+with separate service-compatible interpreters. Focused coverage includes all
+eight requested isolation/parity cases, signed owner/body mismatch, outside
+owner injection, missing index, mid-flight cohort/kill changes, safe quota
+release, exact-outside-cohort proposal parity and preserved truthful reasons.
+Existing frozen OFF differential and confirmation/mutual-consent tests are retained.
+
+**50ms testcase classification: confirmed timing-sensitive baseline/test issue.**
+`test_real_async_validator_transport_is_cancelled_closed_and_has_no_sdk_retry`
+was run five times per checkout, alternating main/branch, with the same interpreter
+and offline runner. Both failed 5/5 in cold focused processes: expected one mock
+transport attempt, actual zero (`assert (0 == 1)`); timeout itself occurred and
+the separate elapsed <0.5s assertion passed. JUnit testcase elapsed (not provider
+latency): main 0.173–0.221s, branch 0.218–0.229s. Both test-body and `_completion`
+source hashes match exactly. In the full-suite order, both pass. The assumption
+that transport necessarily starts inside 50ms is initialization/order-sensitive;
+this patch changes neither that testcase, its timeout, SDK nor retry/deadline code.
+Raw comparison logs/XML remain ignored, not Git artifacts.
+
+Disposable Neo4j `2026.08.1` (localhost only, not a production version claim):
+two actual ANN/retrieval runs PASS, vector index ONLINE/768/cosine. Among 25
+synthetic PREFERS owners, only the configured counterpart is returned; two
+accepted Concept hits occupy one slot, 24 outside owners never enter the pool,
+AVOIDS-only is not positive evidence, and retrieval leaves graph digest unchanged.
+PROFILE: vector ProcedureCall + bounded Top; expansion uses Concept/User
+NodeUniqueIndexSeek, two-ID Unwind, per-Concept Limit and candidate Top. No
+AllNodesScan/NodeByLabelScan. Measured synthetic/stub-validator fallback 1782.035ms
+first run and 91.461ms warm repeat, not provider/p95 performance. Test container
+stopped afterward; isolated synthetic volumes and ignored reports retained.
+
+Generated vectors, provider reports, credentials, local env and query-plan dumps
+are not submitted. Production settings and primary dirty Server checkout are untouched.
+
+GitNexus is bound to the isolated `two-account-semantic-canary-server` checkout,
+base `87a860a`, re-indexed with the intended diff. Pre-commit detect_changes reports
+19 files / 29 indexed symbols / 692 affected flows, **CRITICAL**. Many listed flows
+are expanded from shared `run` symbols; this is not evidence that hundreds of
+runtime paths were edited. Initial upstream queries for dynamic pipeline/HTTP
+entries returned UNKNOWN, not proof of no callers. Manual source/transport review
+and the same-main differential tests supplement the index. No CRITICAL warning is
+waived as a clean graph result; relation, identity, embedding, provider retry,
+quota amounts and lifecycle code remain outside this patch's changes.

@@ -12,6 +12,10 @@ NC='\033[0;37m' # No Color
 SERVER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$SERVER_ROOT" || exit 1
 
+# Operator-only, shared by every child process. An absent cohort stays empty;
+# service-specific dotenv files must not independently widen semantic routing.
+export MATCH_RELATED_INTEREST_CANARY_USER_IDS="${MATCH_RELATED_INTEREST_CANARY_USER_IDS:-}"
+
 # Validate provider and perform non-generative GPT checks BEFORE touching ports.
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo "Usage: ./start_all.sh [ollama|gpt] (default: ollama)"

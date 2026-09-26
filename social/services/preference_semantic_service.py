@@ -17,6 +17,7 @@ from urllib3.util import Timeout
 
 from config import GOOGLE_EMBEDDING_MODEL
 from matchmaker_agent.concept_identity import canonicalize_concept
+from matchmaker_agent.related_interest_canary import canary_requester_enabled, canary_pair_enabled
 from matchmaker_agent.related_interest_contract import (
     enabled as related_interest_enabled, embedding_fingerprint, validated_evidence, bounded_counts,
 )
@@ -202,7 +203,7 @@ def preference_semantic_readiness() -> dict[str, Any]:
 
 def _post_semantic(payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
     related = "embedding_fingerprint" in payload
-    if related and not related_interest_enabled():
+    if related and not canary_requester_enabled(payload.get("requester_user_id")):
         raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
     extra = {}
     if related:
@@ -241,7 +242,7 @@ def retrieve_semantic_preference_candidates(
     # The live pipeline always requires v1; only explicit legacy observation
     # callers retain the original read-only API when mode is not active.
     related = related_policy_required or related_interest_enabled() or preference_semantic_mode() == "active"
-    if related and not related_interest_enabled():
+    if related and not canary_requester_enabled(requester_user_id):
         raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
     identity = canonicalize_concept(topic)
     if not identity:
@@ -283,11 +284,13 @@ def retrieve_semantic_preference_candidates(
         payload["embedding_fingerprint"] = embedding_fingerprint(GOOGLE_EMBEDDING_MODEL)
     result = _post_semantic(payload, remaining_timeout())
     remaining_timeout()
-    if related and not related_interest_enabled():
+    if related and not canary_requester_enabled(requester_user_id):
         raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
     if result.get("canonical_key") != identity.key:
         raise PreferenceSemanticRetrievalError("semantic_graph_invalid_response")
     if result.get("status") == "query_embedding_required":
+        if related and not canary_requester_enabled(requester_user_id):
+            raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
         try:
             vectors = get_embeddings(
                 [identity.label],
@@ -328,6 +331,7 @@ def retrieve_semantic_preference_candidates(
         if (
             not candidate_id or candidate_id == requester_user_id
             or candidate_id in excluded
+            or related and not canary_pair_enabled(requester_user_id, candidate_id)
         ):
             continue
         evidence = by_candidate.setdefault(candidate_id, [])

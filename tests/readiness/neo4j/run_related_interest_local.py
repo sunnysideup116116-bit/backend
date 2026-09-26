@@ -4,6 +4,7 @@ Not R3 qualification, semantic precision scoring, or a production readiness clai
 Uses the existing ownership + local-only socket guards; never imports Server startup.
 """
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -48,6 +49,7 @@ def run():
             max_transaction_retry_time=0) as driver:
         with driver.session(database="neo4j") as session:
             session.run("CREATE CONSTRAINT related_local_key IF NOT EXISTS FOR (c:Concept) REQUIRE c.key IS UNIQUE").consume()
+            session.run("CREATE CONSTRAINT related_local_user IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE").consume()
             session.run(f"""CREATE VECTOR INDEX {INDEX_NAME} IF NOT EXISTS FOR (c:Concept) ON c.embedding_v2
                 OPTIONS {{indexConfig: {{`vector.dimensions`:768, `vector.similarity_function`:'cosine'}}}}""").consume()
             for text, identity in identities.items():
@@ -75,7 +77,11 @@ def run():
                         captured.append((text, params))
                     return session.run(statement, **params)
             start = time.perf_counter()
-            with patch.object(service, "enabled", return_value=True), patch.object(
+            with patch.dict(os.environ, {
+                    "MATCH_RELATED_INTEREST_ENABLED": "on", "MATCH_PREFERENCE_SEMANTIC_MODE": "active",
+                    "MATCH_RELATED_INTEREST_CANARY_USER_IDS": '["pilot-owner","pilot-synthetic-0"]',
+                    "MATCH_RELATED_INTEREST_KILL_SWITCH_FILE": str(harness.ARTIFACTS / "local-canary-kill"),
+                }), patch.object(
                     validator, "_completion", lambda _client, **kwargs: create(**{k: v for k, v in kwargs.items() if k != "timeout"})):
                 result = service.retrieve(Capture(), req, query, client, "deepseek-test-double", model)
             elapsed = time.perf_counter()-start
@@ -83,6 +89,7 @@ def run():
             assert result["validator_counts"]["rejected"] == 1
             ids = [r["candidate_id"] for r in result["candidates"]]
             assert ids and len(ids) == len(set(ids)) <= req.candidate_limit and "pilot-avoid-only" not in ids
+            assert ids == ["pilot-synthetic-0"] and len(result["candidates"][0]["evidence"]) == 2
             assert all(e["relation"] in {"role_mismatch", "sibling_related"}
                 for r in result["candidates"] for e in r["evidence"])
             plans = []
@@ -95,12 +102,15 @@ def run():
                     assert len(params["concepts"]) == 2
                     assert all(c["relation"] in {"role_mismatch", "sibling_related"} for c in params["concepts"])
                     assert statement.index("LIMIT $per_concept_limit") < statement.index("WHERE candidate.id")
+                    assert statement.index("UNWIND $allowed_owner_ids") < statement.index("LIMIT $per_concept_limit")
+                    assert params["allowed_owner_ids"] == ["pilot-owner", "pilot-synthetic-0"]
                 plans.append({"kind": "ANN" if "queryNodes" in statement else "expansion", "operators": operators})
             index = service.index_metadata(session)
         assert before == harness.digest_graph(driver)
     report = {"status": "PASS", "synthetic_only": True, "real_semantic_precision": "not_evaluated",
         "production_ready": False, "topology": topology, "index": index, "plans": plans,
         "dedupe": True, "prefers_only": True, "validator_before_expansion": True,
+        "canary_candidate_isolation": True, "outside_owners_excluded": 24,
         "identity_edges_unchanged_by_retrieval": True, "candidate_count": len(ids),
         "validator_counts": result["validator_counts"], "fallback_ms": round(elapsed*1000, 3)}
     harness.json_file(harness.ARTIFACTS/"related_interest_local.json", report)

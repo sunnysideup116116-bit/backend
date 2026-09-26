@@ -12,6 +12,12 @@ from services import preference_semantic_service as semantic
 from routers import match as router
 
 
+@pytest.fixture(autouse=True)
+def canary_runtime_config(monkeypatch):
+    monkeypatch.setenv("MATCH_PREFERENCE_SEMANTIC_MODE", "active")
+    monkeypatch.setenv("MATCH_RELATED_INTEREST_CANARY_USER_IDS", '["owner","candidate"]')
+
+
 def evidence(q="看足球", c="踢足球", relation="role_mismatch"):
     return {"kind": "semantic_related", "basis_type": "related_interest", "policy_version": POLICY,
         "query_preference": q, "candidate_preference": c, "concept_key": canonicalize_concept(c).key,
@@ -145,10 +151,10 @@ def test_missing_server_pilot_flag_cannot_start_unvalidated_semantic_search(monk
         "candidate_ids": [], "canonical_key": K_POP})
     lookup = Mock(side_effect=AssertionError("must not use legacy ANN"))
     monkeypatch.setattr(router, "retrieve_semantic_preference_candidates", lookup)
-    with pytest.raises(router.MatchSearchPipelineError) as error:
-        router.generate_matches_for_user("owner", source="automatic", search_context=_preference_context(),
-            report_progress=lambda _: True, can_commit=lambda: True)
-    assert error.value.code == "semantic_policy_disabled"
+    result = router.generate_matches_for_user("owner", source="automatic", search_context=_preference_context(),
+        report_progress=lambda _: True, can_commit=lambda: True)
+    assert result["status"] == "no_suitable_candidate"
+    assert result["diagnostics"]["semantic_mode"] == "off"
     lookup.assert_not_called(); matches.insert_one.assert_not_called()
 
 

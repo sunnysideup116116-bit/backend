@@ -2,6 +2,7 @@
 import math
 import time
 from neo4j import Query
+from matchmaker_agent.related_interest_canary import canary_cohort, canary_requester_enabled, canary_pair_enabled
 
 try:
     from .concept_identity import stored_concept_identity
@@ -23,14 +24,17 @@ def index_metadata(session):
     config = (row.get("options") or {}).get("indexConfig") or {}
     key_index = session.run(Query("""
         SHOW INDEXES YIELD state, type, labelsOrTypes, properties
-        WHERE state='ONLINE' AND type='RANGE' AND labelsOrTypes=['Concept'] AND properties=['key']
-        RETURN count(*) AS count
+        WHERE state='ONLINE' AND type='RANGE'
+        RETURN sum(CASE WHEN labelsOrTypes=['Concept'] AND properties=['key'] THEN 1 ELSE 0 END) AS count,
+          sum(CASE WHEN labelsOrTypes=['User'] AND properties=['id'] THEN 1 ELSE 0 END) AS user_count
     """, timeout=3)).single()
     key_ready = bool(key_index and int(key_index.get("count", 0) or 0) > 0)
+    user_ready = bool(key_index and int(key_index.get("user_count", 0) or 0) > 0)
     return {"exists": bool(row), "state": row.get("state", "MISSING"),
         "dimension": config.get("vector.dimensions"), "similarity": config.get("vector.similarity_function"),
         "key_index_ready": key_ready,
-        "ready": bool(key_ready and row.get("state") == "ONLINE" and row.get("labelsOrTypes") == ["Concept"]
+        "user_id_index_ready": user_ready,
+        "ready": bool(key_ready and user_ready and row.get("state") == "ONLINE" and row.get("labelsOrTypes") == ["Concept"]
             and row.get("properties") == ["embedding_v2"] and config.get("vector.dimensions") == DIMENSIONS
             and str(config.get("vector.similarity_function", "")).lower() == "cosine")}
 
@@ -77,8 +81,9 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
     """Do not use old embedding/index, labels, AVOIDS owners, or fuzzy fallback."""
     result = {"status": "error", "canonical_key": identity.key, "candidates": [],
         "retrieval_source": "graph_semantic", "policy_version": POLICY}
-    if not enabled():
+    if not canary_requester_enabled(req.requester_user_id):
         return {**result, "error_code": "semantic_policy_disabled"}
+    allowed_owners = sorted(canary_cohort())
     deadline = min(deadline, clock()+27.0) if deadline is not None else clock()+min(27.0, req.request_budget_seconds)
     session = _DeadlineSession(session, deadline, clock)
     expected = embedding_fingerprint(embedding_model)
@@ -104,13 +109,15 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
         if req.query_embedding is not None:
             return {**result, "error_code": "semantic_query_embedding_invalid"}
         return {**result, "status": "query_embedding_required"}
+    if not canary_requester_enabled(req.requester_user_id):
+        return {**result, "error_code": "semantic_policy_disabled"}
     hits = list(session.run(Query("""
         CALL db.index.vector.queryNodes($index_name, $neighbor_limit, $vector)
         YIELD node AS c, score
         WHERE score >= $min_similarity AND c.key <> $query_key
           AND c.canonicalization_version='v2' AND c.fidelity_status='complete' AND c.embedding_v2_fingerprint=$fingerprint
           AND c.embedding_v2_source_hash=c.semantic_input_hash
-          AND EXISTS { MATCH (c)<-[:PREFERS]-(:User) }
+          AND EXISTS { MATCH (c)<-[:PREFERS]-(owner:User) WHERE owner.id IN $allowed_owner_ids }
         WITH c, score ORDER BY score DESC, c.key ASC LIMIT $concept_limit
         RETURN c.key AS key, c.semantic_text AS semantic_text,
           c.canonicalization_version AS canonicalization_version, c.semantic_input_hash AS semantic_input_hash,
@@ -119,7 +126,7 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
           c.embedding_v2_source_hash AS source_hash, score AS similarity
     """, timeout=3), index_name=INDEX_NAME, neighbor_limit=req.neighbor_limit,
         vector=query_vector, min_similarity=req.min_similarity, query_key=identity.key,
-        fingerprint=expected, concept_limit=req.concept_limit))
+        fingerprint=expected, concept_limit=req.concept_limit, allowed_owner_ids=allowed_owners))
     concepts = []
     seen = set()
     for row in hits[:req.concept_limit]:
@@ -135,10 +142,13 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
         concepts.append({"concept_key": source.key, "semantic_text": source.semantic_text,
             "semantic_input_hash": source.semantic_input_hash, "similarity": float(score)})
     # The only LLM boundary occurs BEFORE any Concept -> User expansion.
+    if not canary_requester_enabled(req.requester_user_id):
+        return {**result, "error_code": "semantic_policy_disabled"}
     accepted, counts = validate_concepts(identity.semantic_text, concepts, client, validator_model,
-        deadline=min(deadline, clock()+18.0), clock=clock, is_enabled=enabled)
+        deadline=min(deadline, clock()+18.0), clock=clock,
+        is_enabled=lambda: canary_requester_enabled(req.requester_user_id))
     result["validator_counts"] = counts
-    if not enabled():
+    if not canary_requester_enabled(req.requester_user_id):
         return {**result, "error_code": "semantic_policy_disabled"}
     if not accepted:
         if counts["error"]:
@@ -157,7 +167,8 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
           AND c.embedding_v2_fingerprint=$fingerprint AND c.embedding_v2_source_hash=c.semantic_input_hash
         WITH c, hit.similarity AS score
         CALL {
-          WITH c MATCH (c)<-[:PREFERS]-(candidate:User)
+          WITH c UNWIND $allowed_owner_ids AS allowed_owner_id
+          MATCH (candidate:User {id:allowed_owner_id})-[:PREFERS]->(c)
           WITH candidate LIMIT $per_concept_limit
           WITH candidate WHERE candidate.id <> $requester_user_id AND NOT candidate.id IN $excluded_user_ids
           RETURN candidate
@@ -169,13 +180,14 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
         RETURN candidate.id AS candidate_id, evidence
     """, timeout=3), concepts=accepted, fingerprint=expected,
         requester_user_id=req.requester_user_id, excluded_user_ids=req.excluded_user_ids,
+        allowed_owner_ids=sorted(canary_cohort()),
         per_concept_limit=req.per_concept_limit, evidence_limit=req.evidence_limit, candidate_limit=req.candidate_limit)
     by_user = {}
     for row in rows:
         if clock() >= deadline:
             raise TimeoutError("semantic_retrieval_timeout")
         uid = row.get("candidate_id")
-        if not isinstance(uid, str) or not uid or uid == req.requester_user_id or uid in req.excluded_user_ids:
+        if not canary_pair_enabled(req.requester_user_id, uid) or uid in req.excluded_user_ids:
             continue
         found = by_user.setdefault(uid, {})
         for item in list(row.get("evidence") or [])[:req.evidence_limit]:

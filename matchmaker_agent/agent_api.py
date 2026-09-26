@@ -1307,12 +1307,18 @@ class RelatedInterestCandidateRequest(PreferenceSemanticCandidateRequest):
 
 @app.post("/api/preferences/related-interest-candidates")
 def related_interest_candidates(req: RelatedInterestCandidateRequest):
-    from related_interest_contract import enabled
+    from matchmaker_agent.related_interest_canary import canary_requester_enabled
     from related_interest_retrieval import retrieve
     deadline = time.monotonic() + req.request_budget_seconds
-    if not enabled():
+    if not canary_requester_enabled(req.requester_user_id):
         return {"status": "error", "error_code": "semantic_policy_disabled", "candidates": [],
                 "canonical_key": req.canonical_key or ""}
+    # The middleware verifies the existing Social signature. A body containing
+    # a canary ID cannot impersonate its owner or claim a background exemption.
+    from agent_quota.service import SCOPE
+    quota_scope = SCOPE.get()
+    if not quota_scope or quota_scope[0] != req.requester_user_id or quota_scope[1] != "matching":
+        raise HTTPException(status_code=403, detail="invalid_quota_context")
     try:
         identity = _preference_request_identity(req)
         if not identity:
