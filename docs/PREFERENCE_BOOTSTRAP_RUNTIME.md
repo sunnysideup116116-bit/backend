@@ -1,6 +1,8 @@
 # Owner-confirmed preference bootstrap runtime
 
-Status: implementation / isolated synthetic validation; **not deployed or enabled**.
+Base bootstrap runtime has completed the approved production integrity/smoke gates.
+The narrow legacy-compound compatibility below is a separate release change;
+deployment, real-owner bootstrap and pilot activation remain distinct steps.
 `PREFERENCE_BOOTSTRAP_ENABLED=off` by default. All semantic/related-interest flags
 remain OFF. No embedding, model, matching, invitation, bulk user discovery or
 production migration is part of this operation. Identity v2 is reused unchanged.
@@ -23,7 +25,8 @@ Owner comes only from the verified identity, never a body user_id or model tool.
 retire_legacy must **each** be true. An omitted AVOIDS panel is not consent.
 No default checked controls or LLM/admin substitute for owner consent.
 
-`complete_set` admits 1–10 atomic items per owner, counted as PREFERS + AVOIDS
+`complete_set` admits 1–10 items per owner (atomic by default; narrowly verified
+legacy-compound exception below), counted as PREFERS + AVOIDS
 **combined**, in one preview/commit; 11 rejects the whole request. It is not split
 into partial commits. `add_only` retains 1–min(5, durable_memory_limit()). The
 shared bootstrap count validator runs at both HTTP boundaries and Graph admission;
@@ -33,6 +36,45 @@ Both modes use whole-request validation, Unicode code-point ≤500 before and af
 truncation, inferred polarity, duplicate alias rows, or mixed-polarity compound.
 Fresh text uses the existing fixed OpenCC normalization then deterministic v2
 identity. Stored v2 identity is independently verified, never converted again.
+
+### Owner-confirmed legacy compound preservation
+
+Only `complete_set` can propose preserving one compound as one v2 identity. There
+is no new client override field. The server reads the owner's current snapshot and
+requires exactly one active PREFERS/AVOIDS legacy association with the same **literal
+text and polarity**. Other-owner, absent, inactive, ambiguous duplicate, reversed,
+or claimed-v2 sources fail closed. No suffix reconstruction, split, renamed phrase,
+sub-preference extraction, semantic alias or global Concept rewrite is performed.
+
+The item carries an owner-private `legacy_compound_source`: owner, physical
+relationship locator, legacy key, relation, exact association hash and owner snapshot
+hash. This proof is inside the signed preview and plan hash. Preview is read-only
+and provisional; mutation still requires every existing complete-set consent flag,
+including reviewed PREFERS, reviewed AVOIDS (explicit empty allowed) and retirement.
+There is no consent bypass at Graph commit or Social coordination.
+
+The legacy source is fed whole to the **unchanged** v2 canonicalizer. Its returned
+semantic_text must equal the source code point for code point. If prefix removal,
+Unicode/case/alias normalization would alter the stored text, this compatibility
+path rejects (`legacy_compound_text_not_lossless`) rather than changing the identity
+contract. Normal mixed-polarity/protected-content/text-length/count checks remain.
+An internal enumeration counts as one item, never an increased ordinary extraction
+cap. Ordinary Social memory-write preflight and bootstrap add-only still reject
+compound preservation; the existing 9001 atomic decomposition behavior is unchanged.
+
+Preview and locked commit revalidate the binding against a fresh server snapshot.
+The source must map one-to-one to the plan's retired association; the signed receipt's
+retirement list must agree with that plan. Changes to locator, text, polarity,
+properties or owner revision invalidate the receipt before mutation. Audit retains
+`legacy_compound_sources` alongside existing before/after/retirement records, not on
+the globally shared Concept. Mongo projection, idempotency, fencing and precise
+rollback use the existing transaction/reconciliation path unchanged.
+
+The result is one full Identity-v2 key. Querying a sub-fragment is **not** an exact
+match for that composite; no atomic child identities or relations are added. Normal
+versioned embedding and related-interest validation may later use the full source
+under separately approved rollout. This exception only proves a fresh legacy source;
+it does not grant a general future compound-edit/write exemption after retirement.
 
 Preview returns normalized full semantic_text/display_label/key/version/hash,
 Concept create/reuse lists, edge create list, exact legacy retirement locators,

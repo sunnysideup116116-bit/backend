@@ -402,6 +402,82 @@ def main():
             assert current() == before
             mark("ordinary_memory_runtime_cap_unchanged")
 
+            compound = "Jazz、Mystery Novels"
+            def compound_fixture():
+                reset()
+                with driver.session() as session:
+                    session.run("MATCH (c:Concept {key:'legacy_like'}) SET c.label=$text", text=compound).consume()
+                return {"mode": "complete_set", "prefers": [compound], "avoids": ["舊避免條件"]}
+
+            values = compound_fixture(); before = current()
+            other_before = graph.read(core.snapshot, "synthetic_b")[0]
+            original_profile = db.profiles.find_one({"user_id": "synthetic_a"})
+            response = client.post(path+"/preview", json=values, headers=headers)
+            assert response.status_code == 200, response.json()
+            p = response.json(); item = next(i for i in p["items"] if i["semantic_text"] == compound)
+            source = item["legacy_compound_source"]
+            assert len(p["items"]) == 2 and len(p["create_concepts"]) == 2
+            assert source["relationship_id"] in {r["id"] for r in p["retire_edges"]}
+            assert current() == before and db.profiles.find_one({"user_id": "synthetic_a"}) == original_profile
+            bad = client.post(path+"/commit", json={"preview_token":p["preview_token"],
+                "consent":{**consent,"complete_set":False}}, headers=headers)
+            assert bad.status_code == 422 and current() == before
+            assert db.preference_bootstrap_operations.count_documents({}) == 0
+            response = submit(p); assert response.json()["status"] == "committed", response.json()
+            after = current()
+            assert len(after["rows"]) == 2 and {r["concept"]["semantic_text"] for r in after["rows"]} == {compound,"舊避免條件"}
+            assert graph.read(core.snapshot,"synthetic_b")[0] == other_before
+            record = graph.status("synthetic_a",p["preview_id"])
+            assert record["legacy_compound_sources"] == [source] and len(record["retired_edges"]) == 2
+            assert db.preference_bootstrap_operations.find_one({"operation_id":p["preview_id"]})["status"] == "complete"
+            projected = db.profiles.find_one({"user_id":"synthetic_a"})
+            assert any(m["semantic_text"] == compound for m in projected["profile_memory_preview"])
+            assert submit(p).json()["status"] == "committed" and current() == after
+            for text in ("Jazz","Mystery Novels"):
+                with driver.session() as session:
+                    assert session.run("MATCH (:User {id:'synthetic_a'})-[:PREFERS]->(:Concept {key:$key}) RETURN count(*) AS n",
+                        key=agent_api.canonicalize_concept(text).key).single()["n"] == 0
+            rolled = client.post(path+"/rollback",json={"operation_id":p["preview_id"],"revision":1,"confirmed":True},headers=headers)
+            assert rolled.json()["status"] == "rolled_back"
+            assert normalize(current()) == normalize(before)
+            mark("legacy_compound_literal_complete_set_commit_projection_idempotency_rollback")
+
+            for variant in ("add_only","new_text","polarity"):
+                values = compound_fixture(); before=current()
+                if variant == "add_only": values["mode"]="add_only"
+                elif variant == "new_text": values["prefers"]=["Jazz、Board Games"]
+                else: values.update(prefers=[],avoids=[compound,"舊避免條件"])
+                r=client.post(path+"/preview",json=values,headers=headers)
+                assert r.status_code == 422 and r.json()["detail"]["code"] == "atomic_item_required"
+                assert current()==before and db.preference_bootstrap_operations.count_documents({})==0
+                mark("legacy_compound_reject_"+variant)
+
+            values=compound_fixture();p=client.post(path+"/preview",json=values,headers=headers).json()
+            with driver.session() as session:
+                session.run("MATCH (:User {id:'synthetic_a'})-[r:PREFERS]->(:Concept {key:'legacy_like'}) SET r.confidence=0.9").consume()
+            changed=current();r=submit(p)
+            assert r.status_code==409 and current()==changed
+            assert db.preference_bootstrap_operations.count_documents({})==0
+            mark("legacy_compound_changed_association_stale_no_mutation")
+
+            values=compound_fixture();p=client.post(path+"/preview",json=values,headers=headers).json();before=current()
+            from matchmaker_agent.preference_bootstrap_contract import seal_preview
+            payload=open_preview(p["preview_token"],"synthetic_a")
+            payload["retire_edges"][0]["id"]="wrong-retirement-locator"
+            forged={**p,"preview_token":seal_preview(payload)}  # server-side fault injection, not a client capability
+            r=submit(forged)
+            assert r.status_code==422 and r.json()["detail"]["code"]=="legacy_compound_retirement_mismatch"
+            assert current()==before and db.preference_bootstrap_operations.count_documents({})==0
+            mark("legacy_compound_retirement_receipt_mismatch_no_mutation")
+
+            from services.memory_service import validate_memory_proposals,MemoryWriteError
+            item=next(i for i in p["items"] if i["semantic_text"]==compound)
+            try:validate_memory_proposals([{**item,"stance":"like"}])
+            except MemoryWriteError as exc:assert exc.error_code=="invalid_atomic_preference"
+            else:raise AssertionError("ordinary facade must not accept compound exemption")
+            assert current()==before
+            mark("legacy_compound_cannot_bypass_ordinary_memory_facade")
+
         report = {"status": "PASS", "synthetic_only": True, "production_ready": False,
                   "graph": topology, "mongo": mongo, "scenarios": results,
                   "authentication": "synthetic principal override; real HMAC internal boundary",

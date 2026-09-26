@@ -103,3 +103,31 @@ preview inventories all 12 synthetic legacy associations, retires exactly those
 associations, preserves the second owner, and projects every new item. Overflow
 and add-only-overflow requests prove zero mutation; the ordinary 7-item write is
 still rejected under the unchanged default cap of 6. No real account text is used.
+
+## Confirmed legacy-compound compatibility
+
+`test_legacy_compound.py` covers a single lossless v2 identity from an exact,
+same-owner fresh legacy locator; both polarities; absent/other-owner/inactive/
+duplicate/v2 sources; polarity changes; tampered proof/retirement; unchanged
+atomic behavior; ordinary Social memory rejection; add-only rejection; and
+required complete-set consent. Client schemas reject a supplied snapshot override.
+
+The real disposable rehearsal adds seven scenarios: literal compound preview /
+commit / synced Mongo projection / audit / duplicate commit / precise rollback;
+add-only, new-text and polarity rejection; changed-association stale rejection;
+signed retirement-locator fault injection rejected with zero mutation; ordinary
+memory façade cannot reuse the exemption. Full-text key is present; sub-fragment
+keys are absent. Another owner referencing the old Concept is unchanged.
+
+Compatibility gate against clean `main@976b06e`:
+
+- Contracts: 631 passed, 232 subtests.
+- Matchmaker: 236 passed, 15 subtests.
+- Social: 1852 passed /34 failures, 63 subtests; clean main has exactly the same
+  34 failing testcase names and first-line signatures. Branch-only failures: 0.
+- Actual disposable Graph + Mongo replica set: all **41 scenarios PASS**.
+- compileall, `bash -n start_all.sh`, diff check: PASS.
+
+The existing 9001 ordinary atomic decomposition remains unchanged. The exemption
+is not passed to that path; the owner-facing Social write façade still rejects
+compound items. No general atomicity, cap, relation policy or semantic flag change.
