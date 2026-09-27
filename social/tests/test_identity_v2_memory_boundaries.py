@@ -76,8 +76,10 @@ class TestInputFidelityMemory:
     def test_old_matchmaker_404_cannot_receive_write_through_legacy_endpoint(self):
         response = Mock(status_code=404)
         label = "A preference for quiet castle visits with no guided tours and no crowds"
+        profiles = mongomock.MongoClient().db.profiles
+        profiles.insert_one({'user_id':'owner'})
         with patch.object(memory.requests, "post", return_value=response) as post, \
-                patch.object(memory, "_queue_memory_retry") as queue:
+                patch.object(memory, "_queue_memory_retry") as queue, patch.object(memory, 'profiles_coll', profiles):
             with pytest.raises(memory.MemoryWriteError, match="memory_apply_endpoint_not_found"):
                 memory.apply_profile_memory_proposals("owner", [self.proposal(label)], "profile", "message")
         post.assert_called_once()

@@ -4,8 +4,9 @@ Base bootstrap runtime has completed the approved production integrity/smoke gat
 The narrow legacy-compound compatibility below is a separate release change;
 deployment, real-owner bootstrap and pilot activation remain distinct steps.
 `PREFERENCE_BOOTSTRAP_ENABLED=off` by default. All semantic/related-interest flags
-remain OFF. No embedding, model, matching, invitation, bulk user discovery or
-production migration is part of this operation. Identity v2 is reused unchanged.
+remain OFF. No provider call, matching or invitation is part of the bootstrap
+transaction. Lifecycle v2 adds only a derived transactional queue (worker OFF by
+default); no production migration is performed. Identity v2 is reused unchanged.
 
 ## Owner API and confirmation
 
@@ -24,10 +25,14 @@ Owner comes only from the verified identity, never a body user_id or model tool.
 `complete_set`: confirm_items, complete_set, reviewed_prefers, reviewed_avoids,
 retire_legacy must **each** be true. An omitted AVOIDS panel is not consent.
 No default checked controls or LLM/admin substitute for owner consent.
+For owner full-source discovery, immutable edit/delete, transactional embedding
+queue and client integration follow [Preference Lifecycle v2](PREFERENCE_LIFECYCLE_V2.md).
+GET `/source` is read-only even when execution is OFF; its optional source receipt
+binds a subsequent complete-set preview to the reviewed Graph/Mongo snapshot.
 
-`complete_set` admits 1–10 items per owner (atomic by default; narrowly verified
+`complete_set` admits 1–64 items and at most16KiB full-source UTF-8 per owner (atomic by default; narrowly verified
 legacy-compound exception below), counted as PREFERS + AVOIDS
-**combined**, in one preview/commit; 11 rejects the whole request. It is not split
+**combined**, in one preview/commit; overflow rejects the whole request. It is not split
 into partial commits. `add_only` retains 1–min(5, durable_memory_limit()). The
 shared bootstrap count validator runs at both HTTP boundaries and Graph admission;
 only complete-set capacity is independent of the ordinary memory limit. Normal
@@ -85,7 +90,7 @@ Neither secret nor bearer token is in a journal/log. Owner preference before-ima
 are private owner data in receipt/audit, never public telemetry/model input.
 
 Inventory is bounded at 100 owner edges and 100 Mongo facts, with overflow rejection;
-it is not a paginated partial inventory. The 10-item input limit does not truncate
+it is not a paginated partial inventory. The input resource limit does not truncate
 retirement inventory: every approved legacy owner association appears in the same
 preview, even if there are more legacy associations than submitted items.
 Unsupported non-JSON Graph properties
@@ -194,10 +199,12 @@ repair/index/readiness steps below remain separate approvals and prerequisites.
    ignore source epochs/revisions/archive/pending fences. Code rollback requires a
    fence-aware release and no unresolved operations; do not delete audit records.
 
-Known boundaries: no UI added; authenticated API only. Neither historical embedding
-fingerprint nor vector readiness is changed. Production compatibility/enablement
-is NOT implied by local PASS. No production bootstrap, new index, backfill,
-embedding_v2, semantic enablement, P1-B, or DatingApp change in this PR.
+Known boundaries: no UI added; authenticated API only. Historical embedding
+fingerprint is not inferred or repaired. The separately gated lifecycle worker
+can process newly verified PREFERS, never legacy data or a bulk backfill.
+Production compatibility/enablement is NOT implied by local PASS. No production
+bootstrap, new index, embedding, semantic activation, P1-B, or DatingApp change
+is performed by this preparation.
 
 ## Validation
 

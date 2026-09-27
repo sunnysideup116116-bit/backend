@@ -9,8 +9,11 @@ import requests
 
 from database import db, profiles_coll
 from services.preference_projection_fence import projection_write
+from services.preference_owner_guard import unique_profile
+from matchmaker_agent.concept_identity import stored_concept_identity, is_v2_preference_key
 from matchmaker_agent.preference_bootstrap_contract import (
     BootstrapError, enabled, require, digest, internal_headers, open_preview, operation_id,
+    seal_source, open_source, validate_bootstrap_item_count,
 )
 
 OPERATIONS = db["preference_bootstrap_operations"]
@@ -63,14 +66,50 @@ def _public(record):
             "retained_concept_count": len(record.get("retained_concepts", []))}
 
 
-def preview(owner, mode, prefers, avoids):
+def source(owner):
+    """Owner-only first-use discovery. No guessed set, retirement or queue writes."""
+    unique_profile(profiles_coll, owner)
+    result = graph_call('source', {'owner': owner})
+    rows = result['rows']
+    require(len({r['concept'].get('key') for r in rows}) == len(rows), 'duplicate_or_conflicting_identity')
+    items = []
+    for row in rows:
+        concept = row['concept']; identity = stored_concept_identity(concept)
+        require(identity or not (is_v2_preference_key(concept.get('key')) or concept.get('canonicalization_version') == 'v2'),
+                'invalid_v2_not_legacy', 422)
+        text = identity.semantic_text if identity else concept.get('semantic_text') or concept.get('label')
+        require(isinstance(text, str) and bool(text), 'legacy_source_unavailable', 422)
+        items.append({'text': text, 'polarity': row['relation'], 'identity_status': 'verified_v2' if identity else 'legacy_unconfirmed'})
+    prefers = [i['text'] for i in items if i['polarity'] == 'PREFERS']
+    avoids = [i['text'] for i in items if i['polarity'] == 'AVOIDS']
+    if items:validate_bootstrap_item_count(prefers, avoids, mode='complete_set')
+    facts = _facts(owner)
+    active = {(r['concept']['key'], r['relation']) for r in rows}
+    for fact in facts:
+        if fact.get('active'):
+            require(fact.get('stance') in {'like', 'require', 'dislike', 'avoid'}, 'unknown_fact_polarity', 422)
+            require((fact.get('concept_key'), 'PREFERS' if fact['stance'] in {'like','require'} else 'AVOIDS') in active,
+                    'unmapped_active_preference_fact', 422)
+    return {'status': 'confirmation_required' if any(i['identity_status']=='legacy_unconfirmed' for i in items) else 'current',
+        'items': items, 'prefers': prefers, 'avoids': avoids, 'complete': True, 'revision': result['revision'],
+        'source_token': seal_source(owner, result['snapshot_hash'], _facts_hash(facts)),
+        'bootstrap_enabled': enabled(), 'requester_requires_v2': False,
+        'confirmation_required': ['confirm_items','complete_set','reviewed_prefers','reviewed_avoids','retire_legacy']}
+
+
+def preview(owner, mode, prefers, avoids, source_token=None):
     require(enabled(), "preference_bootstrap_disabled", 503)
-    profile = profiles_coll.find_one({"user_id": owner}, {"preference_bootstrap_pending": 1})
-    require(profile is not None, "profile_missing", 404)
+    profile = unique_profile(profiles_coll, owner)
     require(not profile.get("preference_bootstrap_pending"), "preference_projection_pending")
     facts = _facts(owner)
+    source_receipt = open_source(source_token, owner) if source_token is not None else None
+    if source_receipt:
+        require(mode == 'complete_set', 'source_requires_complete_set', 422)
+        require(source_receipt['mongo_snapshot_hash'] == _facts_hash(facts), 'stale_source')
     result = graph_call("preview", {"owner": owner, "mode": mode, "prefers": prefers, "avoids": avoids,
                                     "mongo_snapshot_hash": _facts_hash(facts)})
+    if source_receipt:
+        require(result['snapshot_hash'] == source_receipt['snapshot_hash'], 'stale_source')
     active = {(e["concept"]["key"], e["relation"]) for e in result["active_edges"]}
     for fact in facts:
         if fact.get("active"):
@@ -207,6 +246,7 @@ def commit(owner, token, consent):
             return {"status": "reconciliation_required", "operation_id": payload["preview_id"], "graph_status": "unknown"}
         return reconcile(owner, payload["preview_id"])
     require(enabled(), "preference_bootstrap_disabled", 503)
+    unique_profile(profiles_coll, owner)
     graph_call("check", {"owner": owner, "preview_token": token})  # stale → no Mongo/Graph mutation
     if not _prepare(owner, payload):
         # Another request prepared this receipt while this request was paused.

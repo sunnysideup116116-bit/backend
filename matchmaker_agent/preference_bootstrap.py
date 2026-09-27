@@ -14,10 +14,18 @@ from .preference_bootstrap_contract import (
 )
 from .preference_write_fence import lock_preferences, bump_preferences
 from .preference_mutations import write_preference_edges
+from .owner_eligibility_contract import state_allows_use
 
 RELATIONS = {"PREFERS", "AVOIDS", "MEMORY_DISABLED", "CURRENTLY_WANTS"}
 CONCEPT_FIELDS = ("key", "label", "semantic_text", "display_label", "canonicalization_version",
                   "semantic_input_hash", "fidelity_status", "kind")
+
+
+def require_active_owner(tx, owner):
+    rows = list(tx.run('''MATCH (u:User {id:$owner}) RETURN u{.id,.enabled,.active,.is_active,
+        .disabled,.is_disabled,.blocked,.is_blocked,.deleted_at,.status} AS owner_state LIMIT 2''',owner=owner))
+    require(len(rows)==1 and rows[0]['owner_state'].get('id')==owner
+            and state_allows_use(dict(rows[0]['owner_state'])), 'preference_owner_not_ready')
 
 
 def require_schema(tx):
@@ -81,7 +89,7 @@ def build_plan(tx, owner, mode, items):
     retired, keep, new_edges = [], [], []
     for row in before["rows"]:
         concept = row["concept"]
-        if row["relation"] not in {"PREFERS", "AVOIDS"}:
+        if row["relation"] not in {"PREFERS", "AVOIDS"} or row['properties'].get('active') is False:
             keep.append(row["id"])
             continue
         identity = stored_concept_identity(concept)
@@ -188,6 +196,7 @@ class BootstrapGraph:
     def preview(self, owner, mode, prefers, avoids, mongo_snapshot_hash=None):
         require(enabled(), "preference_bootstrap_disabled", 503)
         self.read(require_schema)
+        self.read(require_active_owner, owner)
         plan, before = self.read(preview_plan, owner, mode, prefers, avoids)
         payload = {"policy": POLICY, "normalization_policy": FRESH_PREFERENCE_NORMALIZATION_POLICY,
                    "owner": owner, "mode": mode, "preview_id": str(uuid.uuid4()),
@@ -200,9 +209,19 @@ class BootstrapGraph:
                 "untouched": ["other owners", "legacy Concept identity", "inactive memories", "recent context",
                               "non-memory profile fields", "chat/history/proposals", "embeddings/indexes/flags"]}
 
+    def source(self, owner):
+        """Full owner source, read-only even while bootstrap execution is OFF."""
+        self.read(require_active_owner, owner)
+        before, pending = self.read(snapshot, owner)
+        require(not pending, 'preference_projection_pending')
+        return {'snapshot_hash': digest(before), 'revision': before['revision'],
+                'rows': [r for r in before['rows'] if r['relation'] in {'PREFERS', 'AVOIDS'}
+                    and r['properties'].get('active') is not False]}
+
     def check(self, owner, token):
         payload = open_preview(token, owner)
         def check(tx):
+            require_active_owner(tx, owner)
             current, _ = snapshot(tx, owner)
             require(current["revision"] == payload["owner_revision"]
                     and digest(current) == payload["snapshot_hash"], "stale_preview")
@@ -235,6 +254,7 @@ class BootstrapGraph:
             require(prior["plan_hash"] == payload["plan_hash"], "operation_payload_conflict")
             return prior
         require(enabled(), "preference_bootstrap_disabled", 503)
+        require_active_owner(tx, owner)
         require(time.time() < payload["expires_at"], "preview_expired")
         require(state["revision"] == payload["owner_revision"], "stale_preview")
         plan, before = build_plan(tx, owner, payload["mode"], payload["items"])
@@ -386,6 +406,17 @@ class BootstrapGraph:
                     RETURN keys(c) AS names,COUNT { (c)--() } AS links""", key=concept["key"]).single()
                 if not row:
                     continue
+                from .preference_embedding_jobs import QUEUE_FIELDS
+                extras = set(row['names']) - set(concept)
+                if not row['links'] and extras and extras <= set(QUEUE_FIELDS):
+                    # A rollback may revoke its orphan's derived queue/lease;
+                    # a late worker fails CAS. Never remove vectors, shared
+                    # references, or any unrelated Concept property.
+                    tx.run('MATCH (c:Concept {key:$key}) WHERE c.bootstrap_created_by=$op_id AND NOT (c)--() '
+                        +'REMOVE '+','.join('c.'+field for field in QUEUE_FIELDS),
+                        key=concept['key'],op_id=op_id).consume()
+                    row = tx.run('MATCH (c:Concept {key:$key}) RETURN keys(c) AS names,COUNT { (c)--() } AS links',
+                        key=concept['key']).single()
                 if row["links"] or set(row["names"]) != set(concept):
                     retained.append(concept["key"])
                     continue

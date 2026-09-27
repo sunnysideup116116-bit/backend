@@ -1,4 +1,5 @@
 """Shared validated Identity-v2 edge write, called inside an owner-fenced tx."""
+from .preference_embedding_jobs import ENQUEUE
 
 def write_preference_edges(tx, owner, memories):
     # Both callers validate existing Concept identities in this same tx before
@@ -19,4 +20,5 @@ def write_preference_edges(tx, owner, memories):
             MERGE (u)-[:AVOIDS]->(c))
         FOREACH (_ IN CASE WHEN item.stance IN ['like','require'] THEN [1] ELSE [] END |
             MERGE (u)-[:PREFERS]->(c))
-    """, user_id=owner, memories=memories).consume()
+        WITH c,item WHERE item.stance IN ['like','require']
+    """+ENQUEUE, user_id=owner, memories=memories).consume()

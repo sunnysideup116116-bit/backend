@@ -28,6 +28,16 @@ from services.ayue_agent.shared import write_executors as writes
 from services.match_search_context import safe_search_context, validate_persisted_search_context
 
 
+@pytest.fixture(autouse=True)
+def valid_owner_profile(monkeypatch):
+    profiles=mongomock.MongoClient().db.profiles
+    profiles.insert_one({'user_id':'synthetic-owner'})
+    monkeypatch.setattr(memory,'profiles_coll',profiles)
+    from services import preference_action_projection as projection
+    monkeypatch.setattr(projection, 'stage', lambda *_a: 'synthetic-intent')
+    monkeypatch.setattr(projection, 'settle', lambda *_a: {'status':'synced'})
+
+
 @pytest.fixture(params=[499, 500, 501], ids=lambda value: f"chars-{value}")
 def semantic_text(request):
     prefix = "Quiet accessible castle visits "

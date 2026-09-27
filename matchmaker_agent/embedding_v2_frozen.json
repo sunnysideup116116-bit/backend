@@ -1,0 +1,38 @@
+{
+  "provenance": {
+    "pipeline_version": "concept-embedding-v2-canary-full-fidelity-v1",
+    "provider": "Google Gemini Developer API",
+    "request_model": "models/gemini-embedding-2",
+    "resolved_model": "models/gemini-embedding-2",
+    "provider_reported_model_version": "2",
+    "immutable_model_revision": "unreported",
+    "sdk": "google-generativeai",
+    "sdk_version": "0.8.3",
+    "wire_client": "google-ai-generativelanguage REST",
+    "wire_client_version": "0.6.10",
+    "logical_task": "semantic_similarity",
+    "api_task_type": "omitted for embedding-2; encoded by the exact prefix",
+    "dimension": 768,
+    "input_prefix": "task: sentence similarity | query: ",
+    "input_template": "prefix + full semantic_text",
+    "text_normalization": "existing normalize_preference_text: NFKC, collapse whitespace, strip; output must equal persisted semantic_text; no truncation or fresh OpenCC conversion",
+    "identity_source_version": "v2",
+    "identity_source_normalization_policy": "opencc-1.4.1-s2twp-nfkc-whitespace-v1",
+    "vector_normalization": "L2 via unchanged runtime unit_vector, Python float64; finite/nonzero/768 checked",
+    "runtime_manifest": {
+      "version": "concept_embedding_v2", "provider": "google", "model": "gemini-embedding-2",
+      "task": "semantic_similarity", "dimensions": 768, "prefix": "task: sentence similarity | query: ",
+      "source": "complete_identity_v2_semantic_text", "normalization": "l2", "provider_revision": "unreported"
+    },
+    "runtime_compatibility_fingerprint": "89cc12c59af783aa2953d856c15ba34625e2db129cf5d8bf5712e53af017b640",
+    "source_functions_sha256": {
+      "get_embeddings": "123fd0b078d28e431356c0b5610b415f7b767da8247af3be6ed8e34ba8072b0c",
+      "normalize_preference_text": "cf999d6e4e119ada2e3553997c2b2eb5585d0798f0cf0772a86e1d25a4b1ca90",
+      "unit_vector": "9c09643c9816a54984c64a448837138c2083e556446f80d27f34c9d1bad65d6f",
+      "prepare_batch": "53cbbc0d6f311a783bf3fbb7883d32cd71f16ddd227ac5edd17ceabb13e83547"
+    }
+  },
+  "provenance_fingerprint": "53a1d22fd63bcde9be0fa632df532929a05dcb5aa60ded6879b47ad0c2c1c8af",
+  "runtime_compatibility_fingerprint": "89cc12c59af783aa2953d856c15ba34625e2db129cf5d8bf5712e53af017b640",
+  "immutable_revision_note": "Provider version metadata is not a promise of immutable weights. No historical provenance is inferred."
+}

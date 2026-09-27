@@ -91,6 +91,11 @@ async def preview(payload: PreviewRequest, request: Request):
     return await execute(request, payload, lambda g: g.preview(payload.owner, payload.mode, payload.prefers, payload.avoids, payload.mongo_snapshot_hash))
 
 
+@router.post('/source')
+async def source(payload: InternalRequest, request: Request):
+    return await execute(request, payload, lambda g: g.source(payload.owner))
+
+
 @router.post("/check")
 async def check(payload: TokenRequest, request: Request):
     return await execute(request, payload, lambda g: g.check(payload.owner, payload.preview_token))

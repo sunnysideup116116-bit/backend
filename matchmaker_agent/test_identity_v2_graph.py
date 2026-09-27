@@ -217,6 +217,7 @@ def test_correction_of_same_v2_identity_is_read_only():
     driver.session.return_value.__enter__.return_value = session
     session.execute_write.side_effect = lambda callback: callback(tx)
     tx.run.return_value.single.return_value = identity.as_dict()
+    tx.run.return_value.__iter__.return_value = [identity.as_dict()]
     with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
         result = asyncio.run(agent_api.memory_action(agent_api.MemoryActionRequest(
             user_id="owner", key=identity.key, action="correct", value="K-pop")))
@@ -410,6 +411,8 @@ def test_graph_semantic_boundaries_preserve_complete_499_500(size, surface):
     original = canonicalize_concept("Reading Short Stories")
 
     def run(query, **params):
+        if "RETURN old.key AS key" in query:
+            return [original.as_dict()]
         if "UNWIND $keys" in query:
             return [identity.as_dict()] if surface == "embedding" else []
         if "RETURN concept.key AS key,concept.semantic_text" in query:
@@ -576,6 +579,11 @@ def test_fresh_correction_and_feedback_apply_one_language_contract():
     driver.session.return_value.__enter__.return_value = session
     session.execute_write.side_effect = lambda callback: callback(tx)
     tx.run.return_value.single.return_value = old.as_dict()
+    def correction_run(query, **_kwargs):
+        if 'RETURN old.key AS key' in query:return [old.as_dict()]
+        result=MagicMock();result.single.return_value=old.as_dict()
+        return result
+    tx.run.side_effect=correction_run
     with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
         corrected = asyncio.run(agent_api.memory_action(agent_api.MemoryActionRequest(
             user_id="owner", key=old.key, action="correct", value="阅读科幻小说")))

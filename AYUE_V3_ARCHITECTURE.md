@@ -92,8 +92,11 @@ Mongo profile 建檔由 [Profile writer boundary](docs/PROFILE_WRITER_HARDENING.
 偏好重新確認的 [bootstrap domain API](docs/PREFERENCE_BOOTSTRAP_RUNTIME.md) 預設關閉，
 不屬於 Pi 工具。Owner JWT preview/commit 採 Graph owner revision/fence 與可恢復 Mongo
 projection；完整集合必須分別確認 PREFERS/AVOIDS，才退休 owner-scoped legacy 關係。
-一般記憶、註冊、回饋、修正與 context writer 共用 fence；不新增 semantic/embedding 流程。
-Bootstrap `complete_set` 單次 PREFERS＋AVOIDS 合計最多 10 筆，超額整次拒絕，
+一般記憶、註冊、回饋、修正與 context writer 共用 fence。
+[Preference Lifecycle v2](docs/PREFERENCE_LIFECYCLE_V2.md) 提供本人全量來源確認、
+同交易 PREFERS incremental embedding queue、owner association edit/delete 與投影恢復；
+worker 預設 OFF，未部署／未靜默轉換 legacy。Manual add/action HTTP 需 owner JWT。
+Bootstrap `complete_set` 單次 PREFERS＋AVOIDS 合計最多 64 筆、全文 UTF-8 合計16KiB，超額整次拒絕，
 不拆成多次完整集合提交；`add_only` 與一般 memory extraction/write cap 不變。
 
 正式啟動入口只有 `start_all.sh`。它在清 ports 與建立 logs 前檢查 Node 版本、Pi dependency 與 bridge self-check，再啟動固定的 Social `8000`、Risk `8001`、Matchmaker `9001`、Guardrail `8081`。

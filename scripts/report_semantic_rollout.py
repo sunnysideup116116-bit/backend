@@ -52,12 +52,14 @@ def collect_integrity(db, driver, database, *, limit=20000):
         'active_fact_count': len(facts), 'unmapped_active_facts': unmapped, 'unknown_fact_polarity': unknown}
 
 
-def inventory(accounts, profiles, driver, database, model, *, max_concepts=10000):
+def inventory(accounts, profiles, driver, database, model, *, max_concepts=10000, lifecycle=False):
     from neo4j import Query
     from matchmaker_agent.concept_identity import stored_concept_identity
     from matchmaker_agent.related_interest_contract import embedding_fingerprint
     from matchmaker_agent.semantic_evidence_readiness import verified_vector
     from matchmaker_agent.semantic_rollout_inventory import classify_owner, summarize_readiness
+    if lifecycle:
+        from matchmaker_agent.semantic_rollout_inventory import classify_lifecycle as classify_owner, summarize_lifecycle as summarize_readiness
     from matchmaker_agent.preference_bootstrap import snapshot, preview_plan
     from matchmaker_agent.preference_bootstrap_contract import BootstrapError
     fp = embedding_fingerprint(model)
@@ -67,6 +69,7 @@ def inventory(accounts, profiles, driver, database, model, *, max_concepts=10000
               c.semantic_input_hash AS semantic_input_hash,c.fidelity_status AS fidelity_status,
               c.embedding_v2 AS vector,c.embedding_v2_fingerprint AS fingerprint,
               c.embedding_v2_source_hash AS source_hash,c.embedding_v2_provenance_fingerprint AS provenance
+              ,c.preference_embedding_state AS embedding_job_state
             LIMIT $limit''', timeout=10), limit=max_concepts+1)]
         if len(records) > max_concepts:
             raise ValueError('concept_inventory_truncated')
@@ -87,11 +90,12 @@ def inventory(accounts, profiles, driver, database, model, *, max_concepts=10000
                   u.deleted_at AS deleted_at,u.status AS status,
                   u.preference_projection_pending AS preference_projection_pending LIMIT 2''', timeout=3), owner=owner)]
             snap = None
+            snapshot_error = None
             if len(users) == 1:
                 try:
                     snap, _ = session.execute_read(snapshot, owner)
-                except BootstrapError:
-                    pass
+                except BootstrapError as exc:
+                    snapshot_error = exc.code
             def preview_check(before):
                 active = [r for r in before['rows'] if r['relation'] in {'PREFERS', 'AVOIDS'} and r['properties'].get('active') is not False]
                 source = lambda r: r['concept'].get('semantic_text') or r['concept'].get('label')
@@ -108,7 +112,10 @@ def inventory(accounts, profiles, driver, database, model, *, max_concepts=10000
                 except BootstrapError as exc:
                     return exc.code
                 return None
-            rows.append(classify_owner(account, p, users, snap, vectors, fp, preview_check=preview_check))
+            result=classify_owner(account, p, users, snap, vectors, fp, preview_check=preview_check)
+            if lifecycle and result['requester_eligible'] and snapshot_error in {'bootstrap_inventory_overflow','bootstrap_inventory_too_large'}:
+                result.update(category='BLOCKED_CAPACITY',reason_codes=[snapshot_error])
+            rows.append(result)
         from matchmaker_agent.related_interest_retrieval import index_metadata
         index = index_metadata(session)
     return {'status': 'success', 'sampled_at': time.time(), 'truncated': False,
@@ -118,6 +125,9 @@ def inventory(accounts, profiles, driver, database, model, *, max_concepts=10000
         'verified_v2_concept_count': sum(bool(stored_concept_identity(r)) for r in records),
         'embedding_v2_present_count': sum(r.get('vector') is not None for r in records),
         'compatible_embedding_v2_count': sum(bool(verified_vector(r, fp)) for r in records),
+        'incremental_embedding_jobs': dict(Counter(r['embedding_job_state']
+            if r.get('embedding_job_state') in {'pending','retry','leased','complete','failed','blocked','cancelled'}
+            else 'unknown' for r in records if r.get('embedding_job_state') is not None)),
         'duplicate_concept_key_groups': sum(len(group) > 1 for group in vectors.values()),
         'invalid_claimed_v2_concepts': sum(r.get('canonicalization_version') == 'v2' and not stored_concept_identity(r) for r in records),
         'runtime_fingerprint': fp, 'historical_embedding_fingerprint': 'unknown',
@@ -162,6 +172,7 @@ def enabled_accounts(settings, api_key, *, max_accounts, http):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--include-user-ids', action='store_true')
+    parser.add_argument('--lifecycle', action='store_true', help='Six owner-confirmation-aware lifecycle categories')
     parser.add_argument('--max-accounts', type=int, default=10000)
     parser.add_argument('--since', type=float)
     parser.add_argument('--until', type=float, help='Only jobs/proposals initiated before this exclusive cutoff')
@@ -185,7 +196,7 @@ def main():
         driver = GraphDatabase.driver(os.environ['NEO4J_URI'], auth=(os.environ['NEO4J_USERNAME'], os.environ['NEO4J_PASSWORD']),
             connection_timeout=5, connection_acquisition_timeout=5, max_transaction_retry_time=0)
         report = inventory(accounts, db.profiles, driver, os.getenv('NEO4J_DATABASE', 'neo4j'),
-            os.getenv('GOOGLE_EMBEDDING_MODEL', 'models/gemini-embedding-2'))
+            os.getenv('GOOGLE_EMBEDDING_MODEL', 'models/gemini-embedding-2'), lifecycle=args.lifecycle)
         duplicate_groups = list(db.profiles.aggregate([{'$group': {'_id': '$user_id', 'n': {'$sum': 1}}},
             {'$match': {'n': {'$gt': 1}}}, {'$count': 'groups'}], maxTimeMS=5000))
         report['duplicate_profile_groups'] = duplicate_groups[0]['groups'] if duplicate_groups else 0

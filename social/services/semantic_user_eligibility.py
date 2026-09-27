@@ -15,6 +15,7 @@ from pymongo import timeout as mongo_timeout
 from urllib3.util import Timeout
 
 from matchmaker_agent.semantic_rollout_policy import valid_owner_id
+from matchmaker_agent.owner_eligibility_contract import state_allows_use
 
 PROFILE_FIELDS = {
     "user_id": 1, "enabled": 1, "active": 1, "is_active": 1,
@@ -35,23 +36,6 @@ def initialize_profiles():
 
 class SemanticEligibilityUnavailable(RuntimeError):
     pass
-
-
-def state_allows_use(row):
-    if not isinstance(row, dict):
-        return False
-    for key in ("enabled", "active", "is_active"):
-        if key in row and row[key] is not None and row[key] is not True:
-            return False
-    for key in ("disabled", "is_disabled", "blocked", "is_blocked"):
-        if key in row and row[key] is not None and row[key] is not False:
-            return False
-    status = row.get("status")
-    if status not in (None, 'active', 'enabled'):
-        return False
-    return not row.get("deleted_at") and status not in {
-        "disabled", "blocked", "deleted", "suspended", "inactive",
-    } and not row.get("preference_bootstrap_pending") and not row.get("preference_projection_pending")
 
 
 def lookup_enabled_account(owner, *, deadline, clock=time.monotonic, http=requests):

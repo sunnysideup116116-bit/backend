@@ -20,7 +20,7 @@ def fixed_normal_memory_limit(monkeypatch):
     monkeypatch.delenv("DURABLE_MEMORY_MAX_CANDIDATES_PER_MESSAGE", raising=False)
 
 
-@pytest.mark.parametrize("prefers,avoids", [(5, 0), (5, 3), (6, 1), (7, 3), (10, 0), (0, 10)])
+@pytest.mark.parametrize("prefers,avoids", [(5, 0), (5, 3), (6, 1), (7, 3), (10, 0), (0, 10), (11,0), (32,32), (64,0)])
 def test_complete_set_accepts_whole_combined_batch(prefers, avoids):
     positive, negative = items(prefers), items(avoids, "Synthetic loud venue")
     result = contract.normalize_items(positive, negative, mode="complete_set")
@@ -31,7 +31,7 @@ def test_complete_set_accepts_whole_combined_batch(prefers, avoids):
     assert all(row["canonicalization_version"] == "v2" for row in result)
 
 
-@pytest.mark.parametrize("prefers,avoids", [(11, 0), (0, 11), (6, 5), (10, 1), (5, 6), (0, 0)])
+@pytest.mark.parametrize("prefers,avoids", [(65, 0), (0, 65), (33, 32), (64, 1), (32, 33), (0, 0)])
 def test_complete_set_overflow_rejects_before_normalizing_any_item(prefers, avoids):
     with patch.object(contract, "normalize_fresh_preference_text") as normalize:
         with pytest.raises(contract.BootstrapError, match="bootstrap_item_limit"):
@@ -40,7 +40,7 @@ def test_complete_set_overflow_rejects_before_normalizing_any_item(prefers, avoi
 
 
 @pytest.mark.parametrize("schema", [PreviewInput, PreviewRequest])
-@pytest.mark.parametrize("prefers,avoids", [(5, 0), (5, 3), (6, 1), (7, 3), (10, 0), (0, 10)])
+@pytest.mark.parametrize("prefers,avoids", [(5, 0), (5, 3), (6, 1), (7, 3), (10, 0), (0, 10), (11,0), (32,32)])
 def test_both_http_contracts_accept_complete_set_totals(schema, prefers, avoids):
     extra = {"owner": "synthetic", "mongo_snapshot_hash": "0" * 64} if schema is PreviewRequest else {}
     model = schema(mode="complete_set", prefers=items(prefers), avoids=items(avoids, "Synthetic avoid"), **extra)
@@ -49,7 +49,7 @@ def test_both_http_contracts_accept_complete_set_totals(schema, prefers, avoids)
 
 @pytest.mark.parametrize("schema", [PreviewInput, PreviewRequest])
 @pytest.mark.parametrize("mode,prefers,avoids", [
-    ("complete_set", 11, 0), ("complete_set", 6, 5), ("complete_set", 0, 11),
+    ("complete_set", 65, 0), ("complete_set", 33, 32), ("complete_set", 0, 65),
     ("add_only", 6, 0), ("add_only", 5, 1), ("add_only", 0, 6),
 ])
 def test_both_http_contracts_fail_closed_on_mode_specific_overflow(schema, mode, prefers, avoids):
@@ -90,3 +90,13 @@ def test_larger_complete_set_keeps_atomic_identity_and_polarity_rules(prefers, a
 def test_unknown_mode_cannot_opt_into_larger_limit():
     with pytest.raises(contract.BootstrapError, match="invalid_bootstrap_mode"):
         contract.normalize_items(items(8), [], mode="other")
+
+
+def test_complete_set_utf8_resource_budget_is_whole_request_not_chunked():
+    # Each item is under the ordinary500-character source limit, yet the
+    # combined multibyte source exceeds the full-set resource envelope.
+    values = ['喜'*490+str(i) for i in range(12)]
+    with patch.object(contract, 'normalize_fresh_preference_text') as normalize:
+        with pytest.raises(contract.BootstrapError, match='bootstrap_text_budget'):
+            contract.normalize_items(values, [], mode='complete_set')
+        normalize.assert_not_called()

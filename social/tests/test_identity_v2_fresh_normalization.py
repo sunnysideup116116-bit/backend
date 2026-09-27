@@ -23,6 +23,15 @@ from services.match_search_context import safe_search_context, validate_persiste
 
 
 class TestFreshNormalizationContract:
+    @pytest.fixture(autouse=True)
+    def valid_owner_profile(self, monkeypatch):
+        profiles = mongomock.MongoClient().db.profiles
+        profiles.insert_one({'user_id':'synthetic-owner'})
+        monkeypatch.setattr(memory, 'profiles_coll', profiles)
+        from services import preference_action_projection as projection
+        monkeypatch.setattr(projection, 'stage', lambda *_a: 'synthetic-intent')
+        monkeypatch.setattr(projection, 'settle', lambda *_a: {'status':'synced'})
+
     @pytest.mark.parametrize("source", [
         "安静的咖啡厅", "安靜的咖啡廳", "  安静的咖啡厅（免门票）  ",
         "  Board   Games  ", "Science-fiction", "Kpop", "Ｋ－ｐｏｐ", "阅读 Mystery Novels",

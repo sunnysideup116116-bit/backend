@@ -4,6 +4,7 @@ import math
 import re
 import time
 from matchmaker_agent.preference_write_fence import lock_preferences, bump_preferences
+from matchmaker_agent.preference_embedding_jobs import ENQUEUE
 
 from pydantic import BaseModel, Field
 from concept_identity import (
@@ -32,10 +33,12 @@ def assert_existing_preference_identities(tx, memories):
                c.semantic_input_hash AS semantic_input_hash,
                c.fidelity_status AS fidelity_status
     """, keys=sorted(expected))
+    seen = set()
     for row in rows:
         identity = stored_concept_identity(dict(row))
-        if not identity or identity.key not in expected:
+        if not identity or identity.key not in expected or identity.key in seen:
             raise ValueError("preference_identity_conflict")
+        seen.add(identity.key)
 
 
 class RegistrationProjection(BaseModel):
@@ -142,6 +145,7 @@ def seed_registration(tx, user_id, message_id, memories):
         MERGE (u)-[r:PREFERS]->(c)
         ON CREATE SET r.source='registration_interest',r.evidence_span=item.evidence_span,
                       r.confidence=item.confidence,r.last_seen_at=$now
-    """, user_id=user_id, message_id=message_id, memories=clean, now=now).consume()
+        WITH c
+    """+ENQUEUE, user_id=user_id, message_id=message_id, memories=clean, now=now).consume()
     bump_preferences(tx, user_id)
     return clean

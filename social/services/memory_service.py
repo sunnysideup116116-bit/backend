@@ -3,6 +3,8 @@ import time
 import requests
 
 from services.profile_writer import update_profile as write_profile
+from services.preference_owner_guard import unique_profile
+from matchmaker_agent.preference_bootstrap_contract import BootstrapError
 from database import db, profiles_coll
 from services.language_service import normalize_zh_tw
 from matchmaker_agent.concept_identity import (
@@ -248,6 +250,10 @@ def apply_profile_memory_proposals(user_id: str, proposals: list[dict], surface:
     if not proposals:
         return []
     proposals = validate_memory_proposals(proposals)
+    try:
+        unique_profile(profiles_coll, user_id)
+    except BootstrapError as exc:
+        raise MemoryWriteError(exc.code, retryable=exc.status == 503 or exc.code == 'profile_not_ready') from None
     if source_created_at is None:
         # Explicit/manual fresh operations use entry time. Async callers pass
         # original saved source time and outbox retries retain it unchanged.
@@ -308,18 +314,31 @@ def apply_memory_action(user_id: str, key: str, action: str, value: str | None =
         except PreferenceTextError as exc:
             raise MemoryWriteError(exc.code, retryable=False) from None
     try:
+        unique_profile(profiles_coll, user_id)
+    except BootstrapError as exc:
+        raise MemoryWriteError(exc.code, retryable=exc.status == 503) from None
+    from services import preference_action_projection as projection
+    try:
+        projection_id = projection.stage(user_id, key)
+    except Exception:
+        raise MemoryWriteError('preference_projection_unavailable') from None
+    try:
         response = requests.post(f"{AGENT_URL}/api/v2/memory/action", json={
             "user_id": user_id, "key": key, "action": action, "value": value,
             "source_created_at": source_created_at,
+            "expires_at": source_created_at + 30,
         }, timeout=30)
         response.raise_for_status()
         result = response.json()
     except (requests.RequestException, ValueError) as exc:
+        # The durable intent recovers from current Graph state, never replays
+        # this possibly-committed action after a transport failure.
         raise MemoryWriteError("memory_action_unavailable") from exc
+    projection_result = projection.settle(projection_id)
     if result.get("status") not in {"success", "expired"}:
         raise MemoryWriteError(str(
             result.get("error_code") or result.get("status") or "memory_action_failed"
         )[:80])
     _invalidate_memory_projection(user_id, key if action in {"disable", "correct"} else None)
     _sync_memory_projection(user_id, [])
-    return result
+    return {**result, 'projection_status': projection_result['status']}
