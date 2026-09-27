@@ -18,9 +18,11 @@ Client integration contract (authenticated backend API implemented; UI not added
    `/api/profile/preferences/bootstrap/source` with the owner's Appwrite JWT.
    It reads the **full owner-scoped active Graph PREFERS/AVOIDS set**, not the
    12-item profile cache. Both polarity arrays and identity status are shown.
-   Each item also returns its owner-scoped opaque `key` for existing lifecycle
-   action APIs. Clients echo this server-issued reference; they never generate
-   canonical identity from text. Older responses without keys remain read-only.
+   Each item returns an opaque `key` for correct/disable. This is a MAC, not an
+   encoded canonical key or Neo4j ID. It binds owner, owner revision and the exact
+   active association ID, polarity, properties and immutable Concept snapshot.
+   Clients echo it unchanged; never generate, decode, truncate or repair it.
+   Older responses without keys remain read-only for edit/delete.
    It performs no mutation, even when bootstrap execution is OFF.
 2. Render every full string, separately for positive and negative polarity.
    Never split, paraphrase, infer additional items, guess AVOIDS empty, or
@@ -64,16 +66,39 @@ Concept identity or vectors. Conflicting target polarity is rejected. Disable
 retains MEMORY_DISABLED with original polarity; restore reuses the same identity
 and enqueues verified positive evidence if needed. Neither deletes a shared node.
 
+Correct/disable resolve the reference under the existing Graph owner write fence
+and in the same transaction as mutation. Only one currently active PREFERS/AVOIDS
+association can match. Disabled/retired, wrong owner, wrong polarity, changed
+revision/properties/association, tampered and raw canonical keys fail closed with
+public HTTP409 `stale_source`. The client must fetch full source again. No stale
+action is idempotent success and no stale rejection stages Mongo projection or
+invalidates caches. Even same-identity correction consumes the reference by
+advancing the owner revision (without rewriting the shared Concept). Restore
+retains its existing internal-key contract and increments revision; it never
+revives an old active action reference. Legacy correct still requires explicit
+complete-set reconfirmation; a reference is not permission to convert legacy.
+
 Graph is authoritative; Mongo facts are partial evidence, not a full corpus.
-Actions stage a durable Mongo projection intent before Graph. Success reconciles
-only the old key's `active` flag from current Graph under the existing Mongo fence;
+Correct/disable stage Mongo projection only AFTER Graph acknowledges success.
+A successful Graph transaction atomically records the old key in the bounded
+User `preference_action_projection_keys` recovery list (at most100 distinct keys;
+full backlog fails closed). No new association IDs, nodes, indexes or migration
+are required. Existing projection recovery can discover those committed markers
+via service-signed private scan and acknowledge under a revision fence after
+Mongo synchronization. Thus a lost HTTP acknowledgement or failed Mongo intent
+write cannot lose recovery, and rejected actions leave no recovery marker. This
+reuses the existing15-second projection worker, not an embedding worker.
+Restore retains its prior pre-staged recovery behavior. Success reconciles only
+the old key's `active` flag from current Graph under the existing Mongo fence;
 it never manufactures facts, changes counters, rewrites identity or replays the
-action. An unknown HTTP outcome waits 75 seconds. New Social commands expire
+action. Existing waiting intents still wait75 seconds. New Social commands expire
 30 seconds after source time, checked **after the Graph owner lock** on every
 managed attempt; Graph action transactions are bounded to 20 seconds. Deployment
 requires coherent host clocks and matching writer versions. Background recovery
 polls every 15 seconds, leases 90 seconds and retries at most eight times with
 bounded backoff. Exhaustion remains explicit failed/pending audit, not success.
+The scan does not reset exhausted jobs or replay a mutation. Public action
+responses contain status/projection_status, never internal projection keys.
 The two databases are not distributed ACID. A concurrent Graph revision change
 causes projection retry; bootstrap's snapshot/fact checks remain fail closed.
 

@@ -64,10 +64,21 @@ class RevisionRequest(OperationRequest):
     revision: int = Field(ge=0)
 
 
-async def execute(request, payload, action):
+class ActionProjectionScan(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    limit: int = Field(default=16, ge=1, le=32)
+
+
+class ActionProjectionAck(InternalRequest):
+    key: str = Field(min_length=1, max_length=512)
+    revision: int = Field(ge=0, strict=True)
+
+
+async def execute(request, payload, action, *, require_owner=True):
     try:
         verify_internal(request.url.path, await request.json(), request.headers.get("X-Preference-Bootstrap", ""))
-        owner_id(payload.owner)
+        if require_owner:
+            owner_id(payload.owner)
         if isinstance(payload, OperationRequest):
             operation_id(payload.operation_id)
         def run():
@@ -129,3 +140,16 @@ async def rollback(payload: RevisionRequest, request: Request):
 @router.post("/rollback-check")
 async def rollback_check(payload: RevisionRequest, request: Request):
     return await execute(request, payload, lambda g: g.check_rollback(payload.owner, payload.operation_id, payload.revision))
+
+
+@router.post('/action-projection-pending')
+async def action_projection_pending(payload: ActionProjectionScan, request: Request):
+    # Service-signed recovery scan, never a public owner endpoint.
+    from .preference_action_reference import pending_projections
+    return await execute(request, payload, lambda g: {'items': g.read(pending_projections, payload.limit)}, require_owner=False)
+
+
+@router.post('/action-projection-ack')
+async def action_projection_ack(payload: ActionProjectionAck, request: Request):
+    from .preference_action_reference import acknowledge_projection
+    return await execute(request, payload, lambda g: g.write(acknowledge_projection, payload.owner, payload.key, payload.revision))

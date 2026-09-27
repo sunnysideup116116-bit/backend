@@ -68,6 +68,7 @@ from agent_quota.internal import MatchmakerQuotaMiddleware, start_worker, stop_w
 from matchmaker_agent.preference_write_fence import lock_preferences, bump_preferences, PreferenceFenceError, fence_error_result
 from matchmaker_agent.preference_mutations import write_preference_edges
 from matchmaker_agent.preference_embedding_jobs import enqueue_keys
+from matchmaker_agent import preference_action_reference as action_reference
 app = FastAPI()
 from matchmaker_agent.preference_bootstrap_api import router as preference_bootstrap_router
 app.include_router(preference_bootstrap_router)
@@ -2130,15 +2131,12 @@ async def memory_action(req: MemoryActionRequest):
     if req.action not in {"disable", "restore", "correct"}:
         return {"status": "error", "error_code": "unsupported_action"}
     user_id = re.sub(r"\s+", "", str(req.user_id or ""))[:80]
-    key = str(req.key or "").strip().lower()
+    key = str(req.key or "")
     if not user_id or not key:
         return {"status": "error", "error_code": "invalid_memory_reference"}
     identity = None
     if req.action == "correct":
         # Correction is an explicit owner action, not an implicit legacy re-key.
-        if not is_v2_preference_key(key):
-            return {"status": "error", "error_code": "legacy_identity_unverified",
-                    "reconfirmation_required": True, "retryable": False}
         try:
             label = normalize_fresh_preference_text(req.value or "")
         except PreferenceTextError as exc:
@@ -2158,6 +2156,8 @@ async def memory_action(req: MemoryActionRequest):
         identity = canonicalize_concept(label)
         if not identity:
             return {"status": "error", "error_code": "invalid_correction"}
+    if req.action in {'correct', 'disable'} and not action_reference.valid_format(key):
+        return {'status': 'error', 'error_code': 'stale_source', 'retryable': False}
     now = time.time()
     URI, AUTH, DATABASE = _neo4j_config()
     try:
@@ -2166,11 +2166,14 @@ async def memory_action(req: MemoryActionRequest):
                 if req.action == "disable":
                     @unit_of_work(timeout=20)
                     def disable(tx):
-                        lock_preferences(tx, user_id, source_created_at=req.source_created_at, require_existing=True)
+                        state = lock_preferences(tx, user_id, source_created_at=req.source_created_at, require_existing=True)
                         _require_action_live(req)
+                        bound = action_reference.resolve(tx, user_id, key, state)
+                        concept_key = bound['concept']['key']
                         row = tx.run("""
-                            MATCH (u:User {id:$user_id})-[active:PREFERS|AVOIDS|CURRENTLY_WANTS]->
+                            MATCH (u:User {id:$user_id})-[active:PREFERS|AVOIDS]->
                                   (concept:Concept {key:$key})
+                            WHERE elementId(active)=$association_id AND type(active)=$polarity
                             WITH u,concept,active,type(active) AS original_relation,
                                  active.expires_at AS original_expires_at
                             MERGE (u)-[disabled:MEMORY_DISABLED]->(concept)
@@ -2179,12 +2182,14 @@ async def memory_action(req: MemoryActionRequest):
                                 disabled.disabled_at=$now
                             DELETE active
                             RETURN original_relation
-                        """, user_id=user_id, key=key, now=now).single()
-                        if row:
-                            bump_preferences(tx, user_id)
-                        return dict(row) if row else None
+                        """, user_id=user_id, key=concept_key, association_id=bound['id'], polarity=bound['relation'], now=now).single(strict=True)
+                        if not row:
+                            raise PreferenceFenceError('stale_source')
+                        action_reference.mark_projection(tx, user_id, concept_key)
+                        bump_preferences(tx, user_id)
+                        return {'projection_key': concept_key}
                     changed = session.execute_write(disable)
-                    return {"status": "success" if changed else "not_found"}
+                    return {"status": "success", **changed}
 
                 if req.action == "restore":
                     @unit_of_work(timeout=20)
@@ -2227,27 +2232,34 @@ async def memory_action(req: MemoryActionRequest):
 
                 @unit_of_work(timeout=20)
                 def correct(tx):
-                    lock_preferences(tx, user_id, source_created_at=req.source_created_at, require_existing=True)
+                    nonlocal key
+                    # Keep the original reference across managed transaction retries.
+                    token = req.key
+                    state = lock_preferences(tx, user_id, source_created_at=req.source_created_at, require_existing=True)
                     _require_action_live(req)
+                    bound = action_reference.resolve(tx, user_id, token, state)
+                    key = bound['concept']['key']
                     originals = list(tx.run("""
-                        MATCH (:User {id:$user_id})-[:PREFERS|AVOIDS|CURRENTLY_WANTS|MEMORY_DISABLED]->
+                        MATCH (:User {id:$user_id})-[active:PREFERS|AVOIDS]->
                               (old:Concept {key:$key})
+                        WHERE elementId(active)=$association_id AND type(active)=$polarity
                         RETURN old.key AS key,old.semantic_text AS semantic_text,
                                old.canonicalization_version AS canonicalization_version,
                                old.semantic_input_hash AS semantic_input_hash,
                                old.fidelity_status AS fidelity_status
                         LIMIT 2
-                    """, user_id=user_id, key=key))
+                    """, user_id=user_id, key=key, association_id=bound['id'], polarity=bound['relation']))
                     if len(originals) > 1:
                         raise ValueError("preference_identity_ambiguous")
                     original = originals[0] if originals else None
                     if not original:
-                        return None
+                        raise PreferenceFenceError('stale_source')
                     if not stored_concept_identity(dict(original)):
                         raise ValueError("legacy_identity_unverified")
                     if corrected_key == key:
-                        # An alias/case-only correction must not MERGE then
-                        # DELETE the very same owner's relationship.
+                        # No Concept/association rewrite for an alias; consume the
+                        # reference nonetheless, so acknowledgement cannot replay.
+                        bump_preferences(tx, user_id)
                         return {"relation": "unchanged"}
                     assert_existing_preference_identities(tx, [identity.as_dict()])
                     conflicts = list(tx.run('''MATCH (u:User {id:$user_id})-[old:PREFERS|AVOIDS|CURRENTLY_WANTS|MEMORY_DISABLED]->(:Concept {key:$key})
@@ -2258,8 +2270,9 @@ async def memory_action(req: MemoryActionRequest):
                     if conflicts:
                         raise ValueError('preference_polarity_conflict')
                     row = tx.run("""
-                        MATCH (u:User {id:$user_id})-[existing:PREFERS|AVOIDS|CURRENTLY_WANTS|MEMORY_DISABLED]->
+                        MATCH (u:User {id:$user_id})-[existing:PREFERS|AVOIDS]->
                               (old:Concept {key:$key})
+                        WHERE elementId(existing)=$association_id AND type(existing)=$polarity
                         WITH u,old,existing,type(existing) AS relation,
                              existing.expires_at AS expires_at,
                              existing.original_relation AS original_relation,
@@ -2289,17 +2302,20 @@ async def memory_action(req: MemoryActionRequest):
                             retired.replacement_key=$corrected_key,retired.retirement_reason='owner_correction'
                         DELETE existing
                         RETURN relation
-                    """, user_id=user_id, key=key, corrected_key=corrected_key,
+                    """, user_id=user_id, key=key, association_id=bound['id'], polarity=bound['relation'], corrected_key=corrected_key,
                          label=label, display_label=identity.display_label,
-                         semantic_input_hash=identity.semantic_input_hash, now=now).single()
-                    if row:
-                        enqueue_keys(tx, user_id, [corrected_key])
-                        bump_preferences(tx, user_id)
-                    return dict(row) if row else None
+                         semantic_input_hash=identity.semantic_input_hash, now=now).single(strict=True)
+                    if not row:
+                        raise PreferenceFenceError('stale_source')
+                    action_reference.mark_projection(tx, user_id, key)
+                    enqueue_keys(tx, user_id, [corrected_key])
+                    bump_preferences(tx, user_id)
+                    return dict(row)
                 corrected = session.execute_write(correct)
                 return {
                     "status": "success" if corrected else "not_found",
                     "key": corrected_key if corrected else key,
+                    "projection_key": key,
                 }
     except Exception as exc:
         print(f"[MEMORY][9001 action] failed error={type(exc).__name__}")

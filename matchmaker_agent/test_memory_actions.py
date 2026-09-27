@@ -30,6 +30,17 @@ def graph(result):
 
 
 class MemoryActionTests(unittest.TestCase):
+    def setUp(self):
+        # Old mutation-shape unit tests; real reference validation is covered
+        # separately by test_action_reference (including the original repro).
+        for name, value in (
+            ('valid_format', lambda _key: True),
+            ('resolve', lambda _tx,_owner,key,_state:
+                {'id':'action-fixture-edge','relation':'PREFERS','concept':{'key':key}}),
+        ):
+            patcher = patch.object(agent_api.action_reference, name, value)
+            patcher.start(); self.addCleanup(patcher.stop)
+
     def test_delayed_action_expires_after_owner_lock_without_preference_mutation(self):
         driver, _session, transaction = graph({'original_relation':'PREFERS'})
         request=agent_api.MemoryActionRequest(user_id='owner',key='missing',action='disable',
@@ -88,7 +99,7 @@ class MemoryActionTests(unittest.TestCase):
         )
         with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
             result = asyncio.run(agent_api.memory_action(request))
-        self.assertEqual(result["status"], "not_found")
+        self.assertEqual(result["error_code"], "stale_source")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from database import db, profiles_coll
 from services.preference_projection_fence import projection_write
 from services.preference_owner_guard import unique_profile
 from matchmaker_agent.concept_identity import stored_concept_identity, is_v2_preference_key
+from matchmaker_agent.preference_action_reference import reference
 from matchmaker_agent.preference_bootstrap_contract import (
     BootstrapError, enabled, require, digest, internal_headers, open_preview, operation_id,
     seal_source, open_source, validate_bootstrap_item_count,
@@ -82,7 +83,7 @@ def source(owner):
         require(isinstance(text, str) and bool(text), 'legacy_source_unavailable', 422)
         # Owner-scoped opaque action reference; clients must not derive a key
         # from text or use the bounded profile cache as a complete inventory.
-        items.append({'key': concept['key'], 'text': text, 'polarity': row['relation'],
+        items.append({'key': reference(owner, result['revision'], row), 'text': text, 'polarity': row['relation'],
             'identity_status': 'verified_v2' if identity else 'legacy_unconfirmed'})
     prefers = [i['text'] for i in items if i['polarity'] == 'PREFERS']
     avoids = [i['text'] for i in items if i['polarity'] == 'AVOIDS']

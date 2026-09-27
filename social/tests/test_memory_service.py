@@ -47,7 +47,7 @@ class MemoryServiceTests(unittest.TestCase):
         with patch("services.memory_service.requests.post", return_value=response), \
              patch("services.memory_service._sync_memory_projection") as sync:
             with self.assertRaises(MemoryWriteError) as raised:
-                apply_memory_action("owner", "missing", "disable")
+                apply_memory_action("owner", "par1."+'A'*43, "disable")
         self.assertEqual(raised.exception.error_code, "not_found")
         sync.assert_not_called()
     def test_agent_error_response_is_raised_and_queued(self):

@@ -56,6 +56,7 @@ def process_one(ident=None):
                     {'$set':{'active':(row['key'],polarity) in active}},session=session)
         if graph_call('source',{'owner':row['owner']})['snapshot_hash'] != source['snapshot_hash']:
             raise ValueError('projection_source_changed')
+        graph_call('action-projection-ack', {'owner':row['owner'],'key':row['key'],'revision':source['revision']})
         JOBS.update_one(guard,{'$set':{'state':'complete','completed_at':time.time()},'$unset':{'lease':'','lease_until':''}})
         return {'status':'synced'}
     except Exception:
@@ -65,9 +66,24 @@ def process_one(ident=None):
         return {'status':'pending'}
 
 
+def recover_committed():
+    """Only committed Graph markers can create a recovery Mongo intent.
+
+    No request/ref replay. A stale rejected request never has such a marker.
+    Bounded scan uses the existing service-authenticated internal boundary.
+    """
+    items=graph_call('action-projection-pending', {'limit':16})['items']
+    for item in items:
+        if not JOBS.find_one({'owner':item['owner'],'key':item['key'],
+                             'state':{'$in':['waiting_graph','pending','processing','failed']}}):
+            settle(stage(item['owner'],item['key']))
+
+
 def _worker():
     while not _stop.wait(15):
-        try:process_one()
+        try:
+            recover_committed()
+            process_one()
         except Exception:pass
 
 

@@ -10,6 +10,16 @@ from concept_identity import is_v2_preference_key
 from registration_graph import seed_registration, registration_message_id
 
 
+@pytest.fixture(autouse=True)
+def isolated_identity_action_reference(monkeypatch):
+    # These pre-existing tests isolate identity/text/mutation behavior, not the
+    # new reference boundary. Real MAC/snapshot/fence cases are exercised by
+    # test_action_reference and the disposable Graph+Mongo release harness.
+    monkeypatch.setattr(agent_api.action_reference, 'valid_format', is_v2_preference_key)
+    monkeypatch.setattr(agent_api.action_reference, 'resolve', lambda _tx,_owner,key,_state:
+        {'id':'identity-fixture-edge','relation':'PREFERS','concept':{'key':key}})
+
+
 @pytest.mark.parametrize("surface", ["apply", "registration", "correction", "embedding"])
 def test_v2_graph_operation_preflights_complete_semantic_batch(surface):
     valid = {**canonicalize_concept("K-pop").as_dict(), "stance": "like", "confidence": .99}
@@ -123,8 +133,7 @@ def test_legacy_correction_requires_reconfirmation_without_graph_access():
     with patch.object(agent_api.GraphDatabase, "driver") as driver:
         result = asyncio.run(agent_api.memory_action(agent_api.MemoryActionRequest(
             user_id="owner", key="coffee", action="correct", value="Quiet Coffee Shops")))
-    assert result["error_code"] == "legacy_identity_unverified"
-    assert result["reconfirmation_required"] is True
+    assert result["error_code"] == "stale_source"
     driver.assert_not_called()
 
 
@@ -222,7 +231,7 @@ def test_correction_of_same_v2_identity_is_read_only():
         result = asyncio.run(agent_api.memory_action(agent_api.MemoryActionRequest(
             user_id="owner", key=identity.key, action="correct", value="K-pop")))
     assert result["status"] == "success"
-    assert tx.run.call_count == 2  # serialization guard + read; no memory mutation/bump
+    assert tx.run.call_count == 3  # owner lock + identity read + consume reference revision
     assert "AS revision" in tx.run.call_args_list[0].args[0]
     assert "DELETE" not in tx.run.call_args.args[0]
 
