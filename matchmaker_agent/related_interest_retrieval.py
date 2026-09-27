@@ -165,8 +165,13 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
     result["validator_counts"] = counts
     if not requester_route_allowed(req.requester_user_id):
         return {**result, "error_code": "semantic_policy_disabled"}
+    if counts.get("job_unavailable") or clock() >= deadline:
+        return {**result, "error_code": "semantic_validator_unavailable"}
     if not accepted:
-        if counts["error"]:
+        # Strictly validated REJECTs remain usable when other Concepts fail.
+        # ERROR never grants evidence or a relation; zero trusted decisions
+        # still means unavailable, not a successful semantic rejection.
+        if counts["error"] and not counts.get("rejected", 0):
             return {**result, "error_code": "semantic_validator_unavailable"}
         return {**result, "status": "success", "semantic_concepts_considered": [], "candidate_count": 0}
     evidence = {c["concept_key"]: {
