@@ -3,7 +3,7 @@ import json
 import time
 import uuid
 import asyncio
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIConnectionError, APIStatusError, APITimeoutError
 from pathlib import Path
 
 try:
@@ -12,6 +12,19 @@ except ImportError:
     from related_interest_contract import ACCEPTED, RELATIONS
 
 PROMPT = Path(__file__).with_name("related_interest_relation_v1.txt").read_text(encoding="utf-8")
+
+
+class _SystemicValidatorError(ValueError):
+    """Configuration/provider identity failure, not a Concept relation."""
+
+
+def _systemic_failure(exc):
+    # Per-attempt timeouts and invalid completions remain batch-local ERRORs.
+    # Inspect only typed transport/status metadata, never provider body text.
+    return (isinstance(exc, _SystemicValidatorError)
+        or isinstance(exc, APIConnectionError) and not isinstance(exc, APITimeoutError)
+        or isinstance(exc, APIStatusError) and (
+            exc.status_code in {401, 403, 429} or exc.status_code >= 500))
 
 
 def _completion(client, *, timeout, **request):
@@ -55,7 +68,9 @@ def validate_concepts(query, concepts, client, model, *, deadline, clock=time.mo
     """At most 12 Concepts, batch 2, 2 attempts/batch, one shared wall budget.
 
     IDs sent to the model are transient batch positions, not Graph/user IDs.
-    A valid negative/unknown never retries. Any final error rejects that batch.
+    A valid negative/unknown never retries. Any final error excludes that batch.
+    job_unavailable is a separate, bounded job-level signal: no partial result
+    may bypass an accounting/configuration/systemic provider failure.
     """
     if len(concepts) > 12:
         raise ValueError("concept_limit_exceeded")
@@ -65,6 +80,7 @@ def validate_concepts(query, concepts, client, model, *, deadline, clock=time.mo
         batch = concepts[offset:offset+2]
         pairs = [{"id": str(i), "Q": query, "C": c["semantic_text"]} for i, c in enumerate(batch)]
         relations = None
+        systemic_failure = False
         for _attempt in range(2):
             remaining = deadline-clock()
             if remaining <= 0.1 or not is_enabled():
@@ -73,7 +89,7 @@ def validate_concepts(query, concepts, client, model, *, deadline, clock=time.mo
             counts["retries"] += int(_attempt == 1)
             try:
                 if not str(model or "").startswith("deepseek"):
-                    raise ValueError("validator_model_unavailable")
+                    raise _SystemicValidatorError("validator_model_unavailable")
                 response = _completion(client, timeout=min(6.0, remaining),
                     model=model, temperature=0, max_tokens=4096,
                     messages=[{"role": "system", "content": PROMPT},
@@ -88,19 +104,25 @@ def validate_concepts(query, concepts, client, model, *, deadline, clock=time.mo
                         # calls or bypass the existing billable task boundary.
                         counts["error"] += len(concepts)-offset
                         counts["attempt_errors"] += 1
+                        counts["job_unavailable"] = 1
                         return [], counts
                 if clock() >= deadline:
                     raise ValueError("validator_deadline")
                 if getattr(response, "model", model) != model:
-                    raise ValueError("validator_model_mismatch")
+                    raise _SystemicValidatorError("validator_model_mismatch")
                 choice = response.choices[0]
                 relations = parse_relations(choice.message.content, choice.finish_reason, {p["id"] for p in pairs})
                 break
-            except Exception:
+            except Exception as exc:
                 # No provider exception/body/headers or input text is logged.
                 relations = None
                 counts["attempt_errors"] += 1
+                systemic_failure = systemic_failure or _systemic_failure(exc)
         if relations is None:
+            if systemic_failure:
+                counts["error"] += len(concepts)-offset
+                counts["job_unavailable"] = 1
+                return [], counts
             counts["error"] += len(batch)
             continue
         for i, concept in enumerate(batch):

@@ -75,6 +75,24 @@ def test_accounting_failure_does_not_retry_or_expand(monkeypatch):
     assert client.chat.completions.create.call_count == 1
 
 
+@pytest.mark.parametrize('earlier_relation', ['unrelated', 'role_mismatch'])
+def test_accounting_failure_marks_entire_job_unavailable_despite_prior_decisions(monkeypatch, earlier_relation):
+    from agent_quota import service
+    monkeypatch.setattr(service, 'record_usage_deferred', Mock(side_effect=RuntimeError('private-storage-error')))
+    earlier = completion()
+    earlier.usage = None
+    earlier.choices[0].message.content = json.dumps({'results': [
+        {'id': str(i), 'relation': earlier_relation} for i in range(2)]})
+    client = Mock(); client.with_options.return_value = client
+    client.chat.completions.create.side_effect = [earlier, completion()]
+    accepted, counts = validate_concepts('Watching Football', [{'semantic_text': 'Playing Football'}]*4,
+        client, 'deepseek-test', deadline=100, clock=lambda: 0)
+    assert not accepted and counts['job_unavailable'] == 1
+    assert counts['accepted'] + counts['rejected'] == 2 and counts['error'] == 2
+    assert counts['attempts'] == client.chat.completions.create.call_count == 2
+    assert counts['retries'] == 0 and 'private-storage-error' not in str(counts)
+
+
 def test_deferred_usage_is_durable_and_default_delivery_is_unchanged(tmp_path):
     from agent_quota.service import QuotaService
     quota = QuotaService(store=Mock(), outbox=tmp_path / "quota.sqlite3")
