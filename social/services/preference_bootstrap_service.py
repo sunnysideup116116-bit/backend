@@ -75,11 +75,15 @@ def source(owner):
     items = []
     for row in rows:
         concept = row['concept']; identity = stored_concept_identity(concept)
+        require(isinstance(concept.get('key'), str) and bool(concept['key']), 'preference_identity_missing', 422)
         require(identity or not (is_v2_preference_key(concept.get('key')) or concept.get('canonicalization_version') == 'v2'),
                 'invalid_v2_not_legacy', 422)
         text = identity.semantic_text if identity else concept.get('semantic_text') or concept.get('label')
         require(isinstance(text, str) and bool(text), 'legacy_source_unavailable', 422)
-        items.append({'text': text, 'polarity': row['relation'], 'identity_status': 'verified_v2' if identity else 'legacy_unconfirmed'})
+        # Owner-scoped opaque action reference; clients must not derive a key
+        # from text or use the bounded profile cache as a complete inventory.
+        items.append({'key': concept['key'], 'text': text, 'polarity': row['relation'],
+            'identity_status': 'verified_v2' if identity else 'legacy_unconfirmed'})
     prefers = [i['text'] for i in items if i['polarity'] == 'PREFERS']
     avoids = [i['text'] for i in items if i['polarity'] == 'AVOIDS']
     if items:validate_bootstrap_item_count(prefers, avoids, mode='complete_set')

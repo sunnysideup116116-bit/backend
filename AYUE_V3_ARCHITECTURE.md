@@ -96,6 +96,7 @@ projection；完整集合必須分別確認 PREFERS/AVOIDS，才退休 owner-sco
 [Preference Lifecycle v2](docs/PREFERENCE_LIFECYCLE_V2.md) 提供本人全量來源確認、
 同交易 PREFERS incremental embedding queue、owner association edit/delete 與投影恢復；
 worker 預設 OFF，未部署／未靜默轉換 legacy。Manual add/action HTTP 需 owner JWT。
+完整 owner source 提供 opaque action key；client 不得自行由文字生成 Concept identity。
 Bootstrap `complete_set` 單次 PREFERS＋AVOIDS 合計最多 64 筆、全文 UTF-8 合計16KiB，超額整次拒絕，
 不拆成多次完整集合提交；`add_only` 與一般 memory extraction/write cap 不變。
 

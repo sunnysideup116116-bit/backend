@@ -41,6 +41,7 @@ def test_owner_source_is_read_only_and_never_guesses_empty_avoids(owner,monkeypa
     before=list(owner.profiles.find())
     result=bootstrap.source(OWNER)
     assert result['prefers']==['Jazz、Mystery Novels'] and result['avoids']==['No smoking']
+    assert [item['key'] for item in result['items']]==['legacy_full','legacy_avoid']
     assert result['status']=='confirmation_required' and result['complete']
     assert not result['requester_requires_v2'] and len(result['confirmation_required'])==5
     assert list(owner.profiles.find())==before
@@ -48,6 +49,24 @@ def test_owner_source_is_read_only_and_never_guesses_empty_avoids(owner,monkeypa
     assert contract.open_source(result['source_token'],OWNER)['snapshot_hash']=='a'*64
     with pytest.raises(contract.BootstrapError):contract.open_preview(result['source_token'],OWNER)
     with pytest.raises(contract.BootstrapError):contract.open_source(result['source_token'],'different-owner')
+
+
+def test_full_source_exposes_all_server_action_keys_without_cache_limit(owner,monkeypatch):
+    rows=[{'concept':canonicalize_concept('Reading collection '+str(i)).as_dict(),
+           'relation':'PREFERS' if i%2==0 else 'AVOIDS'} for i in range(64)]
+    call=Mock(return_value={'rows':rows,'revision':8,'snapshot_hash':'a'*64})
+    monkeypatch.setattr(bootstrap,'graph_call',call)
+    result=bootstrap.source(OWNER)
+    assert len(result['items'])==64 and len(result['prefers'])==len(result['avoids'])==32
+    assert [item['key'] for item in result['items']]==[r['concept']['key'] for r in rows]
+    assert all(set(item)=={'key','text','polarity','identity_status'} for item in result['items'])
+    call.assert_called_once_with('source',{'owner':OWNER})
+
+
+def test_source_does_not_invent_missing_legacy_action_key(owner,monkeypatch):
+    monkeypatch.setattr(bootstrap,'graph_call',lambda *_a:{'rows':[
+        {'concept':{'label':'Reading'},'relation':'PREFERS'}],'revision':0,'snapshot_hash':'a'*64})
+    with pytest.raises(contract.BootstrapError,match='preference_identity_missing'):bootstrap.source(OWNER)
 
 
 def test_changed_full_set_cannot_use_stale_discovery_receipt(owner,monkeypatch):

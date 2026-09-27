@@ -18,6 +18,9 @@ Client integration contract (authenticated backend API implemented; UI not added
    `/api/profile/preferences/bootstrap/source` with the owner's Appwrite JWT.
    It reads the **full owner-scoped active Graph PREFERS/AVOIDS set**, not the
    12-item profile cache. Both polarity arrays and identity status are shown.
+   Each item also returns its owner-scoped opaque `key` for existing lifecycle
+   action APIs. Clients echo this server-issued reference; they never generate
+   canonical identity from text. Older responses without keys remain read-only.
    It performs no mutation, even when bootstrap execution is OFF.
 2. Render every full string, separately for positive and negative polarity.
    Never split, paraphrase, infer additional items, guess AVOIDS empty, or
