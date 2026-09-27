@@ -116,15 +116,15 @@ def test_systemic_failure_sets_shared_kill_file_with_bounded_query(monkeypatch, 
 @pytest.mark.parametrize("status,code", [("completed", ""), ("insufficient_common_ground", "insufficient_semantic_ground")])
 def test_normal_outcome_never_queries_monitor_database(monkeypatch, status, code):
     enabled = Mock(side_effect=AssertionError("no monitor work for ordinary completion"))
-    monkeypatch.setattr(monitor, "canary_requester_enabled", enabled)
+    monkeypatch.setattr(monitor, "requester_route_allowed", enabled)
     assert not monitor.on_job_finished("synthetic-a", status, code)
     enabled.assert_not_called()
 
 
 def test_monitor_failure_is_secret_safe_and_does_not_change_completed_job(monkeypatch, caplog):
     import database
-    monkeypatch.setattr(monitor, "canary_requester_enabled", lambda _: True)
-    monkeypatch.setattr(monitor, "canary_cohort", lambda: frozenset({"a", "b"}))
+    monkeypatch.setattr(monitor, "requester_route_allowed", lambda _: True)
+    monkeypatch.setattr(monitor, "legacy_owner_scope", lambda: ['a', 'b'])
     collection = Mock(); collection.find.side_effect = RuntimeError("SECRET provider data")
     monkeypatch.setattr(database, "db", {"match_search_jobs": collection})
     assert not monitor.on_job_finished("a", "failed", "semantic_validator_unavailable")
@@ -150,7 +150,9 @@ def test_report_scope_is_bounded_and_leakage_is_not_hidden():
     rows("messages", [], ordered=False)
     result = collect_report(collections, frozenset({"synthetic-a", "synthetic-b"}), since=900, limit=10)
     assert result["safety_findings"] == {"outside_cohort_semantic_jobs": 1,
-        "outside_cohort_proposals": 1, "rejected_relation_proposals": 1}
+        "outside_cohort_proposals": 1, "rejected_relation_proposals": 1,
+        "missing_rollout_final_proof": 0, "potential_false_shared_claims": 0,
+        "potential_false_shared_openings": 0}
     assert result["preference_search_jobs"] == result["semantic_proposals"] == 1
     assert not result["truncated"] and "outside-owner" not in json.dumps(result)
     assert "private-id" not in json.dumps(result)

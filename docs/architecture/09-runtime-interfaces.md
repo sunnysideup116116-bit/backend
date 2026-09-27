@@ -79,7 +79,7 @@ Registration Graph `registration-bootstrap-v1`：Social profiling 初始化／pr
 - Social 預設 off；`shadow` 使用獨立 CLI，不進 live request。只有 `active` 加上確認且相容的 embedding evidence 才允許同步 fallback。`0.82` 是 provisional synthetic-fixture threshold。
 - 9001 Matchmaker 僅對確實帶有 validated semantic evidence 的 batch 使用 semantic prompt；exact-only prompt 與 P0 相同。Internal evidence 是獨立欄位，公開 `match_basis`、state、history、delivery、opening 不回 matched Concept key／label。
 
-## Related-interest v1 pilot (default OFF, not deployed)
+## Related-interest v1 and staged internal rollout (default OFF)
 
 本節是新的 [internal app-wide policy](../RELATED_INTEREST_PILOT_V1.md)，不改寫舊研究結論。
 Social active fallback 必須另有 `MATCH_RELATED_INTEREST_ENABLED=on`，且只在 qualified exact=0 呼叫
@@ -96,11 +96,32 @@ V1 Ayue理由是 owner-role-bound evidence rendering：經安全檢查的兩項�
 Search jobs 只新增 count-only pilot telemetry，invitation outcomes 沿用 canonical state history，
 不新增 confirmation/consent bypass，也不將 pilot rating 送往拒絕原因的 AVOIDS pipeline。
 
-當前 rollout 是 two-account canary，而非 app-wide enable。Server-only
-`MATCH_RELATED_INTEREST_CANARY_USER_IDS` 必須是恰好兩個相異 stable owner IDs 的 JSON array，
-由正式啟動環境傳入；缺少／格式不符一律關閉 semantic。Body 的 canary／cohort 欄位不提供 authority。
+Server-only `MATCH_RELATED_INTEREST_ROLLOUT_MODE` 預設 `canary`，
+`MATCH_RELATED_INTEREST_CANARY_USER_IDS` 在此相容模式接受 2–10 個相異 stable owner IDs；
+缺少／格式不符一律關閉 semantic。Body 的 canary／cohort 欄位不提供 authority。
 Related-interest 9001 endpoint 必須有既有 HMAC 驗證過的 matching owner scope，且 owner
 與 requester 相同；缺少／不符回 403。Unsigned exact/background 舊路徑不變。
 僅 canary requester 且 qualified exact=0 可 fallback；owner expansion、pool/qualification、
 proposal write 前都再次限制 canary candidate。Exact matching 不新增 cohort filter。
 Kill switch 優先；關閉後不得開始新的 ANN、validator attempt 或 semantic proposal。
+
+`enabled_accounts` 是另行批准才可啟用的新模式，不看 canary list 或人數。
+9001 的 request-local eligibility adapter 依 Appwrite enabled status、Mongo 唯一 profile、
+Graph 唯一 User／pending projection／disabled state 做有界唯讀檢查；沒有 preference 不代表
+requester 不合法。此模式的 candidate 必須經當前 PREFERS／verified-v2 source／source hash／
+runtime fingerprint／provenance hash／768 finite normalized vector 檢查，不使用 historical index。
+元資料 unavailable 或 ambiguous 一律 fail closed；精確匹配路徑不呼叫這些服務。
+
+新增 `POST :9001/api/preferences/related-interest-recheck`：既有 matching HMAC scope owner
+必須等於 requester。嚴格 body 包含 requester/candidate、query key、model/fingerprint、
+1–5 筆既有 validator evidence、可選 strict bool requester_prefers_query 及 ≤5s 剩餘預算。
+僅回 `eligible`／靜態 error code；重新讀帳號、Graph owner/source/vector、允許 relation、
+目前 polarity conflict，不呼叫 LLM／embedding／writer。Social domain service 在 quota reserve
+後、proposal insert 前另讀 Risk block、profile qualification、history，再呼叫本 proof endpoint；
+失敗釋放 quota、不 insert。這不是跨 Appwrite/Neo4j/Mongo 的分散式 transaction 保證。
+
+新 mode 的 job telemetry version=3（讀取仍支援 version=2），記錄有界 eligibility proof
+metadata；proposal 加 `eligibility_policy=enabled-account-v1` 與 final-proof marker。
+15 分鐘內 3 次連續 typed unavailable 的 server kill policy 不變，查詢改依 rollout mode，
+不依固定五人。原 external frozen schedule 不恢復。CLI／資料確認／部署 gate 詳見
+[rollout plan](../SEMANTIC_INTERNAL_ROLLOUT.md)。
