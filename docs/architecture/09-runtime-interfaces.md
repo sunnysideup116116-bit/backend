@@ -17,6 +17,16 @@ the signed 9001 boundary use the same count validator; no chunked complete-set.
 [Preference Lifecycle v2](../PREFERENCE_LIFECYCLE_V2.md) adds owner-only GET
 `/api/profile/preferences/bootstrap/source` and an optional source receipt on
 complete-set preview. It never confirms or migrates legacy data automatically.
+Full source items include owner-scoped opaque `key` references for edit/disable,
+without a 12-item cache limit. No client canonicalization or guessed key fallback.
+References are MAC-only, binding owner revision and exact active association
+identity/polarity/state. Write-fence validation rejects stale/disabled/retired or
+tampered references as HTTP409 `stale_source` with no Graph/Mongo effect. Success
+consumes the reference; clients refetch even for same-text correction. Graph
+commits the minimal projection recovery marker atomically; only committed actions
+may stage Mongo projection. Private service-signed `action-projection-pending`
+and `action-projection-ack` under the bootstrap prefix recover lost acknowledgements
+without replay. They do not enable bootstrap or either embedding worker.
 Manual preference add/action HTTP writes now require enabled-owner JWT matching
 body user_id. Durable verified PREFERS atomically enqueue missing-only v2 work;
 the default-OFF `PREFERENCE_EMBEDDING_V2_ENABLED` worker uses private signed

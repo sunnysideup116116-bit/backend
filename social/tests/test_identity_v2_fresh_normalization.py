@@ -60,10 +60,10 @@ class TestFreshNormalizationContract:
         assert extracted["key"] == registered["key"] == expected.key
 
         response = Mock()
-        response.json.return_value = {"status": "success"}
+        response.json.return_value = {"status": "success", "projection_key": "old_key"}
         with patch.object(memory.requests, "post", return_value=response) as post, \
                 patch.object(memory, "_invalidate_memory_projection"), patch.object(memory, "_sync_memory_projection"):
-            memory.apply_memory_action("synthetic-owner", "old_key", "correct", source)
+            memory.apply_memory_action("synthetic-owner", "par1."+'A'*43, "correct", source)
         assert identity.canonicalize_concept(post.call_args.kwargs["json"]["value"]).key == expected.key
 
         ctx = AgentTurnContext(user_id="synthetic-owner", room_id="room", message="幫我找喜歡 " + source + " 的人")

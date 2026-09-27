@@ -13,6 +13,7 @@ def exercise(driver, api, db, graph, reset, client, headers, path, consent, mark
     from matchmaker_agent.concept_identity import canonicalize_fresh_concept
     from services import preference_bootstrap_service as social
     from services import preference_action_projection as projection
+    from matchmaker_agent.preference_action_reference import reference, acknowledge_projection
     frozen=frozen_contract();vector=[1.0]+[0.0]*767
 
     def write(owner,text,stance='like'):
@@ -24,7 +25,12 @@ def exercise(driver, api, db, graph, reset, client, headers, path, consent, mark
         return identity
 
     def action(owner,key,kind,value=None):
-        result=asyncio.run(api.memory_action(api.MemoryActionRequest(user_id=owner,key=key,action=kind,
+        supplied = key
+        if kind != 'restore':
+            source = graph.source(owner)
+            row = next(r for r in source['rows'] if r['concept']['key']==key)
+            supplied = reference(owner, source['revision'], row)
+        result=asyncio.run(api.memory_action(api.MemoryActionRequest(user_id=owner,key=supplied,action=kind,
             value=value,source_created_at=time.time(),expires_at=time.time()+30)))
         assert result['status']=='success',result
         return result
@@ -36,6 +42,11 @@ def exercise(driver, api, db, graph, reset, client, headers, path, consent, mark
     def tx_call(fn,*args,**kwargs):
         with driver.session() as session:
             return session.execute_write(lambda tx:fn(tx,*args,**kwargs))
+
+    def projection_graph(action, body):
+        if action == 'source':return graph.source(body['owner'])
+        assert action == 'action-projection-ack'
+        return graph.write(acknowledge_projection, body['owner'], body['key'], body['revision'])
 
     reset()
     # A new EMPTY owner can acquire its first normal preference, no bootstrap.
@@ -82,18 +93,18 @@ def exercise(driver, api, db, graph, reset, client, headers, path, consent, mark
     db.preference_facts.insert_one({'user_id':'synthetic_new','concept_key':identity.key,'active':True,'stance':'like','evidence_count':7})
     intent=projection.stage('synthetic_new',identity.key)
     action('synthetic_new',identity.key,'disable')
-    with patch.object(projection,'graph_call',lambda _action,body:graph.source(body['owner'])):
+    with patch.object(projection,'graph_call',projection_graph):
         assert projection.settle(intent)['status']=='synced'
     assert db.preference_facts.find_one({'user_id':'synthetic_new'})['active'] is False
     assert props(identity.key)==before
     action('synthetic_new',identity.key,'restore')
-    with patch.object(projection,'graph_call',lambda _action,body:graph.source(body['owner'])):
+    with patch.object(projection,'graph_call',projection_graph):
         assert projection.settle(projection.stage('synthetic_new',identity.key))['status']=='synced'
     assert db.preference_facts.find_one({'user_id':'synthetic_new'})['active'] is True
     edited=action('synthetic_new',identity.key,'correct','Reading contemporary fiction')
     assert edited['key']!=identity.key and props(identity.key)==before
     assert props(edited['key'])['preference_embedding_state']=='pending'
-    with patch.object(projection,'graph_call',lambda _action,body:graph.source(body['owner'])):
+    with patch.object(projection,'graph_call',projection_graph):
         assert projection.settle(projection.stage('synthetic_new',identity.key))['status']=='synced'
     assert db.preference_facts.find_one({'user_id':'synthetic_new'})['active'] is False
     with driver.session() as session:

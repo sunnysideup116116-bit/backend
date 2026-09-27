@@ -329,9 +329,12 @@ def main():
             pending = graph.preview("synthetic_a", "add_only", ["Science Fiction"], [])
             graph.commit("synthetic_a", pending["preview_token"], consent)
             v2key = current()["rows"][0]["concept"]["key"]
+            from matchmaker_agent.preference_action_reference import reference
+            current_state = current()
+            action_ref = reference('synthetic_a',current_state['revision'],current_state['rows'][0])
             for action in ("disable", "restore", "correct"):
                 outcome = asyncio.run(agent_api.memory_action(agent_api.MemoryActionRequest(
-                    user_id="synthetic_a", key=v2key, action=action,
+                    user_id="synthetic_a", key=v2key if action=='restore' else action_ref, action=action,
                     value="Fresh correction" if action == "correct" else None, source_created_at=time.time())))
                 assert outcome["error_code"] == "preference_projection_pending"
             mark("ordinary_disable_restore_correction_share_pending_fence")

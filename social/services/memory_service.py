@@ -5,6 +5,7 @@ import requests
 from services.profile_writer import update_profile as write_profile
 from services.preference_owner_guard import unique_profile
 from matchmaker_agent.preference_bootstrap_contract import BootstrapError
+from matchmaker_agent.preference_action_reference import valid_format as valid_action_reference
 from database import db, profiles_coll
 from services.language_service import normalize_zh_tw
 from matchmaker_agent.concept_identity import (
@@ -23,10 +24,11 @@ MEMORY_OUTBOX = db["profile_memory_outbox"]
 
 
 class MemoryWriteError(RuntimeError):
-    def __init__(self, error_code: str, *, retryable: bool = True):
+    def __init__(self, error_code: str, *, retryable: bool = True, status_code: int | None = None):
         super().__init__(error_code)
         self.error_code = error_code
         self.retryable = retryable
+        self.status_code = status_code
 
 
 def validate_memory_proposals(proposals: list[dict]) -> list[dict]:
@@ -313,15 +315,21 @@ def apply_memory_action(user_id: str, key: str, action: str, value: str | None =
             value = normalize_fresh_preference_text(value)
         except PreferenceTextError as exc:
             raise MemoryWriteError(exc.code, retryable=False) from None
+    if action in {'correct', 'disable'} and not valid_action_reference(key):
+        raise MemoryWriteError('stale_source', retryable=False, status_code=409)
     try:
         unique_profile(profiles_coll, user_id)
     except BootstrapError as exc:
         raise MemoryWriteError(exc.code, retryable=exc.status == 503) from None
     from services import preference_action_projection as projection
-    try:
-        projection_id = projection.stage(user_id, key)
-    except Exception:
-        raise MemoryWriteError('preference_projection_unavailable') from None
+    # Restore retains its existing internal-key contract; do not weaken its
+    # pre-existing recovery behavior while hardening active correct/disable.
+    projection_id = None
+    if action == 'restore':
+        try:
+            projection_id = projection.stage(user_id, key)
+        except Exception:
+            raise MemoryWriteError('preference_projection_unavailable') from None
     try:
         response = requests.post(f"{AGENT_URL}/api/v2/memory/action", json={
             "user_id": user_id, "key": key, "action": action, "value": value,
@@ -331,14 +339,27 @@ def apply_memory_action(user_id: str, key: str, action: str, value: str | None =
         response.raise_for_status()
         result = response.json()
     except (requests.RequestException, ValueError) as exc:
-        # The durable intent recovers from current Graph state, never replays
-        # this possibly-committed action after a transport failure.
+        # A committed action leaves its recovery marker atomically in Graph.
+        # Never stage Mongo before authoritative Graph validation, or replay an
+        # unknown action outcome. The existing projection worker recovers it.
         raise MemoryWriteError("memory_action_unavailable") from exc
-    projection_result = projection.settle(projection_id)
+    if result.get('error_code') == 'stale_source':
+        raise MemoryWriteError('stale_source', retryable=False, status_code=409)
     if result.get("status") not in {"success", "expired"}:
         raise MemoryWriteError(str(
             result.get("error_code") or result.get("status") or "memory_action_failed"
         )[:80])
-    _invalidate_memory_projection(user_id, key if action in {"disable", "correct"} else None)
+    projection_key = result.get('projection_key') if action in {'disable', 'correct'} else key
+    if not isinstance(projection_key, str) or not projection_key:
+        raise MemoryWriteError('memory_action_outcome_unknown')
+    try:
+        projection_result = projection.settle(projection_id or projection.stage(user_id, projection_key))
+    except Exception:
+        # Graph is already committed; the Graph marker survives a failed Mongo
+        # journal write. A pending projection is NOT permission to retry action.
+        projection_result = {'status': 'pending'}
+    _invalidate_memory_projection(user_id, projection_key if action in {"disable", "correct"} else None)
     _sync_memory_projection(user_id, [])
-    return {**result, 'projection_status': projection_result['status']}
+    # Canonical/new/old Graph keys are internal projection inputs, not client
+    # authority. The next owner action MUST fetch a fresh full source reference.
+    return {'status': result['status'], 'projection_status': projection_result['status']}

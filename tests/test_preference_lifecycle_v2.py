@@ -17,6 +17,7 @@ from services import preference_bootstrap_service as bootstrap
 from services import preference_embedding_service as worker
 from services import preference_action_projection as projection
 from services.preference_owner_guard import unique_profile
+from matchmaker_agent.preference_action_reference import reference, valid_format
 
 OWNER='synthetic-lifecycle'
 VECTOR=[1.0]+[0.0]*767
@@ -36,11 +37,13 @@ def owner(monkeypatch):
 def test_owner_source_is_read_only_and_never_guesses_empty_avoids(owner,monkeypatch):
     rows=[{'concept':{'key':'legacy_full','label':'Jazz、Mystery Novels'},'relation':'PREFERS'},
           {'concept':{'key':'legacy_avoid','label':'No smoking'},'relation':'AVOIDS'}]
+    rows=[{**row,'id':f'fixture-edge-{i}','properties':{}} for i,row in enumerate(rows)]
     call=Mock(return_value={'rows':rows,'revision':4,'snapshot_hash':'a'*64})
     monkeypatch.setattr(bootstrap,'graph_call',call)
     before=list(owner.profiles.find())
     result=bootstrap.source(OWNER)
     assert result['prefers']==['Jazz、Mystery Novels'] and result['avoids']==['No smoking']
+    assert [item['key'] for item in result['items']]==[reference(OWNER,4,r) for r in rows]
     assert result['status']=='confirmation_required' and result['complete']
     assert not result['requester_requires_v2'] and len(result['confirmation_required'])==5
     assert list(owner.profiles.find())==before
@@ -48,6 +51,25 @@ def test_owner_source_is_read_only_and_never_guesses_empty_avoids(owner,monkeypa
     assert contract.open_source(result['source_token'],OWNER)['snapshot_hash']=='a'*64
     with pytest.raises(contract.BootstrapError):contract.open_preview(result['source_token'],OWNER)
     with pytest.raises(contract.BootstrapError):contract.open_source(result['source_token'],'different-owner')
+
+
+def test_full_source_exposes_all_server_action_keys_without_cache_limit(owner,monkeypatch):
+    rows=[{'concept':canonicalize_concept('Reading collection '+str(i)).as_dict(),
+           'relation':'PREFERS' if i%2==0 else 'AVOIDS','id':f'fixture-edge-{i}','properties':{}} for i in range(64)]
+    call=Mock(return_value={'rows':rows,'revision':8,'snapshot_hash':'a'*64})
+    monkeypatch.setattr(bootstrap,'graph_call',call)
+    result=bootstrap.source(OWNER)
+    assert len(result['items'])==64 and len(result['prefers'])==len(result['avoids'])==32
+    assert [item['key'] for item in result['items']]==[reference(OWNER,8,r) for r in rows]
+    assert all(valid_format(item['key']) and item['key'] != r['concept']['key'] for item,r in zip(result['items'],rows))
+    assert all(set(item)=={'key','text','polarity','identity_status'} for item in result['items'])
+    call.assert_called_once_with('source',{'owner':OWNER})
+
+
+def test_source_does_not_invent_missing_legacy_action_key(owner,monkeypatch):
+    monkeypatch.setattr(bootstrap,'graph_call',lambda *_a:{'rows':[
+        {'concept':{'label':'Reading'},'relation':'PREFERS'}],'revision':0,'snapshot_hash':'a'*64})
+    with pytest.raises(contract.BootstrapError,match='preference_identity_missing'):bootstrap.source(OWNER)
 
 
 def test_changed_full_set_cannot_use_stale_discovery_receipt(owner,monkeypatch):
@@ -174,7 +196,7 @@ def test_action_projection_reconciles_current_graph_only(owner,monkeypatch):
     monkeypatch.setattr(projection,'projection_write',lambda *_a,**_k:nullcontext(None))
     owner.facts.insert_one({'user_id':OWNER,'concept_key':'old','active':True,'stance':'like','evidence_count':9})
     owner.facts.insert_one({'user_id':'other','concept_key':'old','active':True,'stance':'like'})
-    monkeypatch.setattr(projection,'graph_call',lambda *_a:{'snapshot_hash':'a','rows':[]})
+    monkeypatch.setattr(projection,'graph_call',lambda *_a:{'snapshot_hash':'a','rows':[],'revision':1})
     ident=projection.stage(OWNER,'old')
     assert projection.process_one(ident)['status']=='idle'  # unknown HTTP outcome waits past command expiry
     assert projection.settle(ident)['status']=='synced'

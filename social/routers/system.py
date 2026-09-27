@@ -696,7 +696,7 @@ def profile_memory_action(req: ProfileMemoryActionRequest, request: Request = No
     try:
         return apply_memory_action(req.user_id, req.key, req.action, req.value)
     except MemoryWriteError as exc:
-        raise HTTPException(status_code=503 if exc.retryable else 422, detail={
+        raise HTTPException(status_code=exc.status_code or (503 if exc.retryable else 422), detail={
             "code": exc.error_code,
             "message": "記憶設定暫時無法更新，請稍後再試。",
         }) from exc

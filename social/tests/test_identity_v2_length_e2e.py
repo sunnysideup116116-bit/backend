@@ -113,8 +113,8 @@ class TestPreferenceLengthBoundary:
 
     def test_manual_correction_keeps_full_value_or_rejects_before_http(self, semantic_text):
         response = Mock()
-        response.json.return_value = {"status": "success"}
-        request = ProfileMemoryActionRequest(user_id="synthetic-owner", key="legacy_key", action="correct", value=semantic_text)
+        response.json.return_value = {"status": "success", "projection_key": "legacy_key"}
+        request = ProfileMemoryActionRequest(user_id="synthetic-owner", key="par1."+'A'*43, action="correct", value=semantic_text)
         with patch.object(memory.requests, "post", return_value=response) as post, \
                 patch.object(memory, "_invalidate_memory_projection") as invalidate, \
                 patch.object(memory, "_sync_memory_projection"):
