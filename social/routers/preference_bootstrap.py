@@ -1,5 +1,6 @@
 """Owner-authenticated bootstrap. No client-selected owner or Pi write tool."""
 from typing import Literal
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
@@ -16,9 +17,17 @@ router = APIRouter(prefix="/api/profile/preferences/bootstrap", tags=["Preferenc
 
 def authenticated(request: Request):
     try:
-        return authenticate_owner(request.headers.get("authorization"))
+        owner = authenticate_owner(request.headers.get("authorization"))
+        from services.semantic_user_eligibility import lookup_enabled_account
+        if not lookup_enabled_account(owner, deadline=time.monotonic()+3):
+            raise HTTPException(403, detail={'code':'owner_disabled'})
+        return owner
     except AppwriteIdentityError as exc:
         raise HTTPException(exc.status_code, detail={"code": exc.code}) from None
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(503, detail={'code':'owner_eligibility_unavailable'}) from None
 
 
 class Input(BaseModel):
@@ -29,6 +38,7 @@ class PreviewInput(Input):
     mode: Literal["add_only", "complete_set"]
     prefers: list[str] = Field(max_length=COMPLETE_SET_MAX_ITEMS)
     avoids: list[str] = Field(max_length=COMPLETE_SET_MAX_ITEMS)  # Required even when explicitly empty.
+    source_token: str | None = Field(default=None, max_length=4096)
 
     @model_validator(mode="after")
     def validate_item_count(self):
@@ -58,7 +68,12 @@ def invoke(fn, *args):
 
 @router.post("/preview")
 def preview(payload: PreviewInput, owner: str = Depends(authenticated)):
-    return invoke(service.preview, owner, payload.mode, payload.prefers, payload.avoids)
+    return invoke(service.preview, owner, payload.mode, payload.prefers, payload.avoids, payload.source_token)
+
+
+@router.get('/source')
+def source(owner: str = Depends(authenticated)):
+    return invoke(service.source, owner)
 
 
 @router.post("/commit")

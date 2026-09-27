@@ -113,7 +113,7 @@ def main():
         def reset():
             with driver.session() as session:
                 assert session.run("MATCH (n:BootstrapHarness {id:$id}) RETURN count(n) AS n", id=state["checkout"]).single()["n"] == 1
-                assert not session.run("MATCH (u:User) WHERE NOT u.id STARTS WITH 'synthetic_' RETURN count(u) AS n").single()["n"]
+                assert not session.run("MATCH (u:User) WHERE NOT (u.id STARTS WITH 'synthetic_' OR u.id STARTS WITH 'rollout-') RETURN count(u) AS n").single()["n"]
                 session.run("MATCH (n) WHERE NOT n:BootstrapHarness DETACH DELETE n").consume()
                 session.run("""CREATE (a:User {id:'synthetic_a'}),(b:User {id:'synthetic_b'}),
                     (x:Concept {key:'legacy_like',label:'舊截斷偏好'}),(y:Concept {key:'legacy_avoid',label:'舊避免條件'}),
@@ -347,7 +347,7 @@ def main():
             mark("rollback_never_deletes_other_owner_reference")
 
             # One complete receipt/transaction, never a truncated legacy inventory.
-            for positive_count, negative_count in ((5, 0), (5, 3), (6, 1), (7, 3), (10, 0), (0, 10)):
+            for positive_count, negative_count in ((5, 0), (5, 3), (6, 1), (7, 3), (10, 0), (0, 10), (11,0), (32,32), (64,0)):
                 reset()
                 with driver.session() as session:
                     session.run("""UNWIND range(0,9) AS i
@@ -372,15 +372,15 @@ def main():
                 assert sum(r["relation"] == "AVOIDS" for r in after["rows"]) == negative_count
                 assert {r["concept"]["semantic_text"] for r in after["rows"]} == set(positive + negative)
                 projected = db.profiles.find_one({"user_id": "synthetic_a"})
-                assert len(projected["profile_memory_preview"]) == positive_count + negative_count
+                assert len(projected["profile_memory_preview"]) == min(12,positive_count + negative_count)
                 assert projected["preference_projection_revision"] == 1 and not projected.get("preference_bootstrap_pending")
                 assert db.preference_bootstrap_operations.count_documents({"owner": "synthetic_a", "status": "complete"}) == 1
                 assert len(graph.status("synthetic_a", p["preview_id"])["retired_edges"]) == 12
                 assert len(graph.read(core.snapshot, "synthetic_b")[0]["rows"]) == 1
                 mark(f"complete_set_capacity_{positive_count}_prefers_{negative_count}_avoids", retired_legacy=12)
 
-            for mode, positive_count, negative_count in (("complete_set", 11, 0), ("complete_set", 6, 5),
-                    ("complete_set", 0, 11), ("add_only", 6, 0), ("add_only", 5, 1), ("add_only", 0, 6)):
+            for mode, positive_count, negative_count in (("complete_set", 65, 0), ("complete_set", 33, 32),
+                    ("complete_set", 0, 65), ("add_only", 6, 0), ("add_only", 5, 1), ("add_only", 0, 6)):
                 reset(); before = current(); before_profile = db.profiles.find_one({"user_id": "synthetic_a"})
                 response = client.post(path + "/preview", json={"mode": mode,
                     "prefers": [f"Synthetic paper craft {i}" for i in range(positive_count)],
@@ -478,6 +478,8 @@ def main():
             assert current()==before
             mark("legacy_compound_cannot_bypass_ordinary_memory_facade")
 
+        from lifecycle_scenarios import exercise
+        exercise(driver, agent_api, db, graph, reset, client, headers, path, consent, mark)
         report = {"status": "PASS", "synthetic_only": True, "production_ready": False,
                   "graph": topology, "mongo": mongo, "scenarios": results,
                   "authentication": "synthetic principal override; real HMAC internal boundary",

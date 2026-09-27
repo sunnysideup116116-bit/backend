@@ -4,12 +4,14 @@ import math
 
 from database import db, profiles_coll
 from matchmaker_agent.preference_bootstrap_contract import BootstrapError
+from services.preference_owner_guard import unique_profile
 
 
 @contextmanager
 def projection_write(owner, operation_id=None, *, source_created_at=None):
     with db.client.start_session() as session:
         with session.start_transaction(max_commit_time_ms=5000):
+            unique_profile(profiles_coll, owner, session=session, check_state=False)
             allowed = [{"preference_bootstrap_pending": {"$exists": False}}]
             if operation_id:
                 allowed.append({"preference_bootstrap_pending": operation_id})

@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import Mock, patch
+import mongomock
 
 from services.memory_service import (
     MemoryWriteError, _sync_memory_projection, apply_memory_action,
@@ -8,6 +9,15 @@ from services.memory_service import (
 
 
 class MemoryServiceTests(unittest.TestCase):
+    def setUp(self):
+        profiles=mongomock.MongoClient().db.profiles
+        profiles.insert_many([{'user_id':'owner'},{'user_id':'demo_user'}])
+        patcher=patch('services.memory_service.profiles_coll', profiles)
+        patcher.start();self.addCleanup(patcher.stop)
+        for target, value in [('stage', 'synthetic-intent'), ('settle', {'status':'synced'})]:
+            patcher=patch('services.preference_action_projection.'+target, return_value=value)
+            patcher.start();self.addCleanup(patcher.stop)
+
     def test_status_aware_graph_snapshot_distinguishes_empty_from_unavailable(self):
         response = Mock(status_code=200)
         response.raise_for_status.return_value = None

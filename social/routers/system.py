@@ -687,7 +687,11 @@ def get_profile_memories(user_id: str):
     return {"memories": doc.get("profile_memory_preview", []), "summary": doc.get("profile_memory_summary", "")}
 
 @router.post("/profile/memories/action")
-def profile_memory_action(req: ProfileMemoryActionRequest):
+def profile_memory_action(req: ProfileMemoryActionRequest, request: Request = None):
+    if request is not None:
+        from routers.preference_bootstrap import authenticated
+        if authenticated(request) != req.user_id:
+            raise HTTPException(403, detail={'code':'preference_owner_mismatch'})
     from services.memory_service import MemoryWriteError, apply_memory_action
     try:
         return apply_memory_action(req.user_id, req.key, req.action, req.value)
@@ -699,7 +703,11 @@ def profile_memory_action(req: ProfileMemoryActionRequest):
 
 
 @router.post("/profile/memories/add")
-def add_profile_memory(req: ProfileMemoryAddRequest):
+def add_profile_memory(req: ProfileMemoryAddRequest, request: Request = None):
+    if request is not None:
+        from routers.preference_bootstrap import authenticated
+        if authenticated(request) != req.user_id:
+            raise HTTPException(403, detail={'code':'preference_owner_mismatch'})
     from services.memory_service import (
         MemoryWriteError,
         apply_profile_memory_proposals,

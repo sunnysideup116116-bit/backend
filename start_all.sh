@@ -16,6 +16,9 @@ cd "$SERVER_ROOT" || exit 1
 # service-specific dotenv files must not independently widen semantic routing.
 export MATCH_RELATED_INTEREST_CANARY_USER_IDS="${MATCH_RELATED_INTEREST_CANARY_USER_IDS:-}"
 export MATCH_RELATED_INTEREST_ROLLOUT_MODE="${MATCH_RELATED_INTEREST_ROLLOUT_MODE:-canary}"
+# One operator-controlled derived-data worker; no per-user cohort enrollment.
+# OFF until the lifecycle release is explicitly approved for deployment.
+export PREFERENCE_EMBEDDING_V2_ENABLED="${PREFERENCE_EMBEDDING_V2_ENABLED:-off}"
 case "$MATCH_RELATED_INTEREST_ROLLOUT_MODE" in
     canary|enabled_accounts|off) ;;
     *) printf 'Invalid server semantic rollout mode.\n' >&2; exit 2 ;;

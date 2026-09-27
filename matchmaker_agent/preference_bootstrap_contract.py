@@ -21,7 +21,10 @@ POLICY = "preference-bootstrap-v1"
 MAX_SNAPSHOT = 100
 MAX_BYTES = 262144
 PREVIEW_TTL = 600
-COMPLETE_SET_MAX_ITEMS = 10
+# Bound one atomic full-set transaction by both cardinality and actual source
+# bytes. Independent of ordinary per-message/add-only extraction quotas.
+COMPLETE_SET_MAX_ITEMS = 64
+COMPLETE_SET_MAX_UTF8_BYTES = 16384
 ADD_ONLY_MAX_ITEMS = 5
 PROTECTED = r"(?:黑人|白人|黃種人|種族|族裔|宗教|信仰|穆斯林|基督教|同性戀|性傾向|性別認同|跨性別|殘障|身心障礙|疾病|政治立場|國籍|公民身分)"
 
@@ -73,6 +76,12 @@ def validate_bootstrap_item_count(prefers, avoids, *, mode):
     require(isinstance(prefers, list) and isinstance(avoids, list), "both_polarities_required", 422)
     limit = COMPLETE_SET_MAX_ITEMS if mode == "complete_set" else min(ADD_ONLY_MAX_ITEMS, durable_memory_limit())
     require(1 <= len(prefers) + len(avoids) <= limit, "bootstrap_item_limit", 422)
+    if mode == "complete_set":
+        try:
+            size = sum(len(value.encode('utf-8')) for value in prefers + avoids)
+        except (AttributeError, UnicodeError):
+            raise BootstrapError('invalid_preference_text', 422) from None
+        require(size <= COMPLETE_SET_MAX_UTF8_BYTES, 'bootstrap_text_budget', 413)
 
 
 def is_compound_item(text):
@@ -129,7 +138,34 @@ def normalize_items(prefers, avoids, *, mode="add_only", legacy_snapshot=None, o
             items[identity.key] = {**identity.as_dict(), "relation": relation}
             if source:
                 items[identity.key]["legacy_compound_source"] = source
+    if mode == 'complete_set':
+        validate_bootstrap_item_count([i['semantic_text'] for i in items.values()], [], mode=mode)
     return sorted(items.values(), key=lambda item: item["key"])
+
+
+def seal_source(owner, snapshot_hash, mongo_hash):
+    """Read-only full-set discovery receipt, never a commit capability."""
+    payload = {'owner': owner_id(owner), 'snapshot_hash': snapshot_hash,
+        'mongo_snapshot_hash': mongo_hash, 'expires_at': time.time()+PREVIEW_TTL,
+        'policy': 'preference-bootstrap-source-v1'}
+    raw = encoded(payload)
+    return base64.urlsafe_b64encode(raw).decode()+'.'+_mac('preference-bootstrap-source-v1', raw)
+
+
+def open_source(token, owner):
+    try:
+        require(isinstance(token, str) and len(token) <= 4096, 'invalid_source_receipt', 403)
+        value, signature = token.rsplit('.', 1)
+        raw = base64.b64decode(value, altchars=b'-_', validate=True)
+        require(hmac.compare_digest(signature, _mac('preference-bootstrap-source-v1', raw)), 'invalid_source_receipt', 403)
+        payload = json.loads(raw)
+        require(payload['owner'] == owner and payload['policy'] == 'preference-bootstrap-source-v1', 'invalid_source_receipt', 403)
+        require(math.isfinite(payload['expires_at']) and time.time() < payload['expires_at'], 'source_receipt_expired')
+        return payload
+    except BootstrapError:
+        raise
+    except Exception:
+        raise BootstrapError('invalid_source_receipt', 403) from None
 
 
 def _mac(domain, payload):

@@ -20,6 +20,7 @@ def graph(result):
     driver.__enter__.return_value = driver
     driver.session.return_value.__enter__.return_value = session
     def run(query, **_kwargs):
+        if 'RETURN old.key AS key' in query:return [result] if result else []
         response = MagicMock()
         response.single.return_value = {"revision": 0, "epoch": 0, "epoch_at": 0, "pending": None} if "AS revision" in query else result
         return response
@@ -29,6 +30,16 @@ def graph(result):
 
 
 class MemoryActionTests(unittest.TestCase):
+    def test_delayed_action_expires_after_owner_lock_without_preference_mutation(self):
+        driver, _session, transaction = graph({'original_relation':'PREFERS'})
+        request=agent_api.MemoryActionRequest(user_id='owner',key='missing',action='disable',
+            source_created_at=10,expires_at=40)
+        with patch.object(agent_api.GraphDatabase,'driver',return_value=driver), patch.object(agent_api.time,'time',return_value=41):
+            result=asyncio.run(agent_api.memory_action(request))
+        self.assertEqual(result['error_code'],'preference_action_expired')
+        self.assertEqual(transaction.run.call_count,1)
+        self.assertNotIn('DELETE',transaction.run.call_args.args[0])
+
     def test_disable_preserves_original_avoid_stance(self):
         driver, session, transaction = graph({"original_relation": "AVOIDS"})
         request = agent_api.MemoryActionRequest(

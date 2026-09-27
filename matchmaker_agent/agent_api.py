@@ -8,7 +8,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from neo4j import GraphDatabase, Query
+from neo4j import GraphDatabase, Query, unit_of_work
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -67,9 +67,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'social'))
 from agent_quota.internal import MatchmakerQuotaMiddleware, start_worker, stop_worker
 from matchmaker_agent.preference_write_fence import lock_preferences, bump_preferences, PreferenceFenceError, fence_error_result
 from matchmaker_agent.preference_mutations import write_preference_edges
+from matchmaker_agent.preference_embedding_jobs import enqueue_keys
 app = FastAPI()
 from matchmaker_agent.preference_bootstrap_api import router as preference_bootstrap_router
 app.include_router(preference_bootstrap_router)
+from matchmaker_agent.preference_embedding_api import router as preference_embedding_router
+app.include_router(preference_embedding_router)
 app.add_middleware(MatchmakerQuotaMiddleware)
 app.router.add_event_handler('startup', validate_signing_config)
 from services.semantic_user_eligibility import initialize_profiles
@@ -1425,6 +1428,7 @@ class MemoryActionRequest(BaseModel):
     action: str
     value: str | None = None
     source_created_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    expires_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
 class ContextProjectionRequest(BaseModel):
     user_id: str
@@ -2111,6 +2115,15 @@ async def list_memories(user_id: str, limit: int = 12, durable_only: bool = Fals
         print(f"[MEMORY][9001] graph_read_failed error={type(exc).__name__}")
         return {"status": "error", "error_code": "graph_read_failed", "memories": []}
 
+def _require_action_live(req):
+    # Social stages projection recovery before sending an expiring command.
+    # Check AFTER the owner lock on every managed retry; a delayed command
+    # cannot mutate Graph after its recovery reader has settled the projection.
+    if req.expires_at is not None and (req.source_created_at is None or
+            time.time() >= min(req.expires_at, req.source_created_at + 30)):
+        raise PreferenceFenceError("preference_action_expired")
+
+
 @app.post("/api/v2/memory/action")
 @app.post("/api/memory/action")
 async def memory_action(req: MemoryActionRequest):
@@ -2151,8 +2164,10 @@ async def memory_action(req: MemoryActionRequest):
         with GraphDatabase.driver(URI, auth=AUTH) as driver:
             with driver.session(database=DATABASE) as session:
                 if req.action == "disable":
+                    @unit_of_work(timeout=20)
                     def disable(tx):
                         lock_preferences(tx, user_id, source_created_at=req.source_created_at, require_existing=True)
+                        _require_action_live(req)
                         row = tx.run("""
                             MATCH (u:User {id:$user_id})-[active:PREFERS|AVOIDS|CURRENTLY_WANTS]->
                                   (concept:Concept {key:$key})
@@ -2172,8 +2187,10 @@ async def memory_action(req: MemoryActionRequest):
                     return {"status": "success" if changed else "not_found"}
 
                 if req.action == "restore":
+                    @unit_of_work(timeout=20)
                     def restore(tx):
                         lock_preferences(tx, user_id, source_created_at=req.source_created_at, require_existing=True)
+                        _require_action_live(req)
                         row = tx.run("""
                             MATCH (u:User {id:$user_id})-[disabled:MEMORY_DISABLED]->
                                   (concept:Concept {key:$key})
@@ -2193,6 +2210,7 @@ async def memory_action(req: MemoryActionRequest):
                             RETURN original_relation,original_expires_at
                         """, user_id=user_id, key=key, now=now).single()
                         if row:
+                            enqueue_keys(tx, user_id, [key])
                             bump_preferences(tx, user_id)
                         return dict(row) if row else None
                     restored = session.execute_write(restore)
@@ -2207,17 +2225,22 @@ async def memory_action(req: MemoryActionRequest):
 
                 corrected_key, label = identity.key, identity.label
 
+                @unit_of_work(timeout=20)
                 def correct(tx):
                     lock_preferences(tx, user_id, source_created_at=req.source_created_at, require_existing=True)
-                    original = tx.run("""
+                    _require_action_live(req)
+                    originals = list(tx.run("""
                         MATCH (:User {id:$user_id})-[:PREFERS|AVOIDS|CURRENTLY_WANTS|MEMORY_DISABLED]->
                               (old:Concept {key:$key})
                         RETURN old.key AS key,old.semantic_text AS semantic_text,
                                old.canonicalization_version AS canonicalization_version,
                                old.semantic_input_hash AS semantic_input_hash,
                                old.fidelity_status AS fidelity_status
-                        LIMIT 1
-                    """, user_id=user_id, key=key).single()
+                        LIMIT 2
+                    """, user_id=user_id, key=key))
+                    if len(originals) > 1:
+                        raise ValueError("preference_identity_ambiguous")
+                    original = originals[0] if originals else None
                     if not original:
                         return None
                     if not stored_concept_identity(dict(original)):
@@ -2227,6 +2250,13 @@ async def memory_action(req: MemoryActionRequest):
                         # DELETE the very same owner's relationship.
                         return {"relation": "unchanged"}
                     assert_existing_preference_identities(tx, [identity.as_dict()])
+                    conflicts = list(tx.run('''MATCH (u:User {id:$user_id})-[old:PREFERS|AVOIDS|CURRENTLY_WANTS|MEMORY_DISABLED]->(:Concept {key:$key})
+                        MATCH (u)-[target:PREFERS|AVOIDS|CURRENTLY_WANTS|MEMORY_DISABLED]->(:Concept {key:$new_key})
+                        WHERE type(old)<>type(target) OR
+                          (type(old)='MEMORY_DISABLED' AND coalesce(old.original_relation,'')<>coalesce(target.original_relation,''))
+                        RETURN type(target) AS relation LIMIT 1''',user_id=user_id,key=key,new_key=corrected_key))
+                    if conflicts:
+                        raise ValueError('preference_polarity_conflict')
                     row = tx.run("""
                         MATCH (u:User {id:$user_id})-[existing:PREFERS|AVOIDS|CURRENTLY_WANTS|MEMORY_DISABLED]->
                               (old:Concept {key:$key})
@@ -2253,12 +2283,17 @@ async def memory_action(req: MemoryActionRequest):
                             SET disabled.original_relation=original_relation,
                                 disabled.original_expires_at=original_expires_at,
                                 disabled.disabled_at=$now)
+                        CREATE (u)-[retired:PREFERENCE_SUPERSEDED]->(old)
+                        SET retired += properties(existing),retired.original_relation=relation,
+                            retired.retired_at=$now,retired.retired_id=elementId(existing),
+                            retired.replacement_key=$corrected_key,retired.retirement_reason='owner_correction'
                         DELETE existing
                         RETURN relation
                     """, user_id=user_id, key=key, corrected_key=corrected_key,
                          label=label, display_label=identity.display_label,
                          semantic_input_hash=identity.semantic_input_hash, now=now).single()
                     if row:
+                        enqueue_keys(tx, user_id, [corrected_key])
                         bump_preferences(tx, user_id)
                     return dict(row) if row else None
                 corrected = session.execute_write(correct)

@@ -97,6 +97,12 @@ app.include_router(preference_bootstrap_router)
 app.router.add_event_handler("shutdown", stop_bootstrap_worker)
 app.router.add_event_handler("startup", validate_signing_config)
 app.router.add_event_handler("startup", start_bootstrap_worker)
+from services.preference_embedding_service import start_worker as start_preference_embedding_worker, stop_worker as stop_preference_embedding_worker
+app.router.add_event_handler('startup', start_preference_embedding_worker)
+app.router.add_event_handler('shutdown', stop_preference_embedding_worker)
+from services.preference_action_projection import start_worker as start_preference_projection_worker, stop_worker as stop_preference_projection_worker
+app.router.add_event_handler('startup', start_preference_projection_worker)
+app.router.add_event_handler('shutdown', stop_preference_projection_worker)
 app.router.add_event_handler("startup", start_quota_worker)
 app.router.add_event_handler("shutdown", stop_quota_worker)
 
