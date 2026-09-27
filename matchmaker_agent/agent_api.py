@@ -72,6 +72,8 @@ from matchmaker_agent.preference_bootstrap_api import router as preference_boots
 app.include_router(preference_bootstrap_router)
 app.add_middleware(MatchmakerQuotaMiddleware)
 app.router.add_event_handler('startup', validate_signing_config)
+from services.semantic_user_eligibility import initialize_profiles
+app.router.add_event_handler('startup', initialize_profiles)
 app.router.add_event_handler('startup', start_worker)
 app.router.add_event_handler('shutdown', stop_worker)
 
@@ -1307,10 +1309,10 @@ class RelatedInterestCandidateRequest(PreferenceSemanticCandidateRequest):
 
 @app.post("/api/preferences/related-interest-candidates")
 def related_interest_candidates(req: RelatedInterestCandidateRequest):
-    from matchmaker_agent.related_interest_canary import canary_requester_enabled
+    from matchmaker_agent.semantic_rollout_policy import requester_route_allowed
     from related_interest_retrieval import retrieve
     deadline = time.monotonic() + req.request_budget_seconds
-    if not canary_requester_enabled(req.requester_user_id):
+    if not requester_route_allowed(req.requester_user_id):
         return {"status": "error", "error_code": "semantic_policy_disabled", "candidates": [],
                 "canonical_key": req.canonical_key or ""}
     # The middleware verifies the existing Social signature. A body containing
@@ -1338,6 +1340,70 @@ def related_interest_candidates(req: RelatedInterestCandidateRequest):
     except Exception:
         return {"status": "error", "error_code": "semantic_graph_unavailable", "candidates": [],
                 "canonical_key": req.canonical_key or ""}
+
+
+class RelatedInterestProof(BaseModel):
+    model_config = {"extra": "forbid"}
+    kind: str = Field(max_length=32)
+    basis_type: str = Field(max_length=32)
+    policy_version: str = Field(max_length=40)
+    query_preference: str = Field(min_length=1, max_length=MAX_PREFERENCE_TEXT_CHARS)
+    candidate_preference: str = Field(min_length=1, max_length=MAX_PREFERENCE_TEXT_CHARS)
+    concept_key: str = Field(pattern=r"^v2_[0-9a-f]{48}$")
+    relation: str = Field(max_length=40)
+    semantic_score: float = Field(ge=0, le=1, allow_inf_nan=False, strict=True)
+    similarity: float = Field(ge=0, le=1, allow_inf_nan=False, strict=True)
+    validator_status: str = Field(max_length=24)
+
+
+class RelatedInterestRecheckRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    requester_user_id: str = Field(min_length=1, max_length=128)
+    candidate_user_id: str = Field(min_length=1, max_length=128)
+    query_key: str = Field(pattern=r"^v2_[0-9a-f]{48}$")
+    embedding_model: str = Field(max_length=100)
+    embedding_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence: list[RelatedInterestProof] = Field(min_length=1, max_length=5)
+    requester_prefers_query: bool = Field(default=False, strict=True)
+    request_budget_seconds: float = Field(default=5.0, gt=0, le=5, allow_inf_nan=False)
+
+
+@app.post("/api/preferences/related-interest-recheck")
+def related_interest_recheck(req: RelatedInterestRecheckRequest):
+    """Fresh proposal proof, not an expansion capability or model decision."""
+    from agent_quota.service import SCOPE
+    from matchmaker_agent.semantic_rollout_policy import pair_route_allowed
+    from matchmaker_agent.related_interest_contract import embedding_fingerprint
+    from matchmaker_agent.semantic_evidence_readiness import recheck_owner_evidence, pair_preferences_safe
+    from related_interest_retrieval import _DeadlineSession
+    from services.semantic_user_eligibility import EnabledUserChecks
+    result = {"status": "success", "eligible": False}
+    scope = SCOPE.get()
+    if not scope or scope[0] != req.requester_user_id or scope[1] != "matching":
+        raise HTTPException(status_code=403, detail="invalid_quota_context")
+    if not pair_route_allowed(req.requester_user_id, req.candidate_user_id):
+        return result
+    deadline = time.monotonic() + req.request_budget_seconds
+    try:
+        expected = embedding_fingerprint(os.getenv("GOOGLE_EMBEDDING_MODEL", "models/gemini-embedding-2"))
+        if req.embedding_fingerprint != expected or embedding_fingerprint(req.embedding_model) != expected:
+            return result
+        uri, auth, database = _neo4j_config()
+        remaining = max(.01, min(2.0, deadline - time.monotonic()))
+        with GraphDatabase.driver(uri, auth=auth, connection_timeout=remaining,
+                connection_acquisition_timeout=remaining, max_transaction_retry_time=0) as driver:
+            with driver.session(database=database, default_access_mode="READ") as raw_session:
+                session = _DeadlineSession(raw_session, deadline, time.monotonic)
+                checks = EnabledUserChecks(session, deadline=deadline)
+                valid = (checks.check(req.requester_user_id) and checks.check(req.candidate_user_id)
+                    and recheck_owner_evidence(session, req.candidate_user_id,
+                        [p.model_dump() for p in req.evidence], req.query_key, expected)
+                    and pair_preferences_safe(session, req.requester_user_id, req.candidate_user_id,
+                        query_key=req.query_key, requester_prefers_query=req.requester_prefers_query))
+        return {**result, "eligible": bool(valid and time.monotonic() < deadline
+            and pair_route_allowed(req.requester_user_id, req.candidate_user_id))}
+    except Exception:
+        return {"status": "error", "eligible": False, "error_code": "semantic_eligibility_unavailable"}
 
 
 @app.get("/api/preferences/related-interest-readiness")

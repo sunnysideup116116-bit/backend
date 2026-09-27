@@ -2,8 +2,9 @@
 import math
 import time
 from neo4j import Query
-from matchmaker_agent.related_interest_canary import canary_cohort, canary_requester_enabled, canary_pair_enabled
+from matchmaker_agent.semantic_rollout_policy import legacy_owner_scope, requester_route_allowed, pair_route_allowed, rollout_mode
 from matchmaker_agent.related_interest_contract import bounded_ann_observations
+from matchmaker_agent.semantic_evidence_readiness import verified_vector, recheck_owner_evidence
 
 try:
     from .concept_identity import stored_concept_identity
@@ -78,15 +79,24 @@ class _DeadlineSession:
         return result
 
 
-def retrieve(session, req, identity, client, validator_model, embedding_model, *, clock=time.monotonic, deadline=None):
+def retrieve(session, req, identity, client, validator_model, embedding_model, *, clock=time.monotonic, deadline=None, eligibility_factory=None):
     """Do not use old embedding/index, labels, AVOIDS owners, or fuzzy fallback."""
     result = {"status": "error", "canonical_key": identity.key, "candidates": [],
         "retrieval_source": "graph_semantic", "policy_version": POLICY}
-    if not canary_requester_enabled(req.requester_user_id):
+    if not requester_route_allowed(req.requester_user_id):
         return {**result, "error_code": "semantic_policy_disabled"}
-    allowed_owners = sorted(canary_cohort())
+    allowed_owners = legacy_owner_scope()
     deadline = min(deadline, clock()+27.0) if deadline is not None else clock()+min(27.0, req.request_budget_seconds)
     session = _DeadlineSession(session, deadline, clock)
+    eligibility = None
+    if rollout_mode() == "enabled_accounts":
+        if eligibility_factory is None:
+            from services.semantic_user_eligibility import EnabledUserChecks
+            eligibility_factory = EnabledUserChecks
+        eligibility = eligibility_factory(session, deadline=deadline, clock=clock)
+        if not eligibility.check(req.requester_user_id):
+            return {**result, "error_code": "semantic_eligibility_unavailable" if eligibility.unavailable else "semantic_requester_ineligible"}
+        result["requester_eligibility_verified"] = True
     expected = embedding_fingerprint(embedding_model)
     if req.embedding_fingerprint != expected or embedding_fingerprint(req.embedding_model) != expected:
         return {**result, "error_code": "semantic_readiness_unconfirmed"}
@@ -100,17 +110,18 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
             c.canonicalization_version AS canonicalization_version, c.semantic_input_hash AS semantic_input_hash,
             c.fidelity_status AS fidelity_status,
             c.embedding_v2 AS vector, c.embedding_v2_fingerprint AS fingerprint,
-            c.embedding_v2_source_hash AS source_hash
+            c.embedding_v2_source_hash AS source_hash,c.embedding_v2_provenance_fingerprint AS provenance
         """, timeout=3), key=identity.key).single()
         source = stored_concept_identity(dict(row)) if row else None
         if (source and source.key == identity.key and row.get("fingerprint") == expected
-                and row.get("source_hash") == source.semantic_input_hash):
+                and row.get("source_hash") == source.semantic_input_hash
+                and (eligibility is None or verified_vector(dict(row), expected))):
             query_vector = unit_vector(row.get("vector")); embedding_source = "concept_v2"
     if query_vector is None:
         if req.query_embedding is not None:
             return {**result, "error_code": "semantic_query_embedding_invalid"}
         return {**result, "status": "query_embedding_required"}
-    if not canary_requester_enabled(req.requester_user_id):
+    if not requester_route_allowed(req.requester_user_id):
         return {**result, "error_code": "semantic_policy_disabled"}
     hits = list(session.run(Query("""
         CALL db.index.vector.queryNodes($index_name, $neighbor_limit, $vector)
@@ -118,16 +129,18 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
         WHERE score >= $min_similarity AND c.key <> $query_key
           AND c.canonicalization_version='v2' AND c.fidelity_status='complete' AND c.embedding_v2_fingerprint=$fingerprint
           AND c.embedding_v2_source_hash=c.semantic_input_hash
-          AND EXISTS { MATCH (c)<-[:PREFERS]-(owner:User) WHERE owner.id IN $allowed_owner_ids }
+          AND EXISTS { MATCH (c)<-[p:PREFERS]-(owner:User)
+            WHERE coalesce(p.active,true)=true AND ($data_gated OR owner.id IN $allowed_owner_ids) }
         WITH c, score ORDER BY score DESC, c.key ASC LIMIT $concept_limit
         RETURN c.key AS key, c.semantic_text AS semantic_text,
           c.canonicalization_version AS canonicalization_version, c.semantic_input_hash AS semantic_input_hash,
           c.fidelity_status AS fidelity_status,
           c.embedding_v2 AS vector, c.embedding_v2_fingerprint AS fingerprint,
-          c.embedding_v2_source_hash AS source_hash, score AS similarity
+          c.embedding_v2_source_hash AS source_hash,
+          c.embedding_v2_provenance_fingerprint AS provenance, score AS similarity
     """, timeout=3), index_name=INDEX_NAME, neighbor_limit=req.neighbor_limit,
         vector=query_vector, min_similarity=req.min_similarity, query_key=identity.key,
-        fingerprint=expected, concept_limit=req.concept_limit, allowed_owner_ids=allowed_owners))
+        fingerprint=expected, concept_limit=req.concept_limit, allowed_owner_ids=allowed_owners or [], data_gated=allowed_owners is None))
     concepts = []
     seen = set()
     for row in hits[:req.concept_limit]:
@@ -135,7 +148,7 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
         score = row.get("similarity")
         if (not source or source.key in seen or source.key == identity.key
                 or row.get("fingerprint") != expected or row.get("source_hash") != source.semantic_input_hash
-                or unit_vector(row.get("vector")) is None
+                or verified_vector(dict(row), expected, require_provenance=eligibility is not None) is None
                 or not isinstance(score, (float, int)) or not math.isfinite(score)
                 or not req.min_similarity <= score <= 1):
             continue
@@ -144,13 +157,13 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
             "semantic_input_hash": source.semantic_input_hash, "similarity": float(score)})
     # The only LLM boundary occurs BEFORE any Concept -> User expansion.
     result["ann_observations"] = bounded_ann_observations(concepts)
-    if not canary_requester_enabled(req.requester_user_id):
+    if not requester_route_allowed(req.requester_user_id):
         return {**result, "error_code": "semantic_policy_disabled"}
     accepted, counts = validate_concepts(identity.semantic_text, concepts, client, validator_model,
         deadline=min(deadline, clock()+18.0), clock=clock,
-        is_enabled=lambda: canary_requester_enabled(req.requester_user_id))
+        is_enabled=lambda: requester_route_allowed(req.requester_user_id))
     result["validator_counts"] = counts
-    if not canary_requester_enabled(req.requester_user_id):
+    if not requester_route_allowed(req.requester_user_id):
         return {**result, "error_code": "semantic_policy_disabled"}
     if not accepted:
         if counts["error"]:
@@ -162,6 +175,13 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
         "concept_key": c["concept_key"], "relation": c["relation"],
         "semantic_score": round(c["similarity"], 4), "similarity": round(c["similarity"], 4),
         "validator_status": "accepted"} for c in accepted}
+    owner_lookup = """
+          WITH c UNWIND $allowed_owner_ids AS allowed_owner_id
+          MATCH (candidate:User {id:allowed_owner_id})-[:PREFERS]->(c)
+    """ if allowed_owners is not None else """
+          WITH c MATCH (candidate:User)-[preference:PREFERS]->(c)
+          WHERE coalesce(preference.active,true)=true
+    """
     rows = session.run(Query("""
         UNWIND $concepts AS hit
         MATCH (c:Concept {key:hit.concept_key})
@@ -169,8 +189,7 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
           AND c.embedding_v2_fingerprint=$fingerprint AND c.embedding_v2_source_hash=c.semantic_input_hash
         WITH c, hit.similarity AS score
         CALL {
-          WITH c UNWIND $allowed_owner_ids AS allowed_owner_id
-          MATCH (candidate:User {id:allowed_owner_id})-[:PREFERS]->(c)
+          __OWNER_LOOKUP__
           WITH candidate LIMIT $per_concept_limit
           WITH candidate WHERE candidate.id <> $requester_user_id AND NOT candidate.id IN $excluded_user_ids
           RETURN candidate
@@ -180,16 +199,18 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
         WITH candidate, evidence, evidence[0].similarity AS best_score
         ORDER BY best_score DESC, candidate.id LIMIT $candidate_limit
         RETURN candidate.id AS candidate_id, evidence
-    """, timeout=3), concepts=accepted, fingerprint=expected,
+    """.replace("__OWNER_LOOKUP__", owner_lookup), timeout=3), concepts=accepted, fingerprint=expected,
         requester_user_id=req.requester_user_id, excluded_user_ids=req.excluded_user_ids,
-        allowed_owner_ids=sorted(canary_cohort()),
+        allowed_owner_ids=legacy_owner_scope() or [], data_gated=allowed_owners is None,
         per_concept_limit=req.per_concept_limit, evidence_limit=req.evidence_limit, candidate_limit=req.candidate_limit)
     by_user = {}
     for row in rows:
         if clock() >= deadline:
             raise TimeoutError("semantic_retrieval_timeout")
         uid = row.get("candidate_id")
-        if not canary_pair_enabled(req.requester_user_id, uid) or uid in req.excluded_user_ids:
+        if not pair_route_allowed(req.requester_user_id, uid) or uid in req.excluded_user_ids:
+            continue
+        if eligibility is not None and not eligibility.check(uid):
             continue
         found = by_user.setdefault(uid, {})
         for item in list(row.get("evidence") or [])[:req.evidence_limit]:
@@ -198,7 +219,12 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
                 found[key] = evidence[key]
     candidates = [{"candidate_id": uid, "evidence": sorted(items.values(),
         key=lambda e: (-e["similarity"], e["concept_key"]))[:req.evidence_limit]} for uid, items in by_user.items() if items]
+    if eligibility is not None:
+        candidates = [c for c in candidates if recheck_owner_evidence(session,
+            c['candidate_id'], c['evidence'], identity.key, expected)]
     candidates.sort(key=lambda c: (-c["evidence"][0]["similarity"], c["candidate_id"]))
+    if eligibility is not None and eligibility.unavailable:
+        return {**result, "error_code": "semantic_eligibility_unavailable"}
     return {**result, "status": "success", "candidates": candidates[:req.candidate_limit],
         "candidate_count": min(len(candidates), req.candidate_limit), "embedding_source": embedding_source,
         "semantic_concepts_considered": [{"concept_key": c["concept_key"], "similarity": round(c["similarity"], 4)} for c in accepted]}

@@ -88,6 +88,18 @@ while True: time.sleep(0.05)
         self.assertFalse((self.root / "pid-8001").exists())
         self.assertNotIn("RUNNING & HEALTHY", result.stdout)
 
+    def test_unknown_rollout_mode_stops_before_any_service_or_port_work(self):
+        result = self._run(MATCH_RELATED_INTEREST_ROLLOUT_MODE='all')
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(any(self.root.glob('pid-*')))
+        self.assertFalse((self.root / '.runtime-logs').exists())
+
+    def test_enabled_accounts_mode_uses_canonical_launcher_without_a_list(self):
+        result = self._run(MATCH_RELATED_INTEREST_ROLLOUT_MODE='enabled_accounts', MATCH_RELATED_INTEREST_CANARY_USER_IDS='')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for port in ('8081', '8001', '9001', '8000'):
+            self.assertTrue((self.root / f'stopped-{port}').exists())
+
     def test_closed_stdin_keeps_services_running_until_sigterm_and_cleans_up(self):
         process = subprocess.Popen(["bash", str(self.root / "start_all.sh")], stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=self.env)

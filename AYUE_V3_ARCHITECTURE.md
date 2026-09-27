@@ -45,11 +45,15 @@ Durable preference 由 server-owned atomic/canonical boundary 寫入。Public Pi
 
 [Related-Interest Matching v1](docs/RELATED_INTEREST_PILOT_V1.md) 是新的 internal app-wide pilot contract，預設仍 OFF，並非把舊 strict validator NO-GO 改判。只有 qualified exact=0 時才走專用 versioned ANN → DeepSeek relation validation → accepted Concepts → PREFERS owners；query embedding 仍為 Gemini。理由區分搜尋意圖、本人已保存偏好與相關但不同的候選興趣，不能把 semantic evidence 宣稱為共同偏好。既有 Pi confirmation、quota、block/history 與 mutual-consent lifecycle 不變；pilot metrics 不進 durable memory。
 
-目前 rollout 限定 two-account canary：`start_all.sh` 將 operator 提供的
-`MATCH_RELATED_INTEREST_CANARY_USER_IDS`（恰好兩個 stable ID 的 JSON array）傳給所有服務。
-缺少／不合法 cohort、非 cohort requester 或 kill switch 均維持 exact-only。
-9001 使用既有 signed owner context 驗證 requester；semantic owner expansion、Social
-qualification 與 proposal 寫入前重新檢查同一 cohort。正常 exact candidates 不受此限制。
+Related-interest 支援分階段的 server-side rollout，見
+[All internal rollout preparation](docs/SEMANTIC_INTERNAL_ROLLOUT.md)。
+`start_all.sh` 一致傳入 `MATCH_RELATED_INTEREST_ROLLOUT_MODE`；預設 `canary` 保持
+既有 2–10 位 allowlist 相容性，明確批准的 `enabled_accounts` 模式則依 enabled account、
+唯一 Mongo profile／Graph identity 判定 requester，不再依賴名單或人口 cap。
+EMPTY／legacy-only requester 不需先 bootstrap；candidate 必須有目前 verified-v2 PREFERS
+與相容的完整 source/hash/vector。9001 檢查 signed owner scope，Social proposal 前重新
+驗證帳號、證據、限制與 history/block。Exact 路徑不增加 readiness 依賴；kill 優先。
+此 preparation 變更不代表 production 已啟用 all-users，不自動修改 flags 或資料。
 
 - 主動關心維持 Profile extraction → follow-up candidate → proactive scheduler → grounded message；它不使用公開 Agent 的推理 loop。
 - App voice 與 registration voice 維持 Gemini runtime。App voice 轉交公開阿月時呼叫同一個 Pi HTTP contract；直接行事曆操作維持既有 typed API。

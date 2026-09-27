@@ -123,7 +123,11 @@ def setup_graph(relation="role_mismatch", *, fingerprint=None):
                 assert events == ["ann", "validate"]
                 events.append("expand")
                 assert params["concepts"][0]["relation"] in ACCEPTED
-                assert "[:PREFERS]" in text and "AVOIDS" not in text
+                assert "AVOIDS" not in text
+                if params['data_gated']:
+                    assert "[preference:PREFERS]" in text and "coalesce(preference.active,true)=true" in text
+                else:
+                    assert "[:PREFERS]" in text and "UNWIND $allowed_owner_ids" in text
                 assert text.index("LIMIT $per_concept_limit") < text.index("WHERE candidate.id")
                 assert params["per_concept_limit"] <= 20 and params["candidate_limit"] <= 50
                 return Result([{"candidate_id": "person", "evidence": [{"concept_key": candidate.key}]}]*2)
@@ -202,3 +206,82 @@ def test_wrong_provider_model_fails_closed():
     accepted, counts = validate_concepts("Q", [{"semantic_text": "C"}], client, "deepseek-test",
         deadline=100, clock=lambda: 0)
     assert not accepted and counts["attempts"] == 2 and counts["error"] == 1
+
+
+@pytest.mark.parametrize('requester_state', ['ready', 'legacy_only', 'empty'])
+def test_enabled_requester_is_independent_of_own_preferences(monkeypatch, tmp_path, requester_state):
+    monkeypatch.setenv('MATCH_RELATED_INTEREST_ENABLED', 'on')
+    monkeypatch.setenv('MATCH_RELATED_INTEREST_ROLLOUT_MODE', 'enabled_accounts')
+    monkeypatch.setenv('MATCH_RELATED_INTEREST_KILL_SWITCH_FILE', str(tmp_path/'kill'))
+    monkeypatch.delenv('MATCH_RELATED_INTEREST_CANARY_USER_IDS')
+    session, req, query, concept, client, events = setup_graph()
+    original = session.run
+    def current(statement, **params):
+        if 'type(r) AS polarity' in str(statement):
+            return Result([{**concept.as_dict(), 'vector': VECTOR, 'fingerprint': embedding_fingerprint(MODEL),
+                'source_hash': concept.semantic_input_hash, 'provenance': 'a'*64, 'polarity': 'PREFERS'}])
+        rows = original(statement, **params)
+        for row in rows:
+            if 'vector' in row: row['provenance'] = 'a'*64
+        return rows
+    session.run = current
+    checks = Mock(unavailable=False); checks.check.return_value = True
+    result = retrieve(session, req, query, client, 'deepseek-test', MODEL, clock=lambda: 0,
+        eligibility_factory=lambda *_a, **_kw: checks)
+    assert events == ['ann', 'validate', 'expand']
+    assert result['requester_eligibility_verified'] is True
+    assert [c['candidate_id'] for c in result['candidates']] == ['person']
+    assert checks.check.call_args_list[0].args == ('owner',)
+
+
+@pytest.mark.parametrize('failure', ['disabled_requester', 'ambiguous_requester', 'metadata_unavailable',
+    'disabled_candidate', 'legacy_candidate', 'empty_candidate', 'stale_candidate'])
+def test_enabled_rollout_drops_unready_current_identity_and_evidence(monkeypatch, tmp_path, failure):
+    monkeypatch.setenv('MATCH_RELATED_INTEREST_ENABLED', 'on')
+    monkeypatch.setenv('MATCH_RELATED_INTEREST_ROLLOUT_MODE', 'enabled_accounts')
+    monkeypatch.setenv('MATCH_RELATED_INTEREST_KILL_SWITCH_FILE', str(tmp_path/'kill'))
+    session, req, query, concept, client, events = setup_graph()
+    original = session.run
+    def current(statement, **params):
+        if 'type(r) AS polarity' in str(statement):
+            if failure == 'empty_candidate': return Result([])
+            row = {**concept.as_dict(), 'vector': VECTOR, 'fingerprint': embedding_fingerprint(MODEL),
+                'source_hash': concept.semantic_input_hash, 'provenance': 'a'*64, 'polarity': 'PREFERS'}
+            if failure == 'legacy_candidate': row['canonicalization_version'] = 'v1'
+            if failure == 'stale_candidate': row['source_hash'] = 'stale'
+            return Result([row])
+        rows = original(statement, **params)
+        for row in rows:
+            if 'vector' in row: row['provenance'] = 'a'*64
+        return rows
+    session.run = current
+    checks = Mock(unavailable=failure == 'metadata_unavailable')
+    checks.check.side_effect = lambda owner: not (owner == 'owner' and failure in {
+        'disabled_requester', 'ambiguous_requester', 'metadata_unavailable'} or owner == 'person' and failure == 'disabled_candidate')
+    result = retrieve(session, req, query, client, 'deepseek-test', MODEL, clock=lambda: 0,
+        eligibility_factory=lambda *_a, **_kw: checks)
+    assert result['candidates'] == []
+    if failure in {'disabled_requester', 'ambiguous_requester', 'metadata_unavailable'}:
+        assert not events
+        client.with_options.assert_not_called()
+
+
+def test_final_proof_endpoint_never_accepts_unsigned_or_wrong_owner(monkeypatch):
+    from agent_api import RelatedInterestRecheckRequest, related_interest_recheck
+    from fastapi import HTTPException
+    from agent_quota.service import SCOPE
+    query = canonicalize_concept('Watching Football'); candidate = canonicalize_concept('Playing Football')
+    req = RelatedInterestRecheckRequest(requester_user_id='owner', candidate_user_id='person',
+        query_key=query.key, embedding_model=MODEL, embedding_fingerprint=embedding_fingerprint(MODEL),
+        evidence=[{'kind': 'semantic_related', 'basis_type': 'related_interest', 'policy_version': 'related_interest_v1',
+            'query_preference': query.semantic_text, 'candidate_preference': candidate.semantic_text,
+            'concept_key': candidate.key, 'relation': 'role_mismatch', 'semantic_score': .9, 'similarity': .9,
+            'validator_status': 'accepted'}])
+    for scope in [None, ('other', 'matching', 'task'), ('owner', 'memory', 'task')]:
+        token = SCOPE.set(scope)
+        try:
+            with pytest.raises(HTTPException) as failure:
+                related_interest_recheck(req)
+            assert failure.value.status_code == 403
+        finally:
+            SCOPE.reset(token)

@@ -4,7 +4,7 @@ import os
 import time
 from pathlib import Path
 
-from matchmaker_agent.related_interest_canary import canary_cohort, canary_requester_enabled
+from matchmaker_agent.semantic_rollout_policy import legacy_owner_scope, requester_route_allowed
 from matchmaker_agent.related_interest_contract import POLICY
 
 UNAVAILABLE_CODES = frozenset({"semantic_validator_unavailable", "semantic_retrieval_timeout"})
@@ -17,7 +17,7 @@ def systemic_failure(rows, *, now):
     terminal = [r for r in rows if type(r.get("completed_at")) in (int, float)
         and now-WINDOW_SECONDS <= r["completed_at"] <= now
         and (r.get("related_interest_pilot") or {}).get("policy_version") == POLICY
-        and (r.get("related_interest_pilot") or {}).get("telemetry_version") == 2
+        and (r.get("related_interest_pilot") or {}).get("telemetry_version") in {2, 3}
         and (r.get("related_interest_pilot") or {}).get("triggered") is True]
     terminal.sort(key=lambda r: r["completed_at"], reverse=True)
     latest = terminal[:CONSECUTIVE_FAILURE_LIMIT]
@@ -26,17 +26,20 @@ def systemic_failure(rows, *, now):
 
 
 def on_job_finished(owner_id, status, error_code):
-    if status != "failed" or error_code not in UNAVAILABLE_CODES or not canary_requester_enabled(owner_id):
+    if status != "failed" or error_code not in UNAVAILABLE_CODES or not requester_route_allowed(owner_id):
         return False
     try:
         from database import db
         from pymongo import timeout
         now = time.time()
         with timeout(0.5):
+            legacy_scope = legacy_owner_scope()
+            scope = {"user_id": {"$in": legacy_scope}} if legacy_scope is not None else {
+                "related_interest_pilot.rollout_mode": "enabled_accounts"}
             rows = list(db["match_search_jobs"].find({
-                "user_id": {"$in": sorted(canary_cohort())},
+                **scope,
                 "related_interest_pilot.policy_version": POLICY,
-                "related_interest_pilot.telemetry_version": 2,
+                "related_interest_pilot.telemetry_version": {"$in": [2, 3]},
                 "related_interest_pilot.triggered": True,
                 "completed_at": {"$gte": now-WINDOW_SECONDS},
             }, {"_id": 0, "status": 1, "error_code": 1, "completed_at": 1,

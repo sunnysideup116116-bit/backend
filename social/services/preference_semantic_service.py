@@ -17,7 +17,7 @@ from urllib3.util import Timeout
 
 from config import GOOGLE_EMBEDDING_MODEL
 from matchmaker_agent.concept_identity import canonicalize_concept
-from matchmaker_agent.related_interest_canary import canary_requester_enabled, canary_pair_enabled
+from matchmaker_agent.semantic_rollout_policy import requester_route_allowed, pair_route_allowed, rollout_mode
 from matchmaker_agent.related_interest_contract import (
     enabled as related_interest_enabled, embedding_fingerprint, validated_evidence, bounded_counts, bounded_ann_observations,
 )
@@ -27,6 +27,7 @@ from services.ai_service import get_embeddings
 AGENT_SEMANTIC_URL = "http://127.0.0.1:9001/api/preferences/semantic-candidates"
 AGENT_READINESS_URL = "http://127.0.0.1:9001/api/preferences/semantic-readiness"
 AGENT_RELATED_URL = "http://127.0.0.1:9001/api/preferences/related-interest-candidates"
+AGENT_RECHECK_URL = "http://127.0.0.1:9001/api/preferences/related-interest-recheck"
 SEMANTIC_DIMENSIONS = 768
 
 _HARD_NEIGHBOR_LIMIT = 32
@@ -43,15 +44,46 @@ SEMANTIC_ERROR_CODES = frozenset({
     "semantic_query_embedding_unavailable", "semantic_query_embedding_invalid",
     "semantic_retrieval_timeout",
     "semantic_policy_disabled", "semantic_validator_unavailable",
+    "semantic_requester_ineligible", "semantic_eligibility_unavailable",
 })
 
 
 class PreferenceSemanticRetrievalError(RuntimeError):
-    def __init__(self, code: str, validator_counts=None, ann_observations=None):
+    def __init__(self, code: str, validator_counts=None, ann_observations=None, requester_verified=False):
         self.code = code if isinstance(code, str) and code in SEMANTIC_ERROR_CODES else "semantic_graph_invalid_response"
         self.validator_counts = bounded_counts(validator_counts)
         self.ann_observations = bounded_ann_observations(ann_observations)
+        self.requester_verified = requester_verified is True
         super().__init__(self.code)
+
+
+def recheck_semantic_proposal(requester, candidate, query_key, evidence, *, deadline=None, requester_prefers_query=False):
+    """Fresh, signed, bounded proof; no retries and no legacy endpoint fallback."""
+    if not pair_route_allowed(requester, candidate):
+        return False
+    if rollout_mode() != "enabled_accounts":
+        return True  # Explicit staged compatibility; old canary is unchanged.
+    from agent_quota.internal import signed_headers
+    deadline = min(deadline, time.monotonic()+5.0) if deadline is not None else time.monotonic()+5.0
+    remaining = deadline - time.monotonic()
+    if remaining <= .1:
+        return False
+    try:
+        response = requests.post(AGENT_RECHECK_URL, headers=signed_headers(), json={
+            "requester_user_id": requester, "candidate_user_id": candidate,
+            "query_key": query_key, "evidence": evidence,
+            "requester_prefers_query": requester_prefers_query,
+            "embedding_model": GOOGLE_EMBEDDING_MODEL,
+            "embedding_fingerprint": embedding_fingerprint(GOOGLE_EMBEDDING_MODEL),
+            "request_budget_seconds": max(.01, remaining-.1),
+        }, timeout=Timeout(total=remaining, connect=min(1.0, remaining), read=remaining))
+        response.raise_for_status()
+        payload = response.json()
+        return bool(time.monotonic() < deadline and isinstance(payload, dict)
+            and payload.get("status") == "success" and payload.get("eligible") is True
+            and pair_route_allowed(requester, candidate))
+    except Exception:
+        return False
 
 
 def _bounded_int(name: str, default: int, hard_max: int) -> int:
@@ -204,7 +236,7 @@ def preference_semantic_readiness() -> dict[str, Any]:
 
 def _post_semantic(payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
     related = "embedding_fingerprint" in payload
-    if related and not canary_requester_enabled(payload.get("requester_user_id")):
+    if related and not requester_route_allowed(payload.get("requester_user_id")):
         raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
     extra = {}
     if related:
@@ -243,7 +275,7 @@ def retrieve_semantic_preference_candidates(
     # The live pipeline always requires v1; only explicit legacy observation
     # callers retain the original read-only API when mode is not active.
     related = related_policy_required or related_interest_enabled() or preference_semantic_mode() == "active"
-    if related and not canary_requester_enabled(requester_user_id):
+    if related and not requester_route_allowed(requester_user_id):
         raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
     identity = canonicalize_concept(topic)
     if not identity:
@@ -285,12 +317,12 @@ def retrieve_semantic_preference_candidates(
         payload["embedding_fingerprint"] = embedding_fingerprint(GOOGLE_EMBEDDING_MODEL)
     result = _post_semantic(payload, remaining_timeout())
     remaining_timeout()
-    if related and not canary_requester_enabled(requester_user_id):
+    if related and not requester_route_allowed(requester_user_id):
         raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
     if result.get("canonical_key") != identity.key:
         raise PreferenceSemanticRetrievalError("semantic_graph_invalid_response")
     if result.get("status") == "query_embedding_required":
-        if related and not canary_requester_enabled(requester_user_id):
+        if related and not requester_route_allowed(requester_user_id):
             raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
         try:
             vectors = get_embeddings(
@@ -318,7 +350,7 @@ def retrieve_semantic_preference_candidates(
     if result.get("status") != "success":
         raise PreferenceSemanticRetrievalError(str(
             result.get("error_code") or "semantic_graph_invalid_response"
-        ), result.get("validator_counts"), result.get("ann_observations"))
+        ), result.get("validator_counts"), result.get("ann_observations"), result.get("requester_eligibility_verified"))
     if result.get("canonical_key") != identity.key:
         raise PreferenceSemanticRetrievalError("semantic_graph_invalid_response")
     if not isinstance(result.get("candidates"), list):
@@ -332,7 +364,7 @@ def retrieve_semantic_preference_candidates(
         if (
             not candidate_id or candidate_id == requester_user_id
             or candidate_id in excluded
-            or related and not canary_pair_enabled(requester_user_id, candidate_id)
+            or related and not pair_route_allowed(requester_user_id, candidate_id)
         ):
             continue
         evidence = by_candidate.setdefault(candidate_id, [])
@@ -419,7 +451,8 @@ def retrieve_semantic_preference_candidates(
         "retrieval_source": "graph_semantic",
         "embedding_source": str(result.get("embedding_source") or "")[:24],
         **({"validator_counts": bounded_counts(result.get("validator_counts")),
-            "ann_observations": bounded_ann_observations(result.get("ann_observations"))}
+            "ann_observations": bounded_ann_observations(result.get("ann_observations")),
+            "requester_eligibility_verified": result.get("requester_eligibility_verified") is True}
            if related else {}),
     }
 

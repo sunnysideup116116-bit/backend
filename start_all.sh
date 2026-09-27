@@ -15,6 +15,11 @@ cd "$SERVER_ROOT" || exit 1
 # Operator-only, shared by every child process. An absent cohort stays empty;
 # service-specific dotenv files must not independently widen semantic routing.
 export MATCH_RELATED_INTEREST_CANARY_USER_IDS="${MATCH_RELATED_INTEREST_CANARY_USER_IDS:-}"
+export MATCH_RELATED_INTEREST_ROLLOUT_MODE="${MATCH_RELATED_INTEREST_ROLLOUT_MODE:-canary}"
+case "$MATCH_RELATED_INTEREST_ROLLOUT_MODE" in
+    canary|enabled_accounts|off) ;;
+    *) printf 'Invalid server semantic rollout mode.\n' >&2; exit 2 ;;
+esac
 
 # Validate provider and perform non-generative GPT checks BEFORE touching ports.
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -55,6 +60,13 @@ done
 for quota_service in social matchmaker; do
     if ! "$SERVER_ROOT/.local-venv/$quota_service/bin/python" -m agent_quota.signing_config; then
         printf 'Shared quota signing configuration unavailable for %s.\n' "$quota_service" >&2
+        exit 1
+    fi
+done
+
+for metadata_service in social matchmaker; do
+    if ! "$SERVER_ROOT/.local-venv/$metadata_service/bin/python" -c 'from pymongo import timeout'; then
+        printf 'Mongo deadline support unavailable for %s; install the service requirements.\n' "$metadata_service" >&2
         exit 1
     fi
 done

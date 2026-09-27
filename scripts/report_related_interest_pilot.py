@@ -12,39 +12,64 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "social"))
 
 
-def collect_report(db, cohort, *, since, limit):
+def collect_report(db, cohort, *, since, limit, until=None):
     """Bounded read-only operator report; private IDs are only used for joins."""
     from services.related_interest_telemetry import summarize
     from matchmaker_agent.related_interest_contract import POLICY, ACCEPTED
     from pymongo import timeout
-    query = {"related_interest_pilot.policy_version": POLICY, "created_at": {"$gte": since}}
+    if not 1 <= limit <= 5000 or not math.isfinite(since) or since < 0:
+        raise ValueError('invalid_report_bound')
+    if until is not None and (not math.isfinite(until) or until <= since):
+        raise ValueError('invalid_report_window')
+    window = {"$gte": since, **({"$lt": until} if until is not None else {})}
+    query = {"related_interest_pilot.policy_version": POLICY, "created_at": window}
     with timeout(5):
         jobs = list(db["match_search_jobs"].find(query, {
             "_id": 0, "user_id": 1, "related_interest_pilot": 1, "retrieval_diagnostics.qualified_exact_count": 1,
-            "error_code": 1, "started_at": 1, "completed_at": 1,
+            "error_code": 1, "created_at": 1, "started_at": 1, "completed_at": 1,
         }).sort("created_at", -1).limit(limit+1).max_time_ms(3000))
         proposals = list(db["matches"].find(query, {
             "_id": 1, "from_user": 1, "to_user": 1, "related_interest_pilot": 1,
             "status": 1, "state_history.to": 1,
             "friend_intro_v4.initiator_preview.reason_render_mode": 1,
             "friend_intro_v4.receiver_invitation.reason_render_mode": 1,
+            "friend_intro_v4.initiator_preview.viewer_text": 1,
+            "friend_intro_v4.receiver_invitation.viewer_text": 1,
+            "reason": 1, "receiver_reason": 1,
         }).sort("created_at", -1).limit(limit+1).max_time_ms(3000))
-        selected = [p for p in proposals[:limit] if p.get("from_user") in cohort and p.get("to_user") in cohort]
+        selected = [p for p in proposals[:limit] if cohort is None or p.get("from_user") in cohort and p.get("to_user") in cohort]
         openings = list(db["messages"].find({
             "metadata.event_type": "match_pair_opening",
             "metadata.match_id": {"$in": [str(p["_id"]) for p in selected]},
-        }, {"_id": 0, "metadata.opening_outcome": 1}).limit(limit+1).max_time_ms(3000)) if selected else []
+        }, {"_id": 0, "metadata.opening_outcome": 1, "content": 1}).limit(limit+1).max_time_ms(3000)) if selected else []
     # Do not silently hide out-of-cohort activity from the safety report.
-    return {"status": "success", "since": since, "cohort_size": len(cohort),
+    safe_jobs = [j for j in jobs[:limit] if cohort is None or j.get('user_id') in cohort]
+    return {"status": "success", "since": since, "until": until,
+        "lifecycle_observed_at": time.time(), "cohort_size": len(cohort) if cohort is not None else None,
+        "scope": 'enabled_accounts' if cohort is None else 'legacy_canary',
+        "observed_enabled_rollout_requesters": len({j.get('user_id') for j in safe_jobs
+            if (j.get('related_interest_pilot') or {}).get('rollout_mode') == 'enabled_accounts'
+            and (j.get('related_interest_pilot') or {}).get('requester_eligibility_verified') is True}),
         "truncated": any(len(rows) > limit for rows in (jobs, proposals, openings)),
         "safety_findings": {
-            "outside_cohort_semantic_jobs": sum(j.get("user_id") not in cohort
+            "outside_cohort_semantic_jobs": sum(cohort is not None and j.get("user_id") not in cohort
                 and (j.get("related_interest_pilot") or {}).get("triggered") is True for j in jobs[:limit]),
             "outside_cohort_proposals": len(proposals[:limit])-len(selected),
-            "rejected_relation_proposals": sum(any(r not in ACCEPTED for r in
+            "rejected_relation_proposals": sum(not (p.get("related_interest_pilot") or {}).get("relations") or any(r not in ACCEPTED for r in
                 (p.get("related_interest_pilot") or {}).get("relations", [])) for p in proposals[:limit]),
+            "missing_rollout_final_proof": sum((p.get('related_interest_pilot') or {}).get('rollout_mode') == 'enabled_accounts'
+                and ((p.get('related_interest_pilot') or {}).get('final_proof_verified') is not True
+                    or (p.get('related_interest_pilot') or {}).get('eligibility_policy') != 'enabled-account-v1') for p in proposals[:limit]),
+            # Conservative alerts, not a new model or a semantic-quality score.
+            # Copy is examined only in memory and is never returned or logged.
+            "potential_false_shared_claims": sum(any(marker in str(value or '')
+                for value in [p.get('reason'), p.get('receiver_reason'), *[
+                    v.get('viewer_text') for v in (p.get('friend_intro_v4') or {}).values() if isinstance(v, dict)]]
+                for marker in ('你們都喜歡', '共同偏好是')) for p in selected),
+            "potential_false_shared_openings": sum(any(marker in str(m.get('content') or '')
+                for marker in ('你們都喜歡', '共同偏好是')) for m in openings[:limit]),
         },
-        **summarize([j for j in jobs[:limit] if j.get("user_id") in cohort], selected, openings[:limit])}
+        **summarize(safe_jobs, selected, openings[:limit])}
 
 
 def main():
@@ -53,6 +78,8 @@ def main():
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--since", type=float, help="Pilot activation Unix timestamp; overrides --days")
     parser.add_argument("--cohort-file", type=Path, help="Private operator JSON array; otherwise use server cohort env")
+    parser.add_argument("--enabled-accounts", action="store_true", help="Population-independent rollout aggregates, no cohort allowlist")
+    parser.add_argument("--until", type=float)
     args = parser.parse_args()
     if not 1 <= args.limit <= 5000:
         parser.error("limit must be 1..5000")
@@ -62,14 +89,18 @@ def main():
         cohort = parse_cohort(raw)
     except (OSError, UnicodeError):
         parser.error("cohort configuration unavailable")
-    if not cohort:
+    if args.enabled_accounts and args.cohort_file:
+        parser.error('choose rollout aggregates OR a canary cohort')
+    if args.enabled_accounts:
+        cohort = None
+    elif not cohort:
         parser.error("explicit valid server cohort required")
     since = args.since if args.since is not None else time.time() - args.days * 86400
     if not math.isfinite(since) or not 0 <= since <= time.time():
         parser.error("invalid start timestamp")
     try:
         from database import db
-        print(json.dumps(collect_report(db, cohort, since=since, limit=args.limit), ensure_ascii=False))
+        print(json.dumps(collect_report(db, cohort, since=since, until=args.until, limit=args.limit), ensure_ascii=False))
     except Exception:
         print(json.dumps({"status": "unavailable"})); return 1
     return 0

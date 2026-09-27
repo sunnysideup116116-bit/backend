@@ -19,7 +19,7 @@ from matchmaker_agent.related_interest_contract import (
     POLICY as RELATED_INTEREST_POLICY, enabled as related_interest_enabled,
     validated_evidence as validated_related_evidence, bounded_counts as related_validator_counts,
 )
-from matchmaker_agent.related_interest_canary import canary_requester_enabled, canary_pair_enabled
+from matchmaker_agent.semantic_rollout_policy import requester_route_allowed, pair_route_allowed, rollout_mode
 from services.ai_service import get_embedding, generate_chat_completion
 from services.memory_service import get_user_graph_memories
 from services.mediator_event_service import queue_mediator_event
@@ -116,6 +116,7 @@ from services.preference_semantic_service import (
     semantic_config,
     semantic_embedding_space_confirmed,
 )
+from services.semantic_proposal_eligibility import proposal_eligible as semantic_proposal_eligible
 from matchmaker_agent.concept_identity import (
     canonical_evidence_span,
     canonical_query_provenance,
@@ -1732,8 +1733,8 @@ def generate_matches_for_user(
     bound_search_context = search_context_for_turn(search_context)
     search_intent = _search_intent(bound_search_context)
     semantic_mode = preference_semantic_mode() if search_intent == "preference" else "off"
-    if semantic_mode == "active" and not canary_requester_enabled(user_id):
-        semantic_mode = "off"  # Non-cohort/missing config/kill: P0 exact-only, never a global rollout.
+    if semantic_mode == "active" and not requester_route_allowed(user_id):
+        semantic_mode = "off"  # Routing disabled/missing config/kill: P0 exact-only.
     diagnostics = {
         "search_intent": search_intent,
         "normalized_topic": str(bound_search_context.get("normalized_topic") or "")[:80],
@@ -1999,7 +2000,7 @@ def generate_matches_for_user(
         )
         if len(qualified_exact) == 0 and semantic_mode == "active":
             diagnostics["semantic_fallback_triggered"] = True
-            if not canary_requester_enabled(req.user_id):
+            if not requester_route_allowed(req.user_id):
                 raise MatchSearchPipelineError("semantic_policy_disabled", "preference_semantic_search")
             from services.related_interest_telemetry import record_search as record_related_search
             record_related_search(search_job_id, req.user_id)
@@ -2032,7 +2033,8 @@ def generate_matches_for_user(
                         getattr(exc, "validator_counts", {}))
                     record_related_search(search_job_id, req.user_id,
                         counts=diagnostics["related_interest_validator"],
-                        ann_observations=getattr(exc, "ann_observations", []))
+                        ann_observations=getattr(exc, "ann_observations", []),
+                        requester_verified=getattr(exc, "requester_verified", False))
                     if qualified_exact:
                         diagnostics["semantic_fallback_error"] = exc.code
                     else:
@@ -2059,7 +2061,8 @@ def generate_matches_for_user(
                     semantic_lookup.get("validator_counts"))
                 record_related_search(search_job_id, req.user_id,
                     counts=diagnostics["related_interest_validator"],
-                    ann_observations=semantic_lookup.get("ann_observations", []))
+                    ann_observations=semantic_lookup.get("ann_observations", []),
+                    requester_verified=semantic_lookup.get("requester_eligibility_verified", False))
                 diagnostics["retrieval_source"] = "graph_exact_then_semantic"
                 diagnostics["semantic_concepts_considered"] = list(
                     semantic_lookup.get("semantic_concepts_considered") or []
@@ -2067,7 +2070,7 @@ def generate_matches_for_user(
                 semantic_ids = list(
                     semantic_lookup.get("candidate_ids") or []
                 )[:50]
-                semantic_ids = [cid for cid in semantic_ids if canary_pair_enabled(req.user_id, cid)]
+                semantic_ids = [cid for cid in semantic_ids if pair_route_allowed(req.user_id, cid)]
                 semantic_match = _candidate_profile_filter(
                     user_doc,
                     excluded_users,
@@ -2093,6 +2096,9 @@ def generate_matches_for_user(
                 semantic_by_id = {
                     str(row.get("user_id") or ""): row for row in semantic_rows
                 }
+                if rollout_mode() == "enabled_accounts":
+                    owner_counts = Counter(str(row.get("user_id") or "") for row in semantic_rows)
+                    semantic_by_id = {uid: row for uid, row in semantic_by_id.items() if owner_counts[uid] == 1}
                 evidence_map = dict(
                     semantic_lookup.get("evidence_by_candidate") or {}
                 )
@@ -2100,7 +2106,7 @@ def generate_matches_for_user(
                     candidate = semantic_by_id.get(candidate_id)
                     if (
                         not candidate or candidate_id in seen_candidates
-                        or not canary_pair_enabled(req.user_id, candidate_id)
+                        or not pair_route_allowed(req.user_id, candidate_id)
                         or participant_pair_key(req.user_id, candidate_id)
                         in excluded_pair_keys
                     ):
@@ -2209,7 +2215,7 @@ def generate_matches_for_user(
             continue
         if (any(e.get("kind") == "semantic_related"
                 for e in preference_evidence_by_id.get(candidate_id, []) if isinstance(e, dict))
-                and not canary_pair_enabled(req.user_id, candidate_id)):
+                and not pair_route_allowed(req.user_id, candidate_id)):
             qualification_by_id.pop(candidate_id, None)
             continue
         if candidate_id in qualification_by_id:
@@ -2265,7 +2271,7 @@ def generate_matches_for_user(
     
     agent_user_doc = strip_agent_payload(user_doc)
     if any(qualification_by_id.get(c.get("user_id"), {}).get("semantic_related_preference_matched")
-           and not canary_pair_enabled(req.user_id, c.get("user_id")) for c in qualified_candidates):
+           and not pair_route_allowed(req.user_id, c.get("user_id")) for c in qualified_candidates):
         raise MatchSearchPipelineError("semantic_policy_disabled", "matchmaker_request")
     selection_deadline = time.monotonic() + MATCH_SELECTION_TIMEOUT_SECONDS
     agent_matches = []
@@ -2277,7 +2283,7 @@ def generate_matches_for_user(
             return {"status": "stale", "matches": [], "debug_info": [],
                     "diagnostics": diagnostics}
         if any(qualification_by_id.get(c.get("user_id"), {}).get("semantic_related_preference_matched")
-               and not canary_pair_enabled(req.user_id, c.get("user_id")) for c in batch):
+               and not pair_route_allowed(req.user_id, c.get("user_id")) for c in batch):
             raise MatchSearchPipelineError("semantic_policy_disabled", "matchmaker_request")
         remaining = selection_deadline - time.monotonic()
         if remaining <= 0:
@@ -2361,7 +2367,7 @@ def generate_matches_for_user(
             for item in matched_preference_evidence
             if isinstance(item, dict)
         )
-        if semantic_preference_selected and not canary_pair_enabled(req.user_id, matched_id):
+        if semantic_preference_selected and not pair_route_allowed(req.user_id, matched_id):
             if quota_reserved:
                 release_daily_quota(req.user_id, bucket="active", operation_key=quota_operation_key)
             raise MatchSearchPipelineError("semantic_policy_disabled", "proposal_write")
@@ -2508,11 +2514,32 @@ def generate_matches_for_user(
                     req.user_id, bucket="active", operation_key=quota_operation_key,
                 )
             return {"status": "stale", "matches": [], "debug_info": []}
-        if semantic_preference_selected and not canary_pair_enabled(req.user_id, matched_id):
+        if semantic_preference_selected and not pair_route_allowed(req.user_id, matched_id):
             if quota_reserved:
                 release_daily_quota(req.user_id, bucket="active", operation_key=quota_operation_key)
             raise MatchSearchPipelineError("semantic_policy_disabled", "proposal_write")
         try:
+            final_rollout_mode = rollout_mode()
+            if semantic_preference_selected and not semantic_proposal_eligible(
+                req.user_id, matched_id, matched_preference_evidence, bound_search_context,
+                profiles=profiles_coll, matches=matches_coll,
+                profile_filter=_candidate_profile_filter, qualify=candidate_qualification,
+                target_stances=target_stances or {}, candidate_stances=candidate_stances_by_id.get(matched_id, {}),
+                deadline=selection_deadline,
+                requester_prefers_query=bool(
+                    {"like", "require"} & (target_stances or {}).get(
+                        str(bound_search_context.get("canonical_preference_key") or ""), set())
+                    and str(bound_search_context.get("canonical_preference_key") or "")
+                    not in getattr(target_stances, "unverified_legacy", {})),
+            ):
+                raise MatchSearchPipelineError("semantic_final_readiness_failed", "proposal_write")
+            if semantic_preference_selected and (not pair_route_allowed(req.user_id, matched_id)
+                    or rollout_mode() != final_rollout_mode
+                    or can_commit is not None and not can_commit()):
+                raise MatchSearchPipelineError("semantic_policy_disabled", "proposal_write")
+            if semantic_preference_selected and final_rollout_mode == "enabled_accounts":
+                match_doc['related_interest_pilot'].update(rollout_mode='enabled_accounts',
+                    eligibility_policy='enabled-account-v1', final_proof_verified=True)
             insert_result = matches_coll.insert_one(match_doc)
         except DuplicateKeyError as exc:
             if quota_reserved:

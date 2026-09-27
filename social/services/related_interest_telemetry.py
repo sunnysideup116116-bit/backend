@@ -4,14 +4,19 @@ import statistics
 from matchmaker_agent.related_interest_contract import POLICY, bounded_counts, bounded_ann_observations
 
 
-def record_search(job_id, owner_id, *, counts=None, ann_observations=None, triggered=True):
+def record_search(job_id, owner_id, *, counts=None, ann_observations=None, triggered=True, requester_verified=None):
     if not job_id or not owner_id:
         return False
     try:
         from database import db
         from pymongo import timeout
+        from matchmaker_agent.semantic_rollout_policy import rollout_mode
+        mode = rollout_mode()
         fields = {"related_interest_pilot.policy_version": POLICY,
-                  "related_interest_pilot.telemetry_version": 2}
+                  "related_interest_pilot.telemetry_version": 3 if mode == "enabled_accounts" else 2,
+                  "related_interest_pilot.rollout_mode": mode}
+        if requester_verified is not None:
+            fields['related_interest_pilot.requester_eligibility_verified'] = requester_verified is True
         if triggered:
             fields["related_interest_pilot.triggered"] = True
         if counts is not None:
@@ -67,7 +72,7 @@ def summarize(jobs, proposals, openings=()):
         validator_unavailable_rate=round(unavailable/len(triggered), 4) if triggered else None)
     attempts = result["validator"]["attempts"]
     concepts = sum(result["validator"][k] for k in ("accepted", "rejected", "error"))
-    detailed = all((j.get("related_interest_pilot") or {}).get("telemetry_version") == 2 for j in triggered)
+    detailed = all((j.get("related_interest_pilot") or {}).get("telemetry_version") in {2, 3} for j in triggered)
     result.update(retry_metrics_complete=detailed,
         validator_retry_rate=round(result["validator"]["retries"]/attempts, 4) if attempts and detailed else None,
         validator_attempt_error_rate=round(result["validator"]["attempt_errors"]/attempts, 4) if attempts and detailed else None,
@@ -79,15 +84,23 @@ def summarize(jobs, proposals, openings=()):
         "score_min": min(scores) if scores else None, "score_median": statistics.median(scores) if scores else None,
         "score_max": max(scores) if scores else None}
     durations = []
+    sources = {'job_creation_to_completion': 0, 'legacy_processing_only': 0, 'missing_or_invalid': 0}
     for job in valid_jobs:
-        start, end = job.get("started_at"), job.get("completed_at")
+        # Current jobs persist created_at, not started_at. Include queue time;
+        # retain old processing-only samples with an explicit source count.
+        start = job.get("created_at") if type(job.get("created_at")) in (int, float) else job.get("started_at")
+        end = job.get("completed_at")
         if (type(start) in (int, float) and type(end) in (int, float)
                 and math.isfinite(start) and math.isfinite(end) and 0 <= end-start <= 31*86400):
             durations.append(end-start)
+            sources['job_creation_to_completion' if type(job.get('created_at')) in (int, float) else 'legacy_processing_only'] += 1
+        else:
+            sources['missing_or_invalid'] += 1
     durations.sort()
     result["latency_seconds"] = {"samples": len(durations),
         "p50": round(statistics.median(durations), 3) if durations else None,
         "p95": round(durations[math.ceil(len(durations)*.95)-1], 3) if durations else None}
+    result['latency_source_counts'] = sources
     modes = [entry.get("reason_render_mode") for p in proposals
         if (p.get("related_interest_pilot") or {}).get("policy_version") == POLICY
         for entry in (p.get("friend_intro_v4") or {}).values() if isinstance(entry, dict)]

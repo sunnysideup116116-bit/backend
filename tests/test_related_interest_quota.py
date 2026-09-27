@@ -17,7 +17,7 @@ def synthetic_completion_boundary(monkeypatch):
     monkeypatch.setattr(validator, "_completion", complete)
 
 
-@pytest.mark.parametrize("path", ["/api/match", "/api/preferences/related-interest-candidates"])
+@pytest.mark.parametrize("path", ["/api/match", "/api/preferences/related-interest-candidates", "/api/preferences/related-interest-recheck"])
 def test_signed_matching_context_is_preserved_for_both_model_endpoints(monkeypatch, path):
     monkeypatch.setattr(internal, "secret", lambda: b"synthetic-signing-secret")
     with task_scope("synthetic-owner", "matching", "synthetic-job"):
@@ -33,14 +33,15 @@ def test_signed_matching_context_is_preserved_for_both_model_endpoints(monkeypat
     assert SCOPE.get() is None
 
 
-def test_forged_context_cannot_reach_related_validator(monkeypatch):
+@pytest.mark.parametrize('path', ['/api/preferences/related-interest-candidates', '/api/preferences/related-interest-recheck'])
+def test_forged_context_cannot_reach_related_validator(monkeypatch, path):
     monkeypatch.setattr(internal, "secret", lambda: b"synthetic-signing-secret")
     seen = []
     async def app(*_args): raise AssertionError("must reject before model")
     async def receive(): return {"type": "http.request", "body": b""}
     async def send(event): seen.append(event)
     asyncio.run(internal.MatchmakerQuotaMiddleware(app)(
-        {"type": "http", "path": "/api/preferences/related-interest-candidates",
+        {"type": "http", "path": path,
          "headers": [(b"x-agent-quota", b"forged.context")]}, receive, send))
     assert seen[0]["status"] == 403 and SCOPE.get() is None
 

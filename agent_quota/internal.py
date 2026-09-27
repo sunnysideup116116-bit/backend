@@ -36,6 +36,7 @@ class MatchmakerQuotaMiddleware:
     async def __call__(self, scope, receive, send):
         if scope['type'] != 'http' or scope.get('path') not in {
             '/api/match', '/api/preferences/related-interest-candidates',
+            '/api/preferences/related-interest-recheck',
         }:
             return await self.app(scope, receive, send)
         value = dict(scope.get('headers', [])).get(b'x-agent-quota', b'').decode()

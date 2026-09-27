@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import time
 from typing import Callable
 
 import requests
+from urllib3.util import Timeout
 
 
 class RiskBlockServiceUnavailable(RuntimeError):
@@ -34,6 +36,7 @@ class RiskBlockService:
         ).rstrip("/")
         self._timeout = float(timeout_seconds or os.getenv("RISK_BLOCK_TIMEOUT_SEC") or "5")
         self._transport = transport or self._http_transport
+        self._custom_transport = transport is not None
 
     @staticmethod
     def _ids(value) -> frozenset[str]:
@@ -45,12 +48,17 @@ class RiskBlockService:
             if str(item or "").strip()
         )
 
-    def get_sets(self, user_id: str) -> UserBlockSets:
+    def get_sets(self, user_id: str, *, deadline: float | None = None) -> UserBlockSets:
         safe_user_id = str(user_id or "").strip()[:128]
         if not safe_user_id:
             raise RiskBlockServiceUnavailable("missing user id")
         try:
-            payload = self._transport(safe_user_id)
+            if deadline is not None and deadline <= time.monotonic():
+                raise RiskBlockServiceUnavailable('block deadline exhausted')
+            payload = (self._http_transport(safe_user_id, deadline=deadline)
+                if deadline is not None and not self._custom_transport else self._transport(safe_user_id))
+            if deadline is not None and deadline <= time.monotonic():
+                raise RiskBlockServiceUnavailable('block deadline exhausted')
             if not isinstance(payload, dict):
                 raise RiskBlockServiceUnavailable("invalid block response")
             outgoing = self._ids(payload.get("blocked_user_ids"))
@@ -67,14 +75,15 @@ class RiskBlockService:
     def excluded_user_ids(self, user_id: str) -> set[str]:
         return set(self.get_sets(user_id).excluded_user_ids)
 
-    def is_pair_blocked(self, first_user_id: str, second_user_id: str) -> bool:
-        return str(second_user_id) in self.get_sets(first_user_id).excluded_user_ids
+    def is_pair_blocked(self, first_user_id: str, second_user_id: str, *, deadline: float | None = None) -> bool:
+        return str(second_user_id) in self.get_sets(first_user_id, deadline=deadline).excluded_user_ids
 
-    def _http_transport(self, user_id: str) -> dict:
+    def _http_transport(self, user_id: str, *, deadline: float | None = None) -> dict:
+        budget = min(self._timeout, max(.001, deadline-time.monotonic())) if deadline is not None else self._timeout
         response = requests.get(
             f"{self._service_url}/api/v1/risk/blocks",
             params={"user_id": user_id},
-            timeout=self._timeout,
+            timeout=Timeout(total=budget, connect=min(1.0, budget), read=budget) if deadline is not None else budget,
         )
         response.raise_for_status()
         payload = response.json()
