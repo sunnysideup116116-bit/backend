@@ -19,6 +19,8 @@
 
 ## Event／Memory／配對現況
 
+偏好系統請先讀 [Preference Lifecycle / Matching 最新架構與演進](docs/PREFERENCE_SYSTEM_OVERVIEW.md)：Identity V2、exact-first、embedding_v2、lifecycle、已完成的 enabled population migration 與 DatingApp PR #45。V1不再是durable writer target；資料ready不代表semantic activation或APK完成。
+
 本功能基線為後端 `e06f9a1`、前端 `7b86365`；文件後續已同步。Main 整合來源、驗證與本機分支安排見 [整合紀錄](docs/MAIN_INTEGRATION_2026-09-09.md)。
 
 - [配對 runtime](docs/architecture/subagent-match.md)：多卡片 Hub、一般／活動語意、先看提案與明確代送授權、選擇性婉拒原因。

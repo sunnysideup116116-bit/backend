@@ -1,12 +1,17 @@
 # R1-L disposable local functional readiness
 
+> Historical readiness/research index. R1/R2/R3 reports and frozen FAIL results
+> remain unchanged; their stage-specific production-blocker wording is not the
+> current deployment state. See [current architecture and scoped audit](../../../docs/PREFERENCE_SYSTEM_OVERVIEW.md).
+> Local tests never substitute for production proof or authorize re-running experiments/P1-B.
+
 The R1 instructions below are provider-free. Separately authorized R2.5/R3 offline
 experiments have explicit CLI gates and selectively parse allowlisted credentials;
 they never load a whole service/production environment. See the final sections.
 
 - **Local baseline = Neo4j 2026.08.1 Community Edition**, `neo4j:2026.08.1`.
-- This is **not** the production version. **Production compatibility remains unknown.**
-- **Production fingerprint remains unknown.** A local PASS never authorizes activation.
+- This is **not** proof of the production version. Production compatibility must be established separately; the current operator audit is linked above.
+- Historical `Concept.embedding` provenance is not inferred. Current `embedding_v2` uses its separately verified pinned manifest; a local PASS never authorizes activation.
 - `MATCH_PREFERENCE_SEMANTIC_MODE=off` and
   `MATCH_PREFERENCE_SEMANTIC_EMBEDDING_SPACE_CONFIRMED=off` remain unchanged.
 - `0.82` remains provisional and unchanged. Deterministic geometry is not model calibration.

@@ -1,5 +1,11 @@
 # Action-reference hardening — Phase 1 validation
 
+> Historical validation record: the no-merge/deploy handoff below was superseded
+> by approved backend PR #28 deployment, PR #29 universal writer hardening, and
+> DatingApp PR #45 merge. Preserve the test results as recorded. Current release
+> facts and restore/projection recovery contract are in [the overview](PREFERENCE_SYSTEM_OVERVIEW.md)
+> and [Lifecycle v2](PREFERENCE_LIFECYCLE_V2.md).
+
 Local validation: PASS under the differential gate (not an all-green-suite claim).
 Exact clean-main base: `12b17c5746c17b8a0a089775e7219a95745aa93b`.
 This branch includes the original full-source supplement `8b881cb` plus this hardening.
@@ -13,7 +19,7 @@ No merge, deployment, APK, P1-B, matching/semantic/embedding policy changes.
 - Raw, forged, stale, disabled, retired, other-owner and polarity-changed references are rejected as public HTTP409 `stale_source`; no Mongo job/cache write occurs on rejection.
 - Every successful correct/disable consumes the reference; same-identity correct advances revision without rewriting a shared Concept. Existing restore cannot resurrect a prior reference.
 - Data-changing success commits a minimal bounded Graph projection marker with the mutation. Mongo projection starts only after success. The existing projection worker can recover a lost acknowledgement through service-signed internal scan/ack; it never replays the mutation or enables an embedding worker.
-- The marker is one optional User property, not a new association schema/index/migration. Restore retains its existing recovery contract.
+- The marker is one optional User property, not a new association schema/index/migration. At this historical gate restore retained its prior recovery contract; PR #29 now gives restore the committed Graph marker as well and rejects legacy reactivation.
 - Old raw-key edit/delete callers fail closed and must fetch full source. The approved client already echoes the source key; no client branch modification was made.
 
 ## Local test results

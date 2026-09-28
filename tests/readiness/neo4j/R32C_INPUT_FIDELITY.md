@@ -1,5 +1,11 @@
 # R3.2c input-fidelity investigation
 
+> Historical / superseded defect investigation. The truncation and "no production
+> validator" statements below describe the cited frozen checkout, not current
+> code. Full-text Identity V2 and related-interest/lifecycle releases now supersede
+> that runtime status; original reproducer and research results remain unchanged.
+> See [current architecture](../../../docs/PREFERENCE_SYSTEM_OVERVIEW.md).
+
 Status: source-level defect reproduced with synthetic pure-function tests.
 This document proposes a future fix; it does not implement a production fix.
 The tests deliberately describe current loss, not a desired retention contract.

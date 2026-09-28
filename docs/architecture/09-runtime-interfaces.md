@@ -4,6 +4,12 @@
 
 ## Public HTTP boundary
 
+Preference current-state entry: [architecture / lifecycle evolution](../PREFERENCE_SYSTEM_OVERVIEW.md).
+Backend PR #29 and DatingApp PR #45 are delivered; the enabled internal population
+migration is complete. Future owner-confirmation API semantics below remain; they
+are no longer an internal per-owner rollout blocker. Readiness does not activate
+semantic, bootstrap, historical workers or APK packaging.
+
 Preference bootstrap adds owner-authenticated `/api/profile/preferences/bootstrap`
 preview/commit/status/reconcile/rollback, default OFF. The private 9001 counterpart
 uses a distinct path/body/time-bound HMAC scope, not a model/user-supplied owner.

@@ -1,5 +1,7 @@
 # 註冊興趣與 Neo4j 初始偏好
 
+2026-09-28 現況：新帳號／EMPTY owner 的第一筆 durable preference直接使用Identity-v2；目前 enabled population migration已完成。下方2026-09-15部署／重複profile數字是historical snapshot，不是當前blocker。現行資料、flags與演進見[架構摘要](PREFERENCE_SYSTEM_OVERVIEW.md)。
+
 ## 責任與流程
 
 註冊表單的 Appwrite `dating_db.user_profiles.interest` 是本人明確填寫的興趣，
@@ -18,10 +20,10 @@
    evidence span、`like`、confidence ≥ 0.9、activity/habit/lifestyle，套用共用 durable limit（預設 6、hard max 8）。
    不寫近期情境、不推論人格／partner trait、不把「不喜歡」轉成 PREFERS。
 6. 使用既有 `memory_service.apply_profile_memory_proposals` → `/api/v2/memory/apply`，
-   `surface=registration_interest` 走 insert-only transaction：`PREFERS -> Concept(kind=interest)`，
+   `surface=registration_interest` 走 insert-only transaction：`PREFERS -> verified Identity-v2 Concept(kind=interest)`，
    記錄 source、bounded evidence、confidence、時間；marker 與關係同時提交。
    同一帳號固定 observation ID，User node lock 防止重複 seed；一般 memory write 保持優先覆寫能力。
-7. Mongo memory preview 沿用既有刷新流程；Concept embedding 與 Event relevance 沿用既有 worker。
+7. Mongo memory preview 沿用既有刷新流程；verified PREFERS 在同一 transaction排入既有embedding_v2 queue，compatible vector重用，missing vector由new worker在transaction外產生。Pending不影響exact；AVOIDS不提供positive semantic evidence。Event relevance為獨立domain，不因此啟用historical worker。
    **建好偏好不等於立刻有活動提案**，仍需 embedding、有效活動、相關性及配對資格。
 
 ## 重試與邊界
@@ -34,7 +36,10 @@
 - 無興趣或無有效正向偏好只建立 User。完成的 bootstrap 不因反覆開啟測驗而重新執行；日後新增偏好走既有聊天流程。
 - 這是明確註冊表單來源的例外入口，不放寬聊天 memory 的 saved owner message／message-use 要求。
 
-## 既有帳號補資料
+## Historical 既有帳號補資料（不是現行 migration authority）
+
+以下CLI與2026-09-15記錄保留作歷史／人工操作說明，不授權重跑bulk migration。
+Current enabled owners：READY29、EMPTY10、blocked identity0；未來EMPTY首次新增直接走v2。
 
 從 Server 執行，使用具 Social／Neo4j 依賴的 Python 環境：
 

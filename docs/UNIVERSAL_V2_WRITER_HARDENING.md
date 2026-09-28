@@ -1,5 +1,13 @@
 # Universal-v2 future-writer hardening
 
+Current release outcome (2026-09-28): backend PR #29 merged/deployed as
+`709ffc9da2c6649ae55f27a182a9703d92694245`; canonical runtime restored and audited
+without changing dirty Server/Pi source. Production restore/rebuild disposable
+checks and cleanup passed; a whole-node hash STOP was read-only reviewed as only
+five added existing-queue metadata fields, not an identity/vector/owner-edge
+change. No mutation retry or data repair was performed. Current population,
+flags and client merge are in [the architecture summary](PREFERENCE_SYSTEM_OVERVIEW.md).
+
 Validated base: `66e7ad869b00624af25c05be83986fa0ad2240fa`.
 Scope: restore and manual projection, plus explicitly approved recovery/old-CLI
 guards. No matching, relation taxonomy, ANN, threshold, validator, embedding

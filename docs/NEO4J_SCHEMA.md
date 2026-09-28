@@ -1,5 +1,9 @@
 # Neo4j Core Schema
 
+Preference-specific current state and V1/V2 boundaries: [architecture overview](PREFERENCE_SYSTEM_OVERVIEW.md).
+Current enabled owners have zero active legacy preference edges; two non-enabled
+historical edges remain out-of-scope. This is not a whole-Graph zero-legacy claim.
+
 Event-driven 主動媒人的完整資料流、API、排程、demo 與除錯請見
 [`EVENT_DRIVEN_MATCHMAKER_GUIDE.md`](./EVENT_DRIVEN_MATCHMAKER_GUIDE.md)。
 
@@ -11,7 +15,7 @@ truth for profiles, recent context, workflow state, and preference evidence. Act
 | Node | Properties | Purpose |
 | --- | --- | --- |
 | `User` | `id` | Stable identity used to connect graph relations. |
-| `Concept` | `key`, `label`, `kind`, `semantic_text`, `display_label`, `canonicalization_version`, `semantic_input_hash`, `fidelity_status`, `embedding`, `embedded_at` | New durable preferences use [Identity v2](PREFERENCE_IDENTITY_V2.md): complete semantic source, separate display, 51-character digest key. Legacy/Event nodes retain their existing identity; absent version is unknown. Vectors have 768 dimensions. |
+| `Concept` | `key`, `label`, `kind`, `semantic_text`, `display_label`, `canonicalization_version`, `semantic_input_hash`, `fidelity_status`; derived `embedding_v2`, source/runtime/provenance metadata; historical `embedding`, `embedded_at` | Durable writers target [Identity v2](PREFERENCE_IDENTITY_V2.md): full semantic source, separate display, deterministic digest. Preference semantic runtime uses only compatible 768-dim embedding_v2/dedicated index, never the historical embedding/index fallback. Legacy/Event nodes are not automatically rewritten. |
 | `Event` | `id`, `dedupe_key`, `schema_version`, `status`, `title`, `summary`, `category`, `region`, `venue`, `starts_at`, `ends_at`, `time_precision`, `session_starts`, `session_ends`, `session_precisions`, `session_count`, `expires_at`, `source_url`, `source_name`, `source_tier`, `first_seen_at`, `last_seen_at` | Time-limited, verified public activity. Multi-session times use parallel primitive arrays rather than extra nodes. |
 
 `MemoryObservation {message_id, owner_user_id, created_at}` is the transactional idempotency marker for memory writes; it is committed together with Concept relations. `Concept.kind` classifies activity/interest/partner_trait etc.; PREFERS/AVOIDS encode direction. The App displays prefer/avoid, not kind.
@@ -27,7 +31,8 @@ not user profile storage.
 | `(User)-[:AVOIDS]->(Concept)` | none | Durable dealbreaker or negative preference. |
 | `(User)-[:HAS_TRAIT]->(Concept)` | none | Public trait projection, when available. |
 | `(User)-[:CURRENTLY_WANTS]->(Concept)` | `expires_at` | Optional short-lived intent projection; not durable preference. |
-| `(User)-[:MEMORY_DISABLED]->(Concept)` | `original_relation`, `original_expires_at`, `disabled_at` | Owner-scoped restore marker; excluded from active reads. |
+| `(User)-[:MEMORY_DISABLED]->(Concept)` | `original_relation`, `original_expires_at`, `disabled_at`; legacy conversion may add `restored_v2_key`, `restored_at` | Owner-scoped inactive marker. Legacy restore leaves this inactive and creates/reuses a v2 target of the same polarity; old source replay is rejected. |
+| `(User)-[:PREFERENCE_SUPERSEDED]->(Concept)` | retirement / operation evidence | Retired owner association archive, not active preference evidence; never reactivate legacy via rollback. |
 | `(Event)-[:HAS_TAG]->(Concept)` | none | Event topic or activity. |
 | `(Event)-[:HAS_VIBE]->(Concept)` | none | Event atmosphere. |
 | `(User)-[:EVENT_RELEVANCE]->(Event)` | bounded semantic evidence, embedding model, update time | Rebuildable candidate-retrieval cache; not a declared user preference. |
@@ -48,12 +53,12 @@ not user profile storage.
 ## Rules
 
 1. Active PREFERS/AVOIDS edges do not duplicate preference evidence metadata. MEMORY_DISABLED stores only the restore metadata listed above; CURRENTLY_WANTS and Event cache edges retain their documented bounded properties.
-2. Disabling removes the active edge, records an owner-scoped MEMORY_DISABLED marker and updates Mongo lifecycle metadata. Restore recreates the original relation (CURRENTLY_WANTS only if unexpired); verified v2 correction moves only this owner's edge, never edits another owner's shared Concept. Unverified legacy correction requires reconfirmation; no implicit re-key or ownership transfer.
+2. Disabling removes only the owner active edge and records MEMORY_DISABLED. Durable restore preserves owner/polarity but targets verified v2 only (legacy deterministic conversion or fail closed); CURRENTLY_WANTS retains its expiry semantics. Correction moves only this owner's association, not the shared Concept identity. Legacy correction requires reconfirmation; manual rebuild cannot revive retired/legacy payload identity. See [lifecycle recovery](PREFERENCE_LIFECYCLE_V2.md).
 3. Raw conversation text and the full recent-context document never enter
    Neo4j. A `CURRENTLY_WANTS` edge contains only `expires_at`.
 4. Event signals reuse `Concept`; separate `Tag`, `Vibe`, and `Category` node
    types are not part of the production schema.
-5. `HAS_PREFERENCE` and `Trait` are migration-only compatibility structures.
+5. `HAS_PREFERENCE`, `Trait` and legacy preference identities are historical inspection/compatibility structures, not durable preference writer targets. The historical preference migration CLI rejects `--apply`; projection maintenance is not migration authority.
 6. Demo reseeding may delete `User` and user-owned memory projections, but it
    must preserve `Event`, `GlobalRule`, `Agent`, and Concepts still linked to
    preserved nodes. A blanket `MATCH (n) DETACH DELETE n` is forbidden.
@@ -67,6 +72,12 @@ not user profile storage.
 Complete v2 source and hashes are verified at write/read/vector projection boundaries; an old worker cannot overwrite source from a shortened label. `profile_memory_preview` is a cache, not proof of an original legacy owner assertion. Normal extracted memory is Graph-owned; explicit feedback additionally writes verified Mongo `preference_facts`. The optional legacy exact bridge only reads independently verified owner-assertion fields and does not populate them. See [read policy and rollout risks](PREFERENCE_IDENTITY_V2.md#exact-read-and-legacy-policy).
 
 ## Event Ingestion V1
+
+This is a separate domain, not permission to use its historical embedding pipeline
+as preference semantic fallback or enable its worker. Active verified PREFERS is
+the only positive preference semantic evidence; AVOIDS is a constraint. Exact
+matching remains usable while embedding_v2 is pending. Provider work stays outside
+the owner Graph transaction and never overwrites historical preference vectors.
 
 - The pilot region is Kaohsiung and the accepted time window is the next 30 days.
 - Port 8000 is the only web-search owner and uses the bounded Tavily adapter.

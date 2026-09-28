@@ -1,12 +1,19 @@
 # Owner-confirmed preference bootstrap runtime
 
+> Current status (2026-09-28): the enabled internal test population completed a
+> separately approved, one-time administrative migration; it no longer awaits
+> per-owner UI consent. The owner-confirmation API below remains mandatory for
+> future owners who lack applicable authorization. No silent migration or new
+> consent-only API was introduced. [Current architecture / population / flags](PREFERENCE_SYSTEM_OVERVIEW.md).
+
 Base bootstrap runtime has completed the approved production integrity/smoke gates.
 The narrow legacy-compound compatibility below is a separate release change;
 deployment, real-owner bootstrap and pilot activation remain distinct steps.
 `PREFERENCE_BOOTSTRAP_ENABLED=off` by default. All semantic/related-interest flags
 remain OFF. No provider call, matching or invitation is part of the bootstrap
 transaction. Lifecycle v2 adds only a derived transactional queue (worker OFF by
-default); no production migration is performed. Identity v2 is reused unchanged.
+default). Those original preparation boundaries are historical; the approved
+internal migration is now complete. Identity v2 is reused unchanged.
 
 ## Owner API and confirmation
 
@@ -24,7 +31,10 @@ Owner comes only from the verified identity, never a body user_id or model tool.
 `add_only`: confirm_items only; never retires legacy relations.
 `complete_set`: confirm_items, complete_set, reviewed_prefers, reviewed_avoids,
 retire_legacy must **each** be true. An omitted AVOIDS panel is not consent.
-No default checked controls or LLM/admin substitute for owner consent.
+No default checked controls or LLM/admin substitute for owner consent in this
+owner-facing API. The completed internal administrative operation had separate
+explicit scope/authority; it is not evidence that an operator clicked consent for
+an owner and cannot be replayed as general migration permission.
 For owner full-source discovery, immutable edit/delete, transactional embedding
 queue and client integration follow [Preference Lifecycle v2](PREFERENCE_LIFECYCLE_V2.md).
 GET `/source` is read-only even when execution is OFF; its optional source receipt
@@ -178,7 +188,11 @@ shared/enriched nodes are retained. Mongo restores only captured changed facts.
 Rollback failure after preparation reconciles current Graph state, never clobbers
 a later writer. Replaying an old receipt cannot recommit a rolled-back operation.
 
-## Enablement / rollback proposal (not performed)
+## Historical enablement / rollback proposal (superseded rollout status)
+
+The steps below describe the earlier preparation phase, not today's migration
+backlog. Current code/data readiness and unchanged activation policy are recorded
+in [the overview](PREFERENCE_SYSTEM_OVERVIEW.md); no further bulk migration is authorized.
 
 [Profile Writer Hardening](PROFILE_WRITER_HARDENING.md) supplies the shared
 creation/recovery boundary for online profile initializers. It does **not** clean

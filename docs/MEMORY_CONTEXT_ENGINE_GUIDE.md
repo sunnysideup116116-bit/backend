@@ -310,9 +310,13 @@ Context Engine 的輸出應是 provider-neutral typed bundle，而不是 prompt 
 
 Owner-confirmed Identity-v2 bootstrap 的現行實作規格見
 [PREFERENCE_BOOTSTRAP_RUNTIME.md](PREFERENCE_BOOTSTRAP_RUNTIME.md)。它預設 OFF，
-以 shared owner fence/revision 保護正常 writers，只有 explicit complete_set 同意才
-退休 legacy PREFERS/AVOIDS；Graph 原子提交與 Mongo projection 明確分開並可恢復。
-不是自動 legacy migration，也不改 semantic flags、embedding 或既有 qualification。
+以 shared owner fence/revision 保護正常 writers，owner-facing flow只有 explicit
+complete_set 同意才退休 legacy PREFERS/AVOIDS；Graph 原子提交與 Mongo projection
+明確分開並可恢復。現有 internal test population 已另外取得一次性 administrative
+migration批准並完成，不再等待逐人確認；不是未來 silent migration 授權，也不把聊天
+摘要／profile facts轉偏好。所有future durable writers只建立／reuse V2，EMPTY第一筆
+亦同；AVOIDS不作positive semantic evidence，exact不等待embedding。
+部署／population／仍OFF的semantic activation政策見[架構摘要](PREFERENCE_SYSTEM_OVERVIEW.md)。
 
 ### 4.1 現行最小 schema
 

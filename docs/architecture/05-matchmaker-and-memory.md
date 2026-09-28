@@ -2,6 +2,8 @@
 
 > 本篇說明 port 9001 媒婆服務（candidate 排序＋Neo4j 記憶）與主服務的記憶／profile pipeline。完整資料邊界請見 [Memory 指南](../MEMORY_CONTEXT_ENGINE_GUIDE.md)。
 
+現行 preference identity／lifecycle／migration 與semantic gate以[架構摘要](../PREFERENCE_SYSTEM_OVERVIEW.md)為入口。Preference V1/V2不要與Ayue runtime版本混淆；current enabled population已遷移，semantic activation仍獨立管控。
+
 ## 1. 媒婆服務（matchmaker_agent, port 9001）
 
 ### 角色
@@ -49,7 +51,7 @@ Preference exact search 是例外語意：候選集合已由 Social 以 canonica
 
 - 偏好必須 **owner-scoped**：`MemoryObservation.message_id` 唯一約束保證同一訊息不會重複套用。
 - `Concept.key` 使用既有 unique constraint／RANGE index；正式環境已驗證為 ONLINE。新 writer 不信任 provider key，而由 `concept_identity.py` 在 server boundary 決定 identity。
-- 已知小型 alias 表先處理高信心 variant：`Kpop`、`K-pop`、`K pop`、`k-pop` 都是 `key=k_pop, label=K-pop`。其他概念用保守、穩定的 label-derived identity；不維護大型手寫 ontology。
+- 已知小型 deterministic alias registry使`Kpop`／`K-pop`等variant有同一v2 identity；`k_pop`只是historical v1 key，不是新writer target。現行key由完整normalized semantic text生成`v2_` digest，display label不參與identity；不建立大型ontology或語意相似alias。
 - `stance=like|require` 投影為 `PREFERS`；`stance=dislike|avoid` 投影為 `AVOIDS`；短期活動意圖另由 recent-context projection 產生 `CURRENTLY_WANTS`。
 - `LIKES_TRAIT`／`DISLIKES_TRAIT` 目前只是 Matchmaker LLM／文字投影的 compatibility label；寫入 Neo4j 前必須分別轉成 `PREFERS`／`AVOIDS`，不得建立同名 Graph relationship。
 - 敏感內容（種族、宗教、性傾向、疾病等）在寫入前被正則擋掉（`agent_api.py` 的 `protected`）。
@@ -67,6 +69,7 @@ Preference exact search 是例外語意：候選集合已由 Social 以 canonica
 - 每個 durable candidate 只能代表一個 atomic concept。只有明確、短而獨立的列舉才由 deterministic boundary 拆開；例如 `K-pop、J-pop、西洋音樂` 拆三筆，但 `適合讀書的安靜咖啡廳` 保持一筆。9001 writer 再做相同的保守防線，不能繞過 extractor 寫入清楚的複合列舉。
 - 同一 candidate／evidence 同時含明確正負 polarity 時 fail closed；只有模型提供 item-level evidence 的獨立 candidates 才分別保留 like／avoid，不能把混合句壓成單一 stance。
 - Concept identity 不是 semantic ontology：`韓國流行音樂` 與 `韓流音樂` 仍是不同 identity。P1-A 只能在 retrieval 階段把高分鄰近 Concept 當成 `semantic_related` evidence；不得建立 alias、MERGE Concept 或改寫 durable edge。
+- Semantic只在qualified exact=0且runtime gates允許時走bounded ANN → validator → final recheck。只有verified v2、compatible embedding_v2與active PREFERS可作positive evidence；AVOIDS只作constraint，embedding pending不阻擋exact。Related-interest不代表shared/identical preference。
 - 每訊息可建立的 durable candidates 由兩個服務共用 `DURABLE_MEMORY_MAX_CANDIDATES_PER_MESSAGE`（預設 6、程式硬上限 8）；extraction、retry/outbox、registration 與 writer 都用同一界線。
 - 使用者可描述近期想做的事而沒有時間單位；不得把「缺時間詞」當作拒絕理由。
 - 顯示摘要由程式投影組合，不直接儲存模型自由文字摘要。

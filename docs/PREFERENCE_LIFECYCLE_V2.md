@@ -1,18 +1,20 @@
 # Preference Lifecycle v2 / Permanent All-User Readiness
 
-Implementation and readiness preparation only. This change does not deploy,
-migrate an account, generate production vectors, change matching policy, or
-enable semantic traffic. No P1-B, relation/ANN/threshold change, or legacy-vector
-fallback is introduced.
+Current contract, updated 2026-09-28: backend PR #29 is deployed at `709ffc9da2c6649ae55f27a182a9703d92694245`; DatingApp PR #45 is merged at `66ba6e8ecd3f2adbcaf95859073eac906e78dc8c`.
+The separately approved internal administrative migration and universal writer
+hardening are complete. This is not semantic activation, P1-B or APK packaging.
+See [current architecture, evolution and scoped population snapshot](PREFERENCE_SYSTEM_OVERVIEW.md).
 
 ## Owner authority and first use
 
 Requester eligibility remains `enabled_accounts`: an enabled Appwrite account,
 one valid Mongo profile and one Graph User, with existing disabled/block/pending
 guards. EMPTY and legacy-only requesters do not need a migration to search.
-Migration of their candidate evidence is a separate owner-authorized operation.
+Candidate-evidence migration has separate authority. The current enabled internal
+test population used an explicitly approved, one-time administrative operation;
+future external/unconfirmed owners still require the confirmation flow below.
 
-Client integration contract (authenticated backend API implemented; UI not added):
+Client integration contract (backend implemented; management/confirmation UI merged in DatingApp PR #45):
 
 1. On first preference/semantic settings entry, GET
    `/api/profile/preferences/bootstrap/source` with the owner's Appwrite JWT.
@@ -44,6 +46,10 @@ Client integration contract (authenticated backend API implemented; UI not added
 Malformed/duplicate owner/profile/Graph identity, ambiguous polarity, stale
 source, incomplete snapshot and unsafe legacy evidence fail closed per owner.
 Historical pilot consent does not confirm a newly discovered complete set.
+That rule is not a remaining blocker for the completed administrative internal
+migration, and its explicit approval must not be generalized into silent migration.
+READY owners no longer need the BLOCKED_CONFIRMATION prompt; EMPTY owners skip
+migration and their first durable write goes directly to Identity-v2.
 
 ## New writes and immutable identity
 
@@ -228,7 +234,16 @@ No fixed population/vector count or old five-user monitor is restored.
 Inventory also reports count-only incremental job states; failed/blocked jobs
 must be investigated, not mistaken for compatible embedding coverage.
 
-Latest preparation inventory (2026-09-27, per-owner reads, not distributed ACID):
+### Current enabled-population snapshot (2026-09-28)
+
+39 enabled/eligible; READY29, EMPTY10, BLOCKED_IDENTITY0. Enabled active legacy
+edges0; active PREFERS compatible vectors64/64. Two non-enabled historical legacy
+edges are explicit out-of-scope, untouched: **not whole-Graph legacy0**. Full
+flags/release provenance and audit scope are in the [current overview](PREFERENCE_SYSTEM_OVERVIEW.md#production-snapshot--2026-09-28).
+
+### Historical / superseded preparation inventory (2026-09-27)
+
+The following pre-migration snapshot is retained as evidence, not a current blocker:
 39 enabled accounts;32 eligible requesters;READY5, MIGRATABLE0, EMPTY3,
 BLOCKED_IDENTITY7, BLOCKED_CONFIRMATION24, BLOCKED_CAPACITY0. Five semantic-ready
 owners,28 verified v2 Concepts/28 compatible vectors; index ONLINE. No duplicate
@@ -244,9 +259,11 @@ transaction support, frozen SDK/source metadata, ONLINE index and host clocks.
 Drain old writers; no mixed-version action commands. Run flags-OFF exact checks
 and approved rollout checks before activation. Do not enable the old frozen
 five-user schedule, bulk-confirm users, rebuild historical embeddings or invoke
-P1-B. Owner UI integration is still a client follow-up using the API above.
+P1-B. Owner UI integration is now merged in DatingApp PR #45 using the API above;
+merge/readiness is not release APK or activation approval. The completed one-time
+internal migration is historical; this document authorizes no additional bulk job.
 
-## Verification at preparation
+## Historical verification at preparation (superseded deployment status)
 
 - Matchmaker full:307 passed (+17 subtests).
 - Contracts:733 passed (+232 subtests), including canonical start_all.sh
