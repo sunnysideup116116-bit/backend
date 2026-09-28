@@ -1,8 +1,13 @@
-# All internal semantic rollout preparation
+# All internal semantic rollout — eligibility contract and historical preparation
 
 This is infrastructure/readiness, not production all-user activation. The accepted
 Phase 2 E2E and frozen R3 conclusions are not re-evaluated here. No extra synthetic
 production pilot, owner bootstrap, embedding backfill, index creation or P1-B.
+
+Current status (2026-09-28): enabled population migration and universal-v2 writer
+hardening are complete; DatingApp PR #45 is merged. Earlier per-owner internal
+confirmation/capacity rollout blockers below are superseded. Production semantic
+activation is still a separate decision. [Current architecture / audited facts](PREFERENCE_SYSTEM_OVERVIEW.md).
 
 ## Ownership and admission
 
@@ -43,7 +48,10 @@ ANN uses only `concept_embedding_v2_index` / `Concept.embedding_v2`:
 verified stored full v2 identity; matching semantic source hash and runtime
 fingerprint; a recorded provenance fingerprint; 768 finite non-boolean numeric
 values, non-zero L2 unit norm. A high similarity score is not relation approval.
-The unchanged frozen validator runs before bounded PREFERS owner expansion.
+The relation validator runs before bounded PREFERS owner expansion; taxonomy and
+acceptance policy remain unchanged. PR #26 excludes Concept-level ERROR while
+retaining trusted decisions; partial ERROR plus valid REJECT can be normal
+no-match, whereas zero-trusted/systemic failure remains typed unavailable.
 Negative/unknown/ERROR evidence never expands into a positive candidate.
 
 Enabled owner metadata and fresh active PREFERS ownership are checked after
@@ -81,13 +89,14 @@ operator artifact, never Git, public logs or a model prompt.
 
 | Class | Definition/action |
 | --- | --- |
-| READY | v2-clean, every active preference has compatible v2 vector |
+| READY | v2-clean, every active positive preference has a compatible v2 vector; AVOIDS needs no positive vector |
 | MIGRATABLE | current owner legacy snapshot admits a deterministic full preview plan; not committed, still requires consent |
 | EMPTY | no active preferences; valid requester, no fabricated candidate proof |
 | BLOCKED | identity ambiguity, unsafe/incomplete evidence, contract overflow or incompatible/missing embeddings; isolate that owner |
 
 `enabled_semantic_requesters` is technical eligibility **if the new mode is
-activated**, not the number currently admitted by production's old canary.
+activated**, not a claim that semantic flags are currently ON. The old canary
+cohort is no longer the enabled_accounts population model.
 `semantic_ready_candidate_owners` requires at least one current positive vector-
 backed v2 edge (an AVOIDS-only READY owner is not a positive candidate).
 An otherwise valid owner with some legacy preferences may own separate ready v2
@@ -101,7 +110,13 @@ Bounds/truncation/missing latency denominators are explicit. Deleted test propos
 are not reconstructed from surviving jobs; immutable operator test receipts are
 separate evidence, not live invitation counts. Zero samples never means success.
 
-## Minimal owner confirmation plan (UI not shipped in this preparation)
+## Owner confirmation flow (now implemented; internal backlog superseded)
+
+The following owner-facing flow remains for future owners requiring confirmation;
+DatingApp PR #45 supplies the UI. It is not a requirement to reconfirm the already
+administratively migrated internal population. That one-time approval allowed
+only deterministic existing-canonicalizer normalization with meaning/polarity
+preserved, never inferred content or migration of other memory types.
 
 1. On first semantic-feature entry, show an **optional readiness panel** for the
    authenticated owner. Requester access does not wait for preference migration.
@@ -125,7 +140,12 @@ the same owner/full current set/empty AVOIDS/retirement. Enabled status, partici
 consent or an operator's inventory alone is not complete-set consent. This PR does
 not authorize a bulk conversion or introduce a new confirmation write route.
 
-### Capacity decision: 11-item owner
+### Historical capacity decision: 11-item owner (superseded)
+
+The later lifecycle contract admits 1–64 combined items and 16 KiB full-source
+UTF-8 within existing snapshot/receipt bounds. Ordinary memory/add-only caps did
+not change; no split complete-set transactions. The original proposal below is
+retained as design history, not a current 10-item limit.
 
 This PR leaves complete-set capacity **10 combined PREFERS+AVOIDS**. That owner is
 individually BLOCKED for bootstrap, not a rollout-wide blocker or requester ban.

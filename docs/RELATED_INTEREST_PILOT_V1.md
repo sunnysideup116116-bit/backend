@@ -1,5 +1,13 @@
 # Semantic Related-Interest Matching v1 — internal app-wide pilot
 
+> Historical pilot / superseded rollout status (2026-09-28): fixed canary cohorts,
+> per-owner internal enrollment and stage-specific "not deployed"/STOP statements
+> below describe earlier phases. Current enabled_accounts eligibility, completed
+> internal V2 migration and unchanged activation flags are in the
+> [current overview](PREFERENCE_SYSTEM_OVERVIEW.md). Relation-policy **v1** is not
+> legacy preference Identity V1. Frozen R3 scores/FAILs remain unchanged; this is
+> not permission to reopen experiments, activate semantic or start P1-B.
+
 Initial implementation was based on main `64bb7e7`; the implementation-gate
 results below are historical. **Flags default OFF.** The accepted two-account
 canary is followed by Phase 2 preparation for 5–10 explicitly confirmed,

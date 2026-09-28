@@ -1,8 +1,8 @@
 # P0.1 Preference Identity v2
 
-Status: implementation in `codex/preference-identity-v2`, pending review. No production migration, re-key, Graph scan, backfill, deploy or semantic activation was performed. R3.3 and P1-B remain stopped. Historical production embedding fingerprint remains unknown.
+Current status (2026-09-28): Identity-v2 is the durable preference standard for current enabled users and every future/new/EMPTY-owner write. Backend PR #29 is deployed, the approved enabled-population migration is complete, and DatingApp PR #45 is merged. See [current architecture and activation boundaries](PREFERENCE_SYSTEM_OVERVIEW.md). V1 is historical/read-only compatibility, never a new durable writer target. Semantic activation, P1-B and APK packaging are not claimed complete.
 
-Current disposition (2026-09-23): **both approved blockers resolved; no new branch-only regression, ready for commit review, not committed**. The historical RED language-parity test now passes through a pinned fresh-input boundary. The independent DatingApp worktree now sends up to 500 Unicode codepoints intact. Historical review snapshots below are retained as evidence, not current blockers. Production remains STOP.
+Historical disposition (2026-09-23, superseded release status): **both approved blockers resolved; no new branch-only regression, ready for commit review, not committed**. The RED language-parity test was repaired through a pinned fresh-input boundary. Review/test snapshots below remain evidence of that stage, not current rollout blockers; frozen R3 results are unchanged.
 
 ## Authoritative text contract
 
@@ -36,7 +36,7 @@ The key is 51 ASCII characters with 192 bits of digest, fitting the existing `^[
 | Durable candidates | Default 6, hard max 8 | Existing `DURABLE_MEMORY_MAX_CANDIDATES_PER_MESSAGE`; overflow, including atomic expansion, fails the operation. |
 | Concept embedding batch | 20 | Existing worker/provider bound; an invalid member rejects the entire batch before provider or write. |
 
-Validation checks both raw and normalized length, type, Unicode and control characters. NFKC expansion cannot silently overflow. No DB schema with a smaller concept-string limit was found in repository code; actual 500-character payloads and 51-character keys are exercised locally. Production DB/version compatibility was not inspected.
+Validation checks both raw and normalized length, type, Unicode and control characters. NFKC expansion cannot silently overflow. No DB schema with a smaller concept-string limit was found in repository code; actual 500-character payloads and 51-character keys are exercised locally. The original P0.1 preparation did not inspect production DB/version compatibility; later release/index/integrity proof is separately recorded in the current overview.
 
 ## Flow and atomicity
 
@@ -59,7 +59,7 @@ Exact and semantic retrieval distinguish raw topic-only requests from verified i
 
 Writer preflight covers the whole operation before effects. Graph transactions revalidate existing targets; mismatched source/hash or vector projection counts roll back. Embedding projection never overwrites Concept label/source from an old 60-character projection. The legacy context writer cannot mutate or occupy the reserved v2 key namespace. Event traversal/relevance algorithms are unchanged.
 
-Correction of a verified v2 owner edge is explicit owner mutation, not migration. Same-identity correction is a no-op. Correction of unverified legacy identity requires reconfirmation and does not relocate edges.
+Correction of a verified v2 owner edge is explicit owner mutation, not migration. Same-identity correction does not rewrite the shared Concept, but consumes its action reference by advancing owner revision. Correction of unverified legacy identity requires reconfirmation and does not relocate edges.
 
 ## Exact read and legacy policy
 
@@ -74,21 +74,21 @@ explicit preference → complete source → v2 key
 
 Legacy equality is **not** proven by a shared prefix, key, short label, dimension or current configuration. A read-only bridge requires owner-scoped `legacy_evidence_scope=owner_assertion`, `legacy_fidelity_status=complete`, full `legacy_semantic_text`, matching `legacy_semantic_input_hash`, and the matching historical key derivation. No writer in this change manufactures that proof or backfills it. Unknown legacy is excluded from confirmed shared/exact evidence; potentially contradictory cross-version evidence fails closed with `indeterminate_legacy_conflict`. Existing same-key negative checks remain conservative.
 
-Owner-only memory display can still show stored legacy text as legacy text. This does not authorize an exact identity bridge, a public shared-preference claim, or inventing missing suffixes. Disable/restore remains owner-scoped with existing expiry semantics.
+Owner-only memory display can still show historical legacy text as legacy text. This does not authorize an exact identity bridge, a public shared-preference claim, or inventing missing suffixes. Durable legacy restore must deterministically create/reuse verified v2 and keep the legacy association inactive, or fail closed; v2/context restore retains its appropriate owner/expiry semantics. Manual rebuild cannot revive legacy identity. See [writer hardening](UNIVERSAL_V2_WRITER_HARDENING.md).
 
 Persisted preference confirmations/jobs must contain verified v2 search metadata. Legacy or altered persisted input returns `preference_search_reconfirmation_required` before search execution/quota use. Already-committed proposal recovery remains before this guard. Fresh generic/activity input and recent-context expiry policy are unchanged.
 
-The frozen v1 derivation is a read/test oracle only. `scripts/audit_canonical_preferences.py` deliberately retains v1 audit semantics; it does not turn an old alias audit into a v2 re-key proposal. No migration script was applied.
+The frozen v1 derivation is a read/test oracle only. `scripts/audit_canonical_preferences.py` deliberately retains v1 audit semantics; it does not turn an old alias audit into a v2 re-key proposal. The original identity implementation did not apply a migration; the later explicitly approved internal migration is recorded separately in the current overview.
 
 ## Retained display/privacy boundaries
 
 - Display abbreviation (40), preview summary (300), list/item caps and non-preference presentation limits remain bounded.
 - Owner context consumes verified complete text, at most 8 items; inactive/other-owner/protected data remains excluded.
 - Counterparty/public rationale privacy projections remain bounded. Verified source is checked before presentation; internal key/hash/proof does not enter public rationale.
-- The R3 validator remains offline and unmodified. A regression executes its actual payload expression for all 96 frozen development cases and verifies complete Q/C. No new provider scoring or R3.3 was run.
+- Historical P0.1 verification kept the frozen R3 readiness validator offline and unchanged: a regression checked full Q/C for all96 development cases, with no new provider scoring/R3.3. Later production related-interest validation is a separate surface; frozen R3 results are not regraded.
 - `MATCH_PREFERENCE_SEMANTIC_MODE=off`, `MATCH_PREFERENCE_SEMANTIC_EMBEDDING_SPACE_CONFIRMED=off`, and `.82` are unchanged.
 
-## Verification and scope
+## Historical implementation verification and scope
 
 New regression files cover the 24 frozen collision pairs; a frozen main P0 implementation is retained under `tests/fixtures/` solely as a differential oracle. Short-case pipeline differentials compare identity equivalence, ordered Matchmaker inputs, filters, qualification, proposal outcomes, confirmation and privacy, allowing only version/verified metadata representation differences. Unknown historical provenance is an intentional fail-closed change, not claimed parity.
 
@@ -103,7 +103,7 @@ Affected source groups:
 - Manual/voice adapters: request schema, server catalog and dispatch/confirmation adapters; no voice transport redesign.
 - Tests: identity/collision oracle, Graph writer/read tests, Social parity/replay/ingress/embedding/context tests, voice tests and disposable local component harness.
 
-## Rollout and rollback risks — no authorization to execute
+## Historical rollout and rollback notes — not current activation authority
 
 ### Previous implementation regression gate (2026-09-22)
 
@@ -128,7 +128,11 @@ Reproduce pure tests with `python -m pytest -q tests/test_preference_identity_v2
 
 GitNexus full index + final diff: 67 files, 368 changed symbols, 68 affected indexed flows, CRITICAL due to the shared identity boundary. Global flow enumeration is bounded and some cross-language/dynamic callbacks are unresolved, so source review and component regressions supplement, not replace, the index. No runtime commit was created.
 
-### Remaining risks
+### Historical remaining risks (2026-09-22; rollout blockers superseded)
+
+This is the pre-rollout risk record, not the current population/release state.
+Cross-version safety principles remain valid; subsequent deployment, migration,
+vector verification and client merge are recorded in the current overview.
 
 1. Coordinated Social + 9001 deployment is required; mixed versions fail closed. Existing unverified pending writes/search confirmations need owner reconfirmation, not automatic replay.
 2. Existing legacy records remain unchanged and may lose exact candidate coverage because provenance is unknown. Audit/reconfirmation/migration requires separate approval; never guess a truncated suffix or merge nodes by prefix.

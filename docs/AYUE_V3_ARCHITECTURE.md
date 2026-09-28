@@ -4,6 +4,8 @@
 
 完整現行說明請見 [Server/AYUE_V3_ARCHITECTURE.md](../AYUE_V3_ARCHITECTURE.md)。
 
+偏好系統的V1/V2、embedding、migration及client整合另見[Preference System Overview](PREFERENCE_SYSTEM_OVERVIEW.md)；這些identity版本不是Public／Private runtime版本。
+
 關鍵規則：
 
 - 公開 request 必須先驗證 owner，所有帳號一律進 Pi，失敗不降級。

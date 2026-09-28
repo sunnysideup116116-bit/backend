@@ -1,5 +1,11 @@
 # V2 Preference Bootstrap — internal pilot contract (DESIGN ONLY)
 
+> Historical / superseded design model, not the deployed API or current migration
+> backlog. Keep original tests/decisions as evidence. Later runtime, administrative
+> internal migration and recovery restrictions are described in the
+> [current architecture](../../../docs/PREFERENCE_SYSTEM_OVERVIEW.md) and
+> [bootstrap runtime](../../../docs/PREFERENCE_BOOTSTRAP_RUNTIME.md).
+
 Base: backend `main@99098067f7d462e3f641bbdbc5d31b3436858975`.
 Branch: `codex/preference-bootstrap-contract`.
 Status: proposed contract + synthetic in-memory tests; **no production adapter,

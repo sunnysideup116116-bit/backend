@@ -1,5 +1,10 @@
 # Preference bootstrap tests
 
+Current deployment/population facts: [Preference System Overview](../../../docs/PREFERENCE_SYSTEM_OVERVIEW.md).
+Past test counts, 10-item limits and no-deploy statements below are historical
+phase evidence, not today's migration/activation authority. Current complete-set
+capacity is 1–64 combined items /16KiB with the existing snapshot bounds.
+
 Runtime contract: `docs/PREFERENCE_BOOTSTRAP_RUNTIME.md`.
 All fixtures are synthetic; no account, credential, raw message or Graph data from
 production. The historical model tests remain design evidence, not integration.
@@ -96,7 +101,7 @@ Base: clean backend `99098067f7d462e3f641bbdbc5d31b3436858975`.
 No production service start, production Graph connection, bootstrap, migration,
 embedding_v2, semantic enablement or deployment was performed.
 
-## Complete-set capacity regression
+## Historical complete-set capacity regression (10-item contract superseded)
 
 `test_complete_set_capacity.py` checks combined totals at both HTTP schemas and
 the shared normalizer: 5, 7, 8 and 10 accepted for complete-set; 11 (including
