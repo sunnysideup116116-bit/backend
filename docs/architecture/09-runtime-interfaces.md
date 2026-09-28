@@ -33,6 +33,18 @@ the default-OFF `PREFERENCE_EMBEDDING_V2_ENABLED` worker uses private signed
 `/api/v2/preferences/embedding-jobs/{claim,finish,fail}` and the frozen Gemini
 pipeline. Action projection recovery never replays Graph mutations. No new Pi tool.
 
+Durable memory restore runs under that same owner fence/transaction: legacy
+disabled preferences may only become verified Identity-v2 associations of the
+same polarity, with their legacy source left inactive. Invalid normalization or
+ambiguous target fails closed before commit and creates no Mongo projection
+intent. Verified PREFERS enqueue missing vectors transactionally; CURRENTLY_WANTS
+keeps its non-preference behavior. The owner-scoped manual projection CLI only
+accepts already-active Graph v2 preference authority, never legacy payload keys.
+Bootstrap rollback that would restore legacy preference identity now returns
+HTTP409 `rollback_legacy_restore_forbidden` before Mongo prepare and again under
+the Graph write fence. Pure v2 rollback and forward reconciliation remain. The
+historical migration CLI rejects `--apply` before credentials/database access.
+
 `GET /api/conversation/summary-status?room_id=...` 與 `POST /api/conversation/summary-rebuild` 使用Appwrite Bearer JWT解析owner。GET只回有界狀態／數量，POST body僅接受room_id；不回摘要原文、其他房間或rollout authority。全域試行批准只由本機operator CLI寫入獨立rollout record；Public Context gate保持read-only。正常turn的compaction改為持久job，由Social lifecycle worker執行既有profile coverage與摘要管線。詳細契約見 [Summary operations](../SUMMARY_ROLLOUT_OPERATIONS.md)。
 
 `routers/public_chat.py` 驗證 owner 後建立 `PublicAgentRequestContext`，呼叫 `run_public_agent_turn()`。公開聊天的 JSON 與 NDJSON URL、choice fields、interaction blocks、sources 與主要 response shape 保持相容；新回覆的 `agent_mode`、`agent_version` 固定為 `pi`。

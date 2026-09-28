@@ -2196,28 +2196,12 @@ async def memory_action(req: MemoryActionRequest):
                     def restore(tx):
                         lock_preferences(tx, user_id, source_created_at=req.source_created_at, require_existing=True)
                         _require_action_live(req)
-                        row = tx.run("""
-                            MATCH (u:User {id:$user_id})-[disabled:MEMORY_DISABLED]->
-                                  (concept:Concept {key:$key})
-                            WITH u,concept,disabled,
-                                 disabled.original_relation AS original_relation,
-                                 disabled.original_expires_at AS original_expires_at
-                            DELETE disabled
-                            FOREACH (_ IN CASE WHEN original_relation='PREFERS' THEN [1] ELSE [] END |
-                                MERGE (u)-[:PREFERS]->(concept))
-                            FOREACH (_ IN CASE WHEN original_relation='AVOIDS' THEN [1] ELSE [] END |
-                                MERGE (u)-[:AVOIDS]->(concept))
-                            FOREACH (_ IN CASE WHEN original_relation='CURRENTLY_WANTS'
-                                                   AND coalesce(original_expires_at,0)>$now
-                                              THEN [1] ELSE [] END |
-                                MERGE (u)-[intent:CURRENTLY_WANTS]->(concept)
-                                SET intent.expires_at=original_expires_at)
-                            RETURN original_relation,original_expires_at
-                        """, user_id=user_id, key=key, now=now).single()
+                        from matchmaker_agent.preference_restore import restore_memory
+                        row = restore_memory(tx, user_id, key, now)
                         if row:
-                            enqueue_keys(tx, user_id, [key])
+                            action_reference.mark_projection(tx, user_id, row['projection_key'])
                             bump_preferences(tx, user_id)
-                        return dict(row) if row else None
+                        return row
                     restored = session.execute_write(restore)
                     if not restored:
                         return {"status": "not_found"}
@@ -2225,8 +2209,8 @@ async def memory_action(req: MemoryActionRequest):
                         restored.get("original_relation") == "CURRENTLY_WANTS"
                         and float(restored.get("original_expires_at") or 0) <= now
                     ):
-                        return {"status": "expired"}
-                    return {"status": "success"}
+                        return {"status": "expired", "projection_key": restored['projection_key']}
+                    return {"status": "success", "projection_key": restored['projection_key']}
 
                 corrected_key, label = identity.key, identity.label
 

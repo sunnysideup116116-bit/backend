@@ -167,6 +167,19 @@ def _consent(mode, consent):
             "complete_set_consent_required", 422)
 
 
+def require_v2_rollback(tx, record, *, lock=False):
+    """Recovery is not authority to reactivate legacy preference identity."""
+    for edge in record['retired_edges']:
+        identity = stored_concept_identity(edge['concept'])
+        require(edge['relation'] in {'PREFERS', 'AVOIDS'} and identity,
+                'rollback_legacy_restore_forbidden')
+        locking = 'SET c.key=c.key' if lock else ''
+        rows = list(tx.run(f'''MATCH (c:Concept {{key:$key}}) {locking}
+            RETURN properties(c) AS concept LIMIT 2''', key=identity.key))
+        current = stored_concept_identity(dict(rows[0]['concept'])) if len(rows) == 1 else None
+        require(current and current.as_dict() == identity.as_dict(), 'rollback_identity_changed')
+
+
 class BootstrapGraph:
     def __init__(self, driver, database="neo4j"):
         self.driver, self.database = driver, database
@@ -355,6 +368,7 @@ class BootstrapGraph:
                     and current["revision"] == revision, "stale_rollback")
             require(not pending or pending == op_id, "preference_projection_pending")
             require(digest(current) == digest(record["after"]), "rollback_after_image_changed")
+            require_v2_rollback(tx, record)
             return record
         return self.read(check)
 
@@ -384,6 +398,7 @@ class BootstrapGraph:
             lock_preferences(tx, owner, expected_revision=record["revision_after"], bootstrap_operation=op_id, require_existing=True)
             current, _ = snapshot(tx, owner)
             require(digest(current) == digest(record["after"]), "rollback_after_image_changed")
+            require_v2_rollback(tx, record, lock=True)
             for edge in record["created_edges"]:
                 row = tx.run("""MATCH (u:User {id:$owner})-[r:PREFERS|AVOIDS]->(c:Concept {key:$key})
                     WHERE elementId(r)=$id AND r.bootstrap_operation=$op_id DELETE r RETURN count(r) AS n""",

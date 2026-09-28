@@ -65,18 +65,18 @@ class MemoryActionTests(unittest.TestCase):
         session.execute_write.assert_called_once()
 
     def test_restore_recreates_the_original_relation_not_always_prefers(self):
-        driver, _session, transaction = graph({
-            "original_relation": "AVOIDS", "original_expires_at": None,
-        })
-        request = agent_api.MemoryActionRequest(
-            user_id="owner", key="smoking", action="restore",
-        )
-        with patch.object(agent_api.GraphDatabase, "driver", return_value=driver):
-            result = asyncio.run(agent_api.memory_action(request))
+        # Exercise authoritative reads and atomic state, not a canned row for
+        # the previous single-Cypher implementation.
+        from test_universal_v2_restore import Graph, invoke
+        graph = Graph()
+        graph.add({'key': 'smoking', 'label': 'Smoking'}, original_relation='AVOIDS')
+        result = invoke(graph, 'smoking')
         self.assertEqual(result["status"], "success")
-        query = next(c.args[0] for c in transaction.run.call_args_list if "DELETE disabled" in c.args[0])
-        self.assertIn("original_relation='AVOIDS'", query)
-        self.assertIn("MERGE (u)-[:AVOIDS]->(concept)", query)
+        active = [e for e in graph.edges if e['relation'] in {'PREFERS', 'AVOIDS'}]
+        self.assertEqual([(e['key'], e['relation']) for e in active],
+                         [(canonicalize_concept('Smoking').key, 'AVOIDS')])
+        self.assertEqual(graph.revisions['owner'], 1)
+        self.assertNotIn('preference_embedding_state', graph.concepts[active[0]['key']])
 
     def test_correct_moves_only_the_owner_relation_to_a_new_concept(self):
         original = canonicalize_concept("Coffee")

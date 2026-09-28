@@ -1,7 +1,7 @@
-"""Migrate Aura preference metadata to Mongo and simplify the graph schema.
+"""Read-only inventory of the historical Aura preference schema.
 
-The default mode is read-only. Pass ``--apply`` only after reviewing the
-printed counts. User content is never printed.
+Legacy apply is retired: this CLI is not Identity-v2 migration authority.
+User content is never printed. --apply is rejected before connecting to a DB.
 """
 
 from __future__ import annotations
@@ -56,8 +56,10 @@ def graph_config() -> tuple[str, tuple[str, str], str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--apply", action="store_true", help="write Mongo backup and mutate Aura")
+    parser.add_argument("--apply", action="store_true", help="retired; always fails closed")
     args = parser.parse_args()
+    if args.apply:
+        parser.error("legacy_preference_apply_forbidden: use the approved Identity-v2 lifecycle")
 
     load_dotenv(ROOT / "social" / ".env", override=False)
     mongo = MongoClient(os.environ["MONGO_URI"], serverSelectionTimeoutMS=8_000)

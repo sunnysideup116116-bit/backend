@@ -72,8 +72,9 @@ The source must map one-to-one to the plan's retired association; the signed rec
 retirement list must agree with that plan. Changes to locator, text, polarity,
 properties or owner revision invalidate the receipt before mutation. Audit retains
 `legacy_compound_sources` alongside existing before/after/retirement records, not on
-the globally shared Concept. Mongo projection, idempotency, fencing and precise
-rollback use the existing transaction/reconciliation path unchanged.
+the globally shared Concept. Mongo projection, idempotency and fencing use the
+existing transaction/reconciliation path. Universal-v2 recovery now forbids a
+rollback that would reactivate legacy preference identity (see below).
 
 The result is one full Identity-v2 key. Querying a sub-fragment is **not** an exact
 match for that composite; no atomic child identities or relations are added. Normal
@@ -165,9 +166,14 @@ Duplicate operation submits return the same outcome; contention can return a
 retryable unavailable/reconciliation response, not a second mutation.
 
 Rollback checks original after revision **and** after-image. Later modification
-blocks before cache invalidation. It removes exact created edges, restores original
-legacy relation/properties (new physical relationship IDs are audited), and bumps
-revision. Created Concepts are deleted only if still unchanged and unreferenced;
+blocks before cache invalidation. A retirement journal that would restore legacy
+identity is rejected with HTTP409 `rollback_legacy_restore_forbidden`, both before
+Mongo preparation and under the Graph transaction fence. Use forward projection
+reconciliation for a committed legacy migration; do not force legacy recovery.
+Pure v2 rollback removes exact created edges, restores only verified original v2
+relation/properties (physical relationship IDs are audited), and bumps revision.
+Current target identity is independently verified under lock before restoration.
+Created Concepts are deleted only if still unchanged and unreferenced;
 shared/enriched nodes are retained. Mongo restores only captured changed facts.
 Rollback failure after preparation reconciles current Graph state, never clobbers
 a later writer. Replaying an old receipt cannot recommit a rolled-back operation.

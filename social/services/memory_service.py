@@ -322,14 +322,8 @@ def apply_memory_action(user_id: str, key: str, action: str, value: str | None =
     except BootstrapError as exc:
         raise MemoryWriteError(exc.code, retryable=exc.status == 503) from None
     from services import preference_action_projection as projection
-    # Restore retains its existing internal-key contract; do not weaken its
-    # pre-existing recovery behavior while hardening active correct/disable.
-    projection_id = None
-    if action == 'restore':
-        try:
-            projection_id = projection.stage(user_id, key)
-        except Exception:
-            raise MemoryWriteError('preference_projection_unavailable') from None
+    # Restore now uses the same committed Graph recovery marker as the other
+    # actions. Rejected normalization must not leave a Mongo intent.
     try:
         response = requests.post(f"{AGENT_URL}/api/v2/memory/action", json={
             "user_id": user_id, "key": key, "action": action, "value": value,
@@ -348,12 +342,12 @@ def apply_memory_action(user_id: str, key: str, action: str, value: str | None =
     if result.get("status") not in {"success", "expired"}:
         raise MemoryWriteError(str(
             result.get("error_code") or result.get("status") or "memory_action_failed"
-        )[:80])
-    projection_key = result.get('projection_key') if action in {'disable', 'correct'} else key
+        )[:80], retryable=result.get('retryable') is not False)
+    projection_key = result.get('projection_key')
     if not isinstance(projection_key, str) or not projection_key:
         raise MemoryWriteError('memory_action_outcome_unknown')
     try:
-        projection_result = projection.settle(projection_id or projection.stage(user_id, projection_key))
+        projection_result = projection.settle(projection.stage(user_id, projection_key))
     except Exception:
         # Graph is already committed; the Graph marker survives a failed Mongo
         # journal write. A pending projection is NOT permission to retry action.
