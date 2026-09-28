@@ -4,6 +4,12 @@ Runtime contract: `docs/PREFERENCE_BOOTSTRAP_RUNTIME.md`.
 All fixtures are synthetic; no account, credential, raw message or Graph data from
 production. The historical model tests remain design evidence, not integration.
 
+Universal-v2 recovery supersedes historical legacy-rollback expectations below:
+runtime rehearsal now requires 409 `rollback_legacy_restore_forbidden`, unchanged
+Graph/Mongo state, and forward reconciliation; v2-only rollback/shared-node
+preservation remains covered. Historical design-model simulations are not writer
+authority or a statement of the current deployed rollback contract.
+
 ## Offline
 
 Use service-specific test environments and `scripts/run_offline_tests.py`:

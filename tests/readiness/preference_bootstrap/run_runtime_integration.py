@@ -180,13 +180,13 @@ def main():
             mark("late_duplicate_prepare_never_reopens_projection")
 
             rolled = client.post(path + "/rollback", json={"operation_id": p["preview_id"], "revision": 1, "confirmed": True}, headers=headers)
-            assert rolled.status_code == 200 and rolled.json()["status"] == "rolled_back", rolled.json()
-            restored = current(); assert restored["revision"] == 2
+            assert rolled.status_code == 409 and 'rollback_legacy_restore_forbidden' in rolled.text, rolled.json()
             normalize = lambda snap: sorted((r["relation"], r["concept"]["key"], json.dumps(r["properties"], sort_keys=True)) for r in snap["rows"])
-            assert normalize(restored) == normalize(before)
-            assert db.preference_facts.find_one({"user_id": "synthetic_a"})["active"]
-            assert submit(p).json()["status"] == "rolled_back"
-            mark("precise_rollback_and_consumed_receipt")
+            assert current() == after
+            assert not db.preference_facts.find_one({"user_id": "synthetic_a"})["active"]
+            assert db.profiles.find_one({"user_id": "synthetic_a"}) == duplicate_profile
+            assert submit(p).json()["status"] == "committed"
+            mark("legacy_rollback_forbidden_without_graph_mongo_side_effect")
 
             reset(); p = get_preview("add_only"); assert not p["retire_edges"]
             assert submit(p).json()["status"] == "committed"
@@ -339,7 +339,7 @@ def main():
                 assert outcome["error_code"] == "preference_projection_pending"
             mark("ordinary_disable_restore_correction_share_pending_fence")
 
-            reset(); p = get_preview(); assert submit(p).json()["status"] == "committed"
+            reset(); p = get_preview('add_only'); assert submit(p).json()["status"] == "committed"
             new_key = p["create_concepts"][0]["key"]
             with driver.session() as session:
                 session.run("MATCH (u:User {id:'synthetic_b'}),(c:Concept {key:$key}) CREATE (u)-[:PREFERS]->(c)", key=new_key).consume()
@@ -441,9 +441,9 @@ def main():
                     assert session.run("MATCH (:User {id:'synthetic_a'})-[:PREFERS]->(:Concept {key:$key}) RETURN count(*) AS n",
                         key=agent_api.canonicalize_concept(text).key).single()["n"] == 0
             rolled = client.post(path+"/rollback",json={"operation_id":p["preview_id"],"revision":1,"confirmed":True},headers=headers)
-            assert rolled.json()["status"] == "rolled_back"
-            assert normalize(current()) == normalize(before)
-            mark("legacy_compound_literal_complete_set_commit_projection_idempotency_rollback")
+            assert rolled.status_code == 409 and 'rollback_legacy_restore_forbidden' in rolled.text
+            assert current() == after
+            mark("legacy_compound_literal_commit_projection_idempotency_rollback_forbidden")
 
             for variant in ("add_only","new_text","polarity"):
                 values = compound_fixture(); before=current()
@@ -483,6 +483,8 @@ def main():
 
         from lifecycle_scenarios import exercise
         exercise(driver, agent_api, db, graph, reset, client, headers, path, consent, mark)
+        from universal_writer_scenarios import exercise as universal_writers
+        universal_writers(driver, agent_api, graph, reset, mark)
         report = {"status": "PASS", "synthetic_only": True, "production_ready": False,
                   "graph": topology, "mongo": mongo, "scenarios": results,
                   "authentication": "synthetic principal override; real HMAC internal boundary",

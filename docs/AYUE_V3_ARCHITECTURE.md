@@ -11,6 +11,7 @@
 - 主動關心、Private V2、App voice 與 registration voice 保持各自 runtime。
 - 舊公開待辦透過 `scripts/retire_public_dag_state.py` 失效；Pi、Private 與完成紀錄保持不變。
 - Server 仍只由 `start_all.sh` 啟動固定四個服務。
+- Durable preference restore／manual projection 經既有 owner fence 與 Identity-v2 authority 驗證；會恢復 legacy 的 rollback 與歷史 CLI apply 均 fail closed。不新增 Pi tool、不混入一般 memories。契約見 [Preference Lifecycle v2](PREFERENCE_LIFECYCLE_V2.md)。
 
 ## Compaction v5 整合
 

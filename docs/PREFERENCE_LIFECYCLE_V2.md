@@ -63,8 +63,17 @@ shared Graph owner fence; duplicate Concepts also fail closed.
 Correction creates/reuses the new verified v2 identity and archives only the
 old owner's association as PREFERENCE_SUPERSEDED. It does not alter old/shared
 Concept identity or vectors. Conflicting target polarity is rejected. Disable
-retains MEMORY_DISABLED with original polarity; restore reuses the same identity
-and enqueues verified positive evidence if needed. Neither deletes a shared node.
+retains MEMORY_DISABLED with original polarity. Verified v2 restore reuses that
+identity; a legacy durable restore canonicalizes the full stored source using the
+existing Identity-v2 normalizer, creates/reuses a verified v2 target, and preserves
+owner and PREFERS/AVOIDS polarity. It never splits text or revives the legacy edge.
+The old MEMORY_DISABLED edge remains inactive with a restored-target marker, so
+replaying that legacy restore fails closed. Missing/ambiguous/lossy source,
+conflicting target identity/polarity or duplicate associations roll back the whole
+transaction. PREFERS queues missing compatible vectors in the same transaction;
+AVOIDS does not enqueue positive evidence. No provider call occurs inside it.
+Neither path deletes a shared node or changes historical vectors. Non-preference
+CURRENTLY_WANTS restore retains its existing expiration semantics.
 
 Correct/disable resolve the reference under the existing Graph owner write fence
 and in the same transaction as mutation. Only one currently active PREFERS/AVOIDS
@@ -79,7 +88,7 @@ revives an old active action reference. Legacy correct still requires explicit
 complete-set reconfirmation; a reference is not permission to convert legacy.
 
 Graph is authoritative; Mongo facts are partial evidence, not a full corpus.
-Correct/disable stage Mongo projection only AFTER Graph acknowledges success.
+Correct/disable/restore stage Mongo projection only AFTER Graph acknowledges success.
 A successful Graph transaction atomically records the old key in the bounded
 User `preference_action_projection_keys` recovery list (at most100 distinct keys;
 full backlog fails closed). No new association IDs, nodes, indexes or migration
@@ -88,7 +97,7 @@ via service-signed private scan and acknowledge under a revision fence after
 Mongo synchronization. Thus a lost HTTP acknowledgement or failed Mongo intent
 write cannot lose recovery, and rejected actions leave no recovery marker. This
 reuses the existing15-second projection worker, not an embedding worker.
-Restore retains its prior pre-staged recovery behavior. Success reconciles only
+Restore uses this same committed marker, not a pre-staged Mongo intent. Success reconciles only
 the old key's `active` flag from current Graph under the existing Mongo fence;
 it never manufactures facts, changes counters, rewrites identity or replays the
 action. Existing waiting intents still wait75 seconds. New Social commands expire
@@ -101,6 +110,39 @@ The scan does not reset exhausted jobs or replay a mutation. Public action
 responses contain status/projection_status, never internal projection keys.
 The two databases are not distributed ACID. A concurrent Graph revision change
 causes projection retry; bootstrap's snapshot/fact checks remain fail closed.
+
+## Owner-scoped manual projection maintenance
+
+`scripts/rebuild_neo4j_projection.py` is not migration authority. Its default
+dry-run validates bounded Mongo reference shape and reports that Graph authority
+has not yet been verified. `--apply` requires one explicit canonical `--owner`.
+Under the existing owner fence it verifies every durable reference against an
+already-active authoritative Graph association with verified Identity-v2 identity
+and the same owner/polarity. Legacy payloads, missing/retired associations,
+unverified identities and ambiguous sources fail closed; labels cannot authorize
+identity creation. An empty Mongo fact cache does not authorize a legacy Graph
+source either.
+
+Durable Graph associations are preserved rather than deleted/recreated from
+partial Mongo caches. Only that owner's expiring CURRENTLY_WANTS projection is
+rebuilt; its key space cannot overwrite a v2 Concept. The CLI does not reset Graph
+Users, erase shared Concepts/history/observations, infer polarity, or perform bulk
+legacy conversion. Existing positive v2 references may enqueue missing vectors;
+external embedding work remains outside the Graph transaction.
+
+Recovery is not an exception to the Identity-v2 writer boundary. Bootstrap
+rollback rejects any retirement journal that would restore a legacy preference
+with HTTP409 `rollback_legacy_restore_forbidden`. Both the read-only check (before
+Mongo prepare) and the authoritative Graph transaction enforce this restriction.
+Pure v2 rollback keeps its existing after-image/revision/owner/archive guards;
+any restored v2 Concept is revalidated under a shared-node lock. Forward
+projection reconciliation remains available; operators must not force a legacy
+rollback to repair a Mongo projection failure.
+
+The historical `scripts/migrate_neo4j_preferences.py` remains a read-only
+inventory tool. `--apply` unconditionally exits with
+`legacy_preference_apply_forbidden` before reading secrets or opening databases.
+Its historical key helper is not runtime migration authority.
 
 ## Resource-based complete-set contract
 
