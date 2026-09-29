@@ -7,8 +7,10 @@
 Preference current-state entry: [architecture / lifecycle evolution](../PREFERENCE_SYSTEM_OVERVIEW.md).
 Backend PR #29 and DatingApp PR #45 are delivered; the enabled internal population
 migration is complete. Future owner-confirmation API semantics below remain; they
-are no longer an internal per-owner rollout blocker. Readiness does not activate
-semantic, bootstrap, historical workers or APK packaging.
+are no longer an internal per-owner rollout blocker. Readiness alone does not
+activate anything; separately approved semantic active / enabled_accounts rollout
+completed on 2026-09-29. Bootstrap/historical workers remain OFF, new V2 worker ON;
+current threshold/kill/rollback policy is in the overview. No APK packaging is implied.
 
 Preference bootstrap adds owner-authenticated `/api/profile/preferences/bootstrap`
 preview/commit/status/reconcile/rollback, default OFF. The private 9001 counterpart

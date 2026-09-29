@@ -1,13 +1,16 @@
 # All internal semantic rollout — eligibility contract and historical preparation
 
-This is infrastructure/readiness, not production all-user activation. The accepted
-Phase 2 E2E and frozen R3 conclusions are not re-evaluated here. No extra synthetic
-production pilot, owner bootstrap, embedding backfill, index creation or P1-B.
+This document retains the rollout eligibility contract and historical preparation
+sequence. The accepted Phase 2 E2E and frozen R3 conclusions are not re-evaluated.
+It does not authorize another pilot, bootstrap, embedding backfill or P1-B.
 
-Current status (2026-09-28): enabled population migration and universal-v2 writer
-hardening are complete; DatingApp PR #45 is merged. Earlier per-owner internal
-confirmation/capacity rollout blockers below are superseded. Production semantic
-activation is still a separate decision. [Current architecture / audited facts](PREFERENCE_SYSTEM_OVERVIEW.md).
+Current status (2026-09-29): enabled population migration, universal-v2 writer
+hardening and **production semantic activation are complete**; DatingApp PR #45
+is merged. Running backend `8ccfe09f688b92c105e961994e4d1da87ed480b7` uses
+`enabled_accounts`, semantic active, related-interest ON, ANN score threshold
+0.90 and kill cleared; bootstrap OFF, new V2 worker ON, historical worker OFF.
+Earlier internal confirmation/capacity/activation blockers are superseded.
+[Current flags, score semantics and kill/rollback runbook](PREFERENCE_SYSTEM_OVERVIEW.md).
 
 ## Ownership and admission
 
@@ -94,8 +97,9 @@ operator artifact, never Git, public logs or a model prompt.
 | EMPTY | no active preferences; valid requester, no fabricated candidate proof |
 | BLOCKED | identity ambiguity, unsafe/incomplete evidence, contract overflow or incompatible/missing embeddings; isolate that owner |
 
-`enabled_semantic_requesters` is technical eligibility **if the new mode is
-activated**, not a claim that semantic flags are currently ON. The old canary
+`enabled_semantic_requesters` measures technical eligibility independently of
+activation; inspect actual process flags/kill rather than inferring activation
+from the inventory count. Current accepted activation is recorded above. The old canary
 cohort is no longer the enabled_accounts population model.
 `semantic_ready_candidate_owners` requires at least one current positive vector-
 backed v2 edge (an AVOIDS-only READY owner is not a positive candidate).
@@ -205,7 +209,8 @@ truncation, corruption, rejected-relation acceptance or false-shared claim requi
 review/kill according to existing policy, not a fake healthy zero. A replacement
 external schedule needs separate explicit approval; this PR creates none.
 
-Release sequence, after PR review/merge and explicit deployment authority:
+Historical preparation release sequence (completed by the later approved
+shadow/active gates; not instructions to reset current production flags):
 
 1. Use only `start_all.sh`, frozen reviewed commit, all semantic/related flags OFF;
    retain kill and bootstrap OFF. Do not manipulate the dirty primary worktree.
@@ -219,8 +224,9 @@ Release sequence, after PR review/merge and explicit deployment authority:
 4. Keep all kill/validator/qualification/history/block/consent/final proof controls.
    No timer reset, rollback of owner data, bootstrap or backfill is implicit.
 
-Preparation validation uses hermetic service suites and owner-verified disposable
+The original preparation validation used hermetic service suites and owner-verified disposable
 Neo4j/Mongo (synthetic vectors/fake relation responses), not production traffic or
 a new model experiment. Local plans must use indexed Concept lookup, bounded
 PREFERS expansion and no all-node/label scan. Deployment health/flags-OFF smoke
-is a **later gate**, not claimed by these unit/integration tests.
+was a **later gate**, not claimed by those unit/integration tests. Its subsequent
+production completion is recorded in the overview, separately from this evidence.

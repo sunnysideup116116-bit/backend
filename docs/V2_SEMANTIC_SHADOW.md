@@ -1,6 +1,17 @@
 # V2 semantic shadow-only hardening and independent threshold holdout
 
-## Release boundary
+> **Historical rollout evidence / preparation instructions superseded — 2026-09-29.**
+> PR #31 was merged/deployed as `8ccfe09f688b92c105e961994e4d1da87ed480b7`.
+> Strict operator-auth, production V2 shadow and subsequent active controlled
+> gates passed; `SEMANTIC_PRODUCTION_READY = YES` was accepted. Current production
+> is **active / related-interest ON / threshold 0.90 / kill cleared**, with
+> bootstrap OFF, new V2 worker ON and historical worker OFF. Use the
+> [current overview and rollback runbook](PREFERENCE_SYSTEM_OVERVIEW.md), not the
+> preparation-state flags below. Holdout results, code invariants and original
+> regression observations are retained unchanged; they are not a natural-flow
+> reliability guarantee or authorization to start another experiment/P1-B.
+
+## Historical release boundary — at PR preparation
 
 Prepared on `codex/v2-semantic-shadow`, from backend main
 `efa5a7f0bc8f2b4caabf9fa4ea15f2c921c31f36` (docs PR30). Its implementation
@@ -8,7 +19,7 @@ is identical to accepted production `709ffc9da2c6649ae55f27a182a9703d92694245`;
 the intervening changes are Markdown only. This PR does **not** deploy, activate,
 migrate owners, modify preference lifecycle, change production threshold, or start P1-B.
 
-Production remains semantic/related-interest/bootstrap OFF, new V2 worker ON,
+At that preparation stage, production remained semantic/related-interest/bootstrap OFF, new V2 worker ON,
 historical worker OFF, kill engaged. The recommendation below is not applied by
 this code: the existing default threshold remains0.82 until a separately approved
 activation/config release. Do not interpret implementation readiness as a production shadow PASS.
@@ -127,7 +138,8 @@ are preserved, not relabeled. Actual accepted taxonomy counts were equivalent2,
 specific5, sibling4, role5; all were retained at every tested threshold.
 
 **ANN_THRESHOLD_READY = YES for this fixed activation holdout.**
-**RECOMMENDED_THRESHOLD = 0.90**, not deployed.0.92 gave no additional benefit in
+**RECOMMENDED_THRESHOLD = 0.90** (not deployed at preparation; subsequently
+approved/applied during the production rollout above).0.92 gave no additional benefit in
 this holdout;0.94 was not chosen merely to minimize calls. Small synthetic sample,
 boundary stability and real ANN competition remain limitations to verify in a
 separately approved controlled shadow window. This does not certify natural-flow

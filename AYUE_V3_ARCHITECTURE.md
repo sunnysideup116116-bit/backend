@@ -41,19 +41,19 @@ User 保留穩定 ID、同步公開 name；初始 PREFERS 不覆寫既有或停�
 
 Durable preference 由 server-owned atomic/canonical boundary 寫入。Public Pi 的 `match.start_search` 明確區分 activity／recent context／preference：前兩者保留 bounded vector retrieval，explicit preference 先走 canonical Graph exact lookup，再進同一套 safety、history、quota、qualification、Matchmaker 與 consent lifecycle。Recent context 過期後不再進 matching 或 Agent context；它不會被當成 durable preference。
 
-[Preference Identity v2](docs/PREFERENCE_IDENTITY_V2.md) 將完整 semantic source 與 display label 分離；超限拒絕而非裁切，exact identity 使用 bounded versioned digest。Legacy unknown 不自動轉換／回填，持久搜尋需可信 v2 metadata 或重新確認；P1 semantic feature 仍 OFF。
+[Preference Identity v2](docs/PREFERENCE_IDENTITY_V2.md) 將完整 semantic source 與 display label 分離；超限拒絕而非裁切，exact identity 使用 bounded versioned digest。Legacy unknown 不自動轉換／回填，持久搜尋需可信 v2 metadata 或重新確認。2026-09-29 preference 與 semantic production rollout 已 closeout；現行 flags、population 與 rollback authority 見 [Preference System Overview](docs/PREFERENCE_SYSTEM_OVERVIEW.md)。
 
-[Related-Interest Matching v1](docs/RELATED_INTEREST_PILOT_V1.md) 是新的 internal app-wide pilot contract，預設仍 OFF，並非把舊 strict validator NO-GO 改判。只有 qualified exact=0 時才走專用 versioned ANN → DeepSeek relation validation → accepted Concepts → PREFERS owners；query embedding 仍為 Gemini。理由區分搜尋意圖、本人已保存偏好與相關但不同的候選興趣，不能把 semantic evidence 宣稱為共同偏好。既有 Pi confirmation、quota、block/history 與 mutual-consent lifecycle 不變；pilot metrics 不進 durable memory。
+[Related-Interest Matching v1](docs/RELATED_INTEREST_PILOT_V1.md) 保留歷史 pilot 證據；目前 production semantic active、related-interest ON，並非把舊 strict validator NO-GO 改判。只有 qualified exact=0 時才走 V2 ANN（Neo4j score threshold 0.90）→ `deepseek-v4.1-flash:cloud` relation validation → trusted ACCEPT Concepts → PREFERS owners；query embedding 仍為 Gemini。ERROR 永非 evidence。理由區分搜尋意圖、本人已保存偏好與相關但不同的候選興趣，不能把 semantic evidence 宣稱為共同偏好。既有 Pi confirmation、quota、block/history 與 mutual-consent lifecycle 不變；telemetry 不進 durable memory。
 
 Related-interest 支援分階段的 server-side rollout，見
-[All internal rollout preparation](docs/SEMANTIC_INTERNAL_ROLLOUT.md)。
+[All internal rollout contract / historical preparation](docs/SEMANTIC_INTERNAL_ROLLOUT.md)。
 `start_all.sh` 一致傳入 `MATCH_RELATED_INTEREST_ROLLOUT_MODE`；預設 `canary` 保持
 既有 2–10 位 allowlist 相容性，明確批准的 `enabled_accounts` 模式則依 enabled account、
 唯一 Mongo profile／Graph identity 判定 requester，不再依賴名單或人口 cap。
 EMPTY／legacy-only requester 不需先 bootstrap；candidate 必須有目前 verified-v2 PREFERS
 與相容的完整 source/hash/vector。9001 檢查 signed owner scope，Social proposal 前重新
 驗證帳號、證據、限制與 history/block。Exact 路徑不增加 readiness 依賴；kill 優先。
-此 preparation 變更不代表 production 已啟用 all-users，不自動修改 flags 或資料。
+Preparation 本身不構成 activation 授權；後續獨立批准的 shadow 與 active controlled gates 已完成，目前 production 使用 `enabled_accounts`。文件不自動修改 flags 或資料。
 
 - 主動關心維持 Profile extraction → follow-up candidate → proactive scheduler → grounded message；它不使用公開 Agent 的推理 loop。
 - App voice 與 registration voice 維持 Gemini runtime。App voice 轉交公開阿月時呼叫同一個 Pi HTTP contract；直接行事曆操作維持既有 typed API。
@@ -95,7 +95,7 @@ projection；完整集合必須分別確認 PREFERS/AVOIDS，才退休 owner-sco
 一般記憶、註冊、回饋、修正與 context writer 共用 fence。
 [Preference Lifecycle v2](docs/PREFERENCE_LIFECYCLE_V2.md) 提供本人全量來源確認、
 同交易 PREFERS incremental embedding queue、owner association edit/delete 與投影恢復；
-worker 預設 OFF，未部署／未靜默轉換 legacy。Manual add/action HTTP 需 owner JWT。
+worker source default OFF，但目前已批准的 production new V2 worker ON；bootstrap 與 historical worker 仍 OFF。已完成的 internal administrative migration 不等於未來 silent migration 授權。Manual add/action HTTP 需 owner JWT。
 完整 owner source 提供 opaque action key；client 不得自行由文字生成 Concept identity。
 Bootstrap `complete_set` 單次 PREFERS＋AVOIDS 合計最多 64 筆、全文 UTF-8 合計16KiB，超額整次拒絕，
 不拆成多次完整集合提交；`add_only` 與一般 memory extraction/write cap 不變。

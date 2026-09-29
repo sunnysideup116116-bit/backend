@@ -2,7 +2,7 @@
 
 > 本篇說明 port 9001 媒婆服務（candidate 排序＋Neo4j 記憶）與主服務的記憶／profile pipeline。完整資料邊界請見 [Memory 指南](../MEMORY_CONTEXT_ENGINE_GUIDE.md)。
 
-現行 preference identity／lifecycle／migration 與semantic gate以[架構摘要](../PREFERENCE_SYSTEM_OVERVIEW.md)為入口。Preference V1/V2不要與Ayue runtime版本混淆；current enabled population已遷移，semantic activation仍獨立管控。
+現行 preference identity／lifecycle／migration 與semantic gate以[架構摘要](../PREFERENCE_SYSTEM_OVERVIEW.md)為入口。Preference V1/V2不要與Ayue runtime版本混淆；current enabled population已遷移，另行批准的semantic production activation已於2026-09-29完成（enabled_accounts、active、0.90）；kill/rollback仍獨立管控。
 
 ## 1. 媒婆服務（matchmaker_agent, port 9001）
 
@@ -98,7 +98,9 @@ Preference exact search 是例外語意：候選集合已由 Social 以 canonica
 - 所有分支在 qualification／LLM 前都收斂到既有 `MATCH_CANDIDATE_POOL_SIZE=20`，Matchmaker 最多處理既有三個小 batch。Graph miss 不以 fuzzy inference 宣稱某人有未保存的偏好。
 - internal job diagnostics 只保存 bounded intent/topic/key、retrieval source、各階段 count、shared key、hard-conflict key 與 reason-code count；不保存 candidate IDs、raw messages 或 Graph payload。
 
-### 3.5 Explicit preference semantic fallback（P1-A）
+### 3.5 Historical P1-A preparation（已由 V2 production rollout 取代）
+
+以下舊 index、CLI-only shadow、0.82 provisional／OFF 描述僅保留早期設計證據，不是 current runtime contract。現行只用 `concept_embedding_v2_index`，exact-first → validator → final recheck；production active / 0.90 與 rollback 見[overview](../PREFERENCE_SYSTEM_OVERVIEW.md)，真正 V2 shadow contract與holdout見[historical rollout evidence](../V2_SEMANTIC_SHADOW.md)。不得將下列舊 index 當作 fallback。
 
 - Feature 預設 `MATCH_PREFERENCE_SEMANTIC_MODE=off`；canary threshold 預設 1，只有 `qualified_exact_count == 0` 才能啟動。Exact Graph hits 必須先經 block/history、test cohort、profile hydration 與 hard-conflict qualification，不能用 raw hit count 壓掉 fallback。
 - `off`／live `shadow` 保留 P0 的 retrieval 順序、20 人視窗、hydration 後 qualification、空結果 reason code 與 exact-only Matchmaker prompt。提前 qualification 和 semantic evidence 強度檢查只作用於 `active`。Differential regression 直接執行 frozen P0 source 比較候選、payload、quota 與 proposal 寫入。

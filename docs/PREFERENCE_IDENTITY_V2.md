@@ -1,6 +1,6 @@
 # P0.1 Preference Identity v2
 
-Current status (2026-09-28): Identity-v2 is the durable preference standard for current enabled users and every future/new/EMPTY-owner write. Backend PR #29 is deployed, the approved enabled-population migration is complete, and DatingApp PR #45 is merged. See [current architecture and activation boundaries](PREFERENCE_SYSTEM_OVERVIEW.md). V1 is historical/read-only compatibility, never a new durable writer target. Semantic activation, P1-B and APK packaging are not claimed complete.
+Current status (2026-09-29): Identity-v2 is the durable preference standard for current enabled users and every future/new/EMPTY-owner write. Backend PR #29 hardening is deployed, the approved enabled-population migration is complete, and DatingApp PR #45 is merged. Separately approved semantic production activation is now complete; see [current architecture, flags and rollback policy](PREFERENCE_SYSTEM_OVERVIEW.md). V1 is historical/read-only compatibility, never a new durable writer target. This closeout does not include P1-B or APK packaging.
 
 Historical disposition (2026-09-23, superseded release status): **both approved blockers resolved; no new branch-only regression, ready for commit review, not committed**. The RED language-parity test was repaired through a pinned fresh-input boundary. Review/test snapshots below remain evidence of that stage, not current rollout blockers; frozen R3 results are unchanged.
 

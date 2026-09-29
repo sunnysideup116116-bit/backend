@@ -4,7 +4,8 @@
 > research decision; its frozen results and reasoning are preserved, not regraded.
 > Later separately approved related-interest production canary, Identity-v2
 > migration/hardening and client merge supersede its deployment-blocker wording.
-> Current architecture/data readiness and still-OFF activation policy are in
+> The later separately approved production active state (2026-09-29),
+> architecture/data readiness and current kill/rollback policy are in
 > [the current overview](PREFERENCE_SYSTEM_OVERVIEW.md). No new research/P1-B is authorized.
 
 Decision date: 2026-09-24. Owner decision: stop the current P1-A production

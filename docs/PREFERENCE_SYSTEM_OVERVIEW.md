@@ -6,7 +6,9 @@
 
 本頁涵蓋 preference matching/lifecycle，不涵蓋一般 Ayue memories、聊天摘要、profile facts、Event pipeline 或 P1-B。以下「V1/V2」是 **preference identity**，不是 Public/Private Ayue runtime 或 relation-policy schema 版本。
 
-來源基線：backend `709ffc9da2c6649ae55f27a182a9703d92694245`（[PR #29](https://github.com/sunnysideup116116-bit/backend/pull/29)）；DatingApp main merge `66ba6e8ecd3f2adbcaf95859073eac906e78dc8c`（[PR #45](https://github.com/edwinchu0711/DatingApp/pull/45)）。2026-09-28 canonical runtime restoration 重新核對 production。文件只整理既有事實，不授權 migration、flag activation 或 APK packaging。
+**Closeout — 2026-09-29：`PREFERENCE_AND_SEMANTIC_ROLLOUT_COMPLETE = YES`。** Preference V2 rollout 與 Semantic related-interest production activation 均已接受完成；production 現為 `enabled_accounts` / semantic active，而非 implemented-but-OFF。
+
+Production code authority：backend `8ccfe09f688b92c105e961994e4d1da87ed480b7`（[PR #31](https://github.com/sunnysideup116116-bit/backend/pull/31)），保留 [PR #29](https://github.com/sunnysideup116116-bit/backend/pull/29) 的 Universal V2 writer hardening；DatingApp integration merge `66ba6e8ecd3f2adbcaf95859073eac906e78dc8c`（[PR #45](https://github.com/edwinchu0711/DatingApp/pull/45)）。本文件記錄已批准、已驗證的狀態；docs-only closeout 不執行部署、改 flags、migration 或 APK packaging。
 
 ## Relevant Source Files / 責任邊界
 
@@ -58,6 +60,18 @@ Correct/edit 改 owner association，不原地改 shared Concept identity；disa
 
 Concept-level validator ERROR 永不形成 evidence；6 REJECT + 2 ERROR 可正常 no-match，ACCEPT + ERROR 只使用可信 ACCEPT。Zero trusted decisions／systemic unavailable 仍回 typed unavailable；3-in-15-minute continuous protection、kill 與 proposal final recheck 不變。[Retrieval](../matchmaker_agent/related_interest_retrieval.py#L162-L182)。
 
+## Production semantic contract
+
+- **Exact-first：qualified exact > 0 → exact only；ANN calls = 0、validator calls = 0。** 只有 qualified exact = 0 才可進 semantic fallback；不能用 semantic 補滿已有 qualified exact 的結果。
+- ANN 僅使用 `concept_embedding_v2_index` / compatible `embedding_v2`。`MATCH_PREFERENCE_SEMANTIC_MIN_SIMILARITY=0.90` 比較的是 Neo4j 回傳的 **`score = (1 + raw cosine) / 2`**，等價 raw cosine 0.80，不是 raw cosine 0.90。Threshold 在 ANN retrieval gate 比較；不取代 validator taxonomy。這是已核准的 production runtime 設定，不是本文件修改 source default。
+- Validator model 為 **`deepseek-v4.1-flash:cloud`**，透過正式 adapter/auth/parser path；不以 catalog 名稱靜默替換 alias。Gemini 768-dim query/Concept embedding pipeline、source hash 與 pinned runtime/provenance checks 不變。
+- ACCEPT 才能進 active PREFERS owner expansion；candidate 必須 enabled、identity/profile 唯一、V2/source/vector 合格，並通過 block/history/quota/qualification。Proposal 前仍重新驗證 owner、polarity、relation、source/fingerprint/readiness 與 consent/lifecycle，任何不符均 drop。
+- **ERROR 不是 ACCEPT，也沒有猜測的 relation。** 有可信 decisions 時只用其 ACCEPT；可信 decisions 全為 REJECT 且伴隨 partial ERROR，可正常 no-match。零可信 decisions（有待驗證 Concepts）、provider/systemic failure 或無法在 shared deadline 內形成可信結果，仍為 typed unavailable；ANN 無 hit 則正常 no-match，不是 validator outage。Partial ERROR 本身不是整筆 job unavailable 或自動 kill 的理由。
+- User-visible reason/opening 只能表達「相關／相近興趣」，**不得把 related-interest 描述成 shared / same / identical preference 或共同偏好**。Query intent 不是 requester 的 durable preference；宣稱本人已保存 Q 仍需 fresh positive Q proof。Draft 不會自動送 invitation，原 confirmation/mutual-consent contract 保留。
+- Matching 不寫 PREFERS/AVOIDS，不把 rejection 寫成 AVOIDS；AVOIDS 永非 positive evidence。Embedding pending 不阻擋 exact matching；historical embedding/index 不作 semantic fallback，也不覆寫歷史向量。
+
+已批准的 synthetic holdout、V2 shadow no-visible-effect proof 與 regression 保留於 [historical shadow rollout evidence](V2_SEMANTIC_SHADOW.md)，不是當前 activation runbook，也不是自然流量可靠性保證。
+
 ## 演進：這一階段完成了什麼
 
 下圖是能力演進，不是重新評分 frozen R3 實驗。R3.3/R3.4 的既有 FAIL 與其他歷史研究數字保持原樣；後續 related-interest product policy／production canary 的批准是另一份證據。
@@ -71,27 +85,69 @@ flowchart TD
     L -->|"explicit internal administrative approval"| M["Existing-user migration：current enabled population → V2"]
     M -->|"close recovery / maintenance side doors"| H["Universal V2 writer hardening"]
     H -->|"PR45 merged"| C["DatingApp：management UI + V2 APIs"]
+    C -->|"independent holdout → V2 shadow → active controlled gates"| S["Production semantic active：enabled_accounts / threshold 0.90"]
 ```
 
 既有 internal test population 的一次性 administrative migration 已獨立批准並完成：只取 authoritative active PREFERS/AVOIDS，保留 polarity與0 AVOIDS；接受既有 canonicalizer 的 deterministic normalization，不拆分／猜測／人工改寫，不把一般 memory/profile facts 轉 preference。原5個v2 owners加24個 migrated owners；identity repair後另外10個 EMPTY，不需 migration。這不是未來 silent migration 授權；外部或需 owner confirmation 的使用者仍走完整 source → review/edit → explicit consent → fresh receipt → complete-set transaction。[Lifecycle](PREFERENCE_LIFECYCLE_V2.md)、[bootstrap](PREFERENCE_BOOTSTRAP_RUNTIME.md)。
 
-## Production snapshot — 2026-09-28
+## Production snapshot — 2026-09-29
 
-下列為已接受且於 canonical restoration 重新驗證的 bounded read-only audit；不是永久固定 population/corpus，也不是全歷史內容稽核。Private owner IDs、原文與 credentials 不寫入文件。
+下列為已接受的 active controlled gate 與後續唯讀複核（Asia/Taipei 12:21、13:29）；不是永久固定 population/corpus，也不是全歷史內容稽核。Private owner IDs、原文與 credentials 不寫入文件。2026-09-28 的 `709ffc9...` / semantic OFF snapshot 是前一階段歷史狀態，已由本節取代。
 
 | 指標 | 已驗證值 | Evidence |
 | --- | --- | --- |
-| Enabled / eligible | 39 / 39 | 2026-09-28 operator audit |
+| Enabled / eligible | 39 / 39 | 2026-09-29 operator audit |
 | READY v2 owners / EMPTY | 29 / 10 | 同次 lifecycle inventory |
 | Blocked identity | 0 | Graph/Mongo identity gate |
 | Enabled owners active legacy edges | 0 | owner-scoped active Graph audit |
 | Active PREFERS compatible embedding | 64 / 64 | source/hash/runtime/provenance gate |
+| Semantic-ready candidate owners | 28 | active verified positive evidence；與 requester eligibility 分開 |
+| Verified V2 Concepts / compatible embedding_v2 | 70 / 68 | 非所有 Concept 都需要 positive vector |
+| Incremental queue | 43 complete，無 pending/stuck | scoped fixture cleanup 後 inventory |
 | Non-enabled historical legacy edges | 2，explicit out-of-scope，未修改 | 同次全庫 metadata 對照；**不得寫成全 Graph=0** |
-| Health / Graph-Mongo integrity / index | 4/4 HTTP200 / PASS / ONLINE | canonical `start_all.sh` restoration |
-| Backend running commit | `709ffc9da2c6649ae55f27a182a9703d92694245` | running process provenance + file hashes |
+| Health / Graph-Mongo integrity / index | 4/4 HTTP200 / PASS / ONLINE | canonical `start_all.sh` release + active gate |
+| Backend running commit | `8ccfe09f688b92c105e961994e4d1da87ed480b7` | running process provenance + file hashes |
 | DatingApp main merge | `66ba6e8ecd3f2adbcaf95859073eac906e78dc8c` | PR #45 merge + ancestor/tree verification |
 
-此 snapshot 的 **semantic／related-interest／bootstrap OFF，new embedding_v2 worker ON，historical worker OFF，kill engaged**；routing 為 `enabled_accounts`，但 routing/readiness 不等於 activation。本輪沒有做新的 migration、P1-B 或 APK packaging，亦未改 build/signing workflow。主 `Server` dirty worktree 的 tracked/non-ignored source、index/status hashes 在 runtime restoration 前後一致；production code authority 是獨立 clean release。
+### Current production flags
+
+```ini
+MATCH_PREFERENCE_SEMANTIC_MODE=active
+MATCH_RELATED_INTEREST_ENABLED=on
+MATCH_RELATED_INTEREST_ROLLOUT_MODE=enabled_accounts
+MATCH_PREFERENCE_SEMANTIC_MIN_SIMILARITY=0.90
+MATCH_PREFERENCE_SEMANTIC_EMBEDDING_SPACE_CONFIRMED=on
+PREFERENCE_BOOTSTRAP_ENABLED=off
+PREFERENCE_EMBEDDING_V2_ENABLED=on
+CONCEPT_EMBEDDING_WORKER_ENABLED=off
+```
+
+Shared kill file：**absent / cleared**。實際位置以四服務一致的 `MATCH_RELATED_INTEREST_KILL_SWITCH_FILE` 為準；不能用呼叫者 cwd 推定另一個 kill file。`enabled_accounts` 不再依賴固定五人 allowlist；EMPTY owner 可作 requester，但不會被虛構為 positive candidate。Bootstrap 仍 OFF，activation 不是新的 migration 授權。
+
+### Accepted controlled activation evidence
+
+| Control | 已驗證結果 | Latency |
+| --- | --- | --- |
+| Exact active no-commit | qualified exact 1；ANN / validator 0；selection 1；既有 fence 在 proposal commit 前停止 | 4.37s pipeline，非完整 proposal E2E |
+| Related active E2E | exact 0；score 0.9774；candidate_more_specific ACCEPT；qualification / final proof PASS；真實 disposable draft 1，invitation 0 | 28.13s job creation→completion |
+| Unrelated active | exact 0；retained ANN hit 0；validator 0；正常 no-match，proposal 0 | 4.27s job creation→completion |
+
+Related job 當次為 **1 ACCEPT / 1 REJECT（candidate_more_broad）/ 6 ERROR**，4 attempts、2 retries；draft 只使用當次 fresh ACCEPT evidence，未重用先前 shadow 的 2 ACCEPT / 6 ERROR 判定。Typed unavailable 0、breaker 未觸發。App card 表達「這是相關而非已確認相同的偏好」，不宣稱共同偏好。
+
+Scoped cleanup 移除 draft、2 inbox references、2 disposable owners 與2個新增 test Concepts/vectors；必要 terminal jobs/accounting 留作 audit。原 preference hashes／vectors 恢復一致，原28個 compatible vectors 與 historical properties 未覆寫；真人 message/thread/read state、dirty `Server` source/index/status hashes 未變。窗口內非測試 jobs 為0，**不可據此宣稱自然流量 reliability PASS**；partial ERROR 的限制如實保留。Private receipts 不進 Git。
+
+## Kill / rollback runbook
+
+這是已接受的緊急停止 policy，不是本 docs-only PR 執行 runtime 操作的授權。
+
+1. 若發現 account leakage、ERROR／拒絕／constraint relation 進 positive evidence、false shared-preference claim、V2/source/fingerprint 證據失效、identity/data corruption、kill 失效或其他 active safety anomaly，立即 engage **同一個已核對的 shared kill file**，停止新 semantic work；kill 同時阻擋 active 與 shadow，不得繞過。
+2. 將 `MATCH_PREFERENCE_SEMANTIC_MODE=off`、`MATCH_RELATED_INTEREST_ENABLED=off`、`MATCH_PREFERENCE_SEMANTIC_EMBEDDING_SPACE_CONFIRMED=off`，維持 kill engaged。透過目前 reviewed clean release 的 canonical `start_all.sh` procedure 套用並核對所有四服務；不得從 dirty `Server` 重建 baseline，不 stash/reset/clean 該 worktree。
+3. 除非另有明確事故處置批准，bootstrap 保持 OFF、new V2 worker ON、historical worker OFF；不回滾／修補真人 preference，不改 threshold/model/taxonomy，不刪歷史 vectors 或真實 proposal/message。Exact 與既有非 semantic lifecycle 保持原 contract。
+4. 核對 running commit/provenance、四項 health200、OFF flags/shared kill、Graph/Mongo integrity、index/source/vector/queue；保存必要 aggregate 與精確 test-artifact receipts，STOP 並回報原因。安全條件無法驗證時保持 fail closed，不自動 clear kill 或重啟 semantic；恢復需要新的批准。
+
+Server continuous protection 保持 **15分鐘內連續3筆 typed unavailable**（`semantic_validator_unavailable`／`semantic_retrieval_timeout`）即 engage 同一 kill；active 與 historical shadow stream 各自依既有 policy 計數。可信 ACCEPT／REJECT 伴隨 Concept ERROR 不等於 typed unavailable，不能因 partial ERROR 自行放寬 validator，也不能把它當作 false healthy zero。Timeout/cancellation/shared deadline 不變：每 attempt最多6s、validator shared最多18s、semantic envelope最多38s；proposal final recheck 在原 selection deadline內最多5s。
+
+舊 five-user／28-vector frozen 15分鐘外部 monitor 不恢復；使用既有 population-independent telemetry／受控唯讀 reporter。任何新 recurring schedule 需另行批准。Provider/catalog readiness 與可 inference 的 adapter contract須分開；不使用 TLS bypass。Shadow 文件與舊 canary / NO-GO 紀錄僅供歷史證據，不能用來覆蓋本節的 current policy。
 
 ## Getting started / Cross-references
 
@@ -99,4 +155,4 @@ flowchart TD
 
 ## Active Development Areas / 未完成事項
 
-[NEEDS INVESTIGATION] 後續 semantic activation、外部使用者 rollout 與 external APK build/packaging 結果需各自取得最新操作批准及驗證；不能由資料 ready 或 PR merge 推論完成。P1-B 未開始。自動分析器此次缺 AST/PageRank 等 optional capabilities，文件採狹義 source review、Git/GitNexus定位及已驗證 operator receipts，不聲稱完整 repository reverse engineering。
+Preference V2 與 semantic production activation 已 closeout；外部使用者 onboarding／需本人確認的 migration 與 external APK build/packaging 不因此被宣告完成或授權。P1-B 未開始。Controlled smoke 不取代持續 availability／latency 的有分母觀察；文件依 source review、Git/GitNexus定位及已接受的 bounded operator receipts，不聲稱完整 repository reverse engineering或全歷史內容稽核。

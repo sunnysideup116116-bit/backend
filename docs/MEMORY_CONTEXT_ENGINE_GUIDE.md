@@ -111,7 +111,7 @@ Saved owner message
 - 每個 durable memory candidate 只表示一個 atomic concept。明確列舉可拆多筆；描述性名詞片語不可用標點或斷詞粗暴拆分。
 - 含明確正負 polarity 的單一複合 candidate fail closed；模型必須用 item-level evidence 分成獨立 candidates，避免把其中一邊的 stance 丟掉。
 - `concept_identity.py` 是 server-owned identity boundary：[Identity v2](PREFERENCE_IDENTITY_V2.md) 以完整 bounded semantic normal form 產生 51 字元 versioned digest。K-pop deterministic aliases 收斂到相同 v2 key；`k_pop` 是舊 v1 key，不自動重寫。Provider key 與縮短 display label 都不能成為 identity source。
-- Semantic source 上限 500，超限整次拒絕、不裁切；它沿用既有 embedding resource bound，而不是宣稱 DB 最大長度。完整文字保留到 owner context／embedding。`韓國流行音樂`／`韓流音樂` 等 semantic synonym 仍是不同 identity；P1-A retrieval 仍 OFF，也永遠不因此自動合併 Concept 或建立 alias。
+- Semantic source 上限 500，超限整次拒絕、不裁切；它沿用既有 embedding resource bound，而不是宣稱 DB 最大長度。完整文字保留到 owner context／embedding。`韓國流行音樂`／`韓流音樂` 等 semantic synonym 仍是不同 identity；已批准的 related-interest retrieval 可連結相關 evidence，但永遠不因此自動合併 Concept 或建立 alias。
 - Fresh preference 共用固定 OpenCC 1.4.1／`s2twp` boundary，缺套件／版本不符 fail closed，不用 UI fallback。Stored v2 source／key／hash 只驗證、不重轉。500 是 raw Unicode codepoints 上限（正規化後也需符合），Dart voice 使用 `runes`；registration 保持獨立 120。
 - 每訊息 limit 由 `DURABLE_MEMORY_MAX_CANDIDATES_PER_MESSAGE` 統一管理（預設 6、硬上限 8），套用於 extraction、outbox、registration 與 9001 writer。
 - Mongo `profile_memory_preview`／`profile_memory_summary` 是 bounded read projection；Graph metadata 與 evidence／lifecycle 不得藉由舊 `HAS_PREFERENCE` properties 重複儲存。
@@ -316,7 +316,7 @@ complete_set 同意才退休 legacy PREFERS/AVOIDS；Graph 原子提交與 Mongo
 migration批准並完成，不再等待逐人確認；不是未來 silent migration 授權，也不把聊天
 摘要／profile facts轉偏好。所有future durable writers只建立／reuse V2，EMPTY第一筆
 亦同；AVOIDS不作positive semantic evidence，exact不等待embedding。
-部署／population／仍OFF的semantic activation政策見[架構摘要](PREFERENCE_SYSTEM_OVERVIEW.md)。
+部署／population／已批准的production semantic active狀態與kill/rollback政策見[架構摘要](PREFERENCE_SYSTEM_OVERVIEW.md)。此狀態不擴大一般memories的preference寫入權限。
 
 ### 4.1 現行最小 schema
 

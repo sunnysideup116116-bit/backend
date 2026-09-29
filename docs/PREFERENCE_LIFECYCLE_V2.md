@@ -1,8 +1,9 @@
 # Preference Lifecycle v2 / Permanent All-User Readiness
 
-Current contract, updated 2026-09-28: backend PR #29 is deployed at `709ffc9da2c6649ae55f27a182a9703d92694245`; DatingApp PR #45 is merged at `66ba6e8ecd3f2adbcaf95859073eac906e78dc8c`.
+Lifecycle contract baseline (2026-09-28): backend PR #29 `709ffc9da2c6649ae55f27a182a9703d92694245`; DatingApp PR #45 merge `66ba6e8ecd3f2adbcaf95859073eac906e78dc8c`. Current running release and flags are in the overview below; this lifecycle contract is unchanged by the later semantic activation.
 The separately approved internal administrative migration and universal writer
-hardening are complete. This is not semantic activation, P1-B or APK packaging.
+hardening are complete. The separately approved semantic activation completed on
+2026-09-29; neither approval includes P1-B or APK packaging.
 See [current architecture, evolution and scoped population snapshot](PREFERENCE_SYSTEM_OVERVIEW.md).
 
 ## Owner authority and first use
@@ -239,7 +240,7 @@ must be investigated, not mistaken for compatible embedding coverage.
 39 enabled/eligible; READY29, EMPTY10, BLOCKED_IDENTITY0. Enabled active legacy
 edges0; active PREFERS compatible vectors64/64. Two non-enabled historical legacy
 edges are explicit out-of-scope, untouched: **not whole-Graph legacy0**. Full
-flags/release provenance and audit scope are in the [current overview](PREFERENCE_SYSTEM_OVERVIEW.md#production-snapshot--2026-09-28).
+flags/release provenance and audit scope are in the [current overview](PREFERENCE_SYSTEM_OVERVIEW.md#production-snapshot--2026-09-29).
 
 ### Historical / superseded preparation inventory (2026-09-27)
 
