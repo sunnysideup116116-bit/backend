@@ -23,14 +23,19 @@ ACCEPTED = frozenset({"equivalent", "candidate_more_specific", "sibling_related"
 def enabled():
     if os.getenv("MATCH_RELATED_INTEREST_ENABLED", "off").lower().strip() not in {"1", "true", "on"}:
         return False
+    return not kill_engaged()
+
+
+def kill_engaged():
+    """Shared emergency stop for both observation and user-visible matching."""
     # Operator-only shared file: both services observe a kill immediately,
     # without a restart or exposing a public flag-editing endpoint.
     path = Path(os.getenv("MATCH_RELATED_INTEREST_KILL_SWITCH_FILE") or
                 Path(__file__).resolve().parents[1] / ".related-interest-disabled")
     try:
-        return not path.exists()
+        return path.exists()
     except OSError:
-        return False
+        return True
 
 
 def embedding_manifest(model):

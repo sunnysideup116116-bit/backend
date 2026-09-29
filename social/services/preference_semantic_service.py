@@ -18,6 +18,7 @@ from urllib3.util import Timeout
 from config import GOOGLE_EMBEDDING_MODEL
 from matchmaker_agent.concept_identity import canonicalize_concept
 from matchmaker_agent.semantic_rollout_policy import requester_route_allowed, pair_route_allowed, rollout_mode
+from matchmaker_agent.semantic_rollout_policy import compute_allowed, compute_pair_allowed
 from matchmaker_agent.related_interest_contract import (
     enabled as related_interest_enabled, embedding_fingerprint, validated_evidence, bounded_counts, bounded_ann_observations,
 )
@@ -117,7 +118,7 @@ def semantic_embedding_space_confirmed() -> bool:
 
 def qualified_exact_trigger_threshold() -> int:
     """Canary default: semantic fallback only when qualified exact count is zero."""
-    if related_interest_enabled():
+    if related_interest_enabled() or preference_semantic_mode() == "shadow":
         return 1
     return _bounded_int(
         "MATCH_PREFERENCE_SEMANTIC_QUALIFIED_EXACT_THRESHOLD", 1,
@@ -159,7 +160,7 @@ def semantic_config() -> dict[str, Any]:
             _HARD_TOTAL_TIMEOUT_SECONDS,
         ),
     }
-    if related_interest_enabled():
+    if related_interest_enabled() or preference_semantic_mode() == "shadow":
         # Explicitly budget validation separately from the retired ANN-only
         # 6s path: <=18s validator + bounded Graph I/O and query embedding.
         config.update(timeout_seconds=27.0, total_timeout_seconds=38.0)
@@ -236,7 +237,7 @@ def preference_semantic_readiness() -> dict[str, Any]:
 
 def _post_semantic(payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
     related = "embedding_fingerprint" in payload
-    if related and not requester_route_allowed(payload.get("requester_user_id")):
+    if related and not compute_allowed(payload.get("requester_user_id"), shadow_only=payload.get("shadow_only") is True):
         raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
     extra = {}
     if related:
@@ -269,13 +270,15 @@ def retrieve_semantic_preference_candidates(
     *,
     excluded_user_ids: set[str] | list[str] | tuple[str, ...],
     related_policy_required: bool = False,
+    shadow_only: bool = False,
 ) -> dict[str, Any]:
     """Return deterministic, deduplicated candidates from bounded Concept ANN."""
     # Bind policy to the caller, not a mutable flag sampled between HTTP calls.
-    # The live pipeline always requires v1; only explicit legacy observation
-    # callers retain the original read-only API when mode is not active.
-    related = related_policy_required or related_interest_enabled() or preference_semantic_mode() == "active"
-    if related and not requester_route_allowed(requester_user_id):
+    # Live and shadow require related_interest_v1 policy over Identity V2.
+    # The historical OFF-mode read remains compatibility only, never shadow.
+    related = shadow_only or related_policy_required or related_interest_enabled() or preference_semantic_mode() in {"active", "shadow"}
+    allowed = lambda: compute_allowed(requester_user_id, shadow_only=shadow_only)
+    if related and not allowed():
         raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
     identity = canonicalize_concept(topic)
     if not identity:
@@ -315,14 +318,16 @@ def retrieve_semantic_preference_candidates(
     }
     if related:
         payload["embedding_fingerprint"] = embedding_fingerprint(GOOGLE_EMBEDDING_MODEL)
+        if shadow_only:
+            payload["shadow_only"] = True
     result = _post_semantic(payload, remaining_timeout())
     remaining_timeout()
-    if related and not requester_route_allowed(requester_user_id):
+    if related and not allowed():
         raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
     if result.get("canonical_key") != identity.key:
         raise PreferenceSemanticRetrievalError("semantic_graph_invalid_response")
     if result.get("status") == "query_embedding_required":
-        if related and not requester_route_allowed(requester_user_id):
+        if related and not allowed():
             raise PreferenceSemanticRetrievalError("semantic_policy_disabled")
         try:
             vectors = get_embeddings(
@@ -364,7 +369,7 @@ def retrieve_semantic_preference_candidates(
         if (
             not candidate_id or candidate_id == requester_user_id
             or candidate_id in excluded
-            or related and not pair_route_allowed(requester_user_id, candidate_id)
+            or related and not compute_pair_allowed(requester_user_id, candidate_id, shadow_only=shadow_only)
         ):
             continue
         evidence = by_candidate.setdefault(candidate_id, [])
@@ -468,6 +473,8 @@ def semantic_observation_summary(
         requester_user_id,
         topic,
         excluded_user_ids=excluded_user_ids,
+        related_policy_required=True,
+        shadow_only=True,
     )
     return {
         "status": "success",

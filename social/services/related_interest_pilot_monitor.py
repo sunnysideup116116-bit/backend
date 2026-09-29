@@ -25,6 +25,36 @@ def systemic_failure(rows, *, now):
         r.get("status") == "failed" and r.get("error_code") in UNAVAILABLE_CODES for r in latest)
 
 
+def on_shadow_finished(owner_id, error_code):
+    """Same 3-in-15m policy; shadow failures never change the visible job status."""
+    from matchmaker_agent.semantic_rollout_policy import shadow_requester_allowed
+    if error_code not in UNAVAILABLE_CODES or not shadow_requester_allowed(owner_id):
+        return False
+    try:
+        from database import db
+        from pymongo import timeout
+        now = time.time()
+        with timeout(.5):
+            jobs = list(db["match_search_jobs"].find({
+                "semantic_shadow.policy_version": POLICY,
+                "semantic_shadow.rollout_mode": "enabled_accounts",
+                "semantic_shadow.observation_only": True,
+                "semantic_shadow.completed_at": {"$gte": now-WINDOW_SECONDS, "$lte": now},
+            }, {"_id": 0, "semantic_shadow": 1}).sort("semantic_shadow.completed_at", -1).limit(CONSECUTIVE_FAILURE_LIMIT))
+        rows = [{"status": m.get("status"), "error_code": m.get("error_code"),
+                 "completed_at": m.get("completed_at"), "related_interest_pilot": m}
+                for j in jobs for m in [j.get("semantic_shadow") or {}]]
+        if not systemic_failure(rows, now=now):
+            return False
+        Path(os.getenv("MATCH_RELATED_INTEREST_KILL_SWITCH_FILE") or
+             Path(__file__).resolve().parents[2]/".related-interest-disabled").touch(exist_ok=True)
+        LOG.error("semantic_shadow_stopped reason=consecutive_validator_unavailability")
+        return True
+    except Exception as exc:
+        LOG.warning("semantic_shadow_stop_check_unavailable error_type=%s", type(exc).__name__)
+        return False
+
+
 def on_job_finished(owner_id, status, error_code):
     if status != "failed" or error_code not in UNAVAILABLE_CODES or not requester_route_allowed(owner_id):
         return False

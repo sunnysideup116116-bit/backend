@@ -1,0 +1,1052 @@
+{
+  "manifest_sha256": "3208f2d66e4b86e3e892429cac1701ff8a0e58fe47dab669ac14c742aa03226c",
+  "model": "deepseek-v4.1-flash:cloud",
+  "embedding_model": "models/gemini-embedding-2",
+  "score_semantics": "(1+raw_cosine)/2; paired exact vector scoring, not a live ANN rank benchmark",
+  "threshold_mode": "offline replay of the SAME once-validated fixed pairs; counts/errors/latency are replay estimates, not four fresh runs",
+  "production_writes": 0,
+  "vectors_persisted": false,
+  "synthetic_only": true,
+  "cases": [
+    {
+      "id": "eq1",
+      "expected": "equivalent",
+      "score": 0.9800984493433784,
+      "raw_cosine": 0.9601968986867568,
+      "observed": "role_mismatch",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 1
+        },
+        "elapsed_seconds": 5.415591738994408,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "eq2",
+      "expected": "equivalent",
+      "score": 0.983881536075971,
+      "raw_cosine": 0.9677630721519419,
+      "observed": "equivalent",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 1,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 2.391600221999397,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "eq3",
+      "expected": "equivalent",
+      "score": 0.9859581656772296,
+      "raw_cosine": 0.9719163313544592,
+      "observed": "candidate_more_specific",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 2,
+          "attempt_errors": 1,
+          "retries": 1,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 1,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 9.434224701006315,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "eq4",
+      "expected": "equivalent",
+      "score": 0.9957604453618973,
+      "raw_cosine": 0.9915208907237946,
+      "observed": "equivalent",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 1,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.10277145299915,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "sp1",
+      "expected": "candidate_more_specific",
+      "score": 0.9546352989405587,
+      "raw_cosine": 0.9092705978811172,
+      "observed": "candidate_more_specific",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 1,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.8220864809991326,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "sp2",
+      "expected": "candidate_more_specific",
+      "score": 0.9714249570977184,
+      "raw_cosine": 0.9428499141954367,
+      "observed": "candidate_more_specific",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 1,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.0145096670021303,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "sp3",
+      "expected": "candidate_more_specific",
+      "score": 0.9692599400646199,
+      "raw_cosine": 0.9385198801292398,
+      "observed": "candidate_more_specific",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 1,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 2.7275723249986186,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "sp4",
+      "expected": "candidate_more_specific",
+      "score": 0.9474006342832311,
+      "raw_cosine": 0.894801268566462,
+      "observed": "candidate_more_specific",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 1,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.554681351997715,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "si1",
+      "expected": "sibling_related",
+      "score": 0.9439936964453699,
+      "raw_cosine": 0.8879873928907397,
+      "observed": "sibling_related",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 1,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.5448082820003037,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "si2",
+      "expected": "sibling_related",
+      "score": 0.9517852829503921,
+      "raw_cosine": 0.9035705659007843,
+      "observed": "sibling_related",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 1,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.5481552839992219,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "si3",
+      "expected": "sibling_related",
+      "score": 0.9658901467774352,
+      "raw_cosine": 0.9317802935548706,
+      "observed": "sibling_related",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 1,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 0.92472116999852,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "si4",
+      "expected": "sibling_related",
+      "score": 0.9529707343382076,
+      "raw_cosine": 0.9059414686764151,
+      "observed": "sibling_related",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 1,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.653143885996542,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "ro1",
+      "expected": "role_mismatch",
+      "score": 0.9772991993337525,
+      "raw_cosine": 0.9545983986675052,
+      "observed": "role_mismatch",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 1
+        },
+        "elapsed_seconds": 1.582848259000457,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "ro2",
+      "expected": "role_mismatch",
+      "score": 0.9621775051390911,
+      "raw_cosine": 0.924355010278182,
+      "observed": "role_mismatch",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 1
+        },
+        "elapsed_seconds": 1.6049171050035511,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "ro3",
+      "expected": "role_mismatch",
+      "score": 0.9732311122139607,
+      "raw_cosine": 0.9464622244279214,
+      "observed": "role_mismatch",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 1
+        },
+        "elapsed_seconds": 1.4632589039974846,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "ro4",
+      "expected": "role_mismatch",
+      "score": 0.9627304109057149,
+      "raw_cosine": 0.9254608218114296,
+      "observed": "role_mismatch",
+      "validator": {
+        "counts": {
+          "accepted": 1,
+          "rejected": 0,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 1
+        },
+        "elapsed_seconds": 1.622141751999152,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "br1",
+      "expected": "candidate_more_broad",
+      "score": 0.958143081185899,
+      "raw_cosine": 0.9162861623717979,
+      "observed": "candidate_more_broad",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 1,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 2.1901078409937327,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "br2",
+      "expected": "candidate_more_broad",
+      "score": 0.96049737475681,
+      "raw_cosine": 0.92099474951362,
+      "observed": "candidate_more_broad",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 1,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.600710190999962,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "br3",
+      "expected": "candidate_more_broad",
+      "score": 0.9300877044551643,
+      "raw_cosine": 0.8601754089103286,
+      "observed": "candidate_more_broad",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 1,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 3.0638778010034002,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "br4",
+      "expected": "candidate_more_broad",
+      "score": 0.9206450047860402,
+      "raw_cosine": 0.8412900095720804,
+      "observed": "candidate_more_broad",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 1,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 2.0617574460047763,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "co1",
+      "expected": "constraint_conflict",
+      "score": 0.9463800396661128,
+      "raw_cosine": 0.8927600793322256,
+      "observed": "constraint_conflict",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 1,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.2033528979955008,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "co2",
+      "expected": "constraint_conflict",
+      "score": 0.965390128271485,
+      "raw_cosine": 0.9307802565429699,
+      "observed": "constraint_conflict",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 1,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 2.177830685999652,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "co3",
+      "expected": "constraint_conflict",
+      "score": 0.9497130258567259,
+      "raw_cosine": 0.8994260517134518,
+      "observed": "constraint_conflict",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 1,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 2.9117373720000614,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "co4",
+      "expected": "constraint_conflict",
+      "score": 0.9249561798757638,
+      "raw_cosine": 0.8499123597515277,
+      "observed": "constraint_conflict",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 1,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.7180929870010004,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "am1",
+      "expected": "lexical_ambiguity",
+      "score": 0.924478845231401,
+      "raw_cosine": 0.8489576904628019,
+      "observed": "lexical_ambiguity",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 1,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 2.3295554400028777,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "am2",
+      "expected": "lexical_ambiguity",
+      "score": 0.9687675526410051,
+      "raw_cosine": 0.9375351052820102,
+      "observed": "lexical_ambiguity",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 1,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 3.2500392709989683,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "am3",
+      "expected": "lexical_ambiguity",
+      "score": 0.9466052756313348,
+      "raw_cosine": 0.8932105512626696,
+      "observed": "lexical_ambiguity",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 1,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 2.974429075999069,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "am4",
+      "expected": "lexical_ambiguity",
+      "score": 0.9639725452959929,
+      "raw_cosine": 0.9279450905919857,
+      "observed": "lexical_ambiguity",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 0,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 1,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.8674583309984882,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "un1",
+      "expected": "unrelated",
+      "score": 0.8919295694034021,
+      "raw_cosine": 0.7838591388068041,
+      "observed": "unrelated",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 1,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.7487474890003796,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "un2",
+      "expected": "unrelated",
+      "score": 0.884083758584628,
+      "raw_cosine": 0.7681675171692559,
+      "observed": "unrelated",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 1,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.5750743669996154,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "un3",
+      "expected": "unrelated",
+      "score": 0.87996192465547,
+      "raw_cosine": 0.75992384931094,
+      "observed": "unrelated",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 1,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.0235501530041802,
+        "http_statuses": [
+          200
+        ]
+      }
+    },
+    {
+      "id": "un4",
+      "expected": "unrelated",
+      "score": 0.8890653171560937,
+      "raw_cosine": 0.7781306343121874,
+      "observed": "unrelated",
+      "validator": {
+        "counts": {
+          "accepted": 0,
+          "rejected": 1,
+          "error": 0,
+          "attempts": 1,
+          "attempt_errors": 0,
+          "retries": 0,
+          "sibling_related": 0,
+          "candidate_more_broad": 0,
+          "equivalent": 0,
+          "unrelated": 1,
+          "unknown": 0,
+          "constraint_conflict": 0,
+          "candidate_more_specific": 0,
+          "lexical_ambiguity": 0,
+          "role_mismatch": 0
+        },
+        "elapsed_seconds": 1.6810048839979572,
+        "http_statuses": [
+          200
+        ]
+      }
+    }
+  ],
+  "matrix": [
+    {
+      "threshold": 0.88,
+      "raw_cosine": 0.76,
+      "retained_pairs": 31,
+      "positive_retention": 16,
+      "accept_class_retention": {
+        "candidate_more_specific": 4,
+        "equivalent": 4,
+        "role_mismatch": 4,
+        "sibling_related": 4
+      },
+      "unrelated_retention": 3,
+      "estimated_validator_attempts": 32,
+      "replayed_ERROR_count": 0,
+      "estimated_total_validator_seconds": 69.76080866198754,
+      "estimated_call_reduction": 0.030303030303030276,
+      "estimated_latency_reduction": 0.014460117604221279
+    },
+    {
+      "threshold": 0.9,
+      "raw_cosine": 0.8,
+      "retained_pairs": 28,
+      "positive_retention": 16,
+      "accept_class_retention": {
+        "candidate_more_specific": 4,
+        "equivalent": 4,
+        "role_mismatch": 4,
+        "sibling_related": 4
+      },
+      "unrelated_retention": 0,
+      "estimated_validator_attempts": 29,
+      "replayed_ERROR_count": 0,
+      "estimated_total_validator_seconds": 64.75598192198959,
+      "estimated_call_reduction": 0.12121212121212122,
+      "estimated_latency_reduction": 0.08516538108028127
+    },
+    {
+      "threshold": 0.92,
+      "raw_cosine": 0.8400000000000001,
+      "retained_pairs": 28,
+      "positive_retention": 16,
+      "accept_class_retention": {
+        "candidate_more_specific": 4,
+        "equivalent": 4,
+        "role_mismatch": 4,
+        "sibling_related": 4
+      },
+      "unrelated_retention": 0,
+      "estimated_validator_attempts": 29,
+      "replayed_ERROR_count": 0,
+      "estimated_total_validator_seconds": 64.75598192198959,
+      "estimated_call_reduction": 0.12121212121212122,
+      "estimated_latency_reduction": 0.08516538108028127
+    },
+    {
+      "threshold": 0.94,
+      "raw_cosine": 0.8799999999999999,
+      "retained_pairs": 24,
+      "positive_retention": 16,
+      "accept_class_retention": {
+        "candidate_more_specific": 4,
+        "equivalent": 4,
+        "role_mismatch": 4,
+        "sibling_related": 4
+      },
+      "unrelated_retention": 0,
+      "estimated_validator_attempts": 25,
+      "replayed_ERROR_count": 0,
+      "estimated_total_validator_seconds": 55.58269824797753,
+      "estimated_call_reduction": 0.24242424242424243,
+      "estimated_latency_reduction": 0.21476016483735616
+    }
+  ],
+  "base_validator_attempts": 33,
+  "base_validator_seconds": 70.78435881499172,
+  "ANN_THRESHOLD_READY": "YES",
+  "RECOMMENDED_THRESHOLD": 0.9,
+  "all_accept_reject_labels_agree": true,
+  "checked_at": 1790643151.0216973
+}

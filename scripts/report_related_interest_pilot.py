@@ -22,10 +22,11 @@ def collect_report(db, cohort, *, since, limit, until=None):
     if until is not None and (not math.isfinite(until) or until <= since):
         raise ValueError('invalid_report_window')
     window = {"$gte": since, **({"$lt": until} if until is not None else {})}
-    query = {"related_interest_pilot.policy_version": POLICY, "created_at": window}
+    query = {"$or": [{"related_interest_pilot.policy_version": POLICY},
+                     {"semantic_shadow.policy_version": POLICY}], "created_at": window}
     with timeout(5):
         jobs = list(db["match_search_jobs"].find(query, {
-            "_id": 0, "user_id": 1, "related_interest_pilot": 1, "retrieval_diagnostics.qualified_exact_count": 1,
+            "_id": 0, "user_id": 1, "related_interest_pilot": 1, "semantic_shadow": 1, "retrieval_diagnostics.qualified_exact_count": 1,
             "error_code": 1, "created_at": 1, "started_at": 1, "completed_at": 1,
         }).sort("created_at", -1).limit(limit+1).max_time_ms(3000))
         proposals = list(db["matches"].find(query, {

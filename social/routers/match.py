@@ -20,6 +20,7 @@ from matchmaker_agent.related_interest_contract import (
     validated_evidence as validated_related_evidence, bounded_counts as related_validator_counts,
 )
 from matchmaker_agent.semantic_rollout_policy import requester_route_allowed, pair_route_allowed, rollout_mode
+from matchmaker_agent.semantic_rollout_policy import shadow_requester_allowed
 from services.ai_service import get_embedding, generate_chat_completion
 from services.memory_service import get_user_graph_memories
 from services.mediator_event_service import queue_mediator_event
@@ -1720,6 +1721,65 @@ def _request_matchmaker_selection(payload: dict, *, timeout: float) -> list[dict
     return selected
 
 
+def _observe_v2_shadow(user_doc, topic, context, excluded_users, excluded_pairs, target_stances, job_id):
+    """Read-only candidate observation with NO reference to the visible pool."""
+    owner = str(user_doc.get("user_id") or "")
+    if not shadow_requester_allowed(owner):
+        return
+    from services.related_interest_telemetry import record_shadow
+    from services.related_interest_pilot_monitor import on_shadow_finished
+    if not record_shadow(job_id, owner, status="running"):
+        return  # Do not run an unobservable experiment.
+    started = time.monotonic()
+    lookup, error, qualified = {}, None, 0
+    try:
+        if not semantic_embedding_space_confirmed():
+            raise PreferenceSemanticRetrievalError("semantic_readiness_unconfirmed")
+        lookup = retrieve_semantic_preference_candidates(owner, topic,
+            excluded_user_ids=excluded_users, related_policy_required=True, shadow_only=True)
+        ids = list(lookup.get("candidate_ids") or [])[:50]
+        evidence = lookup.get("evidence_by_candidate") or {}
+        from pymongo import timeout as mongo_timeout
+        remaining = 38-(time.monotonic()-started)
+        if remaining <= 0:
+            raise PreferenceSemanticRetrievalError("semantic_retrieval_timeout")
+        with mongo_timeout(min(2, remaining)):
+            rows = list(profiles_coll.find(_candidate_profile_filter(user_doc, excluded_users,
+                candidate_ids=ids, require_active_context=False), {"_id": 0}).limit(51)) if ids else []
+        counts = Counter(row.get("user_id") for row in rows)
+        for row in rows:
+            uid = row.get("user_id")
+            if (not shadow_requester_allowed(owner) or time.monotonic()-started >= 38
+                    or uid not in ids or uid in excluded_users or counts[uid] != 1
+                    or participant_pair_key(owner, uid) in excluded_pairs):
+                continue
+            packets = [packet for e in list(evidence.get(uid) or [])[:5]
+                if (packet := validated_related_evidence(e, query_key=context.get("canonical_preference_key", "")))]
+            if not packets:
+                continue
+            result = candidate_qualification(user_doc, without_expired_recent_context(row),
+                # The V2 retrieval has already reread full pair polarity and
+                # conflicts. Only its verified positives support observation;
+                # no unbounded legacy memory HTTP reads or visible evidence.
+                target_stances=target_stances,
+                candidate_stances={packet["concept_key"]: {"like"} for packet in packets},
+                vector_score=0, search_context=context, preference_evidence=packets)
+            qualified += int(bool(result.get("eligible") and result.get("semantic_related_preference_matched")))
+        if not shadow_requester_allowed(owner):
+            error, qualified = "semantic_policy_disabled", 0
+        elif time.monotonic()-started >= 38:
+            error, qualified = "semantic_retrieval_timeout", 0
+    except PreferenceSemanticRetrievalError as exc:
+        error = exc.code
+        lookup = {"validator_counts": exc.validator_counts, "ann_observations": exc.ann_observations}
+    except Exception:
+        error = "semantic_eligibility_unavailable"
+    if record_shadow(job_id, owner, status="failed" if error else "success", error_code=error,
+            counts=lookup.get("validator_counts"), ann_observations=lookup.get("ann_observations"),
+            qualified_count=qualified if not error else 0, elapsed_seconds=time.monotonic()-started):
+        on_shadow_finished(owner, error)
+
+
 def generate_matches_for_user(
     user_id: str, source: str = "manual", *,
     report_progress: Callable[[str], bool] | None = None,
@@ -2122,10 +2182,6 @@ def generate_matches_for_user(
                 diagnostics["semantic_candidate_count_before_filter"] = len(
                     semantic_ids
                 )
-        elif semantic_mode == "shadow":
-            # Shadow observation is an explicit operator/script path.  The live
-            # search performs no provider or Graph work and gains no latency.
-            diagnostics["semantic_shadow_status"] = "separate_observation_only"
     else:
         candidate_match = _candidate_profile_filter(
             user_doc, excluded_users, require_active_context=True,
@@ -2173,6 +2229,11 @@ def generate_matches_for_user(
 
     diagnostics["candidate_pool_count"] = len(top_5_candidates)
     if not top_5_candidates:
+        if search_intent == "preference" and semantic_mode == "shadow":
+            # No raw exact candidates is already proof of qualified exact=0.
+            # Full pair preference/conflict reads happen in the V2 observer.
+            _observe_v2_shadow(user_doc, preference_topic, req.search_context, excluded_users,
+                excluded_pair_keys, {}, search_job_id)
         if prequalified_by_id:
             _apply_qualification_diagnostics(diagnostics, prequalified_by_id)
         result = {
@@ -2250,6 +2311,14 @@ def generate_matches_for_user(
     if search_intent == "preference" and semantic_mode != "active":
         diagnostics["qualified_exact_count"] = len(qualified_candidates)
         diagnostics["semantic_fallback_eligible"] = len(qualified_candidates) < qualified_exact_trigger_threshold()
+        if semantic_mode == "shadow":
+            shadow_exact = [c for c in qualified_candidates if qualification_by_id.get(
+                c.get("user_id"), {}).get("requested_preference_matched")]
+            diagnostics["qualified_exact_count"] = len(shadow_exact)
+            diagnostics["semantic_fallback_eligible"] = not shadow_exact
+            if not shadow_exact:
+                _observe_v2_shadow(user_doc, preference_topic, req.search_context, excluded_users,
+                    excluded_pair_keys, target_stances, search_job_id)
     if not qualified_candidates:
         reason_code = (
             "insufficient_semantic_ground"

@@ -1,7 +1,34 @@
 """Bounded internal pilot observations; no raw labels, messages or memory writes."""
 import math
 import statistics
+import time
 from matchmaker_agent.related_interest_contract import POLICY, bounded_counts, bounded_ann_observations
+
+
+def record_shadow(job_id, owner_id, *, status, counts=None, ann_observations=None,
+                  qualified_count=0, error_code=None, elapsed_seconds=0):
+    """Only an existing job's aggregate observation; never its visible outcome."""
+    if not job_id or not owner_id or status not in {"running", "success", "failed"}:
+        return False
+    try:
+        from database import db
+        from pymongo import timeout
+        from services.preference_semantic_service import SEMANTIC_ERROR_CODES
+        meta = {"policy_version": POLICY, "telemetry_version": 3, "status": status,
+            "triggered": True, "rollout_mode": "enabled_accounts", "observation_only": True,
+            "validator_counts": bounded_counts(counts),
+            "ann_observations": bounded_ann_observations(ann_observations),
+            "qualified_count": max(0, min(50, int(qualified_count))),
+            "error_code": error_code if error_code in SEMANTIC_ERROR_CODES else None,
+            "elapsed_seconds": round(max(0, min(300, float(elapsed_seconds))), 3)}
+        if status != "running":
+            meta["completed_at"] = time.time()
+        with timeout(.5):
+            result = db["match_search_jobs"].update_one(
+                {"job_id": job_id, "user_id": owner_id}, {"$set": {"semantic_shadow": meta}}, upsert=False)
+        return bool(result.matched_count)
+    except Exception:
+        return False
 
 
 def record_search(job_id, owner_id, *, counts=None, ann_observations=None, triggered=True, requester_verified=None):
@@ -38,6 +65,10 @@ def summarize(jobs, proposals, openings=()):
         "confirmation_outcomes": {k: 0 for k in ("awaiting_confirmation", "confirmed", "declined_before_invitation", "other")},
         "invitation_outcomes": {k: 0 for k in ("pending", "accepted", "declined", "expired", "other")}}
     jobs = list(jobs)
+    shadow = [j["semantic_shadow"] for j in jobs if (j.get("semantic_shadow") or {}).get("policy_version") == POLICY]
+    result["shadow"] = {"jobs": len(shadow), "terminal": sum(s.get("status") in {"success", "failed"} for s in shadow),
+        "typed_unavailable": sum(s.get("error_code") in {"semantic_validator_unavailable", "semantic_retrieval_timeout"} for s in shadow),
+        "validator": {k: sum(bounded_counts(s.get("validator_counts"))[k] for s in shadow) for k in bounded_counts({})}}
     proposals = list(proposals)
     valid_jobs = []
     for job in jobs:

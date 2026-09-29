@@ -10,7 +10,7 @@ import re
 from matchmaker_agent.related_interest_canary import (
     canary_cohort, canary_pair_enabled, canary_requester_enabled,
 )
-from matchmaker_agent.related_interest_contract import enabled
+from matchmaker_agent.related_interest_contract import enabled, kill_engaged
 
 ROLLOUT_MODE_ENV = "MATCH_RELATED_INTEREST_ROLLOUT_MODE"
 
@@ -35,6 +35,24 @@ def pair_route_allowed(requester, candidate):
     if rollout_mode() == "canary":
         return canary_pair_enabled(requester, candidate)
     return bool(requester_route_allowed(requester) and valid_owner_id(candidate) and candidate != requester)
+
+
+def shadow_requester_allowed(owner):
+    """Observation permission is NOT proposal permission; never bypass kill."""
+    return bool(rollout_mode() == "enabled_accounts" and valid_owner_id(owner)
+        and os.getenv("MATCH_PREFERENCE_SEMANTIC_MODE", "off").strip().lower() == "shadow"
+        and os.getenv("MATCH_RELATED_INTEREST_ENABLED", "off").strip().lower() in {"off", "0", "false"}
+        and not kill_engaged())
+
+
+def compute_allowed(owner, *, shadow_only=False):
+    return shadow_requester_allowed(owner) if shadow_only else requester_route_allowed(owner)
+
+
+def compute_pair_allowed(requester, candidate, *, shadow_only=False):
+    if not shadow_only:
+        return pair_route_allowed(requester, candidate)
+    return bool(shadow_requester_allowed(requester) and valid_owner_id(candidate) and candidate != requester)
 
 
 def legacy_owner_scope():
