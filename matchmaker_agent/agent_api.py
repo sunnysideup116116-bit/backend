@@ -1307,16 +1307,17 @@ class PreferenceSemanticCandidateRequest(BaseModel):
 
 
 class RelatedInterestCandidateRequest(PreferenceSemanticCandidateRequest):
+    shadow_only: bool = Field(default=False, strict=True)
     embedding_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     request_budget_seconds: float = Field(default=27.0, gt=0, le=27.0, allow_inf_nan=False)
 
 
 @app.post("/api/preferences/related-interest-candidates")
 def related_interest_candidates(req: RelatedInterestCandidateRequest):
-    from matchmaker_agent.semantic_rollout_policy import requester_route_allowed
+    from matchmaker_agent.semantic_rollout_policy import compute_allowed
     from related_interest_retrieval import retrieve
     deadline = time.monotonic() + req.request_budget_seconds
-    if not requester_route_allowed(req.requester_user_id):
+    if not compute_allowed(req.requester_user_id, shadow_only=req.shadow_only):
         return {"status": "error", "error_code": "semantic_policy_disabled", "candidates": [],
                 "canonical_key": req.canonical_key or ""}
     # The middleware verifies the existing Social signature. A body containing

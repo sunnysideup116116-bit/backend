@@ -502,9 +502,8 @@ def test_shadow_mode_does_not_run_semantic_on_live_search_path(monkeypatch):
         report_progress=lambda _step: True, can_commit=lambda: True,
     )
     assert result["status"] == "no_suitable_candidate"
-    assert result["diagnostics"]["semantic_shadow_status"] == (
-        "separate_observation_only"
-    )
+    # Missing server-owned shadow gates/job telemetry still forbids compute.
+    assert "semantic_shadow_status" not in result["diagnostics"]
     semantic_lookup.assert_not_called()
 
 

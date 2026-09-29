@@ -3,8 +3,9 @@ import math
 import time
 from neo4j import Query
 from matchmaker_agent.semantic_rollout_policy import legacy_owner_scope, requester_route_allowed, pair_route_allowed, rollout_mode
+from matchmaker_agent.semantic_rollout_policy import compute_allowed, compute_pair_allowed
 from matchmaker_agent.related_interest_contract import bounded_ann_observations
-from matchmaker_agent.semantic_evidence_readiness import verified_vector, recheck_owner_evidence
+from matchmaker_agent.semantic_evidence_readiness import verified_vector, recheck_owner_evidence, pair_preferences_safe
 
 try:
     from .concept_identity import stored_concept_identity
@@ -83,7 +84,9 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
     """Do not use old embedding/index, labels, AVOIDS owners, or fuzzy fallback."""
     result = {"status": "error", "canonical_key": identity.key, "candidates": [],
         "retrieval_source": "graph_semantic", "policy_version": POLICY}
-    if not requester_route_allowed(req.requester_user_id):
+    shadow_only = getattr(req, "shadow_only", False) is True
+    allowed = lambda: compute_allowed(req.requester_user_id, shadow_only=shadow_only)
+    if not allowed():
         return {**result, "error_code": "semantic_policy_disabled"}
     allowed_owners = legacy_owner_scope()
     deadline = min(deadline, clock()+27.0) if deadline is not None else clock()+min(27.0, req.request_budget_seconds)
@@ -121,7 +124,7 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
         if req.query_embedding is not None:
             return {**result, "error_code": "semantic_query_embedding_invalid"}
         return {**result, "status": "query_embedding_required"}
-    if not requester_route_allowed(req.requester_user_id):
+    if not allowed():
         return {**result, "error_code": "semantic_policy_disabled"}
     hits = list(session.run(Query("""
         CALL db.index.vector.queryNodes($index_name, $neighbor_limit, $vector)
@@ -157,13 +160,13 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
             "semantic_input_hash": source.semantic_input_hash, "similarity": float(score)})
     # The only LLM boundary occurs BEFORE any Concept -> User expansion.
     result["ann_observations"] = bounded_ann_observations(concepts)
-    if not requester_route_allowed(req.requester_user_id):
+    if not allowed():
         return {**result, "error_code": "semantic_policy_disabled"}
     accepted, counts = validate_concepts(identity.semantic_text, concepts, client, validator_model,
         deadline=min(deadline, clock()+18.0), clock=clock,
-        is_enabled=lambda: requester_route_allowed(req.requester_user_id))
+        is_enabled=allowed)
     result["validator_counts"] = counts
-    if not requester_route_allowed(req.requester_user_id):
+    if not allowed():
         return {**result, "error_code": "semantic_policy_disabled"}
     if counts.get("job_unavailable") or clock() >= deadline:
         return {**result, "error_code": "semantic_validator_unavailable"}
@@ -213,7 +216,7 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
         if clock() >= deadline:
             raise TimeoutError("semantic_retrieval_timeout")
         uid = row.get("candidate_id")
-        if not pair_route_allowed(req.requester_user_id, uid) or uid in req.excluded_user_ids:
+        if not compute_pair_allowed(req.requester_user_id, uid, shadow_only=shadow_only) or uid in req.excluded_user_ids:
             continue
         if eligibility is not None and not eligibility.check(uid):
             continue
@@ -227,9 +230,16 @@ def retrieve(session, req, identity, client, validator_model, embedding_model, *
     if eligibility is not None:
         candidates = [c for c in candidates if recheck_owner_evidence(session,
             c['candidate_id'], c['evidence'], identity.key, expected)]
+    if shadow_only:
+        # Observe full current polarity/conflicts without invoking a proposal
+        # endpoint or using the legacy memory cache. Same shared Graph deadline.
+        candidates = [c for c in candidates if pair_preferences_safe(session,
+            req.requester_user_id, c['candidate_id'], query_key=identity.key)]
     candidates.sort(key=lambda c: (-c["evidence"][0]["similarity"], c["candidate_id"]))
     if eligibility is not None and eligibility.unavailable:
         return {**result, "error_code": "semantic_eligibility_unavailable"}
+    if not allowed():
+        return {**result, "error_code": "semantic_policy_disabled"}
     return {**result, "status": "success", "candidates": candidates[:req.candidate_limit],
         "candidate_count": min(len(candidates), req.candidate_limit), "embedding_source": embedding_source,
         "semantic_concepts_considered": [{"concept_key": c["concept_key"], "similarity": round(c["similarity"], 4)} for c in accepted]}
