@@ -68,9 +68,8 @@ class VoiceRegistrationRuntime:
         return self.settings.enabled and self.key_pool.size > 0
 
     def client_ip(self, connection: Request | WebSocket) -> str:
-        forwarded = connection.headers.get("x-forwarded-for", "")
-        if forwarded:
-            return forwarded.split(",", 1)[0].strip()[:80]
+        # Uvicorn resolves forwarded client addresses only for trusted proxy
+        # peers. Re-reading the raw header here would also trust direct clients.
         return str(connection.client.host if connection.client else "unknown")[:80]
 
     def allowed_origin(self, websocket: WebSocket) -> bool:
@@ -306,13 +305,15 @@ def create_router(runtime: VoiceRegistrationRuntime) -> APIRouter:
             client_ip,
             runtime._identity_secret,
         )
-        if not runtime.limiter.allow_start(identity):
-            raise HTTPException(status_code=429, detail="voice_local_rate_limit")
         client_ip_fingerprint = anonymous_identity(
             "voice-ticket-ip",
             client_ip,
             runtime._identity_secret,
         )
+        if not runtime.limiter.allow_start(
+            identity, client_ip_identity=client_ip_fingerprint,
+        ):
+            raise HTTPException(status_code=429, detail="voice_local_rate_limit")
         ticket, ttl = runtime.tickets.issue(identity, client_ip_fingerprint)
         return {
             "ticket": ticket,

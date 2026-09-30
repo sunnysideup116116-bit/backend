@@ -86,6 +86,7 @@ def clear_mongo_database() -> dict[str, Any]:
 
 def clear_all_demo_state() -> dict[str, Any]:
     """Clear all configured demo stores; no cross-store rollback."""
+    ensure_destructive_tools_enabled()
     if MONGO_INIT_ERROR is not None:
         raise DemoCleanupError("mongo_unavailable", status_code=503)
     try:

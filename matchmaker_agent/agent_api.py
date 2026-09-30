@@ -1194,7 +1194,7 @@ async def global_reflection_endpoint(req: GlobalReflectionRequest):
             to_big_five=req.to_big_five,
             to_context=req.to_context,
         )
-        print(f"🧠 全域反思原始回覆:\n{raw_response}")
+        print(f"[GLOBAL_REFLECTION] response_chars={len(raw_response or '')}")
         reflection_data = parse_json_object_from_text(raw_response)
         abstract_rule = reflection_data.get("abstract_rule", "")
         category = reflection_data.get("category", "情境型")
@@ -1227,11 +1227,7 @@ async def global_reflection_endpoint(req: GlobalReflectionRequest):
                         abstract_rule=abstract_rule,
                         category=category,
                     ).consume()
-                    print(
-                        "✅ 全域法則已合併："
-                        f"[{category}] {abstract_rule} -> {similar['content']} "
-                        f"(similarity={similar['similarity']:.2f})"
-                    )
+                    print("[GLOBAL_REFLECTION] outcome=merged")
                     return {
                         "status": "merged",
                         "abstract_rule": similar["content"],
@@ -1253,15 +1249,14 @@ async def global_reflection_endpoint(req: GlobalReflectionRequest):
                     abstract_rule=abstract_rule,
                     category=category,
                 ).consume()
-        print(f"✅ 全域法則已寫入/更新：[{category}] {abstract_rule}")
+        print("[GLOBAL_REFLECTION] outcome=created")
         return {"status": "success", "abstract_rule": abstract_rule, "category": category}
     except json.JSONDecodeError as e:
-        print(f"⚠️ 全域反思 JSON 解析失敗: {e}")
-        print(f"raw={locals().get('raw_response', '')}")
+        print("[GLOBAL_REFLECTION] error=json_parse_failed")
         return {"status": "error", "message": "JSON parse failed"}
     except Exception as e:
-        print(f"⚠️ 全域反思失敗: {e}")
-        return {"status": "error", "message": str(e)}
+        print(f"[GLOBAL_REFLECTION] error={type(e).__name__}")
+        return {"status": "error", "message": "global_reflection_failed"}
 
 
 # === Conversation-derived preference memory ===

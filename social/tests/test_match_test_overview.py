@@ -38,7 +38,7 @@ class MatchTestOverviewTests(unittest.TestCase):
              patch.object(system, "matches_coll", self.matches):
             result = system.get_match_test_overview("seed_user_01")
 
-        self.assertEqual(result["shared_password"], "12345678")
+        self.assertNotIn("shared_password", result)
         self.assertEqual(len(result["accounts"]), 2)
         self.assertEqual(len(result["proposals"]), 1)
         proposal = result["proposals"][0]

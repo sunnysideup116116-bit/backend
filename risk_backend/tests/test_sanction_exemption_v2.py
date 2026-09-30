@@ -63,6 +63,11 @@ class Log:
         return 0
 
 
+class FakeChatLogService(Log):
+    async def get_remaining_cooldown(self, *_):
+        return None
+
+
 def _run(delta=None):
     with patch(
         "app.core.intervention_engine.KBService.get_interventions_by_level",
@@ -86,6 +91,40 @@ def _run(delta=None):
             chat_log_service=Log(),
             message_delta=delta,
         ))
+
+
+def _run_with_log(log, delta=None):
+    with patch(
+        "app.core.intervention_engine.KBService.get_interventions_by_level",
+        side_effect=lambda level: STATE if level == "exempt" else BASE,
+    ):
+        return asyncio.run(InterventionEngine().execute(
+            risk_level="blocked",
+            risk_state={
+                "sexual_boundary": 0.9,
+                "coercion": 0.0,
+                "manipulation": 0.0,
+                "harassment": 0.0,
+                "emotional_pressure": 0.0,
+            },
+            diagnosis={},
+            conv_id="conversation",
+            sender_id="alice",
+            receiver_id="bob",
+            msg_id="message",
+            decision_reason="normal",
+            chat_log_service=log,
+            message_delta=delta,
+        ))
+
+
+def test_cooldown_unavailable_keeps_block_sanction():
+    command = _run_with_log(
+        FakeChatLogService(),
+        {"harassment": 0.055},
+    )
+    assert command["sanction_exempted"] is False
+    assert command["sender_directive"]["action"] == "block_message"
 
 
 def test_minimum_nonzero_delta_is_exempt_and_releases_sanction():

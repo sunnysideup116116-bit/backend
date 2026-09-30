@@ -37,6 +37,24 @@ def test_remaining_cooldown_no_log(chat_service):
     chat_service.db.list_documents.return_value = resp
     assert asyncio.run(chat_service.get_remaining_cooldown("c1", "s1")) == 0
 
+def test_remaining_cooldown_storage_failure_is_unknown(chat_service):
+    chat_service.db.list_documents.side_effect = RuntimeError("storage unavailable")
+    assert asyncio.run(chat_service.get_remaining_cooldown("c1", "s1")) is None
+
+def test_remaining_cooldown_missing_timestamp_is_unknown(chat_service):
+    document = MagicMock()
+    document.data = {"cooldown_seconds": 60}
+    response = MagicMock(); response.documents = [document]
+    chat_service.db.list_documents.return_value = response
+    assert asyncio.run(chat_service.get_remaining_cooldown("c1", "s1")) is None
+
+def test_remaining_cooldown_invalid_timestamp_is_unknown(chat_service):
+    document = MagicMock()
+    document.data = {"cooldown_seconds": 60, "timestamp": "invalid"}
+    response = MagicMock(); response.documents = [document]
+    chat_service.db.list_documents.return_value = response
+    assert asyncio.run(chat_service.get_remaining_cooldown("c1", "s1")) is None
+
 
 def test_blocked_30_minute_boundary_uses_a_fake_clock(chat_service, monkeypatch):
     fixed_now = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)

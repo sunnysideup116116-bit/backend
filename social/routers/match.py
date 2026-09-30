@@ -7,7 +7,8 @@ import math
 import uuid
 from collections import Counter
 from typing import Callable
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
+from services.admin_access_service import require_demo_admin
 from agent_quota.api import budgeted
 from models import (
     MatchRequest, AcceptRequest, MatchDecisionRequest, ProactiveEventRequest,
@@ -3000,7 +3001,7 @@ def proactive_event_match(req: ProactiveEventRequest):
         raise HTTPException(status_code=503, detail="主動活動媒合暫時無法建立") from exc
 
 
-@router.post("/events/discover")
+@router.post("/events/discover", dependencies=[Depends(require_demo_admin)])
 def discover_public_events(req: EventDiscoveryRequest):
     """Queue manual discovery; only the Event worker executes the long pipeline."""
     try:
@@ -3027,7 +3028,7 @@ def get_public_event_discovery_status():
     return {"status": "success", **snapshot}
 
 
-@router.post("/events/relevance/rebuild")
+@router.post("/events/relevance/rebuild", dependencies=[Depends(require_demo_admin)])
 def rebuild_public_event_relevance():
     """Manual demo backfill; internal event/user identifiers are never returned."""
     result = rebuild_all_event_relevance(limit=20)
@@ -3046,13 +3047,13 @@ def rebuild_public_event_relevance():
     }
 
 
-@router.post("/events/opportunities/scan")
+@router.post("/events/opportunities/scan", dependencies=[Depends(require_demo_admin)])
 def scan_public_event_opportunities(req: EventOpportunityScanRequest):
     """Run the bounded opportunity scan used after discovery."""
     return scan_event_opportunities(max_proposals=req.max_proposals)
 
 
-@router.post("/events/lifecycle/run")
+@router.post("/events/lifecycle/run", dependencies=[Depends(require_demo_admin)])
 def run_public_event_lifecycle():
     """Run bounded Event and unresolved-proposal cleanup."""
     return run_event_lifecycle_once()

@@ -1,8 +1,30 @@
 import unittest
+import pytest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from services import demo_cleanup_service as cleanup
+
+
+@pytest.fixture(autouse=True)
+def enabled_demo_cleanup(monkeypatch):
+    # Successful cleanup tests explicitly opt in; the production default is off.
+    monkeypatch.setattr(cleanup, "DEMO_DESTRUCTIVE_TOOLS_ENABLED", True)
+
+
+def test_disabled_cleanup_has_no_side_effects(monkeypatch):
+    monkeypatch.setattr(cleanup, "DEMO_DESTRUCTIVE_TOOLS_ENABLED", False)
+    with patch.object(cleanup, "db") as database, \
+         patch.object(cleanup, "clear_runtime_fallbacks") as runtime, \
+         patch.object(cleanup, "clear_graph") as graph, \
+         patch.object(cleanup, "clear_mongo_database") as mongo:
+        with pytest.raises(cleanup.DemoCleanupError) as raised:
+            cleanup.clear_all_demo_state()
+    assert raised.value.code == "demo_tools_disabled"
+    database.command.assert_not_called()
+    runtime.assert_not_called()
+    graph.assert_not_called()
+    mongo.assert_not_called()
 
 
 class _Collection:

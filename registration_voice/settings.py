@@ -109,7 +109,7 @@ class VoiceRegistrationSettings:
         return cls(
             enabled=_enabled(env.get("VOICE_REGISTRATION_ENABLED"), default=True),
             local_rate_limit_enabled=_enabled(
-                env.get("VOICE_LOCAL_RATE_LIMIT_ENABLED"), default=False,
+                env.get("VOICE_LOCAL_RATE_LIMIT_ENABLED"), default=True,
             ),
             model=(
                 env.get("VOICE_REGISTRATION_MODEL", "gemini-3.1-flash-live-preview").strip()

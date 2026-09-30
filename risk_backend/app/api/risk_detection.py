@@ -46,6 +46,51 @@ def _pretty_format_risk(label: str, state_dict: dict) -> str:
         lines.append(f"      |-- {k.ljust(18)} : {v:.4f}")
     return "\n".join(lines)
 
+
+def _guardrail_log_view(result: dict) -> dict[str, object]:
+    """Return bounded guardrail diagnostics safe for process logs."""
+    flagged_words = result.get("flagged_words")
+    categories = result.get("classifier_categories")
+    if result.get("is_blocked"):
+        reason_code = "hard_block"
+    elif result.get("degraded"):
+        reason_code = "degraded"
+    elif result.get("classifier_flagged"):
+        reason_code = "classifier_flagged"
+    elif flagged_words:
+        reason_code = "keyword_flagged"
+    else:
+        reason_code = "passed"
+    if isinstance(flagged_words, (list, tuple, set, dict)):
+        flagged_count = len(flagged_words)
+    else:
+        flagged_count = int(bool(flagged_words))
+    if isinstance(categories, (list, tuple, set, dict)):
+        category_count = len(categories)
+    else:
+        category_count = int(bool(categories))
+    return {
+        "reason_code": reason_code,
+        "flagged_count": flagged_count,
+        "category_count": category_count,
+        "category_type": type(categories).__name__,
+    }
+
+
+def _nlp_log_view(result: dict) -> dict[str, object]:
+    """Return bounded NLP diagnostics without prompt/model output text."""
+    reasoning = str(result.get("reasoning") or "")
+    features = result.get("detected_features")
+    if isinstance(features, (list, tuple, set, dict)):
+        feature_count = len(features)
+    else:
+        feature_count = int(bool(features))
+    return {
+        "reason_code": "fallback" if reasoning.startswith("Fallback:") else "provider_result",
+        "features_type": type(features).__name__,
+        "features_count": feature_count,
+    }
+
 router = APIRouter()
 
 # 初始化引擎
@@ -79,8 +124,8 @@ async def handle_relationship_update(conv_id, sender_id, receiver_id):
 
         if should_trigger and metrics:
             await chat_log_service.rel_service.generate_rolling_summary(conv_id, metrics)
-    except Exception as e:
-        print(f"Relationship background update failed: {e}")
+    except Exception:
+        print("Relationship background update failed: error_code=relationship_update_failed")
 
 @router.post("/detect", response_model=RiskDetectionResponse)
 @serialized("risk-detect", lambda req, background_tasks: req.conversation_id)
@@ -93,17 +138,20 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print("\n" + "="*70)
         print(f"   [ REQUEST ] {now_str}")
-        print(f"   Sender: {req.sender_id} | Msg: {req.current_message}")
+        print("   [ REQUEST ] payload_received=true")
         print("-" * 50)
 
         # ---------------------------------------------------------
         # STEP 0: Semantic Guardrail
         # ---------------------------------------------------------
         gr_result = await guardrail_engine.check(req.current_message)
+        guardrail_log = _guardrail_log_view(gr_result)
         if gr_result["is_blocked"]:
-            print(f"   [ Step 0 ] Guardrail TRIGGERED: {gr_result['reason']}")
-            if gr_result.get("flagged_words"):
-                print(f"      |-- Flagged Words       : {gr_result['flagged_words']}")
+            print(
+                "   [ Step 0 ] Guardrail TRIGGERED: "
+                f"reason_code={guardrail_log['reason_code']} "
+                f"flagged_count={guardrail_log['flagged_count']}"
+            )
             
             # 1. 建立 Blocked 狀態與診斷資訊 (統一使用 critical_override)
             fake_state = RiskState(sexual_boundary=1.0) 
@@ -157,10 +205,17 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
             return response
 
         if gr_result.get("flagged_words"):
-            print(f"   [ Step 0 ] Flagged (not blocked): {gr_result['flagged_words']}")
+            print(
+                "   [ Step 0 ] Flagged (not blocked): "
+                f"reason_code={guardrail_log['reason_code']} "
+                f"flagged_count={guardrail_log['flagged_count']}"
+            )
         if gr_result.get("classifier_flagged"):
-            cats = gr_result.get("classifier_categories", "unknown")
-            print(f"   [ Step 0 ] Classifier Flagged (not blocked): {cats}")
+            print(
+                "   [ Step 0 ] Classifier Flagged (not blocked): "
+                f"category_type={guardrail_log['category_type']} "
+                f"category_count={guardrail_log['category_count']}"
+            )
 
         # ---------------------------------------------------------
         # 分析前置：建立 Pending 訊息 (貫穿 ID)
@@ -215,8 +270,12 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
         )
         print(_pretty_format_risk("Step 3: NLP Engine Delta", nlp_result['delta'].model_dump()))
         print(f"      |-- NLP Confidence      : {nlp_result.get('confidence', 0):.3f}")
-        print(f"      |-- NLP Reasoning       : {str(nlp_result.get('reasoning', ''))[:100]}")
-        print(f"      |-- NLP Detected Feats  : {nlp_result.get('detected_features', [])}")
+        nlp_log = _nlp_log_view(nlp_result)
+        print(f"      |-- NLP Reason Code     : {nlp_log['reason_code']}")
+        print(
+            "      |-- NLP Detected Feats  : "
+            f"type={nlp_log['features_type']} count={nlp_log['features_count']}"
+        )
 
         initial_delta = await run_blocking(lambda: fusion.fuse(rule_result['delta'], nlp_result['delta'], nlp_confidence=nlp_result.get('confidence', 0.0)))
         # 時段相關的情境規則以「訊息發送時間」為準；未帶則退回處理當下
@@ -227,7 +286,7 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
                     req.message_timestamp.replace('Z', '+00:00')
                 )
             except ValueError:
-                print(f"   [ Warning ] 無法解析 message_timestamp: {req.message_timestamp}")
+                print("   [ Warning ] error_code=invalid_message_timestamp")
 
         bonus_delta, scenarios = await run_blocking(lambda: scenario_risk_layer.evaluate(
             rule_result, nlp_result, computed_features,
@@ -352,10 +411,9 @@ async def detect_risk(req: RiskDetectionRequest, background_tasks: BackgroundTas
 
     except KBUnavailableError as e:
         raise HTTPException(status_code=503, detail="Risk knowledge base is temporarily unavailable") from e
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        print("Risk detection failed: error_code=risk_detect_internal_error")
+        raise HTTPException(status_code=500, detail="risk_detect_internal_error") from None
 
 @router.post("/reset")
 async def reset_risk_state(req: dict):
@@ -386,8 +444,8 @@ async def get_risk_state(conversation_id: str, user_id: str):
             doc = response.documents[0]
             d = doc.data if hasattr(doc, 'data') else doc.to_dict()
             level = d.get("risk_level", "safe")
-    except Exception as e:
-        print(f"get_risk_state: 讀取最新風險等級失敗: {e}")
+    except Exception:
+        print("get_risk_state: error_code=risk_level_lookup_unavailable")
     cooldown = await chat_log_service.get_cooldown_status(conversation_id, user_id)
     remaining = cooldown['remaining_seconds']
     return {
@@ -419,8 +477,10 @@ async def submit_feedback(req: FeedbackRequest):
     if not ok:
         raise HTTPException(status_code=404, detail="intervention log not found")
 
-    print(f"   [ Feedback ] {req.role}={req.feedback} for msg {req.triggered_by_msg_id}"
-          + (f"（詳述 {len(req.detail)} 字）" if req.detail else ""))
+    print(
+        f"   [ Feedback ] role={req.role} feedback={req.feedback} "
+        f"detail_len={len(req.detail) if req.detail else 0}"
+    )
     return {
         "status": "ok",
         "msg_id": req.triggered_by_msg_id,
@@ -473,7 +533,7 @@ async def submit_sender_appeal(req: SenderAppealRequest):
             )
         raise HTTPException(status_code=500, detail="failed to save appeal")
 
-    print(f"   [ Appeal ] sender={req.sender_id} 對 msg {req.triggered_by_msg_id} 提出申訴（{len(req.appeal_text)} 字）")
+    print(f"   [ Appeal ] submitted=true text_len={len(req.appeal_text)}")
     return {
         "status": "ok",
         "msg_id": req.triggered_by_msg_id,
@@ -509,7 +569,7 @@ async def submit_receiver_report(req: ReceiverReportRequest):
             )
         raise HTTPException(status_code=500, detail="failed to save report")
 
-    print(f"   [ Report ] receiver={req.receiver_id} 對 msg {req.triggered_by_msg_id} 提出回報（{len(req.report_text)} 字）")
+    print(f"   [ Report ] submitted=true text_len={len(req.report_text)}")
     return {
         "status": "ok",
         "msg_id": req.triggered_by_msg_id,

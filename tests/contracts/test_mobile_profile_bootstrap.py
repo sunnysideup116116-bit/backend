@@ -1,3 +1,4 @@
+import ast
 import unittest
 from pathlib import Path
 
@@ -18,7 +19,15 @@ class MobileProfileBootstrapContractTests(unittest.TestCase):
 
     def test_router_delegates_to_shared_assessment_state(self):
         source = ROUTER.read_text(encoding="utf-8")
-        self.assertIn('@router.post("/chat")', source)
+        endpoint = next(node for node in ast.parse(source).body
+                        if isinstance(node, ast.FunctionDef) and node.name == "chat_endpoint")
+        route = next(node for node in endpoint.decorator_list
+                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                     and node.func.attr == "post")
+        self.assertEqual(route.args[0].value, "/chat")
+        dependencies = next(item.value for item in route.keywords if item.arg == "dependencies")
+        self.assertIn("require_assessment_budget", [node.id for node in ast.walk(dependencies)
+                                                   if isinstance(node, ast.Name)])
         self.assertIn("handle_assessment_ui_message(", source)
         self.assertIn("initial_interest=req.initial_interest, initialize=req.initialize", source)
         self.assertIn('req.state not in {"big_five", "deep_profile"}', source)

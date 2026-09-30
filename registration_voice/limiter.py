@@ -5,10 +5,13 @@ import hmac
 import secrets
 import threading
 import time
-from collections import defaultdict, deque
+from collections import deque
 from dataclasses import dataclass
 
 from .settings import VoiceRegistrationSettings
+
+
+MAX_LIMITER_BUCKETS = 10_000
 
 
 @dataclass(frozen=True)
@@ -58,9 +61,12 @@ class TicketStore:
 class LocalVoiceLimiter:
     """Server-local limiter retained behind VOICE_LOCAL_RATE_LIMIT_ENABLED."""
 
-    def __init__(self, settings: VoiceRegistrationSettings):
+    def __init__(
+        self, settings: VoiceRegistrationSettings, *, max_bucket_keys: int = MAX_LIMITER_BUCKETS,
+    ):
         self._settings = settings
-        self._events: dict[str, deque[float]] = defaultdict(deque)
+        self._events: dict[str, deque[float]] = {}
+        self._max_bucket_keys = max(1, min(int(max_bucket_keys), MAX_LIMITER_BUCKETS))
         self._active = 0
         self._lock = threading.Lock()
 
@@ -68,21 +74,49 @@ class LocalVoiceLimiter:
     def enabled(self) -> bool:
         return self._settings.local_rate_limit_enabled
 
-    def allow_start(self, identity: str, *, now: float | None = None) -> bool:
+    def allow_start(
+        self, identity: str, *, client_ip_identity: str | None = None,
+        now: float | None = None,
+    ) -> bool:
         if not self.enabled:
             return True
         instant = time.time() if now is None else now
         with self._lock:
-            events = self._events[identity]
-            while events and events[0] <= instant - 86400:
-                events.popleft()
-            ten_minute_count = sum(ts > instant - 600 for ts in events)
-            if (
-                len(events) >= self._settings.per_identity_per_day
-                or ten_minute_count >= self._settings.per_identity_per_ten_minutes
-            ):
-                return False
-            events.append(instant)
+            keys = [f"identity:{identity}"]
+            if client_ip_identity:
+                keys.append(f"ip:{client_ip_identity}")
+            for key in keys:
+                events = self._events.get(key)
+                if events is None:
+                    continue
+                while events and events[0] <= instant - 86400:
+                    events.popleft()
+                ten_minute_count = sum(ts > instant - 600 for ts in events)
+                if (
+                    len(events) >= self._settings.per_identity_per_day
+                    or ten_minute_count >= self._settings.per_identity_per_ten_minutes
+                ):
+                    return False
+            if any(key not in self._events for key in keys):
+                # Only expired quotas may be removed. Evicting a live bucket
+                # would let an attacker reset its limit by filling the store.
+                expired = [
+                    key for key, events in self._events.items()
+                    if not events or events[-1] <= instant - 86400
+                ]
+                for key in expired:
+                    self._events.pop(key, None)
+                new_keys = sum(key not in self._events for key in keys)
+                if len(self._events) + new_keys > self._max_bucket_keys:
+                    return False
+            # Reserve both limits atomically. Changing a client installation ID
+            # must not reset the independent, server-resolved IP budget.
+            for key in keys:
+                events = self._events.get(key)
+                if events is None:
+                    events = deque()
+                    self._events[key] = events
+                events.append(instant)
             return True
 
     def acquire(self) -> bool:

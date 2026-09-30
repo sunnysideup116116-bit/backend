@@ -7,7 +7,7 @@ import os
 import re
 import time
 import config
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from models import (
     ClearRequest,
     SettingsRequest,
@@ -37,10 +37,10 @@ from services.ayue_agent.public_relationship_projection import anonymize_counter
 from services.match_reason_service import V4_REASON_VERSION, reason_for_viewer
 from services.proposal_namespace import namespace_for_document
 from services.demo_cleanup_service import DemoCleanupError, clear_all_demo_state, graph_health
+from services.admin_access_service import require_demo_admin, require_local_debug
 
 router = APIRouter(prefix="/api", tags=["System"])
 MATCH_TEST_COHORT = "match_v1"
-MATCH_TEST_SHARED_PASSWORD = "12345678"
 MATCH_TEST_OWNER_IDS = {"seed_user_01", "seed_user_04"}
 
 
@@ -126,11 +126,11 @@ def client_config():
 
 @router.get("/init")
 def init_system(user_id: str):
-    profiles = list(profiles_coll.find({}, {
+    profiles = list(profiles_coll.find({"user_id": user_id}, {
         "user_id": 1, "big_five": 1, "current_context": 1,
         "recent_context_expires_at": 1, "_id": 0,
     }))
-    users = ["demo_user"]
+    users = [user_id]
     
     is_complete = False
     my_context = "交朋友"
@@ -216,7 +216,7 @@ def init_system(user_id: str):
         "user_location": user_location,
     }
 
-@router.post("/seed")
+@router.post("/seed", dependencies=[Depends(require_demo_admin)])
 def seed_data():
     hobbies = ["想去喝咖啡", "晚上想看電影", "想找人打籃球", "週末想去郊外圖書館看書", "想要去居酒屋小酌"]
     personalities = [
@@ -304,7 +304,7 @@ def get_demo_status(user_id: str):
     }
 
 
-@router.get("/demo/match-test")
+@router.get("/demo/match-test", dependencies=[Depends(require_demo_admin)])
 def get_match_test_overview(user_id: str):
     """Return login guidance for the isolated match-test cohort only."""
     viewer = profiles_coll.find_one(
@@ -410,7 +410,6 @@ def get_match_test_overview(user_id: str):
     )
     return {
         "cohort": MATCH_TEST_COHORT,
-        "shared_password": MATCH_TEST_SHARED_PASSWORD,
         "accounts": accounts,
         "proposals": proposals,
     }
@@ -466,7 +465,7 @@ def get_recent_context_status(user_id: str, run_key: str | None = None):
     }
     return response
 
-@router.post("/clear")
+@router.post("/clear", dependencies=[Depends(require_demo_admin)])
 def clear_data(req: ClearRequest):
     try:
         return clear_all_demo_state()
@@ -752,12 +751,12 @@ def add_profile_memory(req: ProfileMemoryAddRequest, request: Request = None):
         })
     return {"status": "success", "memory": learned[0]}
 
-@router.get("/debug/profile_skill_runs")
+@router.get("/debug/profile_skill_runs", dependencies=[Depends(require_local_debug)])
 def debug_profile_skill_runs(user_id: str, limit: int = 12):
     safe_limit = max(1, min(limit, 30))
     runs = list(db["profile_skill_runs"].find({"user_id": user_id}, {"_id": 0}).sort("created_at", -1).limit(safe_limit))
     return {"runs": runs}
-@router.get("/debug/profile_state")
+@router.get("/debug/profile_state", dependencies=[Depends(require_local_debug)])
 def debug_profile_state(user_id: str):
     """Development-only snapshot for tracing Ayue's event and memory state."""
     profile = profiles_coll.find_one(

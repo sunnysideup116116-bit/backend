@@ -1,6 +1,7 @@
 """Onboarding HTTP adapters extracted from the legacy chat router."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from services.expensive_request_guard import require_assessment_budget
 
 from database import profiles_coll
 from models import ChatRequest, ResetRequest
@@ -14,7 +15,7 @@ from services.assessment_session_service import (
 router = APIRouter()
 
 
-@router.post("/chat")
+@router.post("/chat", dependencies=[Depends(require_assessment_budget)])
 def chat_endpoint(req: ChatRequest):
     if req.state not in {"big_five", "deep_profile"}:
         raise HTTPException(status_code=400, detail="Invalid state")

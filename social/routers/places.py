@@ -1,6 +1,7 @@
 """Server-owned Google Places helpers for frontend search surfaces."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from services.expensive_request_guard import require_places_budget
 
 from models import PlacesAutocompleteRequest, PlacesDetailsRequest
 from services.ayue_agent.google_places_client import (
@@ -10,7 +11,8 @@ from services.ayue_agent.google_places_client import (
 )
 
 
-router = APIRouter(prefix="/api/places", tags=["Places"])
+router = APIRouter(prefix="/api/places", tags=["Places"],
+                   dependencies=[Depends(require_places_budget)])
 
 
 @router.post("/autocomplete")

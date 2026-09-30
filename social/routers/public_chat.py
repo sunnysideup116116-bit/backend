@@ -18,7 +18,7 @@ import traceback
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from services.profile_writer import update_profile as write_profile
@@ -26,6 +26,7 @@ from database import matches_coll, messages_coll, profiles_coll
 from models import DirectChatRequest
 from services.ai_service import generate_chat_completion
 from services.appwrite_identity_service import authenticated_owner_matches
+from services.direct_chat_auth import require_direct_chat_owner
 from services.ayue_agent import (
     mark_public_interaction_presented,
     run_public_agent_turn,
@@ -94,7 +95,7 @@ def _log_public_stream_exception(exc: Exception) -> None:
     )
 
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_direct_chat_owner)])
 MATCH_READINESS_THRESHOLD = 75
 
 

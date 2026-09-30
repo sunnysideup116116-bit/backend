@@ -4,7 +4,9 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 
-from fastapi import FastAPI
+import pytest
+from fastapi import FastAPI, HTTPException, Request
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from registration_voice.provider import ProviderEvent, ToolCall
 from registration_voice.router import (
@@ -324,5 +326,134 @@ def test_session_ticket_is_bound_to_the_client_ip_that_requested_it():
         assert websocket.close_code == 1008
         assert websocket.close_reason == "ticket_client_mismatch"
         assert provider.keys == []
+
+    asyncio.run(scenario())
+
+
+def test_session_limit_uses_resolved_ip_despite_installation_and_header_changes():
+    async def scenario():
+        provider = FakeProvider()
+        runtime = VoiceRegistrationRuntime(
+            settings=settings(local_rate_limit_enabled=True, per_identity_per_ten_minutes=2),
+            keys=["key-a"], provider=provider,
+        )
+        app = FastAPI()
+        app.include_router(create_router(runtime))
+        session_endpoint, _ = endpoints(app)
+        for index in range(3):
+            req = VoiceSessionRequest(
+                installation_id=f"installation-{index:016d}",
+                consent_version=runtime.settings.consent_version,
+                consent_accepted_at="2026-09-10T12:00:00Z",
+            )
+            request = SimpleNamespace(
+                headers={"x-forwarded-for": f"203.0.113.{index + 1}"},
+                client=SimpleNamespace(host="198.51.100.10"),
+            )
+            if index < 2:
+                assert (await session_endpoint(req, request))["ticket"]
+            else:
+                with pytest.raises(HTTPException) as error:
+                    await session_endpoint(req, request)
+                assert error.value.status_code == 429
+        assert provider.keys == []
+
+    asyncio.run(scenario())
+
+
+def test_spoofed_forwarded_header_cannot_transfer_a_ticket_to_another_peer():
+    async def scenario():
+        provider = FakeProvider()
+        app, _ = app_for(provider)
+        session_endpoint, websocket_endpoint = endpoints(app)
+        ticket = await issue_ticket(session_endpoint)
+        websocket = FakeWebSocket(
+            {"type": "hello", "ticket": ticket, "revision": 0, "form": {}},
+            host="203.0.113.10",
+        )
+        websocket.headers["x-forwarded-for"] = "127.0.0.1"
+        await websocket_endpoint(websocket)
+        assert websocket.close_reason == "ticket_client_mismatch"
+        assert provider.keys == []
+
+    asyncio.run(scenario())
+
+
+def test_trusted_proxy_middleware_supplies_the_client_address_for_ticket_binding():
+    async def scenario():
+        runtime = VoiceRegistrationRuntime(settings=settings(), keys=[], provider=FakeProvider())
+        resolved = []
+
+        async def application(scope, receive, send):
+            resolved.append(runtime.client_ip(Request(scope)))
+
+        middleware = ProxyHeadersMiddleware(application, trusted_hosts="127.0.0.1")
+        for peer in ("127.0.0.1", "198.51.100.10"):
+            await middleware(
+                {"type": "http", "client": (peer, 5000), "scheme": "http",
+                 "headers": [(b"x-forwarded-for", b"203.0.113.10")]},
+                None, None,
+            )
+        assert resolved == ["203.0.113.10", "198.51.100.10"]
+
+    asyncio.run(scenario())
+
+
+def test_global_admission_precedes_provider_connection_and_disconnect_releases_it():
+    class QueueWebSocket(FakeWebSocket):
+        def __init__(self, hello):
+            super().__init__(hello)
+            self.incoming = asyncio.Queue()
+
+        async def receive(self):
+            return await self.incoming.get()
+
+    async def scenario():
+        provider = FakeProvider()
+        runtime = VoiceRegistrationRuntime(
+            settings=settings(local_rate_limit_enabled=True, global_concurrency=1),
+            keys=["key-a"], provider=provider,
+        )
+        app = FastAPI()
+        app.include_router(create_router(runtime))
+        session_endpoint, websocket_endpoint = endpoints(app)
+        first = QueueWebSocket({
+            "type": "hello", "ticket": await issue_ticket(session_endpoint),
+            "revision": 0, "form": {},
+        })
+        first_task = asyncio.create_task(websocket_endpoint(first))
+
+        async def wait_ready():
+            while not any(event.get("type") == "ready" for event in first.sent):
+                await asyncio.sleep(0)
+
+        try:
+            await asyncio.wait_for(wait_ready(), timeout=1)
+            second = FakeWebSocket({
+                "type": "hello", "ticket": await issue_ticket(session_endpoint),
+                "revision": 0, "form": {},
+            })
+            await websocket_endpoint(second)
+            assert second.close_code == 1013
+            assert second.sent == [{"type": "local_rate_limit"}]
+            assert provider.keys == ["key-a"]
+
+            await first.incoming.put({"type": "websocket.disconnect"})
+            await asyncio.wait_for(first_task, timeout=1)
+            assert runtime.limiter._active == 0
+
+            third = FakeWebSocket(
+                {"type": "hello", "ticket": await issue_ticket(session_endpoint),
+                 "revision": 0, "form": {}},
+                messages=({"type": "websocket.receive", "text": json.dumps({"type": "stop"})},),
+            )
+            await websocket_endpoint(third)
+            assert third.close_code == 1000
+            assert provider.keys == ["key-a", "key-a"]
+            assert runtime.limiter._active == 0
+        finally:
+            if not first_task.done():
+                first_task.cancel()
+            await asyncio.gather(first_task, return_exceptions=True)
 
     asyncio.run(scenario())

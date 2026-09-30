@@ -37,7 +37,7 @@ class ChatLogService:
             self.mongo_db = self.mongo_client[db_name]
             self.mongo_state_coll = self.mongo_db["risk_state_history"]
         except Exception as e:
-            print(f"[risk_backend] MongoDB init failed: {e}")
+            print("[risk_backend] MongoDB init failed: error_code=mongo_state_init_failed")
             self.mongo_state_coll = None
 
     async def log_message(self, req, msg_id: str = None, is_blocked: bool = False, delivery_status: str = "delivered"):
@@ -59,8 +59,8 @@ class ChatLogService:
 
             final_id = msg_id if msg_id else ID.unique()
             return await run_blocking(lambda: self.db.create_document(self.db_id, "messages", final_id, msg_data))
-        except Exception as e:
-            print(f"log_message failed: {e}")
+        except Exception:
+            print("log_message failed: error_code=message_log_failed")
             return None
 
     async def update_message_status(self, msg_id: str, is_blocked: bool, status: str):
@@ -76,8 +76,8 @@ class ChatLogService:
                 data["delivered_at"] = now
             
             return await run_blocking(lambda: self.db.update_document(self.db_id, "messages", msg_id, data))
-        except Exception as e:
-            print(f"update_message_status failed: {e}")
+        except Exception:
+            print("update_message_status failed: error_code=message_status_update_failed")
             return None
 
     async def get_recent_messages(self, conversation_id: str, limit: int = 5, exclude_msg_id: str = None) -> list:
@@ -105,8 +105,8 @@ class ChatLogService:
                     timestamp=d.get('timestamp', '')
                 ))
             return messages
-        except Exception as e:
-            print(f"get_recent_messages failed: {e}")
+        except Exception:
+            print("get_recent_messages failed: error_code=delivered_history_unavailable")
             return []
 
     async def get_recent_behavior_messages(self, conversation_id: str, limit: int = 20, exclude_msg_id: str = None) -> list:
@@ -141,8 +141,8 @@ class ChatLogService:
                     timestamp=d.get('timestamp', '')
                 ))
             return messages
-        except Exception as e:
-            print(f"get_recent_behavior_messages failed: {e}")
+        except Exception:
+            print("get_recent_behavior_messages failed: error_code=behavior_history_unavailable")
             return []
 
     @serialized("temporal-features", lambda self, conv_id, user_id, temporal: (conv_id, user_id))
@@ -173,8 +173,8 @@ class ChatLogService:
                 await run_blocking(lambda: self.db.update_document(self.db_id, "temporal_features", doc_id, data))
             else:
                 await run_blocking(lambda: self.db.create_document(self.db_id, "temporal_features", ID.unique(), data))
-        except Exception as e:
-            print(f"update_temporal_features failed: {e}")
+        except Exception:
+            print("update_temporal_features failed: error_code=temporal_features_unavailable")
 
     async def log_analysis_detail(self, msg_id, conv_id, rule_res, nlp_res, final_delta, scenarios, diagnostic=None, flagged_words=None, classifier_flag=None):
         """STEP 2-6: Store full analysis summary"""
@@ -200,8 +200,8 @@ class ChatLogService:
                 "guardrail_classifier_flag": json.dumps(classifier_flag or {}),
             }
             await run_blocking(lambda: self.db.create_document(self.db_id, "risk_analysis_logs_", ID.unique(), data))
-        except Exception as e:
-            print(f"log_analysis_detail failed: {e}")
+        except Exception:
+            print("log_analysis_detail failed: error_code=analysis_log_unavailable")
 
     async def get_latest_risk_state_with_time(self, conversation_id: str, user_id: str):
         """Fetch latest risk state and its timestamp"""
@@ -221,8 +221,8 @@ class ChatLogService:
                 d = doc.data if hasattr(doc, 'data') else doc.to_dict()
                 state_data = json.loads(d.get('risk_state', '{}'))
                 return RiskState(**state_data), d.get('timestamp')
-        except Exception as e:
-            print(f"Read risk state from Appwrite failed: {e}, falling back to MongoDB")
+        except Exception:
+            print("Read risk state from Appwrite failed: error_code=appwrite_state_read_failed fallback=mongo")
             
         # MongoDB Fallback
         if self.mongo_state_coll is not None:
@@ -236,8 +236,8 @@ class ChatLogService:
                     if isinstance(state_data, str):
                         state_data = json.loads(state_data)
                     return RiskState(**(state_data or {})), doc.get("timestamp")
-            except Exception as mongo_err:
-                print(f"Read risk state from MongoDB failed: {mongo_err}")
+            except Exception:
+                print("Read risk state from MongoDB failed: error_code=mongo_state_read_failed")
                 
         return RiskState(sexual_boundary=0.0, coercion=0.0, manipulation=0.0, harassment=0.0, emotional_pressure=0.0), None
 
@@ -259,8 +259,8 @@ class ChatLogService:
                 d = doc.data if hasattr(doc, 'data') else doc.to_dict()
                 states.append(RiskState(**json.loads(d.get('risk_state', '{}'))))
             return states
-        except Exception as e:
-            print(f"get_recent_risk_state_history from Appwrite failed: {e}, falling back to MongoDB")
+        except Exception:
+            print("get_recent_risk_state_history from Appwrite failed: error_code=appwrite_history_read_failed fallback=mongo")
             
         # MongoDB Fallback
         if self.mongo_state_coll is not None:
@@ -275,8 +275,8 @@ class ChatLogService:
                         state_data = json.loads(state_data)
                     states.append(RiskState(**(state_data or {})))
                 return states
-            except Exception as mongo_err:
-                print(f"get_recent_risk_state_history from MongoDB failed: {mongo_err}")
+            except Exception:
+                print("get_recent_risk_state_history from MongoDB failed: error_code=mongo_history_read_failed")
                 
         return []
 
@@ -294,15 +294,15 @@ class ChatLogService:
         }
         try:
             await run_blocking(lambda: self.db.create_document(self.db_id, "risk_state_history", ID.unique(), data))
-        except Exception as e:
-            print(f"save_risk_state_history to Appwrite failed: {e}, falling back to MongoDB")
+        except Exception:
+            print("save_risk_state_history to Appwrite failed: error_code=appwrite_history_write_failed fallback=mongo")
             
         # MongoDB Fallback
         if self.mongo_state_coll is not None:
             try:
                 await run_blocking(lambda: self.mongo_state_coll.insert_one(data.copy()))
-            except Exception as mongo_err:
-                print(f"save_risk_state_history to MongoDB failed: {mongo_err}")
+            except Exception:
+                print("save_risk_state_history to MongoDB failed: error_code=mongo_history_write_failed")
 
     async def log_intervention(self, conversation_id, triggered_by_msg_id,
                                sender_id, receiver_id, risk_level, risk_state,
@@ -334,8 +334,8 @@ class ChatLogService:
             }
             await run_blocking(lambda: self.db.create_document(self.db_id, "intervention_logs", ID.unique(), log_data))
             return True
-        except Exception as e:
-            print(f"log_intervention failed: {e}")
+        except Exception:
+            print("log_intervention failed: error_code=intervention_log_unavailable")
             return False
 
     async def get_cooldown_status(self, conversation_id: str, user_id: str) -> dict:
@@ -371,7 +371,7 @@ class ChatLogService:
         except Exception:
             return unknown
 
-    async def get_remaining_cooldown(self, conversation_id: str, user_id: str) -> int:
+    async def get_remaining_cooldown(self, conversation_id: str, user_id: str) -> int | None:
         """依最近一筆介入記錄計算寄件方剩餘的冷卻秒數；無紀錄或已過期回 0。
 
         冷卻必須由後端依「當初施加的秒數 − 已經過時間」推算，前端才能在重開
@@ -398,16 +398,21 @@ class ChatLogService:
 
             ts = data.get("timestamp")
             if not ts:
-                return 0
+                print("get_remaining_cooldown unavailable: error_code=cooldown_timestamp_missing")
+                return None
             last_ts = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
             if last_ts.tzinfo is None:
                 last_ts = last_ts.replace(tzinfo=timezone.utc)
 
             elapsed = (datetime.now(timezone.utc) - last_ts).total_seconds()
             return max(0, int(cooldown - elapsed))
-        except Exception as e:
-            print(f"get_remaining_cooldown failed: {e}")
-            return 0
+        except Exception:
+            # A storage failure is different from an expired or absent
+            # cooldown.  Returning zero here could satisfy the intervention
+            # engine's exemption condition and release a sanction without
+            # proving that the cooldown really ended.
+            print("get_remaining_cooldown unavailable: error_code=cooldown_state_unavailable")
+            return None
 
     async def get_last_displayed_intervention(self, conversation_id: str, user_id: str, role: str) -> Optional[dict]:
         """取得該對話／使用者最近一次**實際對指定角色顯示過**的介入。
@@ -439,8 +444,8 @@ class ChatLogService:
                         "timestamp": data.get("timestamp"),
                     }
             return None
-        except Exception as e:
-            print(f"get_last_displayed_intervention failed: {e}")
+        except Exception:
+            print("get_last_displayed_intervention failed: error_code=intervention_lookup_unavailable")
             return None
 
     async def update_intervention_feedback(self, msg_id: str, role: str, feedback: str, detail: Optional[str] = None) -> bool:
@@ -478,8 +483,8 @@ class ChatLogService:
                 update_data
             ))
             return True
-        except Exception as e:
-            print(f"update_intervention_feedback failed: {e}")
+        except Exception:
+            print("update_intervention_feedback failed: error_code=feedback_update_unavailable")
             return False
 
     async def get_receiver_feedback_statuses(
@@ -537,8 +542,8 @@ class ChatLogService:
                 if fb:
                     feedbacks.append(fb)
             return feedbacks
-        except Exception as e:
-            print(f"get_recent_feedbacks failed: {e}")
+        except Exception:
+            print("get_recent_feedbacks failed: error_code=feedback_lookup_unavailable")
             return []
 
     async def save_guardrail_context_review(
@@ -567,8 +572,8 @@ class ChatLogService:
             }
             await run_blocking(lambda: self.db.create_document(self.db_id, "guardrail_context_reviews", ID.unique(), data))
             return True
-        except Exception as e:
-            print(f"save_guardrail_context_review failed: {e}")
+        except Exception:
+            print("save_guardrail_context_review failed: error_code=guardrail_review_write_failed")
             return False
 
     async def get_recent_guardrail_context_reviews(self, conversation_id: str, sender_id: str, limit: int = 5) -> list:
@@ -590,8 +595,8 @@ class ChatLogService:
                 if judgment:
                     judgments.append(judgment)
             return judgments
-        except Exception as e:
-            print(f"get_recent_guardrail_context_reviews failed: {e}")
+        except Exception:
+            print("get_recent_guardrail_context_reviews failed: error_code=guardrail_review_lookup_failed")
             return []
 
     async def save_sender_appeal(self, msg_id: str, sender_id: str, appeal_text: str) -> dict:
@@ -634,7 +639,7 @@ class ChatLogService:
             if "sender_appeal_text" in msg or "Unknown attribute" in msg or "Invalid document structure" in msg:
                 print("save_sender_appeal failed: Appwrite intervention_logs 尚未建立 sender_appeal_text 屬性")
                 return {"ok": False, "error": "attribute_missing"}
-            print(f"save_sender_appeal failed: {e}")
+            print("save_sender_appeal failed: error_code=appeal_store_unavailable")
             return {"ok": False, "error": "unknown"}
 
     async def save_receiver_report(self, msg_id: str, receiver_id: str, report_text: str) -> dict:
@@ -677,7 +682,7 @@ class ChatLogService:
             if "receiver_report_text" in msg or "Unknown attribute" in msg or "Invalid document structure" in msg:
                 print("save_receiver_report failed: Appwrite intervention_logs 尚未建立 receiver_report_text 屬性")
                 return {"ok": False, "error": "attribute_missing"}
-            print(f"save_receiver_report failed: {e}")
+            print("save_receiver_report failed: error_code=receiver_report_store_unavailable")
             return {"ok": False, "error": "unknown"}
 
     @staticmethod

@@ -160,6 +160,8 @@ class InterventionEngine:
 
             # ③ 剩餘冷卻 = 0
             remaining = await chat_log_service.get_remaining_cooldown(conv_id, sender_id)
+            if remaining is None:
+                return False
             if remaining > 0:
                 return False
 
@@ -175,8 +177,8 @@ class InterventionEngine:
                 return False
 
             return True
-        except Exception as e:
-            print(f"   [ Exempt Warning ] 豁免判定失敗，保守不豁免: {e}")
+        except Exception:
+            print("   [ Exempt Warning ] error_code=sanction_exemption_unavailable; fail_closed=true")
             return False
 
     def _apply_state_notice(self, directive: dict, role: str, risk_level: str) -> dict:
@@ -230,8 +232,8 @@ class InterventionEngine:
                 out.pop("action_options", None)
                 out["show_options"] = False
             return out
-        except Exception as e:
-            print(f"   [ State Notice ] 取用失敗，保留原文案: {e}")
+        except Exception:
+            print("   [ State Notice ] error_code=state_notice_unavailable; fallback=original_directive")
             return directive
 
     async def _apply_throttle(self, directive: dict, risk_level: str, conv_id: str,
@@ -269,8 +271,8 @@ class InterventionEngine:
             if last_ts.tzinfo is None:
                 last_ts = last_ts.replace(tzinfo=timezone.utc)
             elapsed = (datetime.now(timezone.utc) - last_ts).total_seconds()
-        except (ValueError, TypeError) as e:
-            print(f"   [ Throttle Warning ] 無法解析上次介入時間: {e}")
+        except (ValueError, TypeError):
+            print("   [ Throttle Warning ] error_code=invalid_intervention_timestamp")
             return directive
 
         if elapsed < window:

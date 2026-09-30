@@ -1,7 +1,7 @@
 """Demo-only maintenance endpoints, isolated from user chat routing."""
 
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from database import matches_coll, messages_coll, profiles_coll
 from services.demo_cleanup_service import (
@@ -15,9 +15,10 @@ from services.event_discovery_job_service import (
     enqueue_event_discovery_job, event_discovery_job_snapshot,
 )
 from services.event_opportunity_service import scan_event_opportunities
+from services.admin_access_service import require_demo_admin
 
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_demo_admin)])
 LOGGER = logging.getLogger(__name__)
 def _event_job_snapshot() -> dict:
     return event_discovery_job_snapshot()
