@@ -74,6 +74,10 @@ from matchmaker_agent.preference_bootstrap_api import router as preference_boots
 app.include_router(preference_bootstrap_router)
 from matchmaker_agent.preference_embedding_api import router as preference_embedding_router
 app.include_router(preference_embedding_router)
+from matchmaker_agent.event_v2_api import router as event_v2_router
+app.include_router(event_v2_router)
+from matchmaker_agent.event_v2_api import initialize_event_profiles
+app.router.add_event_handler('startup', initialize_event_profiles)
 app.add_middleware(MatchmakerQuotaMiddleware)
 app.router.add_event_handler('startup', validate_signing_config)
 from services.semantic_user_eligibility import initialize_profiles
@@ -441,24 +445,27 @@ async def _evaluate_match_request(req: MatchRequest):
 
 @app.post("/api/proactive_event_match")
 def proactive_event_match(req: ProactiveEventMatchRequest):
-    user_id = re.sub(r"\s+", "", str(req.user_id or ""))[:80]
-    if not user_id:
+    from matchmaker_agent.semantic_rollout_policy import valid_owner_id
+    user_id = req.user_id
+    if not valid_owner_id(user_id):
         return {"status": "error", "message": "user_id is required"}
     started = time.perf_counter()
     try:
-        deleted = agent.clean_expired_events()
-        excluded_user_ids = list(dict.fromkeys(
-            re.sub(r"\s+", "", str(value or ""))[:80]
-            for value in req.excluded_user_ids[:100]
-            if str(value or "").strip()
-        ))
-        matches = agent.find_event_matches(user_id, excluded_user_ids=excluded_user_ids)
+        # Lifecycle worker owns cleanup. Relevance retrieval itself is read-only.
+        deleted = 0
+        from matchmaker_agent.event_v2_contract import EventUnavailable
+        if len(req.excluded_user_ids)>500 or any(not valid_owner_id(v) for v in req.excluded_user_ids):
+            raise EventUnavailable('event_exclusion_invalid')
+        excluded_user_ids = list(dict.fromkeys(req.excluded_user_ids))
+        from matchmaker_agent.event_v2_api import find_matches
+        matches = find_matches(agent, user_id, excluded_user_ids)
         if not matches:
             return {
                 "status": "no_match",
                 "user_id": user_id,
                 "expired_events_deleted": deleted,
                 "message": "目前沒有同時通過活動連結與地雷過濾的人選。",
+                "event_telemetry": getattr(matches, 'telemetry', {}),
             }
         selected = matches[0]
         invitation_order = agent.choose_event_invitation_order(selected)
@@ -467,46 +474,16 @@ def proactive_event_match(req: ProactiveEventMatchRequest):
             if invitation_order.get("first") == "target"
             else selected.get("candidate_id")
         )
-        hook_match = selected
-        if invitation_order.get("first") == "candidate":
-            hook_match = {
-                **selected,
-                "user_id": selected.get("candidate_id"),
-                "user_name": selected.get("candidate_name"),
-                "candidate_id": selected.get("user_id"),
-                "candidate_name": selected.get("user_name"),
-                "target_links": selected.get("candidate_links") or [],
-                "candidate_links": selected.get("target_links") or [],
-                "target_user_concepts": selected.get("candidate_user_concepts") or [],
-                "candidate_user_concepts": selected.get("target_user_concepts") or [],
-                "target_source_kinds": selected.get("candidate_source_kinds") or [],
-                "candidate_source_kinds": selected.get("target_source_kinds") or [],
-            }
-        hook = agent.generate_proactive_event_hook(first_user_id, hook_match)
+        hook = f"阿月看到「{str(selected.get('event_name') or '近期活動')[:120]}」，與你的興趣或近期計畫相關，也想到一位可能對這個活動感興趣的人。要不要先了解看看？"
         second_user_id = (
             selected.get("candidate_id")
             if first_user_id == selected.get("user_id")
             else selected.get("user_id")
         )
-        second_hook_match = selected
-        if second_user_id == selected.get("candidate_id"):
-            second_hook_match = {
-                **selected,
-                "user_id": selected.get("candidate_id"),
-                "user_name": selected.get("candidate_name"),
-                "candidate_id": selected.get("user_id"),
-                "candidate_name": selected.get("user_name"),
-                "target_links": selected.get("candidate_links") or [],
-                "candidate_links": selected.get("target_links") or [],
-                "target_user_concepts": selected.get("candidate_user_concepts") or [],
-                "candidate_user_concepts": selected.get("target_user_concepts") or [],
-                "target_source_kinds": selected.get("candidate_source_kinds") or [],
-                "candidate_source_kinds": selected.get("target_source_kinds") or [],
-            }
-        second_hook = agent.generate_proactive_event_hook(second_user_id, second_hook_match)
+        second_hook = hook
         print(
             f"[TIMING][9001 /api/proactive_event_match] total="
-            f"{time.perf_counter() - started:.3f}s user={user_id}"
+            f"{time.perf_counter() - started:.3f}s policy=event_relevance_v2"
         )
         return {
             "status": "success",
@@ -519,10 +496,13 @@ def proactive_event_match(req: ProactiveEventMatchRequest):
             "hook": hook,
             "first_hook": hook,
             "second_hook": second_hook,
+            "event_telemetry": getattr(matches, 'telemetry', {}),
         }
     except Exception as exc:
-        print(f"[PROACTIVE_EVENT] match failed user={user_id} error={exc}")
-        return {"status": "error", "user_id": user_id, "message": str(exc)}
+        from matchmaker_agent.event_v2_contract import EventUnavailable
+        code = exc.code if isinstance(exc, EventUnavailable) else 'event_relevance_unavailable'
+        return {"status": "unavailable", "error_code": code,
+            "event_telemetry": getattr(exc, 'telemetry', {})}
 
 
 @app.post("/api/events/lifecycle/cleanup")
@@ -813,85 +793,12 @@ def project_event_relevance(req: EventRelevanceProjectionRequest):
         return {"status": "error", "event_count": len(event_ids), "link_count": 0}
 
 
-def _refresh_semantic_event_links(session) -> dict[str, int]:
-    relevance_threshold = max(0.0, min(
-        float(os.getenv("EVENT_RELEVANCE_MIN_SIMILARITY", "0.68")), 1.0,
-    ))
-    avoidance_threshold = max(0.0, min(
-        float(os.getenv("EVENT_AVOIDANCE_MIN_SIMILARITY", "0.74")), 1.0,
-    ))
-    now = time.time()
-    session.run("""
-        MATCH ()-[old:EVENT_RELEVANCE|EVENT_AVOIDANCE]->(event:Event)
-        WHERE event.status = 'active' AND event.expires_at > $now
-        DELETE old
-    """, now=now).consume()
-    avoidance = session.run("""
-        MATCH (user:User)-[:AVOIDS]->(user_concept:Concept)
-        MATCH (event:Event)-[signal_relation:HAS_TAG|HAS_VIBE]->(event_concept:Concept)
-        WHERE event.status = 'active' AND event.expires_at > $now
-          AND user_concept.embedding IS NOT NULL
-          AND event_concept.embedding IS NOT NULL
-          AND user_concept.kind = 'activity'
-          AND type(signal_relation) = 'HAS_TAG'
-        WITH user, event, user_concept, event_concept,
-             vector.similarity.cosine(user_concept.embedding, event_concept.embedding) AS score
-        WHERE score >= $threshold
-        WITH user, event, user_concept, event_concept, score ORDER BY score DESC
-        WITH user, event, collect({user_concept:user_concept.label,
-             event_signal:event_concept.label, similarity:score})[0..3] AS evidence
-        MERGE (user)-[link:EVENT_AVOIDANCE]->(event)
-        SET link.user_concepts=[item IN evidence | item.user_concept],
-            link.event_signals=[item IN evidence | item.event_signal],
-            link.similarities=[item IN evidence | item.similarity],
-            link.source_kinds=['durable'],
-            link.max_similarity=reduce(best=0.0, item IN evidence |
-                CASE WHEN item.similarity > best THEN item.similarity ELSE best END),
-            link.updated_at=$now
-        RETURN count(link) AS written
-    """, now=now, threshold=avoidance_threshold).single()
-    relevance = session.run("""
-        MATCH (user:User)-[preference:PREFERS|CURRENTLY_WANTS]->(user_concept:Concept)
-        MATCH (event:Event)-[signal_relation:HAS_TAG|HAS_VIBE]->(event_concept:Concept)
-        WHERE event.status = 'active' AND event.expires_at > $now
-          AND NOT (user)-[:EVENT_AVOIDANCE]->(event)
-          AND (type(preference) <> 'CURRENTLY_WANTS'
-               OR coalesce(preference.expires_at, 0) > $now)
-          AND user_concept.embedding IS NOT NULL
-          AND event_concept.embedding IS NOT NULL
-          AND ((user_concept.kind = 'activity' AND type(signal_relation) = 'HAS_TAG')
-            OR user_concept.kind = 'interest')
-        WITH user, event, preference, user_concept, event_concept,
-             vector.similarity.cosine(user_concept.embedding, event_concept.embedding) AS score
-        WHERE score >= $threshold
-        WITH user, event, preference, user_concept, event_concept, score ORDER BY score DESC
-        WITH user, event, collect({user_concept:user_concept.label,
-             event_signal:event_concept.label, similarity:score,
-             source_kind:CASE WHEN type(preference)='CURRENTLY_WANTS'
-                THEN 'recent' ELSE 'durable' END})[0..3] AS evidence
-        MERGE (user)-[link:EVENT_RELEVANCE]->(event)
-        SET link.user_concepts=[item IN evidence | item.user_concept],
-            link.event_signals=[item IN evidence | item.event_signal],
-            link.similarities=[item IN evidence | item.similarity],
-            link.source_kinds=[item IN evidence | item.source_kind],
-            link.max_similarity=reduce(best=0.0, item IN evidence |
-                CASE WHEN item.similarity > best THEN item.similarity ELSE best END),
-            link.updated_at=$now
-        RETURN count(link) AS written
-    """, now=now, threshold=relevance_threshold).single()
-    _prune_event_relevance(session)
-    final_relevance = session.run("""
-        MATCH ()-[link:EVENT_RELEVANCE]->(event:Event)
-        WHERE event.status = 'active' AND event.expires_at > $now
-        RETURN count(link) AS count
-    """, now=now).single()
-    return {
-        "relevance_count": int(
-            final_relevance["count"] if final_relevance
-            else (relevance["written"] if relevance else 0)
-        ),
-        "avoidance_count": int(avoidance["written"] if avoidance else 0),
-    }
+def _refresh_semantic_event_links(session) -> dict[str, object]:
+    """Historical refresh hook: V2 readiness only, no legacy vector comparison."""
+    from matchmaker_agent.event_v2_adapter import infrastructure
+    result = infrastructure(session)
+    return {'event_readiness': result, 'projection_mode': 'read_time',
+        'relevance_count': 0, 'avoidance_count': 0}
 
 
 @app.get("/api/concepts/missing-embeddings")

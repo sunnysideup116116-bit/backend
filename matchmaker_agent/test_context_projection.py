@@ -131,27 +131,18 @@ class ContextProjectionEndpointTests(unittest.TestCase):
 
     def test_event_avoidance_only_uses_explicit_activity_dislikes(self):
         _, session = self._graph()
-        agent_api._refresh_semantic_event_links(session)
-        avoidance_query = next(
-            call.args[0]
-            for call in session.run.call_args_list
-            if "MATCH (user:User)-[:AVOIDS]" in call.args[0]
-        )
-        self.assertIn("user_concept.kind = 'activity'", avoidance_query)
-        self.assertIn("type(signal_relation) = 'HAS_TAG'", avoidance_query)
-        self.assertNotIn("OR user_concept.kind = 'interest'", avoidance_query)
-        relevance_query = next(
-            call.args[0]
-            for call in session.run.call_args_list
-            if "MATCH (user:User)-[preference:PREFERS|CURRENTLY_WANTS]" in call.args[0]
-        )
-        self.assertIn("coalesce(preference.expires_at, 0) > $now", relevance_query)
+        result = agent_api._refresh_semantic_event_links(session)
+        self.assertEqual(result['projection_mode'], 'read_time')
+        self.assertTrue(result['event_readiness']['exact_ready'])
+        queries = [str(c.args[0]) for c in session.run.call_args_list]
+        self.assertFalse(any('MERGE ' in q or 'DELETE ' in q or '.embedding ' in q for q in queries))
 
     def test_concept_embedding_projection_stores_versioned_vector(self):
         driver, session = self._graph()
         original_run = session.run.side_effect
 
         def run(query, **kwargs):
+            query = str(query)
             if "UNWIND $keys" in query:
                 return [{"key": "hiking", "label": "爬山"}]
             if "RETURN count(concept) AS written" in query:
@@ -174,8 +165,7 @@ class ContextProjectionEndpointTests(unittest.TestCase):
         self.assertEqual(result["embedded_count"], 1)
         queries = [call.args[0] for call in session.run.call_args_list]
         self.assertTrue(any("CREATE VECTOR INDEX concept_embedding_index" in query for query in queries))
-        prune = next(call for call in session.run.call_args_list if "ranked_links[$limit..]" in call.args[0])
-        self.assertEqual(prune.kwargs["limit"], 3)
+        self.assertFalse(any('ranked_links[$limit..]' in str(call.args[0]) for call in session.run.call_args_list))
         write = next(call for call in session.run.call_args_list if "concept.embedding=item.embedding" in call.args[0])
         self.assertEqual(len(write.kwargs["concepts"][0]["embedding"]), 768)
         self.assertEqual(write.kwargs["concepts"][0]["kind"], "activity")

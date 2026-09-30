@@ -122,6 +122,7 @@ def run_invitation_batches(run_id, is_current, notify):
                 "state": "pending" if retry else "done", "outcome": status,
                 "attempts": attempts, "updated_at": time.time(),
                 "match_id": str(result.get("match_id") or ""),
+                "error_code": str(result.get("error_code") or "")[:80],
             }})
             created += int(status == "created")
             if created >= batch_limit:

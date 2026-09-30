@@ -33,6 +33,9 @@ from services.profile_projection import (
     active_recent_context,
     without_expired_recent_context,
 )
+from services.event_v2_proposal import final_eligible as event_final_eligible
+from services.event_semantic_monitor import on_result as record_event_semantic_result
+from matchmaker_agent.semantic_rollout_policy import valid_owner_id
 
 
 AGENT_EVENT_OPPORTUNITY_URL = "http://127.0.0.1:9001/api/proactive_event_match"
@@ -300,8 +303,8 @@ def create_event_opportunity(
     cycle_id: str = "", can_commit=None,
 ) -> dict[str, Any]:
     """Find one graph bridge and create an anonymous first-party draft."""
-    safe_user_id = re.sub(r"\s+", "", str(user_id or ""))[:80]
-    if not safe_user_id:
+    safe_user_id = user_id
+    if not valid_owner_id(safe_user_id):
         return {"status": "invalid_user"}
     if matches_coll.count_documents(_live_query(safe_user_id), limit=1):
         return {"status": "already_active"}
@@ -312,7 +315,7 @@ def create_event_opportunity(
     except RiskBlockServiceUnavailable:
         return {"status": "risk_block_unavailable"}
     requested_exclusions = {
-        str(value)[:80]
+        str(value)
         for value in (excluded_user_ids or [])
         if str(value or "").strip() and str(value) != safe_user_id
     } | recent_declined | risk_exclusions
@@ -326,10 +329,14 @@ def create_event_opportunity(
     )
     response.raise_for_status()
     agent_result = response.json()
+    if record_event_semantic_result(agent_result.get('status'), agent_result.get('error_code'),
+            agent_result.get('event_telemetry')):
+        return {'status': 'unavailable', 'error_code': 'event_semantic_circuit_open'}
     if agent_result.get("status") != "success":
         return {
             "status": str(agent_result.get("status") or "agent_error"),
             "message": str(agent_result.get("message") or "")[:160],
+            "error_code": str(agent_result.get("error_code") or "")[:80],
         }
 
     selected = agent_result.get("match") or {}
@@ -499,6 +506,15 @@ def create_event_opportunity(
     try:
         if can_commit is not None and not can_commit():
             raise RuntimeError("event_cycle_ownership_lost")
+        if selected.get('event_policy') != 'event_relevance_v2' or not event_final_eligible(
+                safe_user_id, candidate_id, selected.get('event_receipt'), profiles=profiles_coll,
+                matches=matches_coll, live_query=_live_query, declined=_pair_declined_recently):
+            if quota_reserved:
+                release_daily_quota(safe_user_id, bucket='background',
+                    operation_key=f'event-opportunity:{opportunity_key}')
+            return {'status': 'stale', 'error_code': 'event_final_recheck_failed'}
+        if can_commit is not None and not can_commit():
+            raise RuntimeError('event_cycle_ownership_lost')
         inserted = matches_coll.insert_one(match_doc)
     except DuplicateKeyError:
         if quota_reserved:

@@ -60,6 +60,11 @@ EMPTY／legacy-only requester 不需先 bootstrap；candidate 必須有目前 ve
 - Private Ayue 維持 `private_v2.py`，使用 private context 與搬至 shared 的 confirmation manager；不改成 Pi。
 - Conversation compaction、owner memory、relationship memory、配對、活動與所有背景 worker 保持原本 domain ownership。
 
+Event-driven matching 的 [V2 adapter contract](EVENT_V2_ADAPTER_CONTRACT.md) 將 user→activity
+exact relevance、verified V2 positive semantic evidence、未到期近期意圖與 negative constraints
+留在 Event domain。Event tags/vibes 使用獨立 query namespace；新的 signed query-vector／final-proof
+介面不新增 Pi tool、不修改 Preference lifecycle。此 branch 尚未部署，不代表 production Event 已修復。
+
 ## Context、工具與串流
 
 Summary v5 的全域試行批准、線上健康監測與逐份摘要驗證分開。經本機 operator 審核的獨立 70 例報告可批准受控試行；`*` 需要有效的 policy/model/provider/fingerprint 綁定批准，或在未批准時遵守原 readiness gate，逐份 owner/room/policy/evaluation 檢查不變。正常聊天將摘要維護排入持久 job，Social 啟停有 lease 與有界重試的重建 worker。狀態查詢為唯讀且需 owner JWT；詳見 [Summary rollout](docs/SUMMARY_ROLLOUT_OPERATIONS.md)。

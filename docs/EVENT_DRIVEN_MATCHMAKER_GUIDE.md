@@ -2,6 +2,12 @@
 >
 # Event-Driven Proactive Matchmaker Guide
 
+> **Event V2 adapter（本 branch，尚未部署）**：新 runtime 以
+> [Event V2 contract](../EVENT_V2_ADAPTER_CONTRACT.md) 為準，移除 all-Concept legacy
+> embedding barrier，採 read-time user→activity exact／V2 semantic 與 proposal-time proof。
+> 下文 Concept.embedding、legacy relevance projection 與 pending 歸零章節保留為
+> historical pre-V2 evidence，不再是新 adapter 的 authority。沒有重跑 production weekly run。
+
 本文件是「事件驅動主動媒人」功能的完整技術與操作指南。閱讀者不需要先理解
 `matchmaker_new`；正式實作已整合在 `social` 與
 `matchmaker_agent`。
