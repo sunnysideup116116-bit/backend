@@ -94,6 +94,8 @@ app.include_router(agent_quota_router)
 from routers.preference_bootstrap import router as preference_bootstrap_router
 from services.preference_bootstrap_service import start_worker as start_bootstrap_worker, stop_worker as stop_bootstrap_worker
 app.include_router(preference_bootstrap_router)
+from services.event_query_vectors import router as event_query_vectors_router
+app.include_router(event_query_vectors_router)
 app.router.add_event_handler("shutdown", stop_bootstrap_worker)
 app.router.add_event_handler("startup", validate_signing_config)
 app.router.add_event_handler("startup", start_bootstrap_worker)

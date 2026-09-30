@@ -93,6 +93,17 @@ Durable memory 的 500 上限以 raw Unicode codepoints 計算，正規化後也
 
 ## Background and voice boundaries
 
+Event V2 adapter 的 local release contract 見 [Event contract](../../EVENT_V2_ADAPTER_CONTRACT.md)。
+Event exact 是各 owner→activity 的 relevance，不要求兩人共享 preference；先搜尋 qualified
+exact bridges，再對缺 exact 的 owner/activity 使用 V2 semantic。`:9001/api/events/v2/readiness`
+只判 Graph／frozen contract／V2 index infrastructure，不等待全部 Concept vectors。
+`:8000/api/internal/events/v2/query-vectors` 與 `:9001/api/events/v2/recheck` 使用既有
+path/body/time HMAC，缺簽章拒絕。Query encoding 在 Social pinned SDK 執行，只回
+Event namespace/source hash 所綁定的 transient vectors；不投影 durable preference。
+Social Event domain service 在 draft insert 前重查 profile、block、history、opaque Event proof
+及 weekly lease。Unresolved AVOIDS 回 typed unavailable；exact negative 照常阻擋。
+本 branch 的 implementation/tests 不代表已部署或重跑 production Event。
+
 Registration Graph `registration-bootstrap-v1`：Social profiling 初始化／profile 更新只 enqueue，
 既有 memory outbox worker 重新驗證 Appwrite，透過 9001 `POST /api/users/registration-projection`
 同步 User.id/name。`POST /api/v2/memory/apply` 的 `surface=registration_interest` 採 insert-only 初始

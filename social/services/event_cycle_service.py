@@ -20,7 +20,7 @@ from services.proposal_namespace import (
 
 
 AGENT_EVENT_RESET_URL = "http://127.0.0.1:9001/api/events/reset"
-AGENT_PENDING_CONCEPTS_URL = "http://127.0.0.1:9001/api/concepts/missing-embeddings"
+AGENT_EVENT_READINESS_URL = "http://127.0.0.1:9001/api/events/v2/readiness"
 
 
 class EventCycleError(RuntimeError):
@@ -107,41 +107,17 @@ def reset_event_inventory() -> dict[str, Any]:
 
 
 def wait_for_event_relevance() -> dict[str, Any]:
-    """Wait for the existing 8000 embedding worker to finish Graph projection."""
-    wait_seconds = _bounded_int(
-        os.getenv("EVENT_WEEKLY_RELEVANCE_WAIT_SECONDS", "900"),
-        900, 0, 3600,
-    )
-    poll_seconds = _bounded_int(
-        os.getenv("EVENT_WEEKLY_RELEVANCE_POLL_SECONDS", "10"),
-        10, 2, 60,
-    )
-    deadline = time.monotonic() + wait_seconds
-    while True:
-        try:
-            response = requests.get(
-                AGENT_PENDING_CONCEPTS_URL,
-                params={"limit": 1},
-                timeout=(3, 15),
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except (requests.RequestException, ValueError) as exc:
-            return {
-                "status": "unavailable", "ready": False,
-                "error_code": type(exc).__name__,
-            }
-        if payload.get("status") != "success":
-            return {"status": "unavailable", "ready": False}
-        pending = int(payload.get("count", 0) or 0)
-        if pending <= 0:
-            return {"status": "ready", "ready": True, "pending_count": 0}
-        if time.monotonic() >= deadline:
-            return {
-                "status": "timeout", "ready": False,
-                "pending_count": pending,
-            }
-        time.sleep(poll_seconds)
+    """One infrastructure probe; individual vectors NEVER gate the population."""
+    try:
+        response = requests.get(AGENT_EVENT_READINESS_URL, timeout=(3, 15))
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get('policy') != 'event_relevance_v2':
+            raise ValueError('event_readiness_contract')
+        return {key: payload[key] for key in ('status','ready','exact_ready','semantic_ready',
+            'error_code','policy','all_vectors_required') if key in payload}
+    except (requests.RequestException, ValueError):
+        return {'status': 'unavailable', 'ready': False, 'error_code': 'event_readiness_unavailable'}
 
 
 def run_weekly_event_cycle(

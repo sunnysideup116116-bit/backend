@@ -24,6 +24,7 @@ def agent_payload(first_user="owner", second_user="candidate"):
             "session_count": 2,
             "source_url": "https://example.com/event",
             "target_links": ["戶外"], "candidate_links": ["市集"],
+            "event_policy": "event_relevance_v2", "event_receipt": "r"*43,
         },
     }
 
@@ -31,6 +32,9 @@ def agent_payload(first_user="owner", second_user="candidate"):
 class EventOpportunityServiceTests(unittest.TestCase):
     def setUp(self):
         super().setUp()
+        final = patch.object(service, 'event_final_eligible', return_value=True)
+        final.start()
+        self.addCleanup(final.stop)
         blocker = patch.object(
             service.risk_block_service,
             "excluded_user_ids",

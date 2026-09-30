@@ -577,24 +577,10 @@ class EventPipelineTests(unittest.TestCase):
 
     def test_event_match_query_uses_semantic_links_and_hard_avoidance(self):
         agent = MatchmakerAgent.__new__(MatchmakerAgent)
-        driver = MagicMock()
-        session = MagicMock()
-        driver.__enter__.return_value = driver
-        driver.session.return_value.__enter__.return_value = session
-        session.run.return_value = []
-        agent._graph_config = MagicMock(return_value=("bolt://stub", ("stub", "stub"), "neo4j"))
-        with unittest.mock.patch("matchmaker.GraphDatabase.driver", return_value=driver):
-            result = agent.find_event_matches("owner")
+        with unittest.mock.patch('matchmaker_agent.event_v2_api.find_matches', return_value=[]) as retrieve:
+            result = agent.find_event_matches('owner', excluded_user_ids=['blocked'])
         self.assertEqual(result, [])
-        query = session.run.call_args.args[0]
-        self.assertIn("EVENT_RELEVANCE", query)
-        self.assertIn("EVENT_AVOIDANCE", query)
-        self.assertIn("coalesce(active.expires_at, 0) > $now", query)
-        self.assertIn("coalesce(positive.expires_at, 0) > $now", query)
-        self.assertIn("target_relevance.user_concepts", query)
-        self.assertIn("candidate_relevance.user_concepts", query)
-        self.assertIn("excluded_user_ids", query)
-        self.assertNotIn("any(signal IN event_signals", query)
+        retrieve.assert_called_once_with(agent, 'owner', ['blocked'])
 
     def test_event_hook_fallback_never_exposes_candidate_identity(self):
         agent = self._agent_with_failed_llm()
@@ -677,24 +663,10 @@ class EventPipelineTests(unittest.TestCase):
 
     def test_event_match_query_uses_semantic_links_and_hard_avoidance(self):
         agent = MatchmakerAgent.__new__(MatchmakerAgent)
-        driver = MagicMock()
-        session = MagicMock()
-        driver.__enter__.return_value = driver
-        driver.session.return_value.__enter__.return_value = session
-        session.run.return_value = []
-        agent._graph_config = MagicMock(return_value=("bolt://stub", ("stub", "stub"), "neo4j"))
-        with unittest.mock.patch("matchmaker.GraphDatabase.driver", return_value=driver):
-            result = agent.find_event_matches("owner")
+        with unittest.mock.patch('matchmaker_agent.event_v2_api.find_matches', return_value=[]) as retrieve:
+            result = agent.find_event_matches('owner', excluded_user_ids=['blocked'])
         self.assertEqual(result, [])
-        query = session.run.call_args.args[0]
-        self.assertIn("EVENT_RELEVANCE", query)
-        self.assertIn("EVENT_AVOIDANCE", query)
-        self.assertIn("coalesce(active.expires_at, 0) > $now", query)
-        self.assertIn("coalesce(positive.expires_at, 0) > $now", query)
-        self.assertIn("target_relevance.user_concepts", query)
-        self.assertIn("candidate_relevance.user_concepts", query)
-        self.assertIn("excluded_user_ids", query)
-        self.assertNotIn("any(signal IN event_signals", query)
+        retrieve.assert_called_once_with(agent, 'owner', ['blocked'])
 
     def test_event_hook_fallback_never_exposes_candidate_identity(self):
         agent = self._agent_with_failed_llm()

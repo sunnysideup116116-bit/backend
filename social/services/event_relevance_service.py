@@ -1,43 +1,31 @@
-"""Incremental Event relevance orchestration.
+"""Event relevance is a current-source read, not a legacy-vector projection."""
+import requests
 
-Concept vectors and derived Event links live in Neo4j. This service deliberately
-processes one small embedding batch at a time instead of rebuilding all vectors.
-"""
-
-from __future__ import annotations
-
-from typing import Any
-
-from services.concept_embedding_service import (
-    process_pending_concept_embeddings,
-    refresh_semantic_event_links,
-)
+READINESS_URL = 'http://127.0.0.1:9001/api/events/v2/readiness'
 
 
-def project_event_relevance(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """Refresh links for reusable vectors; missing vectors remain background work."""
-    if not events:
-        return {"status": "empty", "event_count": 0, "link_count": 0}
+def _readiness():
     try:
-        result = refresh_semantic_event_links()
-    except Exception as exc:
-        return {
-            "status": "queued", "event_count": len(events), "link_count": 0,
-            "error_code": type(exc).__name__,
-        }
-    return {"event_count": len(events), **result}
+        response = requests.get(READINESS_URL, timeout=(3, 15))
+        response.raise_for_status()
+        result = response.json()
+        if result.get('policy') != 'event_relevance_v2':
+            raise ValueError('event_contract_unavailable')
+        return {'status': 'success' if result.get('semantic_ready') else 'deferred',
+            'exact_ready': result.get('exact_ready') is True,
+            'semantic_ready': result.get('semantic_ready') is True,
+            'policy': 'event_relevance_v2', 'projection_mode': 'read_time', 'link_count': 0,
+            'embedded_count': 0}
+    except Exception:
+        return {'status': 'unavailable', 'error_code': 'event_readiness_unavailable', 'link_count': 0}
 
 
-def rebuild_all_event_relevance(limit: int = 20) -> dict[str, Any]:
-    """Process one bounded Concept batch, then refresh graph links."""
-    result = process_pending_concept_embeddings(batch_size=min(int(limit or 20), 20))
-    status = str(result.get("status") or "error")
-    if status == "idle":
-        try:
-            result = refresh_semantic_event_links()
-            status = str(result.get("status") or "error")
-        except Exception as exc:
-            return {"status": "error", "error_code": type(exc).__name__, "link_count": 0}
-    if status in {"rate_limited", "embedding_failed", "agent_unavailable", "projection_failed"}:
-        return {**result, "status": "deferred"}
-    return result
+def project_event_relevance(events):
+    if not events:
+        return {'status': 'empty', 'event_count': 0, 'link_count': 0}
+    return {**_readiness(), 'event_count': len(events)}
+
+
+def rebuild_all_event_relevance(limit=20):
+    """Compatibility endpoint: inspect V2 infrastructure, never encode legacy."""
+    return _readiness()

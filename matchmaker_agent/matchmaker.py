@@ -442,92 +442,9 @@ class MatchmakerAgent:
         return deleted_count
 
     def find_event_matches(self, user_id, excluded_user_ids=None):
-        """Find active semantic Event bridges while excluding hard avoidances."""
-        uri, auth, database = self._graph_config()
-        query = """
-        MATCH (target:User {id: $user_id})-[target_relevance:EVENT_RELEVANCE]->(event:Event)
-        WHERE event.status = 'active'
-          AND event.expires_at > $now
-          AND NOT (target)-[:EVENT_AVOIDANCE]->(event)
-          AND ('recent' NOT IN coalesce(target_relevance.source_kinds, [])
-               OR 'durable' IN coalesce(target_relevance.source_kinds, [])
-               OR EXISTS {
-                   MATCH (target)-[active:CURRENTLY_WANTS]->(active_concept:Concept)
-                   WHERE coalesce(active.expires_at, 0) > $now
-                     AND toLower(coalesce(active_concept.label, active_concept.key)) IN
-                         [value IN coalesce(target_relevance.user_concepts, []) |
-                          toLower(value)]
-               })
-        MATCH (candidate:User)-[candidate_relevance:EVENT_RELEVANCE]->(event)
-        WHERE candidate <> target
-          AND NOT candidate.id IN $excluded_user_ids
-          AND NOT (candidate)-[:EVENT_AVOIDANCE]->(event)
-          AND ('recent' NOT IN coalesce(candidate_relevance.source_kinds, [])
-               OR 'durable' IN coalesce(candidate_relevance.source_kinds, [])
-               OR EXISTS {
-                   MATCH (candidate)-[active:CURRENTLY_WANTS]->(active_concept:Concept)
-                   WHERE coalesce(active.expires_at, 0) > $now
-                     AND toLower(coalesce(active_concept.label, active_concept.key)) IN
-                         [value IN coalesce(candidate_relevance.user_concepts, []) |
-                          toLower(value)]
-               })
-        WITH target, candidate, event, target_relevance, candidate_relevance,
-             [(target)-[:AVOIDS]->(concept:Concept)
-                | toLower(coalesce(concept.label, concept.key))] AS target_dislikes,
-             [(candidate)-[positive:PREFERS|CURRENTLY_WANTS]->(concept:Concept)
-                WHERE type(positive) <> 'CURRENTLY_WANTS'
-                   OR coalesce(positive.expires_at, 0) > $now
-                | toLower(coalesce(concept.label, concept.key))] AS candidate_positive,
-             [(candidate)-[:AVOIDS]->(concept:Concept)
-                | toLower(coalesce(concept.label, concept.key))] AS candidate_dislikes,
-             [(target)-[positive:PREFERS|CURRENTLY_WANTS]->(concept:Concept)
-                WHERE type(positive) <> 'CURRENTLY_WANTS'
-                   OR coalesce(positive.expires_at, 0) > $now
-                | toLower(coalesce(concept.label, concept.key))] AS target_positive
-        WHERE none(dealbreaker IN target_dislikes WHERE dealbreaker IN candidate_positive)
-          AND none(dealbreaker IN candidate_dislikes WHERE dealbreaker IN target_positive)
-        RETURN target.id AS user_id,
-               coalesce(target.name, target.id) AS user_name,
-               candidate.id AS candidate_id,
-               coalesce(candidate.name, candidate.id) AS candidate_name,
-               event.id AS event_id,
-               event.title AS event_name,
-               event.summary AS event_description,
-               event.venue AS event_location,
-               event.region AS event_region,
-               event.category AS event_category,
-               event.starts_at AS starts_at,
-               event.ends_at AS ends_at,
-               event.time_precision AS time_precision,
-               coalesce(event.session_starts, [event.starts_at]) AS session_starts,
-               coalesce(event.session_ends, [event.ends_at]) AS session_ends,
-               coalesce(event.session_precisions, [event.time_precision]) AS session_precisions,
-               coalesce(event.session_count, 1) AS session_count,
-               event.source_url AS source_url,
-               event.expires_at AS expires_at,
-               coalesce(target_relevance.event_signals, []) AS target_links,
-               coalesce(candidate_relevance.event_signals, []) AS candidate_links,
-               coalesce(target_relevance.user_concepts, []) AS target_user_concepts,
-               coalesce(candidate_relevance.user_concepts, []) AS candidate_user_concepts,
-               coalesce(target_relevance.source_kinds, []) AS target_source_kinds,
-               coalesce(candidate_relevance.source_kinds, []) AS candidate_source_kinds
-        ORDER BY CASE
-                   WHEN 'recent' IN coalesce(target_relevance.source_kinds, [])
-                     OR 'recent' IN coalesce(candidate_relevance.source_kinds, [])
-                   THEN 0 ELSE 1
-                 END,
-                 event.starts_at ASC
-        LIMIT 10
-        """
-        with GraphDatabase.driver(uri, auth=auth) as driver:
-            with driver.session(database=database) as session:
-                return [
-                    dict(record)
-                    for record in session.run(
-                        query, user_id=user_id, now=int(time.time()),
-                        excluded_user_ids=list(excluded_user_ids or [])[:100],
-                    )
-                ]
+        """Current-source V2 user→activity relevance; no legacy cache authority."""
+        from matchmaker_agent.event_v2_api import find_matches
+        return find_matches(self, user_id, list(excluded_user_ids or [])[:500])
 
     def extract_and_ingest_search_results(
         self, search_results, *, region="高雄", window_days=30, max_events=6,

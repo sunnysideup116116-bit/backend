@@ -1,0 +1,96 @@
+"""Bounded Event adapter transport; no normal Preference API changes."""
+import time
+from contextlib import contextmanager
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
+from neo4j import GraphDatabase, Query
+
+from .event_v2_adapter import Adapter, infrastructure, recheck
+from .event_v2_contract import EventUnavailable
+from .preference_bootstrap_contract import verify_internal, BootstrapError
+
+router = APIRouter(prefix='/api/events/v2')
+_profiles = None
+
+
+def initialize_event_profiles():
+    """Exact Event eligibility has no dependency on semantic rollout flags."""
+    from database import profiles_coll
+    global _profiles
+    _profiles = profiles_coll
+
+
+def profiles_for_events():
+    return _profiles
+
+
+class EventMatches(list):
+    def __init__(self, matches, telemetry):
+        super().__init__(matches)
+        self.telemetry = telemetry
+
+
+@contextmanager
+def session_for(agent):
+    uri, auth, database = agent._graph_config()
+    with GraphDatabase.driver(uri, auth=auth, connection_timeout=3,
+            connection_acquisition_timeout=3, max_transaction_retry_time=0) as driver:
+        with driver.session(database=database, default_access_mode='READ') as session:
+            yield session
+
+
+def agent_instance():
+    from agent_api import agent
+    return agent
+
+
+@router.get('/readiness')
+def readiness_endpoint():
+    try:
+        with session_for(agent_instance()) as session:
+            session.run(Query('RETURN 1 AS ok', timeout=3)).single(strict=True)
+            return infrastructure(session)
+    except Exception:
+        return {'status': 'unavailable', 'ready': False, 'exact_ready': False,
+            'semantic_ready': False, 'policy': 'event_relevance_v2',
+            'error_code': 'event_graph_unavailable'}
+
+
+def find_matches(agent, owner, excluded):
+    adapter = None
+    try:
+        with session_for(agent) as session:
+            adapter = Adapter(session, agent.client, agent.model, deadline=time.monotonic()+38)
+            matches = adapter.select(owner, excluded)
+            return EventMatches(matches, adapter.telemetry())
+    except EventUnavailable as exc:
+        exc.telemetry = adapter.telemetry() if adapter else {}
+        raise
+    except TimeoutError:
+        error = EventUnavailable('semantic_retrieval_timeout', systemic=True)
+        error.telemetry = adapter.telemetry() if adapter else {}
+        raise error from None
+    except Exception:
+        raise EventUnavailable('event_graph_unavailable', systemic=True) from None
+
+
+class RecheckRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
+    owner: str = Field(min_length=1, max_length=128)
+    candidate: str = Field(min_length=1, max_length=128)
+    receipt: str = Field(min_length=40, max_length=64)
+
+
+@router.post('/recheck')
+def recheck_endpoint(req: RecheckRequest, request: Request):
+    try:
+        verify_internal(request.url.path, req.model_dump(), request.headers.get('X-Preference-Bootstrap', ''))
+    except BootstrapError:
+        raise HTTPException(403, detail='invalid_event_context') from None
+    try:
+        with session_for(agent_instance()) as session:
+            valid = recheck(session, req.receipt, req.owner, req.candidate, deadline=time.monotonic()+5)
+        return {'status': 'success', 'eligible': valid}
+    except Exception:
+        return {'status': 'unavailable', 'eligible': False}
