@@ -17,6 +17,7 @@ from .related_interest_retrieval import index_metadata, _DeadlineSession
 from .related_interest_validator import validate_concepts
 from .semantic_evidence_readiness import verified_vector, pair_preferences_safe
 from .semantic_rollout_policy import requester_route_allowed
+from .validator_diagnostics import current_trace, emit, remaining_ms
 
 _receipts = OrderedDict()
 _receipt_lock = threading.Lock()
@@ -92,7 +93,12 @@ class Adapter:
                 profiles=profiles_for_events())
             eligible = self.checks.check
         self.eligible, self.vectors, self.validate, self.allowed = eligible, vectors, validate, allowed
-        self.events, self.signals = load_events(self.session, now())
+        started = time.monotonic()
+        try:
+            self.events, self.signals = load_events(self.session, now())
+        finally:
+            emit('event_stage', stage='event_load', elapsed_ms=(time.monotonic()-started)*1000,
+                remaining_event_ms=remaining_ms(deadline, clock))
         self.rows, self.results, self.ann = {}, {}, {}
         self.counts = {'ann_calls': 0, 'validator_calls': 0, 'pending_signals': 0}
         self.validator_counts = {}
@@ -101,15 +107,26 @@ class Adapter:
         self.decisions = {}
 
     def telemetry(self):
-        return {**self.counts, 'semantic_triggered': bool(self.semantic_owners),
+        trace = current_trace()
+        diagnostic = {'diagnostic_id': trace.correlation_id} if trace else {}
+        return {**self.counts, **diagnostic, 'semantic_triggered': bool(self.semantic_owners),
             'validator': bounded_counts(self.validator_counts)}
 
     def relevance(self, owner, *, event_ids=None, exact_only=False):
-        if not self.eligible(owner):
+        started = time.monotonic()
+        eligible = self.eligible(owner)
+        emit('event_stage', stage='event_eligibility', elapsed_ms=(time.monotonic()-started)*1000,
+            remaining_event_ms=remaining_ms(self.deadline, self.clock))
+        if not eligible:
             code = 'event_owner_eligibility_unavailable' if getattr(getattr(self, 'checks', None), 'unavailable', False) else 'event_owner_ineligible'
             raise EventUnavailable(code)
         if owner not in self.rows:
-            self.rows[owner] = load_owner(self.session, owner)
+            started = time.monotonic()
+            try:
+                self.rows[owner] = load_owner(self.session, owner)
+            finally:
+                emit('event_stage', stage='event_owner_signals', elapsed_ms=(time.monotonic()-started)*1000,
+                    remaining_event_ms=remaining_ms(self.deadline, self.clock))
         rows = self.rows[owner]
         positive, negative = owner_signals(rows, self.now())
         requested = set(self.signals) if event_ids is None else set(event_ids) & self.signals.keys()
@@ -119,7 +136,10 @@ class Adapter:
             if key[0]==owner and any(e['user_ref'] not in active_refs for e in evidence):
                 del self.decisions[key]
         groups = {eid: self.signals[eid] for eid in requested}
+        started = time.monotonic()
         exact, negative_unknown = exact_relevance(positive, negative, groups)
+        emit('event_stage', stage='event_exact', category='success', elapsed_ms=(time.monotonic()-started)*1000,
+            remaining_event_ms=remaining_ms(self.deadline, self.clock))
         self.owner_diagnostics[owner] = {'exact_event_count': len(exact)}
         if exact_only:
             return exact
@@ -132,6 +152,7 @@ class Adapter:
         if not groups:
             return {eid:self.decisions[owner,eid] for eid in requested if self.decisions.get((owner,eid))}
         if negative_unknown:
+            emit('event_stage', stage='event_relevance', category='negative_unavailable', typed_code='event_negative_unavailable')
             raise EventUnavailable('event_negative_unavailable')
         if not positive or not groups:
             return {}
@@ -147,8 +168,13 @@ class Adapter:
             raise EventUnavailable('event_positive_embedding_pending')
         event_signals = [s for eid, group in groups.items()
             if negative_state(negative, group)=='clear' for s in group]
-        vectors = self.vectors(event_signals + [p for p in usable if p.namespace=='event-recent-v1'],
-            deadline=self.deadline, clock=self.clock)
+        started = time.monotonic()
+        try:
+            vectors = self.vectors(event_signals + [p for p in usable if p.namespace=='event-recent-v1'],
+                deadline=self.deadline, clock=self.clock)
+        finally:
+            emit('event_stage', stage='event_vectors', elapsed_ms=(time.monotonic()-started)*1000,
+                remaining_event_ms=remaining_ms(self.deadline, self.clock))
         matches, incomplete, local_counts = {}, len(positive) != len(usable), {}
         # Same deployed config keys. Never guess a default activation threshold.
         try:
@@ -174,6 +200,7 @@ class Adapter:
                     if signal.namespace == 'preference-v2':
                         if target.source_hash not in self.ann:
                             self.counts['ann_calls'] += 1
+                            started = time.monotonic()
                             hits = self.session.run(Query('''CALL db.index.vector.queryNodes($index_name,$limit,$vector)
                                 YIELD node,score
                                 WHERE EXISTS {MATCH (:User)-[r:PREFERS]->(node) WHERE coalesce(r.active,true)=true}
@@ -191,6 +218,8 @@ class Adapter:
                                     raise EventUnavailable('event_concept_ambiguous')
                                 verified_hits[props['key']] = hit['score']
                             self.ann[target.source_hash] = verified_hits
+                            emit('event_stage', stage='event_ann', elapsed_ms=(time.monotonic()-started)*1000,
+                                remaining_event_ms=remaining_ms(self.deadline, self.clock))
                         score = self.ann[target.source_hash].get(signal.comparison_key)
                     else:
                         recent = vectors.get(signal.source_hash)
@@ -214,12 +243,20 @@ class Adapter:
             if not self.allowed(owner):
                 raise EventUnavailable('event_semantic_disabled')
             self.counts['validator_calls'] += 1
+            started = time.monotonic()
             accepted, counts = self.validate(signal.text, concepts, self.client, self.model,
                 deadline=min(self.deadline, self.clock()+18), clock=self.clock, is_enabled=lambda: self.allowed(owner))
+            emit('event_stage', stage='event_relevance', elapsed_ms=(time.monotonic()-started)*1000,
+                remaining_event_ms=remaining_ms(self.deadline, self.clock))
             for key, value in bounded_counts(counts).items():
                 self.validator_counts[key] = self.validator_counts.get(key, 0)+value
                 local_counts[key] = local_counts.get(key, 0)+value
             if counts.get('job_unavailable') or self.clock()>=self.deadline:
+                emit('event_stage', stage='event_relevance' if counts.get('job_unavailable') else 'deadline',
+                    category='other' if counts.get('job_unavailable') else 'shared_deadline_exhaustion',
+                    job_unavailable=bool(counts.get('job_unavailable')), typed_code='semantic_validator_unavailable',
+                    final_typed_outcome='unavailable', elapsed_ms=(time.monotonic()-started)*1000,
+                    remaining_event_ms=remaining_ms(self.deadline, self.clock))
                 raise EventUnavailable('semantic_validator_unavailable', systemic=True)
             if not self.allowed(owner):
                 raise EventUnavailable('event_semantic_disabled')
