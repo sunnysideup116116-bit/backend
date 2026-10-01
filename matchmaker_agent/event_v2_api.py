@@ -9,6 +9,7 @@ from neo4j import GraphDatabase, Query
 from .event_v2_adapter import Adapter, infrastructure, recheck
 from .event_v2_contract import EventUnavailable
 from .preference_bootstrap_contract import verify_internal, BootstrapError
+from .validator_diagnostics import diagnostic_scope, emit, exception_metadata
 
 router = APIRouter(prefix='/api/events/v2')
 _profiles = None
@@ -58,21 +59,31 @@ def readiness_endpoint():
 
 
 def find_matches(agent, owner, excluded):
-    adapter = None
-    try:
-        with session_for(agent) as session:
-            adapter = Adapter(session, agent.client, agent.model, deadline=time.monotonic()+38)
-            matches = adapter.select(owner, excluded)
-            return EventMatches(matches, adapter.telemetry())
-    except EventUnavailable as exc:
-        exc.telemetry = adapter.telemetry() if adapter else {}
-        raise
-    except TimeoutError:
-        error = EventUnavailable('semantic_retrieval_timeout', systemic=True)
-        error.telemetry = adapter.telemetry() if adapter else {}
-        raise error from None
-    except Exception:
-        raise EventUnavailable('event_graph_unavailable', systemic=True) from None
+    with diagnostic_scope('event_request') as trace:
+        adapter = None
+        started = time.monotonic()
+        try:
+            with session_for(agent) as session:
+                adapter = Adapter(session, agent.client, agent.model, deadline=time.monotonic()+38)
+                matches = adapter.select(owner, excluded)
+                emit('event_result', stage='event_request', category='success',
+                    final_typed_outcome='accepted' if matches else 'normal_no_match', elapsed_ms=(time.monotonic()-started)*1000)
+                return EventMatches(matches, adapter.telemetry())
+        except EventUnavailable as exc:
+            exc.telemetry = adapter.telemetry() if adapter else {'diagnostic_id': trace.correlation_id}
+            emit('event_result', stage='event_request', typed_code=exc.code, final_typed_outcome='unavailable',
+                elapsed_ms=(time.monotonic()-started)*1000)
+            raise
+        except TimeoutError as exc:
+            error = EventUnavailable('semantic_retrieval_timeout', systemic=True)
+            error.telemetry = adapter.telemetry() if adapter else {'diagnostic_id': trace.correlation_id}
+            emit('event_result', **exception_metadata(exc, 'deadline'), typed_code=error.code,
+                final_typed_outcome='unavailable', elapsed_ms=(time.monotonic()-started)*1000)
+            raise error from None
+        except Exception as exc:
+            emit('event_result', **exception_metadata(exc, 'event_request'), typed_code='event_graph_unavailable',
+                final_typed_outcome='unavailable', elapsed_ms=(time.monotonic()-started)*1000)
+            raise EventUnavailable('event_graph_unavailable', systemic=True) from None
 
 
 class RecheckRequest(BaseModel):
