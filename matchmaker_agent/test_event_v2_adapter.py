@@ -10,6 +10,7 @@ from matchmaker_agent.event_v2_contract import (
 )
 from matchmaker_agent.event_v2_adapter import Adapter, infrastructure, recheck
 from matchmaker_agent.preference_embedding_contract import RUNTIME, PROVENANCE
+from matchmaker_agent.related_interest_contract import RELATIONS
 
 NOW = 1800000000.
 VECTOR = [1.] + [0.] * 767
@@ -83,12 +84,29 @@ def threshold(monkeypatch):
     monkeypatch.setenv('MATCH_PREFERENCE_SEMANTIC_MIN_SIMILARITY', '.90')
 
 
+def enable_event_semantics(monkeypatch, tmp_path):
+    monkeypatch.setenv('MATCH_RELATED_INTEREST_ENABLED', 'on')
+    monkeypatch.setenv('MATCH_RELATED_INTEREST_ROLLOUT_MODE', 'enabled_accounts')
+    monkeypatch.setenv('MATCH_PREFERENCE_SEMANTIC_MODE', 'active')
+    monkeypatch.setenv('MATCH_RELATED_INTEREST_KILL_SWITCH_FILE', str(tmp_path / 'not-engaged'))
+
+
 def adapter(graph, *, validate=None, vectors=None, now=lambda: NOW, allowed=lambda _: True, eligible=lambda _: True):
     return Adapter(graph, None, 'deepseek-v4.1-flash:cloud', deadline=100,
         clock=lambda: 0., now=now, eligible=eligible, allowed=allowed,
         vectors=vectors or (lambda signals, **_: {s.source_hash: VECTOR[:] for s in signals}),
         validate=validate or (lambda _q, concepts, *_a, **_k:
             ([{**c, 'relation': 'sibling_related'} for c in concepts], {'accepted': len(concepts), 'rejected': 0, 'error': 0})))
+
+
+def complete_decision_counts(relation, count, *, accepted, rejected, error=0, attempts=1,
+        attempt_errors=0, retries=0, job_unavailable=0):
+    result = {name: 0 for name in RELATIONS}
+    result[relation] = count
+    result.update(accepted=accepted, rejected=rejected, error=error,
+        attempts=attempts, attempt_errors=attempt_errors, retries=retries,
+        job_unavailable=job_unavailable)
+    return result
 
 
 def test_v2_ready_legacy_null_is_not_pending():
@@ -378,6 +396,240 @@ def test_active_endpoint_uses_truthful_activity_wording_without_preference_claim
     assert '相關' in result['first_hook'] and 'Synthetic event' in result['first_hook']
     assert not any(word in result['first_hook'] for word in ('共同偏好','相同偏好','shared','identical'))
     never.assert_not_called()
+
+
+def test_same_trusted_directional_pair_is_validated_once_across_repeated_activities(monkeypatch, tmp_path):
+    """Repeated Event references to one Q/C pair share a trusted request-local decision."""
+    enable_event_semantics(monkeypatch, tmp_path)
+    owners = {'requester': [preference('打籃球', reference='requester-preference')]}
+    owners.update({f'candidate-{index:02d}': [
+        preference('打籃球', reference=f'candidate-{index:02d}-preference')
+    ] for index in range(45)})
+    activities = [event(('三對三籃球',), eid=f'activity-{index:02d}') for index in range(10)]
+    graph = Graph(owners, activities)
+    input_calls = []
+
+    def valid_reject(query, concepts, *_args, **_kwargs):
+        input_calls.append((query, tuple(item['semantic_text'] for item in concepts)))
+        return [], complete_decision_counts('candidate_more_broad', len(concepts), accepted=0,
+            rejected=len(concepts))
+
+    service = adapter(graph, validate=valid_reject)
+    assert service.select('requester', []) == []
+    logical_calls = len(activities)
+    assert len(input_calls) == 1
+    assert set(input_calls) == {('打籃球', ('三對三籃球',))}
+    assert service.counts['validator_calls'] == 1
+    assert service.counts['ann_calls'] == 1
+    assert graph.calls and not any(any(word in query for word in ('MERGE ', 'SET ', 'DELETE ', 'CREATE '))
+        for query, _params in graph.calls)
+    # Reuse remains request-scoped. A new adapter must perform its own call.
+    another = adapter(graph, validate=valid_reject)
+    another.relevance('requester', event_ids=['activity-00'])
+    assert len(input_calls) == 2
+    assert logical_calls > len(input_calls)
+
+
+def test_repeated_timeout_retry_shape_avoids_outer_deadline_only_for_reused_pair(monkeypatch, tmp_path):
+    """Synthetic Run #24 timing shape: 6 s timeout + trusted retry across repeated activity refs."""
+    from types import SimpleNamespace
+    import matchmaker_agent.related_interest_validator as validator
+
+    enable_event_semantics(monkeypatch, tmp_path)
+
+    class Clock:
+        def __init__(self):
+            self.value = 0.0
+
+        def __call__(self):
+            return self.value
+
+        def advance(self, seconds):
+            self.value += seconds
+
+    clock = Clock()
+    activities = [event(('三對三籃球',), eid=f'timed-{index:02d}') for index in range(10)]
+    graph = Graph({'requester': [preference('打籃球')]}, activities)
+    attempts = []
+
+    def slow_then_trusted_reject(_client, *, timeout, model, **_request):
+        attempt = len(attempts) + 1
+        attempts.append((attempt, timeout))
+        if attempt % 2:
+            clock.advance(timeout)
+            raise TimeoutError('synthetic transport delay')
+        clock.advance(min(2.0, timeout))
+        response = SimpleNamespace(model=model, usage=None, choices=[SimpleNamespace(
+            finish_reason='stop', message=SimpleNamespace(content=
+                '{"results":[{"id":"0","relation":"candidate_more_broad"}]}'))])
+        return response
+
+    monkeypatch.setattr(validator, '_completion', slow_then_trusted_reject)
+    service = Adapter(graph, object(), 'deepseek-v4.1-flash:cloud', deadline=38.0,
+        clock=clock, now=lambda: NOW, eligible=lambda _owner: True,
+        vectors=lambda signals, **_kwargs: {signal.source_hash: VECTOR[:] for signal in signals})
+    assert service.select('requester', []) == []
+    assert clock() == 8.0
+    assert len(attempts) == 2
+    assert service.counts['validator_calls'] == 1
+    assert service.validator_counts['rejected'] == len(activities)
+
+
+def test_trusted_accept_is_rebound_across_owner_fanout(monkeypatch, tmp_path):
+    enable_event_semantics(monkeypatch, tmp_path)
+    graph = Graph({
+        'requester': [preference('慢跑', reference='requester-preference')],
+        'candidate': [preference('慢跑', reference='candidate-preference')],
+    }, [event(('越野跑',), eid='shared-activity')])
+    calls = []
+
+    def trusted_accept(query, concepts, *_args, **_kwargs):
+        calls.append((query, tuple(item['semantic_text'] for item in concepts)))
+        return ([{**concept, 'relation': 'sibling_related'} for concept in concepts],
+            complete_decision_counts('sibling_related', len(concepts), accepted=len(concepts), rejected=0))
+
+    service = adapter(graph, validate=trusted_accept)
+    selected = service.select('requester', [])
+    assert len(selected) == 1
+    assert selected[0]['candidate_id'] == 'candidate'
+    assert len(calls) == 1
+    assert service.counts['validator_calls'] == 1
+    assert service.decisions['requester', 'shared-activity'][0]['user_ref'] == 'requester-preference'
+    assert service.decisions['candidate', 'shared-activity'][0]['user_ref'] == 'candidate-preference'
+    assert service.decisions['requester', 'shared-activity'][0]['event_ref'] == 'shared-activity-tag-越野跑'
+    assert service.decisions['candidate', 'shared-activity'][0]['event_ref'] == 'shared-activity-tag-越野跑'
+
+
+@pytest.mark.parametrize('systemic', [False, True])
+def test_error_or_systemic_unavailable_is_never_cached(monkeypatch, tmp_path, systemic):
+    enable_event_semantics(monkeypatch, tmp_path)
+    graph = Graph({'requester': [preference('打籃球')]}, [
+        event(('三對三籃球',), eid='first'), event(('三對三籃球',), eid='second')])
+    calls = []
+
+    def fail_then_reject(query, concepts, *_args, **_kwargs):
+        calls.append((query, tuple(item['semantic_text'] for item in concepts)))
+        if len(calls) == 1:
+            counts = {'accepted': 0, 'rejected': 0, 'error': len(concepts),
+                'attempts': 1, 'attempt_errors': 1, 'retries': 0}
+            if systemic:
+                counts['job_unavailable'] = 1
+            return [], counts
+        return [], complete_decision_counts('unrelated', len(concepts), accepted=0, rejected=len(concepts))
+
+    service = adapter(graph, validate=fail_then_reject)
+    with pytest.raises(EventUnavailable, match='semantic_validator_unavailable'):
+        service.relevance('requester', event_ids=['first'])
+    assert service.relevance('requester', event_ids=['second']) == {}
+    assert len(calls) == 2
+
+
+def test_kill_engaged_after_trusted_decision_blocks_cached_reuse(monkeypatch, tmp_path):
+    from matchmaker_agent.semantic_rollout_policy import requester_route_allowed
+
+    enable_event_semantics(monkeypatch, tmp_path)
+    kill = tmp_path / 'related-interest-disabled'
+    monkeypatch.setenv('MATCH_RELATED_INTEREST_KILL_SWITCH_FILE', str(kill))
+    graph = Graph({'requester': [preference('打籃球')]}, [
+        event(('三對三籃球',), eid='first'), event(('三對三籃球',), eid='second')])
+    calls = []
+
+    def trusted_reject(query, concepts, *_args, **_kwargs):
+        calls.append((query, tuple(item['semantic_text'] for item in concepts)))
+        return [], complete_decision_counts('unrelated', len(concepts), accepted=0, rejected=len(concepts))
+
+    service = adapter(graph, validate=trusted_reject, allowed=requester_route_allowed)
+    assert service.relevance('requester', event_ids=['first']) == {}
+    kill.touch()
+    with pytest.raises(EventUnavailable, match='event_semantic_disabled'):
+        service.relevance('requester', event_ids=['second'])
+    assert len(calls) == 1
+
+
+def test_unique_pairs_still_exhaust_the_original_event_deadline(monkeypatch, tmp_path):
+    """Deduplication must not turn genuinely unavailable unique pairs into a match."""
+    enable_event_semantics(monkeypatch, tmp_path)
+    class Clock:
+        def __init__(self):
+            self.value = 0.0
+
+        def __call__(self):
+            return self.value
+
+        def advance(self, seconds):
+            self.value += seconds
+
+    clock = Clock()
+    activities = [event((f'activity-{index:02d}',), eid=f'unique-{index:02d}') for index in range(6)]
+    graph = Graph({'requester': [preference('打籃球')]}, activities)
+    seen = []
+
+    def bounded_transport(query, concepts, *_args, deadline, clock, **_kwargs):
+        source = tuple(item['semantic_text'] for item in concepts)
+        seen.append((query, source))
+        remaining = deadline - clock()
+        assert remaining > 0
+        # Existing 6 s maximum attempt; a complete trusted response takes 2 s
+        # after the first timeout. The last unique pair has only 6 s left.
+        clock.advance(min(6.0, remaining))
+        if remaining < 8.0:
+            return [], {'accepted': 0, 'rejected': 0, 'error': len(concepts),
+                'attempts': 1, 'attempt_errors': 1, 'retries': 0}
+        clock.advance(2.0)
+        return [], {'accepted': 0, 'rejected': len(concepts), 'error': 0,
+            'attempts': 2, 'attempt_errors': 1, 'retries': 1, 'unrelated': len(concepts)}
+
+    service = Adapter(graph, None, 'deepseek-v4.1-flash:cloud', deadline=38.0,
+        clock=clock, now=lambda: NOW, eligible=lambda _owner: True,
+        vectors=lambda signals, **_kwargs: {signal.source_hash: VECTOR[:] for signal in signals},
+        validate=bounded_transport)
+    with pytest.raises(EventUnavailable, match='semantic_validator_unavailable'):
+        service.select('requester', [])
+    assert len(seen) == 5
+    assert len({pair for pair in seen}) == 5
+    assert clock() == 38.0
+
+
+def test_partial_error_never_populates_the_trusted_relation_cache(monkeypatch, tmp_path):
+    enable_event_semantics(monkeypatch, tmp_path)
+    graph = Graph({'requester': [preference('打籃球')]}, [
+        event(('三對三籃球',), eid='first'), event(('三對三籃球',), eid='second')])
+    calls = []
+
+    def partial_error(query, concepts, *_args, **_kwargs):
+        calls.append((query, tuple(item['semantic_text'] for item in concepts)))
+        if len(calls) == 1:
+            return [], {'accepted': 0, 'rejected': 0, 'error': len(concepts),
+                'attempts': 2, 'attempt_errors': 2, 'retries': 1}
+        return [], {'accepted': 0, 'rejected': len(concepts), 'error': 0,
+            'attempts': 1, 'attempt_errors': 0, 'retries': 0, 'unrelated': len(concepts)}
+
+    service = adapter(graph, validate=partial_error)
+    with pytest.raises(EventUnavailable, match='semantic_validator_unavailable'):
+        service.relevance('requester', event_ids=['first'])
+    assert service.relevance('requester', event_ids=['second']) == {}
+    assert len(calls) == 2
+
+
+def test_partial_trusted_result_with_error_is_not_cached(monkeypatch, tmp_path):
+    enable_event_semantics(monkeypatch, tmp_path)
+    activities = [event(('三對三籃球', '籃球賽事'), eid=name) for name in ('first', 'second')]
+    graph = Graph({'requester': [preference('打籃球')]}, activities)
+    calls = []
+
+    def partial_trusted(query, concepts, *_args, **_kwargs):
+        calls.append((query, tuple(item['semantic_text'] for item in concepts)))
+        return ([{**concepts[0], 'relation': 'sibling_related'}], {
+            **complete_decision_counts('sibling_related', 1, accepted=1, rejected=0,
+                error=1, attempts=2, attempt_errors=2, retries=1),
+        })
+
+    service = adapter(graph, validate=partial_trusted)
+    first = service.relevance('requester', event_ids=['first'])
+    second = service.relevance('requester', event_ids=['second'])
+    assert first['first'][0]['relation'] == second['second'][0]['relation'] == 'sibling_related'
+    assert first['first'][0]['event_ref'] != second['second'][0]['event_ref']
+    assert len(calls) == 2
 
 
 def test_recheck_endpoint_rejects_unsigned_request_before_graph(monkeypatch):

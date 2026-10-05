@@ -1,5 +1,7 @@
 """Read-time Event relevance. Legacy projections/embeddings have no authority."""
 from collections import OrderedDict
+import hashlib
+import json
 import math
 import os
 import secrets
@@ -12,15 +14,66 @@ from .event_v2_contract import (POLICY, EventUnavailable, owner_signals, query_s
     exact_relevance, compatible_kinds, negative_state, snapshot_hash)
 from .event_v2_vectors import query_vectors
 from .preference_embedding_contract import frozen_contract, RUNTIME, PROVENANCE
-from .related_interest_contract import INDEX_NAME, ACCEPTED, bounded_counts
+from .related_interest_contract import INDEX_NAME, ACCEPTED, RELATIONS, bounded_counts
 from .related_interest_retrieval import index_metadata, _DeadlineSession
-from .related_interest_validator import validate_concepts
+from .related_interest_validator import PROMPT, validate_concepts
 from .semantic_evidence_readiness import verified_vector, pair_preferences_safe
 from .semantic_rollout_policy import requester_route_allowed
 from .validator_diagnostics import current_trace, emit, remaining_ms
 
 _receipts = OrderedDict()
 _receipt_lock = threading.Lock()
+_VALIDATOR_RELATION_CACHE_LIMIT = 128
+
+
+def _validator_relation_key(query, concepts, model):
+    """Digest only the exact relation request; never retain its source text."""
+    texts = [concept.get('semantic_text') for concept in concepts]
+    if not isinstance(query, str) or not isinstance(model, str) or not all(isinstance(text, str) for text in texts):
+        return None
+    material = json.dumps([
+        'event-validator-relation-cache-v1', POLICY, model,
+        hashlib.sha256(PROMPT.encode('utf-8')).hexdigest(),
+        sorted(RELATIONS), sorted(ACCEPTED), query, texts,
+    ], ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    return hashlib.sha256(material).hexdigest()
+
+
+def _trusted_validator_outcome(concepts, accepted, counts):
+    """Return only complete, error-free decisions, stored as positions + taxonomy."""
+    if (not isinstance(accepted, list) or not isinstance(counts, dict)
+            or counts.get('job_unavailable') or counts.get('error') != 0):
+        return None
+    if any(type(counts.get(key)) is not int or counts[key] < 0
+           for key in ('accepted', 'rejected', 'error', *RELATIONS)):
+        return None
+    accepted_total, rejected_total = counts['accepted'], counts['rejected']
+    if accepted_total + rejected_total != len(concepts):
+        return None
+    relation_total = sum(counts[relation] for relation in RELATIONS)
+    if (relation_total != len(concepts)
+            or sum(counts[relation] for relation in ACCEPTED) != accepted_total
+            or relation_total - accepted_total != rejected_total
+            or len(accepted) != accepted_total):
+        return None
+    indexes = {concept.get('concept_key'): index for index, concept in enumerate(concepts)}
+    if len(indexes) != len(concepts):
+        return None
+    accepted_positions = []
+    seen = set()
+    for item in accepted:
+        if not isinstance(item, dict) or item.get('relation') not in ACCEPTED:
+            return None
+        index = indexes.get(item.get('concept_key'))
+        if (index is None or index in seen
+                or item.get('semantic_text') != concepts[index].get('semantic_text')):
+            return None
+        seen.add(index)
+        accepted_positions.append((index, item['relation']))
+    if len(seen) != accepted_total:
+        return None
+    outcome_counts = {key: counts[key] for key in ('accepted', 'rejected', *RELATIONS)}
+    return tuple(accepted_positions), outcome_counts
 
 
 def infrastructure(session):
@@ -102,6 +155,8 @@ class Adapter:
         self.rows, self.results, self.ann = {}, {}, {}
         self.counts = {'ann_calls': 0, 'validator_calls': 0, 'pending_signals': 0}
         self.validator_counts = {}
+        # Event-request-local relation results; no Graph refs, source text, or persistence.
+        self.validator_relations = OrderedDict()
         self.semantic_owners = set()
         self.owner_diagnostics = {}
         self.decisions = {}
@@ -242,12 +297,28 @@ class Adapter:
                 continue
             if not self.allowed(owner):
                 raise EventUnavailable('event_semantic_disabled')
-            self.counts['validator_calls'] += 1
             started = time.monotonic()
-            accepted, counts = self.validate(signal.text, concepts, self.client, self.model,
-                deadline=min(self.deadline, self.clock()+18), clock=self.clock, is_enabled=lambda: self.allowed(owner))
-            emit('event_stage', stage='event_relevance', elapsed_ms=(time.monotonic()-started)*1000,
-                remaining_event_ms=remaining_ms(self.deadline, self.clock))
+            cache_key = _validator_relation_key(signal.text, concepts, self.model)
+            cached = self.validator_relations.get(cache_key) if cache_key else None
+            if self.clock() >= self.deadline:
+                emit('event_stage', stage='deadline', category='shared_deadline_exhaustion',
+                    typed_code='semantic_validator_unavailable', final_typed_outcome='unavailable',
+                    remaining_event_ms=remaining_ms(self.deadline, self.clock))
+                raise EventUnavailable('semantic_validator_unavailable', systemic=True)
+            if cached is None:
+                self.counts['validator_calls'] += 1
+                accepted, counts = self.validate(signal.text, concepts, self.client, self.model,
+                    deadline=min(self.deadline, self.clock()+18), clock=self.clock,
+                    is_enabled=lambda: self.allowed(owner))
+                emit('event_stage', stage='event_relevance', elapsed_ms=(time.monotonic()-started)*1000,
+                    remaining_event_ms=remaining_ms(self.deadline, self.clock))
+            else:
+                self.validator_relations.move_to_end(cache_key)
+                accepted_positions, outcome_counts = cached
+                accepted = [{**concepts[index], 'relation': relation}
+                    for index, relation in accepted_positions]
+                counts = {**outcome_counts, 'error': 0, 'attempts': 0,
+                    'attempt_errors': 0, 'retries': 0}
             for key, value in bounded_counts(counts).items():
                 self.validator_counts[key] = self.validator_counts.get(key, 0)+value
                 local_counts[key] = local_counts.get(key, 0)+value
@@ -260,6 +331,13 @@ class Adapter:
                 raise EventUnavailable('semantic_validator_unavailable', systemic=True)
             if not self.allowed(owner):
                 raise EventUnavailable('event_semantic_disabled')
+            if cached is None and cache_key:
+                trusted = _trusted_validator_outcome(concepts, accepted, counts)
+                if trusted is not None:
+                    self.validator_relations[cache_key] = trusted
+                    self.validator_relations.move_to_end(cache_key)
+                    while len(self.validator_relations) > _VALIDATOR_RELATION_CACHE_LIMIT:
+                        self.validator_relations.popitem(last=False)
             for item in accepted:
                 if (item.get('relation') not in ACCEPTED
                         or item.get('concept_key') not in {c['concept_key'] for c in concepts}):
