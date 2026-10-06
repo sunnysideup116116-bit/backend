@@ -64,7 +64,8 @@ def find_matches(agent, owner, excluded):
         started = time.monotonic()
         try:
             with session_for(agent) as session:
-                adapter = Adapter(session, agent.client, agent.model, deadline=time.monotonic()+38)
+                adapter = Adapter(session, agent.client, agent.model, deadline=time.monotonic()+38,
+                    fallback_model=getattr(agent, 'validator_fallback_model', None))
                 matches = adapter.select(owner, excluded)
                 emit('event_result', stage='event_request', category='success',
                     final_typed_outcome='accepted' if matches else 'normal_no_match', elapsed_ms=(time.monotonic()-started)*1000)
