@@ -35,10 +35,12 @@ _ENUMS = {
     'parser_result': {'valid', 'not_reached', 'malformed_json', 'invalid_relation_response',
         'invalid_relation_schema', 'invalid_relation_row', 'missing_relation', 'duplicate_json_field', 'parser_exception'},
     'retry_decision': {'not_needed', 'eligible_for_existing_retry', 'attempt_limit', 'no_paid_retry',
-        'shared_deadline_exhausted', 'policy_disabled', 'started_existing_retry'},
+        'shared_deadline_exhausted', 'policy_disabled', 'started_existing_retry',
+        'failover_secondary', 'failover_insufficient_budget'},
     'final_typed_outcome': {'accepted', 'normal_no_match', 'unavailable', 'cancelled', 'propagated_exception'},
     'provider': {'ollama_cloud', 'other_provider'},
-    'model_id': {'deepseek-v4.1-flash:cloud', 'other_configured_model'},
+    'provider_role': {'primary', 'secondary'},
+    'model_id': {'deepseek-v4.1-flash:cloud', 'glm-5.3-flash:cloud', 'other_configured_model'},
     'http_status_class': {'2xx', '3xx', '4xx', '5xx', 'unknown'},
     'http_status_source': {'sdk_success_boundary', 'sdk_exception', 'response_hook'},
     'provider_code': {'rate_limit_exceeded', 'insufficient_quota', 'invalid_api_key', 'model_not_found',
@@ -59,10 +61,13 @@ _ENUMS = {
 }
 _ENUMS['failure_stage'] = _ENUMS['stage']
 _ENUMS['stage'] |= {'event_eligibility', 'event_owner_signals'}
+_ENUMS['fallback_model_id'] = _ENUMS['model_id']
 _NUMBERS = frozenset({'batch_id', 'attempt', 'concept_count', 'elapsed_ms', 'timeout_budget_ms',
     'remaining_shared_ms', 'remaining_event_ms', 'http_status', 'accepted', 'rejected', 'error',
-    'attempts', 'retries', 'process_inflight', 'process_peak_inflight', 'before_capped2', 'after_capped3'})
-_BOOLEANS = frozenset({'job_unavailable', 'model_matches_expected', 'breaker_engaged', 'counter_before_is_lower_bound'})
+    'attempts', 'retries', 'failover_attempts', 'failover_elapsed_ms',
+    'process_inflight', 'process_peak_inflight', 'before_capped2', 'after_capped3'})
+_BOOLEANS = frozenset({'job_unavailable', 'model_matches_expected', 'breaker_engaged',
+    'counter_before_is_lower_bound', 'failover_used'})
 
 
 class Trace:
@@ -97,7 +102,8 @@ class Trace:
             if event == 'validator_start':
                 self.identity = {k: row[k] for k in ('provider', 'model_id') if k in row}
             if event == 'attempt_start':
-                self.attempt_fields = {k: row[k] for k in ('batch_id', 'attempt', 'timeout_budget_ms', 'remaining_shared_ms') if k in row}
+                self.attempt_fields = {k: row[k] for k in ('batch_id', 'attempt', 'timeout_budget_ms',
+                    'remaining_shared_ms', 'provider_role', 'model_id', 'failover_elapsed_ms') if k in row}
             if event == 'transport_http':
                 self.attempt_fields.update({k: row[k] for k in ('http_status', 'http_status_class', 'http_status_source') if k in row})
             if row.get('category') not in {None, 'success', 'unknown'}:
@@ -165,13 +171,16 @@ def breaker_transition(correlation_id, latest, *, now, engaged):
         pass
 
 
+KNOWN_VALIDATOR_MODELS = frozenset({'deepseek-v4.1-flash:cloud', 'glm-5.3-flash:cloud'})
+
+
 def provider_identity(client, model):
     try:
         host = urlsplit(str(client.base_url)).hostname
     except Exception:
         host = None
     return {'provider': 'ollama_cloud' if host == 'ollama.com' else 'other_provider',
-        'model_id': model if model == 'deepseek-v4.1-flash:cloud' else 'other_configured_model'}
+        'model_id': model if model in KNOWN_VALIDATOR_MODELS else 'other_configured_model'}
 
 
 def _exception_metadata(exc, stage):
@@ -249,7 +258,11 @@ def diagnosed_validator(function):
     def call(query, concepts, client, model, **kwargs):
         with diagnostic_scope('semantic_validator') as trace:
             started = time.monotonic()
-            trace.emit('validator_start', stage='validator', concept_count=len(concepts), **provider_identity(client, model))
+            identity = provider_identity(client, model)
+            fallback = kwargs.get('fallback_model')
+            if isinstance(fallback, str) and fallback:
+                identity['fallback_model_id'] = fallback
+            trace.emit('validator_start', stage='validator', concept_count=len(concepts), **identity)
             try:
                 accepted, counts = function(query, concepts, client, model, **kwargs)
             except BaseException as exc:
@@ -264,6 +277,8 @@ def diagnosed_validator(function):
             trace.emit('validator_result', **meta, elapsed_ms=(time.monotonic()-started)*1000,
                 remaining_shared_ms=trace.remaining, job_unavailable=bool(counts.get('job_unavailable')),
                 final_typed_outcome='unavailable' if unavailable else 'accepted' if accepted else 'normal_no_match',
-                **{k: counts.get(k, 0) for k in ('accepted', 'rejected', 'error', 'attempts', 'retries')})
+                failover_used=bool(counts.get('failover_attempts')),
+                **{k: counts.get(k, 0) for k in ('accepted', 'rejected', 'error', 'attempts', 'retries',
+                    'failover_attempts')})
             return accepted, counts
     return call

@@ -98,7 +98,8 @@ def validated_evidence(item, *, query_key=None):
 def bounded_counts(value):
     """Only numeric diagnostics, never messages, concept labels or identifiers."""
     result = {}
-    for key in ("accepted", "rejected", "error", "attempts", "attempt_errors", "retries", *sorted(RELATIONS)):
+    for key in ("accepted", "rejected", "error", "attempts", "attempt_errors", "retries",
+            "failover_attempts", *sorted(RELATIONS)):
         raw = value.get(key) if isinstance(value, dict) else 0
         result[key] = min(24, max(0, raw)) if type(raw) is int else 0
     return result

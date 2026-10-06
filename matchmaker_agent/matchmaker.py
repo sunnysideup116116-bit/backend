@@ -159,6 +159,11 @@ class MatchmakerAgent:
         self.event_model = os.getenv(
             "EVENT_EXTRACTION_MODEL_ID", "deepseek-v4.1-flash:cloud",
         )
+        # Optional model-level redundancy for the Event relation validator only.
+        # Empty/unset keeps the existing single-provider contract unchanged.
+        self.validator_fallback_model = os.getenv(
+            "EVENT_VALIDATOR_FALLBACK_MODEL_ID", "",
+        ).strip() or None
         self.system_prompt = """你叫阿月，是一位熟悉台灣校園生活的 AI 媒人。
 你的語氣像熟朋友：溫暖、直率、有觀察力，可以小吐槽但不要刻薄或施壓。
 任務：從已通過資格檢查的 candidates 中選出 0 或 1 位最值得牽線的人，輸出嚴格 JSON，不要 Markdown。

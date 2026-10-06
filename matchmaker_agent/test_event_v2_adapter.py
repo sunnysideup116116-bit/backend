@@ -91,12 +91,14 @@ def enable_event_semantics(monkeypatch, tmp_path):
     monkeypatch.setenv('MATCH_RELATED_INTEREST_KILL_SWITCH_FILE', str(tmp_path / 'not-engaged'))
 
 
-def adapter(graph, *, validate=None, vectors=None, now=lambda: NOW, allowed=lambda _: True, eligible=lambda _: True):
+def adapter(graph, *, validate=None, vectors=None, now=lambda: NOW, allowed=lambda _: True, eligible=lambda _: True,
+        fallback_model=None):
     return Adapter(graph, None, 'deepseek-v4.1-flash:cloud', deadline=100,
         clock=lambda: 0., now=now, eligible=eligible, allowed=allowed,
         vectors=vectors or (lambda signals, **_: {s.source_hash: VECTOR[:] for s in signals}),
         validate=validate or (lambda _q, concepts, *_a, **_k:
-            ([{**c, 'relation': 'sibling_related'} for c in concepts], {'accepted': len(concepts), 'rejected': 0, 'error': 0})))
+            ([{**c, 'relation': 'sibling_related'} for c in concepts], {'accepted': len(concepts), 'rejected': 0, 'error': 0})),
+        fallback_model=fallback_model)
 
 
 def complete_decision_counts(relation, count, *, accepted, rejected, error=0, attempts=1,
@@ -630,6 +632,38 @@ def test_partial_trusted_result_with_error_is_not_cached(monkeypatch, tmp_path):
     assert first['first'][0]['relation'] == second['second'][0]['relation'] == 'sibling_related'
     assert first['first'][0]['event_ref'] != second['second'][0]['event_ref']
     assert len(calls) == 2
+
+
+def test_event_adapter_forwards_secondary_model_to_shared_validator(monkeypatch, tmp_path):
+    enable_event_semantics(monkeypatch, tmp_path)
+    seen = []
+
+    def validate(query, concepts, *_args, **kwargs):
+        seen.append(kwargs.get('fallback_model'))
+        return [], complete_decision_counts('unrelated', len(concepts), accepted=0, rejected=len(concepts))
+
+    graph = Graph({'owner': [preference('打籃球')]}, [event(('籃球',))])
+    service = adapter(graph, validate=validate, fallback_model='glm-5.3-flash:cloud')
+    assert service.relevance('owner', event_ids=['event-one']) == {}
+    assert seen and set(seen) == {'glm-5.3-flash:cloud'}
+
+
+def test_request_local_cache_key_separates_secondary_configuration():
+    from matchmaker_agent.event_v2_adapter import _validator_relation_key
+    concepts = [{'concept_key': 'k', 'semantic_text': 'text'}]
+    plain = _validator_relation_key('q', concepts, 'deepseek-v4.1-flash:cloud')
+    fallback = _validator_relation_key('q', concepts, 'deepseek-v4.1-flash:cloud', 'glm-5.3-flash:cloud')
+    assert plain and fallback and plain != fallback
+
+
+def test_exact_bridge_is_independent_of_validator_failover(monkeypatch, tmp_path):
+    enable_event_semantics(monkeypatch, tmp_path)
+    graph = Graph({'a': [preference('籃球')], 'exact-last': [preference('籃球', ready=False)]})
+    never = Mock(side_effect=AssertionError('exact bridge must not call validator'))
+    service = adapter(graph, vectors=never, validate=never, fallback_model='glm-5.3-flash:cloud')
+    assert service.select('a', [])[0]['candidate_id'] == 'exact-last'
+    assert service.counts['ann_calls'] == service.counts['validator_calls'] == 0
+    never.assert_not_called()
 
 
 def test_recheck_endpoint_rejects_unsigned_request_before_graph(monkeypatch):

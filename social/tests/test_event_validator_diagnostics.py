@@ -107,3 +107,31 @@ def test_log_sink_failure_does_not_change_breaker_accounting_or_engagement(monke
             collection=store, now=lambda: 1000 + index, engage=engage) is (index == 2)
     assert engage.call_count == 1 and store.reads == 3 and len(store.rows) == 3
     assert PRIVATE not in repr(store.rows)
+
+
+def test_primary_timeout_secondary_success_is_not_terminal_unavailable(caplog):
+    store, engage = Observations(), Mock()
+    telemetry_row = {**telemetry(), "validator": {"accepted": 1, "error": 0, "attempts": 2,
+        "retries": 1, "failover_attempts": 1}}
+    stopped = monitor.on_result("success", "", telemetry_row,
+        collection=store, now=lambda: 1000, engage=engage)
+    assert stopped is False and engage.call_count == 0
+    row = store.rows[-1]
+    assert row["status"] == "completed" and row["error_code"] == ""
+    assert row["counts"]["failover_attempts"] == 1
+    assert not monitor.systemic_failure(store.rows, now=1001)
+    rows = transitions(caplog)
+    assert len(rows) == 1 and rows[0]["breaker_engaged"] is False
+
+
+def test_both_unavailable_with_failover_still_engages_breaker(caplog):
+    store, engage = Observations(), Mock()
+    for index in range(3):
+        stopped = monitor.on_result("unavailable", "semantic_validator_unavailable",
+            {**telemetry(), "validator": {"error": 2, "attempts": 2, "retries": 1, "failover_attempts": 1}},
+            collection=store, now=lambda index=index: 2000 + index, engage=engage)
+        assert stopped is (index == 2)
+    assert engage.call_count == 1
+    rows = transitions(caplog)
+    assert [row["after_capped3"] for row in rows] == [1, 2, 3]
+    assert rows[-1]["breaker_engaged"] is True

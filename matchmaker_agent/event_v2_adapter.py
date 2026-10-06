@@ -26,13 +26,14 @@ _receipt_lock = threading.Lock()
 _VALIDATOR_RELATION_CACHE_LIMIT = 128
 
 
-def _validator_relation_key(query, concepts, model):
+def _validator_relation_key(query, concepts, model, fallback_model=None):
     """Digest only the exact relation request; never retain its source text."""
     texts = [concept.get('semantic_text') for concept in concepts]
     if not isinstance(query, str) or not isinstance(model, str) or not all(isinstance(text, str) for text in texts):
         return None
     material = json.dumps([
         'event-validator-relation-cache-v1', POLICY, model,
+        fallback_model if isinstance(fallback_model, str) else None,
         hashlib.sha256(PROMPT.encode('utf-8')).hexdigest(),
         sorted(RELATIONS), sorted(ACCEPTED), query, texts,
     ], ensure_ascii=False, separators=(',', ':')).encode('utf-8')
@@ -135,7 +136,7 @@ def load_owner(session, owner):
 class Adapter:
     def __init__(self, session, client, model, *, deadline, clock=time.monotonic,
                  now=time.time, eligible=None, vectors=query_vectors, validate=validate_concepts,
-                 allowed=requester_route_allowed):
+                 allowed=requester_route_allowed, fallback_model=None):
         self.clock, self.deadline, self.now = clock, deadline, now
         self.session = _DeadlineSession(session, deadline, clock)
         self.client, self.model = client, model
@@ -146,6 +147,7 @@ class Adapter:
                 profiles=profiles_for_events())
             eligible = self.checks.check
         self.eligible, self.vectors, self.validate, self.allowed = eligible, vectors, validate, allowed
+        self.fallback_model = fallback_model if isinstance(fallback_model, str) and fallback_model.strip() else None
         started = time.monotonic()
         try:
             self.events, self.signals = load_events(self.session, now())
@@ -298,7 +300,7 @@ class Adapter:
             if not self.allowed(owner):
                 raise EventUnavailable('event_semantic_disabled')
             started = time.monotonic()
-            cache_key = _validator_relation_key(signal.text, concepts, self.model)
+            cache_key = _validator_relation_key(signal.text, concepts, self.model, self.fallback_model)
             cached = self.validator_relations.get(cache_key) if cache_key else None
             if self.clock() >= self.deadline:
                 emit('event_stage', stage='deadline', category='shared_deadline_exhaustion',
@@ -309,7 +311,7 @@ class Adapter:
                 self.counts['validator_calls'] += 1
                 accepted, counts = self.validate(signal.text, concepts, self.client, self.model,
                     deadline=min(self.deadline, self.clock()+18), clock=self.clock,
-                    is_enabled=lambda: self.allowed(owner))
+                    is_enabled=lambda: self.allowed(owner), fallback_model=self.fallback_model)
                 emit('event_stage', stage='event_relevance', elapsed_ms=(time.monotonic()-started)*1000,
                     remaining_event_ms=remaining_ms(self.deadline, self.clock))
             else:

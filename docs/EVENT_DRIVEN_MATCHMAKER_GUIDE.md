@@ -800,6 +800,7 @@ POST /api/match/events/lifecycle/run
 | `LLM_API_KEY` / `LLM_BASE_URL` | required | Ollama/OpenAI-compatible provider |
 | `LLM_MODEL_ID` | root `Server/.env` required | 一般 matchmaker model |
 | `EVENT_EXTRACTION_MODEL_ID` | root `Server/.env`, `deepseek-v4.1-flash:cloud` default | 活動抽取模型 |
+| `EVENT_VALIDATOR_FALLBACK_MODEL_ID` | root `Server/.env`, optional | Event relation validator 的 model-level secondary；只在 primary 出現 provider 可用性失敗（timeout／connection／429／5xx）時，使用同一 shared deadline 內的既有第二次 attempt。空值 = 維持單一 provider 契約。注意 primary/secondary 共用同一個 Ollama account，帳號層級 outage 仍會同時失敗（fail closed）。 |
 | `EVENT_RELEVANCE_MAX_PER_USER` | `3` | 每人 Event 正向連結上限 |
 | `NEO4J_URI` / `USERNAME` / `PASSWORD` | required | Aura connection |
 | `NEO4J_DATABASE` | `neo4j` | database name |
