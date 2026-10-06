@@ -13,12 +13,16 @@ from .validator_diagnostics import diagnostic_scope, emit, exception_metadata
 
 router = APIRouter(prefix='/api/events/v2')
 _profiles = None
-# Single Event outer-deadline authority. 45 s is the bounded mitigation for the
-# Run #27 outer-deadline terminal unavailables (38 s removed by a short margin
-# over the worst observed bounded semantic flow at ~43.2 s). The validator
-# shared deadline (18 s), per-call maximum (6 s) and attempt limit (2) are
-# unchanged and remain independently enforced below.
-EVENT_OUTER_DEADLINE_SECONDS = 45.0
+# Single Event outer-deadline authority. 75 s is the bounded mitigation for the
+# Run #28 outer-deadline terminal unavailables: under pessimistic replay of the
+# observed workload all three historical terminations disappear at ~61 s, and
+# the real-provider captures complete with headroom (worst ~51 s). 75 s is the
+# smallest tested value that clears the deterministic minimum while keeping a
+# >=15 s margin under the caller's 90 s HTTP timeout. 85 s+ leaves no caller
+# margin and is deliberately not used. The validator shared deadline (18 s),
+# per-call maximum (6 s) and attempt limit (2) are unchanged and remain
+# independently enforced below.
+EVENT_OUTER_DEADLINE_SECONDS = 75.0
 
 
 def initialize_event_profiles():
