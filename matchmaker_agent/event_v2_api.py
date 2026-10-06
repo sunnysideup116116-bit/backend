@@ -13,6 +13,12 @@ from .validator_diagnostics import diagnostic_scope, emit, exception_metadata
 
 router = APIRouter(prefix='/api/events/v2')
 _profiles = None
+# Single Event outer-deadline authority. 45 s is the bounded mitigation for the
+# Run #27 outer-deadline terminal unavailables (38 s removed by a short margin
+# over the worst observed bounded semantic flow at ~43.2 s). The validator
+# shared deadline (18 s), per-call maximum (6 s) and attempt limit (2) are
+# unchanged and remain independently enforced below.
+EVENT_OUTER_DEADLINE_SECONDS = 45.0
 
 
 def initialize_event_profiles():
@@ -64,7 +70,7 @@ def find_matches(agent, owner, excluded):
         started = time.monotonic()
         try:
             with session_for(agent) as session:
-                adapter = Adapter(session, agent.client, agent.model, deadline=time.monotonic()+38,
+                adapter = Adapter(session, agent.client, agent.model, deadline=time.monotonic()+EVENT_OUTER_DEADLINE_SECONDS,
                     fallback_model=getattr(agent, 'validator_fallback_model', None))
                 matches = adapter.select(owner, excluded)
                 emit('event_result', stage='event_request', category='success',
