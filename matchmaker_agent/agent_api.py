@@ -198,6 +198,9 @@ class MatchRequest(BaseModel):
 class ProactiveEventMatchRequest(BaseModel):
     user_id: str
     excluded_user_ids: list[str] = []
+    # Opaque checkpoint from a prior attempt of the same Event run/user. The
+    # request-local caller owns persistence; Matchmaker only rebinds it.
+    checkpoint: dict | None = None
 
 class EventIngestRequest(BaseModel):
     region: str = "高雄"
@@ -458,7 +461,7 @@ def proactive_event_match(req: ProactiveEventMatchRequest):
             raise EventUnavailable('event_exclusion_invalid')
         excluded_user_ids = list(dict.fromkeys(req.excluded_user_ids))
         from matchmaker_agent.event_v2_api import find_matches
-        matches = find_matches(agent, user_id, excluded_user_ids)
+        matches = find_matches(agent, user_id, excluded_user_ids, checkpoint=req.checkpoint)
         if not matches:
             return {
                 "status": "no_match",
@@ -466,6 +469,8 @@ def proactive_event_match(req: ProactiveEventMatchRequest):
                 "expired_events_deleted": deleted,
                 "message": "目前沒有同時通過活動連結與地雷過濾的人選。",
                 "event_telemetry": getattr(matches, 'telemetry', {}),
+                "event_checkpoint": getattr(matches, 'checkpoint', None),
+                "event_resumed": getattr(matches, 'resumed', False),
             }
         selected = matches[0]
         invitation_order = agent.choose_event_invitation_order(selected)
@@ -497,12 +502,17 @@ def proactive_event_match(req: ProactiveEventMatchRequest):
             "first_hook": hook,
             "second_hook": second_hook,
             "event_telemetry": getattr(matches, 'telemetry', {}),
+            "event_checkpoint": getattr(matches, 'checkpoint', None),
+            "event_resumed": getattr(matches, 'resumed', False),
         }
     except Exception as exc:
         from matchmaker_agent.event_v2_contract import EventUnavailable
         code = exc.code if isinstance(exc, EventUnavailable) else 'event_relevance_unavailable'
         return {"status": "unavailable", "error_code": code,
-            "event_telemetry": getattr(exc, 'telemetry', {})}
+            "event_telemetry": getattr(exc, 'telemetry', {}),
+            "event_checkpoint": getattr(exc, 'checkpoint', None),
+            "event_resumable": bool(getattr(exc, 'resumable', False)),
+            "event_resumed": bool(getattr(exc, 'resumed', False))}
 
 
 @app.post("/api/events/lifecycle/cleanup")

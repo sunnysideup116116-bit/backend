@@ -254,7 +254,12 @@ def finish_event_discovery_job(job: dict[str, Any], result: dict[str, Any]) -> N
 
 def fail_event_discovery_job(job: dict[str, Any], exc: Exception) -> None:
     retry_count = int(job.get("retry_count", 0)) + 1
-    retry = job.get("job_kind") == "weekly_cycle" and retry_count <= 3
+    # Resumable durable semantic work gets a wider, still bounded, retry
+    # horizon so per-user checkpoints can be resumed across several worker
+    # passes. Everything else keeps the pre-existing <=3 behavior.
+    resumable = str(exc) == "event_semantic_resume_pending"
+    limit = 8 if resumable else 3
+    retry = job.get("job_kind") == "weekly_cycle" and retry_count <= limit
     _jobs.update_one(
         {"_id": _JOB_ID, "job_token": job.get("job_token"),
          "lease_owner": job.get("lease_owner")},

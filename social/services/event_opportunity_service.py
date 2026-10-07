@@ -307,9 +307,14 @@ def _opportunity_key(event_id: str, first_user: str, second_user: str) -> str:
 
 def create_event_opportunity(
     user_id: str, *, excluded_user_ids: set[str] | list[str] | None = None,
-    cycle_id: str = "", can_commit=None,
+    cycle_id: str = "", can_commit=None, checkpoint: dict | None = None,
 ) -> dict[str, Any]:
-    """Find one graph bridge and create an anonymous first-party draft."""
+    """Find one graph bridge and create an anonymous first-party draft.
+
+    `checkpoint` is the opaque, non-private progress blob a previous attempt
+    persisted (see matchmaker_agent/event_v2_resume.py). When provided the
+    Matchmaker rebinds it and resumes; completed groups are not revalidated.
+    """
     safe_user_id = user_id
     if not valid_owner_id(safe_user_id):
         return {"status": "invalid_user"}
@@ -326,25 +331,32 @@ def create_event_opportunity(
         for value in (excluded_user_ids or [])
         if str(value or "").strip() and str(value) != safe_user_id
     } | recent_declined | risk_exclusions
+    body = {
+        "user_id": safe_user_id,
+        "excluded_user_ids": sorted(requested_exclusions)[:500],
+    }
+    if checkpoint:
+        body["checkpoint"] = checkpoint
     response = requests.post(
         AGENT_EVENT_OPPORTUNITY_URL,
-        json={
-            "user_id": safe_user_id,
-            "excluded_user_ids": sorted(requested_exclusions)[:500],
-        },
+        json=body,
         timeout=(3, EVENT_OPPORTUNITY_TIMEOUT_SECONDS),
     )
     response.raise_for_status()
     agent_result = response.json()
     if record_event_semantic_result(agent_result.get('status'), agent_result.get('error_code'),
             agent_result.get('event_telemetry')):
-        return {'status': 'unavailable', 'error_code': 'event_semantic_circuit_open'}
+        return {'status': 'unavailable', 'error_code': 'event_semantic_circuit_open',
+                'checkpoint': agent_result.get('event_checkpoint')}
     if agent_result.get("status") != "success":
-        return {
+        outcome = {
             "status": str(agent_result.get("status") or "agent_error"),
             "message": str(agent_result.get("message") or "")[:160],
             "error_code": str(agent_result.get("error_code") or "")[:80],
+            "checkpoint": agent_result.get("event_checkpoint"),
+            "resumable": bool(agent_result.get("event_resumable")),
         }
+        return outcome
 
     selected = agent_result.get("match") or {}
     target_id = str(selected.get("user_id") or "")

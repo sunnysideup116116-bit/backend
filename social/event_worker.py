@@ -131,6 +131,17 @@ def run_worker(stop_event: threading.Event | None = None) -> None:
                 "1", "true", "on",
             }:
                 enqueue_weekly_event_discovery_if_due()
+            # Bounded automatic circuit recovery: once the OPEN cooldown has
+            # elapsed, one synthetic probe may close the circuit and let
+            # checkpointed semantic work resume. Never touches the manual kill.
+            if os.getenv("EVENT_SEMANTIC_CIRCUIT_RECOVERY", "on").strip().lower() in {
+                "1", "true", "on",
+            }:
+                try:
+                    from services.event_semantic_monitor import probe_if_due
+                    probe_if_due()
+                except Exception:
+                    pass
             job = claim_event_discovery_job(worker_id)
             if not job:
                 wakeup_stream = _wait_for_work(wakeup_stream, reconcile_seconds, stop_event)
