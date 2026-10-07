@@ -83,6 +83,8 @@ def test_outer_deadline_is_forwarded_to_the_adapter(monkeypatch):
     class Inspect:
         def __init__(self, *_args, **kwargs):
             seen['deadline'] = kwargs['deadline']
+            seen['checkpoint'] = kwargs.get('checkpoint')
+            self.resumed = False
 
         def select(self, *_args, **_kwargs):
             return []
@@ -90,11 +92,15 @@ def test_outer_deadline_is_forwarded_to_the_adapter(monkeypatch):
         def telemetry(self):
             return {}
 
+        def checkpoint_value(self):
+            return None
+
     monkeypatch.setattr(event_v2_api, 'session_for', fake_session_for)
     monkeypatch.setattr(event_v2_api, 'Adapter', Inspect)
     monkeypatch.setattr(event_v2_api.time, 'monotonic', lambda: 1000.0)
-    find_matches(SimpleNamespace(client=None, model=MODEL), 'owner', [])
+    find_matches(SimpleNamespace(client=None, model=MODEL), 'owner', [], checkpoint={'v': 1})
     assert seen['deadline'] == 1000.0 + 120.0
+    assert seen['checkpoint'] == {'v': 1}
 
 
 

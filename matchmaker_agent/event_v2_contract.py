@@ -12,8 +12,17 @@ POLICY = 'event_relevance_v2'
 
 
 class EventUnavailable(RuntimeError):
-    def __init__(self, code, *, systemic=False):
-        self.code, self.systemic = code, systemic
+    """Typed Event failure. `systemic` propagates past candidate fallbacks.
+
+    `resumable` marks an execution-boundary/infrastructure stop that preserved
+    durable progress: the caller must checkpoint and retry later instead of
+    treating the user's whole weekly work as permanently lost. Semantic
+    negatives (`event_negative_unavailable`) and manual-kill stops are never
+    resumable.
+    """
+
+    def __init__(self, code, *, systemic=False, resumable=False):
+        self.code, self.systemic, self.resumable = code, systemic, bool(resumable)
         super().__init__(code)
 
 

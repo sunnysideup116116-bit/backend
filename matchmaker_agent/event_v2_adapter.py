@@ -13,6 +13,10 @@ from neo4j import Query
 from .event_v2_contract import (POLICY, EventUnavailable, owner_signals, query_signal,
     exact_relevance, compatible_kinds, negative_state, snapshot_hash)
 from .event_v2_vectors import query_vectors
+from .event_v2_resume import (actor_digest, decode as decode_checkpoint,
+    encode as encode_checkpoint, progress_for, progress_key, rebind as rebind_evidence,
+    scope_key, snapshot)
+from .event_semantic_circuit import allow_semantic, cooldown_elapsed, close_circuit, open_circuit
 from .preference_embedding_contract import frozen_contract, RUNTIME, PROVENANCE
 from .related_interest_contract import INDEX_NAME, ACCEPTED, RELATIONS, bounded_counts
 from .related_interest_retrieval import index_metadata, _DeadlineSession
@@ -136,7 +140,7 @@ def load_owner(session, owner):
 class Adapter:
     def __init__(self, session, client, model, *, deadline, clock=time.monotonic,
                  now=time.time, eligible=None, vectors=query_vectors, validate=validate_concepts,
-                 allowed=requester_route_allowed, fallback_model=None):
+                 allowed=requester_route_allowed, fallback_model=None, checkpoint=None):
         self.clock, self.deadline, self.now = clock, deadline, now
         self.session = _DeadlineSession(session, deadline, clock)
         self.client, self.model = client, model
@@ -162,12 +166,126 @@ class Adapter:
         self.semantic_owners = set()
         self.owner_diagnostics = {}
         self.decisions = {}
+        # Durable resume: opaque, request-scoped, never persisted here. The
+        # caller persists the value this request eventually emits.
+        self._checkpoint_in = decode_checkpoint(checkpoint)
+        self.checkpoint = None
+        self.resumed = False
+        self.actor_digests = {}
+        self._checkpoint_owner = None
+        self._snapshot = None
+        self._progress = {}
+        self._partial = {}
 
     def telemetry(self):
         trace = current_trace()
         diagnostic = {'diagnostic_id': trace.correlation_id} if trace else {}
         return {**self.counts, **diagnostic, 'semantic_triggered': bool(self.semantic_owners),
             'validator': bounded_counts(self.validator_counts)}
+
+    def checkpoint_value(self):
+        """Opaque resumable progress for the caller to persist. None when there
+        is nothing trustworthy to resume."""
+        if self.checkpoint is not None:
+            return self.checkpoint
+        if not self.decisions and not self._partial:
+            return None
+        return encode_checkpoint(owner=self._checkpoint_owner, snapshot_hash=self._snapshot,
+            decisions=self.decisions, actor_digests=self.actor_digests,
+            progress=self._progress, partial=self._partial,
+            model=self.model, fallback_model=self.fallback_model)
+
+    def _circuit_allows(self):
+        try:
+            return allow_semantic(self.clock)
+        except Exception:
+            # Circuit state unreadable: fail closed rather than guess.
+            return False
+
+    def _restore_checkpoint(self, owner, positive, groups):
+        """Rebind already-trusted decisions from a prior attempt.
+
+        The checkpoint only applies to the same owner and the same event
+        inventory; an actor whose own signals changed is discarded. Restored
+        decisions are never recomputed. The checkpoint owner/snapshot are
+        pinned on the first non-exact relevance (the requester's), so later
+        candidate calls cannot overwrite the resumable state.
+        """
+        if self._checkpoint_owner is None:
+            self._checkpoint_owner = owner
+            self._snapshot = snapshot(self.rows.get(owner) or [], self.events, self.signals)
+            self._progress = {}
+        if owner != self._checkpoint_owner:
+            digest = actor_digest(positive)
+            self.actor_digests[owner] = digest
+            return
+        saved = self._checkpoint_in
+        if not saved or saved.get('owner') != owner or saved.get('snapshot') != self._snapshot:
+            return
+        signals_by_ref = {signal.reference: signal for signal in positive}
+        targets_by_ref = {}
+        for eid, group in self.signals.items():
+            for target in group:
+                targets_by_ref[target.reference] = target
+        digest_now = actor_digest(positive)
+        saved_digest = (saved.get('actor_digests') or {}).get(owner)
+        if saved_digest is not None and saved_digest != digest_now:
+            return
+        self.actor_digests[owner] = digest_now
+        restored = False
+        for key, refs in (saved.get('completed') or {}).items():
+            actor, _, event_id = key.partition('|')
+            if actor != owner or event_id not in groups:
+                continue
+            evidence = rebind_evidence(refs, signals_by_ref=signals_by_ref,
+                targets_by_ref=targets_by_ref)
+            if evidence is None:
+                continue
+            self.decisions[actor, event_id] = evidence
+            restored = restored or bool(evidence)
+        self._progress = {key: dict(value) for key, value in (saved.get('progress') or {}).items()}
+        # Partial (not yet fully trusted) per-event evidence accumulated for
+        # signals already scanned; rebound exactly like completed evidence.
+        for key, refs in (saved.get('partial') or {}).items():
+            actor, _, event_id = key.partition('|')
+            if actor != owner or event_id not in groups:
+                continue
+            evidence = rebind_evidence(refs, signals_by_ref=signals_by_ref,
+                targets_by_ref=targets_by_ref)
+            if evidence:
+                self._partial[(actor, event_id)] = evidence
+        self.resumed = restored or bool(self._progress) or bool(self._partial)
+        if self.resumed:
+            emit('event_stage', stage='event_resume', category='success',
+                restored_decisions=len(self.decisions), restored_partial=len(self._partial),
+                remaining_event_ms=remaining_ms(self.deadline, self.clock))
+
+    def _checkpoint_boundary(self, owner, scope, next_index, signal_count, *, reason,
+            matches=None):
+        """Persist a resumable checkpoint and raise a resumable stop.
+
+        Called only at an execution/availability boundary. Prior trusted
+        decisions, partial per-event evidence and the exact next signal index
+        are preserved so a later worker continues at `next_index` instead of
+        restarting.
+        """
+        for event_id, evidence in (matches or {}).items():
+            if evidence:
+                self._partial.setdefault((owner, event_id), []).extend(evidence)
+        self.actor_digests.setdefault(owner, actor_digest(
+            owner_signals(self.rows.get(owner) or [], self.now())[0]))
+        self._progress[progress_key(owner, scope)] = {'next_index': int(next_index),
+            'signal_count': int(signal_count)}
+        self.checkpoint = encode_checkpoint(owner=self._checkpoint_owner,
+            snapshot_hash=self._snapshot, decisions=self.decisions,
+            actor_digests=self.actor_digests, progress=self._progress,
+            partial={key: value for key, value in self._partial.items() if key[0] == owner},
+            model=self.model, fallback_model=self.fallback_model)
+        emit('event_stage', stage='checkpoint', category='resumable_boundary',
+            typed_code='semantic_validator_unavailable', final_typed_outcome='unavailable',
+            reason=reason, next_index=int(next_index), signal_count=int(signal_count),
+            remaining_event_ms=remaining_ms(self.deadline, self.clock))
+        raise EventUnavailable('semantic_validator_unavailable', systemic=True, resumable=True)
 
     def relevance(self, owner, *, event_ids=None, exact_only=False):
         started = time.monotonic()
@@ -200,6 +318,7 @@ class Adapter:
         self.owner_diagnostics[owner] = {'exact_event_count': len(exact)}
         if exact_only:
             return exact
+        self._restore_checkpoint(owner, positive, groups)
         for eid, evidence in exact.items():
             self.decisions[owner,eid] = evidence
         for eid,group in groups.items():
@@ -215,6 +334,16 @@ class Adapter:
             return {}
         if not self.allowed(owner):
             raise EventUnavailable('event_semantic_disabled')
+        if not self._circuit_allows():
+            # Automatic provider circuit is OPEN (or is still half-open). This
+            # is not the operator kill; it is a bounded, self-recovering
+            # availability state. Fail closed, keep any prior progress.
+            emit('event_stage', stage='event_relevance', category='circuit_open',
+                typed_code='semantic_validator_unavailable',
+                final_typed_outcome='unavailable', resumable=True,
+                remaining_event_ms=remaining_ms(self.deadline, self.clock))
+            self.checkpoint = self.checkpoint_value()
+            raise EventUnavailable('semantic_validator_unavailable', systemic=True, resumable=True)
         readiness = infrastructure(self.session)
         if not readiness['semantic_ready']:
             raise EventUnavailable(readiness['error_code'], systemic=True)
@@ -233,6 +362,12 @@ class Adapter:
             emit('event_stage', stage='event_vectors', elapsed_ms=(time.monotonic()-started)*1000,
                 remaining_event_ms=remaining_ms(self.deadline, self.clock))
         matches, incomplete, local_counts = {}, len(positive) != len(usable), {}
+        # Seed already-scanned partial evidence for this actor/scope. Trusted
+        # decisions for fully completed events were excluded from `groups`
+        # above and are merged back by the caller from the checkpoint.
+        for (actor, event_id), evidence in self._partial.items():
+            if actor == owner and event_id in groups:
+                matches[event_id] = list(evidence)
         # Same deployed config keys. Never guess a default activation threshold.
         try:
             threshold = float(os.environ['MATCH_PREFERENCE_SEMANTIC_MIN_SIMILARITY'])
@@ -241,7 +376,21 @@ class Adapter:
             raise EventUnavailable('event_semantic_config_unavailable', systemic=True) from None
         if not math.isfinite(threshold) or not .75 <= threshold <= 1:
             raise EventUnavailable('event_semantic_config_unavailable', systemic=True)
-        for signal in usable:
+        scope = None if event_ids is None else frozenset(event_ids)
+        saved_progress = progress_for(self._checkpoint_in, owner, scope) if self.resumed else None
+        start_index = saved_progress['next_index'] if saved_progress else 0
+        signal_count = len(usable)
+        if saved_progress and saved_progress.get('signal_count') != signal_count:
+            # The owner's usable signal set changed underneath the checkpoint;
+            # its positions are no longer meaningful, so scan from the start
+            # with the restored trusted decisions still in place but without
+            # the partial accumulation (that would duplicate evidence).
+            start_index = 0
+            for key in [key for key in self._partial if key[0] == owner]:
+                del self._partial[key]
+        for signal_index, signal in enumerate(usable):
+            if signal_index < start_index:
+                continue
             concepts, positions = [], {}
             for event_id, group in groups.items():
                 if negative_state(negative, group) != 'clear':
@@ -303,10 +452,10 @@ class Adapter:
             cache_key = _validator_relation_key(signal.text, concepts, self.model, self.fallback_model)
             cached = self.validator_relations.get(cache_key) if cache_key else None
             if self.clock() >= self.deadline:
-                emit('event_stage', stage='deadline', category='shared_deadline_exhaustion',
-                    typed_code='semantic_validator_unavailable', final_typed_outcome='unavailable',
-                    remaining_event_ms=remaining_ms(self.deadline, self.clock))
-                raise EventUnavailable('semantic_validator_unavailable', systemic=True)
+                # Execution boundary: keep every trusted decision and the exact
+                # next signal index so a later worker resumes here.
+                self._checkpoint_boundary(owner, scope, signal_index, signal_count,
+                    reason='outer_deadline')
             if cached is None:
                 self.counts['validator_calls'] += 1
                 accepted, counts = self.validate(signal.text, concepts, self.client, self.model,
@@ -324,10 +473,12 @@ class Adapter:
             for key, value in bounded_counts(counts).items():
                 self.validator_counts[key] = self.validator_counts.get(key, 0)+value
                 local_counts[key] = local_counts.get(key, 0)+value
-            if counts.get('job_unavailable') or self.clock()>=self.deadline:
-                emit('event_stage', stage='event_relevance' if counts.get('job_unavailable') else 'deadline',
-                    category='other' if counts.get('job_unavailable') else 'shared_deadline_exhaustion',
-                    job_unavailable=bool(counts.get('job_unavailable')), typed_code='semantic_validator_unavailable',
+            if counts.get('job_unavailable'):
+                # Accounting/configuration outage: not a provider availability
+                # failure. Stays terminal and fail-closed exactly as before;
+                # no paid retry is triggered by a resume.
+                emit('event_stage', stage='event_relevance', category='other',
+                    job_unavailable=True, typed_code='semantic_validator_unavailable',
                     final_typed_outcome='unavailable', elapsed_ms=(time.monotonic()-started)*1000,
                     remaining_event_ms=remaining_ms(self.deadline, self.clock))
                 raise EventUnavailable('semantic_validator_unavailable', systemic=True)
@@ -350,7 +501,28 @@ class Adapter:
                         'source_kind': 'recent' if signal.namespace=='event-recent-v1' else 'durable',
                         'user_text': signal.text, 'event_text': target.text,
                         'score': round(item['similarity'], 4)})
+            if self.clock() >= self.deadline:
+                # The signal just validated is fully recorded above, so resume
+                # at the next signal; no paid validation is repeated.
+                emit('event_stage', stage='deadline', category='shared_deadline_exhaustion',
+                    typed_code='semantic_validator_unavailable',
+                    final_typed_outcome='unavailable', remaining_event_ms=remaining_ms(self.deadline, self.clock))
+                self._checkpoint_boundary(owner, scope, signal_index + 1, signal_count,
+                    reason='shared_deadline', matches=matches)
         if (local_counts.get('error') and not (local_counts.get('accepted') or local_counts.get('rejected'))):
+            if not matches and incomplete:
+                # No trusted decision and an incomplete vector set: not a
+                # provider outage, stay fail-closed with the existing typed code.
+                raise EventUnavailable('event_positive_embedding_pending')
+            if not (self.validator_counts.get('accepted') or self.validator_counts.get('rejected')):
+                # True job-level provider availability failure for this user:
+                # no trusted decision anywhere. Preserve the exact resume
+                # position and retry later as its own bounded job attempt.
+                self._checkpoint_boundary(owner, scope, start_index, signal_count,
+                    reason='validator_unavailable', matches=matches)
+            # Partial ERROR (another owner already produced a trusted decision):
+            # unchanged existing semantics - batch-local error, not an outage,
+            # and never promoted to a resumable whole-user stop.
             raise EventUnavailable('semantic_validator_unavailable')
         if not matches and incomplete:
             raise EventUnavailable('event_positive_embedding_pending')

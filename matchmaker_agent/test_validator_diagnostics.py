@@ -380,20 +380,25 @@ def test_event_route_joins_validator_attempts_with_one_server_correlation(
         yield object()
 
     class InspectAdapter:
-        def __init__(self, *_args, **_kwargs):
+        def __init__(self, *_args, **kwargs):
+            assert 'checkpoint' in kwargs, "Event API must accept a resume checkpoint"
             self.trace = event_diagnostics.current_trace()
+            self.resumed = False
             assert self.trace is not None, "Event API must establish the diagnostic scope"
 
         def select(self, owner, _excluded):
             assert owner == PRIVATE
             accepted, counts = event_validator.validate_concepts("打籃球",
-                [{"semantic_text": "三對三籃球"}], None, MODEL, deadline=18., clock=lambda: 0.)
+                [{"semantic_text": "三對三籃球賽"}], None, MODEL, deadline=18., clock=lambda: 0.)
             assert accepted and counts["error"] == 0
             return []
 
         def telemetry(self):
             return {"semantic_triggered": True, "validator": {"accepted": 1},
                 "diagnostic_id": self.trace.correlation_id}
+
+        def checkpoint_value(self):
+            return None
 
     monkeypatch.setattr(api, "session_for", session_for)
     monkeypatch.setattr(api, "Adapter", InspectAdapter)

@@ -40,9 +40,11 @@ def profiles_for_events():
 
 
 class EventMatches(list):
-    def __init__(self, matches, telemetry):
+    def __init__(self, matches, telemetry, checkpoint=None, resumed=False):
         super().__init__(matches)
         self.telemetry = telemetry
+        self.checkpoint = checkpoint
+        self.resumed = resumed
 
 
 @contextmanager
@@ -71,22 +73,26 @@ def readiness_endpoint():
             'error_code': 'event_graph_unavailable'}
 
 
-def find_matches(agent, owner, excluded):
+def find_matches(agent, owner, excluded, checkpoint=None):
     with diagnostic_scope('event_request') as trace:
         adapter = None
         started = time.monotonic()
         try:
             with session_for(agent) as session:
                 adapter = Adapter(session, agent.client, agent.model, deadline=time.monotonic()+EVENT_OUTER_DEADLINE_SECONDS,
-                    fallback_model=getattr(agent, 'validator_fallback_model', None))
+                    fallback_model=getattr(agent, 'validator_fallback_model', None), checkpoint=checkpoint)
                 matches = adapter.select(owner, excluded)
                 emit('event_result', stage='event_request', category='success',
-                    final_typed_outcome='accepted' if matches else 'normal_no_match', elapsed_ms=(time.monotonic()-started)*1000)
-                return EventMatches(matches, adapter.telemetry())
+                    final_typed_outcome='accepted' if matches else 'normal_no_match',
+                    resumed=adapter.resumed, elapsed_ms=(time.monotonic()-started)*1000)
+                return EventMatches(matches, adapter.telemetry(),
+                    checkpoint=adapter.checkpoint_value(), resumed=adapter.resumed)
         except EventUnavailable as exc:
             exc.telemetry = adapter.telemetry() if adapter else {'diagnostic_id': trace.correlation_id}
+            exc.checkpoint = adapter.checkpoint_value() if adapter else None
+            exc.resumed = adapter.resumed if adapter else False
             emit('event_result', stage='event_request', typed_code=exc.code, final_typed_outcome='unavailable',
-                elapsed_ms=(time.monotonic()-started)*1000)
+                resumable=bool(exc.resumable), resumed=exc.resumed, elapsed_ms=(time.monotonic()-started)*1000)
             raise
         except TimeoutError as exc:
             error = EventUnavailable('semantic_retrieval_timeout', systemic=True)
@@ -119,3 +125,37 @@ def recheck_endpoint(req: RecheckRequest, request: Request):
         return {'status': 'success', 'eligible': valid}
     except Exception:
         return {'status': 'unavailable', 'eligible': False}
+
+
+class CircuitProbeRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
+
+
+_PROBE_QUERY = '週末運動'
+_PROBE_CONCEPT = '週末球類活動'
+
+
+@router.post('/circuit/probe')
+def circuit_probe_endpoint(request: Request):
+    """One synthetic, private-data-free provider probe for the HALF_OPEN state.
+
+    It reuses the exact validator contract (18 s shared, 6 s per call, 2
+    attempts, failover) with fixed synthetic text only. No user data, no
+    checkpoint, no proposal. Returns healthy only when a real provider round
+    trip completes.
+    """
+    try:
+        verify_internal(request.url.path, {}, request.headers.get('X-Preference-Bootstrap', ''))
+    except BootstrapError:
+        raise HTTPException(403, detail='invalid_event_context') from None
+    from .related_interest_validator import validate_concepts
+    agent = agent_instance()
+    try:
+        accepted, counts = validate_concepts(_PROBE_QUERY,
+            [{'concept_key': 'circuit-probe', 'semantic_text': _PROBE_CONCEPT}],
+            agent.client, agent.model, deadline=time.monotonic()+18,
+            fallback_model=getattr(agent, 'validator_fallback_model', None))
+    except Exception:
+        return {'status': 'success', 'healthy': False}
+    healthy = counts.get('error') == 0 and counts.get('attempts', 0) >= 1 and not counts.get('job_unavailable')
+    return {'status': 'success', 'healthy': bool(healthy)}

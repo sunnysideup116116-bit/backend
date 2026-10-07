@@ -389,7 +389,7 @@ def test_active_endpoint_uses_truthful_activity_wording_without_preference_claim
     selected={'user_id':'a','candidate_id':'b','event_id':'e','event_name':'Synthetic event',
         'target_links':['慢跑'],'candidate_links':['越野跑'],'target_user_concepts':['慢跑'],
         'candidate_user_concepts':['越野跑'],'target_source_kinds':['durable'],'candidate_source_kinds':['durable']}
-    monkeypatch.setattr('matchmaker_agent.event_v2_api.find_matches',lambda *_a:EventMatches([selected],{'semantic_triggered':True}))
+    monkeypatch.setattr('matchmaker_agent.event_v2_api.find_matches',lambda *_a, **_k:EventMatches([selected],{'semantic_triggered':True}))
     monkeypatch.setattr(agent_api.agent,'choose_event_invitation_order',lambda _:{'first':'target'})
     never=Mock(side_effect=AssertionError('template must not invent shared preference'))
     monkeypatch.setattr(agent_api.agent,'generate_proactive_event_hook',never)
