@@ -39,6 +39,13 @@ from matchmaker_agent.semantic_rollout_policy import valid_owner_id
 
 
 AGENT_EVENT_OPPORTUNITY_URL = "http://127.0.0.1:9001/api/proactive_event_match"
+# Must stay strictly above the Matchmaker Event outer deadline
+# (matchmaker_agent/event_v2_api.py EVENT_OUTER_DEADLINE_SECONDS = 120 s) by the
+# measured non-Event/response overhead (~0.4 s worst) plus operational margin.
+# 150 s keeps a 30 s margin and is the paired half of the final timeout
+# hierarchy; raising the outer deadline alone would let this caller cut the
+# request first and re-create the same premature termination.
+EVENT_OPPORTUNITY_TIMEOUT_SECONDS = 150
 LIVE_STATUSES = {"draft", "pending"}
 DEFAULT_AUTO_SCAN_MAX_PROPOSALS = 3
 DEFAULT_PAIR_DECLINE_COOLDOWN_DAYS = 7
@@ -325,7 +332,7 @@ def create_event_opportunity(
             "user_id": safe_user_id,
             "excluded_user_ids": sorted(requested_exclusions)[:500],
         },
-        timeout=(3, 90),
+        timeout=(3, EVENT_OPPORTUNITY_TIMEOUT_SECONDS),
     )
     response.raise_for_status()
     agent_result = response.json()
