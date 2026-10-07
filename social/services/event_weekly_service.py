@@ -1,12 +1,15 @@
 """Durable weekly progress and fair, bounded invitation batches."""
 
 import hashlib
+import logging
 import os
 import time
 
 from database import db, matches_coll, profiles_coll
 from services.event_opportunity_service import create_event_opportunity
 from services.proposal_namespace import EVENT_INVITATION_NAMESPACE, live_proposal_query
+
+LOG = logging.getLogger(__name__)
 
 RUNS = db["event_weekly_runs"]
 USERS = db["event_weekly_users"]
@@ -143,11 +146,33 @@ def run_invitation_batches(run_id, is_current, notify):
             status = str(result.get("status") or "error")
             attempts = int(row.get("attempts", 0)) + 1
             # A resumable execution/availability boundary keeps the durable
-            # checkpoint and retries later, bounded by the resume horizon. Any
-            # other retryable failure falls back to the pre-existing bounded
-            # attempts < 3 behavior. Terminal semantic outcomes are final.
-            resumable = bool(result.get("resumable")) and bool(result.get("checkpoint"))
-            if resumable and attempts < RESUME_MAX_ATTEMPTS:
+            # checkpoint and retries later, bounded by the resume horizon. The
+            # resume authority may be the checkpoint returned by this attempt
+            # or one already persisted on the row (the producer must never
+            # drop it). Any other retryable failure falls back to the
+            # pre-existing bounded attempts < 3 behavior. Terminal semantic
+            # outcomes remain final.
+            persisted = row.get("checkpoint")
+            returned = result.get("checkpoint")
+            resume_authority = None
+            if result.get("resumable"):
+                resume_authority = returned if returned else (persisted if status == "unavailable" else None)
+            resumable = bool(result.get("resumable")) and bool(resume_authority)
+            contract_violation = bool(result.get("resumable")) and not bool(resume_authority)
+            if contract_violation and attempts < RESUME_MAX_ATTEMPTS:
+                # Producer said resumable but left no resume authority: fail
+                # closed and keep the work non-terminal rather than silently
+                # demoting it into the legacy terminal path. The row keeps its
+                # durable identity so a later attempt can still be scheduled,
+                # bounded by the same async resume horizon.
+                LOG.error("event_resume_contract_violation user=%s status=%s error_code=%s",
+                    uid, status, result.get("error_code") or "")
+                state, outcome, resume_at = "pending", "resume_pending", now + _resume_backoff_seconds(attempts)
+            elif contract_violation:
+                # Horizon genuinely exhausted: existing bounded terminal policy.
+                resume_at = 0.0
+                state, outcome = "done", status
+            elif resumable and attempts < RESUME_MAX_ATTEMPTS:
                 resume_at = now + _resume_backoff_seconds(attempts)
                 state, outcome = "pending", "resume_pending"
             elif status in RETRYABLE and attempts < 3:
@@ -163,7 +188,7 @@ def run_invitation_batches(run_id, is_current, notify):
                 "resume_at": resume_at,
             }
             if resumable:
-                update["checkpoint"] = result.get("checkpoint")
+                update["checkpoint"] = returned if returned else persisted
             USERS.update_one({"_id": row["_id"]}, {"$set": update})
             created += int(status == "created")
             if created >= batch_limit:

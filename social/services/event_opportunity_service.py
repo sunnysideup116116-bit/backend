@@ -347,7 +347,8 @@ def create_event_opportunity(
     if record_event_semantic_result(agent_result.get('status'), agent_result.get('error_code'),
             agent_result.get('event_telemetry')):
         return {'status': 'unavailable', 'error_code': 'event_semantic_circuit_open',
-                'checkpoint': agent_result.get('event_checkpoint')}
+                'checkpoint': agent_result.get('event_checkpoint'),
+                'resumable': bool(agent_result.get('event_resumable'))}
     if agent_result.get("status") != "success":
         outcome = {
             "status": str(agent_result.get("status") or "agent_error"),
@@ -355,6 +356,7 @@ def create_event_opportunity(
             "error_code": str(agent_result.get("error_code") or "")[:80],
             "checkpoint": agent_result.get("event_checkpoint"),
             "resumable": bool(agent_result.get("event_resumable")),
+            "resume_contract_violation": bool(agent_result.get("event_resume_contract_violation")),
         }
         return outcome
 
