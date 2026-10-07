@@ -186,3 +186,44 @@ class EventOpportunityServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EventOpportunityTimeoutHierarchyTests(unittest.TestCase):
+    """The caller HTTP budget must stay strictly above the Matchmaker Event
+    outer deadline, with operational margin; the Event outer deadline authority
+    lives in matchmaker_agent/event_v2_api.py and must not be equal or lower."""
+
+    def test_caller_timeout_exceeds_event_outer_deadline_with_margin(self):
+        from pathlib import Path
+        import re
+
+        caller = service.EVENT_OPPORTUNITY_TIMEOUT_SECONDS
+        api_source = (Path(service.__file__).resolve().parents[2]
+            / 'matchmaker_agent' / 'event_v2_api.py').read_text(encoding='utf-8')
+        match = re.search(r'^EVENT_OUTER_DEADLINE_SECONDS = ([0-9.]+)', api_source, re.M)
+        self.assertIsNotNone(match, 'Event outer deadline authority must exist')
+        outer = float(match.group(1))
+        self.assertEqual(caller, 150)
+        self.assertEqual(outer, 120.0)
+        self.assertGreater(caller, outer)
+        self.assertGreaterEqual(caller - outer, 20)
+
+    @patch.object(service.requests, "post")
+    def test_agent_call_uses_the_paired_caller_timeout(self, post):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"status": "no_match"}
+        post.return_value = response
+        matches = MagicMock()
+        matches.count_documents.return_value = 0
+        matches.find_one.return_value = None
+        profiles = MagicMock()
+        profiles.find.return_value = [
+            {"user_id": "owner", "current_context": "週末想出門", "big_five": {}},
+            {"user_id": "candidate", "current_context": "想逛市集", "big_five": {}},
+        ]
+        with patch.object(service, "profiles_coll", profiles), \
+             patch.object(service, "matches_coll", matches):
+            service.create_event_opportunity("owner")
+        self.assertEqual(post.call_args.kwargs["timeout"],
+                         (3, service.EVENT_OPPORTUNITY_TIMEOUT_SECONDS))
