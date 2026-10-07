@@ -184,16 +184,31 @@ class Adapter:
             'validator': bounded_counts(self.validator_counts)}
 
     def checkpoint_value(self):
-        """Opaque resumable progress for the caller to persist. None when there
-        is nothing trustworthy to resume."""
+        """Opaque resumable progress for the caller to persist. None only when
+        there is no meaningful resumable state at all.
+
+        A progress-only checkpoint (no completed/partial decisions yet) is
+        valid resume state: `next_index == 0` is a real position, not absence.
+        Field presence and the integer type are checked explicitly so a zero
+        index is never treated as falsy.
+        """
         if self.checkpoint is not None:
             return self.checkpoint
-        if not self.decisions and not self._partial:
+        if self._checkpoint_owner is None:
+            return None
+        if not self.decisions and not self._partial and not self._has_progress():
             return None
         return encode_checkpoint(owner=self._checkpoint_owner, snapshot_hash=self._snapshot,
             decisions=self.decisions, actor_digests=self.actor_digests,
             progress=self._progress, partial=self._partial,
             model=self.model, fallback_model=self.fallback_model)
+
+    def _has_progress(self):
+        """True when at least one scope has a valid integer resume position."""
+        for entry in (self._progress or {}).values():
+            if isinstance(entry, dict) and type(entry.get('next_index')) is int:
+                return True
+        return False
 
     def _circuit_allows(self):
         try:
@@ -260,14 +275,13 @@ class Adapter:
                 restored_decisions=len(self.decisions), restored_partial=len(self._partial),
                 remaining_event_ms=remaining_ms(self.deadline, self.clock))
 
-    def _checkpoint_boundary(self, owner, scope, next_index, signal_count, *, reason,
-            matches=None):
-        """Persist a resumable checkpoint and raise a resumable stop.
+    def _record_resume_position(self, owner, scope, next_index, signal_count, *, matches=None):
+        """Record the exact resume position and serialize the checkpoint.
 
-        Called only at an execution/availability boundary. Prior trusted
-        decisions, partial per-event evidence and the exact next signal index
-        are preserved so a later worker continues at `next_index` instead of
-        restarting.
+        A progress-only entry (no completed/partial decisions yet) is valid
+        resume state; `next_index == 0` is a real position, not absence. No
+        progress is fabricated: the position reflects the current scope and
+        how many of its signals were actually processed.
         """
         for event_id, evidence in (matches or {}).items():
             if evidence:
@@ -281,6 +295,18 @@ class Adapter:
             actor_digests=self.actor_digests, progress=self._progress,
             partial={key: value for key, value in self._partial.items() if key[0] == owner},
             model=self.model, fallback_model=self.fallback_model)
+        return self.checkpoint
+
+    def _checkpoint_boundary(self, owner, scope, next_index, signal_count, *, reason,
+            matches=None):
+        """Persist a resumable checkpoint and raise a resumable stop.
+
+        Called only at an execution/availability boundary. Prior trusted
+        decisions, partial per-event evidence and the exact next signal index
+        are preserved so a later worker continues at `next_index` instead of
+        restarting.
+        """
+        self._record_resume_position(owner, scope, next_index, signal_count, matches=matches)
         emit('event_stage', stage='checkpoint', category='resumable_boundary',
             typed_code='semantic_validator_unavailable', final_typed_outcome='unavailable',
             reason=reason, next_index=int(next_index), signal_count=int(signal_count),
@@ -337,12 +363,18 @@ class Adapter:
         if not self._circuit_allows():
             # Automatic provider circuit is OPEN (or is still half-open). This
             # is not the operator kill; it is a bounded, self-recovering
-            # availability state. Fail closed, keep any prior progress.
+            # availability state. Fail closed, keep prior progress, and record
+            # a progress-only checkpoint at the current scope's start so the
+            # user remains resumable instead of terminalizing. A restored
+            # resume position for this scope is preserved, never reset to 0.
+            scope_for_position = None if event_ids is None else frozenset(event_ids)
+            if not progress_for(self._checkpoint_in, owner, scope_for_position) or not self.resumed:
+                usable_now = [p for p in positive if p.namespace == 'event-recent-v1' or p.vector_ready]
+                self._record_resume_position(owner, scope_for_position, 0, len(usable_now))
             emit('event_stage', stage='event_relevance', category='circuit_open',
                 typed_code='semantic_validator_unavailable',
                 final_typed_outcome='unavailable', resumable=True,
                 remaining_event_ms=remaining_ms(self.deadline, self.clock))
-            self.checkpoint = self.checkpoint_value()
             raise EventUnavailable('semantic_validator_unavailable', systemic=True, resumable=True)
         readiness = infrastructure(self.session)
         if not readiness['semantic_ready']:

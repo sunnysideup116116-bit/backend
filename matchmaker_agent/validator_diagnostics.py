@@ -67,7 +67,8 @@ _NUMBERS = frozenset({'batch_id', 'attempt', 'concept_count', 'elapsed_ms', 'tim
     'attempts', 'retries', 'failover_attempts', 'failover_elapsed_ms',
     'process_inflight', 'process_peak_inflight', 'before_capped2', 'after_capped3'})
 _BOOLEANS = frozenset({'job_unavailable', 'model_matches_expected', 'breaker_engaged',
-    'counter_before_is_lower_bound', 'failover_used'})
+    'counter_before_is_lower_bound', 'failover_used', 'resumable', 'resumed',
+    'resume_contract_violation'})
 
 
 class Trace:

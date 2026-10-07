@@ -512,7 +512,8 @@ def proactive_event_match(req: ProactiveEventMatchRequest):
             "event_telemetry": getattr(exc, 'telemetry', {}),
             "event_checkpoint": getattr(exc, 'checkpoint', None),
             "event_resumable": bool(getattr(exc, 'resumable', False)),
-            "event_resumed": bool(getattr(exc, 'resumed', False))}
+            "event_resumed": bool(getattr(exc, 'resumed', False)),
+            "event_resume_contract_violation": bool(getattr(exc, 'resume_contract_violation', False))}
 
 
 @app.post("/api/events/lifecycle/cleanup")

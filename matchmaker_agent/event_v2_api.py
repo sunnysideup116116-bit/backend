@@ -91,8 +91,20 @@ def find_matches(agent, owner, excluded, checkpoint=None):
             exc.telemetry = adapter.telemetry() if adapter else {'diagnostic_id': trace.correlation_id}
             exc.checkpoint = adapter.checkpoint_value() if adapter else None
             exc.resumed = adapter.resumed if adapter else False
+            # Producer contract: resumable work must carry (or already have) a
+            # valid resume authority. A resumable stop without a serialized
+            # checkpoint is an internal inconsistency: never fabricate one, but
+            # emit an explicit diagnostic so the consumer can fail closed and
+            # keep the work non-terminal instead of silently terminalizing it.
+            exc.resume_contract_violation = bool(exc.resumable) and exc.checkpoint is None
+            if exc.resume_contract_violation:
+                emit('event_stage', stage='event_relevance', category='other',
+                    typed_code=exc.code, final_typed_outcome='unavailable',
+                    resumable=True, resume_contract_violation=True)
             emit('event_result', stage='event_request', typed_code=exc.code, final_typed_outcome='unavailable',
-                resumable=bool(exc.resumable), resumed=exc.resumed, elapsed_ms=(time.monotonic()-started)*1000)
+                resumable=bool(exc.resumable), resumed=exc.resumed,
+                resume_contract_violation=bool(exc.resume_contract_violation),
+                elapsed_ms=(time.monotonic()-started)*1000)
             raise
         except TimeoutError as exc:
             error = EventUnavailable('semantic_retrieval_timeout', systemic=True)
