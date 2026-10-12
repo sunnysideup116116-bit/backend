@@ -101,6 +101,9 @@ class ContextGraphServiceTests(unittest.TestCase):
         self.assertEqual(body["summary"], "今天成果被教授打槍,感到煩躁")
         self.assertEqual(outbox.update_one.call_count, 2)
         self.assertEqual(outbox.update_one.call_args.args[1]["$set"]["status"], "applied")
+        marker_args = profiles.update_one.call_args
+        self.assertEqual(marker_args.args[0], {"user_id": "owner", "context_projection_dirty": 11})
+        self.assertEqual(marker_args.args[1], {"$unset": {"context_projection_dirty": ""}})
 
     @patch("services.context_graph_service.requests.post")
     @patch("services.context_graph_service.profiles_coll")
@@ -142,22 +145,30 @@ class ContextGraphServiceTests(unittest.TestCase):
     @patch("services.context_graph_service.profiles_coll")
     @patch("services.context_graph_service.CONTEXT_GRAPH_OUTBOX")
     @patch("services.context_graph_service.time.time", return_value=100.0)
-    def test_reconcile_clears_expired_rows_and_repairs_stale_rows(
+    def test_reconcile_only_processes_marked_and_expired_rows(
         self, _time, outbox, profiles, sync,
     ):
         outbox.find.return_value = _Cursor([{"user_id": "expired"}])
-        outbox.find_one.side_effect = lambda query, *_a, **_k: (
-            {"revision": 4, "status": "applied"} if query.get("user_id") == "fresh" else None
-        )
-        profiles.find.return_value = _Cursor([
-            {"user_id": "stale", "current_context_revision": 3},
-            {"user_id": "fresh", "current_context_revision": 4},
-        ])
+        profiles.find.return_value = _Cursor([{"user_id": "dirty"}])
         sync.return_value = {"status": "success"}
         stats = reconcile_context_projections()
         self.assertEqual(stats["expired"], 1)
-        self.assertEqual(stats["stale"], 1)
-        self.assertEqual(sorted(call.args[0] for call in sync.call_args_list), ["expired", "stale"])
+        self.assertEqual(stats["dirty"], 1)
+        self.assertEqual(sorted(call.args[0] for call in sync.call_args_list), ["dirty", "expired"])
+        self.assertEqual(
+            profiles.find.call_args.args[0],
+            {"context_projection_dirty": {"$exists": True}},
+        )
+
+    @patch("services.context_graph_service.sync_current_context_projection")
+    @patch("services.context_graph_service.profiles_coll")
+    @patch("services.context_graph_service.CONTEXT_GRAPH_OUTBOX")
+    def test_reconcile_never_sweeps_unmarked_profiles(self, outbox, profiles, sync):
+        outbox.find.return_value = _Cursor([])
+        profiles.find.return_value = _Cursor([])
+        stats = reconcile_context_projections()
+        self.assertEqual(stats, {"expired": 0, "dirty": 0, "repaired": 0})
+        sync.assert_not_called()
 
 
 if __name__ == "__main__":

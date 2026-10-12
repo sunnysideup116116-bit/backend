@@ -852,11 +852,16 @@ def apply_recent_context(
             "event": (state_fields.get("event") or {}).get("value"),
             "feeling": (state_fields.get("feeling") or {}).get("value"),
         }
+        next_revision = int(profile.get("current_context_revision", 0)) + 1
         set_fields = {
             "recent_context_state": state,
             "current_context": summary,
             "previous_context": previous,
-            "current_context_revision": int(profile.get("current_context_revision", 0)) + 1,
+            "current_context_revision": next_revision,
+            # Explicit sync marker: only profiles written by this pipeline are
+            # eligible for the projection reconcile, so a fresh deploy never
+            # backfills pre-existing recent-context state.
+            "context_projection_dirty": next_revision,
             "context_signals": projection,
             "recent_context_updated_at": time.time(),
             "recent_context_expires_at": time.time() + 30 * 86400,
