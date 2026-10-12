@@ -190,5 +190,90 @@ class ContextProjectionEndpointTests(unittest.TestCase):
         self.assertEqual(session.run.call_args.kwargs["limit"], 50)
 
 
+    def _situation_graph(self, *, guard_accepts=True):
+        driver, session = self._graph()
+
+        def run(query, **_kwargs):
+            if "AS user_id" in query:
+                result = MagicMock()
+                result.single.return_value = {"user_id": "owner"} if guard_accepts else None
+                return result
+            return MagicMock()
+
+        session.run.side_effect = run
+        return driver, session
+
+    def test_recent_situation_projection_is_separate_from_currently_wants(self):
+        driver, session = self._situation_graph()
+        request = agent_api.RecentSituationProjectionRequest(
+            user_id="owner", revision=4,
+            summary="今日成果被教授打槍，感到煩躁",
+            fields={"event": "成果被教授打槍", "feeling": "煩躁", "timing": "今天",
+                    "unknown_field": "不投影"},
+            expires_at=time.time() + 3600, updated_at=time.time(),
+        )
+        with patch("agent_api.GraphDatabase.driver", return_value=driver):
+            result = asyncio.run(agent_api.project_recent_situation(request))
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(result["applied"])
+        self.assertFalse(result["cleared"])
+        queries = [call.args[0] for call in session.run.call_args_list]
+        self.assertTrue(any("MERGE (s:RecentSituation" in query for query in queries))
+        self.assertTrue(any("HAS_RECENT_SITUATION" in query for query in queries))
+        self.assertFalse(any("CURRENTLY_WANTS" in query for query in queries))
+        situation_call = next(
+            call for call in session.run.call_args_list
+            if "MERGE (s:RecentSituation" in call.args[0]
+        )
+        self.assertIn('"feeling": "煩躁"', situation_call.kwargs["fields_json"])
+        self.assertNotIn("unknown_field", situation_call.kwargs["fields_json"])
+        guard_call = session.run.call_args_list[0]
+        self.assertEqual(guard_call.kwargs["revision"], 4)
+
+    def test_recent_situation_projection_is_idempotent_per_revision(self):
+        for _ in range(2):
+            driver, session = self._situation_graph()
+            request = agent_api.RecentSituationProjectionRequest(
+                user_id="owner", revision=4, summary="今天成果被教授打槍，感到煩躁",
+                fields={"feeling": "煩躁"}, expires_at=time.time() + 3600,
+            )
+            with patch("agent_api.GraphDatabase.driver", return_value=driver):
+                result = asyncio.run(agent_api.project_recent_situation(request))
+            self.assertEqual(result["status"], "success")
+            self.assertTrue(result["applied"])
+            self.assertEqual(result["revision"], 4)
+
+    def test_stale_recent_situation_revision_is_not_applied(self):
+        driver, session = self._situation_graph(guard_accepts=False)
+        request = agent_api.RecentSituationProjectionRequest(
+            user_id="owner", revision=3, summary="舊情境",
+            fields={"event": "舊事件"}, expires_at=time.time() + 3600,
+        )
+        with patch("agent_api.GraphDatabase.driver", return_value=driver):
+            result = asyncio.run(agent_api.project_recent_situation(request))
+        self.assertEqual(result["status"], "success")
+        self.assertFalse(result["applied"])
+        self.assertFalse(any(
+            "MERGE (s:RecentSituation" in call.args[0]
+            for call in session.run.call_args_list
+        ))
+
+    def test_empty_or_expired_recent_situation_clears_only_the_owner_node(self):
+        driver, session = self._situation_graph()
+        request = agent_api.RecentSituationProjectionRequest(
+            user_id="owner", revision=5, summary="",
+            fields={}, expires_at=time.time() - 10,
+        )
+        with patch("agent_api.GraphDatabase.driver", return_value=driver):
+            result = asyncio.run(agent_api.project_recent_situation(request))
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(result["cleared"])
+        queries = [call.args[0] for call in session.run.call_args_list]
+        delete_call = next(call for call in session.run.call_args_list if "DELETE r, s" in call.args[0])
+        self.assertIn("RecentSituation {user_id:$user_id}", delete_call.args[0])
+        self.assertFalse(any("MERGE (s:RecentSituation" in query for query in queries))
+        self.assertFalse(any("CURRENTLY_WANTS" in query for query in queries))
+
+
 if __name__ == "__main__":
     unittest.main()

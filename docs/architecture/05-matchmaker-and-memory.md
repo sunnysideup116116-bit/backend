@@ -52,7 +52,7 @@ Preference exact search 是例外語意：候選集合已由 Social 以 canonica
 - 偏好必須 **owner-scoped**：`MemoryObservation.message_id` 唯一約束保證同一訊息不會重複套用。
 - `Concept.key` 使用既有 unique constraint／RANGE index；正式環境已驗證為 ONLINE。新 writer 不信任 provider key，而由 `concept_identity.py` 在 server boundary 決定 identity。
 - 已知小型 deterministic alias registry使`Kpop`／`K-pop`等variant有同一v2 identity；`k_pop`只是historical v1 key，不是新writer target。現行key由完整normalized semantic text生成`v2_` digest，display label不參與identity；不建立大型ontology或語意相似alias。
-- `stance=like|require` 投影為 `PREFERS`；`stance=dislike|avoid` 投影為 `AVOIDS`；短期活動意圖另由 recent-context projection 產生 `CURRENTLY_WANTS`。
+- `stance=like|require` 投影為 `PREFERS`；`stance=dislike|avoid` 投影為 `AVOIDS`；近期情境（含近期事件與明確感受）另由 recent-situation projection 產生 `(User)-[:HAS_RECENT_SITUATION]->(:RecentSituation)`，此 pipeline 不寫入或刪除 `CURRENTLY_WANTS`。
 - `LIKES_TRAIT`／`DISLIKES_TRAIT` 目前只是 Matchmaker LLM／文字投影的 compatibility label；寫入 Neo4j 前必須分別轉成 `PREFERS`／`AVOIDS`，不得建立同名 Graph relationship。
 - 敏感內容（種族、宗教、性傾向、疾病等）在寫入前被正則擋掉（`agent_api.py` 的 `protected`）。
 - **系統產生的長期建議是 recommendation，不是使用者事實**：禁止寫成 `PREFERS`、`AVOIDS` 或 `CURRENTLY_WANTS`（需獨立 versioned contract + TTL + dismissed state，見 `MEMORY_CONTEXT_ENGINE_GUIDE.md`）。

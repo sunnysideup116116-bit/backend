@@ -22,6 +22,7 @@ from services.profile_projection import (
     clean_profile_text,
     contains_internal_identifier,
     contains_protected_content,
+    recent_context_is_active,
     render_recent_context,
     safe_recent_context,
 )
@@ -35,6 +36,7 @@ from services.proactive_followup_service import (
     validate_followup_proposal,
 )
 from services.skill_loader import load_profile_skill
+from services.context_graph_service import enqueue_context_projection
 from matchmaker_agent.concept_identity import (
     MAX_PREFERENCE_TEXT_CHARS,
     MAX_PROFILE_SOURCE_CHARS,
@@ -53,7 +55,14 @@ PROFILE_RUNS = db["profile_skill_runs"]
 NO_STORE_RE = re.compile(r"(?:不要記|別記|不用記|不必記)")
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,50}$")
 TRAVEL_ACTIVITY_ALIASES = {"travel", "travelling", "traveling", "trip", "旅遊", "旅行", "出國玩"}
-RECENT_FIELD_NAMES = ("activity", "destination", "timing", "companion_intent", "temporal_status")
+RECENT_FIELD_NAMES = ("activity", "destination", "timing", "companion_intent", "temporal_status", "event", "feeling")
+# A situation update needs at least one of these; timing/temporal_status alone
+# are qualifiers and must never replace an existing valid situation.
+RECENT_SUBSTANTIVE_FIELDS = frozenset({"activity", "destination", "event", "feeling"})
+# A still-active event/feeling from the previous episode stays as background
+# context when a new plan starts. It is carried at most one episode and is
+# dropped by a newer event/feeling, an explicit clear, or canonical expiry.
+RECENT_SITUATIONAL_FIELDS = ("event", "feeling")
 RECENT_TIMINGS = {"昨天", "前天", "今天", "明天", "後天", "最近", "近期", "本週", "下週", "本月", "下個月"}
 RECENT_TEMPORAL_STATUSES = {"past", "current", "planned"}
 RECENT_EPISODE_TTL_SECONDS = 30 * 60
@@ -92,6 +101,11 @@ def _field_value(name: str, value: Any, owner_message: str) -> str:
         if value.lower() in TRAVEL_ACTIVITY_ALIASES:
             return "旅行"
         return _activity_from_owner_message(value, owner_message)
+    if name in {"event", "feeling"}:
+        # Situational free text is user-facing; keep at least one Traditional
+        # Chinese character so an untranslated model placeholder cannot become
+        # a stored recent situation.
+        return value if re.search(r"[\u4e00-\u9fff]", value) else ""
     return value
 
 
@@ -105,10 +119,19 @@ def _compose_recent_context_summary(fields: dict[str, Any]) -> str:
     }
     if not typed_fields:
         return ""
+    carried = [
+        name for name in RECENT_SITUATIONAL_FIELDS
+        if isinstance(fields.get(name), dict) and (fields.get(name) or {}).get("carried_from_episode")
+    ]
+    carried_note = (
+        "以下欄位來自前一個情境，屬於過去發生，必須以「最近」呈現，不可寫成今天的活動或計畫："
+        + "、".join(carried) + "。\n" if carried else ""
+    )
     prompt = f"""把以下已驗證的本人近期情境欄位整理成一句自然、精簡的繁體中文。
 只能重組提供的欄位，不可補充地點、日期、人物、偏好或配對狀態。
 依 temporal_status 保留時態：past 是已做過、current 是正在做、planned 才能使用「想／規劃」。沒有 temporal_status 時使用中性「近期活動」，不可擅自改成未來計畫。
-避免「前往市集去市集」這類重複語意；多個活動以「、」自然分隔。
+event 是近期事件、feeling 是使用者明確表達的感受；兩者都必須出現在摘要中，且不可把短暫感受寫成長期人格或偏好。
+{carried_note}避免「前往市集去市集」這類重複語意；多個活動以「、」自然分隔。
 最多 32 個中文字，不加引號、不加解釋，只輸出句子。
 欄位：{json.dumps(typed_fields, ensure_ascii=False)}"""
     try:
@@ -124,12 +147,21 @@ def _compose_recent_context_summary(fields: dict[str, Any]) -> str:
         return fallback
     destination = typed_fields.get("destination")
     activity = typed_fields.get("activity")
+    event = typed_fields.get("event")
+    feeling = typed_fields.get("feeling")
+    temporal_status = _clean((fields.get("temporal_status") or {}).get("value"), 40)
     if destination and destination not in summary:
         return fallback
     if not destination and activity and activity not in summary:
         return fallback
+    if event and event not in summary:
+        return fallback
+    if feeling and feeling not in summary:
+        return fallback
+    if "event" in carried and temporal_status != "past" and "最近" not in summary:
+        return fallback
     verified_chars = set("".join(typed_fields.values()))
-    structural_chars = set("近期最近昨天前天今天明天後天本週下週本月下個月活動有在做過想要打算計畫規劃準備前往去：，、")
+    structural_chars = set("近期最近昨天前天今天明天後天本週下週本月下個月活動有在做過想要打算計畫規劃準備前往去感到覺得心情讓有夠真的很：，、")
     allowed_chars = verified_chars | structural_chars
     if any("\u4e00" <= char <= "\u9fff" and char not in allowed_chars for char in summary):
         return fallback
@@ -142,6 +174,37 @@ def _source_is_newer(candidate: dict[str, Any], existing: dict[str, Any] | None)
     candidate_key = (float(candidate.get("source_timestamp", 0) or 0), str(candidate.get("evidence_message_id") or ""))
     existing_key = (float(existing.get("source_timestamp", 0) or 0), str(existing.get("evidence_message_id") or ""))
     return candidate_key > existing_key
+
+
+def _retained_situational_fields(
+    profile: dict[str, Any], state: dict[str, Any],
+    state_fields: dict[str, Any], patches: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep one still-active prior event/feeling as background for a new plan.
+
+    The prior situation must still be canonically active, must not be replaced
+    or cleared by this message's own evidence, and may be carried at most one
+    episode so old situations never pile up. A newer event/feeling, an explicit
+    clear, or expiry removes it.
+    """
+    if not recent_context_is_active(profile):
+        return {}
+    retained: dict[str, Any] = {}
+    for name in RECENT_SITUATIONAL_FIELDS:
+        previous = state_fields.get(name)
+        if not isinstance(previous, dict) or not previous.get("value"):
+            continue
+        if previous.get("carried_from_episode"):
+            continue
+        patch = patches.get(name)
+        if isinstance(patch, dict) and patch.get("operation") in {"set", "clear"}:
+            continue
+        origin = str(
+            previous.get("plan_id") or state.get("episode_id")
+            or previous.get("evidence_message_id") or ""
+        )[:128]
+        retained[name] = {**previous, "carried_from_episode": origin}
+    return retained
 
 
 def _timestamp(value: Any) -> float:
@@ -520,7 +583,7 @@ def _retry_recent_context_contract(
     prompt = f"""你是阿月的近期情境欄位抽取器。只能讀取一則已儲存的本人原始訊息，不能讀取歷史、助理回覆、工具、配對或行事曆。
 【recent-context skill v{recent_skill['version']}】
 {recent_skill['instructions']}
-這句已被初步判定為本人真實活動。請只輸出 ProfileExtractionDecision JSON，memories 必須是 []；recent_context 必須保留 action=update、message_kind=real_world_update，並從 activity、destination、timing、companion_intent、temporal_status 中輸出所有有明確原文依據的欄位。episode_relation 必須依語意輸出 continue、new 或 unrelated。每個 evidence_span 必須是原句連續子字串，subject 必須是 owner，confidence 至少 0.90；沒有原文依據的欄位不要輸出。
+這句已被初步判定為本人真實活動。請只輸出 ProfileExtractionDecision JSON，memories 必須是 []；recent_context 必須保留 action=update、message_kind=real_world_update，並從 activity、destination、timing、companion_intent、temporal_status、event、feeling 中輸出所有有明確原文依據的欄位。episode_relation 必須依語意輸出 continue、new 或 unrelated。每個 evidence_span 必須是原句連續子字串，subject 必須是 owner，confidence 至少 0.90；沒有原文依據的欄位不要輸出。
 目前有效的 typed episode（只能判斷是否延續，不是新 evidence）：{json.dumps(active_episode or {}, ensure_ascii=False)}
 本人原始訊息：{message}"""
     try:
@@ -606,13 +669,13 @@ def analyze_profile_message(
 【memory skill v{memory_skill['version']}】
 {memory_skill['instructions']}
 
-請輸出 ProfileExtractionDecision JSON。recent_context.action 必須為 update、clear 或 none。episode_relation 必須為 continue、new 或 unrelated：本句是在補充／修正 active episode 時用 continue，開始不同活動時用 new，無關時用 unrelated。短句沒有時間詞也能延續；不確定時用 unrelated，禁止硬合併。每個欄位都要有 value、evidence_span、confidence、subject；subject 只能是 owner。只有確實描述本人現實活動時才 update；訊息可同時包含找人要求，但只擷取本人活動，絕不把找人、配對、提案或等待回覆寫入欄位。時間詞（例如今天、下週）是活動的時間欄位，不是拒絕理由。若提到他人，但同時清楚表達「我喜歡／不喜歡這種類型」，只能提出本人偏好記憶，不能儲存他人的特徵。每個 memories item 只能表示一個 atomic concept；本人明確列舉數個獨立偏好時要拆成多個 items，描述性名詞片語仍保持一個。memories 最多 {durable_memory_limit()} 筆。
+請輸出 ProfileExtractionDecision JSON。recent_context.action 必須為 update、clear 或 none。episode_relation 必須為 continue、new 或 unrelated：本句是在補充／修正 active episode 時用 continue，開始不同活動時用 new，無關時用 unrelated。短句沒有時間詞也能延續；不確定時用 unrelated，禁止硬合併。每個欄位都要有 value、evidence_span、confidence、subject；subject 只能是 owner。只有確實描述本人現實活動、近期發生的事件，或本人明確表達的感受時才 update；event 記錄近期事件，feeling 只記錄本句明確表達的感受，不可推測人格、心理狀態或長期偏好，也不要把短暫心情寫成 memories。訊息可同時包含找人要求，但只擷取本人活動、事件與感受，絕不把找人、配對、提案或等待回覆寫入欄位。時間詞（例如今天、下週）是活動的時間欄位，不是拒絕理由。若提到他人，但同時清楚表達「我喜歡／不喜歡這種類型」，只能提出本人偏好記憶，不能儲存他人的特徵。每個 memories item 只能表示一個 atomic concept；本人明確列舉數個獨立偏好時要拆成多個 items，描述性名詞片語仍保持一個。memories 最多 {durable_memory_limit()} 筆。
 不得自行杜撰摘要。欄位與記憶標籤使用繁體中文；每個 evidence_span 必須是原訊息的連續子字串。label_zh_tw 是完整偏好語意而非顯示摘要，最多 {MAX_PREFERENCE_TEXT_CHARS} 字；不得省略限制、角色、否定或活動方式。evidence_span 最多 160 字，超限不可截取前綴冒充完整 evidence。
 
 待追問只針對本人有明確後續的生活活動或計畫。已有候選使用 existing_slot=1..3 做 update 或 close，不要重複建立；建立時必須有 topic、question_goal、evidence_span、confidence>=0.90、subject=owner。question_goal 只描述中性的後續確認，不得預設活動成功。行事曆、日曆、測驗、配對、他人資料與單純偏好不建立候選；沒有合適候選時 action=none。
 現有待追問候選（只有安全摘要，不含 ID）：{json.dumps(safe_follow_up_candidates, ensure_ascii=False)}
 
-JSON schema：{{"recent_context":{{"action":"update|clear|none","confidence":0.0,"message_kind":"real_world_update|match_operation|durable_preference|other","episode_relation":"continue|new|unrelated","fields":{{"activity":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"destination":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"timing":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"companion_intent":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"temporal_status":{{"operation":"set|clear","value":"past|current|planned","evidence_span":"","confidence":0.0,"subject":"owner"}}}},"reason_code":""}},"memories":[{{"key":"snake_case","label_zh_tw":"繁體中文標籤","stance":"like|dislike|require|avoid","category":"lifestyle|habit|personality|relationship|activity","confidence":0.0,"evidence_span":"","subject":"owner","reason_code":""}}]}}
+JSON schema：{{"recent_context":{{"action":"update|clear|none","confidence":0.0,"message_kind":"real_world_update|match_operation|durable_preference|other","episode_relation":"continue|new|unrelated","fields":{{"activity":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"destination":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"timing":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"companion_intent":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"temporal_status":{{"operation":"set|clear","value":"past|current|planned","evidence_span":"","confidence":0.0,"subject":"owner"}},"event":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}},"feeling":{{"operation":"set|clear","value":"","evidence_span":"","confidence":0.0,"subject":"owner"}}}},"reason_code":""}},"memories":[{{"key":"snake_case","label_zh_tw":"繁體中文標籤","stance":"like|dislike|require|avoid","category":"lifestyle|habit|personality|relationship|activity","confidence":0.0,"evidence_span":"","subject":"owner","reason_code":""}}]}}
 follow_up 欄位：{{"action":"create|update|close|none","existing_slot":null,"topic":"","question_goal":"","timing":"after_days|after_activity|none","wait_days":3,"evidence_span":"","confidence":0.0,"subject":"owner","reason_code":""}}
 目前有效的 typed episode：{json.dumps(prompt_episode or {}, ensure_ascii=False)}
 本人原始訊息：{message}
@@ -693,7 +756,7 @@ def apply_recent_context(
         profile = profiles_coll.find_one(
             {"user_id": user_id},
             {"current_context": 1, "current_context_revision": 1, "recent_context_state": 1,
-             "recent_context_updated_at": 1, "recent_context_draft": 1},
+             "recent_context_updated_at": 1, "recent_context_expires_at": 1, "recent_context_draft": 1},
         ) or {}
         previous = _safe_context_text(profile.get("current_context"))
         state = profile.get("recent_context_state") or {"version": 4, "revision": 0, "fields": {}}
@@ -723,9 +786,27 @@ def apply_recent_context(
                 newest_existing,
             ):
                 return False
-            episode_id = f"episode:{message_id}"[:128]
-            state_fields = {}
-            changed = bool(state.get("fields"))
+            substantive = any(
+                name in RECENT_SUBSTANTIVE_FIELDS
+                and isinstance(patches.get(name), dict)
+                and (patches.get(name) or {}).get("operation") == "set"
+                and (patches.get(name) or {}).get("value")
+                for name in RECENT_FIELD_NAMES
+            )
+            if substantive:
+                episode_id = f"episode:{message_id}"[:128]
+                state_fields = _retained_situational_fields(
+                    profile, state, state_fields, patches,
+                )
+                changed = bool(state.get("fields"))
+            else:
+                # A timing/temporal_status-only proposal is an incomplete
+                # qualifier update, not a new situation. Keep the active
+                # episode instead of erasing an already valid context.
+                episode_id = str(
+                    state.get("episode_id") or (active_episode or {}).get("episode_id")
+                    or f"episode:{message_id}"
+                )[:128]
         if context_action == "clear":
             changed = changed or bool(state_fields)
             state_fields = {}
@@ -768,6 +849,8 @@ def apply_recent_context(
             "timing": (state_fields.get("timing") or {}).get("value"),
             "companion_intent": (state_fields.get("companion_intent") or {}).get("value"),
             "temporal_status": (state_fields.get("temporal_status") or {}).get("value"),
+            "event": (state_fields.get("event") or {}).get("value"),
+            "feeling": (state_fields.get("feeling") or {}).get("value"),
         }
         set_fields = {
             "recent_context_state": state,
@@ -930,6 +1013,14 @@ def process_profile_message(user_id: str, message: str, message_id: str | None, 
         )
         if isinstance(claim_token, str) and not _renew_profile_claim(message_id, claim_token):
             return {"status": "skipped", "reason": "stale_claim"}
+        if recent_changed:
+            # Mongo is the source of truth. The outbox row is the reliable
+            # projection trigger; the context-graph worker retries it and
+            # reconciles any profile whose row was never written.
+            try:
+                enqueue_context_projection(user_id)
+            except Exception as exc:
+                print(f"Recent context projection enqueue skipped: {type(exc).__name__}")
         try:
             from services.memory_service import MemoryWriteError, apply_profile_memory_proposals
             saved_memories = apply_profile_memory_proposals(user_id, decision["memories"], surface, message_id, match_id,

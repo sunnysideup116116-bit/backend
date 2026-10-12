@@ -31,6 +31,7 @@ not user profile storage.
 | `(User)-[:AVOIDS]->(Concept)` | none | Durable dealbreaker or negative preference. |
 | `(User)-[:HAS_TRAIT]->(Concept)` | none | Public trait projection, when available. |
 | `(User)-[:CURRENTLY_WANTS]->(Concept)` | `expires_at` | Optional short-lived intent projection; not durable preference. |
+| `(User)-[:HAS_RECENT_SITUATION]->(RecentSituation)` | node: `user_id`, `revision`, `summary`, `fields_json`, `expires_at`, `updated_at` | Owner-scoped recent-situation projection derived from Mongo; replaced by revision, deleted on expiry/clear. Not durable preference. |
 | `(User)-[:MEMORY_DISABLED]->(Concept)` | `original_relation`, `original_expires_at`, `disabled_at`; legacy conversion may add `restored_v2_key`, `restored_at` | Owner-scoped inactive marker. Legacy restore leaves this inactive and creates/reuses a v2 target of the same polarity; old source replay is rejected. |
 | `(User)-[:PREFERENCE_SUPERSEDED]->(Concept)` | retirement / operation evidence | Retired owner association archive, not active preference evidence; never reactivate legacy via rollback. |
 | `(Event)-[:HAS_TAG]->(Concept)` | none | Event topic or activity. |
@@ -48,14 +49,17 @@ not user profile storage.
 | `preference_facts` | Full preference metadata: stance, confidence, lifecycle, source, reason, evidence count and timestamps. |
 | `profile_memory_outbox` | Retry queue only; it is not canonical memory storage. |
 | `profile_memory_preview` | Up to 12 display-ready active preferences projected into a profile. |
-| `context_graph_outbox` | Retry state for projecting structured recent intent to Neo4j. |
+| `context_graph_outbox` | Retry state for projecting the owner Recent Situation to Neo4j; Mongo `profiles` remains authoritative. |
 
 ## Rules
 
 1. Active PREFERS/AVOIDS edges do not duplicate preference evidence metadata. MEMORY_DISABLED stores only the restore metadata listed above; CURRENTLY_WANTS and Event cache edges retain their documented bounded properties.
 2. Disabling removes only the owner active edge and records MEMORY_DISABLED. Durable restore preserves owner/polarity but targets verified v2 only (legacy deterministic conversion or fail closed); CURRENTLY_WANTS retains its expiry semantics. Correction moves only this owner's association, not the shared Concept identity. Legacy correction requires reconfirmation; manual rebuild cannot revive retired/legacy payload identity. See [lifecycle recovery](PREFERENCE_LIFECYCLE_V2.md).
 3. Raw conversation text and the full recent-context document never enter
-   Neo4j. A `CURRENTLY_WANTS` edge contains only `expires_at`.
+   Neo4j. A `CURRENTLY_WANTS` edge contains only `expires_at`. The owner
+   Recent Situation is projected to one `RecentSituation` node with a bounded
+   `summary` and typed `fields_json`; it is replaced per revision, removed on
+   expiry or clear, and never modifies `PREFERS`／`AVOIDS`／`CURRENTLY_WANTS`.
 4. Event signals reuse `Concept`; separate `Tag`, `Vibe`, and `Category` node
    types are not part of the production schema.
 5. `HAS_PREFERENCE`, `Trait` and legacy preference identities are historical inspection/compatibility structures, not durable preference writer targets. The historical preference migration CLI rejects `--apply`; projection maintenance is not migration authority.
@@ -205,12 +209,17 @@ then verification.
 
 Social refreshes a 12-item Mongo preview lazily (300 seconds), retaining cache on unavailable Graph reads and using revision CAS. Public Context renders at most 8 directional items. `/api/memory/{user_id}` accepts `durable_only` and `query`; query filtering occurs before the limit, with an extra row to compute `truncated`. It is lexical lookup, not new embedding retrieval. Owner-scoped reads do not return disabled or expired intent edges; failure is not proof of absent memory.
 
-## Recent Intent Projection
+## Recent Situation Projection
 
-After Mongo atomically updates `recent_context_state`, the background profile
-task projects only `activity` and `destination` into `CURRENTLY_WANTS`. It does
-not make another LLM call. Every replacement first removes the user's previous
-intent edges, and expired edges are cleaned before graph opportunity searches.
+After Mongo atomically updates `recent_context_state`, the profile task
+enqueues one owner-scoped row in `context_graph_outbox`; the background worker
+projects the bounded Recent Situation (summary plus typed fields, including
+recent `event`/`feeling`) to a single
+`(User)-[:HAS_RECENT_SITUATION]->(:RecentSituation)` node. It does not make
+another LLM call. The projection is idempotent per `revision`, replaced
+monotonically per owner, and deleted when the situation is cleared or expires.
+This pipeline never writes or deletes `CURRENTLY_WANTS` edges; that
+relationship keeps its own intent semantics and sources.
 
 ## Projection Recovery
 
