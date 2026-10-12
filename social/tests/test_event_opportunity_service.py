@@ -1,8 +1,10 @@
 import unittest
 import os
+import time
 from unittest.mock import MagicMock, patch
 
 from services import event_opportunity_service as service
+from services import match_decision_service as decisions
 
 
 def agent_payload(first_user="owner", second_user="candidate"):
@@ -77,10 +79,76 @@ class EventOpportunityServiceTests(unittest.TestCase):
         self.assertEqual(document["proposal_source"], "event_opportunity")
         self.assertTrue(document["participant_pair_key"])
         self.assertEqual(document["event_snapshot"]["session_count"], 2)
-        self.assertEqual(document["event_snapshot"]["actionable_until"], 1_800_086_400)
+        self.assertEqual(document["event_snapshot"]["actionable_until"], 1_800_090_000)
         self.assertNotIn("seed_user", document["reason"])
         queue.assert_called_once()
         self.assertEqual(queue.call_args.args[0], "candidate")
+
+    def _ongoing_payload(self, now):
+        payload = agent_payload()
+        payload["match"].update(
+            starts_at=now - 27 * 86400, ends_at=now + 66 * 86400,
+            session_starts=[now - 27 * 86400], session_ends=[now + 66 * 86400],
+            session_count=1,
+        )
+        return payload
+
+    @patch.object(service, "queue_mediator_event", return_value={"event_id": "queued"})
+    @patch.object(service.requests, "post")
+    def test_ongoing_event_is_accepted_and_survives_lifecycle_at_the_same_time(self, post, _queue):
+        now = time.time()
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = self._ongoing_payload(now)
+        post.return_value = response
+        matches = MagicMock()
+        matches.count_documents.return_value = 0
+        matches.find_one.return_value = None
+        matches.insert_one.return_value.inserted_id = "match_1"
+
+        with patch.object(service, "profiles_coll", self._profiles()), \
+             patch.object(service, "matches_coll", matches):
+            result = service.create_event_opportunity("owner")
+
+        self.assertEqual(result["status"], "created")
+        document = matches.insert_one.call_args.args[0]
+        self.assertEqual(document["event_snapshot"]["actionable_until"],
+                         document["event_snapshot"]["ends_at"])
+
+        lifecycle_matches = MagicMock()
+        cursor = MagicMock()
+        cursor.sort.return_value = cursor
+        cursor.limit.return_value = [document]
+        lifecycle_matches.find.return_value = cursor
+        with patch.object(decisions, "matches_coll", lifecycle_matches):
+            expiry = decisions.expire_event_proposals(now=document["created_at"])
+        self.assertEqual(expiry["expired_count"], 0)
+        lifecycle_matches.find_one_and_update.assert_not_called()
+
+    @patch.object(service.requests, "post")
+    def test_ended_event_fails_the_final_recheck_before_insert(self, post):
+        now = time.time()
+        payload = agent_payload()
+        payload["match"].update(
+            starts_at=now - 2 * 86400, ends_at=now - 3600,
+            session_starts=[now - 2 * 86400], session_ends=[now - 3600],
+            session_count=1,
+        )
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = payload
+        post.return_value = response
+        matches = MagicMock()
+        matches.count_documents.return_value = 0
+        matches.find_one.return_value = None
+
+        with patch.object(service, "profiles_coll", self._profiles()), \
+             patch.object(service, "matches_coll", matches):
+            result = service.create_event_opportunity("owner")
+
+        self.assertEqual(result["status"], "stale")
+        self.assertEqual(result["error_code"], "event_final_recheck_failed")
+        matches.insert_one.assert_not_called()
 
     @patch.object(service.requests, "post")
     def test_existing_live_proposal_blocks_event_write(self, post):

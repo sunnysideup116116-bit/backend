@@ -35,6 +35,7 @@ from services.profile_projection import (
 )
 from services.event_v2_proposal import final_eligible as event_final_eligible
 from services.event_semantic_monitor import on_result as record_event_semantic_result
+from matchmaker_agent.event_temporal import event_live_until, is_temporally_eligible
 from matchmaker_agent.semantic_rollout_policy import valid_owner_id
 
 
@@ -425,6 +426,12 @@ def create_event_opportunity(
     )
     session_starts = _positive_timestamps(selected.get("session_starts"))
     session_ends = _positive_timestamps(selected.get("session_ends"))
+    temporal_event = {
+        "starts_at": selected.get("starts_at"),
+        "ends_at": selected.get("ends_at"),
+        "session_starts": session_starts,
+        "session_ends": session_ends,
+    }
     event_snapshot = {
         "event_id": event_id[:80],
         "title": str(selected.get("event_name") or "")[:160],
@@ -442,7 +449,7 @@ def create_event_opportunity(
             for value in list(selected.get("session_precisions") or [])[:8]
         ],
         "session_count": len(session_starts) or 1,
-        "actionable_until": max(session_starts or _positive_timestamps([selected.get("starts_at")]) or [0]),
+        "actionable_until": event_live_until(temporal_event),
         "source_url": str(selected.get("source_url") or "")[:500],
     }
     # The proactive source has a different promise from a user topic search:
@@ -527,9 +534,11 @@ def create_event_opportunity(
     try:
         if can_commit is not None and not can_commit():
             raise RuntimeError("event_cycle_ownership_lost")
-        if selected.get('event_policy') != 'event_relevance_v2' or not event_final_eligible(
-                safe_user_id, candidate_id, selected.get('event_receipt'), profiles=profiles_coll,
-                matches=matches_coll, live_query=_live_query, declined=_pair_declined_recently):
+        temporally_eligible = is_temporally_eligible(event_snapshot, now=time.time())
+        if (selected.get('event_policy') != 'event_relevance_v2' or not temporally_eligible
+                or not event_final_eligible(
+                    safe_user_id, candidate_id, selected.get('event_receipt'), profiles=profiles_coll,
+                    matches=matches_coll, live_query=_live_query, declined=_pair_declined_recently)):
             if quota_reserved:
                 release_daily_quota(safe_user_id, bucket='background',
                     operation_key=f'event-opportunity:{opportunity_key}')

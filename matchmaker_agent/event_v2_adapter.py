@@ -12,6 +12,7 @@ from neo4j import Query
 
 from .event_v2_contract import (POLICY, EventUnavailable, owner_signals, query_signal,
     exact_relevance, compatible_kinds, negative_state, snapshot_hash)
+from .event_temporal import is_temporally_eligible
 from .event_v2_vectors import query_vectors
 from .event_v2_resume import (actor_digest, decode as decode_checkpoint,
     encode as encode_checkpoint, progress_for, progress_key, rebind as rebind_evidence,
@@ -120,6 +121,10 @@ def load_events(session, now):
         result[eid] = {'event': event, 'signals': sorted(row['signals'], key=lambda s: s['reference'])}
         signals[eid] = [query_signal(s['text'], 'tag' if s['type']=='HAS_TAG' else 'vibe',
             s['reference']) for s in row['signals']]
+    dropped = [eid for eid, value in result.items()
+        if not is_temporally_eligible(value['event'], now=now)]
+    for eid in dropped:
+        result.pop(eid, None); signals.pop(eid, None)
     return result, signals
 
 

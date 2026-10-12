@@ -117,7 +117,7 @@ flowchart TD
     Q -->|Decline| D
     M --> L["Lifecycle Worker"]
     P --> L
-    L -->|Event Started| Z["Mongo expired"]
+    L -->|Event Ended| Z["Mongo expired"]
 ```
 
 ### 4.1 完整案例：阿月用市集替兩個人牽線
@@ -152,7 +152,9 @@ flowchart TD
 11. **雙方同意**：第一方依 CAS 從 `draft/revision 0` 接受後成為 `pending/revision 1`；第二方再依 CAS
     從 `pending/revision 1` 接受後成為 `accepted/revision 2`。尚未建立關係的 pair 此時開聊天室；
     已 accepted 的同一 pair 只保存本次活動邀請結果並沿用既有聊天室，不建立第二個 relationship anchor。
-12. **活動過期**：如果活動先開始而雙方尚未完成同意，lifecycle 將 live proposal 改為 `expired`；
+12. **活動過期**：活動尚未開始或正在進行（`start <= now < end`）時，live proposal 維持有效；
+    只有活動已結束（`now >= end`）時，lifecycle 才以 `event_ended` 將提案改為 `expired`。
+    沒有可信結束時間的活動才沿用原本保守的開始時間期限（`event_started`）；
     已接受聊天室仍保留 Mongo 中的 Event snapshot，不受 Neo4j TTL 清理影響。
 
 資料責任可以簡化成一句話：Neo4j 負責「找關聯」，MongoDB 負責「保存提案與雙方決定」，
@@ -542,7 +544,9 @@ participant_pair_key = sha256(sorted user pair)
 ```
 
 Snapshot 的用途是：即使未來 Neo4j Event 因過期被清掉，accepted chat 仍能保留當時提案內容。
-未解決的多場次邀請以最後一個場次的開始時間作為可操作期限，避免首場開始後過早失效。
+`actionable_until` 是共用 temporal authority（`matchmaker_agent/event_temporal.py`）算出的期限：
+可信的活動結束時間（`ends_at`／最後場次結束）；事件進行中（`start <= now < end`）不會因已開始而失效，
+只有已結束才過期。缺可靠結束時間時才沿用原本保守的開始時間期限，已開始且無可信結束時間的活動不得無限延長。
 
 ### 11.1 Canonical state machine
 
@@ -660,8 +664,10 @@ Hook 目前已經是依「這一方的需求、共同 Event 與可公開關聯�
 
 `event_lifecycle_service.py` 將狀態正確性與 Graph 清理拆成兩個週期：
 
-1. 每 300 秒找出 Mongo 中活動已開始、仍為 `draft/pending` 的 Event proposals。
-2. 以 CAS 將其改成 `expired`，增加 revision、追加 history 並釋放 participants。
+1. 每 300 秒找出 Mongo 中 stored deadline 已到、仍為 `draft/pending` 的 Event proposals。
+2. 逐筆以共用 temporal state 判定期限：`upcoming`／`ongoing`（`start <= now < end`）的提案不因活動已開始而失效；
+   已結束以 `event_ended`、圖上活動已移除以 `event_removed`、缺可信結束時間且保守期限已到以 `event_started` 過期；
+   手動整庫 refresh 仍以 `inventory_refreshed` 過期。過期一律以 CAS 增加 revision、追加 history 並釋放 participants。
 3. 每 86,400 秒呼叫 9001 清掉 `expires_at` 已過的 Neo4j Event。
 4. Graph 回傳的 bounded Event IDs 也走同一條 Mongo CAS expiry path。
 

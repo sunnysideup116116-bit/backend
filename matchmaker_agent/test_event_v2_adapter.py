@@ -347,6 +347,28 @@ def test_final_recheck_rejects_current_state_changes(change):
         now=lambda:time[0],clock=lambda:0.,eligible=eligible)
 
 
+def test_ended_event_is_never_loadable_even_inside_its_graph_ttl_grace():
+    ended = event(eid='ended-event')
+    ended['event'].update(starts_at=NOW-7200, ends_at=NOW-3600)
+    ongoing = event(eid='ongoing-event')
+    ongoing['event'].update(starts_at=NOW-3600, ends_at=NOW+3600)
+    assert ended['event']['expires_at']>NOW and ongoing['event']['expires_at']>NOW
+    graph = Graph({'a': [preference('籃球')]}, events=[ended, ongoing])
+    loaded = adapter(graph)
+    assert set(loaded.events)=={'ongoing-event'}
+    assert set(loaded.signals)=={'ongoing-event'}
+
+
+def test_final_recheck_rejects_event_that_ended_after_selection():
+    graph = Graph({'a': [preference('籃球')], 'b': [preference('籃球')]})
+    selected = adapter(graph).select('a', [])[0]
+    assert recheck(graph, selected['event_receipt'], 'a','b', deadline=100,
+        now=lambda: NOW, clock=lambda: 0., eligible=lambda _:True)
+    graph.events[0]['event'].update(starts_at=NOW-7200, ends_at=NOW-3600)
+    assert not recheck(graph, selected['event_receipt'], 'a','b', deadline=100,
+        now=lambda: NOW, clock=lambda: 0., eligible=lambda _:True)
+
+
 def test_forged_other_owner_or_expired_receipt_never_rechecks():
     graph=Graph({'a':[preference('籃球')],'b':[preference('籃球')]})
     proof=adapter(graph).select('a',[])[0]['event_receipt']

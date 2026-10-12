@@ -91,7 +91,9 @@ Old EVENT_RELEVANCE/EVENT_AVOIDANCE projections are not trusted by the new runti
 Relevance is computed from current sources. A short-lived opaque server receipt
 binds owner IDs, event and the exact source/evidence snapshot; it is not client
 authority. Immediately before draft insertion, refresh owner eligibility, Event
-expiry/source, active polarity/expiry, vector/source/provenance and kill state.
+expiry/source, temporal state (upcoming/ongoing/ended through the shared
+`matchmaker_agent/event_temporal.py` authority), active polarity/expiry,
+vector/source/provenance and kill state.
 Changed/missing/expired proof fails closed, including new avoidance. History,
 block and live-proposal checks remain in the existing Event domain service.
 
