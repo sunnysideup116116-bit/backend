@@ -1351,6 +1351,14 @@ class ContextProjectionRequest(BaseModel):
     expires_at: float
     revision: int = 0
 
+class RecentSituationProjectionRequest(BaseModel):
+    user_id: str
+    revision: int = 0
+    summary: str = ""
+    fields: dict[str, str] = {}
+    expires_at: float = 0.0
+    updated_at: float = 0.0
+
 class ChatTripleRequest(BaseModel):
     session_id: str
     match_id: str | None = None
@@ -1433,6 +1441,76 @@ async def project_current_context(req: ContextProjectionRequest):
         if isinstance(exc, PreferenceFenceError):
             return fence_error_result(exc)
         print(f"[CONTEXT_GRAPH][9001] projection failed error={type(exc).__name__}")
+        return {"status": "error", "message": type(exc).__name__}
+
+
+RECENT_SITUATION_FIELDS = frozenset({
+    "activity", "destination", "timing", "companion_intent", "temporal_status",
+    "event", "feeling",
+})
+
+@app.post("/api/context/situation")
+async def project_recent_situation(req: RecentSituationProjectionRequest):
+    """Owner-scoped Recent Situation node; never touches CURRENTLY_WANTS."""
+    now = time.time()
+    revision = max(0, int(req.revision or 0))
+    requested_expiry = float(req.expires_at or 0.0)
+    expires_at = max(now, min(requested_expiry, now + 45 * 86400))
+    summary = re.sub(r"\s+", " ", str(req.summary or "").strip())[:120]
+    fields: dict[str, str] = {}
+    for name, value in (req.fields or {}).items():
+        if name not in RECENT_SITUATION_FIELDS:
+            continue
+        text = re.sub(r"\s+", " ", str(value or "").strip())[:40]
+        if text:
+            fields[name] = text
+    clear = not summary or requested_expiry <= now
+    fields_json = json.dumps(fields, ensure_ascii=False, sort_keys=True) if fields else ""
+
+    URI, AUTH, DATABASE = _neo4j_config()
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH) as driver:
+            with driver.session(database=DATABASE) as session:
+                def write_situation(tx):
+                    # Monotonic per-owner guard: a retried stale revision can
+                    # neither recreate an old situation nor clobber a newer one.
+                    accepted = tx.run("""
+                        MATCH (u:User {id:$user_id})
+                        WHERE coalesce(u.recent_situation_revision, -1) <= $revision
+                        SET u.recent_situation_revision = $revision
+                        RETURN u.id AS user_id
+                    """, user_id=req.user_id, revision=revision).single()
+                    if not accepted:
+                        return False
+                    if clear:
+                        tx.run("""
+                            MATCH (u:User {id:$user_id})-[r:HAS_RECENT_SITUATION]->(s:RecentSituation {user_id:$user_id})
+                            DELETE r, s
+                        """, user_id=req.user_id).consume()
+                    else:
+                        tx.run("""
+                            MATCH (u:User {id:$user_id})
+                            MERGE (s:RecentSituation {user_id:$user_id})
+                            ON CREATE SET s.created_at=$now
+                            SET s.revision=$revision, s.summary=$summary,
+                                s.fields_json=$fields_json, s.expires_at=$expires_at,
+                                s.updated_at=$updated_at
+                            MERGE (u)-[r:HAS_RECENT_SITUATION]->(s)
+                            SET r.expires_at=$expires_at
+                        """, user_id=req.user_id, revision=revision, summary=summary,
+                             fields_json=fields_json, expires_at=expires_at,
+                             updated_at=float(req.updated_at or now), now=now).consume()
+                    return True
+                applied = session.execute_write(write_situation)
+        return {
+            "status": "success",
+            "user_id": req.user_id,
+            "revision": revision,
+            "cleared": clear,
+            "applied": bool(applied),
+        }
+    except Exception as exc:
+        print(f"[CONTEXT_GRAPH][9001] situation projection failed error={type(exc).__name__}")
         return {"status": "error", "message": type(exc).__name__}
 
 

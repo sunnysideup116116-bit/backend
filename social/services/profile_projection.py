@@ -137,7 +137,9 @@ def render_recent_context(fields: dict[str, Any]) -> str:
     timing = value("timing", 8)
     companion = value("companion_intent", 20)
     temporal_status = value("temporal_status", 12)
-    if not activity and not destination:
+    event = value("event", 28)
+    feeling = value("feeling", 20)
+    if not activity and not destination and not event and not feeling:
         return ""
     prefix = timing if timing in {"昨天", "前天", "今天", "明天", "後天", "最近", "近期", "本週", "下週", "本月", "下個月"} else "近期"
     if destination:
@@ -160,7 +162,7 @@ def render_recent_context(fields: dict[str, Any]) -> str:
                 summary = f"{prefix}規劃前往{destination}{suffix}"
         else:
             summary = f"近期活動：{activity or destination}"
-    else:
+    elif activity:
         if temporal_status == "past":
             summary = f"{prefix if timing else '最近'}有在{activity}"
         elif temporal_status == "current":
@@ -169,6 +171,21 @@ def render_recent_context(fields: dict[str, Any]) -> str:
             summary = f"{prefix}想{activity}"
         else:
             summary = f"近期活動：{activity}"
+    else:
+        summary = ""
+    if event:
+        if not summary:
+            if temporal_status == "past":
+                summary = f"{timing if timing else '最近'}{event}"
+            elif temporal_status == "planned":
+                summary = f"{prefix}想{event}"
+            else:
+                summary = f"{prefix}{event}"
+        elif event not in summary:
+            summary = f"{summary}，{event}"
+    if feeling and feeling not in summary:
+        phrase = feeling if re.match(r"^(?:感到|覺得|心情|情緒|有夠|很|超|真)", feeling) else f"感到{feeling}"
+        summary = f"{summary}，{phrase}" if summary else phrase
     if companion == "自己":
         summary += "，想自己去"
     elif companion == "找人同行":

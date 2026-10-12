@@ -1,9 +1,15 @@
-"""Project structured recent context from Mongo into the Neo4j intent index."""
+"""Project the owner's Recent Situation from Mongo into Neo4j.
+
+Mongo stays authoritative. Every owner-data write enqueues one owner-scoped
+outbox row; the worker retries ``pending`` rows and periodically reconciles
+profiles whose outbox row is missing or stale, so a crash between the profile
+update and the enqueue cannot cause a permanent miss. Expired or cleared
+situations are projected as an explicit clear and then marked ``cleared`` so
+the graph never keeps a stale situation and the worker does not loop.
+"""
 
 from __future__ import annotations
 
-import hashlib
-import re
 import threading
 import time
 from typing import Any
@@ -12,12 +18,20 @@ import requests
 
 from database import db, profiles_coll
 from services.language_service import normalize_zh_tw
-from services.profile_projection import recent_context_is_active
+from services.profile_projection import (
+    recent_context_is_active,
+    safe_recent_context,
+)
 
 
 AGENT_URL = "http://127.0.0.1:9001"
 CONTEXT_GRAPH_OUTBOX = db["context_graph_outbox"]
-PROJECTED_FIELDS = ("activity", "destination")
+SITUATION_FIELDS = (
+    "activity", "destination", "timing", "companion_intent", "temporal_status",
+    "event", "feeling",
+)
+RECENT_SITUATION_TTL_SECONDS = 30 * 86400
+RECONCILE_PROFILE_LIMIT = 200
 _worker_thread: threading.Thread | None = None
 _worker_stop = threading.Event()
 
@@ -34,76 +48,94 @@ def ensure_context_graph_indexes() -> None:
         print(f"Context graph indexes skipped: {type(exc).__name__}")
 
 
-def _concept_key(label: str) -> str:
-    normalized = re.sub(r"\s+", "", label.strip().lower())
-    return "concept_" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
-
-
-def _projection_concepts(state: dict[str, Any]) -> list[dict[str, str]]:
-    fields = state.get("fields") or {}
-    concepts: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for field_name in PROJECTED_FIELDS:
-        field = fields.get(field_name) or {}
+def build_context_projection_payload(
+    profile: dict[str, Any], *, now: float | None = None,
+) -> dict[str, Any]:
+    """Derive the owner-scoped Recent Situation projection from Mongo state."""
+    reference = time.time() if now is None else float(now)
+    active = recent_context_is_active(profile, now=reference)
+    state = (profile.get("recent_context_state") or {}) if active else {}
+    fields: dict[str, str] = {}
+    for name in SITUATION_FIELDS:
+        field = (state.get("fields") or {}).get(name) or {}
         label = normalize_zh_tw(str(field.get("value") or ""), max_length=40).strip()
-        if not label:
-            continue
-        normalized = re.sub(r"\s+", "", label.lower())
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        concepts.append({"key": _concept_key(label), "label": label})
-    return concepts
+        if label:
+            fields[name] = label
+    summary = safe_recent_context(profile.get("current_context"), "") if active else ""
+    expires_at = (
+        float(profile.get("recent_context_expires_at") or (reference + RECENT_SITUATION_TTL_SECONDS))
+        if active else reference
+    )
+    return {
+        "user_id": str(profile.get("user_id") or ""),
+        "revision": int(profile.get("current_context_revision") or state.get("revision") or 0),
+        "summary": summary,
+        "fields": fields,
+        "expires_at": expires_at,
+        "state_updated_at": float(
+            profile.get("recent_context_updated_at") or state.get("updated_at") or 0.0
+        ),
+    }
 
 
-def sync_current_context_projection(user_id: str) -> dict[str, Any]:
-    """Best-effort projection; Mongo remains authoritative on every failure."""
+def enqueue_context_projection(user_id: str) -> dict[str, Any]:
+    """Record a pending projection from the authoritative Mongo profile."""
     profile = profiles_coll.find_one(
         {"user_id": user_id},
         {
+            "current_context": 1,
+            "current_context_revision": 1,
             "recent_context_state": 1,
             "recent_context_expires_at": 1,
-            "current_context_revision": 1,
+            "recent_context_updated_at": 1,
         },
     ) or {}
+    payload = build_context_projection_payload({**profile, "user_id": user_id})
     now = time.time()
-    active = recent_context_is_active(profile, now=now)
-    state = (profile.get("recent_context_state") or {}) if active else {}
-    expires_at = float(profile.get("recent_context_expires_at") or (now + 30 * 86400)) \
-        if active else now
-    payload = {
-        "user_id": user_id,
-        "concepts": _projection_concepts(state),
-        "expires_at": expires_at,
-        "revision": int(profile.get("current_context_revision") or state.get("revision") or 0),
-    }
     CONTEXT_GRAPH_OUTBOX.update_one(
         {"user_id": user_id},
         {"$set": {**payload, "status": "pending", "updated_at": now},
          "$setOnInsert": {"created_at": now}},
         upsert=True,
     )
+    return payload
+
+
+def sync_current_context_projection(user_id: str) -> dict[str, Any]:
+    """Best-effort owner-scoped projection; Mongo remains authoritative."""
+    payload = enqueue_context_projection(user_id)
+    body = {
+        "user_id": user_id,
+        "revision": payload["revision"],
+        "summary": payload["summary"],
+        "fields": payload["fields"],
+        "expires_at": payload["expires_at"],
+        "updated_at": payload["state_updated_at"],
+    }
     try:
         response = requests.post(
-            f"{AGENT_URL}/api/context/project", json=payload, timeout=8,
+            f"{AGENT_URL}/api/context/situation", json=body, timeout=8,
         )
         response.raise_for_status()
         result = response.json()
         if result.get("status") != "success":
             raise RuntimeError(str(result.get("message") or "projection_failed"))
+        # An empty projection is an explicit clear, not an applied situation;
+        # marking it keeps the reconcile scan from deleting it forever.
+        status = "cleared" if not payload["summary"] and not payload["fields"] else "applied"
         CONTEXT_GRAPH_OUTBOX.update_one(
             {"user_id": user_id, "revision": payload["revision"]},
-            {"$set": {"status": "applied", "applied_at": time.time()},
+            {"$set": {"status": status, "applied_at": time.time()},
              "$unset": {"last_error": ""}},
         )
         return result
     except Exception as exc:
         CONTEXT_GRAPH_OUTBOX.update_one(
-            {"user_id": user_id, "revision": payload["revision"]},
+            {"user_id": user_id},
             {"$set": {"status": "pending", "last_error": type(exc).__name__}},
         )
         print(f"[CONTEXT_GRAPH] projection pending user={user_id} error={type(exc).__name__}")
-        return {"status": "pending", "concept_count": len(payload["concepts"])}
+        return {"status": "pending", "field_count": len(payload["fields"])}
 
 
 def retry_pending_context_projections(limit: int = 3) -> dict[str, int]:
@@ -121,10 +153,67 @@ def retry_pending_context_projections(limit: int = 3) -> dict[str, int]:
     return {"attempted": len(user_ids), "applied": applied}
 
 
+def reconcile_context_projections(limit: int = RECONCILE_PROFILE_LIMIT) -> dict[str, int]:
+    """Re-enqueue missing/stale rows and clear graph state after expiry.
+
+    A crash between the profile write and the outbox upsert would otherwise
+    leave that owner unsynchronized forever; this bounded sweep closes the gap.
+    """
+    now = time.time()
+    stats = {"expired": 0, "stale": 0, "repaired": 0}
+    max_rows = max(1, min(int(limit or 1), 500))
+    try:
+        expired_rows = list(CONTEXT_GRAPH_OUTBOX.find(
+            {"status": "applied", "expires_at": {"$lte": now}},
+            {"_id": 0, "user_id": 1},
+        ).sort("updated_at", 1).limit(max_rows))
+    except Exception:
+        return stats
+    stats["expired"] = len(expired_rows)
+    for row in expired_rows:
+        user_id = str(row.get("user_id") or "")
+        if user_id and sync_current_context_projection(user_id).get("status") == "success":
+            stats["repaired"] += 1
+    try:
+        profiles = list(profiles_coll.find(
+            {
+                "user_id": {"$exists": True},
+                "recent_context_state": {"$exists": True},
+                "$or": [
+                    {"recent_context_expires_at": {"$gt": now}},
+                    {"recent_context_expires_at": {"$exists": False}},
+                ],
+            },
+            {"_id": 0, "user_id": 1, "current_context_revision": 1},
+        ).limit(max_rows))
+    except Exception:
+        return stats
+    for profile in profiles:
+        user_id = str(profile.get("user_id") or "")
+        if not user_id:
+            continue
+        revision = int(profile.get("current_context_revision") or 0)
+        try:
+            row = CONTEXT_GRAPH_OUTBOX.find_one(
+                {"user_id": user_id}, {"_id": 0, "revision": 1, "status": 1},
+            )
+        except Exception:
+            continue
+        fresh = bool(row) and int(row.get("revision") or 0) == revision and \
+            str(row.get("status") or "") in {"applied", "cleared", "pending"}
+        if fresh:
+            continue
+        stats["stale"] += 1
+        if sync_current_context_projection(user_id).get("status") == "success":
+            stats["repaired"] += 1
+    return stats
+
+
 def _projection_worker_loop(interval_seconds: float) -> None:
     while not _worker_stop.is_set():
         try:
             retry_pending_context_projections(limit=3)
+            reconcile_context_projections()
         except Exception as exc:
             print(f"[CONTEXT_GRAPH] retry skipped error={type(exc).__name__}")
         _worker_stop.wait(max(5.0, interval_seconds))
