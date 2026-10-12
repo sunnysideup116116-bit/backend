@@ -174,15 +174,18 @@ def render_recent_context(fields: dict[str, Any]) -> str:
     else:
         summary = ""
     if event:
+        event_field = fields.get("event") or {}
+        event_carried = bool(
+            event_field.get("carried_from_episode")
+        ) if isinstance(event_field, dict) else False
         if not summary:
-            if temporal_status == "past":
-                summary = f"{timing if timing else '最近'}{event}"
-            elif temporal_status == "planned":
-                summary = f"{prefix}想{event}"
-            else:
-                summary = f"{prefix}{event}"
+            # No activity/destination headline: the event is the situation and
+            # its own timing (if any) belongs to it. A carried event always
+            # coexists with a plan headline, so it is handled below.
+            summary = f"{timing if timing else '最近'}{event}"
         elif event not in summary:
-            summary = f"{summary}，{event}"
+            marker = "最近" if (event_carried or temporal_status != "past") else ""
+            summary = f"{summary}，{marker}{event}"
     if feeling and feeling not in summary:
         phrase = feeling if re.match(r"^(?:感到|覺得|心情|情緒|有夠|很|超|真)", feeling) else f"感到{feeling}"
         summary = f"{summary}，{phrase}" if summary else phrase

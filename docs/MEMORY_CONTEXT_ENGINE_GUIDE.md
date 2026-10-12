@@ -88,6 +88,7 @@ Saved owner message
 - Source of truth：`recent_context_state` 與 `current_context_revision`。
 - `current_context` 是給 UI／Planner 的安全顯示 projection。
 - `recent_context_state.fields` 除 activity／destination／timing／companion_intent／temporal_status 外，另含情境型 `event`（近期發生的事件）與 `feeling`（本人明確表達的感受）。feeling 是暫時狀態，不得寫成 `PREFERS`／`AVOIDS` 或 durable memory；只有 timing／temporal_status 的不完整更新不得清掉既有有效情境。
+- 新計畫開始時，仍有效（未過 `recent_context_expires_at`）的上一則 event／feeling 可作為背景保留一代表（`carried_from_episode`），摘要以「最近」標示為過去，不得寫成當天計畫；再下一次新 episode、較新的 event／feeling、明確 clear 或 expiry 都會移除它，舊情境不會累積。
 - Mongo 更新成功後會 enqueue `context_graph_outbox`；worker 依 revision 冪等投影到 `(User)-[:HAS_RECENT_SITUATION]->(:RecentSituation)`，過期或清除時刪除該節點。此流程不改動 `CURRENTLY_WANTS`。
 - `recent_context_expires_at` 是 canonical active boundary；明確過期或格式無效時，所有 read projection 必須清空 `current_context`、typed signals 與 embedding，不可再用於 candidate retrieval、reasoning 或 UI。沒有 expiry 的舊 profile 暫時維持相容讀取；本階段不調整 TTL 數字。
 - 只接受 owner 已保存的原始訊息；assistant reply、history、tool result 與 match state 都不是寫入證據。

@@ -443,6 +443,100 @@ class ProfileSkillsTests(unittest.TestCase):
         self.assertEqual(written["context_signals"]["event"], "成果被教授打槍")
         self.assertEqual(written["context_signals"]["feeling"], "煩躁")
 
+    def test_new_episode_keeps_an_active_prior_event_as_background(self):
+        now = time.time()
+        profile = {
+            "current_context": "今天成果被教授打槍,很煩",
+            "current_context_revision": 3,
+            "recent_context_updated_at": now - 20 * 3600,
+            "recent_context_expires_at": now + 86400,
+            "recent_context_state": {"version": 4, "revision": 3, "episode_id": "episode:day1",
+                                     "updated_at": now - 20 * 3600, "fields": {
+                "event": {"value": "成果被教授打槍", "plan_id": "episode:day1", "source_timestamp": 1},
+                "feeling": {"value": "很煩", "plan_id": "episode:day1", "source_timestamp": 1},
+                "temporal_status": {"value": "past", "plan_id": "episode:day1", "source_timestamp": 1},
+            }},
+        }
+        proposal = {
+            "should_update": True, "message_kind": "real_world_update", "context_action": "update",
+            "episode_relation": "new", "plan_id": "message:day2",
+            "fields": {
+                "activity": {"operation": "set", "value": "打球", "evidence_span": "打球"},
+                "timing": {"operation": "set", "value": "今天", "evidence_span": "今天"},
+                "temporal_status": {"operation": "set", "value": "planned", "evidence_span": "想"},
+            },
+        }
+        with patch("services.profile_skills.profiles_coll.find_one", return_value=profile), \
+             patch("services.profile_skills.profiles_coll.update_one",
+                   return_value=SimpleNamespace(modified_count=1)) as update, \
+             patch("services.profile_skills.generate_chat_completion", side_effect=RuntimeError), \
+             patch("services.profile_skills.get_embedding", return_value=[]):
+            self.assertTrue(apply_recent_context("owner", proposal, message_id="day2", source_timestamp=2))
+        written = update.call_args.args[1]["$set"]
+        fields = written["recent_context_state"]["fields"]
+        self.assertEqual(fields["event"]["value"], "成果被教授打槍")
+        self.assertEqual(fields["event"]["carried_from_episode"], "episode:day1")
+        self.assertEqual(fields["feeling"]["value"], "很煩")
+        self.assertEqual(fields["activity"]["value"], "打球")
+        self.assertEqual(fields["temporal_status"]["value"], "planned")
+        self.assertEqual(written["current_context"], "今天想打球，最近成果被教授打槍，很煩")
+
+    def test_already_carried_event_is_not_carried_again(self):
+        now = time.time()
+        profile = {
+            "current_context": "今天想打球，最近成果被教授打槍",
+            "current_context_revision": 4,
+            "recent_context_expires_at": now + 86400,
+            "recent_context_state": {"version": 4, "revision": 4, "episode_id": "episode:day2",
+                                     "updated_at": now, "fields": {
+                "activity": {"value": "打球", "plan_id": "episode:day2", "source_timestamp": 2},
+                "event": {"value": "成果被教授打槍", "plan_id": "episode:day1",
+                          "carried_from_episode": "episode:day1", "source_timestamp": 1},
+            }},
+        }
+        proposal = {
+            "should_update": True, "message_kind": "real_world_update", "context_action": "update",
+            "episode_relation": "new", "fields": {
+                "activity": {"operation": "set", "value": "爬山", "evidence_span": "爬山"},
+            },
+        }
+        with patch("services.profile_skills.profiles_coll.find_one", return_value=profile), \
+             patch("services.profile_skills.profiles_coll.update_one",
+                   return_value=SimpleNamespace(modified_count=1)) as update, \
+             patch("services.profile_skills.generate_chat_completion", side_effect=RuntimeError), \
+             patch("services.profile_skills.get_embedding", return_value=[]):
+            self.assertTrue(apply_recent_context("owner", proposal, message_id="day3", source_timestamp=3))
+        fields = update.call_args.args[1]["$set"]["recent_context_state"]["fields"]
+        self.assertNotIn("event", fields)
+        self.assertEqual(fields["activity"]["value"], "爬山")
+
+    def test_expired_prior_situation_is_not_carried(self):
+        now = time.time()
+        profile = {
+            "current_context": "今天成果被教授打槍",
+            "current_context_revision": 3,
+            "recent_context_expires_at": now - 60,
+            "recent_context_state": {"version": 4, "revision": 3, "episode_id": "episode:old",
+                                     "updated_at": now - 20 * 3600, "fields": {
+                "event": {"value": "成果被教授打槍", "plan_id": "episode:old", "source_timestamp": 1},
+            }},
+        }
+        proposal = {
+            "should_update": True, "message_kind": "real_world_update", "context_action": "update",
+            "episode_relation": "new", "fields": {
+                "activity": {"operation": "set", "value": "打球", "evidence_span": "打球"},
+            },
+        }
+        with patch("services.profile_skills.profiles_coll.find_one", return_value=profile), \
+             patch("services.profile_skills.profiles_coll.update_one",
+                   return_value=SimpleNamespace(modified_count=1)) as update, \
+             patch("services.profile_skills.generate_chat_completion", side_effect=RuntimeError), \
+             patch("services.profile_skills.get_embedding", return_value=[]):
+            self.assertTrue(apply_recent_context("owner", proposal, message_id="next", source_timestamp=2))
+        fields = update.call_args.args[1]["$set"]["recent_context_state"]["fields"]
+        self.assertNotIn("event", fields)
+        self.assertEqual(fields["activity"]["value"], "打球")
+
     def test_active_recent_situation_is_readable_by_context_assembly(self):
         now = time.time()
         profile = {

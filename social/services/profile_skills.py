@@ -22,6 +22,7 @@ from services.profile_projection import (
     clean_profile_text,
     contains_internal_identifier,
     contains_protected_content,
+    recent_context_is_active,
     render_recent_context,
     safe_recent_context,
 )
@@ -58,6 +59,10 @@ RECENT_FIELD_NAMES = ("activity", "destination", "timing", "companion_intent", "
 # A situation update needs at least one of these; timing/temporal_status alone
 # are qualifiers and must never replace an existing valid situation.
 RECENT_SUBSTANTIVE_FIELDS = frozenset({"activity", "destination", "event", "feeling"})
+# A still-active event/feeling from the previous episode stays as background
+# context when a new plan starts. It is carried at most one episode and is
+# dropped by a newer event/feeling, an explicit clear, or canonical expiry.
+RECENT_SITUATIONAL_FIELDS = ("event", "feeling")
 RECENT_TIMINGS = {"昨天", "前天", "今天", "明天", "後天", "最近", "近期", "本週", "下週", "本月", "下個月"}
 RECENT_TEMPORAL_STATUSES = {"past", "current", "planned"}
 RECENT_EPISODE_TTL_SECONDS = 30 * 60
@@ -114,11 +119,19 @@ def _compose_recent_context_summary(fields: dict[str, Any]) -> str:
     }
     if not typed_fields:
         return ""
+    carried = [
+        name for name in RECENT_SITUATIONAL_FIELDS
+        if isinstance(fields.get(name), dict) and (fields.get(name) or {}).get("carried_from_episode")
+    ]
+    carried_note = (
+        "以下欄位來自前一個情境，屬於過去發生，必須以「最近」呈現，不可寫成今天的活動或計畫："
+        + "、".join(carried) + "。\n" if carried else ""
+    )
     prompt = f"""把以下已驗證的本人近期情境欄位整理成一句自然、精簡的繁體中文。
 只能重組提供的欄位，不可補充地點、日期、人物、偏好或配對狀態。
 依 temporal_status 保留時態：past 是已做過、current 是正在做、planned 才能使用「想／規劃」。沒有 temporal_status 時使用中性「近期活動」，不可擅自改成未來計畫。
 event 是近期事件、feeling 是使用者明確表達的感受；兩者都必須出現在摘要中，且不可把短暫感受寫成長期人格或偏好。
-避免「前往市集去市集」這類重複語意；多個活動以「、」自然分隔。
+{carried_note}避免「前往市集去市集」這類重複語意；多個活動以「、」自然分隔。
 最多 32 個中文字，不加引號、不加解釋，只輸出句子。
 欄位：{json.dumps(typed_fields, ensure_ascii=False)}"""
     try:
@@ -136,6 +149,7 @@ event 是近期事件、feeling 是使用者明確表達的感受；兩者都必
     activity = typed_fields.get("activity")
     event = typed_fields.get("event")
     feeling = typed_fields.get("feeling")
+    temporal_status = _clean((fields.get("temporal_status") or {}).get("value"), 40)
     if destination and destination not in summary:
         return fallback
     if not destination and activity and activity not in summary:
@@ -143,6 +157,8 @@ event 是近期事件、feeling 是使用者明確表達的感受；兩者都必
     if event and event not in summary:
         return fallback
     if feeling and feeling not in summary:
+        return fallback
+    if "event" in carried and temporal_status != "past" and "最近" not in summary:
         return fallback
     verified_chars = set("".join(typed_fields.values()))
     structural_chars = set("近期最近昨天前天今天明天後天本週下週本月下個月活動有在做過想要打算計畫規劃準備前往去感到覺得心情讓有夠真的很：，、")
@@ -158,6 +174,37 @@ def _source_is_newer(candidate: dict[str, Any], existing: dict[str, Any] | None)
     candidate_key = (float(candidate.get("source_timestamp", 0) or 0), str(candidate.get("evidence_message_id") or ""))
     existing_key = (float(existing.get("source_timestamp", 0) or 0), str(existing.get("evidence_message_id") or ""))
     return candidate_key > existing_key
+
+
+def _retained_situational_fields(
+    profile: dict[str, Any], state: dict[str, Any],
+    state_fields: dict[str, Any], patches: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep one still-active prior event/feeling as background for a new plan.
+
+    The prior situation must still be canonically active, must not be replaced
+    or cleared by this message's own evidence, and may be carried at most one
+    episode so old situations never pile up. A newer event/feeling, an explicit
+    clear, or expiry removes it.
+    """
+    if not recent_context_is_active(profile):
+        return {}
+    retained: dict[str, Any] = {}
+    for name in RECENT_SITUATIONAL_FIELDS:
+        previous = state_fields.get(name)
+        if not isinstance(previous, dict) or not previous.get("value"):
+            continue
+        if previous.get("carried_from_episode"):
+            continue
+        patch = patches.get(name)
+        if isinstance(patch, dict) and patch.get("operation") in {"set", "clear"}:
+            continue
+        origin = str(
+            previous.get("plan_id") or state.get("episode_id")
+            or previous.get("evidence_message_id") or ""
+        )[:128]
+        retained[name] = {**previous, "carried_from_episode": origin}
+    return retained
 
 
 def _timestamp(value: Any) -> float:
@@ -709,7 +756,7 @@ def apply_recent_context(
         profile = profiles_coll.find_one(
             {"user_id": user_id},
             {"current_context": 1, "current_context_revision": 1, "recent_context_state": 1,
-             "recent_context_updated_at": 1, "recent_context_draft": 1},
+             "recent_context_updated_at": 1, "recent_context_expires_at": 1, "recent_context_draft": 1},
         ) or {}
         previous = _safe_context_text(profile.get("current_context"))
         state = profile.get("recent_context_state") or {"version": 4, "revision": 0, "fields": {}}
@@ -748,7 +795,9 @@ def apply_recent_context(
             )
             if substantive:
                 episode_id = f"episode:{message_id}"[:128]
-                state_fields = {}
+                state_fields = _retained_situational_fields(
+                    profile, state, state_fields, patches,
+                )
                 changed = bool(state.get("fields"))
             else:
                 # A timing/temporal_status-only proposal is an incomplete
