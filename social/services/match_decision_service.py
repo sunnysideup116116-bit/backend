@@ -10,6 +10,11 @@ from bson.objectid import ObjectId
 from pymongo import ReturnDocument
 
 from database import matches_coll
+from matchmaker_agent.event_temporal import (
+    ENDED,
+    LIVE_STATES as TEMPORALLY_LIVE_STATES,
+    event_temporal_state,
+)
 from services.match_state_service import verified_accepted_match_query
 from services.proposal_namespace import (
     EVENT_INVITATION_NAMESPACE,
@@ -84,7 +89,14 @@ def expire_event_proposals(
     *, now: float | None = None, event_ids: list[str] | None = None,
     lead_seconds: int = 0, limit: int = 500, expire_all: bool = False,
 ) -> dict[str, int | str]:
-    """Atomically expire unresolved Event proposals whose activity is no longer actionable."""
+    """Atomically expire unresolved Event proposals whose activity is over.
+
+    The stored deadline prefilters candidates, but the temporal authority is
+    the Event itself: an Event that is still upcoming or ongoing at `now`
+    (start <= now < trustworthy end) is never expired for its start time.
+    Only an ended Event expires as `event_ended`, and an Event without a
+    reliable end keeps the conservative legacy start-based behavior.
+    """
     current_time = float(now if now is not None else time.time())
     safe_lead = max(0, min(int(lead_seconds or 0), 7 * 86400))
     safe_limit = max(1, min(int(limit or 500), 1000))
@@ -112,7 +124,8 @@ def expire_event_proposals(
         {
             "_id": 1, "status": 1, "proposal_revision": 1,
             "event_snapshot.event_id": 1, "event_snapshot.starts_at": 1,
-            "event_snapshot.actionable_until": 1,
+            "event_snapshot.ends_at": 1, "event_snapshot.session_starts": 1,
+            "event_snapshot.session_ends": 1,
         },
     ).sort([("created_at", 1)]).limit(safe_limit))
 
@@ -124,9 +137,14 @@ def expire_event_proposals(
         revision = int(row.get("proposal_revision", 0) or 0)
         event_snapshot = row.get("event_snapshot") or {}
         event_id = str(event_snapshot.get("event_id") or "")
+        temporal_state = event_temporal_state(event_snapshot, now=current_time)
+        if (not expire_all and event_id not in removed_ids
+                and temporal_state in TEMPORALLY_LIVE_STATES):
+            continue
         reason = (
             "inventory_refreshed" if expire_all
             else "event_removed" if event_id in removed_ids
+            else "event_ended" if temporal_state == ENDED
             else "event_started"
         )
         transition = {
