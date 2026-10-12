@@ -128,6 +128,16 @@ def sync_current_context_projection(user_id: str) -> dict[str, Any]:
             {"$set": {"status": status, "applied_at": time.time()},
              "$unset": {"last_error": ""}},
         )
+        try:
+            # Clear only the marker for the revision just projected; a newer
+            # write keeps its own marker and stays eligible for reconciliation.
+            profiles_coll.update_one(
+                {"user_id": user_id, "context_projection_dirty": payload["revision"]},
+                {"$unset": {"context_projection_dirty": ""}},
+            )
+        except Exception:
+            # The projection succeeded; reconcile re-syncs the marker later.
+            pass
         return result
     except Exception as exc:
         CONTEXT_GRAPH_OUTBOX.update_one(
@@ -154,13 +164,16 @@ def retry_pending_context_projections(limit: int = 3) -> dict[str, int]:
 
 
 def reconcile_context_projections(limit: int = RECONCILE_PROFILE_LIMIT) -> dict[str, int]:
-    """Re-enqueue missing/stale rows and clear graph state after expiry.
+    """Repair projections only for owners explicitly marked by a new write.
 
-    A crash between the profile write and the outbox upsert would otherwise
-    leave that owner unsynchronized forever; this bounded sweep closes the gap.
+    The write path stores ``context_projection_dirty`` with the new revision in
+    the same Mongo update as the Recent Situation, so a crash before the outbox
+    upsert is still recovered later. Pre-existing profiles without the marker
+    are never swept, and projections whose situation expired are explicitly
+    cleared in the graph.
     """
     now = time.time()
-    stats = {"expired": 0, "stale": 0, "repaired": 0}
+    stats = {"expired": 0, "dirty": 0, "repaired": 0}
     max_rows = max(1, min(int(limit or 1), 500))
     try:
         expired_rows = list(CONTEXT_GRAPH_OUTBOX.find(
@@ -176,15 +189,8 @@ def reconcile_context_projections(limit: int = RECONCILE_PROFILE_LIMIT) -> dict[
             stats["repaired"] += 1
     try:
         profiles = list(profiles_coll.find(
-            {
-                "user_id": {"$exists": True},
-                "recent_context_state": {"$exists": True},
-                "$or": [
-                    {"recent_context_expires_at": {"$gt": now}},
-                    {"recent_context_expires_at": {"$exists": False}},
-                ],
-            },
-            {"_id": 0, "user_id": 1, "current_context_revision": 1},
+            {"context_projection_dirty": {"$exists": True}},
+            {"_id": 0, "user_id": 1},
         ).limit(max_rows))
     except Exception:
         return stats
@@ -192,18 +198,7 @@ def reconcile_context_projections(limit: int = RECONCILE_PROFILE_LIMIT) -> dict[
         user_id = str(profile.get("user_id") or "")
         if not user_id:
             continue
-        revision = int(profile.get("current_context_revision") or 0)
-        try:
-            row = CONTEXT_GRAPH_OUTBOX.find_one(
-                {"user_id": user_id}, {"_id": 0, "revision": 1, "status": 1},
-            )
-        except Exception:
-            continue
-        fresh = bool(row) and int(row.get("revision") or 0) == revision and \
-            str(row.get("status") or "") in {"applied", "cleared", "pending"}
-        if fresh:
-            continue
-        stats["stale"] += 1
+        stats["dirty"] += 1
         if sync_current_context_projection(user_id).get("status") == "success":
             stats["repaired"] += 1
     return stats

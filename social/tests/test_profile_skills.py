@@ -537,6 +537,28 @@ class ProfileSkillsTests(unittest.TestCase):
         self.assertNotIn("event", fields)
         self.assertEqual(fields["activity"]["value"], "打球")
 
+    def test_recent_context_write_marks_projection_dirty_with_new_revision(self):
+        profile = {
+            "current_context_revision": 7,
+            "recent_context_expires_at": time.time() + 100,
+            "recent_context_state": {"version": 4, "revision": 7, "fields": {}},
+        }
+        proposal = {
+            "should_update": True, "message_kind": "real_world_update", "context_action": "update",
+            "episode_relation": "new", "fields": {
+                "activity": {"operation": "set", "value": "打球", "evidence_span": "打球"},
+            },
+        }
+        with patch("services.profile_skills.profiles_coll.find_one", return_value=profile), \
+             patch("services.profile_skills.profiles_coll.update_one",
+                   return_value=SimpleNamespace(modified_count=1)) as update, \
+             patch("services.profile_skills.generate_chat_completion", side_effect=RuntimeError), \
+             patch("services.profile_skills.get_embedding", return_value=[]):
+            self.assertTrue(apply_recent_context("owner", proposal, message_id="next", source_timestamp=2))
+        written = update.call_args.args[1]["$set"]
+        self.assertEqual(written["current_context_revision"], 8)
+        self.assertEqual(written["context_projection_dirty"], 8)
+
     def test_active_recent_situation_is_readable_by_context_assembly(self):
         now = time.time()
         profile = {
