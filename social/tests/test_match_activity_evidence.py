@@ -295,3 +295,136 @@ def test_prepare_confirmation_never_marks_preference_exploratory(monkeypatch):
         "match.start_search", args, ctx, turn,
     )
     assert "allow_exploratory" not in payload["data"]["search_context"]
+
+
+# --------------------------------------------------------------------------
+# Evidence correctness: typed signal only, active context, traceable provenance
+# --------------------------------------------------------------------------
+
+def test_activity_evidence_query_uses_only_typed_signal_and_active_context(monkeypatch):
+    import json
+
+    import routers.match as match_router
+
+    profiles = MagicMock()
+    profiles.find.return_value = _Rows([])
+    monkeypatch.setattr(match_router, "profiles_coll", profiles)
+    monkeypatch.setattr(match_router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "candidate_ids": [], "canonical_key": "", "normalized_topic": "",
+        "retrieval_source": "graph_exact",
+    })
+
+    match_router._activity_evidence_candidates(
+        {"user_id": "owner"}, TOPIC_CONTEXT, {"owner"},
+    )
+
+    query = profiles.find.call_args_list[0].args[0]
+    assert "context_signals.activity" in query
+    # Free text (negation/third-person risk) is never a retrieval source.
+    assert "current_context" not in json.dumps(query, default=str)
+    # Expired situations cannot qualify: the activity query is expiry-scoped.
+    assert "recent_context_expires_at" in json.dumps(query, default=str)
+
+
+@patch("routers.match.get_user_graph_memories", return_value=[])
+def test_recent_activity_explanation_provenance_and_no_overclaim(_graph):
+    _, items, _, reason = build_validated_match_explanation(
+        {"user_id": "owner"}, {"user_id": "candidate"}, 0.0,
+        search_context=TOPIC_CONTEXT, activity_evidence=RECENT_EVIDENCE,
+    )
+    recent = next(item for item in items if item["kind"] == "candidate_recent_activity")
+    assert recent["candidate_evidence_ids"] == [
+        "profile:candidate:context_signals:activity",
+    ]
+    assert "仍待本人確認" in reason
+    assert "對方是否擅長、願意或已同意同行" in reason  # explicit disclaimer
+    for overclaim in ("對方會打羽球", "擅長打羽球", "對方已同意", "對方已經同意", "可望出席"):
+        assert overclaim not in reason
+
+
+# --------------------------------------------------------------------------
+# Isolated consent chain: ask -> explicit consent -> confirmation -> proposal
+# --------------------------------------------------------------------------
+
+def test_job_without_evidence_asks_for_consent_and_writes_nothing(monkeypatch):
+    job = {
+        "_id": "job-row", "job_id": "job-1", "user_id": "owner",
+        "source": "agent_pi", "lease_id": "lease-1", "quota_billable": False,
+        "search_context": {"search_intent": "activity", "invitation_topic": "羽球",
+                           "query_text": "想找人一起打羽球"},
+    }
+    pipeline = MagicMock(return_value={
+        "status": "no_suitable_candidate", "matches": [],
+        "reason_code": "exploratory_consent_required", "diagnostics": {},
+    })
+    monkeypatch.setattr(jobs, "_claim_next_job", lambda _now: job)
+    monkeypatch.setattr(jobs, "_pipeline", pipeline)
+    monkeypatch.setattr(jobs, "_report_progress", lambda *_a, **_k: True)
+    monkeypatch.setattr(jobs, "_job_has_ownership", lambda _job: True)
+    monkeypatch.setattr(jobs, "profiles_coll", MagicMock())
+    finish = MagicMock(return_value=True)
+    monkeypatch.setattr(jobs, "_finish_job", finish)
+    queue = MagicMock()
+    monkeypatch.setattr(jobs, "queue_mediator_event", queue)
+
+    assert jobs.run_one_match_search_job() is True
+    assert finish.call_args.args[0] is job
+    assert finish.call_args.args[1] == "no_candidates"
+    assert finish.call_args.kwargs["error_code"] == "exploratory_consent_required"
+    assert "探索性" in queue.call_args.args[1]
+    assert queue.call_args.args[2] == "match_search_empty"
+
+
+def test_confirmed_consent_queues_exactly_one_exploratory_search(monkeypatch):
+    from services.ayue_agent.shared import write_executors
+    from tests.test_pi_feedback_regressions import make_turn
+
+    monkeypatch.setattr(write_executors, "assess_match_opportunity",
+                        lambda *_a, **_k: SimpleNamespace(state="ready"))
+    _ctx, turn = make_turn("今天不想碰專題，想找人一起打羽球換個心情")
+    ctx = turn._raw_ctx
+    monkeypatch.setattr(jobs, "exploratory_consent_recorded", lambda *_a, **_k: True)
+    payload, preview = write_executors.prepare_write_confirmation(
+        "match.start_search",
+        {"search_request": {"kind": "activity", "topic": "羽球", "exploratory": True}},
+        ctx, turn,
+    )
+    assert "探索性" in preview
+
+    started = MagicMock(return_value={"status": "queued"})
+    monkeypatch.setattr(write_executors, "start_match_search", started)
+    monkeypatch.setattr(write_executors.TOOL_CALLS, "find_one_and_update", lambda *_a, **_k: None)
+    monkeypatch.setattr(write_executors.TOOL_CALLS, "update_one", MagicMock())
+
+    ok, _reply, _code = write_executors.execute_write(
+        "match.start_search", {}, ctx, turn, "run1", 0,
+        confirmation_id="conf1", payload=payload["data"],
+    )
+    assert ok
+    started.assert_called_once()
+    assert started.call_args.kwargs["search_context"]["allow_exploratory"] == "1"
+    assert started.call_args.kwargs["idempotency_key"] == "confirmation:conf1"
+
+    # A repeated confirmation of the same card must never queue a second search.
+    monkeypatch.setattr(write_executors.TOOL_CALLS, "find_one_and_update",
+                        lambda *_a, **_k: {"idempotency_key": "already-claimed"})
+    ok, reply, _code = write_executors.execute_write(
+        "match.start_search", {}, ctx, turn, "run1", 0,
+        confirmation_id="conf1", payload=payload["data"],
+    )
+    assert ok and "已經處理過" in reply
+    started.assert_called_once()
+
+
+def test_consent_record_is_scoped_to_one_owner_and_topic(monkeypatch):
+    import time as _time
+    now = _time.time()
+    monkeypatch.setattr(jobs, "MATCH_SEARCH_JOBS", Collection([
+        {"user_id": "owner", "status": "no_candidates",
+         "error_code": "exploratory_consent_required",
+         "search_context": {"invitation_topic": "羽球"}, "updated_at": now - 30},
+    ]))
+    assert jobs.exploratory_consent_recorded("owner", "羽球") is True
+    assert jobs.exploratory_consent_recorded("owner", "爬山") is False  # other activity
+    assert jobs.exploratory_consent_recorded("someone-else", "羽球") is False  # other owner
+    assert jobs.exploratory_consent_recorded("owner", "羽球", now=now + 90000) is False  # expired

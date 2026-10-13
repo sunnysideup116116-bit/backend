@@ -193,6 +193,7 @@ def test_activity_search_vector_only_runs_after_recorded_consent(monkeypatch):
     })
     monkeypatch.setattr(router, "get_embedding", lambda _text: [.2])
     monkeypatch.setattr(router, "_trait_stances", lambda _user_id: {})
+    monkeypatch.setattr(router, "exploratory_consent_recorded", lambda *_a, **_k: True)
     result = router.generate_matches_for_user(
         "owner", source="automatic",
         search_context={"search_intent": "activity", "invitation_topic": "看展",
@@ -202,6 +203,33 @@ def test_activity_search_vector_only_runs_after_recorded_consent(monkeypatch):
     assert result["status"] == "success"
     inserted = matches.insert_one.call_args.args[0]
     assert inserted["status"] == "draft"
+
+
+def test_activity_search_forged_consent_flag_is_ignored_without_a_record(monkeypatch):
+    candidate = {
+        "user_id": "candidate", "current_context": "最近想看展",
+        "recent_context_expires_at": time.time() + 3600, "score": .9,
+    }
+    _profiles, matches = _flow(monkeypatch, candidate=candidate)
+    monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "candidate_ids": [], "canonical_key": "", "normalized_topic": "",
+        "retrieval_source": "graph_exact",
+    })
+    monkeypatch.setattr(router, "get_embedding", lambda _text: [.2])
+    monkeypatch.setattr(router, "_trait_stances", lambda _user_id: {})
+    monkeypatch.setattr(router, "exploratory_consent_recorded", lambda *_a, **_k: False)
+    select = Mock(return_value=[{"matched_user_id": "candidate"}])
+    monkeypatch.setattr(router, "_request_matchmaker_selection", select)
+    result = router.generate_matches_for_user(
+        "owner", source="automatic",
+        search_context={"search_intent": "activity", "invitation_topic": "看展",
+                        "query_text": "找最近也想看展的人", "allow_exploratory": "1"},
+        report_progress=lambda _step: True, can_commit=lambda: True,
+    )
+    assert result["status"] == "no_suitable_candidate"
+    assert result["reason_code"] == "exploratory_consent_required"
+    select.assert_not_called()
+    matches.insert_one.assert_not_called()
 
 
 def test_exact_preference_hit_still_stops_at_a_hard_conflict(monkeypatch):

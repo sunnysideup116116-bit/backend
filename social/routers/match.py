@@ -57,6 +57,7 @@ from services.match_search_job_service import (
     MatchSearchPipelineError,
     INVITE_ON_MATCH,
     cancel_match_search,
+    exploratory_consent_recorded,
     public_match_search_status,
     register_match_search_pipeline,
 )
@@ -2531,11 +2532,19 @@ def generate_matches_for_user(
         # Deterministic activity policy: owner-grounded evidence candidates
         # always win the selection slot when they exist. Vector-only recall may
         # only proceed after the owner consented to an exploratory
-        # introduction for this same topic.
+        # introduction for this same topic. The persisted consent record is
+        # re-checked here so a forged/client-supplied flag can never authorize
+        # itself.
+        allow_exploratory = (
+            str(bound_search_context.get("allow_exploratory") or "") == "1"
+            and exploratory_consent_recorded(
+                req.user_id, str(bound_search_context.get("invitation_topic") or ""),
+            )
+        )
         scope = activity_selection_scope(
             [str(candidate.get("user_id") or "") for candidate in qualified_candidates],
             activity_evidence_by_id,
-            allow_exploratory=str(bound_search_context.get("allow_exploratory") or "") == "1",
+            allow_exploratory=allow_exploratory,
         )
         if scope == "evidence":
             qualified_candidates = [
