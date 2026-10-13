@@ -36,6 +36,7 @@ PROMPT = """【配對】
 原句或前文已表達想開始找人，就直接準備真實確認卡；不要先用文字再問一次要不要開始。
 補充「對／好」時仍保留前文主題；source_text 可引用同房間使用者原句，不能引用助理自己編的條件。
 稱呼人使用「對象」「人選」「朋友」，不要用「物件」。
+指定活動的搜尋以「有該活動證據」的人選為優先；若結果回報沒有這類人選並詢問你是否接受探索性介紹，只有在你明確同意後，才再次呼叫 match.start_search，kind=activity、topic=同一個活動、exploratory=true；確認卡會明示探索性，其他情況 exploratory 一律 false。
 人物或活動牽線卡的接受、婉拒與撤回只引導到「阿月牽線」Hub，不在普通聊天代按。"""
 
 
@@ -44,6 +45,7 @@ class MatchSearchInput(BaseModel):
     kind: Literal["activity", "recent_context", "preference"] = "recent_context"
     topic: str | None = Field(default=None, min_length=1, max_length=MAX_PREFERENCE_TEXT_CHARS)
     source_text: str | None = Field(default=None, min_length=1, max_length=600)
+    exploratory: bool = False
 
     @model_validator(mode="after")
     def _validate_topic_contract(self):
@@ -151,7 +153,10 @@ def _prepare_search(runtime: Any, request: MatchSearchInput):
     # The existing deterministic preflight grounds the topic against this
     # verified user source and retains all readiness/quota/confirmation gates.
     source_ctx = ctx.model_copy(update={"message": source})
-    args = {"search_request": {"kind": resolved_kind, "topic": topic}}
+    args = {"search_request": {
+        "kind": resolved_kind, "topic": topic,
+        "exploratory": bool(request.exploratory),
+    }}
     return prepare_write_confirmation("match.start_search", args, source_ctx, runtime.turn)
 
 

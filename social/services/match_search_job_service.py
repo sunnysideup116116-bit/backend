@@ -45,6 +45,8 @@ JOB_STEPS = {
 LEASE_SECONDS = 180
 POLL_SECONDS = 0.5
 MAX_CONTEXT_CHANGE_REQUEUES = 1
+# Exploratory consent is only honored close to the search that asked for it.
+EXPLORATORY_CONSENT_WINDOW_SECONDS = 24 * 3600
 
 MatchPipeline = Callable[..., dict[str, Any]]
 _pipeline: MatchPipeline | None = None
@@ -96,6 +98,7 @@ _FAILURE_MESSAGES = {
     "matchmaker_invalid_response": "配對服務回傳的結果不完整，請稍後再試。",
     "insufficient_common_ground": "我暫時找不到足夠的共同依據；你可以補充這次想一起做的事或主題，再決定是否重新搜尋。",
     "insufficient_semantic_ground": "這次沒有找到證據足夠、又通過安全檢查的相關偏好人選；你可以換個更明確的偏好再試。",
+    "exploratory_consent_required": "這次沒有找到有這項活動相關證據的人選。要不要改用探索性介紹？我會改推薦語意相近、但對方是否喜歡或願意同行都還需要確認的人選；你同意再開始找。",
     "daily_active_quota_exceeded": "今天已經幫你介紹 3 位新朋友了，明天可以再找；已送出的邀請還是能繼續回覆。",
     "unexpected_pipeline_error": "配對流程中途發生問題，請稍後再試。",
 }
@@ -283,6 +286,37 @@ def active_match_search_job(user_id: str) -> dict[str, Any] | None:
     )
 
 
+def exploratory_consent_recorded(
+    user_id: str, topic: str, *, now: float | None = None,
+) -> bool:
+    """True only when this owner was just asked for exploratory consent.
+
+    The consent flag on a search is honored only after a same-topic activity
+    search ended with ``exploratory_consent_required``. A flag can therefore
+    never bootstrap itself, and an old or client-supplied boolean cannot
+    authorize an exploratory proposal on its own.
+    """
+    safe_topic = str(topic or "").strip()[:80]
+    if not safe_topic:
+        return False
+    reference = time.time() if now is None else float(now)
+    try:
+        row = MATCH_SEARCH_JOBS.find_one(
+            {
+                "user_id": user_id,
+                "status": "no_candidates",
+                "error_code": "exploratory_consent_required",
+                "search_context.invitation_topic": safe_topic,
+                "updated_at": {"$gt": reference - EXPLORATORY_CONSENT_WINDOW_SECONDS},
+            },
+            {"_id": 1, "status": 1},
+            sort=[("updated_at", -1)],
+        )
+    except Exception:
+        return False
+    return bool(row)
+
+
 def cancel_match_search(
     user_id: str,
     *,
@@ -433,6 +467,7 @@ def _bounded_diagnostics(value: Any) -> dict[str, Any]:
         "candidate_count_after_retrieval_filter", "candidate_count_after_filter",
         "qualified_exact_count", "semantic_trigger_threshold",
         "semantic_candidate_count_before_filter",
+        "activity_evidence_candidate_count", "qualified_activity_evidence_count",
     ):
         try:
             result[key] = max(0, min(int(value.get(key, 0) or 0), 100))
