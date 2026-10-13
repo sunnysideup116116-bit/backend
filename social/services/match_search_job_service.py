@@ -291,10 +291,13 @@ def exploratory_consent_recorded(
 ) -> bool:
     """True only when this owner was just asked for exploratory consent.
 
-    The consent flag on a search is honored only after a same-topic activity
-    search ended with ``exploratory_consent_required``. A flag can therefore
-    never bootstrap itself, and an old or client-supplied boolean cannot
-    authorize an exploratory proposal on its own.
+    This is the "was asked" precondition, not the consent itself. The actual
+    consent is the user confirming the server-generated exploratory
+    confirmation card, which is the only path that can enqueue a search with
+    ``allow_exploratory`` (via the Pi executor). A flag therefore can never
+    bootstrap itself, and an old or client-supplied boolean cannot authorize
+    an exploratory proposal on its own; a refusal simply never produces a
+    confirmed card and leaves no executable consent.
     """
     safe_topic = str(topic or "").strip()[:80]
     if not safe_topic:

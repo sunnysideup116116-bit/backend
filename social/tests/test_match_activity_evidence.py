@@ -428,3 +428,64 @@ def test_consent_record_is_scoped_to_one_owner_and_topic(monkeypatch):
     assert jobs.exploratory_consent_recorded("owner", "爬山") is False  # other activity
     assert jobs.exploratory_consent_recorded("someone-else", "羽球") is False  # other owner
     assert jobs.exploratory_consent_recorded("owner", "羽球", now=now + 90000) is False  # expired
+
+
+# --------------------------------------------------------------------------
+# User-visible invitation copy: evidence reaches the initiator, role-safe
+# --------------------------------------------------------------------------
+
+@patch("routers.match.get_user_graph_memories", return_value=[])
+def test_initiator_copy_mentions_prefers_evidence_without_consent_claim(_graph):
+    from routers.match import build_friend_intro_v4
+
+    intro = build_friend_intro_v4(
+        {"user_id": "owner", "current_context": "最近想找人打羽球"},
+        {"user_id": "candidate"},
+        0.0, refine=False, search_context=TOPIC_CONTEXT,
+        activity_evidence=PREFERS_EVIDENCE,
+    )
+    initiator = intro["initiator_preview"]["viewer_text"]
+    receiver = intro["receiver_invitation"]["viewer_text"]
+    assert "對方明確提過喜歡羽球" in initiator
+    assert "是否願意同行仍待確認" in initiator
+    for overclaim in ("對方已同意", "對方已經同意", "對方會打羽球", "擅長"):
+        assert overclaim not in initiator
+    # Role isolation: the receiver's card never claims their own evidence.
+    assert "對方明確提過喜歡羽球" not in receiver
+    assert "有位朋友" in receiver and "你願意先認識對方嗎" in receiver
+
+
+@patch("routers.match.get_user_graph_memories", return_value=[])
+def test_initiator_copy_mentions_recent_activity_evidence(_graph):
+    from routers.match import build_friend_intro_v4
+
+    intro = build_friend_intro_v4(
+        {"user_id": "owner", "current_context": "最近想找人打羽球"},
+        {"user_id": "candidate"},
+        0.0, refine=False, search_context=TOPIC_CONTEXT,
+        activity_evidence=RECENT_EVIDENCE,
+    )
+    initiator = intro["initiator_preview"]["viewer_text"]
+    assert "近期活動" in initiator and "打羽球" in initiator
+    assert "是否願意同行仍待確認" in initiator
+    assert "有位朋友" not in initiator
+
+
+@patch("routers.match.get_user_graph_memories")
+def test_shared_reason_still_surfaces_activity_evidence(graph_memories):
+    from matchmaker_agent.concept_identity import canonicalize_concept
+
+    identity = canonicalize_concept("戶外")
+    row = {**identity.as_dict(), "display_label": identity.display_label,
+           "stance": "like", "label": identity.display_label}
+    graph_memories.return_value = [row]
+    _, items, top_reasons, reason = build_validated_match_explanation(
+        {"user_id": "owner"}, {"user_id": "candidate"}, 0.0,
+        search_context=TOPIC_CONTEXT, activity_evidence=PREFERS_EVIDENCE,
+    )
+    kinds = [item["kind"] for item in items]
+    assert "shared_graph" in kinds
+    assert "candidate_activity_interest" in kinds
+    assert "對方明確提過喜歡羽球" in reason
+    assert "是否願意同行仍待確認" in reason
+    assert any("對方明確提過喜歡羽球" == text for text in top_reasons)

@@ -1259,6 +1259,13 @@ def build_validated_match_explanation(
         if candidate_context:
             recommendation_reason += f"。對方公開近況：{candidate_context}。"
         recommendation_reason += "可以先從這些共同點聊起。"
+        if activity_reason_items:
+            reason_items.extend(activity_reason_items)
+            top_reasons = [*top_reasons, activity_reason_items[0]["text"]]
+            recommendation_reason += (
+                f"另外，{activity_reason_items[0]['text']}；"
+                "這只代表活動興趣，是否願意同行仍待確認。"
+            )
     elif activity_reason_items:
         # Candidate-side owner-grounded activity evidence: a direct activity
         # match may say the candidate has the interest/recent activity, but it
@@ -1545,6 +1552,7 @@ def _topic_friend_intro_fallback(
     requester_id: str = "",
     query_text: str = "",
     auto_invite: bool = False,
+    activity_evidence: list[dict] | None = None,
 ) -> dict:
     """Invite around a requested topic without attributing a skill to either user."""
     del tier
@@ -1555,6 +1563,7 @@ def _topic_friend_intro_fallback(
         requester_id=requester_id,
         query_text=query_text,
         auto_invite=auto_invite,
+        activity_evidence=activity_evidence,
     )
 
 
@@ -1635,6 +1644,7 @@ def _friend_intro_entry(
     requester_id: str = "",
     auto_invite: bool = False,
     requested_preference_verified: bool = False,
+    activity_evidence: list[dict] | None = None,
 ) -> dict:
     """Create one V4 projection from one recipient's point of view.
 
@@ -1686,6 +1696,7 @@ def _friend_intro_entry(
             requester_id=requester_id,
             query_text=search_context.get("query_text", ""),
             auto_invite=auto_invite,
+            activity_evidence=activity_evidence,
         )
         reason = (
             _refine_topic_friend_intro(
@@ -1769,6 +1780,7 @@ def _friend_intro_entry(
 def build_friend_intro_v4(
     initiator: dict, receiver: dict, vector_score: float, *, refine: bool = False,
     search_context: dict | None = None, auto_invite: bool = False,
+    activity_evidence: list[dict] | None = None,
 ) -> dict:
     """Create the two immutable V4 friend-introduction projections.
 
@@ -1790,6 +1802,7 @@ def build_friend_intro_v4(
             requester_id=str(initiator.get("user_id") or ""),
             auto_invite=auto_invite,
             requested_preference_verified=requested_preference_verified,
+            activity_evidence=activity_evidence,
         ),
         "receiver_invitation": _friend_intro_entry(
             receiver, initiator, tier, refine=refine,
@@ -1797,6 +1810,7 @@ def build_friend_intro_v4(
             requester_id=str(initiator.get("user_id") or ""),
             auto_invite=auto_invite,
             requested_preference_verified=requested_preference_verified,
+            activity_evidence=activity_evidence,
         ),
     }
     # Sparse snapshots can legitimately produce the same generic sentence for
@@ -2537,6 +2551,12 @@ def generate_matches_for_user(
         # itself.
         allow_exploratory = (
             str(bound_search_context.get("allow_exploratory") or "") == "1"
+            # Consent itself is the user-confirmed exploratory confirmation
+            # card; only the Pi confirmation executor can enqueue with
+            # source=agent_pi. The persisted record below is just the "was
+            # asked" precondition, so a direct API call or a stale flag can
+            # never authorize an exploratory match on its own.
+            and str(source or "").strip().lower() == "agent_pi"
             and exploratory_consent_recorded(
                 req.user_id, str(bound_search_context.get("invitation_topic") or ""),
             )
@@ -2747,6 +2767,10 @@ def generate_matches_for_user(
                 user_doc, candidate_doc, vector_scores.get(matched_id, 0), refine=True,
                 search_context=rationale_search_context,
                 auto_invite=bound_delivery_mode == INVITE_ON_MATCH,
+                activity_evidence=(
+                    activity_evidence_by_id.get(matched_id)
+                    if search_intent == "activity" else None
+                ),
             )
         ai_recommendation_reason = str(
             (friend_intro_v4.get("initiator_preview") or {}).get("viewer_text") or reason
