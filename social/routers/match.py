@@ -57,6 +57,7 @@ from services.match_search_job_service import (
     MatchSearchPipelineError,
     INVITE_ON_MATCH,
     cancel_match_search,
+    exploratory_consent_recorded,
     public_match_search_status,
     register_match_search_pipeline,
 )
@@ -179,6 +180,120 @@ def _candidate_profile_filter(
     if clauses:
         query["$and"] = clauses
     return query
+
+
+def _activity_evidence_candidates(
+    user_doc: dict, search_context: dict, excluded_users: set[str],
+) -> tuple[dict[str, list[dict]], list[dict]]:
+    """Read-only owner-grounded activity evidence for one topic search.
+
+    Only two trustworthy sources qualify a candidate:
+    1) exact Preference V2 lookup (canonical key or deterministic alias), and
+    2) validated typed recent activity (``context_signals.activity``) whose
+    Recent Situation is still active.
+
+    Free-text ``current_context`` is never treated as activity evidence, so a
+    negated or third-person sentence the typed extractor rejected cannot make
+    anyone eligible. The lookup is read-only and must never fail the search:
+    an exact-lookup outage simply degrades to recent-activity/vector recall.
+    """
+    topic = str(search_context.get("invitation_topic") or "").strip()[:80]
+    evidence: dict[str, list[dict]] = {}
+    if not topic:
+        return evidence, []
+    requester_id = str(user_doc.get("user_id") or "")
+    docs_by_id: dict[str, dict] = {}
+    ordered_ids: list[str] = []
+
+    def add(candidate_id: str, item: dict) -> None:
+        if not candidate_id or candidate_id in excluded_users:
+            return
+        evidence.setdefault(candidate_id, []).append(item)
+        if candidate_id not in ordered_ids:
+            ordered_ids.append(candidate_id)
+
+    try:
+        lookup = retrieve_preference_candidate_ids(
+            requester_id, topic, excluded_user_ids=excluded_users,
+            limit=MATCH_VECTOR_RETRIEVAL_LIMIT,
+        )
+        canonical_key = str(lookup.get("canonical_key") or "").strip()[:100]
+        for candidate_id in list(lookup.get("candidate_ids") or [])[:MATCH_VECTOR_RETRIEVAL_LIMIT]:
+            add(str(candidate_id or "").strip(), {
+                "kind": "candidate_prefers",
+                "concept_key": canonical_key,
+                "label": topic,
+            })
+    except PreferenceCandidateLookupError:
+        pass
+    except Exception:
+        pass
+
+    if len(topic) >= 2:
+        try:
+            activity_query = _candidate_profile_filter(
+                user_doc, excluded_users, require_active_context=True,
+            )
+            activity_query["context_signals.activity"] = {"$regex": re.escape(topic)}
+            activity_rows = list(
+                profiles_coll.find(activity_query, {"_id": 0}).limit(
+                    MATCH_VECTOR_RETRIEVAL_LIMIT,
+                )
+            )
+        except Exception:
+            activity_rows = []
+        for row in activity_rows:
+            candidate_id = str(row.get("user_id") or "")
+            activity = str((row.get("context_signals") or {}).get("activity") or "").strip()
+            if candidate_id and activity:
+                docs_by_id[candidate_id] = row
+                add(candidate_id, {
+                    "kind": "candidate_recent_activity",
+                    "activity": activity[:60],
+                    "label": topic,
+                })
+
+    if not ordered_ids:
+        return {}, []
+    # Deterministic priority: explicit durable preference before typed recent
+    # activity, then a stable id order.
+    ordered_ids.sort(key=lambda candidate_id: (
+        0 if any(item["kind"] == "candidate_prefers"
+                 for item in evidence[candidate_id]) else 1,
+        candidate_id,
+    ))
+    missing = [candidate_id for candidate_id in ordered_ids if candidate_id not in docs_by_id]
+    if missing:
+        try:
+            rows = list(profiles_coll.find(
+                _candidate_profile_filter(
+                    user_doc, excluded_users, candidate_ids=missing,
+                    require_active_context=False,
+                ),
+                {"_id": 0},
+            ).limit(len(missing)))
+        except Exception:
+            rows = []
+        for row in rows:
+            docs_by_id[str(row.get("user_id") or "")] = row
+    ordered_docs = [docs_by_id[candidate_id] for candidate_id in ordered_ids
+                    if candidate_id in docs_by_id]
+    return evidence, ordered_docs
+
+
+def activity_selection_scope(
+    qualified_ids: list[str], evidence_by_id: dict[str, list[dict]],
+    *, allow_exploratory: bool,
+) -> str:
+    """Deterministic activity-selection policy.
+
+    Evidence-backed candidates always win when they exist; vector-only recall
+    may only be used after the owner explicitly consented to an exploratory
+    introduction for this topic.
+    """
+    if any(evidence_by_id.get(candidate_id) for candidate_id in qualified_ids):
+        return "evidence"
+    return "exploratory" if allow_exploratory else "consent_required"
 
 
 def _usable_live_pair_index(indexes: dict) -> bool:
@@ -684,6 +799,7 @@ def candidate_qualification(
     allow_adjacent: bool = False,
     search_context: dict | None = None,
     preference_evidence: list[dict] | None = None,
+    activity_evidence: list[dict] | None = None,
 ) -> dict:
     """Require reciprocal safety plus a direct or concrete semantic link.
 
@@ -786,6 +902,13 @@ def candidate_qualification(
     invitation_topic = str(search_context.get("invitation_topic") or "").strip()
     if invitation_topic and float(vector_score or 0) >= vector_qualification_minimum():
         strong_reason_codes.append("requested_topic")
+    activity_evidence = [
+        item for item in list(activity_evidence or [])[:5]
+        if isinstance(item, dict)
+        and item.get("kind") in {"candidate_prefers", "candidate_recent_activity"}
+    ]
+    if search_intent == "activity" and invitation_topic and activity_evidence:
+        strong_reason_codes.append("candidate_activity_evidence")
     semantic_context_similarity = bool(
         target_context
         and candidate_context
@@ -806,7 +929,7 @@ def candidate_qualification(
         strong_reason_codes.append("semantic_context_similarity")
     direct_codes = {
         "shared_activity", "shared_persistent_preference", "shared_value",
-        "requested_preference",
+        "requested_preference", "candidate_activity_evidence",
     }
     level = (
         "direct"
@@ -827,8 +950,19 @@ def candidate_qualification(
             if semantic_preference_evidence and preference_topic else "",
         ], item_limit=3, char_limit=90,
     )
+    activity_evidence_texts = []
+    for item in activity_evidence:
+        if item.get("kind") == "candidate_prefers":
+            label = _short_text(item.get("label"), 40)
+            if label:
+                activity_evidence_texts.append(f"對方明確提過喜歡{label}")
+        elif item.get("kind") == "candidate_recent_activity":
+            activity = _short_text(item.get("activity"), 40)
+            if activity:
+                activity_evidence_texts.append(f"對方近期活動：{activity}")
     candidate_evidence = _short_list(
         [
+            *activity_evidence_texts,
             candidate.get("current_context"), candidate_activity,
             "對方有一項本人保存、與本次主題語意相關的偏好"
             if semantic_preference_evidence else "",
@@ -842,6 +976,7 @@ def candidate_qualification(
             f"對方有明確偏好：{preference_topic}" if candidate_has_requested_preference else "",
             "偏好方向相關（不等同於共同偏好）"
             if semantic_preference_evidence else "",
+            f"對方有「{invitation_topic}」活動證據" if activity_evidence and invitation_topic else "",
             f"本次指定主題：{invitation_topic}" if "requested_topic" in strong_reason_codes else "",
             "近期情境相近" if "semantic_context_similarity" in strong_reason_codes else "",
         ],
@@ -856,6 +991,7 @@ def candidate_qualification(
         "requested_preference_matched": candidate_has_requested_preference,
         "semantic_related_preference_matched": bool(semantic_preference_evidence),
         "preference_retrieval_evidence": semantic_preference_evidence,
+        "activity_evidence": activity_evidence,
         "strong_reason_codes": strong_reason_codes,
         # This is the shared candidate/write contract.  It deliberately
         # contains owner-provided evidence only; vector recall alone yields
@@ -871,6 +1007,11 @@ def candidate_qualification(
                 *(
                     ["語意相關偏好不等同於相同或共同偏好。"]
                     if semantic_preference_evidence else []
+                ),
+                *(
+                    [f"「{invitation_topic}」的偏好或近期活動紀錄只代表活動興趣，"
+                     "不代表擅長、願意或已同意這次同行。"]
+                    if activity_evidence and invitation_topic else []
                 ),
                 *(
                     [f"對方是否具備「{invitation_topic}」技能或已有出席安排，仍待本人確認。"]
@@ -955,6 +1096,7 @@ def build_validated_match_explanation(
     vector_score: float,
     *,
     search_context: dict | None = None,
+    activity_evidence: list[dict] | None = None,
 ):
     """Build user-visible scores and reasons only from owner-bound facts."""
     from matchmaker_agent.concept_identity import stored_concept_identity, verified_legacy_identity
@@ -1077,6 +1219,33 @@ def build_validated_match_explanation(
     }
     shared_reasons = [item["text"] for item in reason_items if item.get("kind") in shared_kinds]
     candidate_context = str(candidate.get("current_context") or "").strip()
+    activity_reason_items = []
+    for item in list(activity_evidence or [])[:2]:
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") == "candidate_prefers":
+            label = _short_text(item.get("label"), 40)
+            concept_key = str(item.get("concept_key") or "").strip()[:100]
+            if not label:
+                continue
+            activity_reason_items.append({
+                "kind": "candidate_activity_interest",
+                "text": f"對方明確提過喜歡{label}",
+                "target_evidence_ids": ["search_context:invitation_topic"],
+                "candidate_evidence_ids": (
+                    [f"graph:{candidate_id}:{concept_key}"] if concept_key else []
+                ),
+            })
+        elif item.get("kind") == "candidate_recent_activity":
+            activity = _short_text(item.get("activity"), 40)
+            if not activity:
+                continue
+            activity_reason_items.append({
+                "kind": "candidate_recent_activity",
+                "text": f"對方近期活動：{activity}",
+                "target_evidence_ids": ["search_context:invitation_topic"],
+                "candidate_evidence_ids": [f"profile:{candidate_id}:context_signals:activity"],
+            })
     if shared_reasons:
         tier = "grounded"
         reason_items.append({
@@ -1090,6 +1259,28 @@ def build_validated_match_explanation(
         if candidate_context:
             recommendation_reason += f"。對方公開近況：{candidate_context}。"
         recommendation_reason += "可以先從這些共同點聊起。"
+        if activity_reason_items:
+            reason_items.extend(activity_reason_items)
+            top_reasons = [*top_reasons, activity_reason_items[0]["text"]]
+            recommendation_reason += (
+                f"另外，{activity_reason_items[0]['text']}；"
+                "這只代表活動興趣，是否願意同行仍待確認。"
+            )
+    elif activity_reason_items:
+        # Candidate-side owner-grounded activity evidence: a direct activity
+        # match may say the candidate has the interest/recent activity, but it
+        # must never claim skill, willingness or confirmed attendance.
+        tier = "grounded"
+        reason_items.extend(activity_reason_items)
+        reason_items.append({
+            "kind": "activity_willingness_unconfirmed",
+            "text": "以上只代表對方有這項活動的偏好或近期活動紀錄，不代表擅長、願意或已同意同行。",
+            "target_evidence_ids": [],
+            "candidate_evidence_ids": [],
+        })
+        top_reasons = [item["text"] for item in activity_reason_items][:2]
+        recommendation_reason = "有活動偏好證據：" + "；".join(top_reasons)
+        recommendation_reason += "。對方是否擅長、願意或已同意同行仍待本人確認。"
     elif invitation_topic:
         tier = "exploratory"
         reason_items.append({
@@ -1361,6 +1552,7 @@ def _topic_friend_intro_fallback(
     requester_id: str = "",
     query_text: str = "",
     auto_invite: bool = False,
+    activity_evidence: list[dict] | None = None,
 ) -> dict:
     """Invite around a requested topic without attributing a skill to either user."""
     del tier
@@ -1371,6 +1563,7 @@ def _topic_friend_intro_fallback(
         requester_id=requester_id,
         query_text=query_text,
         auto_invite=auto_invite,
+        activity_evidence=activity_evidence,
     )
 
 
@@ -1451,6 +1644,7 @@ def _friend_intro_entry(
     requester_id: str = "",
     auto_invite: bool = False,
     requested_preference_verified: bool = False,
+    activity_evidence: list[dict] | None = None,
 ) -> dict:
     """Create one V4 projection from one recipient's point of view.
 
@@ -1502,6 +1696,7 @@ def _friend_intro_entry(
             requester_id=requester_id,
             query_text=search_context.get("query_text", ""),
             auto_invite=auto_invite,
+            activity_evidence=activity_evidence,
         )
         reason = (
             _refine_topic_friend_intro(
@@ -1585,6 +1780,7 @@ def _friend_intro_entry(
 def build_friend_intro_v4(
     initiator: dict, receiver: dict, vector_score: float, *, refine: bool = False,
     search_context: dict | None = None, auto_invite: bool = False,
+    activity_evidence: list[dict] | None = None,
 ) -> dict:
     """Create the two immutable V4 friend-introduction projections.
 
@@ -1606,6 +1802,7 @@ def build_friend_intro_v4(
             requester_id=str(initiator.get("user_id") or ""),
             auto_invite=auto_invite,
             requested_preference_verified=requested_preference_verified,
+            activity_evidence=activity_evidence,
         ),
         "receiver_invitation": _friend_intro_entry(
             receiver, initiator, tier, refine=refine,
@@ -1613,6 +1810,7 @@ def build_friend_intro_v4(
             requester_id=str(initiator.get("user_id") or ""),
             auto_invite=auto_invite,
             requested_preference_verified=requested_preference_verified,
+            activity_evidence=activity_evidence,
         ),
     }
     # Sparse snapshots can legitimately produce the same generic sentence for
@@ -1938,7 +2136,8 @@ def generate_matches_for_user(
     top_5_candidates = []
     seen_candidates = set(excluded_users)
     preference_evidence_by_id: dict[str, list[dict]] = {}
-    candidate_stances_by_id: dict[str, dict[str, set[str]]] = {}
+    activity_evidence_by_id: dict[str, list[dict]] = {}
+    candidate_stances_by_id: dict[str, set[str]] = {}
     prequalified_by_id: dict[str, dict] = {}
     target_stances: dict[str, set[str]] | None = None
     semantic_search_completed = False
@@ -2214,6 +2413,7 @@ def generate_matches_for_user(
             print(f"[TIMING][V1 /api/match] Mongo vector search failed after {time.perf_counter() - step_start:.3f}s")
             raise MatchSearchPipelineError("vector_search_unavailable", "vector_search")
         diagnostics["candidate_count_before_filter"] = len(raw_candidates)
+        vector_candidates: list[tuple[float, dict]] = []
         for c in raw_candidates:
             candidate_id = c.get("user_id")
             if (
@@ -2224,9 +2424,41 @@ def generate_matches_for_user(
                 continue
             seen_candidates.add(candidate_id)
             score = c.get("score", 0.0)
-            top_5_candidates.append((score, c))
-            if len(top_5_candidates) >= MATCH_CANDIDATE_POOL_SIZE:
+            vector_candidates.append((score, c))
+            if len(vector_candidates) >= MATCH_CANDIDATE_POOL_SIZE:
                 break
+        if search_intent == "activity":
+            activity_evidence_by_id, evidence_docs = _activity_evidence_candidates(
+                user_doc, bound_search_context, excluded_users,
+            )
+            diagnostics["activity_evidence_candidate_count"] = len(activity_evidence_by_id)
+            vector_by_id = {
+                str(candidate.get("user_id") or ""): score
+                for score, candidate in vector_candidates
+            }
+            evidence_entries: list[tuple[float, dict]] = []
+            for candidate in evidence_docs:
+                candidate_id = str(candidate.get("user_id") or "")
+                if (
+                    not candidate_id
+                    or candidate_id in excluded_users
+                    or participant_pair_key(req.user_id, candidate_id) in excluded_pair_keys
+                ):
+                    continue
+                evidence_entries.append((vector_by_id.get(candidate_id, 0.0), candidate))
+            if evidence_entries:
+                # Deterministic priority: owner-grounded activity evidence
+                # enters the pool first; vector-only recall only fills what is
+                # left and can never displace an evidence candidate.
+                remaining = [
+                    (score, candidate) for score, candidate in vector_candidates
+                    if str(candidate.get("user_id") or "") not in activity_evidence_by_id
+                ]
+                top_5_candidates = (evidence_entries + remaining)[:MATCH_CANDIDATE_POOL_SIZE]
+            else:
+                top_5_candidates = vector_candidates
+        else:
+            top_5_candidates = vector_candidates
 
     diagnostics["candidate_pool_count"] = len(top_5_candidates)
     if not top_5_candidates:
@@ -2294,6 +2526,7 @@ def generate_matches_for_user(
             vector_score=vector_scores.get(candidate_id, 0),
             search_context=req.search_context,
             preference_evidence=preference_evidence_by_id.get(candidate_id),
+            activity_evidence=activity_evidence_by_id.get(candidate_id),
         )
     _apply_qualification_diagnostics(diagnostics, qualification_by_id)
     qualified_candidates = [
@@ -2309,6 +2542,53 @@ def generate_matches_for_user(
         and participant_pair_key(req.user_id, candidate["user_id"]) not in excluded_pair_keys
     ]
     diagnostics["candidate_count_after_filter"] = len(qualified_candidates)
+    if search_intent == "activity":
+        # Deterministic activity policy: owner-grounded evidence candidates
+        # always win the selection slot when they exist. Vector-only recall may
+        # only proceed after the owner consented to an exploratory
+        # introduction for this same topic. The persisted consent record is
+        # re-checked here so a forged/client-supplied flag can never authorize
+        # itself.
+        allow_exploratory = (
+            str(bound_search_context.get("allow_exploratory") or "") == "1"
+            # Consent itself is the user-confirmed exploratory confirmation
+            # card; only the Pi confirmation executor can enqueue with
+            # source=agent_pi. The persisted record below is just the "was
+            # asked" precondition, so a direct API call or a stale flag can
+            # never authorize an exploratory match on its own.
+            and str(source or "").strip().lower() == "agent_pi"
+            and exploratory_consent_recorded(
+                req.user_id, str(bound_search_context.get("invitation_topic") or ""),
+            )
+        )
+        scope = activity_selection_scope(
+            [str(candidate.get("user_id") or "") for candidate in qualified_candidates],
+            activity_evidence_by_id,
+            allow_exploratory=allow_exploratory,
+        )
+        if scope == "evidence":
+            qualified_candidates = [
+                candidate for candidate in qualified_candidates
+                if activity_evidence_by_id.get(str(candidate.get("user_id") or ""))
+            ]
+            diagnostics["qualified_activity_evidence_count"] = len(qualified_candidates)
+        elif scope == "consent_required":
+            diagnostics["qualified_activity_evidence_count"] = 0
+            return {
+                "status": "no_suitable_candidate", "matches": [],
+                "reason_code": "exploratory_consent_required",
+                "search_context": dict(req.search_context or {}),
+                "diagnostics": diagnostics,
+                "debug_info": [{
+                    "user_id": candidate.get("user_id"),
+                    "score": round(float(vector_scores.get(candidate.get("user_id"), 0) or 0) * 100, 2),
+                    "eligible": True,
+                    "reason_codes": qualification_by_id.get(candidate.get("user_id"), {}).get("strong_reason_codes", []),
+                    "match_basis": qualification_by_id.get(candidate.get("user_id"), {}).get("match_basis", {}),
+                } for candidate in qualified_candidates],
+            }
+        else:
+            diagnostics["qualified_activity_evidence_count"] = 0
     if search_intent == "preference" and semantic_mode != "active":
         diagnostics["qualified_exact_count"] = len(qualified_candidates)
         diagnostics["semantic_fallback_eligible"] = len(qualified_candidates) < qualified_exact_trigger_threshold()
@@ -2460,6 +2740,10 @@ def generate_matches_for_user(
         score_breakdown, reason_items, top_reasons, reason = build_validated_match_explanation(
             user_doc, candidate_doc, vector_scores.get(matched_id, 0),
             search_context=rationale_search_context,
+            activity_evidence=(
+                activity_evidence_by_id.get(matched_id)
+                if search_intent == "activity" else None
+            ),
         )
         receiver_breakdown, receiver_items, _, receiver_reason = build_validated_match_explanation(
             candidate_doc, user_doc, vector_scores.get(matched_id, 0),
@@ -2483,6 +2767,10 @@ def generate_matches_for_user(
                 user_doc, candidate_doc, vector_scores.get(matched_id, 0), refine=True,
                 search_context=rationale_search_context,
                 auto_invite=bound_delivery_mode == INVITE_ON_MATCH,
+                activity_evidence=(
+                    activity_evidence_by_id.get(matched_id)
+                    if search_intent == "activity" else None
+                ),
             )
         ai_recommendation_reason = str(
             (friend_intro_v4.get("initiator_preview") or {}).get("viewer_text") or reason

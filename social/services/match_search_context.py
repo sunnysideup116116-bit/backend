@@ -33,6 +33,7 @@ _SEARCH_CONTEXT_KEYS = (
     "search_intent",
     "normalized_topic",
     "canonical_preference_key",
+    "allow_exploratory",
 )
 _SEARCH_INTENTS = frozenset({"activity", "recent_context", "preference", "generic"})
 
@@ -119,6 +120,7 @@ def safe_search_context(value: Any) -> dict[str, str]:
         "search_intent": 24,
         "normalized_topic": MAX_INVITATION_TOPIC_CHARS,
         "canonical_preference_key": 52,
+        "allow_exploratory": 5,
     }
     result: dict[str, str] = {}
     for key in _SEARCH_CONTEXT_KEYS:
@@ -134,6 +136,16 @@ def safe_search_context(value: Any) -> dict[str, str]:
         result.pop("normalized_topic", None)
     elif result.get("invitation_topic"):
         result["normalized_topic"] = result["invitation_topic"]
+    # Exploratory consent belongs only to an activity search that still names
+    # its topic; a preference or generic request can never carry the flag.
+    if (
+        intent != "activity"
+        or not result.get("invitation_topic")
+        or result.get("allow_exploratory", "").strip().lower() not in {"1", "true", "yes"}
+    ):
+        result.pop("allow_exploratory", None)
+    else:
+        result["allow_exploratory"] = "1"
     return result
 
 

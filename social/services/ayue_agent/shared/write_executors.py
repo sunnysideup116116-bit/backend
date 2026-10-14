@@ -1065,6 +1065,25 @@ def prepare_write_confirmation(
                 })
             else:
                 search_context = {"search_intent": "recent_context"}
+        if (
+            isinstance(semantic_request, dict)
+            and str(semantic_request.get("kind") or "") == "activity"
+            and bool(semantic_request.get("exploratory"))
+            and str(search_context.get("invitation_topic") or "").strip()
+        ):
+            # Exploratory consent is honored only after the server itself
+            # asked this owner for it on the same activity topic. A model or
+            # client supplied boolean can never bootstrap the flag, and it is
+            # dropped silently otherwise so the normal evidence-first search
+            # (and its own consent question) still runs.
+            from services.match_search_job_service import exploratory_consent_recorded
+            exploratory_topic = str(search_context.get("invitation_topic") or "").strip()
+            if exploratory_consent_recorded(
+                str(getattr(ctx, "user_id", "") or ""), exploratory_topic,
+            ):
+                search_context = safe_search_context({
+                    **search_context, "allow_exploratory": "1",
+                })
         data = {"search_context": search_context} if search_context else {}
         topic = str(search_context.get("invitation_topic") or "").strip()
         preference_topic = str(search_context.get("normalized_topic") or "").strip() \
@@ -1098,15 +1117,26 @@ def prepare_write_confirmation(
                 )
             )
             skill_note = f"不一定已經會{topic}。" if skill_requested else ""
-            preview = (
-                f"我會依「{topic}」這個邀請需求，找一位可以替你詢問的人選；"
-                "找到後就替你問問願不願意認識，不會先假設對方也喜歡這項活動。"
-                f"{skill_note}要我開始找並送出邀請嗎？"
-            ) if invitation_evidence else (
-                f"我會依你想找人一起{topic}的需求搜尋，先給你看人選與推薦說明。"
-                f"不會先假設對方也喜歡或擅長這項活動。{skill_note}"
-                "你看完再決定是否送出邀請；現在只開始搜尋，可以嗎？"
-            )
+            if search_context.get("allow_exploratory") == "1":
+                invite_note = (
+                    "找到後就替你問問對方願不願意認識；" if invitation_evidence else ""
+                )
+                preview = (
+                    f"這次沒有找到有「{topic}」相關證據的人選。我會改用探索性介紹："
+                    "只推薦語意相近、但對方是否喜歡、擅長或願意同行都還需要確認的人選；"
+                    "不會假設對方已經有興趣。"
+                    f"{invite_note}要開始嗎？"
+                )
+            else:
+                preview = (
+                    f"我會依「{topic}」這個邀請需求，找一位可以替你詢問的人選；"
+                    "找到後就替你問問願不願意認識，不會先假設對方也喜歡這項活動。"
+                    f"{skill_note}要我開始找並送出邀請嗎？"
+                ) if invitation_evidence else (
+                    f"我會依你想找人一起{topic}的需求搜尋，先給你看人選與推薦說明。"
+                    f"不會先假設對方也喜歡或擅長這項活動。{skill_note}"
+                    "你看完再決定是否送出邀請；現在只開始搜尋，可以嗎？"
+                )
         elif isinstance(getattr(turn, "active_proposal", None), dict) and (
             getattr(turn, "active_proposal", {}).get("stage") == "waiting_other"
         ):

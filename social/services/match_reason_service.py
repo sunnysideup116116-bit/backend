@@ -219,13 +219,15 @@ def topic_friend_intro_fallback(
     requester_id: str = "",
     query_text: str = "",
     auto_invite: bool = False,
+    activity_evidence: list[dict] | None = None,
 ) -> dict:
     """Role-specific copy for a one-search topic request.
 
     The topic belongs to the requester.  A receiver must therefore see it as
     another person's wish, while the requester sees it as their own request;
     neither direction claims that the other person has the skill or has agreed
-    to attend.
+    to attend.  Verified candidate activity evidence is disclosed only to the
+    requester, and always as an interest, never as willingness.
     """
     safe_topic = short_public_text(topic, 80)
     # ``invitation_topic`` is intentionally a compact label (for example,
@@ -246,11 +248,36 @@ def topic_friend_intro_fallback(
             activity_phrase = f"一起{activity_phrase}"
     is_requester = str(viewer.get("user_id") or "") == str(requester_id or "")
     other_trait = public_personality_phrase(other)
-    basis = (
-        f"推薦說明：對方{other_trait}；可先了解相處節奏，活動意願仍待確認。"
-        if other_trait else
-        "推薦說明：這次是探索性介紹，目前沒有足夠共同活動依據，仍需先確認彼此意願。"
-    )
+    other_id = str(other.get("user_id") or "")
+    evidence_line = ""
+    evidence_keys: list[str] = []
+    if is_requester:
+        for item in list(activity_evidence or [])[:2]:
+            if not isinstance(item, dict):
+                continue
+            if item.get("kind") == "candidate_prefers":
+                label = short_public_text(item.get("label"), 40)
+                concept_key = short_public_text(item.get("concept_key"), 100)
+                if label and concept_key:
+                    evidence_line = f"我看到對方明確提過喜歡{label}"
+                    evidence_keys.append(f"graph:{other_id}:{concept_key}")
+                    break
+            if item.get("kind") == "candidate_recent_activity":
+                activity = short_public_text(item.get("activity"), 40)
+                if activity:
+                    evidence_line = f"我看到對方的近期活動和{activity}相關"
+                    evidence_keys.append(f"profile:{other_id}:context_signals:activity")
+                    break
+    if evidence_line:
+        basis = f"推薦說明：{evidence_line}；這只代表活動興趣，是否願意同行仍待確認。"
+        if other_trait:
+            basis += f"對方{other_trait}。"
+    else:
+        basis = (
+            f"推薦說明：對方{other_trait}；可先了解相處節奏，活動意願仍待確認。"
+            if other_trait else
+            "推薦說明：這次是探索性介紹，目前沒有足夠共同活動依據，仍需先確認彼此意願。"
+        )
     if is_requester:
         first = f"你這次想找人{activity_phrase}；我找到一位可以替你詢問的人選。"
         text = first + (
@@ -270,11 +297,9 @@ def topic_friend_intro_fallback(
         "recommendation_basis": basis,
         "scenario_bridge": activity_phrase,
         "personality_dynamic": "",
-        "conversation_starter": f"配對成功後，可以先問對方想怎麼安排{activity_phrase}。",
+        "conversation_starter": f"配對成功後，可以直接先問對方想怎麼安排{activity_phrase}。",
         "accepted_opening": f"好消息，{COUNTERPARTY_PLACEHOLDER}也願意認識你！可以先聊聊{activity_phrase}的想法，再決定要不要同行。",
-        "used_evidence_keys": [
-            "search_context.invitation_topic",
-        ],
+        "used_evidence_keys": ["search_context.invitation_topic", *evidence_keys],
     }
 
 
