@@ -170,6 +170,28 @@ def test_destructive_tools_are_local_operator_only_even_with_valid_admin_token(m
     assert all(not spy.mock_calls for spy in spies)
 
 
+@pytest.mark.parametrize("header_name", [
+    "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Forwarded",
+    "CF-Connecting-IP", "CF-Ray",
+])
+def test_proxy_injected_headers_can_never_masquerade_as_local_operator(monkeypatch, header_name):
+    """Worst case: loopback peer + localhost Host + valid token + confirm header.
+
+    A tunnel/proxy that ever preserved spoofed values would still be rejected
+    because any proxy-injected header disqualifies the request from being local.
+    """
+    monkeypatch.setattr(access.config, "DEMO_DESTRUCTIVE_TOOLS_ENABLED", True)
+    monkeypatch.setenv("AYUE_DEMO_ADMIN_TOKEN", "d" * 32)
+    messages = MagicMock()
+    monkeypatch.setattr(demo, "messages_coll", messages)
+    response = asyncio.run(_request(_app(), "POST", "/api/demo/reset_db_state?confirm=true",
+                                    client_ip="127.0.0.1", host="localhost",
+                                    headers={header_name: "127.0.0.1", "X-Ayue-Admin-Token": "d" * 32}))
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "local_operator_required"
+    messages.delete_many.assert_not_called()
+
+
 @pytest.mark.parametrize("path,payload", [
     ("/api/demo/clear_graph", None),
     ("/api/demo/clear_all", None),

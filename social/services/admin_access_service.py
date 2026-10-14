@@ -10,8 +10,22 @@ Three independent authorities:
   ``AYUE_DEMO_ADMIN_TOKEN``). A feature flag alone never grants permission to
   erase data.
 * ``require_local_operator`` -- destructive maintenance is additionally
-  restricted to a true local operator connection; the public tunnel terminates
-  on loopback, so both the client address and the Host header must be local.
+  restricted to a true local operator connection. Trust boundary (verified
+  against the live deployment on 2026-10-14):
+
+  * ``request.client.host`` is the ASGI client address. Uvicorn runs with its
+    default proxy-header support, but cloudflared overwrites X-Forwarded-For
+    with the Cloudflare-verified client IP, so tunnel traffic always carries
+    the real public address (a spoofed ``X-Forwarded-For: 127.0.0.1`` arrives
+    as e.g. ``140.117.71.158:0`` in the access log). Only genuine local
+    sockets present a loopback client.
+  * The Host check is enforced one layer earlier: the Cloudflare edge answers
+    spoofed Host headers (``Host: localhost`` / ``127.0.0.1``) with its own 403
+    before any tunnel delivery.
+  * As belt-and-braces, any request carrying a proxy/tunnel-injected header
+    (CF-Connecting-IP, CF-Ray, X-Forwarded-*, X-Real-IP, Forwarded) is never
+    treated as local, even if a future proxy preserved a spoofed client
+    address or Host header.
 """
 
 import hashlib
@@ -36,9 +50,23 @@ def _constant_time_token_match(expected: str, supplied: str) -> bool:
     )
 
 
+_PROXY_INJECTED_HEADERS = (
+    "cf-connecting-ip",
+    "cf-ray",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-forwarded-port",
+    "x-real-ip",
+    "forwarded",
+)
+
+
 def _local_origin(request: Request) -> bool:
     """True only for a loopback client that did not arrive through the tunnel."""
     if request.client is None:
+        return False
+    if any(request.headers.get(name) for name in _PROXY_INJECTED_HEADERS):
         return False
     try:
         client_local = ipaddress.ip_address(request.client.host).is_loopback
@@ -71,8 +99,10 @@ def require_demo_admin(request: Request) -> None:
 def require_local_operator(request: Request) -> None:
     """Destructive maintenance must never be reachable through the public tunnel.
 
-    The tunnel terminates on loopback, so a client-IP check alone is not enough:
-    a public Host header is rejected even when a valid admin token is present.
+    Neither the loopback client address nor a local Host header can be chosen by
+    a public caller: cloudflared always presents the CF-verified client IP and
+    the Cloudflare edge rejects spoofed Host headers before delivery. Requests
+    that carry proxy/tunnel headers are rejected outright as well.
     """
     if not _local_origin(request):
         raise HTTPException(status_code=403, detail={"code": "local_operator_required"})
