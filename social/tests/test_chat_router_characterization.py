@@ -46,9 +46,9 @@ EXPECTED_ROUTES = {
     ("POST", "/api/ai_rooms"): ("CreateAiRoomRequest", ()),
     ("POST", "/api/chat"): ("ChatRequest", ()),
     ("POST", "/api/chat/reset"): ("ResetRequest", ()),
-    ("POST", "/api/demo/reset_db_state"): (None, ()),
-    ("POST", "/api/demo/clear_graph"): (None, ()),
-    ("POST", "/api/demo/clear_all"): (None, ()),
+    ("POST", "/api/demo/reset_db_state"): (None, ("confirm",)),
+    ("POST", "/api/demo/clear_graph"): (None, ("confirm",)),
+    ("POST", "/api/demo/clear_all"): (None, ("confirm",)),
     ("POST", "/api/demo/events/discover/start"): (None, ()),
     ("POST", "/api/demo/events/invitations/scan"): (
         None, ("confirm", "max_proposals"),

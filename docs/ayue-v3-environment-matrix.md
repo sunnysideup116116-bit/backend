@@ -19,7 +19,8 @@ The table records variable names and public defaults only. Secret values from `s
 |---|---:|---|---|---|
 | `MONGO_URI` | yes | none | `social.env`, existing Server env | Mongo ping |
 | `MONGO_DB_NAME` | yes | `profiling_db` | `social.env`, existing Server env, example | Non-empty and Mongo database selectable |
-| `DEMO_DESTRUCTIVE_TOOLS_ENABLED` | no | `off` | `social.env`, example | Boolean; must remain off outside disposable demo data |
+| `DEMO_DESTRUCTIVE_TOOLS_ENABLED` | no | `off` | `social.env`, example | Boolean; must remain off outside disposable demo data. Destructive demo routes additionally require `AYUE_DEMO_ADMIN_TOKEN`, a loopback client and Host, and `confirm=true` |
+| `EVENT_OPS_ADMIN_TOKEN` | no | none | `social.env`, operator only | Event discovery / scan / maintenance token (`x-ayue-event-ops-token`); independent of `DEMO_DESTRUCTIVE_TOOLS_ENABLED`; grants no demo/reset/seed route; never logged |
 | `RISK_SERVICE_URL` | yes for pair chat | `http://127.0.0.1:8001` | existing Server env, example | HTTP endpoint reachable |
 | `RISK_TIMEOUT_SEC` | yes for pair chat | `20` | existing Server env, example | Number greater than or equal to 20 |
 | `OLLAMA_HOST` | yes | `https://ollama.com` | `social.env`, existing Server env, example | HTTPS/HTTP endpoint reachable |

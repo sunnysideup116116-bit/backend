@@ -69,29 +69,152 @@ def test_feature_flag_is_not_admin_authority(monkeypatch, headers):
     messages.delete_many.assert_not_called()
 
 
+EVENT_OPS_HEADER = {"X-Ayue-Event-Ops-Token": "e" * 32}
+DEMO_ADMIN_HEADER = {"X-Ayue-Admin-Token": "d" * 32}
+
+
 @pytest.mark.parametrize("path,payload,operation", [
     ("/api/match/events/discover", {"region": "test"}, "enqueue_event_discovery_job"),
     ("/api/match/events/relevance/rebuild", None, "rebuild_all_event_relevance"),
     ("/api/match/events/opportunities/scan", {}, "scan_event_opportunities"),
     ("/api/match/events/lifecycle/run", None, "run_event_lifecycle_once"),
 ])
-def test_global_event_maintenance_requires_admin_before_job_or_graph_work(monkeypatch, path, payload, operation):
+@pytest.mark.parametrize("headers", [
+    {},
+    DEMO_ADMIN_HEADER,
+    {"X-Ayue-Event-Ops-Token": "wrong-token"},
+])
+def test_event_maintenance_requires_its_own_token_before_job_or_graph_work(monkeypatch, path, payload, operation, headers):
     monkeypatch.setattr(access.config, "DEMO_DESTRUCTIVE_TOOLS_ENABLED", True)
-    monkeypatch.setenv("AYUE_DEMO_ADMIN_TOKEN", "t" * 32)
+    monkeypatch.setenv("AYUE_DEMO_ADMIN_TOKEN", "d" * 32)
+    monkeypatch.setenv("EVENT_OPS_ADMIN_TOKEN", "e" * 32)
     work = MagicMock()
     monkeypatch.setattr(match, operation, work)
-    response = asyncio.run(_request(_app(), "POST", path, json=payload))
+    response = asyncio.run(_request(_app(), "POST", path, json=payload, headers=headers))
     assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "event_ops_admin_required"
     work.assert_not_called()
 
 
-def test_enabled_authenticated_maintenance_can_run_against_fake_store(monkeypatch):
+@pytest.mark.parametrize("path,payload,operation,result", [
+    ("/api/match/events/discover", {"region": "test"}, "enqueue_event_discovery_job", {"status": "queued"}),
+    ("/api/match/events/relevance/rebuild", None, "rebuild_all_event_relevance", {"status": "success"}),
+    ("/api/match/events/opportunities/scan", {}, "scan_event_opportunities", {"status": "success", "created_count": 0}),
+    ("/api/match/events/lifecycle/run", None, "run_event_lifecycle_once", {"status": "success"}),
+])
+def test_event_ops_token_works_without_destructive_flag_and_with_any_host(
+    monkeypatch, path, payload, operation, result,
+):
+    monkeypatch.setattr(access.config, "DEMO_DESTRUCTIVE_TOOLS_ENABLED", False)
+    monkeypatch.setenv("EVENT_OPS_ADMIN_TOKEN", "e" * 32)
+    work = MagicMock(return_value=result)
+    monkeypatch.setattr(match, operation, work)
+    response = asyncio.run(_request(_app(), "POST", path, json=payload, headers=EVENT_OPS_HEADER))
+    assert response.status_code == 200
+    work.assert_called_once()
+
+
+@pytest.mark.parametrize("path,payload", [
+    ("/api/demo/clear_graph?confirm=true", None),
+    ("/api/demo/clear_all?confirm=true", None),
+    ("/api/demo/reset_db_state?confirm=true", None),
+    ("/api/demo/events/reset?confirm=true", None),
+    ("/api/demo/events/discover/start", None),
+    ("/api/demo/events/invitations/scan?confirm=true", None),
+    ("/api/seed", None),
+    ("/api/clear?confirm=true", {"user_id": "owner"}),
+])
+def test_event_ops_token_cannot_reach_demo_seed_or_reset_routes(monkeypatch, path, payload):
+    monkeypatch.setattr(access.config, "DEMO_DESTRUCTIVE_TOOLS_ENABLED", True)
+    monkeypatch.setenv("EVENT_OPS_ADMIN_TOKEN", "e" * 32)
+    monkeypatch.setenv("AYUE_DEMO_ADMIN_TOKEN", "d" * 32)
+    spies = []
+    for module, names in [(system, ("profiles_coll", "matches_coll", "messages_coll", "clear_all_demo_state")),
+                          (demo, ("profiles_coll", "matches_coll", "messages_coll", "clear_graph", "clear_all_demo_state",
+                                  "reset_event_inventory", "enqueue_event_discovery_job", "scan_event_opportunities"))]:
+        for name in names:
+            spy = MagicMock()
+            monkeypatch.setattr(module, name, spy)
+            spies.append(spy)
+    response = asyncio.run(_request(_app(), "POST", path, json=payload, client_ip="127.0.0.1",
+                                    host="localhost", headers=EVENT_OPS_HEADER))
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "demo_admin_required"
+    assert all(not spy.mock_calls for spy in spies)
+
+
+@pytest.mark.parametrize("path,payload", [
+    ("/api/demo/clear_graph?confirm=true", None),
+    ("/api/demo/clear_all?confirm=true", None),
+    ("/api/demo/reset_db_state?confirm=true", None),
+    ("/api/demo/events/reset?confirm=true", None),
+    ("/api/seed", None),
+    ("/api/clear?confirm=true", {"user_id": "owner"}),
+])
+def test_destructive_tools_are_local_operator_only_even_with_valid_admin_token(monkeypatch, path, payload):
+    monkeypatch.setattr(access.config, "DEMO_DESTRUCTIVE_TOOLS_ENABLED", True)
+    monkeypatch.setenv("AYUE_DEMO_ADMIN_TOKEN", "d" * 32)
+    spies = []
+    for module, names in [(system, ("profiles_coll", "matches_coll", "messages_coll", "clear_all_demo_state")),
+                          (demo, ("profiles_coll", "matches_coll", "messages_coll", "clear_graph", "clear_all_demo_state",
+                                  "reset_event_inventory"))]:
+        for name in names:
+            spy = MagicMock()
+            monkeypatch.setattr(module, name, spy)
+            spies.append(spy)
+    response = asyncio.run(_request(_app(), "POST", path, json=payload,
+                                    client_ip="203.0.113.10", host="service.misproject.us.ci",
+                                    headers=DEMO_ADMIN_HEADER))
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "local_operator_required"
+    assert all(not spy.mock_calls for spy in spies)
+
+
+@pytest.mark.parametrize("path,payload", [
+    ("/api/demo/clear_graph", None),
+    ("/api/demo/clear_all", None),
+    ("/api/demo/reset_db_state", None),
+    ("/api/clear", {"user_id": "owner"}),
+])
+def test_unconfirmed_destructive_tools_reject_before_work(monkeypatch, path, payload):
+    monkeypatch.setattr(access.config, "DEMO_DESTRUCTIVE_TOOLS_ENABLED", True)
+    monkeypatch.setenv("AYUE_DEMO_ADMIN_TOKEN", "d" * 32)
+    spies = []
+    for module, names in [(system, ("profiles_coll", "matches_coll", "messages_coll", "clear_all_demo_state")),
+                          (demo, ("profiles_coll", "matches_coll", "messages_coll", "clear_graph", "clear_all_demo_state"))]:
+        for name in names:
+            spy = MagicMock()
+            monkeypatch.setattr(module, name, spy)
+            spies.append(spy)
+    response = asyncio.run(_request(_app(), "POST", path, json=payload, client_ip="127.0.0.1",
+                                    host="localhost", headers=DEMO_ADMIN_HEADER))
+    assert response.status_code == 400
+    assert all(not spy.mock_calls for spy in spies)
+
+
+def test_admin_tokens_are_never_echoed_in_responses(monkeypatch):
+    monkeypatch.setattr(access.config, "DEMO_DESTRUCTIVE_TOOLS_ENABLED", True)
+    monkeypatch.setenv("EVENT_OPS_ADMIN_TOKEN", "e" * 32)
+    monkeypatch.setenv("AYUE_DEMO_ADMIN_TOKEN", "d" * 32)
+    for path, payload, headers in [
+        ("/api/match/events/opportunities/scan", {}, {"X-Ayue-Event-Ops-Token": "z" * 32}),
+        ("/api/demo/reset_db_state?confirm=true", None, {"X-Ayue-Admin-Token": "z" * 32}),
+    ]:
+        response = asyncio.run(_request(_app(), "POST", path, json=payload, headers=headers))
+        assert response.status_code == 403
+        assert "z" * 32 not in response.text
+        assert "e" * 32 not in response.text
+        assert "d" * 32 not in response.text
+
+
+def test_enabled_authenticated_local_maintenance_can_run_against_fake_store(monkeypatch):
     monkeypatch.setattr(access.config, "DEMO_DESTRUCTIVE_TOOLS_ENABLED", True)
     monkeypatch.setenv("AYUE_DEMO_ADMIN_TOKEN", "t" * 32)
     stores = [MagicMock() for _ in range(3)]
     for name, store in zip(("messages_coll", "matches_coll", "profiles_coll"), stores):
         monkeypatch.setattr(demo, name, store)
-    response = asyncio.run(_request(_app(), "POST", "/api/demo/reset_db_state",
+    response = asyncio.run(_request(_app(), "POST", "/api/demo/reset_db_state?confirm=true",
+                                    client_ip="127.0.0.1", host="localhost",
                                     headers={"X-Ayue-Admin-Token": "t" * 32}))
     assert response.status_code == 200
     stores[0].delete_many.assert_called_once()
