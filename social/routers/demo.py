@@ -15,10 +15,10 @@ from services.event_discovery_job_service import (
     enqueue_event_discovery_job, event_discovery_job_snapshot,
 )
 from services.event_opportunity_service import scan_event_opportunities
-from services.admin_access_service import require_demo_admin
+from services.admin_access_service import require_demo_admin, require_local_operator
 
 
-router = APIRouter(dependencies=[Depends(require_demo_admin)])
+router = APIRouter(dependencies=[Depends(require_demo_admin), Depends(require_local_operator)])
 LOGGER = logging.getLogger(__name__)
 def _event_job_snapshot() -> dict:
     return event_discovery_job_snapshot()
@@ -29,7 +29,9 @@ def _cleanup_error(exc: DemoCleanupError) -> HTTPException:
 
 
 @router.post("/demo/clear_graph")
-def clear_graph_data():
+def clear_graph_data(confirm: bool = False):
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true is required")
     try:
         return {"status": "success", "graph": clear_graph()}
     except DemoCleanupError as exc:
@@ -37,7 +39,9 @@ def clear_graph_data():
 
 
 @router.post("/demo/clear_all")
-def clear_all_data():
+def clear_all_data(confirm: bool = False):
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true is required")
     try:
         return clear_all_demo_state()
     except DemoCleanupError as exc:
@@ -50,7 +54,9 @@ def clear_all_data():
 
 
 @router.post("/demo/reset_db_state")
-def reset_db_state():
+def reset_db_state(confirm: bool = False):
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true is required")
     messages_coll.delete_many({"room_id": {"$regex": "mediator_private"}})
     matches_coll.update_many({}, {"$unset": {"date_coordination": ""}})
     profiles_coll.update_many({}, {"$set": {"mediator_inbox": []}})

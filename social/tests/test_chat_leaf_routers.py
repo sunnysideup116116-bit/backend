@@ -287,7 +287,7 @@ class ChatLeafRouterTests(unittest.TestCase):
              patch("routers.demo.matches_coll.update_many") as update_matches, \
              patch("routers.demo.profiles_coll.update_many") as update_profiles, \
              patch("builtins.print"):
-            response = reset_db_state()
+            response = reset_db_state(confirm=True)
 
         self.assertEqual(response, {"status": "success", "message": "DB state reset"})
         delete_messages.assert_called_once_with({"room_id": {"$regex": "mediator_private"}})
