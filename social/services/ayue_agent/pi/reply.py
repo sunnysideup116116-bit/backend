@@ -187,6 +187,14 @@ def verified_observation_fallback(observations: list[dict]) -> str | None:
             "公開資料已有部分查詢結果，但這次後續處理失敗，無法可靠完成整個需求；"
             "也沒有建立或執行任何需要確認的變更。請直接重試原需求。"
         )
+    if any(str(item.get("tool") or "").startswith("relationship.") for item in successful):
+        if any(
+            str(item.get("tool") or "").startswith("relationship.")
+            and item.get("status") == "failed"
+            for item in observations if isinstance(item, dict)
+        ):
+            return "我讀到了部分聯絡人資料，但後續查詢未能完成，無法可靠回答；請重試原問題。"
+        return "我讀到了關係資料，但這次沒能可靠完成回答；請重試原問題。"
     latest = successful[-1]
     tool = str(latest.get("tool") or "")
     result = latest.get("result") or {}
@@ -201,7 +209,7 @@ def verified_observation_fallback(observations: list[dict]) -> str | None:
         if facts:
             compact = json.dumps(facts, ensure_ascii=False, separators=(",", ":"))[:1800]
             return f"我已讀到正式產品說明，但自然語言整理失敗。以下是已驗證的功能資料：{compact}"
-    if tool.startswith(("calendar.", "relationship.", "profile.", "memory.", "match.")) and values:
+    if tool.startswith(("calendar.", "profile.", "memory.", "match.")) and values:
         return "我已查到資料，重點是：\n" + "\n".join(f"- {value}" for value in values[:5])
     return "查詢已成功，但這次自然語言整理失敗。已驗證資料仍保留；你可以要我換個方式整理。"
 

@@ -29,7 +29,6 @@ from services.ayue_agent.shared.confirmation import (
     ConfirmationManager,
 )
 from services.ayue_agent.shared.contact_selections import ContactSelectionManager
-from services.ayue_agent.shared.operation_batches import OperationBatchManager
 from services.ayue_agent.shared.guard import guard_proposal
 from services.ayue_agent.shared.guard_contracts import GuardResultCode, ToolProposal
 from services.ayue_agent.shared.write_actions import prepare_write_confirmation
@@ -51,7 +50,6 @@ class PiToolRuntime:
         trace: dict[str, Any],
         confirmation_collection: Any,
         contact_selection_collection: Any,
-        operation_batch_collection: Any,
         on_progress: Callable | None = None,
     ) -> None:
         self.turn = turn
@@ -59,7 +57,6 @@ class PiToolRuntime:
         self.trace = trace
         self.confirmations = ConfirmationManager(confirmation_collection)
         self.contact_selections = ContactSelectionManager(contact_selection_collection)
-        self.operation_batches = OperationBatchManager(operation_batch_collection)
         self.on_progress = on_progress
         self.seen_keys: set[tuple[str, str]] = set()
         self.domain_reads: dict[str, int] = {}
@@ -158,14 +155,6 @@ class PiToolRuntime:
             "source_engine": payload.get("source_engine") or "pi",
             "tool_protocol_version": payload.get("tool_protocol_version") or "pi_public.v1",
         }
-        batch_id = str(getattr(self.turn, "_operation_batch_id", "") or "")
-        item_id = str(getattr(self.turn, "_operation_item_id", "") or "")
-        batch_revision = int(getattr(self.turn, "_operation_batch_revision", 0) or 0)
-        if batch_id and item_id:
-            tagged_payload["_operation_item_id"] = item_id
-            idempotency_key = idempotency_key or (
-                f"operation-batch:{batch_id}:{item_id}:{batch_revision}:{self.run_id}"
-            )
         return self.confirmations.create_confirmation(
             user_id=self.turn.user_id,
             room_id=self.turn.room_id,

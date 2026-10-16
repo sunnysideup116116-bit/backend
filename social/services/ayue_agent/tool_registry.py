@@ -650,8 +650,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "relationship.get_contact_evidence": ToolSpec(
         "relationship.get_contact_evidence", ToolRisk.READ, "contact_evidence",
-        "讀取目前 accepted-contact 清單中最多三位候選人的較完整公開摘要；只能使用本回合清單回傳的 contact_ref，不接受 user ID。",
+        "讀取目前 accepted-contact 清單中最多三位候選人的較完整公開摘要；"
+        "contact_refs 必須包含本回合清單回傳的 1 至 3 個 contact_ref，不接受 user ID。",
         "我把這幾位朋友再仔細看看～",
+        planner_arguments_model=_RelationshipContactEvidenceArguments,
         executor_arguments_model=_RelationshipContactEvidenceArguments,
         output_model=_ContactEvidenceListOutput,
         argument_source=ToolArgumentSource.PLANNER_GROUNDED,

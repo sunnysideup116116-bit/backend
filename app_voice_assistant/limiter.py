@@ -83,7 +83,18 @@ class AppVoiceLimiter:
         self._active = 0
         self._lock = threading.Lock()
 
+    @property
+    def rate_limit_enabled(self) -> bool:
+        """Per-identity session budget gate; mirrors registration_voice's switch.
+
+        Scope is ``allow_session`` only. The global concurrency gate
+        (``acquire``) stays governed by ``VOICE_APP_GLOBAL_CONCURRENCY``.
+        """
+        return self._settings.rate_limit_enabled
+
     def allow_session(self, identity: str, *, now: float | None = None) -> bool:
+        if not self.rate_limit_enabled:
+            return True
         instant = time.time() if now is None else now
         with self._lock:
             values = self._turns[identity]

@@ -40,7 +40,6 @@ CASES = [
     ("match_status", "我現在的配對進度如何？", "match.get_status"),
     ("match_start", "現在開始幫我找新的對象", "match.start_search"),
     ("assessment", "我想重新做基本性格探索", "profile.start_assessment"),
-    ("workflow", "先幫我約小安，然後新增明天下午三點的行程", "workflow.queue_operations"),
 ]
 
 
@@ -98,9 +97,6 @@ def main() -> int:
             actual.append(name)
             if name == "product.get_info":
                 valid = isinstance(arguments.get("query"), str) and bool(arguments["query"].strip())
-            elif name == "workflow.queue_operations":
-                operations = arguments.get("operations")
-                valid = isinstance(operations, list) and 2 <= len(operations) <= 4
             else:
                 spec = get_tool_spec(name)
                 canonical = (
@@ -190,7 +186,6 @@ def main() -> int:
         expected_spec = get_tool_spec(expected)
         expected_write = bool(
             (expected_spec and getattr(expected_spec.risk, "value", "") == "write")
-            or expected == "workflow.queue_operations"
         )
         reached_terminal = (
             bool(result.get("stopped")) if expected_write

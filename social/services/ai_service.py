@@ -22,6 +22,7 @@ from services.ayue_agent.product_identity import PUBLIC_AYUE_PERSONA
 from services.assessment_provider import assessment_dialogue_prompt, request_assessment_json
 from services import codex_chat_provider
 from services.gpt_settings import LLM_OWNER_NAMES
+from llm_providers import openrouter_provider
 import threading
 import time
 
@@ -54,10 +55,13 @@ def _resolve_chat_model(
     """Resolve process-wide override before per-call tier preferences."""
     if model_owner is not None and model_owner not in LLM_OWNER_NAMES:
         raise ValueError(f"Unknown LLM owner: {model_owner}")
-    if codex_chat_provider.selected_provider() == "gpt":
+    selected = codex_chat_provider.selected_provider()
+    if selected == "gpt":
         return codex_chat_provider.selected_model(
             fast=prefer_fast_model, owner=model_owner,
         )
+    if selected == "openrouter":
+        return openrouter_provider.selected_model(fast=prefer_fast_model)
     if _RUNTIME_MODEL_OVERRIDE:
         return _RUNTIME_MODEL_OVERRIDE
     if explicit_model:
@@ -330,7 +334,9 @@ def generate_chat_completion(
 
 ) -> ChatResult:
 
-    if codex_chat_provider.selected_provider() == "gpt":
+    selected = codex_chat_provider.selected_provider()
+
+    if selected == "gpt":
         result = codex_chat_provider.generate(
             prompt, model=_resolve_chat_model(
                 explicit_model=model, model_owner=model_owner,
@@ -339,6 +345,30 @@ def generate_chat_completion(
         )
         return ChatResult(
             content=result["content"] if json_output else normalize_zh_tw(result["content"]),
+            input_tokens=result.get("input_tokens", 0), output_tokens=result.get("output_tokens", 0),
+            duration_ms=result["duration_ms"], prompt=prompt,
+        )
+
+    if selected == "openrouter":
+        result = openrouter_provider.generate(
+            prompt, model=_resolve_chat_model(
+                explicit_model=model, model_owner=model_owner,
+            ),
+            system_prompt=system_prompt, json_output=json_output, on_token=on_token,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+        content = result["content"]
+        if json_output:
+            import re
+
+            content = re.sub(r'^```json\s*', '', content)
+            content = re.sub(r'^```\s*', '', content)
+            content = re.sub(r'\s*```$', '', content)
+            content = content.strip()
+        else:
+            content = normalize_zh_tw(content)
+        return ChatResult(
+            content=content,
             input_tokens=result.get("input_tokens", 0), output_tokens=result.get("output_tokens", 0),
             duration_ms=result["duration_ms"], prompt=prompt,
         )
@@ -459,7 +489,8 @@ def generate_chat_completion_with_tools(
             for item in conversation_messages
         ):
             raise ValueError("invalid_conversation_messages")
-    if codex_chat_provider.selected_provider() == "gpt":
+    selected = codex_chat_provider.selected_provider()
+    if selected == "gpt":
         effective_model = _resolve_chat_model(
             prefer_fast_model=prefer_fast_model, model_owner=model_owner,
         )
@@ -473,6 +504,19 @@ def generate_chat_completion_with_tools(
         result = codex_chat_provider.generate(
             provider_prompt, model=effective_model, system_prompt=system_prompt, tools=tools,
             deadline_monotonic=deadline_monotonic, on_token=on_token,
+        )
+        return ToolCallResult(**result, prompt=prompt, model_name=effective_model)
+    if selected == "openrouter":
+        effective_model = _resolve_chat_model(
+            prefer_fast_model=prefer_fast_model, model_owner=model_owner,
+        )
+        # OpenRouter accepts native assistant/tool role payloads; the adapter
+        # normalizes ollama's embedded arguments dict to the JSON-string form.
+        result = openrouter_provider.generate(
+            prompt, model=effective_model, system_prompt=system_prompt, tools=tools,
+            deadline_monotonic=deadline_monotonic, on_token=on_token,
+            temperature=temperature, max_tokens=max_tokens,
+            conversation_messages=conversation_messages,
         )
         return ToolCallResult(**result, prompt=prompt, model_name=effective_model)
 
@@ -568,9 +612,15 @@ def _generate_assessment_json(prompt: str, kind: str, temperature: float) -> dic
     model = _resolve_chat_model()
 
     def call(deadline: float) -> str:
-        if codex_chat_provider.selected_provider() == "gpt":
+        selected = codex_chat_provider.selected_provider()
+        if selected == "gpt":
             return codex_chat_provider.generate(
                 prompt, model=model, json_output=True, deadline_monotonic=deadline,
+            )["content"]
+        if selected == "openrouter":
+            return openrouter_provider.generate(
+                prompt, model=model, json_output=True, temperature=temperature,
+                max_tokens=2048, deadline_monotonic=deadline,
             )["content"]
         token = _OLLAMA_DEADLINE.set(deadline)
         try:

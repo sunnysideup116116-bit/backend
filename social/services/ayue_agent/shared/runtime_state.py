@@ -4,15 +4,13 @@ from __future__ import annotations
 
 from .confirmation import ConfirmationManager
 from .contact_selections import ContactSelectionManager
-from .operation_batches import OperationBatchManager
-from .runtime_collections import CONFIRMATIONS, CONTACT_SELECTIONS, OPERATION_BATCHES, RUNS
+from .runtime_collections import CONFIRMATIONS, CONTACT_SELECTIONS, RUNS
 
 
 def ensure_indexes() -> None:
     try:
         RUNS.create_index("created_at", expireAfterSeconds=14 * 86400)
         RUNS.create_index([("user_id", 1), ("created_at", -1)])
-        OperationBatchManager(OPERATION_BATCHES).ensure_indexes()
         ContactSelectionManager(CONTACT_SELECTIONS).ensure_indexes()
     except Exception as exc:
         print(f"Agent runtime index setup skipped: {type(exc).__name__}")

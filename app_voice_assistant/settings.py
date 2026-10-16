@@ -37,6 +37,7 @@ class AppVoiceSettings:
     per_user_per_day: int
     global_concurrency: int
     tts_per_user_per_day: int
+    rate_limit_enabled: bool
     test_user_ids: frozenset[str]
     tool_routing_mode: str
     proxy_user_ids: frozenset[str]
@@ -131,6 +132,9 @@ class AppVoiceSettings:
             per_user_per_day=bounded("VOICE_APP_PER_DAY", 30, 1, 10000),
             global_concurrency=bounded("VOICE_APP_GLOBAL_CONCURRENCY", 4, 1, 1000),
             tts_per_user_per_day=bounded("VOICE_APP_TTS_PER_DAY", 60, 1, 1000),
+            rate_limit_enabled=_enabled(
+                env.get("VOICE_APP_RATE_LIMIT_ENABLED"), default=True,
+            ),
             test_user_ids=test_ids,
             tool_routing_mode=routing_mode,
             proxy_user_ids=proxy_ids,

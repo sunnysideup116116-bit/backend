@@ -32,7 +32,11 @@ from .contracts import (
     requires_confirmation,
     safe_context,
 )
-from .duplex_runtime import run_duplex_session
+from .duplex_runtime import (
+    run_duplex_session,
+    sanitize_recent_turns,
+    sanitize_script_lines,
+)
 from .contextual import bind_target
 from .capabilities import CATALOG
 from .limiter import (
@@ -231,9 +235,20 @@ class AppVoiceRuntime:
 
         task.add_done_callback(finished)
 
-    async def wait_memory_tasks(self) -> None:
-        if self._memory_tasks:
-            await asyncio.gather(*tuple(self._memory_tasks), return_exceptions=True)
+    async def wait_memory_tasks(self, timeout: float | None = None) -> None:
+        tasks = [task for task in self._memory_tasks if not task.done()]
+        if not tasks:
+            return
+        try:
+            if timeout is None:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            else:
+                await asyncio.wait(set(tasks), timeout=timeout)
+        except Exception:
+            pass
+        done = [task for task in self._memory_tasks if task.done()]
+        if done:
+            await asyncio.gather(*done, return_exceptions=True)
 
     def client_ip(self, connection: Request | WebSocket) -> str:
         forwarded = connection.headers.get("x-forwarded-for", "")
@@ -438,6 +453,14 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
         memory = VoiceMemoryRecord()
         authenticated_owner = ""
         if runtime.memory is not None:
+            # 上一場 session 的記憶摘要是背景任務；新 session 先等它落地
+            # （帶 timeout 上限），避免剛剛的對話還沒寫回就讀到舊摘要。
+            try:
+                await asyncio.wait_for(
+                    runtime.wait_memory_tasks(), timeout=6
+                )
+            except Exception:
+                pass
             try:
                 owner, memory = await asyncio.to_thread(
                     runtime.memory.authenticate_and_load,
@@ -706,6 +729,9 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
             quota_token = SCOPE.set((ticket.user_id, "voice", ticket.session_id))
             output_mode = str(hello.get("output_mode") or "gemini_tts")
             input_mode = str(hello.get("input_mode") or "on_device_text")
+            script_lines = sanitize_script_lines(hello.get("script_lines"))
+            resume_voice = hello.get("resume_voice") is True
+            recent_turns = sanitize_recent_turns(hello.get("recent_turns"))
             memory_record = VoiceMemoryRecord(
                 older_summary=ticket.memory_older_summary,
                 recent_summary=ticket.memory_recent_summary,
@@ -800,6 +826,9 @@ def create_router(runtime: AppVoiceRuntime) -> APIRouter:
                         task_service=(
                             runtime.tasks if ticket.protocol_version >= 4 else None
                         ),
+                        initial_script_lines=script_lines,
+                        resume_voice=resume_voice,
+                        recent_turns=recent_turns,
                     )
                     await send_event({"type": "closed", "reconnect": True})
                     await websocket.close(code=1000)

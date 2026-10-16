@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import patch
 
+from jsonschema import Draft202012Validator
+
 from services.ayue_agent.contracts import AgentTurnContext, ToolCall
 from services.ayue_agent.tool_registry import (
     READ_ONLY_TOOLS,
@@ -8,9 +10,11 @@ from services.ayue_agent.tool_registry import (
     TOOL_REGISTRY,
     ToolRisk,
     executor_arguments_for_turn,
+    planner_arguments_allowed,
     tool_call_key,
 )
 from services.ayue_agent.tools import execute_tool
+from services.ayue_agent.pi.registry import tool_schemas
 
 
 class AyueAgentRegistryTests(unittest.TestCase):
@@ -248,6 +252,41 @@ class AyueAgentRegistryTests(unittest.TestCase):
             executor_arguments_for_turn(spec, [], {"destination": "Destination", "travel_mode": "WALK"})["travel_mode"],
             "WALK",
         )
+
+
+def test_pi_relationship_target_schemas_match_backend_validation():
+    schemas = {item["name"]: item["parameters"] for item in tool_schemas()}
+    cases = [
+        ("relationship.get_contact_evidence", {}, False),
+        ("relationship.get_contact_evidence", {"contact_refs": []}, False),
+        ("relationship.get_contact_evidence", {"contact_refs": ["ref"]}, True),
+        ("relationship.get_contact_evidence", {"contact_ref": "ref"}, False),
+        ("relationship.get_contact_evidence", {"contact_refs": ["a", "b", "c", "d"]}, False),
+        ("relationship.start_date_coordination", {"target_source": "name"}, False),
+        ("relationship.start_date_coordination", {"target_source": "name", "target_evidence_span": "小安"}, True),
+        ("relationship.start_date_coordination", {"target_source": "name", "target_evidence_span": "  "}, False),
+        ("relationship.start_date_coordination", {"target_source": "mention"}, True),
+        ("relationship.start_date_coordination", {"target_source": "mention", "target_evidence_span": "小安"}, False),
+        ("relationship.cancel_date_coordination", {"target_source": "name"}, False),
+        ("relationship.cancel_date_coordination", {"target_source": "name", "target_evidence_span": "小安"}, True),
+        ("relationship.cancel_date_coordination", {"target_source": "focused_card"}, True),
+        ("relationship.cancel_date_coordination", {"target_source": "focused_card", "target_evidence_span": "小安"}, False),
+        ("relationship.get_my_views", {"target_source": "name"}, False),
+        ("relationship.get_my_views", {"target_source": "name", "target_evidence_span": "小安"}, True),
+        ("relationship.get_my_views", {"target_source": "contact_refs"}, False),
+        ("relationship.get_my_views", {"target_source": "contact_refs", "contact_refs": []}, False),
+        ("relationship.get_my_views", {"target_source": "contact_refs", "contact_refs": ["ref"]}, True),
+        ("relationship.get_my_views", {"target_source": "recent_contact"}, True),
+    ]
+    for name, arguments, accepted in cases:
+        exposed = Draft202012Validator(schemas[name]).is_valid(arguments)
+        backend = planner_arguments_allowed(TOOL_REGISTRY[name], arguments)
+        assert exposed is accepted, (name, arguments, "model-facing schema")
+        assert backend is accepted, (name, arguments, "backend validation")
+    evidence_spec = TOOL_REGISTRY["relationship.get_contact_evidence"]
+    assert executor_arguments_for_turn(evidence_spec, [], {"contact_refs": ["ref"]}) == {
+        "contact_refs": ["ref"],
+    }
 
 
 if __name__ == "__main__":

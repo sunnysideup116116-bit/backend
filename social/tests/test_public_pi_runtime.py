@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 from routers import public_chat, system
 from services.ayue_agent import public_runtime
+from services.ayue_agent.pi.reply import failed_reply
 
 
 def test_public_runtime_always_calls_pi(monkeypatch):
@@ -53,3 +54,38 @@ def test_http_gate_reports_missing_pi_without_fallback(monkeypatch):
 def test_experiment_runtime_api_is_removed():
     paths = {route.path for route in system.router.routes}
     assert "/api/settings/agent-runtime" not in paths
+
+
+def test_relationship_tool_failure_does_not_present_contact_names_as_an_answer():
+    observations = [
+        {"tool": "relationship.list_accepted_contacts", "status": "ok", "result": {
+            "contacts": [{"display_name": "小安"}],
+        }},
+        {"tool": "relationship.get_contact_evidence", "status": "failed",
+         "error_code": "executor_args_invalid"},
+        {"tool": "profile.get_self_summary", "status": "ok", "result": {
+            "summary": "喜歡戶外活動",
+        }},
+    ]
+
+    reply = failed_reply("pi_tool_schema_invalid", observations=observations)
+
+    assert "後續查詢未能完成" in reply
+    assert "重點是" not in reply
+    assert "小安" not in reply
+    assert "喜歡戶外活動" not in reply
+
+
+def test_relationship_view_fallback_does_not_flatten_private_views():
+    observations = [{"tool": "relationship.get_my_views", "status": "ok", "result": {
+        "contacts": [{"display_name": "小安", "groups": [{
+            "topic": "相處", "views": [{"text": "聊天有點冷"}],
+        }]}],
+    }}]
+
+    reply = failed_reply("pi_reply_invalid", observations=observations)
+
+    assert "沒能可靠完成回答" in reply
+    assert "重點是" not in reply
+    assert "小安" not in reply
+    assert "聊天有點冷" not in reply

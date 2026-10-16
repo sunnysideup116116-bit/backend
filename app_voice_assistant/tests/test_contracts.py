@@ -1168,6 +1168,21 @@ def test_demo_allowlist_limiter_and_ticket_are_fail_closed():
     assert tickets.consume(token) is None
 
 
+def test_session_rate_limit_switch_off_makes_the_budget_a_noop():
+    settings = AppVoiceSettings.from_env({
+        "VOICE_APP_RATE_LIMIT_ENABLED": "off",
+        "VOICE_APP_PER_10_MINUTES": "1",
+        "VOICE_APP_PER_DAY": "1",
+    })
+    limiter = AppVoiceLimiter(settings)
+
+    assert all(limiter.allow_session("identity", now=100) for _ in range(5))
+
+
+def test_session_rate_limit_switch_defaults_to_enabled():
+    assert AppVoiceSettings.from_env({}).rate_limit_enabled is True
+
+
 def test_non_demo_mode_disables_account_allowlist_but_still_rejects_empty_id():
     settings = AppVoiceSettings.from_env({
         "VOICE_APP_DEMO_ONLY": "off",

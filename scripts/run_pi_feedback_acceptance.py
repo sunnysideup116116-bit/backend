@@ -78,7 +78,7 @@ def run_case(name, message, history, topic):
          patch.object(write_executors, "start_match_search", side_effect=start_search):
         result = public_turn.run_pi_public_turn(
             request, confirmation_collection=store.confirmations, contact_selection_collection=store.selections,
-            operation_batch_collection=store.batches, runs_collection=store.runs,
+            runs_collection=store.runs,
         )
         failure = result.fallback_reason
         assert not failure, failure

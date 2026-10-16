@@ -6,7 +6,6 @@ from services import assessment_session_service as assessment
 from services.ayue_agent.pi import public_turn
 from services.ayue_agent.shared.confirmation import ConfirmationManager
 from services.ayue_agent.shared.contact_selections import ContactSelectionManager
-from services.ayue_agent.shared.operation_batches import OperationBatchManager
 
 
 @pytest.mark.parametrize('action', ['confirm', 'cancel'])
@@ -32,9 +31,8 @@ def test_completed_assessment_has_buttons_and_resolves(monkeypatch, action, resu
         result = public_turn._handle_assessment(ctx, 'run1')
     confirmations = ConfirmationManager(db.confirmations)
     selections = ContactSelectionManager(db.selections)
-    batches = OperationBatchManager(db.batches)
     result = public_turn._bind_interactions(result, ctx=ctx, run_id='run1',
-        confirmations=confirmations, selections=selections, batches=batches)
+        confirmations=confirmations, selections=selections)
     assert '好奇且外向' in result.reply
     assert result.choice_prompt['state'] == 'pending'
     assert sum(b['type'] == 'confirmation' for b in result.interaction_blocks_v1) == 1
@@ -46,11 +44,11 @@ def test_completed_assessment_has_buttons_and_resolves(monkeypatch, action, resu
         message_id='assistant-message', persisted_content=result.reply,
         interaction_blocks_v1=result.interaction_blocks_v1)
     ctx.choice_id, ctx.choice_action = result.choice_prompt['id'], action
-    resolved = public_turn._handle_choice(ctx, None, 'run2', confirmations, selections, batches)
+    resolved = public_turn._handle_choice(ctx, None, 'run2', confirmations, selections)
     assert resolved.choice_resolution['state'] == ('confirmed' if action == 'confirm' else 'cancelled')
     profile = db.profiles.find_one({'user_id': 'owner'})
     assert profile['big_five'] == (draft if action == 'confirm' else {'summary': '舊資料'})
     assert profile['agentic_assessment_session']['status'] == ('completed' if action == 'confirm' else 'cancelled')
-    again = public_turn._handle_choice(ctx, None, 'run3', confirmations, selections, batches)
+    again = public_turn._handle_choice(ctx, None, 'run3', confirmations, selections)
     assert again.conversation_intent == 'confirmation_missing'
     assert db.profiles.find_one({'user_id': 'owner'}) == profile

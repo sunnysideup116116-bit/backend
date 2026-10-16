@@ -167,7 +167,6 @@ def pi_context(turn: Any) -> dict:
         "mentioned_contacts": getattr(turn, "mentioned_contacts", None),
         "mentioned_contact_overflow": getattr(turn, "mentioned_contact_overflow", False),
         "date_coordination_summary": getattr(turn, "date_coordination_summary", None),
-        "operation_batch": getattr(turn, "_operation_batch_context", None),
     }
     return {key: value for key, value in result.items() if value is not None}
 
@@ -389,7 +388,6 @@ def run_pi_turn(
     trace: dict,
     confirmation_collection: Any,
     contact_selection_collection: Any,
-    operation_batch_collection: Any,
     on_progress=None,
     on_token: Callable[[str], None] | None = None,
     debug_enabled=False,
@@ -422,7 +420,6 @@ def run_pi_turn(
         trace=trace,
         confirmation_collection=confirmation_collection,
         contact_selection_collection=contact_selection_collection,
-        operation_batch_collection=operation_batch_collection,
         on_progress=on_progress,
     )
     observations = tool_runtime.observations
@@ -487,13 +484,13 @@ def run_pi_turn(
         started = time.perf_counter()
         tool_dispatch_count += 1
         if budget_class == "standard" and (
-            name.startswith("web.") or name == "workflow.queue_operations"
+            name.startswith("web.") or tool_dispatch_count >= 4
         ):
             budget_class = "complex"
             model_limit = hard_model_limit
             tool_limit = hard_tool_limit
             turn_deadline = hard_deadline
-            trace["pi_budget_upgraded_by"] = "research" if name.startswith("web.") else "workflow"
+            trace["pi_budget_upgraded_by"] = "research" if name.startswith("web.") else "multi_tool"
         if tool_dispatch_count > tool_limit or time.monotonic() >= turn_deadline:
             forced_failure = "pi_tool_budget_exhausted"
             return {"observations": [{"status": "failed", "code": forced_failure}], "stop": True}

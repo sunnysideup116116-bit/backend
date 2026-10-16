@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import array
 import asyncio
 import base64
 import hmac
@@ -68,6 +69,43 @@ SCREEN_CONTEXT_TIMEOUT_SECONDS = 0.75
 SCREEN_CONTEXT_COALESCE_SECONDS = 0.1
 BACKGROUND_RESULT_IDLE_SECONDS = 8.0
 
+SCRIPT_MAX_LINES = 10
+SCRIPT_MAX_LINE_CHARS = 300
+SCRIPT_MIN_SPEECH_SECONDS = 0.35
+SCRIPT_SILENCE_SECONDS = 0.45
+SCRIPT_ECHO_GRACE_SECONDS = 0.4
+SCRIPT_VOICE_RMS_THRESHOLD = 550.0
+
+
+def sanitize_script_lines(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    lines: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        lines.append(text[:SCRIPT_MAX_LINE_CHARS])
+        if len(lines) >= SCRIPT_MAX_LINES:
+            break
+    return lines
+
+
+def pcm_frame_rms(payload: bytes) -> float:
+    count = len(payload) // 2
+    if count == 0:
+        return 0.0
+    try:
+        samples = array.array('h', payload[: count * 2])
+    except (ValueError, TypeError):
+        return 0.0
+    if not samples:
+        return 0.0
+    squared = sum(
+        int(sample) * int(sample) for sample in samples
+    )
+    return (squared / len(samples)) ** 0.5
+
 
 def session_started_prompt(context: dict[str, Any]) -> str:
     """Build the first Live control message in the configured reply language."""
@@ -84,6 +122,74 @@ def session_started_prompt(context: dict[str, Any]) -> str:
         f"user_display_name={str(config.get('self_name') or '')[:40]}\n"
         f"{messages.get(language, messages['zh-TW'])}"
     )
+
+
+def _resume_turn_lines(turns: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for turn in turns:
+        role = str(turn.get("role") or "").strip()
+        content = str(turn.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        content = content.replace("\n", " ")[:200] or "（略）"
+        speaker = "使用者" if role == "user" else "阿月"
+        lines.append(f"{speaker}: {content}")
+        if len(lines) >= 8:
+            break
+    return "\n".join(lines)
+
+
+def session_resumed_prompt(
+    context: dict[str, Any],
+    recent_turns: list[dict[str, Any]] | None = None,
+) -> str:
+    """Prompt for an automatic reconnection: continue, never re-greet."""
+    config = context.get("voice_config") or {}
+    language = str(config.get("response_language") or "zh-TW")
+    messages = {
+        "zh-TW": (
+            "[VOICE_SESSION_RESUMED] 這是同一場語音對話的自動恢復，"
+            "不是新的開始。不要重新打招呼、不要自我介紹，"
+            "安靜等使用者說話；說話時以正在進行中的對話語氣自然接續。"
+        ),
+        "zh-CN": (
+            "[VOICE_SESSION_RESUMED] 这是同一场语音对话的自动恢复，"
+            "不是新的开始。不要重新打招呼、不要自我介绍，"
+            "安静等使用者说话；说话时以进行中的对话语气自然接续。"
+        ),
+        "en-US": (
+            "[VOICE_SESSION_RESUMED] This is the automatic recovery of an "
+            "ongoing conversation, not a new start. Do not greet again and do "
+            "not introduce yourself; wait silently for the user to speak and "
+            "continue mid-conversation naturally."
+        ),
+    }
+    prompt = (
+        f"{messages.get(language, messages['zh-TW'])}\n"
+        f"response_language={language}\n"
+    )
+    transcript = _resume_turn_lines(recent_turns or [])
+    if transcript:
+        prompt += f"接續前已發生的對話：\n{transcript}\n"
+    return prompt
+
+
+def sanitize_recent_turns(raw: Any) -> list[dict[str, str]]:
+    """Normalize client-provided recent conversation turns."""
+    if not isinstance(raw, list):
+        return []
+    turns: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip()
+        content = str(item.get("text") or item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        turns.append({"role": role, "content": content[:500]})
+        if len(turns) >= 8:
+            break
+    return turns
 
 
 @dataclass
@@ -303,6 +409,9 @@ async def run_duplex_session(
     task_service: VoiceTaskService | None = None,
     quota_reader: Any | None = None,
     quota_poll_seconds: float = 30,
+    initial_script_lines: list[str] | None = None,
+    resume_voice: bool = False,
+    recent_turns: list[dict[str, str]] | None = None,
 ) -> None:
     """Bridge one app WebSocket to one persistent, full-duplex Gemini session."""
 
@@ -413,6 +522,17 @@ async def run_duplex_session(
     queued_background_results: list[tuple[str | dict[str, Any], str]] = []
     progress_turn_pending = False
     background_flush_task: asyncio.Task[None] | None = None
+    script_lines = sanitize_script_lines(initial_script_lines)
+    script_active = bool(script_lines)
+    script_index = 0
+    script_phase = "idle"
+    script_close_requested = False
+    script_close_reason = ""
+    script_last_audio_done = 0.0
+    script_speak_lock = asyncio.Lock()
+    script_speech_started = False
+    script_speech_started_at = 0.0
+    script_last_voice_at = 0.0
     confirmation_timeout_task: asyncio.Task[None] | None = None
     task_watcher_task: asyncio.Task[None] | None = None
     quota_watcher_task: asyncio.Task[None] | None = None
@@ -3071,6 +3191,9 @@ async def run_duplex_session(
         nonlocal next_step_dispatched_intent, next_step_selected_proposal
         nonlocal live_turn_active
 
+        if script_active:
+            return False
+
         if response.go_away:
             await send_event({"type": "state", "state": "reconnecting"})
             return True
@@ -3264,10 +3387,129 @@ async def run_duplex_session(
                         awaiting_results.pop(action_id, None)
         return False
 
+    async def _speak_script_text(text: str, *, line_index: int | None) -> None:
+        nonlocal script_phase, script_last_audio_done, script_close_reason
+        nonlocal script_close_requested
+        nonlocal script_speech_started, script_speech_started_at, script_last_voice_at
+        async with script_speak_lock:
+            script_phase = "speaking"
+            script_speech_started = False
+            script_speech_started_at = 0.0
+            script_last_voice_at = time.monotonic()
+            response_id = uuid.uuid4().hex
+            await send_event({
+                "type": "assistant_reply",
+                "text": text,
+                "code": "script",
+                "response_id": response_id,
+                "speech_mode": "gemini_live_duplex",
+                "can_interrupt": False,
+            })
+            chunks = 0
+            try:
+                async for chunk in provider.stream_synthesize(text):
+                    await send_event({
+                        "type": "audio_chunk",
+                        "response_id": response_id,
+                        "sequence": chunks,
+                        "mime_type": "audio/pcm;rate=24000",
+                        "base64": base64.b64encode(chunk).decode("ascii"),
+                    })
+                    chunks += 1
+            except Exception:
+                script_last_audio_done = time.monotonic()
+                if script_phase == "speaking":
+                    script_phase = "listening"
+                script_close_reason = "audio_unavailable"
+                script_close_requested = True
+                await send_event({
+                    "type": "audio_unavailable",
+                    "response_id": response_id,
+                })
+                await send_event({
+                    "type": "script_mode_finished",
+                    "reason": script_close_reason,
+                    "lines_spoken": script_index,
+                })
+                return
+            complete_payload = {
+                "type": "audio_complete",
+                "response_id": response_id,
+                "chunks": chunks,
+            }
+            if line_index is not None:
+                complete_payload["script_line"] = line_index
+                complete_payload["script_lines"] = len(script_lines)
+            await send_event(complete_payload)
+            script_last_audio_done = time.monotonic()
+            script_phase = "listening"
+
+    async def next_script_line() -> None:
+        if script_index >= len(script_lines):
+            return
+        await _speak_script_text(
+            script_lines[script_index],
+            line_index=script_index,
+        )
+
+    async def advance_script() -> None:
+        nonlocal script_index, script_phase, script_close_requested
+        if not script_active or script_phase != "speaking":
+            return
+        script_index += 1
+        if script_index >= len(script_lines):
+            script_phase = "closed"
+            script_close_requested = True
+            await send_event({
+                "type": "script_mode_finished",
+                "lines_spoken": len(script_lines),
+            })
+            return
+        await next_script_line()
+
+    def request_script_advance() -> None:
+        nonlocal script_phase
+        if not script_active or script_phase != "listening":
+            return
+        script_phase = "speaking"
+        asyncio.create_task(advance_script())
+
+    def script_feed_frame(payload: bytes) -> None:
+        nonlocal script_speech_started, script_last_voice_at
+        nonlocal script_speech_started_at
+        if not script_active or script_phase != "listening":
+            return
+        now = time.monotonic()
+        if now - script_last_audio_done < SCRIPT_ECHO_GRACE_SECONDS:
+            return
+        if pcm_frame_rms(payload) >= SCRIPT_VOICE_RMS_THRESHOLD:
+            if not script_speech_started:
+                script_speech_started = True
+                script_speech_started_at = now
+            script_last_voice_at = now
+            return
+        if not script_speech_started:
+            return
+        if now - script_speech_started_at < SCRIPT_MIN_SPEECH_SECONDS:
+            return
+        if now - script_last_voice_at < SCRIPT_SILENCE_SECONDS:
+            return
+        script_speech_started = False
+        request_script_advance()
+
     async def reconnect_live() -> None:
         nonlocal pending, checking_replayed_turn
         resumed = await live.reconnect()
         await sync_screen_context(force=True)
+        if not resumed and not script_active:
+            # 非-resume 的重建等於全新 Gemini 上下文；把 session 內已累積的
+            # 對話餵回去，避免「剛剛的對話被忘掉」。
+            try:
+                await live.send_text(
+                    session_resumed_prompt(context, remembered_turns)
+                )
+            except Exception:
+                pass
         checking_replayed_turn = resumed
         if not resumed:
             lost_confirmation: DuplexConfirmation | None = None
@@ -3364,8 +3606,28 @@ async def run_duplex_session(
     if quota_reader is not None:
         quota_watcher_task = asyncio.create_task(watch_quota())
     try:
-        await sync_screen_context()
-        await live.send_text(session_started_prompt(context))
+        if script_active:
+            # 阿月語音腳本：不餵音訊給 Gemini、不送開場提示，
+            # 等第一個麥克風音框到達時才念第 1 句（主迴圈內啟動）。
+            pass
+        else:
+            await sync_screen_context()
+            if resume_voice:
+                merged_turns: list[dict[str, Any]] = []
+                seen: set[tuple[str, str]] = set()
+                for turn in list(recent_turns or []) + list(remembered_turns):
+                    role = str(turn.get("role") or "")
+                    content = str(turn.get("content") or "")[:100]
+                    key = (role, content)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    merged_turns.append(turn)
+                await live.send_text(
+                    session_resumed_prompt(context, merged_turns)
+                )
+            else:
+                await live.send_text(session_started_prompt(context))
         while True:
             remaining = max_session_seconds - (time.monotonic() - started)
             if remaining <= 0:
@@ -3374,6 +3636,8 @@ async def run_duplex_session(
                     "state": "session_expired",
                     "reconnect": True,
                 })
+                break
+            if script_close_requested:
                 break
             try:
                 message = await asyncio.wait_for(websocket.receive(), timeout=remaining)
@@ -3386,13 +3650,25 @@ async def run_duplex_session(
                 continue
             if binary is not None:
                 if binary and len(binary) <= 4096:
-                    try:
-                        await live.send_audio(bytes(binary))
-                    except Exception:
-                        await send_event({
-                            "type": "state",
-                            "state": "reconnecting",
-                        })
+                    if script_active:
+                        if script_phase == "idle":
+                            script_phase = "speaking"
+                            await send_event({
+                                "type": "script_mode_started",
+                                "lines": len(script_lines),
+                            })
+                            asyncio.create_task(next_script_line())
+                        else:
+                            script_feed_frame(bytes(binary))
+                    else:
+                        try:
+                            await live.send_audio(bytes(binary))
+                        except Exception:
+                            # 重連窗口（receive_live 正在重建 Gemini transport）：
+                            # 丟棄這幾個音框即可，絕不能讓 exception 逃逸把
+                            # 整個 duplex session 崩掉（那是「講到一半斷線、
+                            # 重連後重新打招呼」的根因）。
+                            pass
                 continue
             raw = message.get("text")
             if not raw:
@@ -3415,6 +3691,30 @@ async def run_duplex_session(
                                         latency_ms=control.get('latency_ms'), result_code='observed')
                 continue
             if quota_stopped and kind not in {'action_result', 'task_cancel', 'task_dismiss', 'stop'}:
+                continue
+            if script_active:
+                if kind == "stop":
+                    break
+                if kind == "script_line_request":
+                    text = str(
+                        control.get("text") or ""
+                    ).strip()[:SCRIPT_MAX_LINE_CHARS]
+                    if text and script_phase == "listening":
+                        script_phase = "speaking"
+                        asyncio.create_task(
+                            _speak_script_text(text, line_index=None)
+                        )
+                if kind == "utterance":
+                    text = str(control.get("text") or "").strip()[:2000]
+                    if text:
+                        remember("user", text)
+                        await send_event({
+                            "type": "user_transcript",
+                            "text": display_transcript(text),
+                            "final": True,
+                        })
+                        if script_phase == "listening":
+                            request_script_advance()
                 continue
             if kind == 'plan_selection':
                 async with state_lock:

@@ -17,10 +17,10 @@ from services.assessment_session_service import (
 )
 from services.ayue_agent.context import build_public_agent_turn_context
 from services.ayue_agent.capabilities import normalize_public_language
-from services.ayue_agent.contracts import AgentResult, TurnClockV1
+from services.ayue_agent.contracts import AgentResult
 from services.ayue_agent.public_relationship_projection import validated_mentioned_contact_ids
 from services.ayue_agent.shared.runtime_collections import (
-    CONFIRMATIONS, CONTACT_SELECTIONS, OPERATION_BATCHES, RUNS,
+    CONFIRMATIONS, CONTACT_SELECTIONS, RUNS,
 )
 from services.ayue_agent.shared.write_actions import (
     execute_write, prepare_date_coordination_for_contact_id,
@@ -37,7 +37,6 @@ from services.ayue_agent.shared.contact_selections import (
     ContactSelectionManager,
     contact_selection_block,
 )
-from services.ayue_agent.shared.operation_batches import OperationBatchManager
 from services.language_service import normalize_public_reply
 
 from .reply import confirmed_reply
@@ -97,7 +96,6 @@ def _assessment_result(outcome: dict[str, Any], session: dict[str, Any], run_id:
 def _bind_interactions(
     result: AgentResult, *, ctx: Any, run_id: str,
     confirmations: ConfirmationManager, selections: ContactSelectionManager,
-    batches: OperationBatchManager,
 ) -> AgentResult:
     # OpenCC s2twp maps 對象 to 物件. Apply person terminology after its final pass.
     messages = [normalize_public_language(normalize_public_reply(str(item))) for item in (result.messages or []) if str(item).strip()]
@@ -174,20 +172,12 @@ def _bind_interactions(
                 final_content=result.reply or "", interaction_blocks_v1=blocks,
             )
         result = result.model_copy(update={"choice_prompt": choice, "interaction_blocks_v1": blocks})
-    batch = batches.latest_pending(user_id=ctx.user_id, room_id=ctx.room_id, surface=SURFACE_PUBLIC)
-    if batch and str(batch.get("source_engine") or "dag") == "pi":
-        current = batches.current_item(batch) or {}
-        if choice:
-            batches.bind_confirmation(str(batch.get("_id") or ""), str(choice.get("id") or ""))
-        elif current.get("status") == "active":
-            batches.mark_awaiting_input(str(batch.get("_id") or ""))
     return result
 
 
 def _handle_choice(
     ctx: Any, turn: Any, run_id: str,
     confirmations: ConfirmationManager, selections: ContactSelectionManager,
-    batches: OperationBatchManager,
 ) -> AgentResult | None:
     if ctx.choice_action is None:
         return None
@@ -282,10 +272,6 @@ def _handle_choice(
         if resolution:
             sync_choice_message_projection(messages_coll, room_id=ctx.room_id, projection=resolution)
         reply = "好，這次先不執行變更。"
-        batches.resolve_choice(
-            user_id=ctx.user_id, room_id=ctx.room_id, surface=SURFACE_PUBLIC,
-            choice_id=choice_id, outcome="cancelled", result_summary="使用者取消目前操作，未執行變更。",
-        )
         if (resolution and resolution.get("state") == "cancelled"
                 and record.get("tool_name") == ASSESSMENT_COMMIT_ACTION):
             payload = dict(record.get("payload") or {})
@@ -332,11 +318,6 @@ def _handle_choice(
         )
     reply = confirmed_reply(results)
     changed = any(bool(item.get("ok")) for item in results if isinstance(item, dict))
-    batches.resolve_choice(
-        user_id=ctx.user_id, room_id=ctx.room_id, surface=SURFACE_PUBLIC,
-        choice_id=choice_id, outcome="completed" if changed else "failed",
-        result_summary=reply,
-    )
     return AgentResult(
         handled=True, reply=reply, messages=[reply], presentation_class="transaction",
         conversation_intent="confirmation", agent_run_id=run_id, agent_mode="pi",
@@ -368,101 +349,19 @@ def _handle_assessment(ctx: Any, run_id: str) -> AgentResult | None:
     return _assessment_result(outcome, session, run_id)
 
 
-def _continue_batch_after_choice(
-    result: AgentResult, *, ctx: Any, turn: Any, run_id: str,
-    trace: dict[str, Any], batches: OperationBatchManager,
-    confirmation_store: Any, selection_store: Any, batch_store: Any,
-    on_progress: Callable | None, on_token: Callable[[str], None] | None,
-    debug_enabled: bool,
-) -> AgentResult:
-    """Continue the newly active item in the same HTTP run after a receipt."""
-    if not result.choice_resolution:
-        return result
-    batch = batches.latest_pending(user_id=ctx.user_id, room_id=ctx.room_id, surface=SURFACE_PUBLIC)
-    current = batches.current_item(batch)
-    if (
-        not batch or str(batch.get("source_engine") or "dag") != "pi"
-        or not current or current.get("status") != "active"
-    ):
-        return result
-    request = str(current.get("request") or "").strip()
-    if not request:
-        batches.pause(str(batch.get("_id") or ""), reason="missing_current_request")
-        return result
-    next_clock = turn.clock
-    saved_clock = batch.get("source_clock")
-    if isinstance(saved_clock, dict) and saved_clock:
-        try:
-            next_clock = TurnClockV1.model_validate(saved_clock)
-        except Exception:
-            pass
-    next_ctx = ctx.model_copy(update={
-        "message": request, "choice_id": None, "choice_action": None,
-        "assessment_action": None, "message_id": None,
-    })
-    receipt = str(result.reply or "").strip()
-    history = list(turn.recent_messages or [])
-    if receipt:
-        history.append({
-            "role": "assistant", "content": receipt,
-            "sent_at": turn.clock.local_iso, "timezone": turn.clock.timezone,
-        })
-    next_turn = turn.model_copy(update={
-        "message": request, "clock": next_clock, "recent_messages": history[-12:],
-    })
-    object.__setattr__(next_turn, "_raw_ctx", next_ctx)
-    object.__setattr__(next_turn, "_mentioned_ids", list(getattr(turn, "_mentioned_ids", []) or []))
-    object.__setattr__(next_turn, "_operation_batch_context", batches.prompt_context(batch, auto_resume=True))
-    object.__setattr__(next_turn, "_operation_batch_id", str(batch.get("_id") or ""))
-    object.__setattr__(next_turn, "_operation_batch_revision", int(batch.get("revision", 0) or 0))
-    object.__setattr__(next_turn, "_operation_item_id", str(current.get("item_id") or ""))
-    next_result = run_pi_turn(
-        next_turn, run_id=run_id, trace=trace, on_progress=on_progress,
-        on_token=on_token,
-        debug_enabled=debug_enabled, confirmation_collection=confirmation_store,
-        contact_selection_collection=selection_store, operation_batch_collection=batch_store,
-    )
-    first_messages = list(result.messages or ([receipt] if receipt else []))
-    combined_messages = [*first_messages, *list(next_result.messages or [])][:3]
-    index_offset = len(first_messages)
-    combined_blocks = [
-        {**block, "message_index": int(block.get("message_index", 0) or 0) + index_offset}
-        if isinstance(block, dict) and block.get("type") == "text"
-        else dict(block)
-        for block in (next_result.interaction_blocks_v1 or [])
-        if isinstance(block, dict)
-    ]
-    if first_messages:
-        combined_blocks = [
-            *({"type": "text", "message_index": index} for index in range(len(first_messages))),
-            *combined_blocks,
-        ]
-    return next_result.model_copy(update={
-        "reply": "\n\n".join(combined_messages),
-        "messages": combined_messages,
-        "interaction_blocks_v1": combined_blocks[:4],
-        "choice_resolution": result.choice_resolution,
-        "calendar_state_changed": bool(result.calendar_state_changed or next_result.calendar_state_changed),
-        "match_state_changed": bool(result.match_state_changed or next_result.match_state_changed),
-        "llm_call_metrics": [*list(result.llm_call_metrics or []), *list(next_result.llm_call_metrics or [])],
-    })
-
-
 def run_pi_public_turn(
     ctx: Any, *, on_progress: Callable | None = None,
     on_token: Callable[[str], None] | None = None, debug_enabled: bool = False,
     confirmation_collection: Any = None, contact_selection_collection: Any = None,
-    operation_batch_collection: Any = None, runs_collection: Any = None,
+    runs_collection: Any = None,
 ) -> AgentResult:
     """Run one authenticated Pi public turn without importing Scheduler."""
     if not bool(getattr(ctx, "external_calendar_authorized", False)):
         raise PermissionError("pi_authenticated_owner_required")
     confirmation_store = CONFIRMATIONS if confirmation_collection is None else confirmation_collection
     selection_store = CONTACT_SELECTIONS if contact_selection_collection is None else contact_selection_collection
-    batch_store = OPERATION_BATCHES if operation_batch_collection is None else operation_batch_collection
     confirmations = ConfirmationManager(confirmation_store)
     selections = ContactSelectionManager(selection_store)
-    batches = OperationBatchManager(batch_store)
     run_id = uuid.uuid4().hex
     mentioned_ids, overflow = validated_mentioned_contact_ids(ctx.user_id, ctx.mentioned_ids)
     ctx = ctx.model_copy(update={
@@ -472,18 +371,6 @@ def run_pi_public_turn(
     turn = build_public_agent_turn_context(ctx, clock=build_turn_clock(ctx.message))
     object.__setattr__(turn, "_raw_ctx", ctx)
     object.__setattr__(turn, "_mentioned_ids", mentioned_ids)
-
-    pending_batches = batches.list_pending(user_id=ctx.user_id, room_id=ctx.room_id, surface=SURFACE_PUBLIC)
-    active_batch = pending_batches[0] if pending_batches else None
-    if active_batch and str(active_batch.get("source_engine") or "dag") != "pi":
-        batches.pause(str(active_batch.get("_id") or ""), reason="engine_switched")
-        active_batch = None
-    if active_batch:
-        current = batches.current_item(active_batch) or {}
-        object.__setattr__(turn, "_operation_batch_context", batches.prompt_context(active_batch))
-        object.__setattr__(turn, "_operation_batch_id", str(active_batch.get("_id") or ""))
-        object.__setattr__(turn, "_operation_batch_revision", int(active_batch.get("revision", 0) or 0))
-        object.__setattr__(turn, "_operation_item_id", str(current.get("item_id") or ""))
 
     trace: dict[str, Any] = {"event_sequence": []}
     streamed_parts: list[str] = []
@@ -495,22 +382,15 @@ def run_pi_public_turn(
         on_token(fragment)
 
     runtime_on_token = emit_validated_token if on_token is not None else None
-    choice_result = _handle_choice(ctx, turn, run_id, confirmations, selections, batches)
+    choice_result = _handle_choice(ctx, turn, run_id, confirmations, selections)
     if choice_result is not None:
-        choice_result = _continue_batch_after_choice(
-            choice_result, ctx=ctx, turn=turn, run_id=run_id, trace=trace,
-            batches=batches, confirmation_store=confirmation_store,
-            selection_store=selection_store, batch_store=batch_store,
-            on_progress=on_progress, on_token=runtime_on_token,
-            debug_enabled=debug_enabled,
-        )
         result = _bind_interactions(choice_result, ctx=ctx, run_id=run_id,
-                                    confirmations=confirmations, selections=selections, batches=batches)
+                                    confirmations=confirmations, selections=selections)
     else:
         assessment_result = _handle_assessment(ctx, run_id)
         if assessment_result is not None:
             result = _bind_interactions(assessment_result, ctx=ctx, run_id=run_id,
-                                        confirmations=confirmations, selections=selections, batches=batches)
+                                        confirmations=confirmations, selections=selections)
         else:
             if ctx.choice_action is None and ctx.assessment_action is None:
                 selections.supersede_active(user_id=ctx.user_id, room_id=ctx.room_id)
@@ -525,10 +405,9 @@ def run_pi_public_turn(
                 debug_enabled=debug_enabled,
                 confirmation_collection=confirmation_store,
                 contact_selection_collection=selection_store,
-                operation_batch_collection=batch_store,
             )
             result = _bind_interactions(result, ctx=ctx, run_id=run_id,
-                                        confirmations=confirmations, selections=selections, batches=batches)
+                                        confirmations=confirmations, selections=selections)
     trace["result"] = {
         "handled": True, "conversation_intent": result.conversation_intent,
         "fallback_reason": result.fallback_reason,

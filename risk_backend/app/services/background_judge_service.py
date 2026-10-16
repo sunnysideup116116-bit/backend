@@ -135,6 +135,7 @@ class BackgroundJudgeService:
                 adapter.generate,
                 prompt,
                 model=model,
+                extra_kwargs=self._routing_extra_kwargs(),
             )
             parsed = self._parse_response(response_text)
         except Exception as e:
@@ -159,14 +160,34 @@ class BackgroundJudgeService:
 
         from app.core.llm_adapters import OpenAICompatAdapter
 
-        base_url = os.getenv("BACKGROUND_JUDGE_BASE_URL", "http://localhost:11434/v1")
-        api_key = os.getenv("BACKGROUND_JUDGE_API_KEY", "ollama")
+        if self._is_openrouter_mode():
+            if not os.getenv("OPENROUTER_API_KEY", "").strip():
+                raise RuntimeError(
+                    "openrouter_mode_requires_openrouter_api_key")
+            base_url = "https://openrouter.ai/api/v1"
+            api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        else:
+            base_url = os.getenv("BACKGROUND_JUDGE_BASE_URL", "http://localhost:11434/v1")
+            api_key = os.getenv("BACKGROUND_JUDGE_API_KEY", "ollama")
         self._adapter = OpenAICompatAdapter(base_url=base_url, api_key=api_key)
         return self._adapter
+
+    def _is_openrouter_mode(self) -> bool:
+        return os.getenv("AYUE_LLM_PROVIDER", "ollama").strip().lower() == "openrouter"
+
+    def _routing_extra_kwargs(self):
+        if not self._is_openrouter_mode():
+            return None
+        tier = os.getenv("AYUE_OPENROUTER_SERVICE_TIER", "").strip().lower() or "default"
+        if tier not in {"default", "flex", "priority", "fast", "ultrafast"}:
+            tier = "default"
+        return {"provider": {"sort": "latency"}, "service_tier": tier}
 
     def _resolve_model(self) -> str:
         if self._model:
             return self._model
+        if self._is_openrouter_mode():
+            return os.getenv("AYUE_OPENROUTER_MODEL", "").strip() or "deepseek/deepseek-v4.1-flash"
         return os.getenv("BACKGROUND_JUDGE_MODEL", "qwen2.5:3b")
 
     def _build_prompt(self, sender_id: str, current_message: str, recent_messages: List[Message], flagged_words, classifier_flag) -> str:

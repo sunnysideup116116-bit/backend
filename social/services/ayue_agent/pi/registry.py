@@ -12,7 +12,7 @@ from services.ayue_agent.tool_registry import get_tool_spec, planner_arguments_s
 
 from . import (
     assessment_tools, calendar_tools, match_tools, places_tools, product_tools, profile_tools,
-    relationship_tools, system_tools, web_tools, workflow_tools,
+    relationship_tools, system_tools, web_tools,
 )
 
 
@@ -37,7 +37,6 @@ DOMAINS = (
     PiDomain("web", web_tools.TOOL_NAMES, web_tools.PROMPT, web_tools.handle),
     PiDomain("match", match_tools.TOOL_NAMES, match_tools.PROMPT, match_tools.handle),
     PiDomain("product", product_tools.TOOL_NAMES, product_tools.PROMPT, product_tools.handle),
-    PiDomain("workflow", workflow_tools.TOOL_NAMES, workflow_tools.PROMPT, workflow_tools.handle),
 )
 
 TOOL_HANDLERS: dict[str, DomainHandler] = {
@@ -75,7 +74,7 @@ def tool_schemas() -> list[dict[str, Any]]:
         item["name"]: item
         for item in (
             *calendar_tools.write_tool_schemas(), *places_tools.SCHEMAS,
-            *product_tools.SCHEMAS, *workflow_tools.SCHEMAS, *match_tools.SCHEMAS,
+            *product_tools.SCHEMAS, *relationship_tools.SCHEMAS, *match_tools.SCHEMAS,
         )
     }
     result: list[dict[str, Any]] = []

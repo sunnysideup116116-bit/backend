@@ -32,8 +32,9 @@ class CodexProviderError(RuntimeError):
 
 def selected_provider() -> str:
     provider = os.environ.get("AYUE_LLM_PROVIDER", "ollama").strip().lower()
-    if provider not in {"ollama", "gpt"}:
-        raise CodexProviderError("AYUE_LLM_PROVIDER must be ollama or gpt")
+    if provider not in {"ollama", "gpt", "openrouter"}:
+        raise CodexProviderError(
+            "AYUE_LLM_PROVIDER must be ollama, gpt or openrouter")
     return provider
 
 

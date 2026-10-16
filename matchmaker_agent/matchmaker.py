@@ -43,6 +43,14 @@ if os.getenv("AYUE_SKIP_DOTENV", "").strip().lower() not in {"1", "true", "on"}:
             os.environ.setdefault(key, value)
     load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
+# The shared provider adapter lives at the server root; agent_api inserts this
+# path before service imports, and direct service-directory imports rely here.
+import sys
+_SERVER_ROOT = Path(__file__).resolve().parents[1]
+if str(_SERVER_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SERVER_ROOT))
+from llm_providers import openrouter_provider  # noqa: E402
+
 MATCH_LLM_TIMEOUT_SECONDS = 60.0
 MATCH_MAX_OUTPUT_TOKENS = 4096
 MATCH_RETRY_OUTPUT_TOKENS = 8192
@@ -151,13 +159,25 @@ def provider_search_context(value) -> dict[str, str]:
 
 class MatchmakerAgent:
     def __init__(self):
-        self.client = OpenAI(
-            api_key=os.getenv("LLM_API_KEY"),
-            base_url=os.getenv("LLM_BASE_URL")
-        )
-        self.model = os.getenv("LLM_MODEL_ID")
-        self.event_model = os.getenv(
-            "EVENT_EXTRACTION_MODEL_ID", "deepseek-v4.1-flash:cloud",
+        self._openrouter = openrouter_provider.is_openrouter()
+        if self._openrouter:
+            self.client = OpenAI(
+                api_key=openrouter_provider.api_key(),
+                base_url=openrouter_provider.BASE_URL,
+            )
+            self.model = openrouter_provider.selected_model()
+            self.event_model = self.model
+        else:
+            self.client = OpenAI(
+                api_key=os.getenv("LLM_API_KEY"),
+                base_url=os.getenv("LLM_BASE_URL")
+            )
+            self.model = os.getenv("LLM_MODEL_ID")
+            self.event_model = os.getenv(
+                "EVENT_EXTRACTION_MODEL_ID", "deepseek-v4.1-flash:cloud",
+            )
+        self._routing_extra = (
+            openrouter_provider.routing_extra_body() if self._openrouter else None
         )
         # Optional model-level redundancy for the Event relation validator only.
         # Empty/unset keeps the existing single-provider contract unchanged.
@@ -321,6 +341,7 @@ class MatchmakerAgent:
                     target_deep_profile, search_context,
                 ),
                 temperature=0.7, max_tokens=MATCH_MAX_OUTPUT_TOKENS,
+                extra_body=self._routing_extra,
             )
             return _match_content(response)
         except APITimeoutError:
@@ -353,6 +374,7 @@ class MatchmakerAgent:
                         response = await client.chat.completions.create(
                             model=self.model, messages=messages,
                             temperature=0.7, max_tokens=budget,
+                            extra_body=self._routing_extra,
                         )
                         from agent_quota.service import record_usage
                         import uuid
@@ -517,9 +539,13 @@ class MatchmakerAgent:
             f"sources={len(compact_results)} skills="
             f"{sorted({item.get('skill_name') for item in compact_results if item.get('skill_name')})}"
         )
-        fallback_model = os.getenv(
-            "EVENT_EXTRACTION_FALLBACK_MODEL_ID", self.model or "",
-        ).strip()
+        fallback_model = (
+            ""
+            if self._openrouter
+            else os.getenv(
+                "EVENT_EXTRACTION_FALLBACK_MODEL_ID", self.model or "",
+            ).strip()
+        )
         selected_model = self.event_model
 
         def extract_once(user_prompt, temperature):
@@ -533,6 +559,7 @@ class MatchmakerAgent:
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=temperature,
+                    extra_body=self._routing_extra,
                 )
 
             try:
@@ -1434,6 +1461,7 @@ class MatchmakerAgent:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.55,
+                extra_body=self._routing_extra,
             )
             content = (response.choices[0].message.content or "").strip()
             if not content:
@@ -1490,6 +1518,7 @@ class MatchmakerAgent:
                     {"role": "user", "content": reflection_prompt},
                 ],
                 temperature=0.1,
+                extra_body=self._routing_extra,
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -1521,6 +1550,7 @@ B 近期情境：{to_context}
                     {"role": "user", "content": global_prompt},
                 ],
                 temperature=0.3,
+                extra_body=self._routing_extra,
             )
             return response.choices[0].message.content
         except Exception as e:

@@ -26,15 +26,50 @@ esac
 
 # Validate provider and perform non-generative GPT checks BEFORE touching ports.
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    echo "Usage: ./start_all.sh [ollama|gpt] (default: ollama)"
+    echo "Usage: ./start_all.sh [ollama|gpt|openrouter]"
+    echo "Without arguments an interactive menu asks for the mode; after 15s idle ollama is kept."
     echo "GPT reads allowlisted settings from Server/.env; shell overrides win. See GPT_MODE.md."
+    echo "OpenRouter reads OPENROUTER_API_KEY and AYUE_OPENROUTER_* from Server/.env."
     exit 0
 fi
 if (( $# > 1 )); then
-    echo "Usage: ./start_all.sh [ollama|gpt]" >&2
+    echo "Usage: ./start_all.sh [ollama|gpt|openrouter]" >&2
     exit 2
 fi
-export AYUE_LLM_PROVIDER="${1:-${AYUE_LLM_PROVIDER:-ollama}}"
+
+# Mode resolution order: explicit argument > existing environment > interactive menu.
+# The menu reads stdin only on a real terminal: pipes and closed stdin belong to
+# the later interactive loop, so automation keeps the env/argument contract.
+export AYUE_LLM_PROVIDER="${1:-${AYUE_LLM_PROVIDER:-}}"
+if [[ -z "$AYUE_LLM_PROVIDER" ]]; then
+    if [[ ! -t 0 ]]; then
+        export AYUE_LLM_PROVIDER="ollama"
+        echo "Non-interactive stdin; keeping the default LLM provider: ollama." >&2
+    else
+        MENU_TIMEOUT_SECONDS="${AYUE_MENU_TIMEOUT_SECONDS:-15}"
+        if ! [[ "$MENU_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+            MENU_TIMEOUT_SECONDS=15
+        fi
+        echo -e "${CYAN}請選擇 LLM 啟動模式（${MENU_TIMEOUT_SECONDS} 秒未輸入將自動選用 ollama）：${NC}"
+        echo -e "  ${GREEN}1) ollama${NC}     Ollama Cloud（預設，Enter 可直接採用）"
+        echo -e "  ${GREEN}2) gpt${NC}        Codex ChatGPT OAuth（詳見 GPT_MODE.md）"
+        echo -e "  ${GREEN}3) openrouter${NC} OpenRouter deepseek-v4.1-flash（provider 依 latency 路由）"
+        if read -t "$MENU_TIMEOUT_SECONDS" -r -p "👉 請輸入 1/2/3（Enter = ollama）: " llm_choice; then
+            case "${llm_choice:-}" in
+                ""|1) export AYUE_LLM_PROVIDER="ollama" ;;
+                2) export AYUE_LLM_PROVIDER="gpt" ;;
+                3) export AYUE_LLM_PROVIDER="openrouter" ;;
+                *)
+                    echo -e "${YELLOW}⚠️  無效選項 \"$llm_choice\"，自動使用 ollama。${NC}" >&2
+                    export AYUE_LLM_PROVIDER="ollama"
+                    ;;
+            esac
+        else
+            echo -e "${YELLOW}⏱️  ${MENU_TIMEOUT_SECONDS} 秒未選擇，自動使用 ollama。${NC}" >&2
+            export AYUE_LLM_PROVIDER="ollama"
+        fi
+    fi
+fi
 case "$AYUE_LLM_PROVIDER" in
     ollama) ;;
     gpt)
@@ -43,7 +78,13 @@ case "$AYUE_LLM_PROVIDER" in
             exit 1
         fi
         ;;
-    *) echo "Usage: ./start_all.sh [ollama|gpt]" >&2; exit 2 ;;
+    openrouter)
+        if ! "$SERVER_ROOT/.local-venv/social/bin/python" \
+            "$SERVER_ROOT/llm_providers/openrouter_provider.py"; then
+            exit 1
+        fi
+        ;;
+    *) echo "Usage: ./start_all.sh [ollama|gpt|openrouter]" >&2; exit 2 ;;
 esac
 
 # Fresh preference identity must not vary with optional converter availability.
