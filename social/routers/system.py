@@ -37,7 +37,8 @@ from services.ayue_agent.public_relationship_projection import anonymize_counter
 from services.match_reason_service import V4_REASON_VERSION, reason_for_viewer
 from services.proposal_namespace import namespace_for_document
 from services.demo_cleanup_service import DemoCleanupError, clear_all_demo_state, graph_health
-from services.admin_access_service import require_demo_admin, require_local_debug
+from services.admin_access_service import (require_demo_admin, require_local_debug,
+    require_local_operator)
 
 router = APIRouter(prefix="/api", tags=["System"])
 MATCH_TEST_COHORT = "match_v1"
@@ -216,7 +217,7 @@ def init_system(user_id: str):
         "user_location": user_location,
     }
 
-@router.post("/seed", dependencies=[Depends(require_demo_admin)])
+@router.post("/seed", dependencies=[Depends(require_demo_admin), Depends(require_local_operator)])
 def seed_data():
     hobbies = ["想去喝咖啡", "晚上想看電影", "想找人打籃球", "週末想去郊外圖書館看書", "想要去居酒屋小酌"]
     personalities = [
@@ -465,8 +466,10 @@ def get_recent_context_status(user_id: str, run_key: str | None = None):
     }
     return response
 
-@router.post("/clear", dependencies=[Depends(require_demo_admin)])
-def clear_data(req: ClearRequest):
+@router.post("/clear", dependencies=[Depends(require_demo_admin), Depends(require_local_operator)])
+def clear_data(req: ClearRequest, confirm: bool = False):
+    if not confirm:
+        raise HTTPException(status_code=400, detail="confirm=true is required")
     try:
         return clear_all_demo_state()
     except DemoCleanupError as exc:

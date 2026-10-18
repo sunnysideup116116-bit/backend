@@ -682,6 +682,8 @@ Hook 目前已經是依「這一方的需求、共同 Event 與可公開關聯�
 
 ## 14. Public API
 
+管理端點（`/api/match/events/discover`、`/events/relevance/rebuild`、`/events/opportunities/scan`、`/events/lifecycle/run`）使用獨立的 `EVENT_OPS_ADMIN_TOKEN`（header `x-ayue-event-ops-token`），與 demo 破壞性工具的 `AYUE_DEMO_ADMIN_TOKEN` 分離，且不依賴 `DEMO_DESTRUCTIVE_TOOLS_ENABLED`。demo 別名（`/api/demo/*`、`/api/seed`、`/api/clear`）維持原本 gate，另外限制為 loopback client/Host 並要求 `confirm=true`。
+
 ### 14.1 探索活動
 
 ```http
