@@ -639,10 +639,25 @@ def _run_activity_generation_fixture(
 
 def _wire_mock_preference_api(monkeypatch, candidate_ids_by_key):
     """Connect Social's real adapter to the Matchmaker endpoint with mock graph I/O."""
+    import importlib.util
+    import sys
     from pathlib import Path
 
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "matchmaker_agent"))
-    import agent_api as matchmaker_api
+    matchmaker_dir = Path(__file__).resolve().parents[2] / "matchmaker_agent"
+    monkeypatch.syspath_prepend(str(matchmaker_dir))
+    import matchmaker
+
+    model_agent = MagicMock()
+    agent_factory = MagicMock(return_value=model_agent)
+    monkeypatch.setattr(matchmaker, "MatchmakerAgent", agent_factory)
+    api_spec = importlib.util.spec_from_file_location(
+        "_activity_evidence_matchmaker_api_fixture", matchmaker_dir / "agent_api.py",
+    )
+    assert api_spec and api_spec.loader
+    matchmaker_api = importlib.util.module_from_spec(api_spec)
+    monkeypatch.setitem(sys.modules, api_spec.name, matchmaker_api)
+    api_spec.loader.exec_module(matchmaker_api)
+    agent_factory.assert_called_once_with()
     from services import preference_candidate_service
 
     session = MagicMock()
