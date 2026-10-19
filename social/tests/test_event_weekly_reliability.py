@@ -50,11 +50,71 @@ def test_restart_recovers_committed_result_without_new_selection(monkeypatch, st
 def test_failures_retry_bounded_and_do_not_starve_other_users(monkeypatch, stores):
     profiles = stores[3]
     profiles.rows = [{"user_id": "bad"}, {"user_id": "good"}]
-    monkeypatch.setattr(weekly, "create_event_opportunity", lambda uid, **_: {"status": "error" if uid == "bad" else "no_match"})
+    calls = {}
+    def create(uid, **_):
+        calls[uid] = calls.get(uid, 0) + 1
+        return {"status": "error", "error_code": "event_graph_unavailable"} if uid == "bad" else {"status": "no_match"}
+    monkeypatch.setattr(weekly, "create_event_opportunity", create)
     result = weekly.run_invitation_batches("week", lambda: True, lambda _: None)
-    assert result["status"] == "partial"
+    assert result["status"] == "retry_pending"
     assert result["failed_user_count"] == 1
+    assert result["attempt_count"] == 2
+    assert result["retry_pending_count"] == 1
+    bad_row = next(row for row in stores[1].rows if row["user_id"] == "bad")
+    assert bad_row["state"] == "pending" and bad_row["outcome"] == "retry_pending"
+    assert bad_row["resume_at"] > weekly.time.time()
+
+    # Each worker pass observes the persisted backoff. Force the clock window
+    # open here to exercise the next bounded attempts without sleeping.
+    for _ in range(2):
+        bad_row["resume_at"] = 0
+        result = weekly.run_invitation_batches("week", lambda: True, lambda _: None)
+    assert calls == {"bad": 3, "good": 1}
+    assert result["status"] == "partial"
     assert result["attempt_count"] == 4
+    assert result["retry_pending_count"] == 0
+    assert bad_row["state"] == "done" and bad_row["outcome"] == "error"
+    assert bad_row["error_code"] == "event_graph_unavailable"
+
+
+@pytest.mark.parametrize("error_code", [
+    "event_semantic_disabled",
+    "event_semantic_config_unavailable",
+    "event_owner_ineligible",
+    "event_negative_unavailable",
+])
+def test_deterministic_unavailable_is_terminal_once(monkeypatch, stores, error_code):
+    stores[3].rows = [{"user_id": "owner"}]
+    calls = []
+    monkeypatch.setattr(weekly, "create_event_opportunity", lambda uid, **_: calls.append(uid) or {
+        "status": "unavailable", "error_code": error_code,
+    })
+
+    result = weekly.run_invitation_batches("week", lambda: True, lambda _: None)
+
+    row = stores[1].rows[0]
+    assert calls == ["owner"]
+    assert result["status"] == "partial"
+    assert result["retry_pending_count"] == result["resume_pending_count"] == 0
+    assert row["state"] == "done" and row["attempts"] == 1
+    assert row["outcome"] == "unavailable"
+    assert row["error_code"] == error_code
+
+
+def test_identity_lookup_unavailable_remains_retryable(monkeypatch, stores):
+    stores[3].rows = [{"user_id": "owner"}]
+    calls = []
+    monkeypatch.setattr(weekly, "create_event_opportunity", lambda uid, **_: calls.append(uid) or {
+        "status": "unavailable", "error_code": "event_owner_eligibility_unavailable",
+    })
+
+    result = weekly.run_invitation_batches("week", lambda: True, lambda _: None)
+    row = stores[1].rows[0]
+    assert calls == ["owner"]
+    assert result["retry_pending_count"] == 1
+    assert row["state"] == "pending" and row["outcome"] == "retry_pending"
+    assert row["error_code"] == "event_owner_eligibility_unavailable"
+    assert row["resume_at"] > weekly.time.time()
 
 
 def test_lease_loss_preserves_pending_progress(monkeypatch, stores):
@@ -85,6 +145,24 @@ def test_discovery_failure_never_clears_inventory(monkeypatch, stores):
     with pytest.raises(RuntimeError):
         weekly.run_durable_cycle("week", lambda: True, lambda _: None, region="高雄", window_days=30, categories=["市集"])
     cleanup.assert_not_called()
+
+
+def test_transient_retry_pending_requeues_saved_cycle(monkeypatch, stores):
+    from services import event_cycle_service as cycle
+    runs = stores[0]
+    runs.rows = [{"_id": "week", "discovery": {"status": "success"},
+                  "cleanup": {"status": "success"}, "users_prepared": True}]
+    monkeypatch.setattr(cycle, "wait_for_event_relevance", lambda: {"ready": True})
+    monkeypatch.setattr(weekly, "run_invitation_batches", lambda *args, **kwargs: {
+        "status": "retry_pending", "retry_pending_count": 1, "resume_pending_count": 0,
+    })
+
+    with pytest.raises(RuntimeError, match="event_semantic_resume_pending"):
+        weekly.run_durable_cycle("week", lambda: True, lambda _: None,
+                                 region="高雄", window_days=30, categories=["市集"])
+
+    assert runs.rows[0]["invitation_scan"]["retry_pending_count"] == 1
+    assert "result" not in runs.rows[0]
 
 
 def test_resume_uses_saved_discovery_and_population(monkeypatch, stores):
