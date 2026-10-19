@@ -5,6 +5,7 @@ import re
 import os
 import math
 import uuid
+import unicodedata
 from collections import Counter
 from typing import Callable
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
@@ -144,6 +145,50 @@ MATCH_VECTOR_RETRIEVAL_LIMIT = 100
 MATCH_MAX_CANDIDATE_BATCHES = 3
 MATCH_SELECTION_TIMEOUT_SECONDS = 120.0
 MATCH_TEST_ID_PATTERN = r"^(?:seed_user_|match_test_)"
+_ACTIVITY_PREFERENCE_PHRASES = {
+    "羽球": (("打羽球", "bounded_phrase"), ("羽球雙打", "bounded_phrase")),
+}
+_ACTIVITY_TITLE_ALIAS_GROUPS = (
+    ("Street Fighter", "街頭霸王", "快打旋風"),
+)
+_ACTIVITY_TITLE_PHRASES = (
+    ("玩街頭霸王", "deterministic_alias_phrase"),
+    ("玩快打旋風", "deterministic_alias_phrase"),
+)
+
+
+def _activity_topic_token(value: object) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"[\s\-‐‑‒–—_]+", "", text)
+
+
+def _activity_preference_lookup_topics(topic: str) -> list[tuple[str, str]]:
+    """Return at most five whitelisted exact Concept labels for activity recall."""
+    topic = str(topic or "").strip()[:80]
+    if not topic:
+        return []
+    variants: list[tuple[str, str]] = [(topic, "exact_canonical")]
+    token = _activity_topic_token(topic)
+    alias_group = next((
+        group for group in _ACTIVITY_TITLE_ALIAS_GROUPS
+        if token in {_activity_topic_token(item) for item in group}
+    ), None)
+    if alias_group:
+        variants.extend((item, "deterministic_alias") for item in alias_group)
+        variants.extend(_ACTIVITY_TITLE_PHRASES)
+    else:
+        variants.extend(_ACTIVITY_PREFERENCE_PHRASES.get(topic, ()))
+
+    result: list[tuple[str, str]] = []
+    seen = set()
+    for label, match_kind in variants:
+        key = _activity_topic_token(label)
+        if key and key not in seen:
+            seen.add(key)
+            result.append((label, match_kind))
+        if len(result) >= 5:
+            break
+    return result
 
 
 def _search_intent(search_context: dict | None) -> str:
@@ -188,7 +233,8 @@ def _activity_evidence_candidates(
     """Read-only owner-grounded activity evidence for one topic search.
 
     Only two trustworthy sources qualify a candidate:
-    1) exact Preference V2 lookup (canonical key or deterministic alias), and
+    1) exact, active verified-v2 Preference lookup using the topic plus a
+       small allowlist of activity phrases/title aliases, and
     2) validated typed recent activity (``context_signals.activity``) whose
     Recent Situation is still active.
 
@@ -201,29 +247,63 @@ def _activity_evidence_candidates(
     evidence: dict[str, list[dict]] = {}
     if not topic:
         return evidence, []
+    lookup_topics = _activity_preference_lookup_topics(topic)
+    if not lookup_topics:
+        return evidence, []
     requester_id = str(user_doc.get("user_id") or "")
     docs_by_id: dict[str, dict] = {}
     ordered_ids: list[str] = []
+    evidence_keys: dict[str, set[tuple[str, str]]] = {}
 
     def add(candidate_id: str, item: dict) -> None:
         if not candidate_id or candidate_id in excluded_users:
             return
-        evidence.setdefault(candidate_id, []).append(item)
+        identity = (str(item.get("kind") or ""), str(
+            item.get("concept_key") or item.get("activity") or "",
+        ))
+        seen = evidence_keys.setdefault(candidate_id, set())
+        if identity not in seen:
+            evidence.setdefault(candidate_id, []).append(item)
+            seen.add(identity)
         if candidate_id not in ordered_ids:
             ordered_ids.append(candidate_id)
 
     try:
         lookup = retrieve_preference_candidate_ids(
-            requester_id, topic, excluded_user_ids=excluded_users,
+            requester_id, lookup_topics[0][0], excluded_user_ids=excluded_users,
             limit=MATCH_VECTOR_RETRIEVAL_LIMIT,
+            v2_only=True,
+            additional_topics=[label for label, _kind in lookup_topics[1:]],
         )
         canonical_key = str(lookup.get("canonical_key") or "").strip()[:100]
         for candidate_id in list(lookup.get("candidate_ids") or [])[:MATCH_VECTOR_RETRIEVAL_LIMIT]:
             add(str(candidate_id or "").strip(), {
                 "kind": "candidate_prefers",
                 "concept_key": canonical_key,
-                "label": topic,
+                "label": str(lookup.get("normalized_topic") or lookup_topics[0][0])[:80],
+                "activity_evidence_match": "exact_canonical",
             })
+        variant_by_key = {}
+        for label, match_kind in lookup_topics[1:]:
+            identity = canonicalize_concept(label)
+            if identity:
+                variant_by_key[identity.key] = (label, match_kind)
+        for group in list(lookup.get("additional_candidates") or [])[:4]:
+            if not isinstance(group, dict):
+                continue
+            concept_key = str(group.get("canonical_key") or "").strip()[:100]
+            variant = variant_by_key.get(concept_key)
+            candidate_ids = group.get("candidate_ids")
+            if not variant or not isinstance(candidate_ids, list):
+                continue
+            label, match_kind = variant
+            for candidate_id in candidate_ids[:MATCH_VECTOR_RETRIEVAL_LIMIT]:
+                add(str(candidate_id or "").strip(), {
+                    "kind": "candidate_prefers",
+                    "concept_key": concept_key,
+                    "label": label,
+                    "activity_evidence_match": match_kind,
+                })
     except PreferenceCandidateLookupError:
         pass
     except Exception:

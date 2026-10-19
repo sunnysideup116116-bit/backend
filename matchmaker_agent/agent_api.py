@@ -109,6 +109,7 @@ GLOBAL_RULE_SIMILARITY_THRESHOLD = max(
 PREFERENCE_SEMANTIC_INDEX_NAME = "concept_embedding_index"
 PREFERENCE_SEMANTIC_DIMENSIONS = 768
 PREFERENCE_SEMANTIC_GRAPH_TIMEOUT_SECONDS = 3.0
+PREFERENCE_CANDIDATE_GRAPH_TIMEOUT_SECONDS = 4.0
 
 
 def compact_global_rule(text: str) -> str:
@@ -1199,6 +1200,8 @@ class PreferenceCandidateRequest(BaseModel):
     semantic_input_hash: str | None = Field(default=None, max_length=64)
     excluded_user_ids: list[str] = Field(default_factory=list, max_length=200)
     limit: int = Field(default=20, ge=1, le=100)
+    v2_only: bool = False
+    additional_topics: list[str] = Field(default_factory=list, max_length=4)
 
 
 class PreferenceSemanticCandidateRequest(BaseModel):
@@ -1578,16 +1581,45 @@ def preference_candidates(req: PreferenceCandidateRequest):
         return {"status": "error", "error_code": exc.code, "candidate_ids": [], "retryable": False}
     if not identity:
         return {"status": "skipped", "canonical_key": "", "candidate_ids": []}
+    additional_identities = []
+    if req.v2_only:
+        seen_keys = {identity.key}
+        for topic in req.additional_topics:
+            try:
+                additional_identity = canonicalize_concept(topic)
+            except PreferenceTextError:
+                return {"status": "error", "error_code": "preference_search_identity_invalid", "candidate_ids": []}
+            if additional_identity and additional_identity.key not in seen_keys:
+                seen_keys.add(additional_identity.key)
+                additional_identities.append(additional_identity)
     excluded = list(dict.fromkeys(
         str(value).strip()[:128]
         for value in req.excluded_user_ids
         if str(value or "").strip()
     ))[:200]
     URI, AUTH, DATABASE = _neo4j_config()
+    graph_deadline = (
+        time.monotonic() + PREFERENCE_CANDIDATE_GRAPH_TIMEOUT_SECONDS
+        if req.v2_only else None
+    )
+
+    def run_candidate_query(cypher: str, **parameters):
+        if graph_deadline is None:
+            return session.run(cypher, **parameters)
+        remaining = graph_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("preference candidate graph deadline exceeded")
+        return session.run(Query(cypher, timeout=remaining), **parameters)
+
+    driver_options = ({
+        "connection_timeout": 1.0,
+        "connection_acquisition_timeout": 1.0,
+        "max_transaction_retry_time": 0.0,
+    } if req.v2_only else {})
     try:
-        with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        with GraphDatabase.driver(URI, auth=AUTH, **driver_options) as driver:
             with driver.session(database=DATABASE) as session:
-                concept = session.run("""
+                concept = run_candidate_query("""
                     MATCH (concept:Concept {key:$key})
                     RETURN concept.key AS key,concept.semantic_text AS semantic_text,
                            concept.canonicalization_version AS canonicalization_version,
@@ -1597,26 +1629,95 @@ def preference_candidates(req: PreferenceCandidateRequest):
                 verified = stored_concept_identity(dict(concept)) if concept else None
                 rows = []
                 if verified and verified.key == identity.key:
-                    rows = session.run("""
-                    MATCH (concept:Concept {key:$key})<-[:PREFERS]-(candidate:User)
-                    WHERE candidate.id <> $requester_user_id
-                      AND concept.canonicalization_version = 'v2'
-                      AND concept.semantic_input_hash = $semantic_input_hash
-                    WITH candidate
-                    LIMIT $limit
-                    RETURN candidate.id AS candidate_id
-                """, key=identity.key, requester_user_id=req.requester_user_id,
-                     semantic_input_hash=verified.semantic_input_hash, limit=req.limit)
+                    if req.v2_only:
+                        rows = run_candidate_query("""
+                            MATCH (candidate:User)-[preference:PREFERS]->
+                                  (concept:Concept {key:$key})
+                            WHERE candidate.id <> $requester_user_id
+                              AND candidate.id NOT IN $excluded_user_ids
+                              AND coalesce(preference.active,true)=true
+                              AND candidate.preference_projection_pending IS NULL
+                              AND NOT EXISTS {
+                                  MATCH (candidate)-[avoid:AVOIDS]->(concept)
+                                  WHERE coalesce(avoid.active,true)=true
+                              }
+                              AND NOT EXISTS { MATCH (candidate)-[:MEMORY_DISABLED]->(concept) }
+                              AND concept.canonicalization_version = 'v2'
+                              AND concept.semantic_text = $semantic_text
+                              AND concept.semantic_input_hash = $semantic_input_hash
+                              AND coalesce(concept.fidelity_status,'complete') = 'complete'
+                              AND (concept.canonical_key IS NULL OR concept.canonical_key = $key)
+                              AND (concept.concept_key IS NULL OR concept.concept_key = $key)
+                            WITH candidate
+                            LIMIT $limit
+                            RETURN candidate.id AS candidate_id
+                        """, key=identity.key, requester_user_id=req.requester_user_id,
+                             excluded_user_ids=excluded,
+                             semantic_text=verified.semantic_text,
+                             semantic_input_hash=verified.semantic_input_hash, limit=req.limit)
+                    else:
+                        rows = run_candidate_query("""
+                        MATCH (concept:Concept {key:$key})<-[:PREFERS]-(candidate:User)
+                        WHERE candidate.id <> $requester_user_id
+                          AND concept.canonicalization_version = 'v2'
+                          AND concept.semantic_input_hash = $semantic_input_hash
+                        WITH candidate
+                        LIMIT $limit
+                        RETURN candidate.id AS candidate_id
+                    """, key=identity.key, requester_user_id=req.requester_user_id,
+                         semantic_input_hash=verified.semantic_input_hash, limit=req.limit)
                 raw_candidate_ids = list(dict.fromkeys(
                     str(row["candidate_id"])
                     for row in rows if str(row.get("candidate_id") or "").strip()
                 ))
+                raw_additional_candidates: dict[str, list[str]] = {
+                    item.key: [] for item in additional_identities
+                }
+                remaining = max(0, req.limit - len(raw_candidate_ids))
+                if additional_identities and remaining:
+                    proofs = [{
+                        "key": item.key,
+                        "semantic_text": item.semantic_text,
+                        "semantic_input_hash": item.semantic_input_hash,
+                        "rank": rank,
+                    } for rank, item in enumerate(additional_identities)]
+                    extra_rows = run_candidate_query("""
+                        UNWIND $proofs AS proof
+                        MATCH (candidate:User)-[preference:PREFERS]->
+                              (concept:Concept {key:proof.key})
+                        WHERE candidate.id <> $requester_user_id
+                          AND candidate.id NOT IN $excluded_user_ids
+                          AND coalesce(preference.active,true)=true
+                          AND candidate.preference_projection_pending IS NULL
+                          AND NOT EXISTS {
+                              MATCH (candidate)-[avoid:AVOIDS]->(concept)
+                              WHERE coalesce(avoid.active,true)=true
+                          }
+                          AND NOT EXISTS { MATCH (candidate)-[:MEMORY_DISABLED]->(concept) }
+                          AND concept.canonicalization_version = 'v2'
+                          AND concept.semantic_text = proof.semantic_text
+                          AND concept.semantic_input_hash = proof.semantic_input_hash
+                          AND coalesce(concept.fidelity_status,'complete') = 'complete'
+                          AND (concept.canonical_key IS NULL OR concept.canonical_key = proof.key)
+                          AND (concept.concept_key IS NULL OR concept.concept_key = proof.key)
+                        WITH proof,candidate ORDER BY proof.rank,candidate.id
+                        LIMIT $limit
+                        RETURN proof.key AS canonical_key,candidate.id AS candidate_id
+                    """, proofs=proofs, requester_user_id=req.requester_user_id,
+                         excluded_user_ids=excluded, limit=remaining)
+                    for row in extra_rows:
+                        key = str(row.get("canonical_key") or "").strip()
+                        candidate_id = str(row.get("candidate_id") or "").strip()
+                        if key in raw_additional_candidates and candidate_id:
+                            ids = raw_additional_candidates[key]
+                            if candidate_id not in ids:
+                                ids.append(candidate_id)
                 # Optional compatibility is owner-edge proof, never a short
                 # global label. Both branches share one hard ID budget.
                 remaining = max(0, req.limit - len(raw_candidate_ids))
                 legacy = canonicalize_concept_v1(identity.semantic_text)
-                if remaining and legacy:
-                    legacy_rows = session.run("""
+                if not req.v2_only and remaining and legacy:
+                    legacy_rows = run_candidate_query("""
                         MATCH (concept:Concept {key:$legacy_key})<-[edge:PREFERS]-(candidate:User)
                         WHERE candidate.id <> $requester_user_id
                           AND coalesce(concept.canonicalization_version,'legacy_unknown') <> 'v2'
@@ -1637,7 +1738,7 @@ def preference_candidates(req: PreferenceCandidateRequest):
                     candidate_id for candidate_id in raw_candidate_ids
                     if candidate_id not in excluded
                 ]
-        return {
+        result = {
             "status": "success",
             "canonical_key": identity.key,
             "normalized_topic": identity.label,
@@ -1645,6 +1746,14 @@ def preference_candidates(req: PreferenceCandidateRequest):
             "candidate_count_before_filter": len(raw_candidate_ids),
             "candidate_count_after_filter": len(candidate_ids),
         }
+        if req.v2_only:
+            result["v2_only"] = True
+            result["additional_candidates"] = [
+                {"canonical_key": item.key,
+                 "candidate_ids": raw_additional_candidates.get(item.key, [])}
+                for item in additional_identities
+            ]
+        return result
     except Exception as exc:
         print(f"[PREFERENCE_MATCH] graph_lookup_failed error={type(exc).__name__}")
         return {

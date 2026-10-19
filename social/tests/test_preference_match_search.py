@@ -132,10 +132,13 @@ def test_activity_search_uses_exact_lookup_only_as_evidence(monkeypatch):
     profiles, matches = _flow(monkeypatch, candidate=candidate)
     captured = {}
 
-    def lookup(owner, topic, *, excluded_user_ids, limit):
-        captured.update(owner=owner, topic=topic)
-        return {"candidate_ids": ["candidate"], "canonical_key": "",
-                "normalized_topic": "", "retrieval_source": "graph_exact",
+    def lookup(owner, topic, *, excluded_user_ids, limit, v2_only=False,
+               additional_topics=()):
+        captured.update(owner=owner, topic=topic, v2_only=v2_only,
+                        additional_topics=additional_topics)
+        return {"candidate_ids": ["candidate"], "canonical_key": canonicalize_concept(topic).key,
+                "normalized_topic": topic, "v2_only": v2_only,
+                "additional_candidates": [], "retrieval_source": "graph_exact",
                 "candidate_count_before_filter": 1, "candidate_count_after_filter": 1}
 
     monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lookup)
@@ -151,6 +154,8 @@ def test_activity_search_uses_exact_lookup_only_as_evidence(monkeypatch):
     profiles.aggregate.assert_called_once()  # vector recall still runs
     assert result["diagnostics"]["retrieval_source"] == "vector"
     assert captured["topic"] == "看展"  # exact lookup is evidence-only for activity
+    assert captured["v2_only"] is True
+    assert captured["additional_topics"] == []
     inserted = matches.insert_one.call_args.args[0]
     assert inserted["match_source_kind"] == "requested_topic"
 

@@ -235,6 +235,89 @@ def test_negative_preference_request_never_becomes_positive_graph_search(
     assert store.c.count_documents({}) == 0
 
 
+def test_pi_activity_grounding_accepts_lowercase_street_fighter_from_visible_user_text(monkeypatch):
+    from services.ayue_agent.pi.match_tools import MatchSearchInput, _prepare_search
+    from services.ayue_agent.shared import write_executors
+
+    monkeypatch.setattr(
+        write_executors, "assess_match_opportunity",
+        lambda *_a, **_k: SimpleNamespace(state="ready"),
+    )
+    _ctx, turn = make_turn("幫我找人一起玩 street fighter")
+    payload, preview = _prepare_search(
+        SimpleNamespace(turn=turn),
+        MatchSearchInput(kind="activity", topic="Street Fighter"),
+    )
+
+    assert payload is not None
+    assert payload["data"]["search_context"]["invitation_topic"] == "Street Fighter"
+    assert "Street Fighter" in preview
+
+
+def test_pi_lowercase_street_fighter_dispatch_creates_confirmation_card(monkeypatch):
+    from services.ayue_agent.shared import write_executors
+
+    monkeypatch.setattr(
+        write_executors, "assess_match_opportunity",
+        lambda *_a, **_k: SimpleNamespace(state="ready"),
+    )
+    store = mongomock.MongoClient().test
+    _ctx, turn = make_turn("幫我找人一起玩 street fighter")
+    runtime = tool_runtime.PiToolRuntime(
+        turn, run_id="lowercase-street-fighter", trace={},
+        confirmation_collection=store.c,
+        contact_selection_collection=store.s,
+    )
+
+    result = runtime.dispatch("match.start_search", {
+        "kind": "activity", "topic": "Street Fighter",
+    })
+
+    assert result["result"]["pending_confirmation"] is True
+    record = store.c.find_one({})
+    assert record["status"] == "prepared"
+    assert record["payload"]["search_context"]["search_intent"] == "activity"
+    assert record["payload"]["search_context"]["invitation_topic"] == "Street Fighter"
+    assert "Street Fighter" in record["preview_text"]
+
+
+def test_activity_grounding_still_rejects_a_topic_absent_from_the_visible_message(monkeypatch):
+    from services.ayue_agent.pi.match_tools import MatchSearchInput, _prepare_search
+    from services.ayue_agent.shared import write_executors
+
+    monkeypatch.setattr(
+        write_executors, "assess_match_opportunity",
+        lambda *_a, **_k: SimpleNamespace(state="ready"),
+    )
+    _ctx, turn = make_turn("我想找人一起打羽球")
+    payload, reply = _prepare_search(
+        SimpleNamespace(turn=turn),
+        MatchSearchInput(kind="activity", topic="Street Fighter"),
+    )
+
+    assert payload is None
+    assert "想找人一起做什麼活動" in reply
+
+
+def test_write_executor_also_rejects_an_absent_case_variant_activity(monkeypatch):
+    from services.ayue_agent.shared.write_executors import prepare_write_confirmation
+    from services.ayue_agent.shared import write_executors
+
+    monkeypatch.setattr(
+        write_executors, "assess_match_opportunity",
+        lambda *_a, **_k: SimpleNamespace(state="ready"),
+    )
+    ctx, turn = make_turn("我想找人一起打羽球")
+    payload, reply = prepare_write_confirmation(
+        "match.start_search",
+        {"search_request": {"kind": "activity", "topic": "Street Fighter"}},
+        ctx, turn,
+    )
+
+    assert payload is None
+    assert "想找人一起做什麼活動" in reply
+
+
 @pytest.mark.parametrize("message,history,arguments,topic", [
     ("對", [{"role": "user", "content": "幫我找一起衝浪的人"}, {"role": "assistant", "content": "要開始找衝浪人選嗎？"}], {"kind": "activity", "topic": "衝浪"}, "衝浪"),
     ("改用近期情境就好", [{"role": "user", "content": "找衝浪人選"}], {"kind": "recent_context"}, None),

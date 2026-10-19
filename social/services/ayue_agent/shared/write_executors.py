@@ -56,6 +56,16 @@ _DATE_CARD_CAPABILITY_QUESTION_RE = re.compile(
 )
 
 
+def _activity_topic_is_grounded(topic: Any, source: Any) -> bool:
+    """Match the same visible activity phrase while ignoring ASCII case only."""
+    topic_text = str(topic or "").strip()
+    source_text = str(source or "")
+    if not topic_text or not source_text:
+        return False
+    pattern = r"(?<![A-Za-z0-9])" + re.escape(topic_text) + r"(?![A-Za-z0-9])"
+    return bool(re.search(pattern, source_text, flags=re.IGNORECASE | re.ASCII))
+
+
 def _is_date_card_capability_question(message: Any) -> bool:
     """Recognise the closed capability question that must stay read-only."""
     compact = re.sub(r"\s+", "", str(message or "")).strip()
@@ -1041,7 +1051,7 @@ def prepare_write_confirmation(
                 message = bounded_search_text(getattr(ctx, "message", ""), 600)
                 topic_span = bounded_search_text(semantic_request.get("topic"), 80)
             if request_kind == "activity":
-                if not topic_span or topic_span not in message:
+                if not _activity_topic_is_grounded(topic_span, message):
                     return None, "你這次想找人一起做什麼活動？確認活動後，我會先找人選給你看。"
                 search_context = safe_search_context({
                     "search_intent": "activity",
