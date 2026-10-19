@@ -20,6 +20,10 @@ class PreferenceCandidateLookupError(RuntimeError):
     pass
 
 
+class ActivityAvoidanceSnapshotError(RuntimeError):
+    pass
+
+
 def _bounded_count(value: Any, fallback: int) -> int:
     try:
         return max(0, min(int(value), 100))
@@ -141,3 +145,79 @@ def retrieve_preference_candidate_ids(
             for item in additional_identities
         ]
     return result
+
+
+def retrieve_activity_avoidance_snapshot(
+    candidate_ids: list[str] | tuple[str, ...],
+    topic_family: list[str] | tuple[str, ...],
+) -> dict[str, dict[str, Any]]:
+    """Read a complete bounded v2 AVOIDS snapshot for activity qualification.
+
+    The result must account for every requested candidate. An absent, malformed,
+    or unavailable graph result raises instead of silently meaning "no AVOID".
+    """
+    safe_ids = list(dict.fromkeys(
+        str(value or "").strip()[:128] for value in candidate_ids
+        if str(value or "").strip()
+    ))
+    if (not safe_ids or len(safe_ids) > 100
+            or len(safe_ids) != len(candidate_ids)):
+        raise ActivityAvoidanceSnapshotError("activity_safety_candidate_ids_invalid")
+    identities = []
+    seen_keys = set()
+    for value in list(topic_family or ()):
+        try:
+            identity = canonicalize_concept(value)
+        except PreferenceTextError as exc:
+            raise ActivityAvoidanceSnapshotError("activity_safety_topic_invalid") from exc
+        if identity and identity.key not in seen_keys:
+            seen_keys.add(identity.key)
+            identities.append(identity)
+    if not identities or len(identities) > 5:
+        raise ActivityAvoidanceSnapshotError("activity_safety_topic_invalid")
+    topic_keys = {identity.key for identity in identities}
+    request_payload = {
+        "candidate_ids": safe_ids,
+        "topic_family": [identity.label for identity in identities],
+    }
+    try:
+        response = requests.post(
+            f"{AGENT_URL}/api/preferences/activity-avoidances",
+            json=request_payload,
+            timeout=(1, 5),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise ActivityAvoidanceSnapshotError("activity_safety_unavailable") from exc
+    if not isinstance(payload, dict) or payload.get("status") != "success":
+        code = payload.get("error_code") if isinstance(payload, dict) else None
+        raise ActivityAvoidanceSnapshotError(str(code or "activity_safety_invalid_response")[:80])
+    raw_checks = payload.get("candidate_checks")
+    if not isinstance(raw_checks, list) or len(raw_checks) != len(safe_ids):
+        raise ActivityAvoidanceSnapshotError("activity_safety_invalid_response")
+    checks: dict[str, dict[str, Any]] = {}
+    for item in raw_checks:
+        if not isinstance(item, dict):
+            raise ActivityAvoidanceSnapshotError("activity_safety_invalid_response")
+        candidate_id = str(item.get("candidate_id") or "").strip()[:128]
+        verification_status = str(item.get("verification_status") or "")
+        raw_avoid_keys = item.get("avoid_concept_keys")
+        if (candidate_id not in safe_ids or candidate_id in checks
+                or verification_status not in {"verified", "unverified"}
+                or not isinstance(raw_avoid_keys, list)
+                or len(raw_avoid_keys) > len(topic_keys)):
+            raise ActivityAvoidanceSnapshotError("activity_safety_invalid_response")
+        avoid_keys = []
+        for value in raw_avoid_keys:
+            key = str(value or "").strip()[:100]
+            if key not in topic_keys or key in avoid_keys:
+                raise ActivityAvoidanceSnapshotError("activity_safety_invalid_response")
+            avoid_keys.append(key)
+        checks[candidate_id] = {
+            "verification_status": verification_status,
+            "avoid_concept_keys": sorted(avoid_keys),
+        }
+    if set(checks) != set(safe_ids):
+        raise ActivityAvoidanceSnapshotError("activity_safety_invalid_response")
+    return checks

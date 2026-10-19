@@ -1204,6 +1204,12 @@ class PreferenceCandidateRequest(BaseModel):
     additional_topics: list[str] = Field(default_factory=list, max_length=4)
 
 
+class ActivityAvoidanceSnapshotRequest(BaseModel):
+    """Bounded, read-only v2 AVOIDS snapshot for activity candidate safety."""
+    candidate_ids: list[str] = Field(min_length=1, max_length=100)
+    topic_family: list[str] = Field(min_length=1, max_length=5)
+
+
 class PreferenceSemanticCandidateRequest(BaseModel):
     requester_user_id: str = Field(min_length=1, max_length=128)
     topic: str = Field(min_length=1, max_length=MAX_PREFERENCE_TEXT_CHARS)
@@ -1760,6 +1766,114 @@ def preference_candidates(req: PreferenceCandidateRequest):
             "status": "error", "error_code": "preference_graph_unavailable",
             "canonical_key": identity.key, "candidate_ids": [],
         }
+
+
+@app.post("/api/preferences/activity-avoidances")
+def activity_avoidance_snapshot(req: ActivityAvoidanceSnapshotRequest):
+    """Check bounded activity candidates against their complete v2 AVOIDS family.
+
+    Every requested candidate receives an explicit verification result. Missing
+    owners, pending projections, or malformed matching Concept identities are
+    reported as unverified so callers cannot mistake an incomplete read for a
+    conflict-free candidate.
+    """
+    candidate_ids = list(dict.fromkeys(
+        str(value or "").strip()[:128] for value in req.candidate_ids
+        if str(value or "").strip()
+    ))
+    if len(candidate_ids) != len(req.candidate_ids) or not candidate_ids:
+        return {"status": "error", "error_code": "activity_safety_candidate_ids_invalid",
+                "candidate_checks": []}
+
+    identities_by_key = {}
+    try:
+        for topic in req.topic_family:
+            identity = canonicalize_concept(topic)
+            if not identity:
+                raise PreferenceTextError("invalid_activity_topic")
+            identities_by_key.setdefault(identity.key, identity)
+    except PreferenceTextError:
+        return {"status": "error", "error_code": "activity_safety_topic_invalid",
+                "candidate_checks": []}
+    if not identities_by_key or len(identities_by_key) > 5:
+        return {"status": "error", "error_code": "activity_safety_topic_invalid",
+                "candidate_checks": []}
+
+    URI, AUTH, DATABASE = _neo4j_config()
+    deadline = time.monotonic() + PREFERENCE_CANDIDATE_GRAPH_TIMEOUT_SECONDS
+    driver_options = {
+        "connection_timeout": 1.0,
+        "connection_acquisition_timeout": 1.0,
+        "max_transaction_retry_time": 0.0,
+    }
+    try:
+        with GraphDatabase.driver(URI, auth=AUTH, **driver_options) as driver:
+            with driver.session(database=DATABASE) as session:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("activity avoidance graph deadline exceeded")
+                rows = session.run(Query("""
+                    UNWIND $candidate_ids AS candidate_id
+                    OPTIONAL MATCH (candidate:User {id:candidate_id})
+                    WITH candidate_id,candidate
+                    OPTIONAL MATCH (candidate)-[avoid:AVOIDS]->(concept:Concept)
+                    WHERE concept.key IN $topic_keys
+                      AND coalesce(avoid.active,true)=true
+                      AND NOT EXISTS {
+                          MATCH (candidate)-[:MEMORY_DISABLED]->(concept)
+                      }
+                    WITH candidate_id,candidate,
+                         collect(DISTINCT CASE WHEN concept IS NULL THEN null ELSE {
+                             key:concept.key,
+                             canonical_key:concept.canonical_key,
+                             concept_key:concept.concept_key,
+                             semantic_text:concept.semantic_text,
+                             canonicalization_version:concept.canonicalization_version,
+                             semantic_input_hash:concept.semantic_input_hash,
+                             fidelity_status:concept.fidelity_status
+                         } END) AS avoids
+                    RETURN candidate_id,
+                           candidate.id IS NOT NULL AS owner_present,
+                           CASE WHEN candidate IS NULL THEN false
+                                WHEN candidate.preference_projection_pending IS NULL THEN true
+                                ELSE false END AS projection_ready,
+                           avoids
+                    ORDER BY candidate_id
+                """, timeout=remaining), candidate_ids=candidate_ids,
+                    topic_keys=list(identities_by_key))
+                rows = [dict(row) for row in rows]
+
+        by_id = {str(row.get("candidate_id") or ""): row for row in rows}
+        checks = []
+        for candidate_id in candidate_ids:
+            row = by_id.get(candidate_id) or {}
+            verified = bool(row.get("owner_present") and row.get("projection_ready"))
+            avoid_keys = []
+            proofs = row.get("avoids") if isinstance(row.get("avoids"), list) else []
+            for proof in proofs:
+                if not isinstance(proof, dict):
+                    verified = False
+                    continue
+                key = str(proof.get("key") or "")
+                expected = identities_by_key.get(key)
+                identity = stored_concept_identity(proof)
+                if (not expected or not identity or identity.key != key
+                        or identity.semantic_text != expected.semantic_text
+                        or identity.semantic_input_hash != expected.semantic_input_hash):
+                    verified = False
+                    continue
+                if key not in avoid_keys:
+                    avoid_keys.append(key)
+            checks.append({
+                "candidate_id": candidate_id,
+                "verification_status": "verified" if verified else "unverified",
+                "avoid_concept_keys": sorted(avoid_keys),
+            })
+        return {"status": "success", "candidate_checks": checks}
+    except Exception as exc:
+        print(f"[ACTIVITY_AVOIDANCE] graph_lookup_failed error={type(exc).__name__}")
+        return {"status": "error", "error_code": "activity_safety_unavailable",
+                "candidate_checks": []}
 
 
 def _semantic_index_metadata(session) -> dict:

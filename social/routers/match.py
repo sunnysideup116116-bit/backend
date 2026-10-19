@@ -109,7 +109,9 @@ from services.risk_block_service import (
     risk_block_service,
 )
 from services.preference_candidate_service import (
+    ActivityAvoidanceSnapshotError,
     PreferenceCandidateLookupError,
+    retrieve_activity_avoidance_snapshot,
     retrieve_preference_candidate_ids,
 )
 from services.preference_semantic_service import (
@@ -155,11 +157,21 @@ _ACTIVITY_TITLE_PHRASES = (
     ("玩街頭霸王", "deterministic_alias_phrase"),
     ("玩快打旋風", "deterministic_alias_phrase"),
 )
+_ACTIVITY_BADMINTON_FAMILY = ("羽球", "打羽球", "羽球雙打")
 
 
 def _activity_topic_token(value: object) -> str:
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
     return re.sub(r"[\s\-‐‑‒–—_]+", "", text)
+
+
+def _activity_title_alias_group(topic: str) -> tuple[str, ...] | None:
+    token = _activity_topic_token(topic)
+    phrase_labels = {_activity_topic_token(label) for label, _ in _ACTIVITY_TITLE_PHRASES}
+    return next((
+        group for group in _ACTIVITY_TITLE_ALIAS_GROUPS
+        if token in ({_activity_topic_token(item) for item in group} | phrase_labels)
+    ), None)
 
 
 def _activity_preference_lookup_topics(topic: str) -> list[tuple[str, str]]:
@@ -168,14 +180,13 @@ def _activity_preference_lookup_topics(topic: str) -> list[tuple[str, str]]:
     if not topic:
         return []
     variants: list[tuple[str, str]] = [(topic, "exact_canonical")]
-    token = _activity_topic_token(topic)
-    alias_group = next((
-        group for group in _ACTIVITY_TITLE_ALIAS_GROUPS
-        if token in {_activity_topic_token(item) for item in group}
-    ), None)
+    alias_group = _activity_title_alias_group(topic)
     if alias_group:
-        variants.extend((item, "deterministic_alias") for item in alias_group)
-        variants.extend(_ACTIVITY_TITLE_PHRASES)
+        topic_key = _activity_topic_token(topic)
+        variants.extend((item, "deterministic_alias") for item in alias_group
+                        if _activity_topic_token(item) != topic_key)
+        variants.extend((label, match_kind) for label, match_kind in _ACTIVITY_TITLE_PHRASES
+                        if _activity_topic_token(label) != topic_key)
     else:
         variants.extend(_ACTIVITY_PREFERENCE_PHRASES.get(topic, ()))
 
@@ -189,6 +200,91 @@ def _activity_preference_lookup_topics(topic: str) -> list[tuple[str, str]]:
         if len(result) >= 5:
             break
     return result
+
+
+def _activity_avoidance_topic_family(topic: str) -> list[str]:
+    """Return the complete, bounded deterministic family used for AVOID checks."""
+    topic = str(topic or "").strip()[:80]
+    if not topic:
+        return []
+    token = _activity_topic_token(topic)
+    title_group = _activity_title_alias_group(topic)
+    if title_group:
+        labels = [*title_group, *(label for label, _ in _ACTIVITY_TITLE_PHRASES)]
+    elif token in {_activity_topic_token(item) for item in _ACTIVITY_BADMINTON_FAMILY}:
+        # AVOID checks include the broad activity and its known activity form.
+        labels = list(_ACTIVITY_BADMINTON_FAMILY)
+    else:
+        labels = [topic]
+    result = []
+    seen = set()
+    for label in labels:
+        identity = canonicalize_concept(label)
+        if identity and identity.key not in seen:
+            seen.add(identity.key)
+            result.append(identity.label)
+        if len(result) >= 5:
+            break
+    return result
+
+
+def _activity_avoidance_conflict_keys(
+    topic: str, activity_evidence: list[dict] | None, avoid_keys: list[str] | set[str],
+) -> list[str]:
+    """Apply exact aliases and conservative badminton-form conflict rules."""
+    avoid = {str(key or "").strip() for key in avoid_keys if str(key or "").strip()}
+    if not avoid:
+        return []
+    topic = str(topic or "").strip()[:80]
+    token = _activity_topic_token(topic)
+    topic_identity = canonicalize_concept(topic)
+    if not topic_identity:
+        return []
+
+    title_group = _activity_title_alias_group(topic)
+    if title_group:
+        family = {
+            identity.key for label in (
+                *title_group, *(label for label, _ in _ACTIVITY_TITLE_PHRASES),
+            ) if (identity := canonicalize_concept(label))
+        }
+        return sorted(avoid & family)
+
+    badminton_keys = {
+        label: identity.key
+        for label in _ACTIVITY_BADMINTON_FAMILY
+        if (identity := canonicalize_concept(label))
+    }
+    if token in {_activity_topic_token(label) for label in _ACTIVITY_BADMINTON_FAMILY}:
+        broad_avoids = {badminton_keys["羽球"], badminton_keys["打羽球"]}
+        conflicts = avoid & broad_avoids
+        doubles_key = badminton_keys["羽球雙打"]
+        direct_doubles_evidence = False
+        for item in list(activity_evidence or ())[:5]:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("concept_key") or "").strip() == doubles_key:
+                direct_doubles_evidence = True
+                break
+            if item.get("kind") == "candidate_recent_activity":
+                activity_text = str(item.get("activity") or "")
+                activity_identity = canonicalize_concept(activity_text)
+                if (activity_identity and activity_identity.key == doubles_key) or (
+                    _activity_topic_token("羽球雙打") in _activity_topic_token(activity_text)
+                ):
+                    direct_doubles_evidence = True
+                    break
+        if (token == _activity_topic_token("羽球雙打") or direct_doubles_evidence):
+            if doubles_key in avoid:
+                conflicts.add(doubles_key)
+        return sorted(conflicts)
+
+    evidence_keys = {
+        str(item.get("concept_key") or "").strip()
+        for item in list(activity_evidence or ())[:5]
+        if isinstance(item, dict) and item.get("concept_key")
+    }
+    return sorted(avoid & (evidence_keys | {topic_identity.key}))
 
 
 def _search_intent(search_context: dict | None) -> str:
@@ -240,8 +336,9 @@ def _activity_evidence_candidates(
 
     Free-text ``current_context`` is never treated as activity evidence, so a
     negated or third-person sentence the typed extractor rejected cannot make
-    anyone eligible. The lookup is read-only and must never fail the search:
-    an exact-lookup outage simply degrades to recent-activity/vector recall.
+    anyone eligible. Positive preference lookup is read-only and may degrade
+    to typed recent-activity/vector recall when unavailable. The separate
+    bounded AVOID snapshot is mandatory and its failure propagates fail-closed.
     """
     topic = str(search_context.get("invitation_topic") or "").strip()[:80]
     evidence: dict[str, list[dict]] = {}
@@ -342,6 +439,22 @@ def _activity_evidence_candidates(
                  for item in evidence[candidate_id]) else 1,
         candidate_id,
     ))
+    # One safety read covers every bounded evidence source before any result is
+    # returned as direct activity evidence. Do not degrade a failed read to an
+    # empty AVOID set.
+    ordered_ids = ordered_ids[:MATCH_VECTOR_RETRIEVAL_LIMIT]
+    family = _activity_avoidance_topic_family(topic)
+    avoidance_by_id = retrieve_activity_avoidance_snapshot(ordered_ids, family)
+    allowed_ids = {
+        candidate_id for candidate_id in ordered_ids
+        if avoidance_by_id.get(candidate_id, {}).get("verification_status") == "verified"
+        and not _activity_avoidance_conflict_keys(
+            topic, evidence.get(candidate_id),
+            avoidance_by_id.get(candidate_id, {}).get("avoid_concept_keys", []),
+        )
+    }
+    evidence = {candidate_id: evidence[candidate_id] for candidate_id in ordered_ids
+                if candidate_id in allowed_ids}
     missing = [candidate_id for candidate_id in ordered_ids if candidate_id not in docs_by_id]
     if missing:
         try:
@@ -357,7 +470,7 @@ def _activity_evidence_candidates(
         for row in rows:
             docs_by_id[str(row.get("user_id") or "")] = row
     ordered_docs = [docs_by_id[candidate_id] for candidate_id in ordered_ids
-                    if candidate_id in docs_by_id]
+                    if candidate_id in allowed_ids and candidate_id in docs_by_id]
     return evidence, ordered_docs
 
 
@@ -880,13 +993,15 @@ def candidate_qualification(
     search_context: dict | None = None,
     preference_evidence: list[dict] | None = None,
     activity_evidence: list[dict] | None = None,
+    activity_avoidance_check: dict | None = None,
 ) -> dict:
     """Require reciprocal safety plus a direct or concrete semantic link.
 
     ``allow_adjacent`` is retained as a call-compatibility keyword only.  It
     never grants eligibility by itself.  A request-scoped activity topic or
     specific recent contexts may let a high-scoring candidate reach the
-    Matchmaker; the candidate side remains explicitly unverified.
+    Matchmaker; activity candidates also require an explicit verified AVOID
+    snapshot before either evidence or exploratory eligibility is granted.
     """
     del allow_adjacent
     search_context = safe_search_context(search_context)
@@ -980,6 +1095,29 @@ def candidate_qualification(
     if semantic_preference_evidence and not candidate_has_requested_preference:
         strong_reason_codes.append("semantic_related_preference")
     invitation_topic = str(search_context.get("invitation_topic") or "").strip()
+    activity_avoidance_status = "not_applicable"
+    activity_avoidance_conflict_keys = []
+    if search_intent == "activity":
+        activity_avoidance_status = "unverified"
+    if search_intent == "activity" and invitation_topic:
+        check = activity_avoidance_check if isinstance(activity_avoidance_check, dict) else {}
+        family_keys = {
+            identity.key for label in _activity_avoidance_topic_family(invitation_topic)
+            if (identity := canonicalize_concept(label))
+        }
+        raw_avoid_keys = check.get("avoid_concept_keys")
+        if (check.get("verification_status") != "verified"
+                or not isinstance(raw_avoid_keys, list)
+                or len(raw_avoid_keys) > len(family_keys)
+                or any(str(key or "").strip() not in family_keys for key in raw_avoid_keys)):
+            activity_avoidance_status = "unverified"
+        else:
+            activity_avoidance_conflict_keys = _activity_avoidance_conflict_keys(
+                invitation_topic, activity_evidence, raw_avoid_keys,
+            )
+            activity_avoidance_status = (
+                "conflict" if activity_avoidance_conflict_keys else "clear"
+            )
     if invitation_topic and float(vector_score or 0) >= vector_qualification_minimum():
         strong_reason_codes.append("requested_topic")
     activity_evidence = [
@@ -987,6 +1125,10 @@ def candidate_qualification(
         if isinstance(item, dict)
         and item.get("kind") in {"candidate_prefers", "candidate_recent_activity"}
     ]
+    if activity_avoidance_status not in {"clear", "not_applicable"}:
+        # A conflicted or unverifiable candidate must not retain positive
+        # activity evidence in diagnostics, recommendation copy, or selection.
+        activity_evidence = []
     if search_intent == "activity" and invitation_topic and activity_evidence:
         strong_reason_codes.append("candidate_activity_evidence")
     semantic_context_similarity = bool(
@@ -1064,8 +1206,14 @@ def candidate_qualification(
         char_limit=90,
     )
     return {
-        "eligible": not hard_conflicts and not legacy_conflict_indeterminate and bool(strong_reason_codes),
+        "eligible": (
+            not hard_conflicts and not legacy_conflict_indeterminate
+            and activity_avoidance_status in {"clear", "not_applicable"}
+            and bool(strong_reason_codes)
+        ),
         "hard_conflict_keys": sorted(set(hard_conflicts)),
+        "activity_avoidance_status": activity_avoidance_status,
+        "activity_avoidance_conflict_keys": activity_avoidance_conflict_keys,
         **({"legacy_identity_status": "indeterminate_legacy_conflict"} if legacy_conflict_indeterminate else {}),
         "shared_preference_keys": shared_persistent_preferences[:8],
         "requested_preference_matched": candidate_has_requested_preference,
@@ -2217,6 +2365,7 @@ def generate_matches_for_user(
     seen_candidates = set(excluded_users)
     preference_evidence_by_id: dict[str, list[dict]] = {}
     activity_evidence_by_id: dict[str, list[dict]] = {}
+    activity_avoidance_by_id: dict[str, dict] = {}
     candidate_stances_by_id: dict[str, set[str]] = {}
     prequalified_by_id: dict[str, dict] = {}
     target_stances: dict[str, set[str]] | None = None
@@ -2508,9 +2657,14 @@ def generate_matches_for_user(
             if len(vector_candidates) >= MATCH_CANDIDATE_POOL_SIZE:
                 break
         if search_intent == "activity":
-            activity_evidence_by_id, evidence_docs = _activity_evidence_candidates(
-                user_doc, bound_search_context, excluded_users,
-            )
+            try:
+                activity_evidence_by_id, evidence_docs = _activity_evidence_candidates(
+                    user_doc, bound_search_context, excluded_users,
+                )
+            except ActivityAvoidanceSnapshotError as exc:
+                raise MatchSearchPipelineError(
+                    "matchmaker_graph_unavailable", "activity_avoidance_check",
+                ) from exc
             diagnostics["activity_evidence_candidate_count"] = len(activity_evidence_by_id)
             vector_by_id = {
                 str(candidate.get("user_id") or ""): score
@@ -2539,6 +2693,22 @@ def generate_matches_for_user(
                 top_5_candidates = vector_candidates
         else:
             top_5_candidates = vector_candidates
+
+    if search_intent == "activity" and top_5_candidates:
+        activity_topic = str(bound_search_context.get("invitation_topic") or "").strip()[:80]
+        activity_candidate_ids = list(dict.fromkeys(
+            str(candidate.get("user_id") or "").strip()
+            for _score, candidate in top_5_candidates
+            if str(candidate.get("user_id") or "").strip()
+        ))[:MATCH_CANDIDATE_POOL_SIZE]
+        try:
+            activity_avoidance_by_id = retrieve_activity_avoidance_snapshot(
+                activity_candidate_ids, _activity_avoidance_topic_family(activity_topic),
+            )
+        except ActivityAvoidanceSnapshotError as exc:
+            raise MatchSearchPipelineError(
+                "matchmaker_graph_unavailable", "activity_avoidance_check",
+            ) from exc
 
     diagnostics["candidate_pool_count"] = len(top_5_candidates)
     if not top_5_candidates:
@@ -2607,6 +2777,7 @@ def generate_matches_for_user(
             search_context=req.search_context,
             preference_evidence=preference_evidence_by_id.get(candidate_id),
             activity_evidence=activity_evidence_by_id.get(candidate_id),
+            activity_avoidance_check=activity_avoidance_by_id.get(candidate_id),
         )
     _apply_qualification_diagnostics(diagnostics, qualification_by_id)
     qualified_candidates = [

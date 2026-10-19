@@ -36,6 +36,13 @@ PREFERS_EVIDENCE = [{"kind": "candidate_prefers", "concept_key": "v2_" + "a" * 4
 RECENT_EVIDENCE = [{"kind": "candidate_recent_activity", "activity": "打羽球", "label": "羽球"}]
 
 
+def _verified_avoidance_snapshot(candidate_ids, _topics):
+    return {
+        candidate_id: {"verification_status": "verified", "avoid_concept_keys": []}
+        for candidate_id in candidate_ids
+    }
+
+
 # --------------------------------------------------------------------------
 # Evidence lookup
 # --------------------------------------------------------------------------
@@ -52,6 +59,8 @@ def test_activity_evidence_candidates_combines_exact_preference_and_typed_activi
         "candidate_ids": ["cand-pref", "owner", "blocked-user"],
         "canonical_key": "v2_" + "a" * 48,
     })
+    monkeypatch.setattr(match_router, "retrieve_activity_avoidance_snapshot",
+                        _verified_avoidance_snapshot)
 
     evidence, docs = match_router._activity_evidence_candidates(
         {"user_id": "owner"}, TOPIC_CONTEXT, {"owner", "blocked-user"},
@@ -76,6 +85,8 @@ def test_activity_evidence_lookup_outage_degrades_to_typed_activity(monkeypatch)
         raise match_router.PreferenceCandidateLookupError("preference_graph_unavailable")
 
     monkeypatch.setattr(match_router, "retrieve_preference_candidate_ids", _unavailable)
+    monkeypatch.setattr(match_router, "retrieve_activity_avoidance_snapshot",
+                        _verified_avoidance_snapshot)
 
     evidence, docs = match_router._activity_evidence_candidates(
         {"user_id": "owner"}, TOPIC_CONTEXT, {"owner"},
@@ -126,6 +137,7 @@ def test_candidate_activity_evidence_is_direct_and_never_claims_willingness(_gra
     qualification = candidate_qualification(
         {"user_id": "owner"}, {"user_id": "candidate"},
         search_context=TOPIC_CONTEXT, activity_evidence=PREFERS_EVIDENCE,
+        activity_avoidance_check={"verification_status": "verified", "avoid_concept_keys": []},
     )
     assert qualification["eligible"] is True
     assert "candidate_activity_evidence" in qualification["strong_reason_codes"]
@@ -140,6 +152,7 @@ def test_recent_activity_evidence_qualifies_with_activity_text(_graph):
     qualification = candidate_qualification(
         {"user_id": "owner"}, {"user_id": "candidate"},
         search_context=TOPIC_CONTEXT, activity_evidence=RECENT_EVIDENCE,
+        activity_avoidance_check={"verification_status": "verified", "avoid_concept_keys": []},
     )
     assert qualification["eligible"] is True
     assert qualification["match_basis"]["level"] == "direct"
@@ -155,6 +168,7 @@ def test_activity_evidence_never_bypasses_hard_conflict(graph_memories):
     qualification = candidate_qualification(
         {"user_id": "owner"}, {"user_id": "candidate"},
         search_context=TOPIC_CONTEXT, activity_evidence=PREFERS_EVIDENCE,
+        activity_avoidance_check={"verification_status": "verified", "avoid_concept_keys": []},
     )
     assert qualification["eligible"] is False
     assert qualification["hard_conflict_keys"] == ["smoking"]
@@ -500,7 +514,10 @@ def test_activity_phrase_and_alias_expansion_is_small_and_exact():
     expected_titles = {"Street Fighter", "街頭霸王", "快打旋風", "玩街頭霸王", "玩快打旋風"}
     token = lambda value: "".join(value.casefold().split())
     expected_tokens = {token(label) for label in expected_titles}
-    for topic in ("Street Fighter", "street fighter", "街頭霸王", "快打旋風"):
+    for topic in (
+        "Street Fighter", "street fighter", "街頭霸王", "快打旋風",
+        "玩街頭霸王", "玩快打旋風",
+    ):
         variants = _activity_preference_lookup_topics(topic)
         assert len(variants) == 5
         assert variants[0][0] == topic
@@ -524,6 +541,8 @@ def test_bounded_phrase_lookup_keeps_candidate_owned_v2_provenance_and_exclusion
         ]),
     ]
     monkeypatch.setattr(match_router, "profiles_coll", profiles)
+    monkeypatch.setattr(match_router, "retrieve_activity_avoidance_snapshot",
+                        _verified_avoidance_snapshot)
     lookup = MagicMock(return_value={
         "v2_only": True,
         "canonical_key": canonicalize_concept("羽球").key,
@@ -550,6 +569,113 @@ def test_bounded_phrase_lookup_keeps_candidate_owned_v2_provenance_and_exclusion
     assert evidence["candidate-play"][0]["label"] == "打羽球"
     assert evidence["candidate-play"][0]["activity_evidence_match"] == "bounded_phrase"
     assert {doc["user_id"] for doc in docs} == {"candidate-play", "candidate-doubles"}
+
+
+def test_activity_evidence_retrieval_blocks_cross_language_street_fighter_avoid(monkeypatch):
+    import routers.match as match_router
+    from matchmaker_agent.concept_identity import canonicalize_concept
+
+    phrase = canonicalize_concept("玩街頭霸王")
+    avoid = canonicalize_concept("Street Fighter")
+    captured = {}
+    profiles = MagicMock()
+    profiles.find.return_value = _Rows([{"user_id": "candidate", "context_signals": {}}])
+    monkeypatch.setattr(match_router, "profiles_coll", profiles)
+    monkeypatch.setattr(match_router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "v2_only": True, "canonical_key": canonicalize_concept("Street Fighter").key,
+        "normalized_topic": "Street Fighter", "candidate_ids": [],
+        "additional_candidates": [{"canonical_key": phrase.key,
+                                    "candidate_ids": ["candidate"]}],
+    })
+    def avoidance_snapshot(ids, topics):
+        captured.update(ids=ids, topics=topics)
+        return {"candidate": {"verification_status": "verified",
+                              "avoid_concept_keys": [avoid.key]}}
+    monkeypatch.setattr(match_router, "retrieve_activity_avoidance_snapshot", avoidance_snapshot)
+
+    evidence, docs = match_router._activity_evidence_candidates(
+        {"user_id": "owner"},
+        {"search_intent": "activity", "invitation_topic": "Street Fighter"},
+        {"owner"},
+    )
+
+    assert captured["ids"] == ["candidate"]
+    assert {canonicalize_concept(topic).key for topic in captured["topics"]} == {
+        canonicalize_concept(label).key for label in (
+            "Street Fighter", "街頭霸王", "快打旋風", "玩街頭霸王", "玩快打旋風",
+        )
+    }
+    assert evidence == {}
+    assert docs == []
+
+
+@pytest.mark.parametrize("positive,negative,topic,expected", [
+    ("玩街頭霸王", "Street Fighter", "街頭霸王", True),
+    ("Street Fighter", "快打旋風", "Street Fighter", True),
+    ("玩街頭霸王", "玩快打旋風", "Street Fighter", True),
+    ("打羽球", "羽球", "羽球", True),
+    ("羽球雙打", "打羽球", "羽球", True),
+    ("羽球雙打", "羽球雙打", "羽球", True),
+    ("打羽球", "羽球雙打", "羽球", False),
+    ("羽球", "羽球雙打", "羽球", False),
+    ("打羽球", "羽球雙打", "羽球雙打", True),
+    ("玩街頭霸王", "格鬥遊戲", "Street Fighter", False),
+])
+def test_activity_avoidance_conflict_policy_is_bounded_and_form_aware(
+    positive, negative, topic, expected,
+):
+    from matchmaker_agent.concept_identity import canonicalize_concept
+    from routers.match import _activity_avoidance_conflict_keys
+
+    evidence = [{"kind": "candidate_prefers", "concept_key": canonicalize_concept(positive).key}]
+    avoid_key = canonicalize_concept(negative).key
+    assert bool(_activity_avoidance_conflict_keys(topic, evidence, [avoid_key])) is expected
+
+
+def test_activity_qualification_fails_closed_for_conflict_or_unverified_avoid_snapshot():
+    from matchmaker_agent.concept_identity import canonicalize_concept
+
+    phrase = canonicalize_concept("玩街頭霸王")
+    english = canonicalize_concept("Street Fighter")
+    context = {"search_intent": "activity", "invitation_topic": "Street Fighter"}
+    evidence = [{"kind": "candidate_prefers", "concept_key": phrase.key,
+                 "label": "玩街頭霸王"}]
+
+    conflict = candidate_qualification(
+        {"user_id": "owner"}, {"user_id": "candidate"},
+        search_context=context, activity_evidence=evidence,
+        activity_avoidance_check={"verification_status": "verified",
+                                  "avoid_concept_keys": [english.key]},
+        target_stances={}, candidate_stances={},
+    )
+    unverified = candidate_qualification(
+        {"user_id": "owner"}, {"user_id": "candidate"},
+        search_context=context, activity_evidence=evidence,
+        activity_avoidance_check={"verification_status": "unverified",
+                                  "avoid_concept_keys": []},
+        target_stances={}, candidate_stances={},
+    )
+
+    assert conflict["eligible"] is False
+    assert conflict["activity_avoidance_status"] == "conflict"
+    assert conflict["activity_avoidance_conflict_keys"] == [english.key]
+    assert conflict["activity_evidence"] == []
+    assert unverified["eligible"] is False
+    assert unverified["activity_avoidance_status"] == "unverified"
+    assert unverified["activity_evidence"] == []
+
+
+def test_narrow_badminton_avoid_detects_typed_doubles_but_not_general_play():
+    from matchmaker_agent.concept_identity import canonicalize_concept
+    from routers.match import _activity_avoidance_conflict_keys
+
+    doubles = canonicalize_concept("羽球雙打").key
+    assert _activity_avoidance_conflict_keys(
+        "羽球", [{"kind": "candidate_recent_activity", "activity": "最近打羽球雙打"}], [doubles],
+    ) == [doubles]
+    assert _activity_avoidance_conflict_keys(
+        "羽球", [{"kind": "candidate_recent_activity", "activity": "打羽球"}], [doubles],
+    ) == []
 
 
 @patch("routers.match.get_user_graph_memories", return_value=[])
@@ -586,7 +712,8 @@ def test_street_fighter_alias_phrase_reaches_initiator_reason_with_graph_provena
 
 def _run_activity_generation_fixture(
     monkeypatch, *, candidates, context, lookup_result, source="automatic",
-    existing_matches=(), lookup_callable=None,
+    existing_matches=(), lookup_callable=None, avoidance_callable=None,
+    exploratory_consent=False,
 ):
     from routers import match as match_router
     from tests.test_preference_match_search import _flow
@@ -611,6 +738,10 @@ def _run_activity_generation_fixture(
     lookup = (MagicMock(side_effect=lookup_callable) if lookup_callable
               else MagicMock(return_value=lookup_result))
     monkeypatch.setattr(match_router, "retrieve_preference_candidate_ids", lookup)
+    monkeypatch.setattr(
+        match_router, "retrieve_activity_avoidance_snapshot",
+        avoidance_callable or _verified_avoidance_snapshot,
+    )
     selection_payloads = []
 
     def select(payload, **_kwargs):
@@ -621,7 +752,7 @@ def _run_activity_generation_fixture(
     monkeypatch.setattr(match_router, "_request_matchmaker_selection", selection)
     reserve = MagicMock(return_value={"status": "reserved"})
     monkeypatch.setattr(match_router, "reserve_daily_quota", reserve)
-    consent_lookup = MagicMock(return_value=False)
+    consent_lookup = MagicMock(return_value=exploratory_consent)
     monkeypatch.setattr(match_router, "exploratory_consent_recorded", consent_lookup)
 
     result = match_router.generate_matches_for_user(
@@ -637,7 +768,9 @@ def _run_activity_generation_fixture(
     }
 
 
-def _wire_mock_preference_api(monkeypatch, candidate_ids_by_key):
+def _wire_mock_preference_api(
+    monkeypatch, candidate_ids_by_key, *, avoidances_by_candidate=None,
+):
     """Connect Social's real adapter to the Matchmaker endpoint with mock graph I/O."""
     import importlib.util
     import sys
@@ -659,12 +792,35 @@ def _wire_mock_preference_api(monkeypatch, candidate_ids_by_key):
     api_spec.loader.exec_module(matchmaker_api)
     agent_factory.assert_called_once_with()
     from services import preference_candidate_service
+    avoidances_by_candidate = avoidances_by_candidate or {}
 
     session = MagicMock()
 
     def run_graph_query(query, **parameters):
         cypher = getattr(query, "text", query)
         assert 0 < query.timeout <= matchmaker_api.PREFERENCE_CANDIDATE_GRAPH_TIMEOUT_SECONDS
+        if "UNWIND $candidate_ids AS candidate_id" in cypher:
+            from matchmaker_agent.concept_identity import canonicalize_concept
+
+            family_keys = set(parameters["topic_keys"])
+            checks = []
+            for candidate_id in parameters["candidate_ids"]:
+                avoid_proofs = []
+                for label in avoidances_by_candidate.get(candidate_id, ()):
+                    identity = canonicalize_concept(label)
+                    if identity.key in family_keys:
+                        avoid_proofs.append({
+                            "key": identity.key, "canonical_key": identity.key,
+                            "concept_key": identity.key, "semantic_text": identity.semantic_text,
+                            "canonicalization_version": "v2",
+                            "semantic_input_hash": identity.semantic_input_hash,
+                            "fidelity_status": "complete",
+                        })
+                checks.append({
+                    "candidate_id": candidate_id, "owner_present": True,
+                    "projection_ready": True, "avoids": avoid_proofs,
+                })
+            return checks
         if "RETURN concept.key AS key" in cypher:
             return SimpleNamespace(single=lambda: None)
         if "UNWIND $proofs AS proof" in cypher:
@@ -683,17 +839,26 @@ def _wire_mock_preference_api(monkeypatch, candidate_ids_by_key):
     monkeypatch.setattr(matchmaker_api.GraphDatabase, "driver", driver_factory)
 
     def local_http_post(url, *, json, timeout):
-        assert url.endswith("/api/preferences/candidates")
         assert timeout == (1, 5)
-        request = matchmaker_api.PreferenceCandidateRequest.model_validate(json)
-        payload = matchmaker_api.preference_candidates(request)
+        if url.endswith("/api/preferences/candidates"):
+            request = matchmaker_api.PreferenceCandidateRequest.model_validate(json)
+            payload = matchmaker_api.preference_candidates(request)
+        elif url.endswith("/api/preferences/activity-avoidances"):
+            request = matchmaker_api.ActivityAvoidanceSnapshotRequest.model_validate(json)
+            payload = matchmaker_api.activity_avoidance_snapshot(request)
+        else:
+            raise AssertionError(f"unexpected internal API: {url}")
         response = MagicMock()
         response.raise_for_status.return_value = None
         response.json.return_value = payload
         return response
 
     monkeypatch.setattr(preference_candidate_service.requests, "post", local_http_post)
-    return preference_candidate_service.retrieve_preference_candidate_ids, session
+    return (
+        preference_candidate_service.retrieve_preference_candidate_ids,
+        preference_candidate_service.retrieve_activity_avoidance_snapshot,
+        session,
+    )
 
 
 def test_street_fighter_alias_runs_through_qualification_selection_and_primary_copy(monkeypatch):
@@ -706,7 +871,7 @@ def test_street_fighter_alias_runs_through_qualification_selection_and_primary_c
     }
     title = canonicalize_concept("Street Fighter")
     saved_phrase = canonicalize_concept("玩街頭霸王")
-    lookup_callable, graph_session = _wire_mock_preference_api(
+    lookup_callable, avoidance_callable, graph_session = _wire_mock_preference_api(
         monkeypatch, {saved_phrase.key: ["candidate-sf"]},
     )
     flow = _run_activity_generation_fixture(
@@ -716,6 +881,7 @@ def test_street_fighter_alias_runs_through_qualification_selection_and_primary_c
             "query_text": "想找人一起玩 Street Fighter",
         },
         lookup_callable=lookup_callable,
+        avoidance_callable=avoidance_callable,
         lookup_result={
             "status": "success", "v2_only": True, "canonical_key": title.key,
             "normalized_topic": "Street Fighter", "candidate_ids": [],
@@ -746,7 +912,147 @@ def test_street_fighter_alias_runs_through_qualification_selection_and_primary_c
         f"graph:candidate-sf:{saved_phrase.key}",
     ]
     assert "對方明確提過喜歡玩街頭霸王" in match_doc["match_basis"]["counterparty_evidence"]
-    assert len(graph_session.run.call_args_list) == 2
+    assert len(graph_session.run.call_args_list) == 4
+
+
+def test_street_fighter_cross_language_avoid_blocks_typed_and_vector_recall(monkeypatch):
+    import time
+    from matchmaker_agent.concept_identity import canonicalize_concept
+
+    candidate = {
+        "user_id": "candidate-sf", "current_context": "最近想找人玩 Street Fighter",
+        "context_signals": {"activity": "Street Fighter"},
+        "recent_context_expires_at": time.time() + 3600, "score": .96,
+    }
+    title = canonicalize_concept("Street Fighter")
+    avoid_alias = canonicalize_concept("快打旋風")
+    lookup_callable, avoidance_callable, graph_session = _wire_mock_preference_api(
+        monkeypatch, {}, avoidances_by_candidate={"candidate-sf": ["快打旋風"]},
+    )
+    flow = _run_activity_generation_fixture(
+        monkeypatch, candidates=[candidate], source="agent_pi", exploratory_consent=True,
+        context={
+            "search_intent": "activity", "invitation_topic": "Street Fighter",
+            "query_text": "想找人一起玩 Street Fighter", "allow_exploratory": "1",
+        },
+        lookup_callable=lookup_callable,
+        avoidance_callable=avoidance_callable,
+        lookup_result={
+            "status": "success", "v2_only": True, "canonical_key": title.key,
+            "normalized_topic": "Street Fighter", "candidate_ids": [],
+            "additional_candidates": [],
+        },
+    )
+
+    assert flow["selection"].call_count == 0
+    flow["matches"].insert_one.assert_not_called()
+    flow["reserve"].assert_not_called()
+    assert flow["result"]["status"] == "no_suitable_candidate"
+    assert len(graph_session.run.call_args_list) == 4
+    assert avoid_alias.key in graph_session.run.call_args_list[2].kwargs["topic_keys"]
+    assert avoid_alias.key in graph_session.run.call_args_list[3].kwargs["topic_keys"]
+
+
+def test_unverified_avoidance_read_cannot_fall_through_to_exploratory_selection(monkeypatch):
+    import time
+    from matchmaker_agent.concept_identity import canonicalize_concept
+
+    candidate = {
+        "user_id": "candidate", "current_context": "最近想看展",
+        "context_signals": {}, "recent_context_expires_at": time.time() + 3600,
+        "score": .95,
+    }
+    topic = canonicalize_concept("看展")
+
+    def unverified(candidate_ids, _topics):
+        return {
+            candidate_id: {"verification_status": "unverified", "avoid_concept_keys": []}
+            for candidate_id in candidate_ids
+        }
+
+    flow = _run_activity_generation_fixture(
+        monkeypatch, candidates=[candidate], source="agent_pi", exploratory_consent=True,
+        context={"search_intent": "activity", "invitation_topic": "看展",
+                 "query_text": "想找人一起看展", "allow_exploratory": "1"},
+        avoidance_callable=unverified,
+        lookup_result={"status": "success", "v2_only": True,
+                       "canonical_key": topic.key, "normalized_topic": "看展",
+                       "candidate_ids": [], "additional_candidates": []},
+    )
+
+    assert flow["selection"].call_count == 0
+    flow["matches"].insert_one.assert_not_called()
+    flow["reserve"].assert_not_called()
+    assert flow["result"]["status"] == "no_suitable_candidate"
+
+
+def test_badminton_doubles_avoid_does_not_expand_to_all_badminton(monkeypatch):
+    from matchmaker_agent.concept_identity import canonicalize_concept
+    import time
+
+    candidate = {
+        "user_id": "candidate-play", "current_context": "",
+        "context_signals": {}, "recent_context_expires_at": time.time() + 3600,
+        "score": .95,
+    }
+    broad_preference = canonicalize_concept("打羽球")
+    lookup_callable, avoidance_callable, _session = _wire_mock_preference_api(
+        monkeypatch, {broad_preference.key: ["candidate-play"]},
+        avoidances_by_candidate={"candidate-play": ["羽球雙打"]},
+    )
+    flow = _run_activity_generation_fixture(
+        monkeypatch, candidates=[candidate], context={
+            "search_intent": "activity", "invitation_topic": "羽球",
+            "query_text": "想找人一起打羽球",
+        },
+        lookup_callable=lookup_callable,
+        avoidance_callable=avoidance_callable,
+        lookup_result={
+            "status": "success", "v2_only": True,
+            "canonical_key": canonicalize_concept("羽球").key,
+            "normalized_topic": "羽球", "candidate_ids": [],
+            "additional_candidates": [],
+        },
+    )
+
+    assert flow["result"]["status"] == "success"
+    assert flow["selection"].call_count == 1
+    assert flow["matches"].insert_one.call_count == 1
+
+
+def test_badminton_broad_avoid_blocks_doubles_phrase_candidate(monkeypatch):
+    from matchmaker_agent.concept_identity import canonicalize_concept
+    import time
+
+    candidate = {
+        "user_id": "candidate-doubles", "current_context": "",
+        "context_signals": {}, "recent_context_expires_at": time.time() + 3600,
+        "score": .95,
+    }
+    doubles = canonicalize_concept("羽球雙打")
+    lookup_callable, avoidance_callable, _session = _wire_mock_preference_api(
+        monkeypatch, {doubles.key: ["candidate-doubles"]},
+        avoidances_by_candidate={"candidate-doubles": ["打羽球"]},
+    )
+    flow = _run_activity_generation_fixture(
+        monkeypatch, candidates=[candidate], context={
+            "search_intent": "activity", "invitation_topic": "羽球",
+            "query_text": "想找人一起打羽球",
+        },
+        lookup_callable=lookup_callable,
+        avoidance_callable=avoidance_callable,
+        lookup_result={
+            "status": "success", "v2_only": True,
+            "canonical_key": canonicalize_concept("羽球").key,
+            "normalized_topic": "羽球", "candidate_ids": [],
+            "additional_candidates": [],
+        },
+    )
+
+    assert flow["selection"].call_count == 0
+    flow["matches"].insert_one.assert_not_called()
+    flow["reserve"].assert_not_called()
+    assert flow["result"]["status"] == "no_suitable_candidate"
 
 
 def test_badminton_phrase_evidence_for_both_saved_forms_reaches_selection(monkeypatch):
@@ -761,7 +1067,7 @@ def test_badminton_phrase_evidence_for_both_saved_forms_reaches_selection(monkey
     topic = canonicalize_concept("羽球")
     play = canonicalize_concept("打羽球")
     doubles = canonicalize_concept("羽球雙打")
-    lookup_callable, graph_session = _wire_mock_preference_api(
+    lookup_callable, avoidance_callable, graph_session = _wire_mock_preference_api(
         monkeypatch, {
             play.key: ["candidate-play"],
             doubles.key: ["candidate-doubles"],
@@ -774,6 +1080,7 @@ def test_badminton_phrase_evidence_for_both_saved_forms_reaches_selection(monkey
             "query_text": "想找人一起打羽球",
         },
         lookup_callable=lookup_callable,
+        avoidance_callable=avoidance_callable,
         lookup_result={
             "status": "success", "v2_only": True, "canonical_key": topic.key,
             "normalized_topic": "羽球", "candidate_ids": [],
@@ -797,7 +1104,7 @@ def test_badminton_phrase_evidence_for_both_saved_forms_reaches_selection(monkey
         and item.get("candidate_evidence_ids") == [f"graph:candidate-doubles:{doubles.key}"]
         for item in match_doc["reason_items"]
     )
-    assert len(graph_session.run.call_args_list) == 2
+    assert len(graph_session.run.call_args_list) == 4
 
 
 def test_unexpected_phrase_cannot_become_evidence_and_requires_consent_before_quota(monkeypatch):
@@ -811,7 +1118,7 @@ def test_unexpected_phrase_cannot_become_evidence_and_requires_consent_before_qu
     }
     topic = canonicalize_concept("羽球")
     collector = canonicalize_concept("收藏羽球拍")
-    lookup_callable, graph_session = _wire_mock_preference_api(monkeypatch, {})
+    lookup_callable, avoidance_callable, graph_session = _wire_mock_preference_api(monkeypatch, {})
     flow = _run_activity_generation_fixture(
         monkeypatch, candidates=[candidate], source="agent_pi",
         context={
@@ -819,6 +1126,7 @@ def test_unexpected_phrase_cannot_become_evidence_and_requires_consent_before_qu
             "query_text": "想找人一起打羽球", "allow_exploratory": "1",
         },
         lookup_callable=lookup_callable,
+        avoidance_callable=avoidance_callable,
         lookup_result={
             "status": "success", "v2_only": True, "canonical_key": topic.key,
             "normalized_topic": "羽球", "candidate_ids": [],
@@ -850,7 +1158,7 @@ def test_pair_excluded_candidate_cannot_reenter_through_alias(monkeypatch):
     }
     title = canonicalize_concept("Street Fighter")
     saved_phrase = canonicalize_concept("玩街頭霸王")
-    lookup_callable, _graph_session = _wire_mock_preference_api(
+    lookup_callable, avoidance_callable, _graph_session = _wire_mock_preference_api(
         monkeypatch, {saved_phrase.key: ["candidate-sf"]},
     )
     flow = _run_activity_generation_fixture(
@@ -865,6 +1173,7 @@ def test_pair_excluded_candidate_cannot_reenter_through_alias(monkeypatch):
             "query_text": "想找人一起玩 Street Fighter",
         },
         lookup_callable=lookup_callable,
+        avoidance_callable=avoidance_callable,
         lookup_result={
             "status": "success", "v2_only": True, "canonical_key": title.key,
             "normalized_topic": "Street Fighter", "candidate_ids": [],

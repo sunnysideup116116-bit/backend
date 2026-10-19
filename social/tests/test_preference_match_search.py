@@ -34,6 +34,10 @@ def _flow(monkeypatch, *, candidate, target=None):
     matches.insert_one.return_value.inserted_id = "proposal"
     monkeypatch.setattr(router, "profiles_coll", profiles)
     monkeypatch.setattr(router, "matches_coll", matches)
+    monkeypatch.setattr(router, "retrieve_activity_avoidance_snapshot", lambda candidate_ids, _topics: {
+        candidate_id: {"verification_status": "verified", "avoid_concept_keys": []}
+        for candidate_id in candidate_ids
+    })
     monkeypatch.setattr(router.risk_block_service, "excluded_user_ids", lambda _: set())
     monkeypatch.setattr(router, "agent_candidate_limit", lambda: 3)
     monkeypatch.setattr(router, "build_validated_match_explanation", lambda *_a, **_k: (
@@ -66,6 +70,10 @@ def test_preference_search_uses_exact_graph_and_ignores_unrelated_recent_context
         "recent_context_expires_at": time.time() + 3600,
     }
     profiles, matches = _flow(monkeypatch, candidate=candidate)
+    activity_safety = Mock(side_effect=AssertionError(
+        "Preference V2 must not invoke activity-only AVOID policy"
+    ))
+    monkeypatch.setattr(router, "retrieve_activity_avoidance_snapshot", activity_safety)
     monkeypatch.setattr(router, "get_embedding", Mock(side_effect=AssertionError(
         "preference search must not use recent-context embeddings"
     )))
@@ -93,6 +101,7 @@ def test_preference_search_uses_exact_graph_and_ignores_unrelated_recent_context
     assert inserted["search_context"]["canonical_preference_key"] == K_POP
     assert result["diagnostics"]["retrieval_source"] == "graph_exact"
     assert result["diagnostics"]["candidate_count_after_filter"] == 1
+    activity_safety.assert_not_called()
 
 
 def test_preference_search_still_applies_block_and_pair_history_exclusions(monkeypatch):
@@ -184,6 +193,41 @@ def test_activity_search_without_evidence_asks_for_exploratory_consent(monkeypat
     assert result["reason_code"] == "exploratory_consent_required"
     select.assert_not_called()  # vector-only candidates never reach selection
     matches.insert_one.assert_not_called()
+
+
+def test_activity_avoidance_snapshot_failure_stops_before_exploratory_selection(monkeypatch):
+    candidate = {
+        "user_id": "candidate", "current_context": "最近想看展",
+        "recent_context_expires_at": time.time() + 3600, "score": .9,
+    }
+    profiles, matches = _flow(monkeypatch, candidate=candidate)
+    monkeypatch.setattr(router, "retrieve_preference_candidate_ids", lambda *_a, **_k: {
+        "candidate_ids": [], "canonical_key": "", "normalized_topic": "",
+        "retrieval_source": "graph_exact",
+    })
+    monkeypatch.setattr(router, "get_embedding", lambda _text: [.2])
+    monkeypatch.setattr(router, "_trait_stances", lambda _user_id: {})
+    monkeypatch.setattr(router, "exploratory_consent_recorded", lambda *_a, **_k: True)
+    selection = Mock(side_effect=AssertionError("unverified candidates must not reach selection"))
+    monkeypatch.setattr(router, "_request_matchmaker_selection", selection)
+
+    def unavailable(_candidate_ids, _topics):
+        raise router.ActivityAvoidanceSnapshotError("activity_safety_unavailable")
+
+    monkeypatch.setattr(router, "retrieve_activity_avoidance_snapshot", unavailable)
+    with pytest.raises(router.MatchSearchPipelineError) as caught:
+        router.generate_matches_for_user(
+            "owner", source="agent_pi",
+            search_context={"search_intent": "activity", "invitation_topic": "看展",
+                            "query_text": "找最近也想看展的人", "allow_exploratory": "1"},
+            report_progress=lambda _step: True, can_commit=lambda: True,
+        )
+
+    assert caught.value.code == "matchmaker_graph_unavailable"
+    assert caught.value.stage == "activity_avoidance_check"
+    selection.assert_not_called()
+    matches.insert_one.assert_not_called()
+    profiles.insert_one.assert_not_called()
 
 
 def test_activity_search_vector_only_runs_after_recorded_consent(monkeypatch):
