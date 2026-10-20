@@ -1,6 +1,29 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+# All launch paths for this Linux user share one lock outside the release tree.
+# Keeping the descriptor in this launcher (and closing it on every long-lived
+# service child below) makes the kernel release the lock when the launcher exits
+# without letting a service process retain it.
+START_ALL_LOCK_FILE="/run/user/$(id -u)/ayue-backend-start-all.lock"
+START_ALL_LOCK_DIR="${START_ALL_LOCK_FILE%/*}"
+if ! command -v flock >/dev/null 2>&1; then
+    printf 'The util-linux flock command is required; refusing to start without the global launcher lock.\n' >&2
+    exit 1
+fi
+if [[ ! -d "$START_ALL_LOCK_DIR" || ! -w "$START_ALL_LOCK_DIR" ]]; then
+    printf 'User runtime lock directory is unavailable (%s); refusing to start.\n' "$START_ALL_LOCK_DIR" >&2
+    exit 1
+fi
+if ! exec 9>>"$START_ALL_LOCK_FILE"; then
+    printf 'Unable to open the global launcher lock (%s); refusing to start.\n' "$START_ALL_LOCK_FILE" >&2
+    exit 1
+fi
+if ! flock --exclusive --nonblock 9; then
+    printf 'Another start_all.sh launcher is already active; refusing before port cleanup.\n' >&2
+    exit 75
+fi
+
 # --- Color Definitions for Polish ---
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -272,7 +295,7 @@ start_services() {
         echo -e "${GREEN}✨ Guardrail Classifier is already running on Port 8081.${NC}"
     else
         if [ -x "$SERVER_ROOT/scripts/run_ayue_guardrail.sh" ]; then
-            "$SERVER_ROOT/scripts/run_ayue_guardrail.sh" >"$LOG_DIR/guardrail.log" 2>&1 &
+            "$SERVER_ROOT/scripts/run_ayue_guardrail.sh" 9>&- >"$LOG_DIR/guardrail.log" 2>&1 &
             GUARDRAIL_PID=$!
             SERVICE_PIDS+=("$GUARDRAIL_PID")
             echo -e "${GREEN}✅ Guardrail started (PID: $GUARDRAIL_PID). Logs: $LOG_DIR/guardrail.log${NC}"
@@ -287,7 +310,7 @@ start_services() {
 
     # 3. Start Risk Detection Backend (Port 8001)
     echo -e "\n${CYAN}🛡️  Starting Risk Detection Backend on Port 8001...${NC}"
-    "$SERVER_ROOT/scripts/run_ayue_risk.sh" >"$LOG_DIR/risk.log" 2>&1 &
+    "$SERVER_ROOT/scripts/run_ayue_risk.sh" 9>&- >"$LOG_DIR/risk.log" 2>&1 &
     RISK_PID=$!
     SERVICE_PIDS+=("$RISK_PID")
     echo -e "${GREEN}✅ Risk Backend started (PID: $RISK_PID). Logs: $LOG_DIR/risk.log${NC}"
@@ -297,7 +320,7 @@ start_services() {
 
     # 4. Start Matchmaker Agent (Port 9001)
     echo -e "\n${CYAN}💘 Starting Matchmaker Agent on Port 9001...${NC}"
-    "$SERVER_ROOT/scripts/run_ayue_matchmaker.sh" >"$LOG_DIR/matchmaker.log" 2>&1 &
+    "$SERVER_ROOT/scripts/run_ayue_matchmaker.sh" 9>&- >"$LOG_DIR/matchmaker.log" 2>&1 &
     MATCHMAKER_PID=$!
     SERVICE_PIDS+=("$MATCHMAKER_PID")
     echo -e "${GREEN}✅ Matchmaker Agent started (PID: $MATCHMAKER_PID). Logs: $LOG_DIR/matchmaker.log${NC}"
@@ -307,7 +330,7 @@ start_services() {
 
     # 5. Start Ayue Social / Main API (Port 8000)
     echo -e "\n${CYAN}🚀 Starting Ayue Social Backend on Port 8000...${NC}"
-    "$SERVER_ROOT/scripts/run_ayue_social.sh" >"$LOG_DIR/social.log" 2>&1 &
+    "$SERVER_ROOT/scripts/run_ayue_social.sh" 9>&- >"$LOG_DIR/social.log" 2>&1 &
     SOCIAL_PID=$!
     SERVICE_PIDS+=("$SOCIAL_PID")
     echo -e "${GREEN}✅ Ayue Social Backend started (PID: $SOCIAL_PID). Logs: $LOG_DIR/social.log${NC}"

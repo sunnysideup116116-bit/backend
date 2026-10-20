@@ -12,6 +12,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 import uuid
 
 from pymongo.errors import PyMongoError
@@ -30,8 +31,21 @@ from services.event_cycle_service import run_weekly_event_cycle
 from services.event_discovery_service import discover_and_ingest_events
 
 _worker_thread: threading.Thread | None = None
+_supervisor_thread: threading.Thread | None = None
 _stop_event = threading.Event()
 _worker_lock = threading.Lock()
+
+# The supervisor restarts a worker that exits unexpectedly with bounded
+# exponential backoff. A persistently broken worker must make the Social
+# process fail so systemd's Restart=on-failure policy can recover the full
+# service stack instead of leaving HTTP healthy with no Event consumer.
+_SUPERVISOR_MAX_RESTARTS = 3
+_SUPERVISOR_RESTART_BASE_SECONDS = 2.0
+_SUPERVISOR_RESTART_MAX_SECONDS = 30.0
+_SUPERVISOR_POLL_SECONDS = 1.0
+_SUPERVISOR_STABLE_SECONDS = 300.0
+_SUPERVISOR_SHUTDOWN_JOIN_SECONDS = 3.0
+_SUPERVISOR_EXIT_CODE = 70
 
 
 def _keep_job_lease_alive(
@@ -179,31 +193,198 @@ def run_worker(stop_event: threading.Event | None = None) -> None:
         print(f"[EVENT_WORKER] stopped worker={worker_id}", flush=True)
 
 
-def start_event_discovery_worker() -> None:
+def _run_worker_attempt(
+    stop_event: threading.Event,
+    result: dict[str, BaseException],
+    worker_runner,
+) -> None:
+    try:
+        worker_runner(stop_event)
+    except BaseException as exc:
+        result["error"] = exc
+        try:
+            print(
+                f"[EVENT_WORKER] worker attempt raised error={type(exc).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
+            traceback.print_tb(exc.__traceback__, file=sys.stderr)
+        except Exception:
+            print(
+                f"[EVENT_WORKER] worker attempt raised error={type(exc).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+
+def _exit_social_after_worker_failure(
+    consecutive_failures: int, error: BaseException | None,
+) -> None:
+    error_name = type(error).__name__ if error is not None else "unexpected_return"
+    print(
+        "[EVENT_WORKER] fatal: bounded recovery exhausted "
+        f"failures={consecutive_failures} last_error={error_name} "
+        f"process_exit={_SUPERVISOR_EXIT_CODE}",
+        file=sys.stderr,
+        flush=True,
+    )
+    os._exit(_SUPERVISOR_EXIT_CODE)
+
+
+def _supervise_worker(
+    stop_event: threading.Event,
+    *,
+    worker_runner=None,
+    fatal_handler=None,
+    max_restarts: int | None = None,
+    restart_base_seconds: float | None = None,
+    restart_max_seconds: float | None = None,
+    poll_seconds: float | None = None,
+    stable_seconds: float | None = None,
+) -> None:
+    """Run exactly one worker attempt at a time and recover bounded failures.
+
+    There is intentionally no work-duration timeout. A live worker may be idle,
+    waiting on MongoDB, performing Discovery, or awaiting an LLM/provider call.
+    Only an attempt thread that has actually exited is considered failed.
+    """
     global _worker_thread
-    with _worker_lock:
-        if _worker_thread and _worker_thread.is_alive():
-            return
-        _stop_event.clear()
-        _worker_thread = threading.Thread(
-            target=run_worker,
-            args=(_stop_event,),
+    runner = worker_runner or run_worker
+    fatal = fatal_handler or _exit_social_after_worker_failure
+    restart_limit = _SUPERVISOR_MAX_RESTARTS if max_restarts is None else max_restarts
+    base_delay = (
+        _SUPERVISOR_RESTART_BASE_SECONDS
+        if restart_base_seconds is None else restart_base_seconds
+    )
+    max_delay = (
+        _SUPERVISOR_RESTART_MAX_SECONDS
+        if restart_max_seconds is None else restart_max_seconds
+    )
+    poll_interval = _SUPERVISOR_POLL_SECONDS if poll_seconds is None else poll_seconds
+    stable_uptime = _SUPERVISOR_STABLE_SECONDS if stable_seconds is None else stable_seconds
+    consecutive_failures = 0
+
+    while not stop_event.is_set():
+        result: dict[str, BaseException] = {}
+        worker = threading.Thread(
+            target=_run_worker_attempt,
+            args=(stop_event, result, runner),
             name="event-discovery-worker",
             daemon=True,
         )
-        _worker_thread.start()
-        print("[EVENT_WORKER] background worker thread started", flush=True)
+        with _worker_lock:
+            _worker_thread = worker
+        started_at = time.monotonic()
+        worker.start()
+        while worker.is_alive():
+            worker.join(timeout=poll_interval)
+        with _worker_lock:
+            if _worker_thread is worker:
+                _worker_thread = None
+
+        if stop_event.is_set():
+            return
+
+        if time.monotonic() - started_at >= stable_uptime:
+            consecutive_failures = 0
+        consecutive_failures += 1
+        error = result.get("error")
+        error_name = type(error).__name__ if error is not None else "unexpected_return"
+        print(
+            f"[EVENT_WORKER] worker exited unexpectedly; "
+            f"consecutive_failures={consecutive_failures} error={error_name}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if consecutive_failures > restart_limit:
+            fatal(consecutive_failures, error)
+            # Test handlers may return; production's handler exits the process.
+            stop_event.set()
+            return
+
+        delay = min(base_delay * (2 ** (consecutive_failures - 1)), max_delay)
+        print(
+            f"[EVENT_WORKER] restarting after delay={delay:g}s "
+            f"retry={consecutive_failures}/{restart_limit}",
+            flush=True,
+        )
+        if stop_event.wait(delay):
+            return
+
+
+def _event_worker_supervisor_entry(stop_event: threading.Event) -> None:
+    try:
+        _supervise_worker(stop_event)
+    except BaseException as exc:
+        if stop_event.is_set():
+            print(
+                f"[EVENT_WORKER] supervisor stopped during shutdown "
+                f"error={type(exc).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        _exit_social_after_worker_failure(1, exc)
+
+
+def start_event_discovery_worker() -> None:
+    global _supervisor_thread
+    with _worker_lock:
+        if _supervisor_thread and _supervisor_thread.is_alive():
+            return
+        if _worker_thread and _worker_thread.is_alive():
+            # A live attempt without its supervisor cannot be safely replaced.
+            # Fail the Social process rather than allowing a second claimant.
+            _exit_social_after_worker_failure(
+                1, RuntimeError("worker_alive_without_supervisor"),
+            )
+        _stop_event.clear()
+        _supervisor_thread = threading.Thread(
+            target=_event_worker_supervisor_entry,
+            args=(_stop_event,),
+            name="event-discovery-supervisor",
+            daemon=True,
+        )
+        _supervisor_thread.start()
+        print("[EVENT_WORKER] background supervisor thread started", flush=True)
 
 
 def stop_event_discovery_worker() -> None:
-    global _worker_thread
+    global _worker_thread, _supervisor_thread
     with _worker_lock:
-        if not _worker_thread or not _worker_thread.is_alive():
+        supervisor = _supervisor_thread
+        worker = _worker_thread
+        if not supervisor or not supervisor.is_alive():
+            _stop_event.set()
+            if worker and worker.is_alive():
+                print(
+                    "[EVENT_WORKER] supervisor unavailable while worker remains alive; "
+                    "worker state retained",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            _worker_thread = None
+            _supervisor_thread = None
             return
         _stop_event.set()
-        _worker_thread.join(timeout=3.0)
-        _worker_thread = None
-        print("[EVENT_WORKER] background worker thread stopped", flush=True)
+    supervisor.join(timeout=_SUPERVISOR_SHUTDOWN_JOIN_SECONDS)
+    with _worker_lock:
+        if _supervisor_thread is supervisor and not supervisor.is_alive():
+            _supervisor_thread = None
+        worker = _worker_thread
+        if worker and not worker.is_alive():
+            _worker_thread = None
+        still_alive = bool(supervisor.is_alive() or (worker and worker.is_alive()))
+    if still_alive:
+        print(
+            "[EVENT_WORKER] shutdown pending; active worker retained and "
+            "duplicate start refused until it exits",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print("[EVENT_WORKER] background supervisor stopped", flush=True)
 
 
 if __name__ == "__main__":
