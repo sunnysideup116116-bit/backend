@@ -9,6 +9,16 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+LOCK_DECLARATION = 'START_ALL_LOCK_FILE="/run/user/$(id -u)/ayue-backend-start-all.lock"'
+
+
+def _isolated_launcher_source():
+    source = (ROOT / "start_all.sh").read_text(encoding="utf-8")
+    assert LOCK_DECLARATION in source
+    return source.replace(
+        LOCK_DECLARATION,
+        'START_ALL_LOCK_FILE="${STUB_START_ALL_LOCK_FILE:?}"',
+    )
 
 
 def _fake_normalizer_runtimes(root, *, failure=None):
@@ -24,7 +34,7 @@ def _fake_normalizer_runtimes(root, *, failure=None):
 
 
 def _prefix_script(tmp_path):
-    prefix = (ROOT / "start_all.sh").read_text().split('LOG_DIR="', 1)[0]
+    prefix = _isolated_launcher_source().split('LOG_DIR="', 1)[0]
     script = tmp_path / "start_all.sh"
     script.write_text(prefix + '\nprintf "selected=%s\\n" "$AYUE_LLM_PROVIDER"\n')
     _fake_normalizer_runtimes(tmp_path)
@@ -38,7 +48,11 @@ def _prefix_script(tmp_path):
 def _run_tty_menu(tmp_path, *, feed=None, menu_timeout="15", env_extra=None, timeout=15):
     """Run the menu on a real pty so [[ -t 0 ]] is true for the interactive branch."""
     script = _prefix_script(tmp_path)
-    env = {"PATH": os.environ["PATH"], "AYUE_MENU_TIMEOUT_SECONDS": menu_timeout}
+    env = {
+        "PATH": os.environ["PATH"],
+        "AYUE_MENU_TIMEOUT_SECONDS": menu_timeout,
+        "STUB_START_ALL_LOCK_FILE": str(tmp_path / "launcher.lock"),
+    }
     env.update(env_extra or {})
     master_fd, slave_fd = pty.openpty()
     process = subprocess.Popen(
@@ -58,11 +72,12 @@ def _run_tty_menu(tmp_path, *, feed=None, menu_timeout="15", env_extra=None, tim
 @pytest.mark.parametrize("arguments,code", [(["--help"], 0), (["invalid"], 2), (["gpt", "extra"], 2), (["gpt"], 1)])
 def test_early_exits_never_touch_ports_or_logs(tmp_path, arguments, code):
     script = tmp_path / "start_all.sh"
-    script.write_bytes((ROOT / "start_all.sh").read_bytes())
+    script.write_text(_isolated_launcher_source(), encoding="utf-8")
     # GPT fails because the fake root has no Social python. All early branches
     # must exit before mkdir, lsof, fuser, curl or launch scripts.
     result = subprocess.run(["bash", str(script), *arguments], capture_output=True, text=True,
-                            env={"PATH": os.environ["PATH"], "AYUE_LLM_PROVIDER": "ollama"}, timeout=3)
+                            env={"PATH": os.environ["PATH"], "AYUE_LLM_PROVIDER": "ollama",
+                                 "STUB_START_ALL_LOCK_FILE": str(tmp_path / "launcher.lock")}, timeout=3)
     assert result.returncode == code
     assert not (tmp_path / ".runtime-logs").exists()
 
@@ -76,7 +91,8 @@ def test_selection_and_successful_preflight_before_startup(tmp_path, args, env_p
     script = _prefix_script(tmp_path)
     result = subprocess.run(
         ["bash", str(script), *args], capture_output=True, text=True, input="",
-        env={"PATH": os.environ["PATH"], "AYUE_LLM_PROVIDER": env_provider}, timeout=5)
+        env={"PATH": os.environ["PATH"], "AYUE_LLM_PROVIDER": env_provider,
+             "STUB_START_ALL_LOCK_FILE": str(tmp_path / "launcher.lock")}, timeout=5)
     assert result.returncode == 0
     assert f"selected={expected}" in result.stdout
     assert ("preflight=gpt" in result.stdout) == (expected == "gpt")
@@ -88,7 +104,8 @@ def test_non_interactive_stdin_falls_back_to_ollama_instantly(tmp_path):
     script = _prefix_script(tmp_path)
     result = subprocess.run(
         ["bash", str(script)], capture_output=True, text=True, input="",
-        env={"PATH": os.environ["PATH"]}, timeout=5)
+        env={"PATH": os.environ["PATH"],
+             "STUB_START_ALL_LOCK_FILE": str(tmp_path / "launcher.lock")}, timeout=5)
     assert result.returncode == 0
     assert "selected=ollama" in result.stdout
     assert "Non-interactive stdin" in result.stderr
@@ -120,11 +137,12 @@ def test_menu_idle_timeout_falls_back_to_ollama_on_tty(tmp_path):
 
 def test_missing_pi_dependencies_fail_before_logs_or_ports(tmp_path):
     script = tmp_path / "start_all.sh"
-    script.write_bytes((ROOT / "start_all.sh").read_bytes())
+    script.write_text(_isolated_launcher_source(), encoding="utf-8")
     _fake_normalizer_runtimes(tmp_path)
     result = subprocess.run(
         ["bash", str(script), "ollama"], capture_output=True, text=True,
-        env={"PATH": os.environ["PATH"]}, timeout=3,
+        env={"PATH": os.environ["PATH"],
+             "STUB_START_ALL_LOCK_FILE": str(tmp_path / "launcher.lock")}, timeout=3,
     )
     assert result.returncode == 1
     assert "Pi dependencies are missing" in result.stderr
@@ -134,11 +152,12 @@ def test_missing_pi_dependencies_fail_before_logs_or_ports(tmp_path):
 @pytest.mark.parametrize("service", ["social", "matchmaker"])
 def test_pinned_normalizer_failure_precedes_logs_ports_and_service_start(tmp_path, service):
     script = tmp_path / "start_all.sh"
-    script.write_bytes((ROOT / "start_all.sh").read_bytes())
+    script.write_text(_isolated_launcher_source(), encoding="utf-8")
     _fake_normalizer_runtimes(tmp_path, failure=service)
     result = subprocess.run(
         ["bash", str(script), "ollama"], capture_output=True, text=True,
-        env={"PATH": os.environ["PATH"]}, timeout=3,
+        env={"PATH": os.environ["PATH"],
+             "STUB_START_ALL_LOCK_FILE": str(tmp_path / "launcher.lock")}, timeout=3,
     )
     assert result.returncode == 1
     assert f"Pinned preference normalizer unavailable for {service}" in result.stderr

@@ -14,6 +14,13 @@ class AyueLaunchScriptTests(unittest.TestCase):
         self.assertIn("http://localhost:4173", source)
         self.assertIn('export CORS_ORIGINS=', source)
 
+    def test_start_all_takes_a_release_independent_lock_before_port_cleanup(self):
+        source = (SERVER_ROOT / "start_all.sh").read_text(encoding="utf-8")
+        self.assertIn('START_ALL_LOCK_FILE="/run/user/$(id -u)/ayue-backend-start-all.lock"', source)
+        self.assertLess(source.index("flock --exclusive --nonblock 9"), source.index("cleanup_port 8000"))
+        for service in ("guardrail", "risk", "matchmaker", "social"):
+            self.assertIn(f"run_ayue_{service}.sh\" 9>&-", source)
+
     def test_social_launcher_uses_canonical_working_directory_and_venv(self):
         source = (SCRIPTS / "run_ayue_social.sh").read_text(encoding="utf-8")
         self.assertIn('social', source)
