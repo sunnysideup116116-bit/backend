@@ -124,7 +124,15 @@ def run_invitation_batches(run_id, is_current, notify):
     while True:
         require_owner(is_current)
         now = time.time()
-        rows = list(USERS.find({"run_id": run_id, "state": "pending"}).sort("order", 1).limit(30))
+        rows = list(USERS.find({
+            "run_id": run_id,
+            "state": "pending",
+            "$or": [
+                {"resume_at": {"$lte": now}},
+                {"resume_at": {"$exists": False}},
+                {"resume_at": None},
+            ],
+        }).sort("order", 1).limit(30))
         if not rows:
             break
         created = 0
