@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import mongomock
 import pytest
 from services import event_discovery_job_service as jobs
@@ -19,6 +21,39 @@ def test_one_off_waits_until_due_and_preserves_weekly_key(monkeypatch):
     claimed = jobs.claim_event_discovery_job("worker")
     assert claimed["job_kind"] == "weekly_cycle"
     assert jobs.claim_event_discovery_job("another-worker") is None
+
+
+def test_completed_w43_is_not_requeued_and_w44_is_enqueued_once(monkeypatch):
+    coll = mongomock.MongoClient().db.jobs
+    coll.insert_one({"_id": jobs._JOB_ID, "state": "completed",
+                     "last_schedule_key": "2026-W43", "run_number": 43})
+    monkeypatch.setattr(jobs, "_jobs", coll)
+    monkeypatch.setenv("EVENT_DISCOVERY_WEEKDAY", "0")
+    monkeypatch.setenv("EVENT_DISCOVERY_HOUR", "8")
+
+    w43 = jobs.enqueue_weekly_event_discovery_if_due(
+        datetime(2026, 10, 19, 9, tzinfo=jobs.TAIPEI),
+    )
+    assert w43["status"] == "already_running"
+    row = coll.find_one({"_id": jobs._JOB_ID})
+    assert row["state"] == "completed"
+    assert row["last_schedule_key"] == "2026-W43"
+    assert row["run_number"] == 43
+
+    w44 = jobs.enqueue_weekly_event_discovery_if_due(
+        datetime(2026, 10, 26, 9, tzinfo=jobs.TAIPEI),
+    )
+    assert w44["status"] == "queued"
+    row = coll.find_one({"_id": jobs._JOB_ID})
+    assert row["state"] == "queued"
+    assert row["last_schedule_key"] == "2026-W44"
+    assert row["run_number"] == 44
+
+    repeated = jobs.enqueue_weekly_event_discovery_if_due(
+        datetime(2026, 10, 26, 10, tzinfo=jobs.TAIPEI),
+    )
+    assert repeated["status"] == "already_running"
+    assert coll.find_one({"_id": jobs._JOB_ID})["run_number"] == 44
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), 999])
