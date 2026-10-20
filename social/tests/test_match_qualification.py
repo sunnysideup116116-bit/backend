@@ -386,6 +386,7 @@ class MatchQualificationTests(unittest.TestCase):
         qualification = candidate_qualification(
             target, candidate, vector_score=0.82,
             search_context={"invitation_topic": "衝浪", "query_text": "想找人一起衝浪"},
+            activity_avoidance_check={"verification_status": "verified", "avoid_concept_keys": []},
         )
         self.assertTrue(qualification["eligible"])
         self.assertIn("requested_topic", qualification["strong_reason_codes"])
@@ -541,6 +542,7 @@ class MatchQualificationTests(unittest.TestCase):
             candidate_stances={"surfing": {"like"}},
             vector_score=0.99,
             search_context={"invitation_topic": "衝浪"},
+            activity_avoidance_check={"verification_status": "verified", "avoid_concept_keys": []},
         )
         self.assertFalse(qualification["eligible"])
         self.assertEqual(qualification["hard_conflict_keys"], ["surfing"])

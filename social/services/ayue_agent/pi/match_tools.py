@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from services.ayue_agent.shared.write_actions import prepare_write_confirmation
+from services.ayue_agent.shared.write_executors import _activity_topic_is_grounded
 from matchmaker_agent.concept_identity import (
     canonical_evidence_span,
     canonicalize_concept,
@@ -116,6 +117,7 @@ def _prepare_search(runtime: Any, request: MatchSearchInput):
             raw_source for raw_source, text in source_views
             if topic and (
                 topic in text
+            or (request.kind == "activity" and _activity_topic_is_grounded(topic, text))
                 or bool(identity and canonical_evidence_span(text, identity))
             )
         ), "")
@@ -128,6 +130,7 @@ def _prepare_search(runtime: Any, request: MatchSearchInput):
         topic and source and any(source in text for text in sources)
         and (
             topic in source_view
+            or (request.kind == "activity" and _activity_topic_is_grounded(topic, source_view))
             or bool(identity and canonical_evidence_span(source_view, identity))
         )
     )
