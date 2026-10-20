@@ -170,7 +170,13 @@ def test_entrypoints_share_early_loader_and_startup_validation():
 
 
 def test_start_all_missing_key_fails_before_port_cleanup(config_root):
-    shutil.copy(ROOT / "start_all.sh", config_root / "start_all.sh")
+    start_all = (ROOT / "start_all.sh").read_text()
+    production_lock = 'START_ALL_LOCK_FILE="/run/user/$(id -u)/ayue-backend-start-all.lock"'
+    assert production_lock in start_all
+    (config_root / "start_all.sh").write_text(start_all.replace(
+        production_lock,
+        'START_ALL_LOCK_FILE="${STUB_START_ALL_LOCK_FILE:?}"',
+    ))
     package = config_root / "agent_quota"
     package.mkdir()
     (package / "__init__.py").write_text("")
@@ -183,6 +189,7 @@ def test_start_all_missing_key_fails_before_port_cleanup(config_root):
         bin_dir.mkdir(parents=True)
         (bin_dir / "python").symlink_to(sys.executable)
     environment = {k: v for k, v in os.environ.items() if k not in {"APPWRITE_API_KEY", "AYUE_SKIP_DOTENV", "DOTENV_DISABLED", "PYTHONPATH"}}
+    environment["STUB_START_ALL_LOCK_FILE"] = str(config_root / "launcher.lock")
     result = subprocess.run(["bash", "start_all.sh", "ollama"], cwd=config_root, env=environment, capture_output=True, text=True, timeout=10)
     assert result.returncode == 1
     assert "Internal quota signing configuration unavailable" in result.stderr

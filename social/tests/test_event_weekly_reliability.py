@@ -3,6 +3,7 @@
 from datetime import datetime
 from unittest.mock import MagicMock
 
+import mongomock
 import pytest
 
 from services import event_delivery_service as delivery
@@ -157,6 +158,43 @@ def test_schedule_catches_up_after_monday_window(monkeypatch):
     assert jobs.enqueue_weekly_event_discovery_if_due(datetime(2026, 9, 7, 7, tzinfo=jobs.TAIPEI)) is None
     assert jobs.enqueue_weekly_event_discovery_if_due(datetime(2026, 9, 8, 10, tzinfo=jobs.TAIPEI))["status"] == "queued"
     assert enqueue.call_args.kwargs["schedule_key"] == "2026-W37"
+
+
+def test_completed_w43_is_not_requeued_and_w44_is_enqueued_once(monkeypatch):
+    collection = mongomock.MongoClient().db.jobs
+    collection.insert_one({
+        "_id": jobs._JOB_ID,
+        "state": "completed",
+        "last_schedule_key": "2026-W43",
+        "run_number": 43,
+    })
+    monkeypatch.setattr(jobs, "_jobs", collection)
+    monkeypatch.setenv("EVENT_DISCOVERY_WEEKDAY", "0")
+    monkeypatch.setenv("EVENT_DISCOVERY_HOUR", "8")
+
+    w43 = jobs.enqueue_weekly_event_discovery_if_due(
+        datetime(2026, 10, 19, 9, tzinfo=jobs.TAIPEI),
+    )
+    assert w43["status"] == "already_running"
+    row = collection.find_one({"_id": jobs._JOB_ID})
+    assert row["state"] == "completed"
+    assert row["last_schedule_key"] == "2026-W43"
+    assert row["run_number"] == 43
+
+    w44 = jobs.enqueue_weekly_event_discovery_if_due(
+        datetime(2026, 10, 26, 9, tzinfo=jobs.TAIPEI),
+    )
+    assert w44["status"] == "queued"
+    row = collection.find_one({"_id": jobs._JOB_ID})
+    assert row["state"] == "queued"
+    assert row["last_schedule_key"] == "2026-W44"
+    assert row["run_number"] == 44
+
+    repeated_w44 = jobs.enqueue_weekly_event_discovery_if_due(
+        datetime(2026, 10, 26, 10, tzinfo=jobs.TAIPEI),
+    )
+    assert repeated_w44["status"] == "already_running"
+    assert collection.find_one({"_id": jobs._JOB_ID})["run_number"] == 44
 
 
 def test_weekly_failure_requeues_same_token_but_bounds_retries(monkeypatch):
