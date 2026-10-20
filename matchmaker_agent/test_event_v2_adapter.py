@@ -194,6 +194,22 @@ def test_exact_avoidance_blocks_and_unresolved_negative_is_unavailable():
         adapter(graph).relevance('owner')
 
 
+@pytest.mark.parametrize(('checks_unavailable', 'expected_code'), [
+    (False, 'event_owner_ineligible'),
+    (True, 'event_owner_eligibility_unavailable'),
+])
+def test_owner_identity_failure_code_distinguishes_rejection_from_lookup_outage(
+        checks_unavailable, expected_code):
+    service = adapter(Graph({'owner': [preference('籃球')]}), eligible=lambda _: False)
+    service.checks = Mock(unavailable=checks_unavailable)
+
+    with pytest.raises(EventUnavailable) as raised:
+        service.relevance('owner')
+
+    assert raised.value.code == expected_code
+    assert raised.value.resumable is False
+
+
 def test_avoids_only_never_positive():
     graph = Graph({'owner': [preference('籃球', polarity='AVOIDS')]})
     assert adapter(graph).relevance('owner') == {}

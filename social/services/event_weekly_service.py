@@ -14,7 +14,17 @@ LOG = logging.getLogger(__name__)
 RUNS = db["event_weekly_runs"]
 USERS = db["event_weekly_users"]
 RETRYABLE = {"error", "failed", "agent_error", "risk_block_unavailable", "quota_unavailable",
-             "invalid_agent_projection", "unavailable", "stale", "resume_pending"}
+             "invalid_agent_projection", "unavailable", "stale", "resume_pending", "retry_pending"}
+# These codes describe decisions that cannot change during another attempt in
+# the same weekly job. Keep the original unavailable status/error_code in the
+# terminal row; in particular, do not turn a disabled route into no_match.
+# Identity lookup outages have their own code and intentionally remain retryable.
+TERMINAL_UNAVAILABLE_ERROR_CODES = frozenset({
+    "event_semantic_disabled",
+    "event_semantic_config_unavailable",
+    "event_owner_ineligible",
+    "event_negative_unavailable",
+})
 # Durable semantic resume: a user whose bounded semantic work hit an execution
 # boundary or provider outage keeps its checkpoint and retries later on a
 # bounded exponential backoff, instead of losing the whole weekly pass. The
@@ -30,6 +40,12 @@ RESUME_BACKOFF_CAP_SECONDS = max(
 def _resume_backoff_seconds(attempts: int) -> int:
     exponent = max(0, min(int(attempts) - 1, 5))
     return min(RESUME_BACKOFF_CAP_SECONDS, RESUME_BACKOFF_BASE_SECONDS * (2 ** exponent))
+
+
+def _terminal_unavailable(result: dict) -> bool:
+    """Recognize explicit same-job policy/configuration/eligibility outcomes."""
+    return (str(result.get("status") or "") == "unavailable"
+            and str(result.get("error_code") or "") in TERMINAL_UNAVAILABLE_ERROR_CODES)
 
 
 def weekly_progress(run_id):
@@ -108,7 +124,15 @@ def run_invitation_batches(run_id, is_current, notify):
     while True:
         require_owner(is_current)
         now = time.time()
-        rows = list(USERS.find({"run_id": run_id, "state": "pending"}).sort("order", 1).limit(30))
+        rows = list(USERS.find({
+            "run_id": run_id,
+            "state": "pending",
+            "$or": [
+                {"resume_at": {"$lte": now}},
+                {"resume_at": {"$exists": False}},
+                {"resume_at": None},
+            ],
+        }).sort("order", 1).limit(30))
         if not rows:
             break
         created = 0
@@ -149,9 +173,10 @@ def run_invitation_batches(run_id, is_current, notify):
             # checkpoint and retries later, bounded by the resume horizon. The
             # resume authority may be the checkpoint returned by this attempt
             # or one already persisted on the row (the producer must never
-            # drop it). Any other retryable failure falls back to the
-            # pre-existing bounded attempts < 3 behavior. Terminal semantic
-            # outcomes remain final.
+            # drop it). Explicit deterministic unavailable codes terminalize
+            # once. Other retryable failures defer to the worker's bounded
+            # retry queue and get a per-user backoff so this batch cannot
+            # immediately select the same failed row again.
             persisted = row.get("checkpoint")
             returned = result.get("checkpoint")
             resume_authority = None
@@ -175,9 +200,9 @@ def run_invitation_batches(run_id, is_current, notify):
             elif resumable and attempts < RESUME_MAX_ATTEMPTS:
                 resume_at = now + _resume_backoff_seconds(attempts)
                 state, outcome = "pending", "resume_pending"
-            elif status in RETRYABLE and attempts < 3:
-                resume_at = 0.0
-                state, outcome = "pending", status
+            elif status in RETRYABLE and attempts < 3 and not _terminal_unavailable(result):
+                resume_at = now + _resume_backoff_seconds(attempts)
+                state, outcome = "pending", "retry_pending"
             else:
                 resume_at = 0.0
                 state, outcome = "done", status
@@ -207,12 +232,20 @@ def run_invitation_batches(run_id, is_current, notify):
         attempts += int(row.get("attempts", 0))
     failures = sum(v for k, v in counts.items() if k in RETRYABLE)
     pending_resume = int(counts.get("resume_pending", 0))
-    status = "success" if not failures else ("resume_pending" if pending_resume and
-        failures == pending_resume else "partial")
+    pending_retry = int(counts.get("retry_pending", 0))
+    if not failures:
+        status = "success"
+    elif pending_resume and not pending_retry and failures == pending_resume:
+        status = "resume_pending"
+    elif pending_retry and not pending_resume and failures == pending_retry:
+        status = "retry_pending"
+    else:
+        status = "partial"
     return {"status": status,
             "created_count": counts.get("created", 0), "scanned_count": sum(counts.values()),
             "attempt_count": attempts, "failed_user_count": failures,
             "resume_pending_count": pending_resume,
+            "retry_pending_count": pending_retry,
             "max_proposals_per_batch": batch_limit, "status_counts": counts}
 
 
@@ -265,11 +298,11 @@ def run_durable_cycle(run_id, is_current, notify, *, region, window_days, catego
               "reset": {"status": "not_required", "policy": "preserve_unexpired_inventory"},
               "cleanup": cleanup, "relevance_readiness": readiness, "invitation_scan": scan,
               "status": "success" if discovery.get("status") == scan.get("status") == cleanup.get("status") == "success" else "partial"}
-    if int(scan.get("resume_pending_count") or 0) > 0:
-        # Durable work remains: surface it as a resumable cycle failure so the
-        # existing bounded job retry requeues the run. Discovery/cleanup stage
-        # checkpoints are already committed and are not redone, and each user's
-        # own checkpoint/backoff governs the next semantic attempt.
+    if (int(scan.get("resume_pending_count") or 0) > 0
+            or int(scan.get("retry_pending_count") or 0) > 0):
+        # Durable user work remains, either with a semantic checkpoint or a
+        # bounded transient retry. The existing worker retry/backoff requeues
+        # only the unfinished population; discovery and cleanup stay committed.
         checkpoint("invitation_scan", scan)
         raise RuntimeError("event_semantic_resume_pending")
     checkpoint("result", result)

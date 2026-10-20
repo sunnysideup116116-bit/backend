@@ -58,12 +58,20 @@ def test_durable_weekly_scans_population_with_semantic_pending(monkeypatch):
         seen.append(owner)
         return {'status':'created','match_id':'synthetic'} if owner=='exact-ready' else {'status':'unavailable','error_code':'event_positive_embedding_pending'}
     monkeypatch.setattr(weekly,'create_event_opportunity',create)
-    result=weekly.run_durable_cycle('synthetic-week',lambda:True,lambda _:None,region='test',window_days=30,categories=[])
+    with pytest.raises(RuntimeError, match='event_semantic_resume_pending'):
+        weekly.run_durable_cycle('synthetic-week',lambda:True,lambda _:None,region='test',window_days=30,categories=[])
     assert set(seen)=={'pending','exact-ready'}
-    assert result['invitation_scan']['scanned_count']==2
-    assert result['invitation_scan']['created_count']==1
-    assert result['invitation_scan']['failed_user_count']==1
-    assert result['status']=='partial'
+    assert len(seen)==2
+    scan=stores['RUNS'].find_one({'_id':'synthetic-week'})['invitation_scan']
+    assert scan['scanned_count']==2 and scan['created_count']==1
+    assert scan['failed_user_count']==1 and scan['retry_pending_count']==1
+    assert scan['status']=='retry_pending'
+    rows={row['user_id']:row for row in stores['USERS'].rows}
+    assert rows['exact-ready']['state']=='done' and rows['exact-ready']['outcome']=='created'
+    assert rows['pending']['state']=='pending' and rows['pending']['attempts']==1
+    assert rows['pending']['outcome']=='retry_pending'
+    assert rows['pending']['error_code']=='event_positive_embedding_pending'
+    assert rows['pending']['resume_at']>0
 
 
 def test_rebuild_is_read_only_and_does_not_enable_old_worker(monkeypatch):
