@@ -9,6 +9,7 @@
 - 新版 Release Candidate：`.worktrees/release-candidate-6a2a137-server`，目標 SHA 同上 main。
 - Rollback PR base：`codex/rollback-base-1efa6c7`，固定於 `1efa6c72f775309ce42ff3dcfd85f6479c3f91a9`。
 - Rollback 分支：`codex/rollback-compatibility-1efa6c7`。程式碼 SHA：`c55450c644fcad13b705c4baa529c301351f7882`；manifest 的 `rollback_code_commit` 必須與此值一致，這是 guard 的 `--expected-target-sha`。
+- **PR review head 與 Production rollback checkout 分開固定：** PR #50 的 `56f15c14729895b8135cbff4cef18c6af4bf1625` 是完整 review/CI 記錄，包含對 `test_durable_weekly_scans_population_with_semantic_pending` 的測試契約修正；它不是 Production rollback checkout。正式 rollback worktree 固定使用 `2d70ceb507f5edbd19a0d0a9eae5ae8aa7956e7e`，該 commit 是 `c55450c644fcad13b705c4baa529c301351f7882` 的 docs-only descendant，程式碼不變；PR head 相對 code pin 還含有 `social/tests/test_event_v2_contract.py`，guard 必須拒絕直接以 PR head 作為 runtime checkout，不得放寬 guard allowlist。操作時使用 PR #50 最新審查過的 Runbook，runtime source checkout 則固定為 `2d70ceb`；後續文件更新不改變此 runtime SHA。
 - Rollback branch 是舊版專用相容回退版本。PR base 必須是 rollback base；不得合併至新版 `main`。
 - Production 最近一次已知健康驗證由 2026-10-21 使用者回報：四個 health endpoint 為 HTTP 200、無重複 launcher、MongoDB／Neo4j 可用、W43 completed；Event lifecycle、delivery、weekly scheduling 暫時關閉。本文件沒有重查 Production。
 - 相容回退只增加 retry/checkpoint 恢復及唯讀 guard；不做 schema migration/backfill，也不回復 MongoDB／Neo4j snapshot。
@@ -17,7 +18,7 @@
 
 - Runtime manifest：`docs/rollback-runtime-manifest.json`。它固定 rollback code SHA、三個 Python runtime 的 pip freeze、Python／Node 版本、依賴檔與安裝目錄 digest，以及外部 Guardrail 資產 digest。
 - Runtime archive 僅包含 `.local-venv/social`、`.local-venv/matchmaker`、`venv`、`pi_agent/node_modules`；不含 `.env`、正式資料或 Guardrail 大型模型。Archive 的 SHA-256 記錄在 manifest。
-- Archive 對應目前 Linux 主機與固定路徑 `.worktrees/rollback-compatibility-1efa6c7-server`。Python venv 的 Python 執行檔連結到主機 `/usr/bin/python3`；不可把 venv 搬到另一個 host 或不同路徑後直接使用。若 worktree 被清理，先從 GitHub checkout manifest 指定的 rollback commit 至原路徑，再以 digest 驗證並還原 runtime archive。
+- Archive 對應目前 Linux 主機與 manifest 的 `archive.extraction_release_path`：`/home/sunny/桌面/Graduate_Project/.worktrees/rollback-compatibility-1efa6c7-server`。正式使用前，該路徑必須是乾淨的 `2d70ceb` rollback checkout（其程式碼 pin 為 `c55450c`）；不可將 PR review head `56f15c1` 留在該路徑後直接執行 guard。Python venv 的 Python 執行檔連結到主機 `/usr/bin/python3`；不可把 venv 搬到另一個 host 或不同路徑後直接使用。若 worktree 被清理，先從 GitHub checkout 固定的 `2d70ceb` 至 manifest 指定原路徑，再以 digest 驗證並還原 runtime archive。
 - Artifact 目前放在隔離交付目錄 `/tmp/ayue-rollback-artifacts/rollback-runtime-c55450c644fcad13b705c4baa529c301351f7882.tar.gz`；檔案 SHA-256 由 manifest 固定。它不依賴 worktree 存活，但 `/tmp` 不是長期保存位置；正式維護前須將 archive 與 manifest 複製到受控、備份且權限限制的 release storage，並重新驗證 digest。
 - Guardrail binary/model 是外部相依：manifest 列出絕對路徑、大小、mode 與 SHA-256。部署前逐一比對，檔案須可由服務使用者讀取，binary 須可執行；不可刪除或搬移。
 - `.env` 不進 Git、不進 runtime archive、不輸出至 terminal/log。維護窗口從目前 active release 安全複製到新 release 和 rollback release，檔案 owner 為服務使用者、mode `0600`。Social 設定必須明確包含 `MONGO_DB_NAME=profiling_fordemo`；guard 會拒絕缺漏、不同 DB、缺少必要集合或 singleton。
