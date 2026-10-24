@@ -49,21 +49,75 @@ def test_durable_weekly_scans_population_with_semantic_pending(monkeypatch):
     stores = {name: Collection() for name in ('RUNS','USERS','matches_coll')}
     stores['profiles_coll'] = Collection([{'user_id':'pending'}, {'user_id':'exact-ready'}])
     for name,store in stores.items(): monkeypatch.setattr(weekly,name,store)
-    monkeypatch.setattr(discovery,'discover_and_ingest_events',lambda **_: {'status':'success'})
-    monkeypatch.setattr(lifecycle,'run_event_lifecycle_once',lambda: {'status':'success'})
-    monkeypatch.setattr(cycle,'wait_for_event_relevance',lambda: {'ready':True,'exact_ready':True,
-        'semantic_ready':False,'all_vectors_required':False,'status':'degraded'})
+    discovery_calls, cleanup_calls, readiness_calls = [], [], []
+    monkeypatch.setattr(discovery,'discover_and_ingest_events',
+        lambda **_: discovery_calls.append(True) or {'status':'success'})
+    monkeypatch.setattr(lifecycle,'run_event_lifecycle_once',
+        lambda: cleanup_calls.append(True) or {'status':'success'})
+    monkeypatch.setattr(cycle,'wait_for_event_relevance',lambda: readiness_calls.append(True) or {
+        'ready':True,'exact_ready':True,'semantic_ready':False,
+        'all_vectors_required':False,'status':'degraded'})
     seen=[]
+    pending_outcome = {'status':'unavailable','error_code':'event_positive_embedding_pending'}
     def create(owner, **kwargs):
         seen.append(owner)
-        return {'status':'created','match_id':'synthetic'} if owner=='exact-ready' else {'status':'unavailable','error_code':'event_positive_embedding_pending'}
+        if owner=='exact-ready': return {'status':'created','match_id':'synthetic'}
+        return dict(pending_outcome)
     monkeypatch.setattr(weekly,'create_event_opportunity',create)
-    result=weekly.run_durable_cycle('synthetic-week',lambda:True,lambda _:None,region='test',window_days=30,categories=[])
+    run_args = ('synthetic-week',lambda:True,lambda _:None)
+    run_kwargs = {'region':'test','window_days':30,'categories':[]}
+
+    # A missing positive embedding is retryable but has no semantic progress
+    # checkpoint to resume. Preserve its due time and keep the weekly run open.
+    with pytest.raises(RuntimeError,match='event_semantic_resume_pending'):
+        weekly.run_durable_cycle(*run_args,**run_kwargs)
     assert set(seen)=={'pending','exact-ready'}
-    assert result['invitation_scan']['scanned_count']==2
-    assert result['invitation_scan']['created_count']==1
-    assert result['invitation_scan']['failed_user_count']==1
-    assert result['status']=='partial'
+    run=stores['RUNS'].find_one({'_id':'synthetic-week'})
+    assert run['stage']=='invitation_scan' and 'result' not in run
+    assert run['discovery']=={'status':'success'} and run['cleanup']=={'status':'success'}
+    assert run['relevance_readiness']['semantic_ready'] is False
+    assert run['invitation_scan']['scanned_count']==2
+    assert run['invitation_scan']['status']=='retry_pending'
+    assert run['invitation_scan']['created_count']==1
+    assert run['invitation_scan']['failed_user_count']==1
+    assert run['invitation_scan']['pending_user_count']==1
+    assert run['invitation_scan']['retry_pending_count']==1
+    pending=next(row for row in stores['USERS'].rows if row['user_id']=='pending')
+    ready=next(row for row in stores['USERS'].rows if row['user_id']=='exact-ready')
+    assert pending['state']=='pending' and pending['outcome']=='retry_pending'
+    assert pending['attempts']==1 and pending['resume_at']>weekly.time.time()
+    assert pending['error_code']=='event_positive_embedding_pending'
+    assert 'checkpoint' not in pending
+    assert ready['state']=='done' and ready['outcome']=='created'
+
+    # Before the user retry is due, the same run remains incomplete and does
+    # not repeat discovery, cleanup, or the already completed invitation.
+    first_resume_at=pending['resume_at']
+    with pytest.raises(RuntimeError,match='event_semantic_resume_pending'):
+        weekly.run_durable_cycle(*run_args,**run_kwargs)
+    assert seen.count('pending')==1 and seen.count('exact-ready')==1
+    assert pending['resume_at']==first_resume_at
+    assert len(discovery_calls)==len(cleanup_calls)==1
+    assert 'result' not in stores['RUNS'].find_one({'_id':'synthetic-week'})
+
+    # Once due, only the unfinished user's row is retried. The saved discovery
+    # and cleanup checkpoints are reused; the completed user is not invited twice.
+    pending['resume_at']=0
+    pending_outcome.update({'status':'no_match'})
+    result=weekly.run_durable_cycle(*run_args,**run_kwargs)
+    assert result['status']=='success'
+    assert result['invitation_scan']['retry_pending_count']==0
+    assert pending['state']=='done' and pending['outcome']=='no_match'
+    assert ready['state']=='done' and ready['attempts']==1
+    assert seen.count('pending')==2 and seen.count('exact-ready')==1
+    assert len(discovery_calls)==len(cleanup_calls)==1
+    assert len(readiness_calls)==3
+    assert stores['RUNS'].find_one({'_id':'synthetic-week'})['result']==result
+
+    # A completed weekly token is idempotent on subsequent calls.
+    assert weekly.run_durable_cycle(*run_args,**run_kwargs)==result
+    assert seen.count('pending')==2 and seen.count('exact-ready')==1
+    assert len(discovery_calls)==len(cleanup_calls)==1
 
 
 def test_rebuild_is_read_only_and_does_not_enable_old_worker(monkeypatch):
