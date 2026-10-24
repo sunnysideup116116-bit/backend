@@ -22,7 +22,7 @@
 - Artifact 目前放在隔離交付目錄 `/tmp/ayue-rollback-artifacts/rollback-runtime-c55450c644fcad13b705c4baa529c301351f7882.tar.gz`；檔案 SHA-256 由 manifest 固定。它不依賴 worktree 存活，但 `/tmp` 不是長期保存位置；正式維護前須將 archive 與 manifest 複製到受控、備份且權限限制的 release storage，並重新驗證 digest。
 - Guardrail binary/model 是外部相依：manifest 列出絕對路徑、大小、mode 與 SHA-256。部署前逐一比對，檔案須可由服務使用者讀取，binary 須可執行；不可刪除或搬移。
 - `.env` 不進 Git、不進 runtime archive、不輸出至 terminal/log。維護窗口從目前 active release 安全複製到新 release 和 rollback release，檔案 owner 為服務使用者、mode `0600`。Social 設定必須明確包含 `MONGO_DB_NAME=profiling_fordemo`；guard 會拒絕缺漏、不同 DB、缺少必要集合或 singleton。
-- systemd unit 的 `ExecStart` 明確使用 `ollama`；保留 Production 目前的 semantic rollout flags，不切換 OpenRouter，也不擴大 canary。不要將秘密放進 unit、命令列或 PR。
+- systemd unit 範本的 `ExecStart` 明確傳入 `ollama`。安裝前必須對照執行中服務的有效 `AYUE_LLM_PROVIDER`；若不同，立即 STOP 並先確認 provider 決策，不得把 unit 當成透明切換。保留 Production 目前的 semantic rollout flags，不擴大 canary。不要將秘密放進 unit、命令列或 PR。
 
 ## 強制 STOP 條件
 
