@@ -182,6 +182,86 @@ def test_provider_failure_is_not_retried_as_another_batch(batch_flow):
     matches.insert_one.assert_not_called()
 
 
+def test_activity_selection_requires_owner_evidence_and_valid_situation_flag(monkeypatch):
+    import agent_quota.internal as internal
+
+    monkeypatch.setattr(internal, "signed_headers", lambda: {})
+    payload = {
+        "target_user": {
+            "user_id": "owner", "current_context": "昨天專題被教授打槍",
+            "context_signals": {"event": "專題被教授打槍", "feeling": "心情有點差"},
+        },
+        "candidates": [{
+            "user_id": "candidate",
+            "candidate_activity_evidence": [{
+                "evidence_id": "activity_evidence_1", "kind": "candidate_prefers",
+                "concept_key": "v2_badminton", "label": "打羽球",
+            }],
+        }],
+        "search_context": {"search_intent": "activity", "invitation_topic": "羽球"},
+    }
+
+    def response(selection_basis):
+        item = {"matched_user_id": "candidate"}
+        if selection_basis is not None:
+            item["selection_basis"] = selection_basis
+        result = requests.Response()
+        result.status_code = 200
+        result._content = json.dumps({"outcome": "selected", "matches": [item]}).encode()
+        return result
+
+    monkeypatch.setattr(router.requests, "post", lambda *_a, **_k: response({
+        "candidate_evidence_ids": ["activity_evidence_1"],
+        "used_prior_situation": True,
+    }))
+    selected = router._request_matchmaker_selection(payload, timeout=3.0)
+    assert selected[0]["selection_basis"]["candidate_evidence_ids"] == [
+        "activity_evidence_1",
+    ]
+
+    for invalid_basis in (
+        None,
+        {"candidate_evidence_ids": ["unknown"], "used_prior_situation": True},
+        {"candidate_evidence_ids": [], "used_prior_situation": "yes"},
+    ):
+        monkeypatch.setattr(
+            router.requests, "post", lambda *_a, _basis=invalid_basis, **_k: response(_basis),
+        )
+        with pytest.raises(jobs.MatchSearchPipelineError) as exc:
+            router._request_matchmaker_selection(payload, timeout=3.0)
+        assert exc.value.code == "matchmaker_invalid_response"
+
+
+def test_matchmaker_cannot_claim_prior_situation_when_target_has_none(monkeypatch):
+    import agent_quota.internal as internal
+
+    monkeypatch.setattr(internal, "signed_headers", lambda: {})
+    monkeypatch.setattr(router.requests, "post", lambda *_a, **_k: response_for_activity_without_situation())
+    payload = {
+        "target_user": {"user_id": "owner", "current_context": "想打羽球",
+                        "context_signals": {"activity": "羽球"}},
+        "candidates": [{"user_id": "candidate", "candidate_activity_evidence": [
+            {"evidence_id": "e1"},
+        ]}],
+        "search_context": {"search_intent": "activity", "invitation_topic": "羽球"},
+    }
+    with pytest.raises(jobs.MatchSearchPipelineError) as exc:
+        router._request_matchmaker_selection(payload, timeout=3.0)
+    assert exc.value.code == "matchmaker_invalid_response"
+
+
+def response_for_activity_without_situation():
+    result = requests.Response()
+    result.status_code = 200
+    result._content = json.dumps({
+        "outcome": "selected",
+        "matches": [{"matched_user_id": "candidate", "selection_basis": {
+            "candidate_evidence_ids": ["e1"], "used_prior_situation": True,
+        }}],
+    }).encode()
+    return result
+
+
 def test_shared_selection_budget_exhaustion_is_failed_not_no_candidates(batch_flow, monkeypatch):
     _, matches, post = batch_flow
     clock = Mock(side_effect=[0, 1, 121])

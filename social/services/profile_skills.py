@@ -63,6 +63,12 @@ RECENT_SUBSTANTIVE_FIELDS = frozenset({"activity", "destination", "event", "feel
 # context when a new plan starts. It is carried at most one episode and is
 # dropped by a newer event/feeling, an explicit clear, or canonical expiry.
 RECENT_SITUATIONAL_FIELDS = ("event", "feeling")
+_DURABLE_MEMORY_EVIDENCE_CUE_RE = re.compile(
+    r"(?:喜歡|不喜歡|討厭|偏好|熱愛|愛好|我愛|需要|希望|要求|重視|在意|"
+    r"習慣|常常|經常|通常|總是|一直|每(?:天|週|周|月|年)|"
+    r"\blike\b|\blove\b|\bhate\b|\bprefer\b|\busually\b|\boften\b)",
+    re.IGNORECASE,
+)
 RECENT_TIMINGS = {"昨天", "前天", "今天", "明天", "後天", "最近", "近期", "本週", "下週", "本月", "下個月"}
 RECENT_TEMPORAL_STATUSES = {"past", "current", "planned"}
 RECENT_EPISODE_TTL_SECONDS = 30 * 60
@@ -711,8 +717,20 @@ follow_up 欄位：{{"action":"create|update|close|none","existing_slot":null,"t
                 retry_result["active_episode_id"] = str((safe_episode or {}).get("episode_id") or "")
                 recent = retry_result
     memories, codes = [], []
+    has_explicit_recent_situation = bool(
+        recent.get("should_update")
+        and any(name in (recent.get("fields") or {}) for name in RECENT_SITUATIONAL_FIELDS)
+    )
     for item in contract.memories:
         candidate, code = _validate_memory(item.model_dump(), message)
+        if (candidate and has_explicit_recent_situation
+                and not _DURABLE_MEMORY_EVIDENCE_CUE_RE.search(
+                    str(candidate.get("evidence_span") or ""),
+                )):
+            # Recent events/feelings are not durable preference evidence by
+            # themselves. A separate explicit preference or lasting-habit cue
+            # must occur inside this memory's owner-provided evidence span.
+            candidate, code = None, "transient_situation_not_preference"
         codes.append(code)
         if candidate:
             memories.append(candidate)

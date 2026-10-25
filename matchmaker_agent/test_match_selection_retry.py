@@ -267,3 +267,44 @@ class MatchSelectionRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('"recommendation_reason"', subject.system_prompt)
         self.assertNotIn('"score_breakdown"', subject.system_prompt)
         self.assertIn("不可為了湊結果硬選", subject.system_prompt)
+
+    def test_activity_selection_receives_expiring_context_and_cited_owner_evidence(self):
+        subject = self.subject()
+        context = "昨天專題被教授打槍，今天想找人一起打羽球散心"
+        evidence = {
+            "evidence_id": "activity_evidence_1",
+            "kind": "candidate_prefers",
+            "concept_key": "v2_badminton",
+            "label": "打羽球",
+        }
+        messages = subject._match_messages(
+            {"user_id": "owner", "current_context": context,
+             "context_signals": {"event": "專題被教授打槍", "feeling": "心情有點差"}},
+            [{"user_id": "candidate", "candidate_activity_evidence": [evidence]}],
+            search_context={
+                "search_intent": "activity", "invitation_topic": "羽球",
+                "query_text": "我想找人一起打羽球散散心",
+            },
+        )
+        request = json.loads(messages[1]["content"])
+        self.assertIn("專題被教授打槍", request["target_user"]["current_context"])
+        self.assertEqual(
+            request["candidates"][0]["candidate_activity_evidence"], [evidence],
+        )
+        self.assertIn("selection_basis", messages[0]["content"])
+        self.assertIn("有期限的近期情境", messages[0]["content"])
+        self.assertIn("不可從近期情境推論對方", messages[0]["content"])
+
+    def test_non_activity_selection_prompts_keep_their_existing_contract(self):
+        subject = self.subject()
+        for context in (
+            {"search_intent": "preference", "normalized_topic": "K-pop"},
+            {"search_intent": "recent_context", "query_text": "最近想交朋友"},
+            {"search_intent": "generic"},
+        ):
+            messages = subject._match_messages(
+                {"user_id": "owner", "current_context": "近期有點忙"},
+                [{"user_id": "candidate"}], search_context=context,
+            )
+            self.assertNotIn("本輪活動搜尋的選人依據契約", messages[0]["content"])
+            self.assertNotIn("selection_basis", messages[0]["content"])

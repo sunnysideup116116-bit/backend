@@ -942,6 +942,96 @@ class ProfileSkillsTests(unittest.TestCase):
         self.assertTrue(result["retry_scheduled"])
         self.assertEqual(result["attempt_count"], 1)
 
+    def test_demo_day1_emotion_is_expiring_recent_context_not_a_preference(self):
+        import mongomock
+
+        message = "今天專題被教授打槍了，心情有點差。"
+        extraction = {
+            "recent_context": {
+                "action": "update", "message_kind": "real_world_update",
+                "confidence": .97, "episode_relation": "new", "reason_code": "explicit_event",
+                "fields": {
+                    "event": {
+                        "operation": "set", "value": "專題被教授打槍",
+                        "evidence_span": "專題被教授打槍", "confidence": .97,
+                        "subject": "owner",
+                    },
+                    "feeling": {
+                        "operation": "set", "value": "心情有點差",
+                        "evidence_span": "心情有點差", "confidence": .97,
+                        "subject": "owner",
+                    },
+                    "timing": {
+                        "operation": "set", "value": "今天",
+                        "evidence_span": "今天", "confidence": .97,
+                        "subject": "owner",
+                    },
+                    "temporal_status": {
+                        "operation": "set", "value": "past",
+                        "evidence_span": "今天", "confidence": .97,
+                        "subject": "owner",
+                    },
+                },
+            },
+            "memories": [],
+        }
+        store = mongomock.MongoClient().demo
+        store.profiles.insert_one({
+            "user_id": "demo-owner", "current_context_revision": 0,
+            "recent_context_state": {"version": 4, "revision": 0, "fields": {}},
+        })
+        with patch.object(profile_skills, "profiles_coll", store.profiles), \
+             patch.object(profile_skills, "get_embedding", return_value=[]), \
+             patch.object(profile_skills, "generate_chat_completion",
+                          return_value=ChatResult(content=json.dumps(extraction))):
+            decision = analyze_profile_message(message)
+            self.assertEqual(decision["memories"], [])
+            self.assertEqual(decision["memory_codes"], ["no_memory_candidate"])
+            self.assertTrue(apply_recent_context(
+                "demo-owner", decision["recent_context"],
+                message_id="demo-day-1", source_timestamp=time.time(),
+            ))
+
+        profile = store.profiles.find_one({"user_id": "demo-owner"})
+        self.assertIn("event", profile["recent_context_state"]["fields"])
+        self.assertIn("feeling", profile["recent_context_state"]["fields"])
+        self.assertNotIn("memories", profile)
+        self.assertGreater(profile["recent_context_expires_at"], time.time())
+        self.assertIn("專題被教授打槍", profile_projection.active_recent_context(profile))
+        self.assertEqual(
+            profile_projection.active_context_signals(profile)["feeling"],
+            "心情有點差",
+        )
+
+    def test_recent_setback_cannot_be_promoted_to_a_permanent_trait_by_model_output(self):
+        message = "今天專題被教授打槍了，心情有點差。"
+        fabricated_memory = {
+            "key": "outgoing", "label_zh_tw": "外向", "stance": "like",
+            "category": "personality", "confidence": .97,
+            "evidence_span": "心情有點差", "subject": "owner",
+        }
+        with patch(
+            "services.profile_skills.generate_chat_completion",
+            return_value=ChatResult(content=json.dumps({
+                "recent_context": {
+                    "action": "update", "message_kind": "real_world_update",
+                    "confidence": .97, "episode_relation": "new",
+                    "fields": {
+                        "event": {"operation": "set", "value": "專題被教授打槍",
+                                   "evidence_span": "專題被教授打槍", "confidence": .97,
+                                   "subject": "owner"},
+                        "feeling": {"operation": "set", "value": "心情有點差",
+                                     "evidence_span": "心情有點差", "confidence": .97,
+                                     "subject": "owner"},
+                    },
+                },
+                "memories": [fabricated_memory],
+            })),
+        ):
+            decision = analyze_profile_message(message)
+        self.assertEqual(decision["memories"], [])
+        self.assertEqual(decision["memory_codes"], ["transient_situation_not_preference"])
+
 
 if __name__ == "__main__":
     unittest.main()

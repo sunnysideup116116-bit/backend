@@ -299,6 +299,109 @@ def test_activity_grounding_still_rejects_a_topic_absent_from_the_visible_messag
     assert "想找人一起做什麼活動" in reply
 
 
+def test_generic_ball_search_is_clarified_before_any_confirmation_card(monkeypatch):
+    from services.ayue_agent.pi.match_tools import MatchSearchInput, _prepare_search
+    from services.match_search_context import activity_topic_requires_sport_clarification
+
+    assert activity_topic_requires_sport_clarification("打球散散心") is True
+    assert activity_topic_requires_sport_clarification("羽球和籃球") is True
+    assert activity_topic_requires_sport_clarification("羽球和羽毛球") is False
+
+    monkeypatch.setattr(
+        "services.ayue_agent.pi.match_tools.prepare_write_confirmation",
+        lambda *_a, **_k: pytest.fail("ambiguous ball request must not create a card"),
+    )
+    _, turn = make_turn("我想找人一起打球散散心")
+    runtime = SimpleNamespace(turn=turn)
+
+    for request in (
+        MatchSearchInput(kind="recent_context"),
+        MatchSearchInput(kind="activity", topic="打球散散心"),
+        MatchSearchInput(kind="activity", topic="羽球和籃球"),
+    ):
+        payload, reply = _prepare_search(runtime, request)
+        assert payload is None
+        assert "羽球、籃球" in reply
+        assert "確認球種後" in reply
+
+
+def test_write_confirmation_boundary_rejects_generic_ball_topic(monkeypatch):
+    from services.ayue_agent.shared import write_executors
+
+    monkeypatch.setattr(
+        write_executors, "assess_match_opportunity",
+        lambda *_a, **_k: SimpleNamespace(state="ready"),
+    )
+    ctx, turn = make_turn("我想找人一起打球散散心")
+    payload, reply = write_executors.prepare_write_confirmation(
+        "match.start_search",
+        {"search_request": {"kind": "activity", "topic": "打球"}},
+        ctx, turn,
+    )
+    assert payload is None
+    assert "確認球種後" in reply
+
+
+def test_confirmed_badminton_topic_is_same_on_card_and_search_job(monkeypatch):
+    from services.ayue_agent.shared import write_executors
+
+    monkeypatch.setattr(
+        write_executors, "assess_match_opportunity",
+        lambda *_a, **_k: SimpleNamespace(state="ready"),
+    )
+    store = mongomock.MongoClient().test
+    submitted = []
+    monkeypatch.setattr(write_executors, "TOOL_CALLS", store.calls)
+
+    def start_search(user_id, **kwargs):
+        submitted.append((user_id, kwargs))
+        return {"status": "queued"}
+
+    monkeypatch.setattr(write_executors, "start_match_search", start_search)
+    history = [
+        {"role": "user", "content": "我想找人一起打球散散心"},
+        {"role": "assistant", "content": "你說的打球想找哪一種？羽球、籃球，或其他球類？"},
+    ]
+    request, turn = make_turn("羽球", history)
+    runtime = tool_runtime.PiToolRuntime(
+        turn, run_id="badminton-choice", trace={},
+        confirmation_collection=store.confirmations,
+        contact_selection_collection=store.selections,
+    )
+
+    result = runtime.dispatch("match.start_search", {
+        "kind": "activity", "topic": "羽球",
+    })
+
+    assert result["result"]["pending_confirmation"] is True
+    record = store.confirmations.find_one({})
+    assert record["payload"]["search_context"]["search_intent"] == "activity"
+    assert record["payload"]["search_context"]["invitation_topic"] == "羽球"
+    assert "依「羽球」這個活動需求搜尋" in record["preview_text"]
+    assert "一起羽球" not in record["preview_text"]
+    assert submitted == []
+    manager = ConfirmationManager(store.confirmations)
+    manager.bind_final_preview(
+        user_id=request.user_id, origin_run_id="badminton-choice",
+        final_content=record["preview_text"],
+    )
+    assert manager.mark_presented(
+        user_id=request.user_id, origin_run_id="badminton-choice",
+        message_id="saved-card", persisted_content=record["preview_text"],
+    )
+    manager.execute_confirmed(
+        user_id=request.user_id, room_id=request.room_id,
+        surface="public_ayue", choice_id=record["_id"],
+        executor=lambda name, args, uid, payload: write_executors.execute_write(
+            name, args, request, turn, "badminton-confirm", 0, payload=payload,
+        ),
+    )
+
+    assert submitted[0][0] == "owner"
+    assert submitted[0][1]["search_context"]["search_intent"] == "activity"
+    assert submitted[0][1]["search_context"]["invitation_topic"] == "羽球"
+
+
 def test_write_executor_also_rejects_an_absent_case_variant_activity(monkeypatch):
     from services.ayue_agent.shared.write_executors import prepare_write_confirmation
     from services.ayue_agent.shared import write_executors

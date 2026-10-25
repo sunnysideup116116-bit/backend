@@ -348,6 +348,9 @@ class MatchQualificationTests(unittest.TestCase):
         qualification = candidate_qualification(
             {"user_id": "owner", "context_signals": {"activity": "合掌村旅行"}},
             {"user_id": "candidate", "context_signals": {"activity": "合掌村旅行"}},
+            activity_avoidance_check={
+                "verification_status": "verified", "avoid_concept_keys": [],
+            },
         )
         self.assertTrue(qualification["eligible"])
         self.assertIn("shared_activity", qualification["strong_reason_codes"])
