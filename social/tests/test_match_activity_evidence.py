@@ -5,6 +5,7 @@ user-visible reason contract, the deterministic evidence-over-vector selection
 policy, the exploratory consent record, and the confirmation boundary that
 creates the consent flag.
 """
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +14,7 @@ import pytest
 from routers.match import (
     _activity_evidence_candidates,
     activity_selection_scope,
+    build_friend_intro_v4,
     build_validated_match_explanation,
     candidate_qualification,
 )
@@ -159,6 +161,67 @@ def test_recent_activity_evidence_qualifies_with_activity_text(_graph):
     assert "對方近期活動:打羽球" in qualification["match_basis"]["counterparty_evidence"]
 
 
+@patch("routers.match.get_user_graph_memories", return_value=[])
+def test_generic_ball_activity_cannot_reach_selection_without_sport_clarification(_graph):
+    import time
+
+    qualification = candidate_qualification(
+        {"user_id": "owner", "current_context": "想找人一起打球",
+         "context_signals": {"activity": "打球"},
+         "recent_context_expires_at": time.time() + 3600},
+        {"user_id": "candidate", "current_context": "最近也在打球",
+         "context_signals": {"activity": "打球"},
+         "recent_context_expires_at": time.time() + 3600},
+        vector_score=.99,
+        search_context={"search_intent": "recent_context"},
+        activity_avoidance_check={"verification_status": "verified", "avoid_concept_keys": []},
+    )
+    assert qualification["eligible"] is False
+    assert qualification["activity_avoidance_status"] == "unverified"
+
+
+@patch("routers.match.get_user_graph_memories", return_value=[])
+def test_same_badminton_avoid_snapshot_blocks_activity_and_recent_context(_graph):
+    import time
+    from matchmaker_agent.concept_identity import canonicalize_concept
+
+    avoid_key = canonicalize_concept("羽球").key
+    target = {
+        "user_id": "owner", "current_context": "想找人打羽球",
+        "context_signals": {"activity": "羽球"},
+        "recent_context_expires_at": time.time() + 3600,
+    }
+    candidate = {
+        "user_id": "candidate", "current_context": "近期打羽球雙打",
+        "context_signals": {"activity": "羽球雙打"},
+        "recent_context_expires_at": time.time() + 3600,
+    }
+    avoidance = {"verification_status": "verified", "avoid_concept_keys": [avoid_key]}
+    evidence = [{
+        "kind": "candidate_prefers",
+        "concept_key": canonicalize_concept("打羽球").key,
+        "label": "打羽球",
+    }]
+    results = [
+        candidate_qualification(
+            target, candidate,
+            search_context={"search_intent": "activity", "invitation_topic": "羽球"},
+            activity_evidence=evidence,
+            activity_avoidance_check=avoidance,
+        ),
+        candidate_qualification(
+            target, candidate,
+            search_context={"search_intent": "recent_context"},
+            activity_evidence=evidence,
+            activity_avoidance_check=avoidance,
+        ),
+    ]
+
+    assert all(item["eligible"] is False for item in results)
+    assert all(item["activity_avoidance_status"] == "conflict" for item in results)
+    assert all(item["activity_avoidance_conflict_keys"] == [avoid_key] for item in results)
+
+
 @patch("routers.match.get_user_graph_memories")
 def test_activity_evidence_never_bypasses_hard_conflict(graph_memories):
     graph_memories.side_effect = lambda user_id, _limit: (
@@ -203,6 +266,35 @@ def test_activity_explanation_is_grounded_on_candidate_evidence_only(_graph):
     assert top_reasons == ["對方明確提過喜歡羽球"]
     interest = next(item for item in items if item["kind"] == "candidate_activity_interest")
     assert interest["candidate_evidence_ids"] == [f"graph:candidate:{'v2_' + 'a' * 48}"]
+
+
+@pytest.mark.parametrize("topic,query,concept,expected_phrase", [
+    ("羽球", "我想找人一起打羽球散散心", "羽球雙打", "一起打羽球"),
+    ("Street Fighter", "幫我找人一起玩 street fighter", "玩街頭霸王", "一起玩 Street Fighter"),
+])
+@patch("routers.match.get_user_graph_memories", return_value=[])
+def test_activity_friend_intro_preserves_a_grounded_action_phrase(
+    _graph, topic, query, concept, expected_phrase,
+):
+    from matchmaker_agent.concept_identity import canonicalize_concept
+
+    saved = canonicalize_concept(concept)
+    intro = build_friend_intro_v4(
+        {"user_id": "owner", "current_context": query},
+        {"user_id": "candidate"}, 0.0, refine=False,
+        search_context={
+            "search_intent": "activity", "invitation_topic": topic,
+            "query_text": query,
+        },
+        activity_evidence=[{
+            "kind": "candidate_prefers", "concept_key": saved.key,
+            "label": concept,
+        }],
+    )
+    viewer_text = intro["initiator_preview"]["viewer_text"]
+    assert expected_phrase in viewer_text
+    assert "是否願意同行仍待確認" in viewer_text
+    assert "對方已同意" not in viewer_text
 
 
 @patch("routers.match.get_user_graph_memories", return_value=[])
@@ -713,14 +805,18 @@ def test_street_fighter_alias_phrase_reaches_initiator_reason_with_graph_provena
 def _run_activity_generation_fixture(
     monkeypatch, *, candidates, context, lookup_result, source="automatic",
     existing_matches=(), lookup_callable=None, avoidance_callable=None,
-    exploratory_consent=False,
+    exploratory_consent=False, selection_callable=None, target=None,
+    use_matchmaker_api=False,
 ):
     from routers import match as match_router
     from tests.test_preference_match_search import _flow
 
     real_explanation = match_router.build_validated_match_explanation
     real_friend_intro = match_router.build_friend_intro_v4
-    profiles, matches = _flow(monkeypatch, candidate=candidates[0])
+    real_matchmaker_selection = match_router._request_matchmaker_selection
+    profiles, matches = _flow(
+        monkeypatch, candidate=candidates[0], target=target,
+    )
     candidate_rows = [dict(candidate) for candidate in candidates]
     profiles.aggregate.return_value = candidate_rows
     profiles.find.side_effect = lambda *_args, **_kwargs: _Rows(candidate_rows)
@@ -744,12 +840,34 @@ def _run_activity_generation_fixture(
     )
     selection_payloads = []
 
-    def select(payload, **_kwargs):
+    def select(payload, **kwargs):
         selection_payloads.append(payload)
-        return [{"matched_user_id": payload["candidates"][0]["user_id"]}]
+        if selection_callable:
+            return selection_callable(payload, **kwargs)
+        candidate = payload["candidates"][0]
+        evidence_ids = [
+            item["evidence_id"] for item in candidate.get("candidate_activity_evidence", [])
+            if item.get("evidence_id")
+        ]
+        return [{
+            "matched_user_id": candidate["user_id"],
+            **({"selection_basis": {
+                "candidate_evidence_ids": evidence_ids[:1],
+                "used_prior_situation": bool(
+                    str(((payload.get("target_user") or {}).get("context_signals") or {}).get("event") or "").strip()
+                    or str(((payload.get("target_user") or {}).get("context_signals") or {}).get("feeling") or "").strip()
+                ),
+            }} if context.get("search_intent") == "activity" else {}),
+        }]
 
-    selection = MagicMock(side_effect=select)
-    monkeypatch.setattr(match_router, "_request_matchmaker_selection", selection)
+    selection = None
+    if not use_matchmaker_api:
+        selection = MagicMock(side_effect=select)
+        monkeypatch.setattr(match_router, "_request_matchmaker_selection", selection)
+    else:
+        monkeypatch.setattr(
+            match_router, "_request_matchmaker_selection", real_matchmaker_selection,
+        )
     reserve = MagicMock(return_value={"status": "reserved"})
     monkeypatch.setattr(match_router, "reserve_daily_quota", reserve)
     consent_lookup = MagicMock(return_value=exploratory_consent)
@@ -770,6 +888,7 @@ def _run_activity_generation_fixture(
 
 def _wire_mock_preference_api(
     monkeypatch, candidate_ids_by_key, *, avoidances_by_candidate=None,
+    selection_provider=None,
 ):
     """Connect Social's real adapter to the Matchmaker endpoint with mock graph I/O."""
     import importlib.util
@@ -781,6 +900,19 @@ def _wire_mock_preference_api(
     import matchmaker
 
     model_agent = MagicMock()
+    selection_calls = []
+
+    async def match_async(target_user, candidates, *_args, search_context=None, **_kwargs):
+        selection_calls.append({
+            "target_user": target_user,
+            "candidates": candidates,
+            "search_context": search_context,
+        })
+        if selection_provider is None:
+            return json.dumps({"outcome": "no_suitable_candidate", "matches": []})
+        return json.dumps(selection_provider(target_user, candidates, search_context))
+
+    model_agent.match_async = match_async
     agent_factory = MagicMock(return_value=model_agent)
     monkeypatch.setattr(matchmaker, "MatchmakerAgent", agent_factory)
     api_spec = importlib.util.spec_from_file_location(
@@ -790,6 +922,20 @@ def _wire_mock_preference_api(
     matchmaker_api = importlib.util.module_from_spec(api_spec)
     monkeypatch.setitem(sys.modules, api_spec.name, matchmaker_api)
     api_spec.loader.exec_module(matchmaker_api)
+    matchmaker_api.get_user_graph_memory = lambda *_args, **_kwargs: ""
+    matchmaker_api.get_global_rules = lambda *_args, **_kwargs: ""
+    from concurrent.futures import Future
+
+    class ImmediateExecutor:
+        def submit(self, function, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(function(*args, **kwargs))
+            except BaseException as exc:
+                future.set_exception(exc)
+            return future
+
+    matchmaker_api._MATCH_GRAPH_POOL = ImmediateExecutor()
     agent_factory.assert_called_once_with()
     from services import preference_candidate_service
     avoidances_by_candidate = avoidances_by_candidate or {}
@@ -838,12 +984,17 @@ def _wire_mock_preference_api(
     driver_factory = MagicMock(return_value=driver)
     monkeypatch.setattr(matchmaker_api.GraphDatabase, "driver", driver_factory)
 
-    def local_http_post(url, *, json, timeout):
-        assert timeout == (1, 5)
-        if url.endswith("/api/preferences/candidates"):
+    def local_http_post(url, *, json, timeout, **_kwargs):
+        if url.endswith("/api/match"):
+            import asyncio
+            request = matchmaker_api.MatchRequest.model_validate(json)
+            payload = asyncio.run(matchmaker_api._evaluate_match_request(request))
+        elif url.endswith("/api/preferences/candidates"):
+            assert timeout == (1, 5)
             request = matchmaker_api.PreferenceCandidateRequest.model_validate(json)
             payload = matchmaker_api.preference_candidates(request)
         elif url.endswith("/api/preferences/activity-avoidances"):
+            assert timeout == (1, 5)
             request = matchmaker_api.ActivityAvoidanceSnapshotRequest.model_validate(json)
             payload = matchmaker_api.activity_avoidance_snapshot(request)
         else:
@@ -854,6 +1005,9 @@ def _wire_mock_preference_api(
         return response
 
     monkeypatch.setattr(preference_candidate_service.requests, "post", local_http_post)
+    import agent_quota.internal as internal
+    monkeypatch.setattr(internal, "signed_headers", lambda: {})
+    session.selection_calls = selection_calls
     return (
         preference_candidate_service.retrieve_preference_candidate_ids,
         preference_candidate_service.retrieve_activity_avoidance_snapshot,
@@ -1055,6 +1209,97 @@ def test_badminton_broad_avoid_blocks_doubles_phrase_candidate(monkeypatch):
     assert flow["result"]["status"] == "no_suitable_candidate"
 
 
+def _run_recent_context_badminton_fixture(monkeypatch, *, avoid_keys, verification_status="verified"):
+    import time
+    from matchmaker_agent.concept_identity import canonicalize_concept
+    from routers import match as match_router
+    from tests.test_preference_match_search import _flow
+    from services.match_search_context import context_embedding_source_hash
+
+    now = time.time()
+    target_context = "昨天專題被教授打槍，今天想打羽球散散心"
+    candidate = {
+        "user_id": "candidate-badminton",
+        "current_context": "最近提到羽球雙打",
+        "context_signals": {"activity": "羽球雙打"},
+        "recent_context_expires_at": now + 3600,
+        "score": .96,
+    }
+    target = {
+        "user_id": "owner", "current_context": target_context,
+        "context_signals": {"event": "專題被教授打槍", "feeling": "心情有點差", "activity": "羽球"},
+        "recent_context_expires_at": now + 3600, "context_embedding": [.1],
+        "context_embedding_source_hash": context_embedding_source_hash(target_context),
+        "current_context_revision": 2,
+    }
+    profiles, matches = _flow(monkeypatch, candidate=candidate, target=target)
+    profiles.aggregate.return_value = [dict(candidate)]
+    monkeypatch.setattr(match_router, "get_embedding", lambda _text: [.96])
+    badminton_keys = {
+        canonicalize_concept(label).key
+        for label in ("羽球", "打羽球", "羽球雙打")
+    }
+    monkeypatch.setattr(
+        match_router, "_trait_stances",
+        lambda user_id: ({canonicalize_concept("羽球").key: {"avoid"}}
+                         if user_id == candidate["user_id"] and avoid_keys else {}),
+    )
+    snapshot_calls = []
+
+    def snapshot(candidate_ids, topic_family):
+        snapshot_calls.append((candidate_ids, topic_family))
+        return {
+            candidate_id: {
+                "verification_status": verification_status,
+                "avoid_concept_keys": list(avoid_keys),
+            }
+            for candidate_id in candidate_ids
+        }
+
+    monkeypatch.setattr(match_router, "retrieve_activity_avoidance_snapshot", snapshot)
+    result = match_router.generate_matches_for_user(
+        "owner", source="automatic",
+        search_context={
+            "search_intent": "recent_context",
+            "query_text": "我想找人一起打羽球散散心",
+        },
+        report_progress=lambda _step, **_kwargs: True,
+        can_commit=lambda: True,
+    )
+    return result, matches, snapshot_calls, badminton_keys
+
+
+def test_recent_context_activity_avoidance_cannot_be_bypassed_by_intent(monkeypatch):
+    from matchmaker_agent.concept_identity import canonicalize_concept
+
+    badminton_key = canonicalize_concept("羽球").key
+    result, matches, calls, family_keys = _run_recent_context_badminton_fixture(
+        monkeypatch, avoid_keys=[badminton_key],
+    )
+
+    assert result["status"] == "no_suitable_candidate"
+    matches.insert_one.assert_not_called()
+    assert len(calls) == 1
+    assert set(calls[0][1]) == {"羽球", "打羽球", "羽球雙打"}
+
+
+def test_recent_context_activity_avoidance_is_fail_closed_and_clear_candidate_can_match(monkeypatch):
+    result, matches, calls, _family_keys = _run_recent_context_badminton_fixture(
+        monkeypatch, avoid_keys=[], verification_status="unverified",
+    )
+    assert result["status"] == "no_suitable_candidate"
+    matches.insert_one.assert_not_called()
+    assert calls
+
+    result, matches, calls, _family_keys = _run_recent_context_badminton_fixture(
+        monkeypatch, avoid_keys=[], verification_status="verified",
+    )
+    assert result["status"] == "success"
+    assert result["matches"][0]["matched_user_id"] == "candidate-badminton"
+    assert matches.insert_one.call_count == 1
+    assert calls
+
+
 def test_badminton_phrase_evidence_for_both_saved_forms_reaches_selection(monkeypatch):
     from matchmaker_agent.concept_identity import canonicalize_concept
 
@@ -1105,6 +1350,151 @@ def test_badminton_phrase_evidence_for_both_saved_forms_reaches_selection(monkey
         for item in match_doc["reason_items"]
     )
     assert len(graph_session.run.call_args_list) == 4
+
+
+def test_demo_cross_day_context_and_activity_reach_selection_with_grounded_candidate(monkeypatch):
+    import json
+    import time
+    import mongomock
+    from services.ai_service import ChatResult
+    from services.profile_skills import analyze_profile_message, apply_recent_context
+    from services import profile_skills
+    from matchmaker_agent.concept_identity import canonicalize_concept
+
+    day1 = "今天專題被教授打槍了，心情有點差。"
+    extraction = {
+        "recent_context": {
+            "action": "update", "message_kind": "real_world_update",
+            "confidence": .97, "episode_relation": "new", "reason_code": "accepted",
+            "fields": {
+                "event": {"operation": "set", "value": "專題被教授打槍",
+                           "evidence_span": "專題被教授打槍", "confidence": .97,
+                           "subject": "owner"},
+                "feeling": {"operation": "set", "value": "心情有點差",
+                             "evidence_span": "心情有點差", "confidence": .97,
+                             "subject": "owner"},
+                "timing": {"operation": "set", "value": "今天",
+                            "evidence_span": "今天", "confidence": .97,
+                            "subject": "owner"},
+                "temporal_status": {"operation": "set", "value": "past",
+                                    "evidence_span": "今天", "confidence": .97,
+                                    "subject": "owner"},
+            },
+        },
+        "memories": [],
+    }
+    store = mongomock.MongoClient().demo
+    store.profiles.insert_one({
+        "user_id": "owner", "current_context_revision": 0,
+        "recent_context_state": {"version": 4, "revision": 0, "fields": {}},
+    })
+    monkeypatch.setattr(profile_skills, "profiles_coll", store.profiles)
+    monkeypatch.setattr(profile_skills, "get_embedding", lambda _text: [.1])
+    monkeypatch.setattr(
+        profile_skills, "generate_chat_completion",
+        lambda *_args, **_kwargs: ChatResult(content=json.dumps(extraction)),
+    )
+    decision = analyze_profile_message(day1)
+    assert decision["memories"] == []
+    assert decision["memory_codes"] == ["no_memory_candidate"]
+    assert apply_recent_context(
+        "owner", decision["recent_context"], message_id="day-1",
+        source_timestamp=time.time(),
+    )
+    day1_profile = store.profiles.find_one({"user_id": "owner"}, {"_id": 0})
+    assert day1_profile["context_signals"]["event"] == "專題被教授打槍"
+    assert day1_profile["context_signals"]["feeling"] == "心情有點差"
+    assert day1_profile["recent_context_expires_at"] > time.time()
+
+    now = time.time()
+    topic = canonicalize_concept("羽球")
+    play = canonicalize_concept("打羽球")
+    doubles = canonicalize_concept("羽球雙打")
+    candidates = [
+        {"user_id": "candidate-a", "current_context": "最近提到羽球",
+         "context_signals": {"activity": "羽球"},
+         "recent_context_expires_at": now + 3600, "score": .95},
+        {"user_id": "candidate-b", "current_context": "最近提到羽球雙打",
+         "context_signals": {"activity": "羽球雙打"},
+         "recent_context_expires_at": now + 3600, "score": .94},
+        {"user_id": "candidate-c", "current_context": "近期活動與羽球相關",
+         "context_signals": {"activity": "打羽球"},
+         "recent_context_expires_at": now + 3600, "score": .93},
+    ]
+    def controlled_matchmaker(target_user, candidates, _search_context):
+        target_signals = target_user.get("context_signals") or {}
+        selected_id = "candidate-b" if target_signals.get("event") else "candidate-a"
+        selected_candidate = next(
+            candidate for candidate in candidates
+            if candidate["user_id"] == selected_id
+        )
+        evidence_id = selected_candidate["candidate_activity_evidence"][0]["evidence_id"]
+        return {
+            "outcome": "selected",
+            "matches": [{
+                "matched_user_id": selected_id,
+                "selection_basis": {
+                    "candidate_evidence_ids": [evidence_id],
+                    "used_prior_situation": bool(
+                        target_signals.get("event") or target_signals.get("feeling")
+                    ),
+                },
+            }],
+        }
+
+    lookup_callable, avoidance_callable, graph_session = _wire_mock_preference_api(
+        monkeypatch,
+        {play.key: ["candidate-a", "candidate-c"], doubles.key: ["candidate-b"]},
+        avoidances_by_candidate={"candidate-c": ["羽球"]},
+        selection_provider=controlled_matchmaker,
+    )
+
+    search_context = {
+        "search_intent": "activity", "invitation_topic": "羽球",
+        "query_text": "我想找人一起打羽球散散心",
+    }
+    target_a = {
+        "user_id": "owner", "current_context": search_context["query_text"],
+        "context_signals": {"activity": "羽球"},
+        "recent_context_expires_at": now + 86400, "context_embedding": [.1],
+    }
+    case_a = _run_activity_generation_fixture(
+        monkeypatch, candidates=candidates, target=target_a,
+        context=search_context, source="agent_pi", use_matchmaker_api=True,
+        lookup_callable=lookup_callable, avoidance_callable=avoidance_callable,
+        lookup_result={"status": "success", "v2_only": True,
+                       "canonical_key": topic.key, "normalized_topic": "羽球",
+                       "candidate_ids": [], "additional_candidates": []},
+    )
+    case_b = _run_activity_generation_fixture(
+        monkeypatch, candidates=candidates, target=day1_profile,
+        context=search_context, source="agent_pi", use_matchmaker_api=True,
+        lookup_callable=lookup_callable, avoidance_callable=avoidance_callable,
+        lookup_result={"status": "success", "v2_only": True,
+                       "canonical_key": topic.key, "normalized_topic": "羽球",
+                       "candidate_ids": [], "additional_candidates": []},
+    )
+
+    case_a_payload, case_b_payload = graph_session.selection_calls
+    assert case_a_payload["search_context"]["invitation_topic"] == "羽球"
+    assert case_b_payload["search_context"]["invitation_topic"] == "羽球"
+    assert case_b_payload["target_user"]["context_signals"]["event"] == "專題被教授打槍"
+    assert case_b_payload["target_user"]["context_signals"]["feeling"] == "心情有點差"
+    assert [item["user_id"] for item in case_b_payload["candidates"]] == [
+        "candidate-a", "candidate-b",
+    ]
+    assert case_a["result"]["matches"][0]["matched_user_id"] == "candidate-a"
+    assert case_b["result"]["matches"][0]["matched_user_id"] == "candidate-b"
+    match_doc = case_b["matches"].insert_one.call_args.args[0]
+    selected_basis = match_doc["selection_basis"]
+    assert selected_basis["requester_prior_situation_used"] is True
+    assert selected_basis["candidate_evidence"][0]["candidate_id"] == "candidate-b"
+    assert selected_basis["candidate_evidence"][0]["canonical_key"] == doubles.key
+    intro = match_doc["friend_intro_v4"]["initiator_preview"]["viewer_text"]
+    assert "對方明確提過喜歡" in intro
+    for unsupported_claim in ("對方擅長", "對方願意同行", "對方已同意同行", "一定會安慰"):
+        assert unsupported_claim not in intro
+    assert len(graph_session.run.call_args_list) >= 8
 
 
 def test_unexpected_phrase_cannot_become_evidence_and_requires_consent_before_quota(monkeypatch):

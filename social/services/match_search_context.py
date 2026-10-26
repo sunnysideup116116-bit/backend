@@ -48,6 +48,42 @@ _BARE_CONFIRMATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+_GENERIC_BALL_ACTIVITY_RE = re.compile(r"(?:打球|踢球|玩球|球類(?:活動|運動)?)")
+_EXPLICIT_BALL_SPORT_RE = re.compile(
+    r"羽毛?球|籃球|足球|排球|網球|桌球|乒乓球|棒球|壘球|壁球|匹克球|高爾夫|"
+    r"badminton|basketball|football|volleyball|tennis|baseball|softball|"
+    r"table\s*tennis|squash|pickleball|golf",
+    re.IGNORECASE,
+)
+_BALL_SPORT_ALIAS_KEYS = {
+    "羽球": "badminton", "羽毛球": "badminton", "badminton": "badminton",
+    "籃球": "basketball", "basketball": "basketball",
+    "足球": "football", "football": "football",
+    "排球": "volleyball", "volleyball": "volleyball",
+    "網球": "tennis", "tennis": "tennis",
+    "桌球": "table_tennis", "乒乓球": "table_tennis", "tabletennis": "table_tennis",
+    "棒球": "baseball", "baseball": "baseball",
+    "壘球": "softball", "softball": "softball",
+    "壁球": "squash", "squash": "squash",
+    "匹克球": "pickleball", "pickleball": "pickleball",
+    "高爾夫": "golf", "golf": "golf",
+}
+
+
+def activity_topic_requires_sport_clarification(value: Any) -> bool:
+    """True when ball play is generic or more than one sport is named."""
+    text = re.sub(r"\s+", "", str(value or ""))[:120]
+    if not text:
+        return False
+    sport_names = {
+        _BALL_SPORT_ALIAS_KEYS.get(
+            re.sub(r"\s+", "", match.group(0)).casefold(),
+            re.sub(r"\s+", "", match.group(0)).casefold(),
+        )
+        for match in _EXPLICIT_BALL_SPORT_RE.finditer(text)
+    }
+    return bool(_GENERIC_BALL_ACTIVITY_RE.search(text) or len(sport_names) > 1)
+
 
 def bounded_search_text(value: Any, limit: int) -> str:
     """Normalize and cap one user supplied search-context string."""

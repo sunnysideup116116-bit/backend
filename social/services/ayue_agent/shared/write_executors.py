@@ -35,6 +35,7 @@ from .date_coordination_state import (
     CANCELLABLE_STATUSES as DATE_COORDINATION_CANCELLABLE_STATUSES,
 )
 from services.match_search_context import (
+    activity_topic_requires_sport_clarification,
     safe_search_context, search_context_for_turn, validate_persisted_search_context,
 )
 from matchmaker_agent.concept_identity import (
@@ -1051,6 +1052,8 @@ def prepare_write_confirmation(
                 message = bounded_search_text(getattr(ctx, "message", ""), 600)
                 topic_span = bounded_search_text(semantic_request.get("topic"), 80)
             if request_kind == "activity":
+                if activity_topic_requires_sport_clarification(topic_span):
+                    return None, "你說的打球想找哪一種？羽球、籃球，或其他球類？確認球種後，我再依那個活動幫你找人。"
                 if not _activity_topic_is_grounded(topic_span, message):
                     return None, "你這次想找人一起做什麼活動？確認活動後，我會先找人選給你看。"
                 search_context = safe_search_context({
@@ -1143,7 +1146,7 @@ def prepare_write_confirmation(
                     "找到後就替你問問願不願意認識，不會先假設對方也喜歡這項活動。"
                     f"{skill_note}要我開始找並送出邀請嗎？"
                 ) if invitation_evidence else (
-                    f"我會依你想找人一起{topic}的需求搜尋，先給你看人選與推薦說明。"
+                    f"我會依「{topic}」這個活動需求搜尋，先給你看人選與推薦說明。"
                     f"不會先假設對方也喜歡或擅長這項活動。{skill_note}"
                     "你看完再決定是否送出邀請；現在只開始搜尋，可以嗎？"
                 )

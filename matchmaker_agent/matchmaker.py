@@ -250,6 +250,18 @@ class MatchmakerAgent:
         
         memory_text = graph_memory if graph_memory else "目前圖庫中尚無該使用者的偏好或地雷紀錄。"
         system_content = self.system_prompt.replace("[GRAPH_MEMORY_PLACEHOLDER]", memory_text)
+        if context.get("search_intent") == "activity":
+            system_content += (
+                "\n本輪活動搜尋的選人依據契約：target_user.current_context 與 context_signals "
+                "是有期限的近期情境，只能描述發起者此刻需求，不是永久人格或長期偏好。"
+                "candidate_activity_evidence 是 Social 已驗證且屬於該候選人本人的活動證據；"
+                "只可用其中的 evidence_id 說明該候選人為何符合活動，不可從近期情境推論對方"
+                "擅長安慰、情緒穩定、願意陪伴或已同意同行。不要輸出隱藏推理。"
+                "若 outcome=selected，該筆 match 必須附上 selection_basis："
+                "candidate_evidence_ids 為所選候選人的 1 至 3 個 candidate_activity_evidence ID；"
+                "used_prior_situation 是布林值，只在發起者近期 event/feeling 實際參與這次選人時為 true。"
+                "候選人沒有活動證據時，candidate_evidence_ids 必須是空陣列；不可捏造 ID。"
+            )
         semantic_evidence_present = False
         for candidate_index, candidate in enumerate(candidates):
             if not isinstance(candidate, dict):
@@ -393,11 +405,16 @@ class MatchmakerAgent:
                             if exc.code != "matchmaker_output_truncated" or attempt:
                                 raise
                             print("[matchmaker] retry=1 code=matchmaker_output_truncated")
+                            retry_match = '{"matched_user_id":"候選ID"}'
+                            activity_retry_contract = ""
+                            if provider_search_context(search_context).get("search_intent") == "activity":
+                                activity_retry_contract = "若本輪是 activity，仍須附上符合上方契約的 selection_basis。"
                             messages = [
                                 {**messages[0], "content": messages[0]["content"] +
                                  '\n前次輸出達長度上限。這次只輸出最短決策 JSON：'
-                                 '{"outcome":"selected","matches":[{"matched_user_id":"候選ID"}]}'
-                                 ' 或 {"outcome":"no_suitable_candidate","matches":[]}。不要附加分析或推薦文。'},
+                                 '{"outcome":"selected","matches":[' + retry_match + ']}'
+                                 ' 或 {"outcome":"no_suitable_candidate","matches":[]}。'
+                                 '不要附加分析或推薦文。' + activity_retry_contract},
                                 *messages[1:],
                             ]
         except (TimeoutError, APITimeoutError):

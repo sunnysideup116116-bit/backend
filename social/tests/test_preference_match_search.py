@@ -48,10 +48,25 @@ def _flow(monkeypatch, *, candidate, target=None):
         "initiator_preview": {"viewer_text": "對方明確喜歡 K-pop；你願意認識對方嗎？"},
         "receiver_invitation": {"viewer_text": "有人想認識你；你願意認識對方嗎？"},
     })
-    monkeypatch.setattr(
-        router, "_request_matchmaker_selection",
-        lambda payload, **_kwargs: [{"matched_user_id": payload["candidates"][0]["user_id"]}],
-    )
+    def select(payload, **_kwargs):
+        candidate = payload["candidates"][0]
+        result = {"matched_user_id": candidate["user_id"]}
+        if (payload.get("search_context") or {}).get("search_intent") == "activity":
+            evidence_ids = [
+                item["evidence_id"] for item in candidate.get("candidate_activity_evidence", [])
+                if item.get("evidence_id")
+            ]
+            result["selection_basis"] = {
+                "candidate_evidence_ids": evidence_ids[:1],
+                "used_prior_situation": bool(
+                    {"event", "feeling"} & set(
+                        ((payload.get("target_user") or {}).get("context_signals") or {}).keys()
+                    )
+                ),
+            }
+        return [result]
+
+    monkeypatch.setattr(router, "_request_matchmaker_selection", select)
     return profiles, matches
 
 

@@ -82,6 +82,7 @@ from services.profile_projection import (
     without_expired_recent_context,
 )
 from services.match_search_context import (
+    activity_topic_requires_sport_clarification,
     context_embedding_source_hash,
     provider_search_context,
     safe_search_context,
@@ -293,6 +294,18 @@ def _search_intent(search_context: dict | None) -> str:
     if intent in {"activity", "recent_context", "preference", "generic"}:
         return intent
     return "activity" if context.get("invitation_topic") else "recent_context"
+
+
+def _activity_avoidance_topic_for_request(
+    search_intent: str, search_context: dict | None, target: dict,
+) -> str:
+    """Bind AVOID checks to the exact requested or active typed activity only."""
+    context = safe_search_context(search_context)
+    if search_intent == "activity":
+        return str(context.get("invitation_topic") or "").strip()[:80]
+    if search_intent == "recent_context" and recent_context_is_active(target):
+        return str((target.get("context_signals") or {}).get("activity") or "").strip()[:80]
+    return ""
 
 
 def _candidate_profile_filter(
@@ -1095,14 +1108,25 @@ def candidate_qualification(
     if semantic_preference_evidence and not candidate_has_requested_preference:
         strong_reason_codes.append("semantic_related_preference")
     invitation_topic = str(search_context.get("invitation_topic") or "").strip()
+    activity_avoidance_topic = _activity_avoidance_topic_for_request(
+        search_intent, search_context, target,
+    )
     activity_avoidance_status = "not_applicable"
     activity_avoidance_conflict_keys = []
     if search_intent == "activity":
         activity_avoidance_status = "unverified"
-    if search_intent == "activity" and invitation_topic:
+    elif activity_avoidance_topic:
+        activity_avoidance_status = "unverified"
+    if (activity_avoidance_topic
+            and activity_topic_requires_sport_clarification(activity_avoidance_topic)):
+        # No bounded AVOID family can represent an unspecified ball sport.
+        # Do not let a generic recent-context or direct activity call reach
+        # selection until the requester chooses one sport.
+        activity_avoidance_status = "unverified"
+    elif activity_avoidance_topic:
         check = activity_avoidance_check if isinstance(activity_avoidance_check, dict) else {}
         family_keys = {
-            identity.key for label in _activity_avoidance_topic_family(invitation_topic)
+            identity.key for label in _activity_avoidance_topic_family(activity_avoidance_topic)
             if (identity := canonicalize_concept(label))
         }
         raw_avoid_keys = check.get("avoid_concept_keys")
@@ -1112,8 +1136,17 @@ def candidate_qualification(
                 or any(str(key or "").strip() not in family_keys for key in raw_avoid_keys)):
             activity_avoidance_status = "unverified"
         else:
+            # Typed recent activity is used only to distinguish a known
+            # activity form (for example badminton doubles) during AVOID
+            # conflict checks. It does not become public activity evidence.
+            avoidance_evidence = list(activity_evidence or ())[:5]
+            if candidate_activity:
+                avoidance_evidence.append({
+                    "kind": "candidate_recent_activity",
+                    "activity": candidate_activity[:60],
+                })
             activity_avoidance_conflict_keys = _activity_avoidance_conflict_keys(
-                invitation_topic, activity_evidence, raw_avoid_keys,
+                activity_avoidance_topic, avoidance_evidence, raw_avoid_keys,
             )
             activity_avoidance_status = (
                 "conflict" if activity_avoidance_conflict_keys else "clear"
@@ -1784,10 +1817,32 @@ def _topic_friend_intro_fallback(
 ) -> dict:
     """Invite around a requested topic without attributing a skill to either user."""
     del tier
+    copy_topic = str(topic or "").strip()
+    query_token = _activity_topic_token(query_text)
+    grounded_phrase = next((
+        label for label, match_kind in _activity_preference_lookup_topics(copy_topic)
+        if match_kind in {"bounded_phrase", "deterministic_alias_phrase"}
+        and _activity_topic_token(label) in query_token
+    ), "")
+    if grounded_phrase:
+        copy_topic = grounded_phrase
+    else:
+        sport_token = _activity_topic_token(copy_topic)
+        sport_verb = {
+            "羽球": "打", "羽毛球": "打", "打羽球": "打", "羽球雙打": "打",
+            "籃球": "打", "足球": "踢", "排球": "打", "網球": "打",
+            "桌球": "打", "乒乓球": "打", "棒球": "打", "壘球": "打",
+            "壁球": "打", "匹克球": "打",
+        }.get(sport_token)
+        title_group = _activity_title_alias_group(copy_topic)
+        if sport_verb:
+            copy_topic = f"{sport_verb}{copy_topic}"
+        elif title_group:
+            copy_topic = f"玩 {copy_topic}" if re.search(r"[A-Za-z]", copy_topic) else f"玩{copy_topic}"
     return topic_friend_intro_fallback(
         viewer,
         other,
-        topic,
+        copy_topic,
         requester_id=requester_id,
         query_text=query_text,
         auto_invite=auto_invite,
@@ -2145,6 +2200,38 @@ def _request_matchmaker_selection(payload: dict, *, timeout: float) -> list[dict
             or not isinstance(selected[0].get("matched_user_id"), str)
             or selected[0]["matched_user_id"] not in allowed_ids):
         raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response")
+    if _search_intent(payload.get("search_context")) == "activity":
+        candidate_by_id = {
+            str(candidate.get("user_id") or ""): candidate
+            for candidate in payload.get("candidates", [])
+            if isinstance(candidate, dict)
+        }
+        selected_candidate = candidate_by_id[selected[0]["matched_user_id"]]
+        allowed_evidence_ids = {
+            str(item.get("evidence_id") or "")
+            for item in selected_candidate.get("candidate_activity_evidence", [])
+            if isinstance(item, dict) and item.get("evidence_id")
+        }
+        basis = selected[0].get("selection_basis")
+        if (not isinstance(basis, dict)
+                or not isinstance(basis.get("candidate_evidence_ids"), list)
+                or not isinstance(basis.get("used_prior_situation"), bool)):
+            raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response")
+        cited_evidence_ids = basis["candidate_evidence_ids"]
+        if (len(cited_evidence_ids) > 3
+                or any(not isinstance(value, str) for value in cited_evidence_ids)
+                or len(cited_evidence_ids) != len(set(cited_evidence_ids))
+                or set(cited_evidence_ids) - allowed_evidence_ids
+                or bool(allowed_evidence_ids) and not cited_evidence_ids):
+            raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response")
+        target_user = payload.get("target_user") or {}
+        target_signals = target_user.get("context_signals") or {}
+        has_prior_situation = bool(
+            str(target_signals.get("event") or "").strip()
+            or str(target_signals.get("feeling") or "").strip()
+        )
+        if basis["used_prior_situation"] and not has_prior_situation:
+            raise MatchSearchPipelineError("matchmaker_invalid_response", "matchmaker_response")
     return selected
 
 
@@ -2282,6 +2369,9 @@ def generate_matches_for_user(
     stored_context = str(user_doc.get("current_context") or "")
     normalized_context = safe_recent_context(stored_context, "交朋友")
     user_doc["current_context"] = normalized_context
+    activity_avoidance_topic = _activity_avoidance_topic_for_request(
+        search_intent, bound_search_context, user_doc,
+    )
     query_text = str((req.search_context or {}).get("query_text") or "").strip()
     user_embedding: list[float] = []
     if search_intent == "preference":
@@ -2694,8 +2784,7 @@ def generate_matches_for_user(
         else:
             top_5_candidates = vector_candidates
 
-    if search_intent == "activity" and top_5_candidates:
-        activity_topic = str(bound_search_context.get("invitation_topic") or "").strip()[:80]
+    if activity_avoidance_topic and top_5_candidates:
         activity_candidate_ids = list(dict.fromkeys(
             str(candidate.get("user_id") or "").strip()
             for _score, candidate in top_5_candidates
@@ -2703,7 +2792,8 @@ def generate_matches_for_user(
         ))[:MATCH_CANDIDATE_POOL_SIZE]
         try:
             activity_avoidance_by_id = retrieve_activity_avoidance_snapshot(
-                activity_candidate_ids, _activity_avoidance_topic_family(activity_topic),
+                activity_candidate_ids,
+                _activity_avoidance_topic_family(activity_avoidance_topic),
             )
         except ActivityAvoidanceSnapshotError as exc:
             raise MatchSearchPipelineError(
@@ -2898,6 +2988,24 @@ def generate_matches_for_user(
             "search_context": provider_search_context(req.search_context),
         }
         for candidate_payload in payload["candidates"]:
+            candidate_id = str(candidate_payload.get("user_id") or "")
+            activity_items = activity_evidence_by_id.get(candidate_id, [])[:5]
+            if search_intent == "activity" and activity_items:
+                candidate_payload["candidate_activity_evidence"] = [
+                    {
+                        "evidence_id": f"activity_evidence_{index + 1}",
+                        "kind": item.get("kind"),
+                        **({"concept_key": item.get("concept_key"),
+                            "label": item.get("label")}
+                           if item.get("kind") == "candidate_prefers" else {}),
+                        **({"activity": item.get("activity")}
+                           if item.get("kind") == "candidate_recent_activity" else {}),
+                    }
+                    for index, item in enumerate(activity_items)
+                    if item.get("kind") in {
+                        "candidate_prefers", "candidate_recent_activity",
+                    }
+                ]
             evidence = qualification_by_id.get(candidate_payload.get("user_id"), {}).get(
                 "preference_retrieval_evidence"
             )
@@ -3104,6 +3212,28 @@ def generate_matches_for_user(
             "created_at": time.time(),
             "state_history": [{"from": None, "to": "draft", "actor": req.user_id, "action": "created", "at": time.time()}]
         }
+        if search_intent == "activity":
+            selection_basis = m.get("selection_basis")
+            cited_ids = set(selection_basis.get("candidate_evidence_ids") or []) \
+                if isinstance(selection_basis, dict) else set()
+            selected_evidence = []
+            for index, item in enumerate(activity_evidence_by_id.get(matched_id, [])[:5]):
+                evidence_id = f"activity_evidence_{index + 1}"
+                if evidence_id not in cited_ids:
+                    continue
+                selected_evidence.append({
+                    "evidence_id": evidence_id,
+                    "candidate_id": matched_id,
+                    "kind": item.get("kind"),
+                    "canonical_key": item.get("concept_key"),
+                    "label": item.get("label") or item.get("activity"),
+                })
+            match_doc["selection_basis"] = {
+                "requester_prior_situation_used": bool(
+                    selection_basis.get("used_prior_situation")
+                ) if isinstance(selection_basis, dict) else False,
+                "candidate_evidence": selected_evidence,
+            }
         if search_intent == "preference":
             # Never put private Concept identifiers into the public match_basis.
             match_doc["preference_retrieval_evidence"] = matched_preference_evidence
