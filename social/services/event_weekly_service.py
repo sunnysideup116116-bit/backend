@@ -108,7 +108,18 @@ def run_invitation_batches(run_id, is_current, notify):
     while True:
         require_owner(is_current)
         now = time.time()
-        rows = list(USERS.find({"run_id": run_id, "state": "pending"}).sort("order", 1).limit(30))
+        # Deferred retry rows keep their due time across worker or release
+        # restarts. Exclude future rows in the query so an early retry cannot
+        # occupy the bounded page and starve users whose work is already due.
+        rows = list(USERS.find({
+            "run_id": run_id,
+            "state": "pending",
+            "$or": [
+                {"resume_at": {"$lte": now}},
+                {"resume_at": {"$exists": False}},
+                {"resume_at": None},
+            ],
+        }).sort("order", 1).limit(30))
         if not rows:
             break
         created = 0
@@ -176,8 +187,11 @@ def run_invitation_batches(run_id, is_current, notify):
                 resume_at = now + _resume_backoff_seconds(attempts)
                 state, outcome = "pending", "resume_pending"
             elif status in RETRYABLE and attempts < 3:
-                resume_at = 0.0
-                state, outcome = "pending", status
+                # Keep transient retries durable and deferred. An immediate
+                # pending outcome would otherwise be selected again in this
+                # same batch and could spin until the three-attempt horizon.
+                resume_at = now + _resume_backoff_seconds(attempts)
+                state, outcome = "pending", "retry_pending"
             else:
                 resume_at = 0.0
                 state, outcome = "done", status
@@ -201,18 +215,37 @@ def run_invitation_batches(run_id, is_current, notify):
             break
     counts = {}
     attempts = 0
-    for row in USERS.find({"run_id": run_id}, {"outcome": 1, "attempts": 1}):
+    pending_user_count = pending_unclassified = 0
+    for row in USERS.find({"run_id": run_id}, {"state": 1, "outcome": 1, "attempts": 1}):
         outcome = row.get("outcome", "unprocessed")
         counts[outcome] = counts.get(outcome, 0) + 1
         attempts += int(row.get("attempts", 0))
-    failures = sum(v for k, v in counts.items() if k in RETRYABLE)
+        if row.get("state") == "pending":
+            pending_user_count += 1
+            if outcome not in {"retry_pending", "resume_pending"}:
+                # Unknown or legacy pending outcomes are never enough evidence
+                # to save the weekly cycle as complete. Requeue the same job
+                # and require a due, bounded attempt to settle each row.
+                pending_unclassified += 1
+    pending_retry = int(counts.get("retry_pending", 0))
+    failures = sum(v for k, v in counts.items()
+                   if k in RETRYABLE or k == "retry_pending") + pending_unclassified
     pending_resume = int(counts.get("resume_pending", 0))
-    status = "success" if not failures else ("resume_pending" if pending_resume and
-        failures == pending_resume else "partial")
+    if not failures:
+        status = "success"
+    elif pending_resume and not pending_retry and failures == pending_resume:
+        status = "resume_pending"
+    elif pending_retry and not pending_resume and failures == pending_retry:
+        status = "retry_pending"
+    else:
+        status = "partial"
     return {"status": status,
             "created_count": counts.get("created", 0), "scanned_count": sum(counts.values()),
             "attempt_count": attempts, "failed_user_count": failures,
+            "pending_user_count": pending_user_count,
+            "pending_unclassified_count": pending_unclassified,
             "resume_pending_count": pending_resume,
+            "retry_pending_count": pending_retry,
             "max_proposals_per_batch": batch_limit, "status_counts": counts}
 
 
@@ -265,11 +298,12 @@ def run_durable_cycle(run_id, is_current, notify, *, region, window_days, catego
               "reset": {"status": "not_required", "policy": "preserve_unexpired_inventory"},
               "cleanup": cleanup, "relevance_readiness": readiness, "invitation_scan": scan,
               "status": "success" if discovery.get("status") == scan.get("status") == cleanup.get("status") == "success" else "partial"}
-    if int(scan.get("resume_pending_count") or 0) > 0:
-        # Durable work remains: surface it as a resumable cycle failure so the
-        # existing bounded job retry requeues the run. Discovery/cleanup stage
-        # checkpoints are already committed and are not redone, and each user's
-        # own checkpoint/backoff governs the next semantic attempt.
+    if (int(scan.get("resume_pending_count") or 0) > 0
+            or int(scan.get("retry_pending_count") or 0) > 0
+            or int(scan.get("pending_unclassified_count") or 0) > 0):
+        # Preserve the weekly job while any bounded user retry remains. The
+        # worker's existing retry policy requeues this same job token; saved
+        # discovery, cleanup and per-user checkpoints are reused on resume.
         checkpoint("invitation_scan", scan)
         raise RuntimeError("event_semantic_resume_pending")
     checkpoint("result", result)

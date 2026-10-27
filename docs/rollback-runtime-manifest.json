@@ -1,0 +1,358 @@
+{
+  "schema_version": 1,
+  "repository": "sunnysideup116116-bit/backend",
+  "rollback_base_sha": "1efa6c72f775309ce42ff3dcfd85f6479c3f91a9",
+  "rollback_code_commit": "aff995c8a6740e1b9e0b9e430075bf4c04992636",
+  "main_sha": "d545b5816a72d32f22eb4dd71935449db85f2495",
+  "premerge_release_candidate_sha": "4cfbd82263dcdb1946b54567d3e8158c49ef8250",
+  "production_sha": "1efa6c72f775309ce42ff3dcfd85f6479c3f91a9",
+  "generated_at_utc": "2026-10-21T07:33:37.667472+00:00",
+  "host": {
+    "system": "Linux",
+    "release": "7.0.0-38-generic",
+    "machine": "x86_64",
+    "system_python": "/usr/bin/python3.12",
+    "system_python_version": "Python 3.12.3",
+    "node": "v22.23.4",
+    "npm": "10.9.9"
+  },
+  "runtime_roots": {
+    "social": {
+      "path": ".local-venv/social",
+      "tree_sha256": "7a36606ef219c63a253bc7f64ca4c269a84985a7493ef38d7d80a2faf4c150c5",
+      "file_count": 9995,
+      "outside_symlinks": [
+        {
+          "path": "bin/python",
+          "target": "python3"
+        },
+        {
+          "path": "bin/python3",
+          "target": "/usr/bin/python3"
+        },
+        {
+          "path": "bin/python3.12",
+          "target": "python3"
+        }
+      ],
+      "python_version": "3.12.3",
+      "python_executable": "/home/sunny/桌面/Graduate_Project/.worktrees/rollback-compatibility-1efa6c7-server/.local-venv/social/bin/python",
+      "python_platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39",
+      "pip": "pip 24.0 from /home/sunny/桌面/Graduate_Project/.worktrees/rollback-compatibility-1efa6c7-server/.local-venv/social/lib/python3.12/site-packages/pip (python 3.12)",
+      "pip_freeze_all": [
+        "annotated-doc==0.0.5",
+        "annotated-types==0.8.0",
+        "anyio==4.15.1",
+        "attrs==26.1.0",
+        "certifi==2026.10.19",
+        "cffi==2.1.1",
+        "charset-normalizer==3.5.2",
+        "click==8.5.0",
+        "cryptography==50.0.0",
+        "distro==1.9.0",
+        "dnspython==2.9.0",
+        "email-validator==2.3.0",
+        "fastapi==0.111.0",
+        "fastapi-cli==0.0.32",
+        "google-ai-generativelanguage==0.6.10",
+        "google-api-core==2.33.0",
+        "google-api-python-client==2.201.0",
+        "google-auth==2.62.0",
+        "google-auth-httplib2==0.4.4",
+        "google-genai==2.11.0",
+        "google-generativeai==0.8.3",
+        "googleapis-common-protos==1.75.0",
+        "grpcio==1.84.0",
+        "grpcio-status==1.71.2",
+        "h11==0.16.0",
+        "httpcore==1.0.9",
+        "httplib2==0.32.0",
+        "httptools==0.9.0",
+        "httpx==0.28.1",
+        "idna==3.20",
+        "Jinja2==3.1.6",
+        "jsonschema==4.26.0",
+        "jsonschema-specifications==2025.9.1",
+        "markdown-it-py==4.2.0",
+        "MarkupSafe==3.0.4",
+        "mdurl==0.1.2",
+        "neo4j==5.21.0",
+        "ollama==0.4.7",
+        "openai==1.30.1",
+        "OpenCC==1.4.1",
+        "orjson==3.13.0",
+        "pip==24.0",
+        "proto-plus==1.28.2",
+        "protobuf==5.29.6",
+        "pyasn1==0.6.4",
+        "pyasn1_modules==0.4.2",
+        "pycparser==3.11",
+        "pydantic==2.14.1",
+        "pydantic_core==2.50.1",
+        "Pygments==2.21.0",
+        "pymongo==4.7.2",
+        "pyparsing==3.3.3",
+        "pypinyin==0.55.0",
+        "python-dotenv==1.0.1",
+        "python-multipart==0.0.32",
+        "pytz==2026.5",
+        "PyYAML==6.0.3",
+        "referencing==0.37.0",
+        "requests==2.34.2",
+        "rich==15.0.0",
+        "rich-toolkit==0.20.6",
+        "rpds-py==2026.9.1",
+        "shellingham==1.5.4",
+        "sniffio==1.3.1",
+        "starlette==0.37.2",
+        "tenacity==9.1.4",
+        "tqdm==4.70.1",
+        "typer==0.27.3",
+        "typing-inspection==0.4.4",
+        "typing_extensions==4.16.0",
+        "ujson==6.0.0",
+        "uritemplate==4.2.0",
+        "urllib3==2.8.0",
+        "uvicorn==0.30.1",
+        "uvloop==0.23.0",
+        "watchfiles==1.3.0",
+        "websockets==16.1"
+      ],
+      "pip_check": "PASS"
+    },
+    "matchmaker": {
+      "path": ".local-venv/matchmaker",
+      "tree_sha256": "bfe19b1451a2ceb49c992e40f0f3a975429cbd64d3e8e11b89168ac6ecd63c69",
+      "file_count": 6256,
+      "outside_symlinks": [
+        {
+          "path": "bin/python",
+          "target": "python3"
+        },
+        {
+          "path": "bin/python3",
+          "target": "/usr/bin/python3"
+        },
+        {
+          "path": "bin/python3.12",
+          "target": "python3"
+        }
+      ],
+      "python_version": "3.12.3",
+      "python_executable": "/home/sunny/桌面/Graduate_Project/.worktrees/rollback-compatibility-1efa6c7-server/.local-venv/matchmaker/bin/python",
+      "python_platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39",
+      "pip": "pip 24.0 from /home/sunny/桌面/Graduate_Project/.worktrees/rollback-compatibility-1efa6c7-server/.local-venv/matchmaker/lib/python3.12/site-packages/pip (python 3.12)",
+      "pip_freeze_all": [
+        "annotated-doc==0.0.4",
+        "annotated-types==0.7.0",
+        "anyio==4.13.0",
+        "certifi==2026.4.22",
+        "charset-normalizer==3.4.7",
+        "click==8.3.3",
+        "colorama==0.4.6",
+        "distro==1.9.0",
+        "dnspython==2.9.0",
+        "fastapi==0.136.1",
+        "h11==0.16.0",
+        "httpcore==1.0.9",
+        "httpx==0.28.1",
+        "idna==3.13",
+        "jiter==0.14.0",
+        "neo4j==6.2.0",
+        "openai==2.35.1",
+        "OpenCC==1.4.1",
+        "pip==24.0",
+        "pydantic==2.13.4",
+        "pydantic_core==2.46.4",
+        "pymongo==4.18.2",
+        "python-dotenv==1.2.2",
+        "pytz==2026.2",
+        "requests==2.33.1",
+        "sniffio==1.3.1",
+        "starlette==1.0.0",
+        "tqdm==4.67.3",
+        "typing-inspection==0.4.2",
+        "typing_extensions==4.15.0",
+        "urllib3==2.6.3",
+        "uvicorn==0.46.0"
+      ],
+      "pip_check": "PASS"
+    },
+    "risk": {
+      "path": "venv",
+      "tree_sha256": "66d9404097a55801ddda39bed5c0507fda5e9017f748183c274cd72c3932e91e",
+      "file_count": 8818,
+      "outside_symlinks": [
+        {
+          "path": "bin/python",
+          "target": "python3"
+        },
+        {
+          "path": "bin/python3",
+          "target": "/usr/bin/python3"
+        },
+        {
+          "path": "bin/python3.12",
+          "target": "python3"
+        }
+      ],
+      "python_version": "3.12.3",
+      "python_executable": "/home/sunny/桌面/Graduate_Project/.worktrees/rollback-compatibility-1efa6c7-server/venv/bin/python",
+      "python_platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39",
+      "pip": "pip 24.0 from /home/sunny/桌面/Graduate_Project/.worktrees/rollback-compatibility-1efa6c7-server/venv/lib/python3.12/site-packages/pip (python 3.12)",
+      "pip_freeze_all": [
+        "annotated-doc==0.0.4",
+        "annotated-types==0.7.0",
+        "anyio==4.12.1",
+        "appwrite==16.0.0",
+        "certifi==2026.2.25",
+        "cffi==2.0.0",
+        "charset-normalizer==3.4.4",
+        "click==8.3.1",
+        "cryptography==46.0.5",
+        "distro==1.9.0",
+        "fastapi==0.133.0",
+        "google-ai-generativelanguage==0.6.15",
+        "google-api-core==2.30.0",
+        "google-api-python-client==2.190.0",
+        "google-auth==2.48.0",
+        "google-auth-httplib2==0.3.0",
+        "google-generativeai==0.8.6",
+        "googleapis-common-protos==1.72.0",
+        "grpcio==1.78.0",
+        "grpcio-status==1.71.2",
+        "h11==0.16.0",
+        "httpcore==1.0.9",
+        "httplib2==0.31.2",
+        "httpx==0.28.1",
+        "idna==3.11",
+        "iniconfig==2.3.1",
+        "jiter==0.14.0",
+        "openai==2.32.0",
+        "packaging==26.3",
+        "pip==24.0",
+        "pluggy==1.7.0",
+        "proto-plus==1.27.1",
+        "protobuf==5.29.6",
+        "pyasn1==0.6.2",
+        "pyasn1_modules==0.4.2",
+        "pycparser==3.0",
+        "pydantic==2.12.5",
+        "pydantic_core==2.41.5",
+        "Pygments==2.21.0",
+        "pyparsing==3.3.2",
+        "pytest==9.1.1",
+        "python-dotenv==1.0.0",
+        "requests==2.32.5",
+        "rsa==4.9.1",
+        "sniffio==1.3.1",
+        "starlette==0.52.1",
+        "tqdm==4.67.3",
+        "typing-inspection==0.4.2",
+        "typing_extensions==4.15.0",
+        "uritemplate==4.2.0",
+        "urllib3==2.6.3",
+        "uvicorn==0.41.0"
+      ],
+      "pip_check": "PASS"
+    },
+    "pi_node_modules": {
+      "path": "pi_agent/node_modules",
+      "tree_sha256": "76b79b9e9f534e488eb3e4a3e75e327d4c374e55dfd4a3b41d54c45cba6119a1",
+      "file_count": 13971,
+      "outside_symlinks": []
+    }
+  },
+  "source_lockfiles": {
+    "social_requirements": {
+      "path": "social/requirements.txt",
+      "sha256": "3685d53f5be4c699dd36052765537bcfc65b4e0e61cd85edb677bcee9845ae74"
+    },
+    "matchmaker_requirements": {
+      "path": "matchmaker_agent/requirements.txt",
+      "sha256": "ba045a99aa817ac37691dfd106d8c16ee13edff5200b6219506ad9ef9078c7d3"
+    },
+    "risk_requirements": {
+      "path": "risk_backend/requirements.txt",
+      "sha256": "c7de454781541c0c004bd856056abba2d851415a4915763b8ba91033c25b2b1d"
+    },
+    "pi_package_lock": {
+      "path": "pi_agent/package-lock.json",
+      "sha256": "1d191f360dba5c17bc40df2e3ef369e06e9b5ee5951403999b8f353cc62a6b3d"
+    }
+  },
+  "guardrail_external_assets": [
+    {
+      "name": "guardrail_binary",
+      "path": "/home/sunny/Applications/llama-b10333/llama-server",
+      "size_bytes": 17896,
+      "mode": "0o755",
+      "sha256": "1d374fdb717832ec01d4829eff9feb46dfc83b7ccbb9d867c15315dbd8aa4bbe"
+    },
+    {
+      "name": "guardrail_model",
+      "path": "/home/sunny/下載/llama-guard-3-1b-q4_k_m (1).gguf",
+      "size_bytes": 955443776,
+      "mode": "0o664",
+      "sha256": "aad6b88210cc5cc02cc41b1c0e5ee6097e840fd3e5db578abe22fe595e2293e4"
+    }
+  ],
+  "environment_policy": {
+    "env_files_included": false,
+    "expected_mongo_db_name": "profiling_fordemo",
+    "provider": "openrouter",
+    "stage1_event_flags": {
+      "EVENT_LIFECYCLE_WORKER_ENABLED": "off",
+      "EVENT_DELIVERY_WORKER_ENABLED": "off",
+      "EVENT_WEEKLY_CYCLE_ENABLED": "off",
+      "EVENT_SEMANTIC_CIRCUIT_RECOVERY": "off"
+    }
+  },
+  "rollback_guard": {
+    "compatibility_id": "event-weekly-retry-pending-v1",
+    "blocked_exit_code": 75,
+    "required_attestation": "--workers-stopped",
+    "additional_checks": [
+      "active-release symlink",
+      "GNOME autostart",
+      "user and system ayue-backend.service",
+      "/proc writer/launcher scan before and after Mongo read",
+      "explicit expected database",
+      "required collections via bounded, anchored BSON-regex listCollections filter",
+      "singleton and weekly run record",
+      "retry/checkpoint/lease invariants"
+    ]
+  },
+  "archive": {
+    "filename": "rollback-runtime-c55450c644fcad13b705c4baa529c301351f7882.tar.gz",
+    "contains": [
+      ".local-venv/social",
+      ".local-venv/matchmaker",
+      "venv",
+      "pi_agent/node_modules"
+    ],
+    "excludes": [
+      ".env",
+      "MongoDB/Neo4j data",
+      "Guardrail external model and binary"
+    ],
+    "extraction_release_path": "/home/sunny/桌面/Graduate_Project/.worktrees/rollback-compatibility-1efa6c7-server",
+    "sha256": "b0db1fca0bd471bc9ab6d45405b6c744a2a175f4fe9be73231d1c8450e65dd92",
+    "size_bytes": 153826680,
+    "storage_path": "/home/sunny/桌面/Graduate_Project/artifacts/rollback-runtime-20261027/rollback-runtime-c55450c644fcad13b705c4baa529c301351f7882.tar.gz",
+    "sidecar_path": "/home/sunny/桌面/Graduate_Project/artifacts/rollback-runtime-20261027/rollback-runtime-c55450c644fcad13b705c4baa529c301351f7882.tar.gz.sha256",
+    "mode": "0600",
+    "verified_members": 42993,
+    "contains_env_files": false,
+    "contains_unsafe_paths": false
+  },
+  "rollback_branch": "codex/rollback-compatibility-1efa6c7",
+  "rollback_pr_base": "codex/rollback-base-1efa6c7",
+  "review_status": "open for manual review; never merge into main; Production cutover requires separate authorization",
+  "package_lock_summary": {
+    "lockfile_version": 3,
+    "package_count": 125
+  },
+  "tree_digest_scheme": "sha256 over sorted relative POSIX paths with NUL separators; directories include a type marker; files include mode and bytes; symlinks include their stored target text.",
+  "runtime_relocation_policy": "Restore runtime roots under the exact extraction_release_path on the same Linux host; Python venv interpreter symlinks depend on the pinned /usr/bin/python3.12 host interpreter."
+}

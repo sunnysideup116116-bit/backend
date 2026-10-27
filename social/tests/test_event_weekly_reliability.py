@@ -50,11 +50,125 @@ def test_restart_recovers_committed_result_without_new_selection(monkeypatch, st
 def test_failures_retry_bounded_and_do_not_starve_other_users(monkeypatch, stores):
     profiles = stores[3]
     profiles.rows = [{"user_id": "bad"}, {"user_id": "good"}]
-    monkeypatch.setattr(weekly, "create_event_opportunity", lambda uid, **_: {"status": "error" if uid == "bad" else "no_match"})
+    calls = {}
+    def create(uid, **_):
+        calls[uid] = calls.get(uid, 0) + 1
+        return {"status": "error", "error_code": "event_graph_unavailable"} if uid == "bad" else {"status": "no_match"}
+    monkeypatch.setattr(weekly, "create_event_opportunity", create)
     result = weekly.run_invitation_batches("week", lambda: True, lambda _: None)
-    assert result["status"] == "partial"
+    assert result["status"] == "retry_pending"
     assert result["failed_user_count"] == 1
+    assert result["attempt_count"] == 2
+    assert result["retry_pending_count"] == 1
+    bad_row = next(row for row in stores[1].rows if row["user_id"] == "bad")
+    assert bad_row["state"] == "pending" and bad_row["outcome"] == "retry_pending"
+    assert bad_row["resume_at"] > weekly.time.time()
+
+    # A pass before the due time cannot select or spin on the failed row.
+    weekly.run_invitation_batches("week", lambda: True, lambda _: None)
+    assert calls == {"bad": 1, "good": 1}
+
+    # Once due, the existing three-attempt limit still bounds retries.
+    for _ in range(2):
+        bad_row["resume_at"] = 0
+        result = weekly.run_invitation_batches("week", lambda: True, lambda _: None)
+    assert calls == {"bad": 3, "good": 1}
+    assert result["status"] == "partial"
     assert result["attempt_count"] == 4
+    assert result["retry_pending_count"] == 0
+    assert bad_row["state"] == "done" and bad_row["outcome"] == "error"
+    assert bad_row["error_code"] == "event_graph_unavailable"
+
+
+@pytest.mark.parametrize("checkpoint", [None, {"v": 1, "progress": {"page": 2}}])
+def test_retry_pending_waits_for_due_and_preserves_checkpoint(monkeypatch, stores, checkpoint):
+    runs, users, matches, profiles = stores
+    runs.rows.append({"_id": "week", "users_prepared": True})
+    row = {"_id": "week-owner", "run_id": "week", "user_id": "owner",
+           "state": "pending", "outcome": "retry_pending", "attempts": 1,
+           "resume_at": weekly.time.time() + 3600}
+    if checkpoint is not None:
+        row["checkpoint"] = checkpoint
+    users.rows.append(row)
+    seen = []
+    monkeypatch.setattr(weekly, "create_event_opportunity", lambda uid, **kwargs:
+                        seen.append(kwargs.get("checkpoint")) or {"status": "no_match"})
+
+    waiting = weekly.run_invitation_batches("week", lambda: True, lambda _: None)
+    assert seen == []
+    assert waiting["retry_pending_count"] == 1
+    assert row["state"] == "pending" and row["outcome"] == "retry_pending"
+
+    row["resume_at"] = 0
+    due = weekly.run_invitation_batches("week", lambda: True, lambda _: None)
+    assert seen == [checkpoint]
+    assert due["retry_pending_count"] == 0
+    assert row["state"] == "done" and row["outcome"] == "no_match"
+    if checkpoint is not None:
+        assert row["checkpoint"] == checkpoint
+
+    # Repeating the same weekly run cannot reprocess completed work.
+    weekly.run_invitation_batches("week", lambda: True, lambda _: None)
+    assert seen == [checkpoint]
+
+
+def test_pending_retry_requeues_same_week_after_cycle_failure_and_worker_crash(monkeypatch, stores):
+    from services import event_cycle_service as cycle
+    runs, users, matches, profiles = stores
+    runs.rows.append({"_id": "week", "discovery": {"status": "success"},
+                      "cleanup": {"status": "success"}, "users_prepared": True})
+    users.rows.append({"_id": "week-owner", "run_id": "week", "user_id": "owner",
+                      "state": "pending", "outcome": "retry_pending", "attempts": 1,
+                      "resume_at": weekly.time.time() + 3600,
+                      "checkpoint": {"v": 1, "progress": {"page": 2}}})
+    monkeypatch.setattr(cycle, "wait_for_event_relevance", lambda: {"ready": True})
+    monkeypatch.setattr(weekly, "create_event_opportunity",
+                        MagicMock(side_effect=AssertionError("future retry must not run")))
+    queue = Collection([{"_id": jobs._JOB_ID, "state": "running", "job_kind": "weekly_cycle",
+                         "job_token": "same-week-token", "lease_owner": "dead-worker",
+                         "lease_expires_at": 0, "retry_count": 0}])
+    monkeypatch.setattr(jobs, "_jobs", queue)
+
+    # Simulate an old process dying after the per-user state was saved. The
+    # expired singleton lease is atomically reclaimable under the same token.
+    claimed = jobs.claim_event_discovery_job("rollback-worker")
+    assert claimed["job_token"] == "same-week-token"
+    claimed = {**claimed, "job_kind": "weekly_cycle"}
+    with pytest.raises(RuntimeError, match="event_semantic_resume_pending"):
+        weekly.run_durable_cycle("week", lambda: True, lambda _: None,
+                                 region="高雄", window_days=30, categories=["市集"])
+    assert "result" not in runs.rows[-1]
+    assert runs.rows[-1]["invitation_scan"]["retry_pending_count"] == 1
+
+    jobs.fail_event_discovery_job(claimed, RuntimeError("event_semantic_resume_pending"))
+    queued = queue.find_one({"_id": jobs._JOB_ID})
+    assert queued["state"] == "queued"
+    assert queued["job_token"] == "same-week-token"
+    assert queued["retry_count"] == 1
+
+
+def test_unclassified_future_pending_never_saves_weekly_success(monkeypatch, stores):
+    from services import event_cycle_service as cycle
+    runs, users, matches, profiles = stores
+    runs.rows.append({"_id": "week", "discovery": {"status": "success"},
+                      "cleanup": {"status": "success"}, "users_prepared": True})
+    users.rows.append({"_id": "week-owner", "run_id": "week", "user_id": "owner",
+                      "state": "pending", "attempts": 1,
+                      "resume_at": weekly.time.time() + 3600,
+                      "checkpoint": {"v": 1, "progress": {"page": 2}}})
+    monkeypatch.setattr(cycle, "wait_for_event_relevance", lambda: {"ready": True})
+    create = MagicMock(side_effect=AssertionError("future or unclassified row must not run"))
+    monkeypatch.setattr(weekly, "create_event_opportunity", create)
+
+    with pytest.raises(RuntimeError, match="event_semantic_resume_pending"):
+        weekly.run_durable_cycle("week", lambda: True, lambda _: None,
+                                 region="高雄", window_days=30, categories=["市集"])
+
+    scan = runs.rows[-1]["invitation_scan"]
+    assert scan["pending_user_count"] == 1
+    assert scan["pending_unclassified_count"] == 1
+    assert "result" not in runs.rows[-1]
+    create.assert_not_called()
 
 
 def test_lease_loss_preserves_pending_progress(monkeypatch, stores):
