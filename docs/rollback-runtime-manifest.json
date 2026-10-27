@@ -2,8 +2,9 @@
   "schema_version": 1,
   "repository": "sunnysideup116116-bit/backend",
   "rollback_base_sha": "1efa6c72f775309ce42ff3dcfd85f6479c3f91a9",
-  "rollback_code_commit": "c55450c644fcad13b705c4baa529c301351f7882",
-  "main_sha": "6a2a1372b3d4ea5ada4650da90f06f59642dec67",
+  "rollback_code_commit": "aff995c8a6740e1b9e0b9e430075bf4c04992636",
+  "main_sha": "d545b5816a72d32f22eb4dd71935449db85f2495",
+  "premerge_release_candidate_sha": "4cfbd82263dcdb1946b54567d3e8158c49ef8250",
   "production_sha": "1efa6c72f775309ce42ff3dcfd85f6479c3f91a9",
   "generated_at_utc": "2026-10-21T07:33:37.667472+00:00",
   "host": {
@@ -12,7 +13,7 @@
     "machine": "x86_64",
     "system_python": "/usr/bin/python3.12",
     "system_python_version": "Python 3.12.3",
-    "node": "v22.23.3",
+    "node": "v22.23.4",
     "npm": "10.9.9"
   },
   "runtime_roots": {
@@ -299,7 +300,7 @@
   "environment_policy": {
     "env_files_included": false,
     "expected_mongo_db_name": "profiling_fordemo",
-    "provider": "ollama",
+    "provider": "openrouter",
     "stage1_event_flags": {
       "EVENT_LIFECYCLE_WORKER_ENABLED": "off",
       "EVENT_DELIVERY_WORKER_ENABLED": "off",
@@ -317,7 +318,7 @@
       "user and system ayue-backend.service",
       "/proc writer/launcher scan before and after Mongo read",
       "explicit expected database",
-      "required collections",
+      "required collections via bounded, anchored BSON-regex listCollections filter",
       "singleton and weekly run record",
       "retry/checkpoint/lease invariants"
     ]
@@ -338,8 +339,8 @@
     "extraction_release_path": "/home/sunny/桌面/Graduate_Project/.worktrees/rollback-compatibility-1efa6c7-server",
     "sha256": "b0db1fca0bd471bc9ab6d45405b6c744a2a175f4fe9be73231d1c8450e65dd92",
     "size_bytes": 153826680,
-    "storage_path": "/tmp/ayue-rollback-artifacts/rollback-runtime-c55450c644fcad13b705c4baa529c301351f7882.tar.gz",
-    "sidecar_path": "/tmp/ayue-rollback-artifacts/rollback-runtime-c55450c644fcad13b705c4baa529c301351f7882.tar.gz.sha256",
+    "storage_path": "/home/sunny/桌面/Graduate_Project/artifacts/rollback-runtime-20261027/rollback-runtime-c55450c644fcad13b705c4baa529c301351f7882.tar.gz",
+    "sidecar_path": "/home/sunny/桌面/Graduate_Project/artifacts/rollback-runtime-20261027/rollback-runtime-c55450c644fcad13b705c4baa529c301351f7882.tar.gz.sha256",
     "mode": "0600",
     "verified_members": 42993,
     "contains_env_files": false,
@@ -347,7 +348,7 @@
   },
   "rollback_branch": "codex/rollback-compatibility-1efa6c7",
   "rollback_pr_base": "codex/rollback-base-1efa6c7",
-  "review_status": "awaiting manual Draft PR review; never merge into main",
+  "review_status": "open for manual review; never merge into main; Production cutover requires separate authorization",
   "package_lock_summary": {
     "lockfile_version": 3,
     "package_count": 125
