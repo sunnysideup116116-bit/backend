@@ -6,12 +6,14 @@
 
 - GitHub `main` 的本輪檢查基準：`d545b5816a72d32f22eb4dd71935449db85f2495`。CI timeout 修復分支為 `codex/event-v2-selection-clock-fix`，commit `4cfbd82263dcdb1946b54567d3e8158c49ef8250`；PR 建立受 GitHub API 403 阻擋，尚未合併。該 commit 只修改測試，不得在 PR 建立、CI failure-name parity 和 merge 之前宣稱它已進入 main。
 - 目前 pre-merge Release Candidate：`.worktrees/release-candidate-6a2a137-server`，實際 checkout `4cfbd82263dcdb1946b54567d3e8158c49ef8250`；名字沿用舊目錄，不能按目錄名稱推斷 SHA。合併 P0 修復後，仍須用 GitHub 最新 main SHA 更新並再次核對。
-- Production active-release symlink 指向 `1efa6c72f775309ce42ff3dcfd85f6479c3f91a9`；但 2026-10-27 唯讀 Host 檢查發現現有 launcher 和服務的 cwd 在 dirty `Server/`（HEAD `68dd674f88c07aabea9a1329d9db35e079865c1b`，16 個 dirty entries），所以實際載入版本不能表示成單一 Git SHA。不得改動這個 dirty `Server/`。
+- Production active-release symlink 指向 `1efa6c72f775309ce42ff3dcfd85f6479c3f91a9`；但 2026-10-27 唯讀 Host 檢查發現現有 GNOME Terminal launcher 和服務的 cwd 在 dirty `Server/`（HEAD `68dd674f88c07aabea9a1329d9db35e079865c1b`，16 個 dirty entries），所以實際載入版本不能表示成單一 Git SHA。不得改動這個 dirty `Server/`。
 - Rollback PR base：`codex/rollback-base-1efa6c7`，固定於 `1efa6c72f775309ce42ff3dcfd85f6479c3f91a9`。Rollback 分支：`codex/rollback-compatibility-1efa6c7`；PR #50 必須留在這個舊版 base，不得合併到最新 `main`。
 - Rollback code pin：`aff995c8a6740e1b9e0b9e430075bf4c04992636`，包含 Atlas 相容的 collection filter、安全測試及 OpenRouter systemd provider。Manifest 的 `rollback_code_commit` 必須一致；這是 guard 的 `--expected-target-sha`。PR head 僅可在此 pin 之後增加 runbook、manifest 等允許的文件變更；Guard 不得接受額外程式或測試差異。
 - Rollback runtime worktree 固定路徑：`/home/sunny/桌面/Graduate_Project/.worktrees/rollback-compatibility-1efa6c7-server`。最後交付的精確 runtime checkout SHA 以本機 artifact receipt 記錄為準；其 HEAD 必須是上述 code pin 的後代，且相對 pin 只能有 Runbook、Manifest 和 archive sidecar 文件差異。
 - PR #50 是獨立舊版相容回退交付。它保留現有 Mongo/Neo4j 資料，不做 migration/backfill，也不還原舊 DB snapshot。
 - 2026-10-27 唯讀 Production 檢查：四個 health endpoint 均 HTTP 200；一個 GNOME Terminal launcher、沒有專用 user/system `ayue-backend.service`；Mongo/W44 讀取成功，W44 `2026-W44`, run 35, `completed/partial`, 47/47 terminal，無 pending/retry/resume、無 active lease。Global Invitation Delivery 狀態仍 UNKNOWN，Production 沒有對應索引。
+- 同一檢查發現目前 dirty `Server/start_all.sh` 沒有全域 flock，`/run/user/1000/ayue-backend-start-all.lock` 不存在，launcher 沒持有 lock FD；目前只有一個 launcher，但 GNOME backend autostart 仍 active，可能另起指向 `active-release` 的 launcher。現有 process ancestry 是 GNOME Terminal；不得在維護時段前另起 launcher。PR #48 候選的 global lock 已由隔離啟動競態測試驗證，但 Production 尚未使用該版本。
+- 目前 live checkout 的 Event Worker 沒有 supervisor，Production heartbeat endpoint 最近回報 404；DB 顯示 W44 已完成且沒有待 claim 工作，但 worker liveness 仍無法由目前服務監管。
 - 實際 Production provider 為 OpenRouter。Rollback/New Release systemd unit 必須明確使用 `start_all.sh openrouter`；不得因舊 unit 範本預設 Ollama 而切換 provider。
 - 現有來源 `Server/social/.env` 明確設 lifecycle/weekly 為 `on`；程式預設 delivery 與 semantic circuit recovery 也為 `on`。Production Process memory 不能由本次 read-only shell 直接確認，維護前按「可能為 ON」處理；新版候選 `.env` 的 Stage 1 則已明確將四項全部設為 `off`。
 
