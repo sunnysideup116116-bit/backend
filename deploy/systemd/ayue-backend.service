@@ -6,7 +6,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=/home/sunny/桌面/Graduate_Project/.worktrees/active-release
-ExecStart=/home/sunny/桌面/Graduate_Project/.worktrees/active-release/start_all.sh ollama
+ExecStart=/home/sunny/桌面/Graduate_Project/.worktrees/active-release/start_all.sh openrouter
 Environment=HOME=/home/sunny
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/sunny/.local/bin
 Environment=AYUE_SHUTDOWN_TIMEOUT_SECONDS=30

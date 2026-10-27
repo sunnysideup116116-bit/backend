@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from bson.regex import Regex
 from dotenv import dotenv_values
 from pymongo import MongoClient, ReadPreference
 from pymongo.read_concern import ReadConcern
@@ -148,8 +149,14 @@ def _count(collection: Any, query: dict) -> int:
 def read_retry_snapshot(db: Any, *, now: float | None = None) -> dict[str, Any]:
     """Read bounded metadata from the expected collections; never return user ids."""
     try:
+        required_names = "^(?:" + "|".join(
+            re.escape(name) for name in REQUIRED_COLLECTIONS
+        ) + ")$"
         names = set(db.list_collection_names(
-            filter={"name": {"$in": list(REQUIRED_COLLECTIONS)}},
+            # Atlas listCollections requires the name filter to be a BSON regex;
+            # a query-operator document such as {"$in": [...]} fails closed there.
+            # Keep the regex fully anchored to this small, fixed allowlist.
+            filter={"name": Regex(required_names)},
             maxTimeMS=QUERY_TIMEOUT_MS,
         ))
     except Exception as exc:

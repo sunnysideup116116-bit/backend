@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import re
 import subprocess
 from types import SimpleNamespace
 
@@ -138,6 +139,7 @@ class FakeDB:
         }
         self.collection_names = set(self.collections if collection_names is None else collection_names)
         self.fail_collection_list = fail_collection_list
+        self.collection_filter = None
 
     def __getitem__(self, name):
         return self.collections[name]
@@ -146,8 +148,10 @@ class FakeDB:
         if self.fail_collection_list is not None:
             raise self.fail_collection_list
         assert kwargs["maxTimeMS"] == guard.QUERY_TIMEOUT_MS
+        self.collection_filter = kwargs["filter"]["name"]
+        assert isinstance(self.collection_filter, guard.Regex)
         return [name for name in self.collection_names
-                if name in kwargs["filter"]["name"]["$in"]]
+                if re.fullmatch(self.collection_filter.pattern, name)]
 
 
 def make_snapshot(*, job=None, run=None, rows=(), now=1000.0, invalid_state_count=0):
@@ -183,6 +187,16 @@ def active_release_link(tmp_path):
 def test_correct_database_valid_singleton_and_no_pending_pass():
     snapshot, _ = make_snapshot()
     assert guard.evaluate_retry_snapshot(snapshot) == []
+
+
+def test_required_collection_filter_is_an_anchored_bson_regex():
+    extra = "event_weekly_users_backup"
+    db = FakeDB(collection_names=set(guard.REQUIRED_COLLECTIONS) | {extra})
+    guard.read_retry_snapshot(db, now=1000)
+    assert isinstance(db.collection_filter, guard.Regex)
+    assert db.collection_filter.pattern == (
+        "^(?:event_discovery_jobs|event_weekly_users|event_weekly_runs)$"
+    )
 
 
 def test_missing_singleton_is_blocked_even_when_database_is_empty():
