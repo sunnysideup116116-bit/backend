@@ -264,12 +264,38 @@ def response_for_activity_without_situation():
 
 def test_shared_selection_budget_exhaustion_is_failed_not_no_candidates(batch_flow, monkeypatch):
     _, matches, post = batch_flow
-    clock = Mock(side_effect=[0, 1, 121])
-    monkeypatch.setattr(router.time, "monotonic", clock)
+    clock_values = iter((0.0, 1.0, 121.0))
+    clock_reads = []
+
+    def selection_clock():
+        try:
+            value = next(clock_values)
+        except StopIteration:
+            pytest.fail("unexpected additional selection-deadline clock read")
+        clock_reads.append(value)
+        return value
+
+    class RouterTime:
+        """Override only this module's clock, not the shared stdlib time module."""
+
+        def monotonic(self):
+            return selection_clock()
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(router, "time", RouterTime())
+    # Other libraries and pytest keep the real process-wide clock.
+    time.monotonic()
+    assert time.monotonic is real_monotonic
+
     with pytest.raises(jobs.MatchSearchPipelineError) as exc:
         run()
     assert exc.value.code == "matchmaker_timeout"
+    assert clock_reads == [0.0, 1.0, 121.0]
     post.assert_called_once()
+    assert post.call_args.kwargs["timeout"] == 119.0
     matches.insert_one.assert_not_called()
 
 
